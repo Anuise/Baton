@@ -138,7 +138,8 @@ impl WorkspaceFs for LocalWorkspaceFs {
         blocking(move || write_file_atomic(&path, &bytes)).await
     }
     async fn write_readonly_files(&self, dir: &Path, files: &[(String, Vec<u8>)]) -> PortResult<()> {
-        baton_ports::write_readonly_tree(dir, files)
+        let (dir, files) = (dir.to_path_buf(), files.to_vec());
+        blocking(move || baton_ports::write_readonly_tree(&dir, &files)).await
     }
     async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>> {
         let path = path.to_path_buf();
