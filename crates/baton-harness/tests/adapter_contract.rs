@@ -1,0 +1,462 @@
+//! Adapter 契約測試（spec D-04 第 2 層）：同一份契約同時跑在 fake 與真實 Claude Code Adapter 上，
+//! 確保 Runtime harness 用的 fake 行為與真實 CLI 一致。
+//!
+//! 三種受測對象：
+//! - **fake**：`FakeAgentAdapter`，腳本化成真實 CLI 在各情境下的事件順序。每次 `cargo test` 都執行。
+//! - **replay**：真實 `ClaudeCodeAdapter`，餵入真實 CLI 錄下的 stream-json（`tests/fixtures/`）。
+//!   不需要 CLI，每次 `cargo test` 都執行，確保解析器與錄下的真實輸出一致。
+//! - **live**：真實 `ClaudeCodeAdapter` + Windows Job Object ProcessControl + 已登入的 Claude Code。
+//!   只在已登入的 Windows 環境手動或夜間執行（`#[ignore]`），執行方式與結果記錄見 `docs/adapter-contract.md`。
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use baton_harness::fakes::FakeAgentAdapter;
+use baton_domain::quota::{LimitStatus, QuotaWindow};
+use baton_ports::{AdapterEvent, AgentAdapter, RunSpec};
+use baton_runtime::claude_adapter::{ClaudeCodeAdapter, STREAM_FILE};
+use futures::StreamExt;
+
+/// 契約情境：要 Worker 做什麼。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scenario {
+    /// 回覆一句話就結束。
+    Completes,
+    /// 指定不存在的模型：CLI 回報錯誤並以失敗結束。
+    InvalidModel,
+}
+
+impl Scenario {
+    fn fixture(self) -> &'static str {
+        match self {
+            Scenario::Completes => "claude-2.1.307-completes.jsonl",
+            Scenario::InvalidModel => "claude-2.1.307-invalid-model.jsonl",
+        }
+    }
+}
+
+const PROMPT: &str = "請只回覆 OK 兩個字，不要使用任何工具。";
+const INVALID_MODEL: &str = "baton-contract-no-such-model";
+/// 一個情境最多等多久（真實 CLI 需要連線）。
+const SCENARIO_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn contract_spec(run_id: &str, scenario: Scenario, model: Option<String>, config_dir: Option<String>, working_dir: &Path) -> RunSpec {
+    RunSpec {
+        run_id: run_id.to_string(),
+        task_id: "task_contract".to_string(),
+        command_id: format!("cmd_{run_id}"),
+        prompt: PROMPT.to_string(),
+        working_dir: Some(working_dir.to_string_lossy().into_owned()),
+        config_dir,
+        settings_dir: None,
+        model: match scenario {
+            Scenario::Completes => model,
+            Scenario::InvalidModel => Some(INVALID_MODEL.to_string()),
+        },
+    }
+}
+
+#[async_trait]
+trait Subject: Send + Sync {
+    fn adapter(&self) -> Arc<dyn AgentAdapter>;
+    /// 讓 Worker 依情境執行到結束，回傳 Adapter 交出的全部事件。
+    async fn run(&self, scenario: Scenario, spec: RunSpec) -> Vec<AdapterEvent>;
+}
+
+async fn collect(adapter: &dyn AgentAdapter, spec: RunSpec) -> Vec<AdapterEvent> {
+    let handle = adapter.launch(spec).await.expect("launch 失敗");
+    tokio::time::timeout(SCENARIO_TIMEOUT, adapter.events(&handle).collect::<Vec<_>>())
+        .await
+        .expect("情境在時限內沒有結束")
+}
+
+// ---------------------------------------------------------------- 契約條款
+
+/// 不含 heartbeat 的事件（heartbeat 的次數取決於輸出的時機，不屬於契約）。
+fn meaningful(events: &[AdapterEvent]) -> Vec<&AdapterEvent> {
+    events.iter().filter(|e| **e != AdapterEvent::Heartbeat).collect()
+}
+
+/// 同一個 Run 回報的原生 Session 只有一個，而且在任何結果之前就回報。
+fn assert_single_native_session_first(events: &[AdapterEvent]) -> String {
+    let meaningful = meaningful(events);
+    let Some(AdapterEvent::Started { native_session_id: Some(first) }) = meaningful.first() else {
+        panic!("第一個事件必須是帶原生 Session 識別的 Started：{events:?}");
+    };
+    for event in &meaningful {
+        if let AdapterEvent::Started { native_session_id } = event {
+            assert_eq!(native_session_id.as_deref(), Some(first.as_str()), "同一個 Run 不能回報第二個原生 Session：{events:?}");
+        }
+    }
+    first.clone()
+}
+
+/// 事件以恰好一個 `Exited` 結尾。
+fn assert_ends_with_one_exit(events: &[AdapterEvent], success: bool) {
+    let exits: Vec<_> = events.iter().filter(|e| matches!(e, AdapterEvent::Exited { .. })).collect();
+    assert_eq!(exits, [&AdapterEvent::Exited { success }], "{events:?}");
+    assert_eq!(events.last(), Some(&AdapterEvent::Exited { success }), "Exited 之後不能再有事件：{events:?}");
+}
+
+async fn contract_completes(subject: &dyn Subject, spec: RunSpec) {
+    let events = subject.run(Scenario::Completes, spec).await;
+
+    assert_single_native_session_first(&events);
+    assert_ends_with_one_exit(&events, true);
+    assert!(!events.iter().any(|e| matches!(e, AdapterEvent::Error { .. })), "正常完成不應有錯誤：{events:?}");
+    assert!(
+        events.iter().any(|e| matches!(e, AdapterEvent::Message { text } if text.contains("OK"))),
+        "Worker 的回覆以 Message 交出：{events:?}"
+    );
+    // 額度的「推估」來源（票 27）：結束前回報這一輪的用量
+    assert!(
+        events.iter().any(|e| matches!(e, AdapterEvent::UsageReported { tokens, .. } if *tokens > 0)),
+        "完成前回報用量：{events:?}"
+    );
+}
+
+async fn contract_invalid_model(subject: &dyn Subject, spec: RunSpec) {
+    let events = subject.run(Scenario::InvalidModel, spec).await;
+
+    assert_single_native_session_first(&events);
+    assert_ends_with_one_exit(&events, false);
+    let error_at = events.iter().position(|e| matches!(e, AdapterEvent::Error { message } if !message.trim().is_empty()));
+    let exit_at = events.iter().position(|e| matches!(e, AdapterEvent::Exited { .. }));
+    assert!(error_at.is_some() && error_at < exit_at, "失敗前先交出非空的錯誤原因：{events:?}");
+}
+
+/// 啟動指令只由 RunSpec 決定（Runtime 重建後據此找回程序），而且 Prompt 不放在指令列上。
+fn contract_spawn_spec(subject: &dyn Subject, spec: &RunSpec) {
+    let adapter = subject.adapter();
+    let first = adapter.spawn_spec(spec);
+
+    assert_eq!(first, adapter.spawn_spec(spec), "同一個 RunSpec 必須得到同一個啟動指令");
+    assert_eq!(first.command_id, spec.command_id);
+    assert!(!first.args.iter().any(|a| a.contains(PROMPT)), "Prompt 不放在指令列：{:?}", first.args);
+}
+
+// ---------------------------------------------------------------- fake
+
+/// fake：依真實 CLI 的行為腳本化（見 replay 的錄製檔）。
+struct FakeSubject {
+    adapter: Arc<FakeAgentAdapter>,
+}
+
+#[async_trait]
+impl Subject for FakeSubject {
+    fn adapter(&self) -> Arc<dyn AgentAdapter> {
+        self.adapter.clone()
+    }
+
+    async fn run(&self, scenario: Scenario, spec: RunSpec) -> Vec<AdapterEvent> {
+        let started = AdapterEvent::Started { native_session_id: Some(format!("fake-session-{}", spec.run_id)) };
+        let script = match scenario {
+            Scenario::Completes => vec![
+                started,
+                AdapterEvent::Heartbeat,
+                AdapterEvent::Message { text: "OK".into() },
+                AdapterEvent::RateLimited {
+                    window: Some(QuotaWindow::FiveHour),
+                    status: LimitStatus::Allowed,
+                    used: Some(0.1),
+                    reset_at_millis: Some(1_792_660_800_000),
+                    raw: "{}".into(),
+                },
+                AdapterEvent::UsageReported { tokens: 1_200, raw: "{}".into() },
+                AdapterEvent::Exited { success: true },
+            ],
+            Scenario::InvalidModel => vec![
+                started,
+                AdapterEvent::Message { text: format!("There's an issue with the selected model ({INVALID_MODEL}).") },
+                AdapterEvent::UsageReported { tokens: 0, raw: "{}".into() },
+                AdapterEvent::Error { message: format!("There's an issue with the selected model ({INVALID_MODEL}).") },
+                AdapterEvent::Exited { success: false },
+            ],
+        };
+        self.adapter.script_next_run(script);
+        collect(&*self.adapter, spec).await
+    }
+}
+
+fn fake() -> FakeSubject {
+    FakeSubject { adapter: Arc::new(FakeAgentAdapter::default()) }
+}
+
+#[tokio::test]
+async fn fake_adapter_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    contract_completes(&fake(), contract_spec("run_fake_ok", Scenario::Completes, None, None, dir.path())).await;
+}
+
+#[tokio::test]
+async fn fake_adapter_reports_an_invalid_model() {
+    let dir = tempfile::tempdir().unwrap();
+    contract_invalid_model(&fake(), contract_spec("run_fake_bad", Scenario::InvalidModel, None, None, dir.path())).await;
+}
+
+#[test]
+fn fake_adapter_spawn_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    contract_spawn_spec(&fake(), &contract_spec("run_fake_spec", Scenario::Completes, None, None, dir.path()));
+}
+
+// ---------------------------------------------------------------- replay
+
+fn fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name)
+}
+
+/// replay：真實 Adapter 讀取真實 CLI 錄下的輸出（扮演一個已經跑完的程序）。
+struct ReplaySubject {
+    adapter: Arc<ClaudeCodeAdapter>,
+}
+
+#[async_trait]
+impl Subject for ReplaySubject {
+    fn adapter(&self) -> Arc<dyn AgentAdapter> {
+        self.adapter.clone()
+    }
+
+    async fn run(&self, scenario: Scenario, spec: RunSpec) -> Vec<AdapterEvent> {
+        self.adapter.prepare(&spec).await.expect("prepare 失敗");
+        let recorded = std::fs::read(fixture_path(scenario.fixture())).expect("找不到錄製檔");
+        std::fs::write(self.adapter.run_dir(&spec.run_id).join(STREAM_FILE), recorded).unwrap();
+        collect(&*self.adapter, spec).await
+    }
+}
+
+fn replay(data_dir: &Path) -> ReplaySubject {
+    let adapter = ClaudeCodeAdapter::new("claude".into(), "baton-mcp-shim.exe".into(), data_dir, Vec::new())
+        .with_poll(Duration::from_millis(5));
+    ReplaySubject { adapter: Arc::new(adapter) }
+}
+
+#[tokio::test]
+async fn recorded_claude_code_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    contract_completes(&replay(dir.path()), contract_spec("run_replay_ok", Scenario::Completes, None, None, dir.path())).await;
+}
+
+#[tokio::test]
+async fn recorded_claude_code_reports_an_invalid_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = contract_spec("run_replay_bad", Scenario::InvalidModel, None, None, dir.path());
+    contract_invalid_model(&replay(dir.path()), spec).await;
+}
+
+#[test]
+fn claude_code_adapter_spawn_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    contract_spawn_spec(&replay(dir.path()), &contract_spec("run_replay_spec", Scenario::Completes, None, None, dir.path()));
+}
+
+// ---------------------------------------------------------------- live
+
+/// live：真的啟動 `claude -p`。設定：
+/// - `BATON_LIVE_PROFILE_DIR`（必要）：已登入 Claude Code 的設定目錄，作為 Run 的 `CLAUDE_CONFIG_DIR`。
+/// - `BATON_LIVE_MODEL`（選用）：正常完成情境使用的模型（例如 `haiku`），省略時用帳號預設。
+/// - `BATON_LIVE_RECORD_DIR`（選用）：把 CLI 的 stream-json 另存到這個目錄（更新 replay 的錄製檔用）。
+#[cfg(windows)]
+mod live {
+    use super::*;
+    use baton_ports::{ClaudeEnvironment, ProcessControl, ToolProbe};
+    use baton_runtime::claude_cli::ClaudeCli;
+    use baton_runtime::windows_process::WindowsProcessControl;
+
+    struct LiveSubject {
+        adapter: Arc<ClaudeCodeAdapter>,
+        process_control: WindowsProcessControl,
+        record_dir: Option<PathBuf>,
+    }
+
+    impl LiveSubject {
+        /// 真的啟動 `claude -p` 並收集事件到結束。
+        async fn execute(&self, spec: &RunSpec) -> Vec<AdapterEvent> {
+            self.adapter.prepare(spec).await.expect("prepare 失敗");
+            let mut spawn = self.adapter.spawn_spec(spec);
+            // 與 Supervisor 相同：憑證只經環境變數交付（這裡沒有 Runtime，shim 的工具呼叫會失敗，不影響契約）
+            spawn.env.push(("BATON_AGENT_TOKEN".into(), "contract-test-token".into()));
+            spawn.env.push(("BATON_RUNTIME_URL".into(), "http://127.0.0.1:9".into()));
+            let receipt = self.process_control.spawn(spawn).await.expect("無法啟動 claude");
+            let events = collect(&*self.adapter, spec.clone()).await;
+            self.process_control.stop(&receipt.identity, Duration::from_secs(10)).await.ok();
+            events
+        }
+    }
+
+    #[async_trait]
+    impl Subject for LiveSubject {
+        fn adapter(&self) -> Arc<dyn AgentAdapter> {
+            self.adapter.clone()
+        }
+
+        async fn run(&self, scenario: Scenario, spec: RunSpec) -> Vec<AdapterEvent> {
+            let events = self.execute(&spec).await;
+            if let Some(dir) = &self.record_dir {
+                std::fs::create_dir_all(dir).unwrap();
+                let stream = self.adapter.run_dir(&spec.run_id).join(STREAM_FILE);
+                std::fs::copy(stream, dir.join(scenario.fixture())).unwrap();
+            }
+            eprintln!("{scenario:?}：{events:?}");
+            events
+        }
+    }
+
+    struct Live {
+        subject: LiveSubject,
+        config_dir: String,
+        model: Option<String>,
+        data_dir: tempfile::TempDir,
+    }
+
+    async fn live() -> Live {
+        let config_dir = std::env::var("BATON_LIVE_PROFILE_DIR").expect("請設定 BATON_LIVE_PROFILE_DIR");
+        let version = ClaudeCli.probe_claude().await.expect("無法探測 Claude Code");
+        eprintln!("Claude Code：{version:?}");
+        let ToolProbe::Found { version_output } = version else { panic!("找不到 Claude Code") };
+        assert!(
+            matches!(baton_domain::claude_code::check(version_output.as_deref()), baton_domain::claude_code::VersionCheck::Supported(_)),
+            "契約只在支援的版本上執行：{version_output:?}"
+        );
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut adapter = ClaudeCodeAdapter::for_current_process(data_dir.path());
+        if let Ok(shim) = std::env::var("BATON_LIVE_SHIM") {
+            let inherited = std::env::vars_os().map(|(k, _)| k.to_string_lossy().into_owned()).collect();
+            adapter = ClaudeCodeAdapter::new("claude".into(), shim, data_dir.path(), inherited);
+        }
+        Live {
+            subject: LiveSubject {
+                adapter: Arc::new(adapter),
+                process_control: WindowsProcessControl::new(),
+                record_dir: std::env::var_os("BATON_LIVE_RECORD_DIR").map(PathBuf::from),
+            },
+            config_dir,
+            model: std::env::var("BATON_LIVE_MODEL").ok().filter(|m| !m.is_empty()),
+            data_dir,
+        }
+    }
+
+    fn unique(tag: &str) -> String {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        format!("run_live_{tag}_{nanos}")
+    }
+
+    #[tokio::test]
+    #[ignore = "需要已登入的 Claude Code；設定 BATON_LIVE_PROFILE_DIR，見 docs/adapter-contract.md"]
+    async fn live_claude_code_completes() {
+        let live = live().await;
+        let work = live.data_dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let spec = contract_spec(&unique("ok"), Scenario::Completes, live.model.clone(), Some(live.config_dir.clone()), &work);
+        contract_completes(&live.subject, spec).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "需要已登入的 Claude Code；設定 BATON_LIVE_PROFILE_DIR，見 docs/adapter-contract.md"]
+    async fn live_claude_code_reports_an_invalid_model() {
+        let live = live().await;
+        let work = live.data_dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let spec = contract_spec(&unique("bad"), Scenario::InvalidModel, None, Some(live.config_dir.clone()), &work);
+        contract_invalid_model(&live.subject, spec).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "需要已登入的 Claude Code；設定 BATON_LIVE_PROFILE_DIR，見 docs/adapter-contract.md"]
+    async fn live_claude_code_adapter_spawn_spec() {
+        let live = live().await;
+        let spec = contract_spec(&unique("spec"), Scenario::Completes, live.model.clone(), Some(live.config_dir.clone()), live.data_dir.path());
+        contract_spawn_spec(&live.subject, &spec);
+    }
+
+    /// Worker 寫得到 Workspace，若 CLI 載入 Workspace 內的 `.claude\settings*.json`，Worker 就能改變自己的權限。
+    /// 用不存在的模型（不產生輸出 token），只看 `system/init` 回報的權限模式。
+    #[tokio::test]
+    #[ignore = "需要已登入的 Claude Code；設定 BATON_LIVE_PROFILE_DIR，見 docs/adapter-contract.md"]
+    async fn live_claude_code_ignores_settings_files_inside_the_workspace() {
+        let live = live().await;
+        let work = live.data_dir.path().join("work");
+        std::fs::create_dir_all(work.join(".claude")).unwrap();
+        let widen = r#"{"permissions":{"defaultMode":"acceptEdits"}}"#;
+        std::fs::write(work.join(".claude").join("settings.json"), widen).unwrap();
+        std::fs::write(work.join(".claude").join("settings.local.json"), widen).unwrap();
+        let spec = contract_spec(&unique("project"), Scenario::InvalidModel, None, Some(live.config_dir.clone()), &work);
+
+        live.subject.execute(&spec).await;
+
+        let stream = std::fs::read_to_string(live.subject.adapter.run_dir(&spec.run_id).join(STREAM_FILE)).unwrap();
+        let init: serde_json::Value = stream
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|v| v["type"] == "system" && v["subtype"] == "init")
+            .expect("沒有 system/init");
+        assert_eq!(init["permissionMode"], "default", "Workspace 內的設定檔不可改變 Worker 的權限模式：{init}");
+    }
+
+    /// 權限轉接（spec D-08、AI-144）：需要核准的工具經 `--permission-prompt-tool` 送到 Baton 的 `permission_prompt`，
+    /// 以本機的假 Agent API 回覆「等待裁定」（`behavior: deny` 加上 Baton 的說明欄位），確認 CLI 接受這個回應形狀、
+    /// 工具確實沒有執行，而且 Worker 不重試同一個操作就結束。
+    #[tokio::test]
+    #[ignore = "需要已登入的 Claude Code；設定 BATON_LIVE_PROFILE_DIR 與 BATON_LIVE_SHIM，見 docs/adapter-contract.md"]
+    async fn live_claude_code_routes_permission_prompts_to_baton_and_honours_a_deny() {
+        use axum::extract::{Path as UrlPath, State};
+        use axum::Json;
+        use std::sync::Mutex;
+        type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+        async fn tool(
+            State(calls): State<Calls>,
+            UrlPath(name): UrlPath<String>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            calls.lock().unwrap().push((name.clone(), body));
+            Json(match name.as_str() {
+                "permission_prompt" => serde_json::json!({
+                    "behavior": "deny",
+                    "message": "這個操作超出授權，已建立裁定請求；請保存 checkpoint 後改做其他步驟或以 blocked 結束",
+                    "status": "waiting_decision",
+                    "decision_request_id": "decision_contract",
+                }),
+                _ => serde_json::json!({ "ok": true }),
+            })
+        }
+
+        std::env::var("BATON_LIVE_SHIM").expect("這個測試需要真的 shim：請設定 BATON_LIVE_SHIM");
+        let calls: Calls = Arc::default();
+        let app = axum::Router::new().route("/agent/v1/tools/{name}", axum::routing::post(tool)).with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let live = live().await;
+        let work = live.data_dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let marker = work.join("baton-permission-check.txt");
+        let mut spec = contract_spec(&unique("perm"), Scenario::Completes, live.model.clone(), Some(live.config_dir.clone()), &work);
+        spec.prompt = format!(
+            "請用 Bash 工具執行這個指令：echo checked > \"{}\"。如果工具被拒絕，不要重試、也不要改用其他工具，直接回覆 DENIED 並結束。",
+            marker.display()
+        );
+        let adapter = &live.subject.adapter;
+        adapter.prepare(&spec).await.unwrap();
+        let mut spawn = adapter.spawn_spec(&spec);
+        spawn.env.push(("BATON_AGENT_TOKEN".into(), "contract-test-token".into()));
+        spawn.env.push(("BATON_RUNTIME_URL".into(), url));
+        let receipt = live.subject.process_control.spawn(spawn).await.expect("無法啟動 claude");
+        let events = collect(&**adapter, spec.clone()).await;
+        live.subject.process_control.stop(&receipt.identity, Duration::from_secs(10)).await.ok();
+        eprintln!("事件：{events:?}");
+
+        let prompts: Vec<serde_json::Value> =
+            calls.lock().unwrap().iter().filter(|(name, _)| name == "permission_prompt").map(|(_, body)| body.clone()).collect();
+        eprintln!("permission_prompt 收到：{prompts:#?}");
+        assert!(!prompts.is_empty(), "需要核准的 Bash 應經 permission_prompt 送到 Baton");
+        assert_eq!(prompts[0]["tool_name"], "Bash", "{prompts:?}");
+        assert!(prompts[0]["input"]["command"].as_str().is_some_and(|c| c.contains("baton-permission-check")), "{prompts:?}");
+        assert!(!marker.exists(), "被拒絕的工具不可執行");
+        assert_eq!(prompts.len(), 1, "收到 deny 後不重試同一個操作：{prompts:?}");
+        assert_ends_with_one_exit(&events, true);
+    }
+}

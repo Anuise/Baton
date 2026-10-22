@@ -2,6 +2,8 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::authorization::Capability;
+use crate::guard::{self, ActiveGuard, GuardRule};
+use crate::knowledge::{self, KnowledgeContent, KnowledgeKind, KnowledgeScope, KnowledgeSource, NewKnowledge};
 use crate::task::{
     ContractField, Dependency, Goal, TaskChange, TaskCommand, TaskContract,
 };
@@ -38,6 +40,7 @@ struct World {
     runs: Vec<Run>,
     leases: Vec<ExecutionLease>,
     workdirs: Vec<Workdir>,
+    guards: Vec<ActiveGuard>,
     next_run: u32,
 }
 
@@ -54,6 +57,7 @@ impl World {
             runs: vec![],
             leases: vec![],
             workdirs: vec![],
+            guards: vec![],
             next_run: 0,
         };
         world.task_command(TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() }).unwrap();
@@ -114,7 +118,17 @@ impl World {
 
     fn decide(&self, command: RunCommand, now: Timestamp) -> Result<RunChange, RunError> {
         let task = self.task_ctx();
-        decide(&RunContext { task: &task, runs: &self.runs, leases: &self.leases, workdirs: &self.workdirs }, command, now)
+        decide(
+            &RunContext {
+                task: &task,
+                runs: &self.runs,
+                leases: &self.leases,
+                workdirs: &self.workdirs,
+                guards: &self.guards,
+            },
+            command,
+            now,
+        )
     }
 
     /// 判定並套用；被拒絕時狀態完全不變。
@@ -294,6 +308,48 @@ fn dispatch_re_checks_admission_so_a_missing_capability_blocks_it() {
 
     assert!(matches!(result, Err(RunError::AdmissionDenied(ref missing)) if !missing.is_empty()), "{result:?}");
     assert_eq!(world.task("t1").status, TaskStatus::Ready, "被拒絕時 Task 不變");
+}
+
+/// 一個 Workspace 範圍的有效教訓轉成的 Guard。
+fn workspace_guard(id: &str, rule: GuardRule) -> ActiveGuard {
+    let content = KnowledgeContent::new(KnowledgeKind::Lesson, "部署要先備份", "", &[], &[], None).unwrap();
+    let new = NewKnowledge {
+        id: format!("lesson-{id}"),
+        kind: KnowledgeKind::Lesson,
+        scope: KnowledgeScope { kind: knowledge::ScopeKind::Workspace, workspace_id: Some("w1".into()), goal_id: None, task_id: None },
+        content,
+        source: KnowledgeSource::User,
+        valid_from: None,
+        valid_until: None,
+    };
+    let lesson = knowledge::create(new, None, T0).unwrap().entries.remove(0);
+    let guard = guard::create(id.into(), &lesson, rule, T0).unwrap().guard;
+    ActiveGuard { guard, lesson }
+}
+
+#[test]
+fn dispatch_runs_the_applicable_guards_and_a_violation_blocks_it_with_the_source_lesson() {
+    let mut world = World::new(&["t1"]);
+    world.guards.push(workspace_guard(
+        "g1",
+        GuardRule::Preflight { field: ContractFieldName::DoneCriteria, must_mention: "備份".into() },
+    ));
+
+    let result = world.dispatch("t1", T0);
+
+    let Err(RunError::GuardViolated(violations)) = &result else { panic!("{result:?}") };
+    assert_eq!(violations.len(), 1);
+    assert_eq!((violations[0].guard_id.as_str(), violations[0].lesson_title.as_str()), ("g1", "部署要先備份"));
+    assert_eq!(result.as_ref().unwrap_err().code(), "guard_violated");
+    assert!(world.runs.is_empty() && world.leases.is_empty(), "被 Guard 擋下時什麼都不寫");
+    assert_eq!(world.task("t1").status, TaskStatus::Ready);
+
+    // 符合規則的 Guard 不擋
+    world.guards[0] = workspace_guard(
+        "g1",
+        GuardRule::Preflight { field: ContractFieldName::DoneCriteria, must_mention: "五個".into() },
+    );
+    assert!(world.dispatch("t1", T0).is_ok());
 }
 
 #[test]
@@ -771,4 +827,95 @@ proptest! {
             check_invariants(&world);
         }
     }
+}
+
+// ---------------------------------------------------------------- 原生 Session 與模型
+
+fn bind(world: &mut World, run_id: &str, session: &str) -> Result<RunChange, RunError> {
+    let generation = world.run(run_id).generation;
+    let command =
+        RunCommand::BindNativeSession { run_id: run_id.into(), generation, native_session_id: session.into() };
+    world.step(command, later(1_000))
+}
+
+#[test]
+fn the_first_native_session_id_is_bound_to_the_run_with_an_event() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+
+    let change = bind(&mut world, &run_id, "sess-a").unwrap();
+
+    assert_eq!(world.run(&run_id).native_session_id.as_deref(), Some("sess-a"));
+    assert_eq!(change.events.len(), 1);
+    assert_eq!(change.events[0].event_type, EVENT_RUN_NATIVE_SESSION_BOUND);
+    assert_eq!(change.events[0].payload["native_session_id"], "sess-a");
+}
+
+#[test]
+fn reporting_the_same_native_session_again_changes_nothing() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    bind(&mut world, &run_id, "sess-a").unwrap();
+    let before = world.run(&run_id).clone();
+
+    let change = bind(&mut world, &run_id, "sess-a").unwrap();
+
+    assert!(!change.changed(), "重新接上串流時重播的 Session 識別是冪等的");
+    assert_eq!(world.run(&run_id), &before);
+}
+
+#[test]
+fn a_different_native_session_never_replaces_the_bound_one_and_the_conflict_is_recorded() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    bind(&mut world, &run_id, "sess-a").unwrap();
+
+    let change = bind(&mut world, &run_id, "sess-b").unwrap();
+
+    assert_eq!(world.run(&run_id).native_session_id.as_deref(), Some("sess-a"), "不靜默改指其他原生 Session");
+    assert_eq!(change.events.len(), 1);
+    let event = &change.events[0];
+    assert_eq!(event.event_type, EVENT_RUN_NATIVE_SESSION_CONFLICT);
+    assert_eq!((event.payload["bound"].as_str(), event.payload["reported"].as_str()), (Some("sess-a"), Some("sess-b")));
+}
+
+#[test]
+fn native_sessions_from_a_stale_generation_or_an_ended_run_are_rejected() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    let generation = world.run(&run_id).generation;
+
+    let stale = RunCommand::BindNativeSession {
+        run_id: run_id.clone(),
+        generation: generation + 1,
+        native_session_id: "sess-x".into(),
+    };
+    assert_eq!(world.step(stale, later(1)), Err(RunError::StaleReport));
+
+    world.step(RunCommand::Finish { run_id: run_id.clone(), generation, outcome: RunOutcome::Succeeded }, later(2)).unwrap();
+    assert_eq!(bind(&mut world, &run_id, "sess-x").map(|_| ()), Err(RunError::StaleReport));
+    assert_eq!(world.run(&run_id).native_session_id, None);
+}
+
+#[test]
+fn the_workers_model_override_is_fixed_into_the_launch_payload_at_dispatch() {
+    let mut world = World::new(&["t1", "t2"]);
+    world.workspace.model_overrides.worker = Some("claude-opus-5-5".into());
+    world.workspace.model_overrides.controller = Some("sonnet".into());
+
+    let change = world.step(RunCommand::Dispatch { run_id: "r1".into(), task_id: "t1".into(), profile_id: "p1".into() }, T0).unwrap();
+    assert_eq!(change.outbox.unwrap().payload.model.as_deref(), Some("claude-opus-5-5"), "Worker Run 用 Worker 角色的覆寫");
+
+    world.workspace.model_overrides.worker = None;
+    let change = world.step(RunCommand::Dispatch { run_id: "r2".into(), task_id: "t2".into(), profile_id: "p1".into() }, T0).unwrap();
+    assert_eq!(change.outbox.unwrap().payload.model, None, "沒有覆寫就不指定模型（spec D-30）");
+}
+
+#[test]
+fn launch_payloads_stored_before_models_existed_have_no_model() {
+    let old = r#"{"task_id":"t1","prompt":"p","working_dir":"C:\\a"}"#;
+
+    let payload: LaunchPayload = serde_json::from_str(old).unwrap();
+
+    assert_eq!(payload.model, None);
 }

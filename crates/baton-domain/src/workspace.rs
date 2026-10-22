@@ -11,9 +11,12 @@ use crate::Timestamp;
 pub const AGGREGATE_TYPE: &str = "workspace";
 pub const EVENT_CREATED: &str = "workspace_created";
 pub const EVENT_ARCHIVED: &str = "workspace_archived";
+pub const EVENT_MODEL_OVERRIDES_CHANGED: &str = "workspace_model_overrides_changed";
 
 /// 顯示名稱的長度上限（字元數）。
 pub const MAX_NAME_CHARS: usize = 100;
+/// 模型名稱的長度上限（字元數）。
+pub const MAX_MODEL_CHARS: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +53,57 @@ pub struct Workspace {
     pub version: i64,
     pub created_at: Timestamp,
     pub archived_at: Option<Timestamp>,
+    /// 依角色覆寫的模型（spec D-30）；沒有覆寫的角色沿用帳號的 Claude Code 預設。
+    #[serde(default)]
+    pub model_overrides: ModelOverrides,
+}
+
+/// Agent 的角色（spec D-30 的 Controller、Worker、Reviewer）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRole {
+    Controller,
+    Worker,
+    Reviewer,
+}
+
+/// 每個角色的模型覆寫；`None` 表示不指定模型（平台預設，spec D-30）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ModelOverrides {
+    #[serde(default)]
+    pub controller: Option<String>,
+    #[serde(default)]
+    pub worker: Option<String>,
+    #[serde(default)]
+    pub reviewer: Option<String>,
+}
+
+impl ModelOverrides {
+    /// 某個角色要使用的模型；沒有覆寫時為 `None`。
+    pub fn model_for(&self, role: AgentRole) -> Option<&str> {
+        match role {
+            AgentRole::Controller => self.controller.as_deref(),
+            AgentRole::Worker => self.worker.as_deref(),
+            AgentRole::Reviewer => self.reviewer.as_deref(),
+        }
+    }
+
+    /// 去掉前後空白，空字串視為不覆寫；名稱只能由 Claude Code `--model` 的別名或完整名稱會用到的字元組成。
+    pub fn normalized(self) -> Result<Self, WorkspaceError> {
+        let normalize = |value: Option<String>| -> Result<Option<String>, WorkspaceError> {
+            let Some(trimmed) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) else { return Ok(None) };
+            let allowed = |c: char| c.is_ascii_alphanumeric() || "._-:[]@/".contains(c);
+            if trimmed.chars().count() > MAX_MODEL_CHARS || !trimmed.chars().all(allowed) {
+                return Err(WorkspaceError::ModelNameInvalid(trimmed.to_string()));
+            }
+            Ok(Some(trimmed.to_string()))
+        };
+        Ok(Self {
+            controller: normalize(self.controller)?,
+            worker: normalize(self.worker)?,
+            reviewer: normalize(self.reviewer)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +111,8 @@ pub enum WorkspaceCommand {
     /// `id` 由呼叫端產生（Domain 不產生亂數）；`name` 省略時取目錄名稱。
     Create { id: String, name: Option<String>, path: String },
     Archive { id: String },
+    /// 設定依角色的模型覆寫（整組取代）；與目前相同時沒有任何變動。
+    SetModelOverrides { id: String, overrides: ModelOverrides },
 }
 
 /// 命令成功後的結果：新的 Workspace 狀態與要追加的事件。
@@ -80,6 +136,8 @@ pub enum WorkspaceError {
     NotFound(String),
     #[error("Workspace {0} 已經封存")]
     AlreadyArchived(String),
+    #[error("模型名稱只能包含英數字與 . _ - : [ ] @ /，且不超過 {MAX_MODEL_CHARS} 個字元：{0}")]
+    ModelNameInvalid(String),
 }
 
 impl WorkspaceError {
@@ -91,6 +149,7 @@ impl WorkspaceError {
             WorkspaceError::AlreadyRegistered { .. } => "workspace_already_exists",
             WorkspaceError::NotFound(_) => "workspace_not_found",
             WorkspaceError::AlreadyArchived(_) => "workspace_already_archived",
+            WorkspaceError::ModelNameInvalid(_) => "model_name_invalid",
         }
     }
 }
@@ -140,6 +199,7 @@ pub fn decide(existing: &[Workspace], command: WorkspaceCommand, now: Timestamp)
                 version: 1,
                 created_at: now,
                 archived_at: None,
+                model_overrides: ModelOverrides::default(),
             };
             let created = event(
                 &workspace,
@@ -162,6 +222,25 @@ pub fn decide(existing: &[Workspace], command: WorkspaceCommand, now: Timestamp)
             };
             let archived = event(&workspace, EVENT_ARCHIVED, now, serde_json::json!({}));
             Ok(Decision { workspace, events: vec![archived] })
+        }
+        WorkspaceCommand::SetModelOverrides { id, overrides } => {
+            let current = existing.iter().find(|w| w.id == id).ok_or_else(|| WorkspaceError::NotFound(id.clone()))?;
+            if current.status == WorkspaceStatus::Archived {
+                return Err(WorkspaceError::AlreadyArchived(id));
+            }
+            let overrides = overrides.normalized()?;
+            if overrides == current.model_overrides {
+                return Ok(Decision { workspace: current.clone(), events: Vec::new() });
+            }
+            let workspace =
+                Workspace { version: current.version + 1, model_overrides: overrides.clone(), ..current.clone() };
+            let changed = event(
+                &workspace,
+                EVENT_MODEL_OVERRIDES_CHANGED,
+                now,
+                serde_json::json!({ "from": current.model_overrides, "to": overrides }),
+            );
+            Ok(Decision { workspace, events: vec![changed] })
         }
     }
 }
@@ -288,6 +367,82 @@ mod tests {
             decide(&[archived], WorkspaceCommand::Archive { id: "w1".into() }, T2),
             Err(WorkspaceError::AlreadyArchived("w1".into()))
         );
+    }
+
+    fn set_models(id: &str, controller: Option<&str>, worker: Option<&str>, reviewer: Option<&str>) -> WorkspaceCommand {
+        let overrides = ModelOverrides {
+            controller: controller.map(Into::into),
+            worker: worker.map(Into::into),
+            reviewer: reviewer.map(Into::into),
+        };
+        WorkspaceCommand::SetModelOverrides { id: id.into(), overrides }
+    }
+
+    #[test]
+    fn new_workspaces_override_no_model_so_every_role_uses_the_accounts_default() {
+        let ws = created("w1", "C:\\work\\notes");
+
+        for role in [AgentRole::Controller, AgentRole::Worker, AgentRole::Reviewer] {
+            assert_eq!(ws.model_overrides.model_for(role), None);
+        }
+    }
+
+    #[test]
+    fn model_overrides_are_set_per_role_trimmed_and_recorded_as_an_event() {
+        let existing = [created("w1", "C:\\work\\notes")];
+
+        let decision = decide(&existing, set_models("w1", None, Some("  claude-opus-5-5 "), Some("")), T2).unwrap();
+
+        let ws = &decision.workspace;
+        assert_eq!(ws.model_overrides.model_for(AgentRole::Worker), Some("claude-opus-5-5"));
+        assert_eq!(ws.model_overrides.model_for(AgentRole::Reviewer), None, "空字串視為不覆寫");
+        assert_eq!(ws.model_overrides.model_for(AgentRole::Controller), None);
+        assert_eq!(ws.version, 2);
+        assert_eq!(decision.events.len(), 1);
+        assert_eq!(decision.events[0].event_type, EVENT_MODEL_OVERRIDES_CHANGED);
+        assert_eq!(decision.events[0].payload["to"]["worker"], "claude-opus-5-5");
+    }
+
+    #[test]
+    fn setting_the_same_model_overrides_again_changes_nothing() {
+        let first = decide(&[created("w1", "C:\\a")], set_models("w1", Some("sonnet"), None, None), T2).unwrap().workspace;
+
+        let again = decide(std::slice::from_ref(&first), set_models("w1", Some(" sonnet "), None, None), T2).unwrap();
+
+        assert_eq!((again.workspace, again.events.len()), (first, 0));
+    }
+
+    #[test]
+    fn model_names_outside_the_allowed_characters_are_rejected() {
+        let existing = [created("w1", "C:\\a")];
+        let too_long = "x".repeat(MAX_MODEL_CHARS + 1);
+        for bad in ["opus --dangerously-skip-permissions", "a;b", "模型", too_long.as_str()] {
+            let result = decide(&existing, set_models("w1", None, Some(bad), None), T2);
+            assert!(matches!(result, Err(WorkspaceError::ModelNameInvalid(_))), "{bad}: {result:?}");
+        }
+        let accepted = set_models("w1", Some("claude-opus-5-5[1m]"), Some("us.anthropic.claude:1"), None);
+        assert!(decide(&existing, accepted, T2).is_ok());
+    }
+
+    #[test]
+    fn model_overrides_of_unknown_or_archived_workspaces_are_rejected() {
+        let mut archived = created("w1", "C:\\a");
+        archived.status = WorkspaceStatus::Archived;
+
+        assert_eq!(decide(&[], set_models("nope", None, None, None), T2), Err(WorkspaceError::NotFound("nope".into())));
+        assert_eq!(
+            decide(&[archived], set_models("w1", Some("opus"), None, None), T2),
+            Err(WorkspaceError::AlreadyArchived("w1".into()))
+        );
+    }
+
+    #[test]
+    fn workspaces_serialized_before_model_overrides_existed_have_no_overrides() {
+        let old = r#"{"id":"w1","name":"a","path":"C:\\a","status":"active","version":1,"created_at":1,"archived_at":null}"#;
+
+        let ws: Workspace = serde_json::from_str(old).unwrap();
+
+        assert_eq!(ws.model_overrides, ModelOverrides::default());
     }
 
     #[test]

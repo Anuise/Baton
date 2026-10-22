@@ -5,6 +5,7 @@
 
 use baton_domain::authorization::AuthorizationRevision;
 use baton_domain::agent::ReportRecord;
+use baton_domain::guard::ActiveGuard;
 use baton_domain::run::{ExecutionLease, Run, RunView};
 use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
@@ -68,6 +69,8 @@ pub(crate) struct Loaded {
     pub(crate) workdirs: Vec<Workdir>,
     /// 這個 Workspace 的整合項目，依排入順序（票 20）。
     pub(crate) integrations: Vec<IntegrationEntry>,
+    /// Run 准入時要檢查的 Guard；只有派工路徑以 `guards::load_active_guards` 填入，其他路徑是空的（票 38）。
+    pub(crate) guards: Vec<ActiveGuard>,
 }
 
 impl Loaded {
@@ -268,6 +271,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
         reports,
         workdirs,
         integrations,
+        guards: Vec::new(),
     })
 }
 

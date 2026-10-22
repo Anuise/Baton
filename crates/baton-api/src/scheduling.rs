@@ -165,7 +165,7 @@ pub(crate) async fn overview(state: &ApiState) -> Result<SchedulingOverview, Tas
     let mut status =
         crate::quota::current(&state.store, &*state.quota_observer, state.clock.now()).await.map_err(ApiError::from)?;
     let quota = crate::quota::known_used(&status);
-    let snapshot = state.store.scheduling_snapshot(quota.clone()).await.map_err(ApiError::from)?;
+    let snapshot = state.store.scheduling_snapshot(quota.clone(), state.clock.now()).await.map_err(ApiError::from)?;
     let limits = snapshot.settings.mode.limits();
     let usable = scheduler::usable_profiles(&snapshot.profiles).len();
 

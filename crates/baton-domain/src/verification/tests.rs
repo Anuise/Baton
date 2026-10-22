@@ -95,6 +95,7 @@ impl World {
             updated_at: T0,
             started_at: None,
             ended_at: None,
+            native_session_id: None,
         });
     }
 

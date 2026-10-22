@@ -14,6 +14,7 @@ const workspace: Workspace = {
   version: 1,
   created_at: 1_700_000_000_000,
   archived_at: null,
+  model_overrides: { controller: null, worker: null, reviewer: null },
 };
 
 /** 相當於使用者在系統匣按「完全退出」。 */
@@ -42,6 +43,7 @@ const client = {
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
   backupStatus: vi.fn(async () => ({ backups: [], latest_drill: null })),
   listKnowledge: vi.fn(async () => ({ search_mode: "full_text", entries: [] })),
+  listGuards: vi.fn(async () => ({ guards: [] })),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({
@@ -61,6 +63,8 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "授權設定 筆記" }));
     expect(await screen.findByText(/授權讀取失敗/)).toBeInTheDocument();
+    // 模型設定與授權設定放在同一個 Workspace 設定畫面
+    expect(await screen.findByRole("heading", { name: "模型設定：筆記" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "工作面板：筆記" })).not.toBeInTheDocument();
   });
 

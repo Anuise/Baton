@@ -41,6 +41,7 @@ const workspace: Workspace = {
   version: 1,
   created_at: 1_700_000_000_000,
   archived_at: null,
+  model_overrides: { controller: null, worker: null, reviewer: null },
 };
 
 /** 2023-11-14 22:13:20 UTC。 */
@@ -593,6 +594,59 @@ describe("派工與 Run", () => {
     const queued = within(card("部署")).getByRole("group", { name: "排隊原因" });
     const lifecycle = within(queued).getByText("完全退出").closest("li")!;
     expect(within(lifecycle).getByText("Workspace 在完全退出後等待「繼續工作」")).toBeInTheDocument();
+  });
+
+  it("Guard 擋下的原因標示為「Guard 擋下」，並顯示來源教訓的標題", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [readyTask()],
+        queue: [
+          {
+            workspace_id: "ws_1",
+            task_id: "task_1",
+            title: "部署",
+            priority: 0,
+            requested_at: T0,
+            position: 1,
+            reasons: [
+              {
+                category: "guard",
+                code: "guard_violated",
+                message: "契約的「範圍與限制」沒有提到「備份」（來源教訓「部署前先備份資料庫」）",
+                guard: { guard_id: "gd_1", lesson_id: "kn_1", lesson_title: "部署前先備份資料庫" },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const queued = within(card("部署")).getByRole("group", { name: "排隊原因" });
+    const guard = within(queued).getByText("Guard 擋下").closest("li")!;
+    expect(guard).toHaveTextContent("契約的「範圍與限制」沒有提到「備份」");
+    expect(within(guard).getByText("來源教訓：部署前先備份資料庫")).toBeInTheDocument();
+  });
+
+  it("派工被 Guard 擋下（202）時立即顯示原因與來源教訓", async () => {
+    const user = await renderBoard(
+      fakeClient({
+        tasks: [readyTask()],
+        queueOnDispatch: [
+          {
+            category: "guard",
+            code: "guard_violated",
+            message: "Task 要求了「部署」能力（來源教訓「不要直接部署」）",
+            guard: { guard_id: "gd_2", lesson_id: "kn_2", lesson_title: "不要直接部署" },
+          },
+        ],
+      }),
+    );
+
+    await user.click(within(card("部署")).getByRole("button", { name: "派工" }));
+
+    const queued = await within(card("部署")).findByRole("group", { name: "排隊原因" });
+    expect(within(queued).getByText("Guard 擋下")).toBeInTheDocument();
+    expect(within(queued).getByText("來源教訓：不要直接部署")).toBeInTheDocument();
   });
 
   it("讀不到排程總覽時看板照常顯示，Run 狀態列改顯示 profile_id", async () => {

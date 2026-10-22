@@ -6,13 +6,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::event::DomainEvent;
-use crate::{product, Timestamp};
+use crate::{claude_code, product, Timestamp};
 
-/// 最低支援的 Claude Code 版本（主、次、修訂）。
-///
-/// 暫定值：實測過的版本系列是 2.1.x，且需要 `claude auth status`。
-/// spec 規定最低版本在 Adapter 驗證時固定，屆時再依驗證結果調整。
-pub const MIN_CLAUDE_CODE_VERSION: (u64, u64, u64) = (2, 1, 0);
+/// 最低支援的 Claude Code 版本（主、次、修訂）：與 Profile 派工阻擋共用 Adapter 驗證時固定的版本
+/// （`claude_code::MIN_SUPPORTED_VERSION`，票 14）。
+pub const MIN_CLAUDE_CODE_VERSION: (u64, u64, u64) = (
+    claude_code::MIN_SUPPORTED_VERSION.major as u64,
+    claude_code::MIN_SUPPORTED_VERSION.minor as u64,
+    claude_code::MIN_SUPPORTED_VERSION.patch as u64,
+);
 
 pub const CLAUDE_CODE_DOCS_URL: &str = "https://code.claude.com/docs/en/setup";
 pub const GIT_DOCS_URL: &str = "https://git-scm.com/download/win";
@@ -264,13 +266,13 @@ mod tests {
 
         assert_eq!(check.status, ToolStatus::TooOld);
         assert_eq!(check.version.as_deref(), Some("2.0.9"));
-        assert_eq!(check.minimum_version.as_deref(), Some("2.1.0"));
+        assert_eq!(check.minimum_version.as_deref(), Some("2.1.307"));
         assert_eq!(check.guidance[0].command, "claude update");
     }
 
     #[test]
     fn claude_at_or_above_the_minimum_version_is_ok_with_no_guidance() {
-        for output in ["2.1.0 (Claude Code)", "2.1.307 (Claude Code)", "10.0.0"] {
+        for output in ["2.1.307 (Claude Code)", "2.2.0 (Claude Code)", "10.0.0"] {
             let check = check_claude(found(output));
             assert_eq!(check.status, ToolStatus::Ok, "{output}");
             assert!(check.guidance.is_empty());

@@ -42,6 +42,7 @@ impl AgentAdapter for TreeAdapter {
             working_dir: spec.working_dir.clone(),
             command_id: spec.command_id.clone(),
             env: Vec::new(),
+            ..Default::default()
         }
     }
 

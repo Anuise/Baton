@@ -98,7 +98,7 @@ async fn every_port_can_be_driven_through_its_fake() {
     // ProcessControl
     let receipt = ports
         .process_control
-        .spawn(SpawnSpec { program: "claude".into(), args: vec![], working_dir: None, command_id: "cmd-1".into(), env: vec![] })
+        .spawn(SpawnSpec { program: "claude".into(), args: vec![], working_dir: None, command_id: "cmd-1".into(), env: vec![], ..Default::default() })
         .await
         .unwrap();
     assert_eq!(ports.process_control.inspect(&receipt.identity).await.unwrap(), Liveness::Alive);
@@ -121,6 +121,7 @@ async fn every_port_can_be_driven_through_its_fake() {
             command_id: "cmd-1".into(),
             prompt: "hi".into(),
             working_dir: None,
+            ..Default::default()
         })
         .await
         .unwrap();

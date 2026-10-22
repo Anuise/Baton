@@ -1,7 +1,7 @@
 //! 正式執行環境使用的 Port。
 //!
 //! 目前只有系統時鐘、平台辨識、DPAPI 憑證保護、目錄檢查與建立、成果與工作目錄檔案讀寫、Claude Code／Git 環境探測、驗證命令執行、
-//! worktree 建立與整合合併（git CLI，票 20）是真實實作；其餘 Port 的正式版由後續的票提供，
+//! Claude Code Adapter、worktree 建立與整合合併（git CLI，票 20）是真實實作；其餘 Port 的正式版由後續的票提供，
 //! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
 
 use std::path::Path;
@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use baton_domain::Timestamp;
 use baton_ports::*;
-use futures::stream::BoxStream;
 
+use crate::claude_adapter::ClaudeCodeAdapter;
 use crate::claude_cli::ClaudeCli;
 use crate::windows_platform::WindowsPlatformInfo;
 
@@ -40,28 +40,6 @@ impl ProcessControl for Unavailable {
     }
     async fn stop(&self, _identity: &ProcessIdentity, _grace: Duration) -> PortResult<StopResult> {
         Err(PortError::NotImplemented("ProcessControl"))
-    }
-}
-
-#[async_trait]
-impl AgentAdapter for Unavailable {
-    fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
-        SpawnSpec {
-            program: String::new(),
-            args: Vec::new(),
-            working_dir: spec.working_dir.clone(),
-            command_id: spec.command_id.clone(),
-            env: Vec::new(),
-        }
-    }
-    async fn launch(&self, _spec: RunSpec) -> PortResult<AgentHandle> {
-        Err(PortError::NotImplemented("AgentAdapter"))
-    }
-    fn events(&self, _handle: &AgentHandle) -> BoxStream<'static, AdapterEvent> {
-        Box::pin(futures::stream::empty())
-    }
-    async fn resume_capability(&self, _session: &SessionRef) -> PortResult<Capability> {
-        Err(PortError::NotImplemented("AgentAdapter"))
     }
 }
 
@@ -184,8 +162,8 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> PortResult<T> + Send
     tokio::task::spawn_blocking(work).await.map_err(|e| PortError::Failed(format!("檔案工作被中斷：{e}")))?
 }
 
-/// 組出正式執行用的 Port 組合。
-pub fn production_ports() -> Ports {
+/// 組出正式執行用的 Port 組合；`data_dir` 是 Runtime 的資料目錄（Run 的啟動檔案與輸出放在其下）。
+pub fn production_ports(data_dir: &Path) -> Ports {
     let unavailable = Arc::new(Unavailable);
     // Windows 上使用真實的 Job Object 實作；其他平台維持尚未實作
     #[cfg(windows)]
@@ -195,7 +173,7 @@ pub fn production_ports() -> Ports {
     Ports {
         clock: Arc::new(SystemClock),
         process_control,
-        agent_adapter: unavailable.clone(),
+        agent_adapter: Arc::new(ClaudeCodeAdapter::for_current_process(data_dir)),
         quota_observer: unavailable.clone(),
         workspace_fs: Arc::new(LocalWorkspaceFs),
         platform_info: Arc::new(WindowsPlatformInfo),

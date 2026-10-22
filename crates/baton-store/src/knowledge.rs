@@ -410,7 +410,7 @@ fn entry_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeEntry> {
     })
 }
 
-fn load_entry(conn: &Connection, id: &str) -> rusqlite::Result<Option<KnowledgeEntry>> {
+pub(crate) fn load_entry(conn: &Connection, id: &str) -> rusqlite::Result<Option<KnowledgeEntry>> {
     conn.query_row(&format!("SELECT {ENTRY_COLUMNS} FROM knowledge_entry WHERE id = ?1"), [id], entry_row)
         .map(Some)
         .or_else(|e| match e {

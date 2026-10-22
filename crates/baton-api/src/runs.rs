@@ -62,6 +62,7 @@ impl From<RunError> for TaskApiError {
             RunError::TaskNotReady(_)
             | RunError::AdmissionRejected(_)
             | RunError::DependenciesUnfinished(_)
+            | RunError::GuardViolated(_)
             | RunError::ExecutionConflict { .. }
             | RunError::TransitionInvalid { .. }
             | RunError::StaleReport

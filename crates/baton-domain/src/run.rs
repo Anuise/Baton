@@ -18,10 +18,12 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{BlockedNote, CheckpointNote, ProgressNote, ReportContent, ReportRecord};
 use crate::authorization::{self, AdmissionDenied};
 use crate::event::DomainEvent;
+use crate::guard::{self, ActiveGuard, GuardViolation};
 use crate::task::{
     self, ContractContent, ContractField, ContractFieldName, MissingItem, Task, TaskContext, TaskStatus, Versioned,
 };
 use crate::workdir::{Workdir, WorkdirKind};
+use crate::workspace::{AgentRole, Workspace};
 use crate::Timestamp;
 
 pub const RUN_AGGREGATE: &str = "run";
@@ -37,6 +39,8 @@ pub const EVENT_RUN_CANCELLED: &str = "run_cancelled";
 pub const EVENT_RUN_PROGRESS_REPORTED: &str = "run_progress_reported";
 pub const EVENT_RUN_CHECKPOINT_SAVED: &str = "run_checkpoint_saved";
 pub const EVENT_RUN_BLOCKED_REPORTED: &str = "run_blocked_reported";
+pub const EVENT_RUN_NATIVE_SESSION_BOUND: &str = "run_native_session_bound";
+pub const EVENT_RUN_NATIVE_SESSION_CONFLICT: &str = "run_native_session_conflict";
 
 /// 派工 Outbox 項目的種類：要求 Supervisor 啟動這個 Run 的程序。
 pub const OUTBOX_LAUNCH_RUN: &str = "launch_run";
@@ -144,6 +148,9 @@ pub struct Run {
     pub updated_at: Timestamp,
     pub started_at: Option<Timestamp>,
     pub ended_at: Option<Timestamp>,
+    /// Adapter 首次回報的原生 Session 識別；綁定後不會被改成別的 Session。
+    #[serde(default)]
+    pub native_session_id: Option<String>,
 }
 
 /// execution lease：Task 的寫入所有權。
@@ -188,6 +195,9 @@ pub struct LaunchPayload {
     pub prompt: String,
     /// Worker 的工作目錄：Task 在平台登記的 worktree 或輸出目錄（票 20）。
     pub working_dir: String,
+    /// 派工當下 Workspace 對 Worker 角色的模型覆寫（spec D-30）；`None` 表示沿用帳號的預設模型。
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// 面板與 API 看到的一個 Run：Run 本身加上它的 lease，以及 Worker 最新的進度、checkpoint 與受阻回報。
@@ -259,6 +269,8 @@ pub enum RunCommand {
     Heartbeat { run_id: String, generation: i64 },
     /// Worker 回報進度、checkpoint 或受阻（Agent API）；同時續約 lease。受阻會讓 Task 進入 `blocked`。
     Report { run_id: String, generation: i64, content: ReportContent },
+    /// Adapter 回報了原生 Session 識別：第一次就綁定；之後相同是冪等的，不同則只記錄衝突、不改綁定。
+    BindNativeSession { run_id: String, generation: i64, native_session_id: String },
     /// Worker 回報結束。
     Finish { run_id: String, generation: i64, outcome: RunOutcome },
     /// 確認程序已經不在（核對結果、啟動結果不明且找不到程序）。
@@ -280,6 +292,7 @@ impl RunCommand {
             | RunCommand::LaunchFailed { run_id, .. }
             | RunCommand::Heartbeat { run_id, .. }
             | RunCommand::Report { run_id, .. }
+            | RunCommand::BindNativeSession { run_id, .. }
             | RunCommand::Finish { run_id, .. }
             | RunCommand::Interrupt { run_id, .. }
             | RunCommand::ReconcileLease { run_id, .. }
@@ -331,6 +344,8 @@ pub enum RunError {
     AdmissionDenied(Vec<MissingItem>),
     #[error(transparent)]
     AdmissionRejected(#[from] AdmissionDenied),
+    #[error("Guard 擋下了派工：{}", join_violations(.0))]
+    GuardViolated(Vec<GuardViolation>),
     #[error("還有相依的 Task 沒有完成：{}", .0.join("、"))]
     DependenciesUnfinished(Vec<String>),
     #[error("Task {task_id} 已經有 Run {run_id} 持有寫入所有權，不能同時派第二個")]
@@ -362,6 +377,10 @@ fn join_messages(items: &[MissingItem]) -> String {
     items.iter().map(|i| i.message.as_str()).collect::<Vec<_>>().join("；")
 }
 
+fn join_violations(items: &[GuardViolation]) -> String {
+    items.iter().map(|v| format!("{}（來源教訓「{}」）", v.message, v.lesson_title)).collect::<Vec<_>>().join("；")
+}
+
 impl RunError {
     /// 穩定的機器可讀代碼，API 與 UI 依它判斷錯誤種類。
     pub fn code(&self) -> &'static str {
@@ -372,6 +391,7 @@ impl RunError {
             RunError::TaskNotReady(_) => "task_not_ready",
             RunError::AdmissionDenied(_) => "task_admission_denied",
             RunError::AdmissionRejected(_) => "admission_rejected",
+            RunError::GuardViolated(_) => "guard_violated",
             RunError::DependenciesUnfinished(_) => "dependencies_unfinished",
             RunError::ExecutionConflict { .. } => "execution_conflict",
             RunError::TransitionInvalid { .. } => "run_transition_invalid",
@@ -394,6 +414,8 @@ pub struct RunContext<'a> {
     pub leases: &'a [ExecutionLease],
     /// Workspace 內平台登記的工作目錄（票 20）；派工只認已可用的目錄。
     pub workdirs: &'a [Workdir],
+    /// Run 准入時要檢查的 Guard（Store 已篩出「啟用且來源教訓現在有效」者；範圍由 `guard::violations` 判定）。
+    pub guards: &'a [ActiveGuard],
 }
 
 impl RunContext<'_> {
@@ -509,9 +531,10 @@ impl<'a> Editing<'a> {
 
 /// 套用一個命令。
 pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Result<RunChange, RunError> {
-    ctx.task.workspace.ok_or_else(|| RunError::WorkspaceNotFound(ctx.task.workspace_id.to_string()))?;
+    let workspace =
+        ctx.task.workspace.ok_or_else(|| RunError::WorkspaceNotFound(ctx.task.workspace_id.to_string()))?;
     if let RunCommand::Dispatch { run_id, task_id, profile_id } = command {
-        return dispatch(ctx, run_id, task_id, profile_id, now);
+        return dispatch(ctx, workspace, run_id, task_id, profile_id, now);
     }
 
     let run = ctx.run(command.run_id())?;
@@ -602,6 +625,23 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             };
             Ok(RunChange { task, report: Some(report), ..edit.into_change() })
         }
+        RunCommand::BindNativeSession { generation, native_session_id, .. } => {
+            check_report(run, edit.lease.as_ref(), generation)?;
+            match &run.native_session_id {
+                Some(bound) if *bound == native_session_id => Ok(RunChange::default()),
+                Some(bound) => {
+                    // 條件綁定：已綁定的 Session 不會被靜默改指；衝突留下事件供查核
+                    let payload = serde_json::json!({ "bound": bound, "reported": native_session_id });
+                    edit.push(EVENT_RUN_NATIVE_SESSION_CONFLICT, payload);
+                    Ok(edit.into_change())
+                }
+                None => {
+                    edit.push(EVENT_RUN_NATIVE_SESSION_BOUND, serde_json::json!({ "native_session_id": native_session_id }));
+                    edit.run.native_session_id = Some(native_session_id);
+                    Ok(edit.into_change())
+                }
+            }
+        }
         RunCommand::Finish { generation, outcome, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
             match outcome {
@@ -686,7 +726,7 @@ struct Checked<'a> {
 }
 
 /// 派工的前置檢查（與帳號、容量無關）：Task 必須是 `ready`、沒有人持有寫入所有權、准入檢查通過（授權可能在
-/// ready 之後被撤銷，AI-61）、相依都已完成，而且 Task 的工作目錄已經登記為可用（票 20）。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
+/// ready 之後被撤銷，AI-61）、適用的 Guard 都沒有違反（票 38）、相依都已完成，而且 Task 的工作目錄已經登記為可用（票 20）。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
 pub fn check_dispatch(ctx: &RunContext<'_>, task_id: &str) -> Result<(), RunError> {
     check_dispatch_inner(ctx, task_id).map(|_| ())
 }
@@ -712,6 +752,11 @@ fn check_dispatch_inner<'a>(ctx: &'a RunContext<'a>, task_id: &str) -> Result<Ch
         ctx.task.authorization,
         &contract.content.required_capabilities,
     )?;
+    // 已驗證教訓轉成的 Guard：在 Run 准入時檢查，違反就不派（票 38）
+    let violations = guard::violations(ctx.guards, task, contract, ctx.runs);
+    if !violations.is_empty() {
+        return Err(RunError::GuardViolated(violations));
+    }
     // 相依是否完成是派工時才檢查的條件（AI-61）
     let unfinished: Vec<String> = ctx
         .task
@@ -736,6 +781,7 @@ fn check_dispatch_inner<'a>(ctx: &'a RunContext<'a>, task_id: &str) -> Result<Ch
 
 fn dispatch(
     ctx: &RunContext<'_>,
+    workspace: &Workspace,
     run_id: String,
     task_id: String,
     profile_id: String,
@@ -762,6 +808,7 @@ fn dispatch(
         updated_at: now,
         started_at: None,
         ended_at: None,
+        native_session_id: None,
     };
     let lease = ExecutionLease {
         run_id: run_id.clone(),
@@ -780,6 +827,7 @@ fn dispatch(
             task_id: task.id.clone(),
             prompt: render_prompt(&task.title, &contract.content),
             working_dir: workdir.path.clone(),
+            model: workspace.model_overrides.model_for(AgentRole::Worker).map(str::to_string),
         },
         created_at: now,
         delivered_at: None,
