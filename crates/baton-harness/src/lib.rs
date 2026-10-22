@@ -24,7 +24,7 @@ use baton_domain::auth::Role;
 use baton_domain::guardian::JournalRecord;
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::Timestamp;
-use baton_ports::{AgentAdapter, Ports, VerificationDriver};
+use baton_ports::{AgentAdapter, BrowserDriver, Ports, VerificationDriver};
 use baton_guardian::launcher::{self, LoginLaunch};
 use baton_guardian::{Guardian, GuardianStep, RuntimeHost};
 use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeOptions};
@@ -50,6 +50,7 @@ pub struct HarnessBuilder {
     prepare: Option<PrepareDataDir>,
     adapter: Option<AdapterFactory>,
     verification_driver: Option<Arc<dyn VerificationDriver>>,
+    browser_driver: Option<Arc<dyn BrowserDriver>>,
     exit_timing: ExitTiming,
     full_text_search: bool,
     exit_linger: Option<Duration>,
@@ -99,6 +100,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// 以指定的瀏覽器 Runner 取代 fake（例如正式的 `LocalBrowserDriver`，以真實的 Playwright 驗證；票 46）。
+    pub fn browser_driver(mut self, driver: Arc<dyn BrowserDriver>) -> Self {
+        self.browser_driver = Some(driver);
+        self
+    }
+
     pub async fn start(self) -> Harness {
         self.try_start().await.unwrap_or_else(|e| panic!("Runtime 啟動失敗：{e}"))
     }
@@ -116,6 +123,7 @@ impl HarnessBuilder {
             fakes,
             adapter,
             verification_driver: self.verification_driver,
+            browser_driver: self.browser_driver,
             runtime: None,
             http: reqwest::Client::new(),
             exit_timing: self.exit_timing,
@@ -138,6 +146,8 @@ pub struct Harness {
     adapter: Option<Arc<dyn AgentAdapter>>,
     /// 取代 fake 的驗證 Adapter Port；`None` 時用 `fakes.verification_driver`。
     verification_driver: Option<Arc<dyn VerificationDriver>>,
+    /// 取代 fake 的瀏覽器 Runner；`None` 時用 `fakes.browser_driver`。
+    browser_driver: Option<Arc<dyn BrowserDriver>>,
     runtime: Option<RunningRuntime>,
     http: reqwest::Client,
     exit_timing: ExitTiming,
@@ -201,6 +211,7 @@ impl Harness {
             prepare: None,
             adapter: None,
             verification_driver: None,
+            browser_driver: None,
             exit_timing: ExitTiming::default(),
             full_text_search: true,
             exit_linger: None,
@@ -230,6 +241,9 @@ impl Harness {
         }
         if let Some(driver) = &self.verification_driver {
             ports.verification_driver = driver.clone();
+        }
+        if let Some(driver) = &self.browser_driver {
+            ports.browser_driver = driver.clone();
         }
         ports
     }
