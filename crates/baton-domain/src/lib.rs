@@ -17,6 +17,7 @@ pub mod context;
 pub mod conversation;
 pub mod decision;
 pub mod event;
+pub mod exploration;
 pub mod external_operation;
 pub mod guard;
 pub mod guardian;
