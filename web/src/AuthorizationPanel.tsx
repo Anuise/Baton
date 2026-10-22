@@ -1,0 +1,278 @@
+import { useCallback, useEffect, useState } from "react";
+
+import { formatTimestamp } from "./time";
+import type {
+  AuthorizationClient,
+  AuthorizationRevision,
+  AuthorizationView,
+  Capability,
+  ConfirmationSummary,
+  Grant,
+  Workspace,
+} from "./runtimeClient";
+
+type ViewState = { state: "loading" } | { state: "ready"; view: AuthorizationView } | { state: "failed"; reason: string };
+
+/** 已勾選的能力與它的目標資源、限制（每行一項）；沒有出現在這裡的能力就是沒有授權。 */
+type Draft = Partial<Record<Capability, { targets: string; restrictions: string }>>;
+
+interface Props {
+  client: AuthorizationClient;
+  workspace: Workspace;
+  /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
+  timeZone?: string;
+}
+
+const lines = (text: string) =>
+  text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+
+function draftFrom(grants: Grant[]): Draft {
+  const draft: Draft = {};
+  for (const grant of grants) {
+    draft[grant.capability] = { targets: grant.targets.join("\n"), restrictions: grant.restrictions.join("\n") };
+  }
+  return draft;
+}
+
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function sourceLabel(revision: AuthorizationRevision, view: AuthorizationView): string {
+  const template = view.templates.find((t) => t.id === revision.source.template_id);
+  const name = template?.name ?? revision.source.template_id ?? "";
+  switch (revision.source.kind) {
+    case "template":
+      return `範本「${name}」`;
+    case "template_edited":
+      return `範本「${name}」（已編輯）`;
+    case "custom":
+      return "自行組成";
+  }
+}
+
+/**
+ * Workspace 授權設定（I2）：選取目錄不等於授權。
+ * 使用者從建議範本或空白開始編輯，檢視確認摘要（含風險揭露）後確認並保存，授權才生效。
+ */
+export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
+  const [loaded, setLoaded] = useState<ViewState>({ state: "loading" });
+  const [draft, setDraft] = useState<Draft>({});
+  const [templateId, setTemplateId] = useState<string | null>(null);
+  const [summary, setSummary] = useState<ConfirmationSummary | null>(null);
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const view = await client.getAuthorization(workspace.id);
+      setLoaded({ state: "ready", view });
+      setDraft(draftFrom(view.effective?.grants ?? []));
+      setTemplateId(view.effective?.source.template_id ?? null);
+    } catch (e) {
+      setLoaded({ state: "failed", reason: reasonOf(e) });
+    }
+  }, [client, workspace.id]);
+
+  useEffect(() => {
+    setLoaded({ state: "loading" });
+    setSummary(null);
+    setAcknowledged(false);
+    setNotice(null);
+    setError(null);
+    void load();
+  }, [load]);
+
+  if (loaded.state === "loading") return <section aria-label="授權設定">載入中…</section>;
+  if (loaded.state === "failed") {
+    return (
+      <section aria-label="授權設定">
+        <p role="alert">無法取得授權設定：{loaded.reason}</p>
+      </section>
+    );
+  }
+  const view = loaded.view;
+
+  /** 內容一改，先前看過的摘要與風險確認都作廢，必須重新檢視。 */
+  const edit = (next: Draft, nextTemplateId: string | null = templateId) => {
+    setDraft(next);
+    setTemplateId(nextTemplateId);
+    setSummary(null);
+    setAcknowledged(false);
+    setNotice(null);
+    setError(null);
+  };
+
+  const grants = (): Grant[] =>
+    view.capabilities.flatMap(({ capability }) => {
+      const entry = draft[capability];
+      return entry ? [{ capability, targets: lines(entry.targets), restrictions: lines(entry.restrictions) }] : [];
+    });
+
+  const toggle = (capability: Capability, enabled: boolean) => {
+    const next = { ...draft };
+    if (enabled) next[capability] = { targets: "", restrictions: "" };
+    else delete next[capability];
+    edit(next);
+  };
+
+  const change = (capability: Capability, field: "targets" | "restrictions", value: string) =>
+    edit({ ...draft, [capability]: { ...draft[capability]!, [field]: value } });
+
+  const review = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setSummary(await client.summarizeAuthorization(workspace.id, grants()));
+      setAcknowledged(false);
+    } catch (e) {
+      setError(reasonOf(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirm = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const revision = await client.confirmAuthorization(workspace.id, {
+        templateId,
+        grants: grants(),
+        acknowledgedRisk: acknowledged,
+      });
+      await load();
+      setSummary(null);
+      setAcknowledged(false);
+      setNotice(`已保存為 revision ${revision.revision}`);
+    } catch (e) {
+      setError(reasonOf(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const effective = view.effective;
+  return (
+    <section className="authorization" aria-label="授權設定">
+      <h2>授權設定：{workspace.name}</h2>
+      {effective ? (
+        <p>
+          目前授權：revision {effective.revision}，確認於 {formatTimestamp(effective.confirmed_at, timeZone)}，來源：
+          {sourceLabel(effective, view)}
+        </p>
+      ) : (
+        <p className="authorization-unconfirmed">
+          尚未確認授權：選取目錄不等於授權，確認之前任何需要能力的 Agent 都不會被准入。
+        </p>
+      )}
+
+      <div className="authorization-templates">
+        <h3>建議範本（可編輯）</h3>
+        {view.templates.map((template) => (
+          <div key={template.id}>
+            <button type="button" onClick={() => edit(draftFrom(template.grants), template.id)}>
+              套用「{template.name}」
+            </button>
+            <span className="authorization-template-description">{template.description}</span>
+          </div>
+        ))}
+      </div>
+
+      <fieldset>
+        <legend>能力、目標資源與限制</legend>
+        {view.capabilities.map(({ capability, label, high_risk }) => {
+          const entry = draft[capability];
+          return (
+            <div key={capability} className="authorization-capability">
+              <label>
+                <input type="checkbox" checked={entry !== undefined} onChange={(e) => toggle(capability, e.target.checked)} />
+                {label}
+                {high_risk && <span className="authorization-high-risk">（高風險，需要明確授權）</span>}
+              </label>
+              {entry && (
+                <>
+                  <label>
+                    {label}：目標資源（每行一項）
+                    <textarea value={entry.targets} onChange={(e) => change(capability, "targets", e.target.value)} />
+                  </label>
+                  <label>
+                    {label}：限制（每行一項）
+                    <textarea
+                      value={entry.restrictions}
+                      onChange={(e) => change(capability, "restrictions", e.target.value)}
+                    />
+                  </label>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </fieldset>
+
+      <button type="button" disabled={busy} onClick={() => void review()}>
+        檢視確認摘要
+      </button>
+
+      {summary && (
+        <section className="authorization-summary" aria-label="確認摘要">
+          <h3>確認摘要</h3>
+          {summary.items.length === 0 ? (
+            <p>沒有授予任何能力。</p>
+          ) : (
+            <ul>
+              {summary.items.map((item) => (
+                <li key={item.capability}>
+                  <strong>{item.label}</strong>
+                  {item.high_risk && <span className="authorization-high-risk">（高風險）</span>}
+                  ：{item.targets.join("、")}
+                  {item.restrictions.length > 0 && <>；限制：{item.restrictions.join("、")}</>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {summary.risks.map((risk) => (
+            <p key={risk} className="authorization-risk">
+              {risk}
+            </p>
+          ))}
+          {summary.requires_risk_acknowledgement && (
+            <label>
+              <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
+              我了解並接受上述風險
+            </label>
+          )}
+          <button
+            type="button"
+            disabled={busy || (summary.requires_risk_acknowledgement && !acknowledged)}
+            onClick={() => void confirm()}
+          >
+            確認並保存授權
+          </button>
+        </section>
+      )}
+
+      {notice && <p role="status">{notice}</p>}
+      {error && <p role="alert">{error}</p>}
+
+      {view.revisions.length > 0 && (
+        <section aria-label="授權歷史">
+          <h3>授權歷史</h3>
+          <ol>
+            {[...view.revisions].reverse().map((revision) => (
+              <li key={revision.revision}>
+                revision {revision.revision}：{formatTimestamp(revision.confirmed_at, timeZone)}，
+                {sourceLabel(revision, view)}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+    </section>
+  );
+}

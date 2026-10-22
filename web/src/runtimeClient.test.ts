@@ -101,4 +101,45 @@ describe("Runtime 用戶端", () => {
     expect(invoke).toHaveBeenNthCalledWith(2, "workspace_create", { path: "C:\\docs", name: "文件" });
     expect(invoke).toHaveBeenNthCalledWith(3, "workspace_archive", { id: "ws_1" });
   });
+
+  it("HTTP 版讀取、預覽與確認 Workspace 授權", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const grants = [{ capability: "read_files" as const, targets: ["C:\\docs"], restrictions: [] }];
+
+    await client.getAuthorization("ws_1");
+    await client.summarizeAuthorization("ws_1", grants);
+    await client.confirmAuthorization("ws_1", { templateId: "research_docs", grants, acknowledgedRisk: false });
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/authorization");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/authorization/summary", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grants }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/authorization", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false }),
+    });
+  });
+
+  it("Tauri 版以指令與參數管理 Workspace 授權", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+    const grants = [{ capability: "read_files" as const, targets: ["C:\\docs"], restrictions: [] }];
+
+    await client.getAuthorization("ws_1");
+    await client.summarizeAuthorization("ws_1", grants);
+    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "workspace_authorization", { id: "ws_1" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "workspace_authorization_summary", { id: "ws_1", grants });
+    expect(invoke).toHaveBeenNthCalledWith(3, "workspace_authorization_confirm", {
+      id: "ws_1",
+      templateId: null,
+      grants,
+      acknowledgedRisk: true,
+    });
+  });
 });

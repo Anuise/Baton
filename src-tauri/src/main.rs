@@ -7,10 +7,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::{CreateWorkspaceRequest, HealthResponse, PlatformResponse, WorkspaceList};
+use baton_api::{
+    AuthorizationView, ConfirmAuthorizationRequest, CreateWorkspaceRequest, HealthResponse, PlatformResponse,
+    SummaryRequest, WorkspaceList,
+};
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, RuntimeClient};
 use baton_credential::DpapiProtector;
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
+use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
 use baton_domain::workspace::Workspace;
 use tauri::{Manager, State};
 use tokio::sync::OnceCell;
@@ -117,11 +121,60 @@ async fn workspace_archive(link: State<'_, RuntimeLink>, id: String) -> Result<W
     link.client.archive_workspace(&id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 讀取 Workspace 的授權設定（目前授權、歷史、建議範本）。
+#[tauri::command]
+async fn workspace_authorization(link: State<'_, RuntimeLink>, id: String) -> Result<AuthorizationView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.authorization(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 取得確認前的摘要（預覽，不保存）。
+#[tauri::command]
+async fn workspace_authorization_summary(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    grants: Vec<Grant>,
+) -> Result<ConfirmationSummary, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.authorization_summary(&id, &SummaryRequest { grants }).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 確認並保存授權（產生新的 revision）。
+#[tauri::command]
+async fn workspace_authorization_confirm(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    template_id: Option<String>,
+    grants: Vec<Grant>,
+    acknowledged_risk: bool,
+) -> Result<AuthorizationRevision, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client
+        .confirm_authorization(&id, &ConfirmAuthorizationRequest { template_id, grants, acknowledged_risk })
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
         .manage(link)
-        .invoke_handler(tauri::generate_handler![runtime_health, runtime_platform, workspace_list, workspace_create, workspace_archive])
+        .invoke_handler(tauri::generate_handler![
+            runtime_health,
+            runtime_platform,
+            workspace_list,
+            workspace_create,
+            workspace_archive,
+            workspace_authorization,
+            workspace_authorization_summary,
+            workspace_authorization_confirm
+        ])
         .setup(|app| {
             // 不等 Web UI 來問：App 一開啟就連回或啟動 Runtime
             let handle = app.handle().clone();

@@ -9,9 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    CreateWorkspaceRequest, ErrorBody, HealthResponse, PlatformResponse, WorkspaceList, CLIENT_HEADER,
-    CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, WORKSPACES_PATH,
+    admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationView,
+    ConfirmAuthorizationRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse, PlatformResponse, SummaryRequest,
+    WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, WORKSPACES_PATH,
 };
+use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
@@ -80,6 +82,38 @@ impl RuntimeClient {
 
     pub async fn archive_workspace(&self, id: &str) -> Result<Workspace, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &format!("{WORKSPACES_PATH}/{id}/archive"), None).await
+    }
+
+    /// 讀取 Workspace 的授權設定：目前生效的 revision、歷史、建議範本與能力清單。
+    pub async fn authorization(&self, workspace_id: &str) -> Result<AuthorizationView, ClientError> {
+        self.get_json(&authorization_path(workspace_id)).await
+    }
+
+    /// 確認前的摘要（預覽，不保存）。
+    pub async fn authorization_summary(
+        &self,
+        workspace_id: &str,
+        request: &SummaryRequest,
+    ) -> Result<ConfirmationSummary, ClientError> {
+        self.send_json(reqwest::Method::POST, &authorization_summary_path(workspace_id), Some(request)).await
+    }
+
+    /// 確認並保存授權；內容相同時回傳既有的 revision。
+    pub async fn confirm_authorization(
+        &self,
+        workspace_id: &str,
+        request: &ConfirmAuthorizationRequest,
+    ) -> Result<AuthorizationRevision, ClientError> {
+        self.send_json(reqwest::Method::PUT, &authorization_path(workspace_id), Some(request)).await
+    }
+
+    /// Run 的准入檢查（被拒絕時回傳 `ClientError::Rejected`，附原因代碼）。
+    pub async fn check_admission(
+        &self,
+        workspace_id: &str,
+        request: &AdmissionCheckRequest,
+    ) -> Result<Admission, ClientError> {
+        self.send_json(reqwest::Method::POST, &admission_check_path(workspace_id), Some(request)).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
