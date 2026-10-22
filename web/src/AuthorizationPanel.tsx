@@ -156,6 +156,8 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
         grants: grants(),
         acknowledgedRisk: acknowledged,
         acknowledgedExpansion,
+        // 檢視摘要時的目前 revision：另一個視窗在那之後確認過，就拒絕而不覆蓋
+        expectedRevision: summary?.changes?.base_revision ?? null,
       });
       await load();
       setSummary(null);

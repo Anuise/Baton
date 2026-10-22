@@ -130,6 +130,7 @@ describe("Runtime 用戶端", () => {
       grants,
       acknowledgedRisk: false,
       acknowledgedExpansion: true,
+      expectedRevision: 2,
     });
 
     expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/authorization");
@@ -141,7 +142,13 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/authorization", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false, acknowledged_expansion: true }),
+      body: JSON.stringify({
+        template_id: "research_docs",
+        grants,
+        acknowledged_risk: false,
+        acknowledged_expansion: true,
+        expected_revision: 2,
+      }),
     });
   });
 
@@ -152,7 +159,13 @@ describe("Runtime 用戶端", () => {
 
     await client.getAuthorization("ws_1");
     await client.summarizeAuthorization("ws_1", grants);
-    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true, acknowledgedExpansion: false });
+    await client.confirmAuthorization("ws_1", {
+      templateId: null,
+      grants,
+      acknowledgedRisk: true,
+      acknowledgedExpansion: false,
+      expectedRevision: null,
+    });
 
     expect(invoke).toHaveBeenNthCalledWith(1, "workspace_authorization", { id: "ws_1" });
     expect(invoke).toHaveBeenNthCalledWith(2, "workspace_authorization_summary", { id: "ws_1", grants });
@@ -162,6 +175,7 @@ describe("Runtime 用戶端", () => {
       grants,
       acknowledgedRisk: true,
       acknowledgedExpansion: false,
+      expectedRevision: null,
     });
   });
 

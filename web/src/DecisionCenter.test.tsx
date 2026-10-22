@@ -759,6 +759,7 @@ describe("裁定中心：允許本次操作與修改 Workspace 授權", () => {
       grants: proposed,
       acknowledgedRisk: true,
       acknowledgedExpansion: true,
+      expectedRevision: 3,
     });
     // 修改授權不會回答這個請求，選項仍可作答
     expect(client.answerDecision).not.toHaveBeenCalled();
