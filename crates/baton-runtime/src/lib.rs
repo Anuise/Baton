@@ -4,6 +4,7 @@
 //! 所有外部副作用都經由注入的 `Ports`。正式執行檔與測試 harness 共用這個入口。
 
 pub mod backup;
+pub mod browser_driver;
 pub mod claude_adapter;
 pub mod claude_cli;
 pub mod credentials;
@@ -11,6 +12,8 @@ pub mod installer;
 pub mod log;
 mod maintenance;
 pub mod production_ports;
+pub mod secret_resolver;
+pub mod semantic_judge;
 pub mod single_instance;
 pub mod supervisor;
 pub mod update_source;

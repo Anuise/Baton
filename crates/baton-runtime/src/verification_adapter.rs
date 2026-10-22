@@ -65,6 +65,7 @@ impl Execution<'_> {
                     Err(error) => Observation::Unreachable { reason: error.to_string() },
                 }
             }
+            Operation::Browser { .. } => Observation::Unsupported { reason: "尚未實作瀏覽器操作".into() },
             Operation::Manual { instruction } => Observation::Unsupported {
                 reason: format!("CLI／API Adapter 無法自動執行人工步驟：{instruction}"),
             },
@@ -306,6 +307,7 @@ pub async fn execute(ports: &Ports, data_dir: &Path, item: &PendingVerificationR
         verdict,
         reason_code,
         cleanup: CleanupRecord { state_dir: run.state_dir, state_dir_removed, service_stopped, problems },
+        artifacts: Vec::new(),
         started_at,
         finished_at: ports.clock.now(),
     }

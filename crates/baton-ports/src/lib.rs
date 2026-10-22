@@ -4,6 +4,7 @@
 //! 型別形狀依 spec 的「Port」草圖；欄位只放目前需要的最小集合，後續票再擴充。
 
 mod agent;
+mod browser;
 mod claude_env;
 mod command;
 mod clock;
@@ -22,6 +23,10 @@ mod workspace_fs;
 use std::sync::Arc;
 
 pub use agent::{AdapterEvent, AgentAdapter, AgentHandle, Capability, RunSpec, SessionRef};
+pub use browser::{
+    BrowserCommand, BrowserDriver, BrowserFile, BrowserOutcome, BrowserSession, BrowserSessionRequest, BrowserStep, JudgeAccount,
+    JudgeOutcome, JudgeRequest, PageSnapshot, SecretResolver, SemanticJudge,
+};
 pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, ToolProbe};
 pub use clock::Clock;
 pub use command::{CommandOutput, CommandRequest, CommandRunner};
@@ -79,4 +84,10 @@ pub struct Ports {
     pub update_source: Arc<dyn UpdateSource>,
     /// CLI／API 驗證 Adapter 的命令、HTTP、受驗服務與狀態目錄（票 45）。
     pub verification_driver: Arc<dyn VerificationDriver>,
+    /// web 驗證 Adapter 的瀏覽器 Runner（票 46）。
+    pub browser_driver: Arc<dyn BrowserDriver>,
+    /// web 驗證的受限語意 judge（票 46）。
+    pub semantic_judge: Arc<dyn SemanticJudge>,
+    /// 驗證用秘密參照的解析（票 46）。
+    pub secret_resolver: Arc<dyn SecretResolver>,
 }

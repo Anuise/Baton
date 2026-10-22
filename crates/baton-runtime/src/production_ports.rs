@@ -246,6 +246,9 @@ pub fn production_ports(data_dir: &Path, port: u16) -> Ports {
             None => unavailable.clone(),
         },
         verification_driver: Arc::new(crate::verification_driver::LocalVerificationDriver::default()),
+        browser_driver: Arc::new(crate::browser_driver::LocalBrowserDriver::default()),
+        semantic_judge: Arc::new(crate::semantic_judge::ClaudeSemanticJudge::default()),
+        secret_resolver: Arc::new(crate::secret_resolver::EnvSecretResolver),
     }
 }
 
