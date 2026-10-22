@@ -22,6 +22,10 @@ use baton_domain::knowledge::{
     BODY_MAX_CHARS, EVIDENCE_MAX, EVIDENCE_MAX_CHARS, LESSON_FIELD_MAX_CHARS, QUERY_MAX_CHARS, QUERY_TERM_MIN_CHARS,
     TAGS_MAX, TAG_MAX_CHARS, TITLE_MAX_CHARS, TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE,
 };
+use baton_domain::external_operation::{
+    KEY_MAX_CHARS, OPERATION_MAX_CHARS, REASON_MAX_CHARS as OPERATION_REASON_MAX_CHARS, RECEIPT_MAX_CHARS,
+    REQUEST_MAX_BYTES, TARGET_MAX_CHARS, TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
+};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -389,6 +393,41 @@ fn tool_definitions() -> Value {
                 },
             },
         },
+        {
+            "name": TOOL_BEGIN_EXTERNAL_OPERATION,
+            "description": "送出 Runtime 無法撤回的外部操作（部署、發訊、付費、遠端寫入、修改正式資料）之前必須先呼叫，以冪等鍵登記。只有回應 status 為 proceed 才可以送出；already_succeeded 代表先前已經成功，沿用 receipt、不要再送；result_unknown 或 in_progress_elsewhere 不要送出，先保存 checkpoint 再 report_blocked 結束，或改做其他步驟。重試同一件事（包括換 Run 或 Runtime 重啟後）一律用同一個冪等鍵。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "idempotency_key": {
+                        "type": "string",
+                        "maxLength": KEY_MAX_CHARS,
+                        "description": "代表「這一件事」的穩定鍵（例如 deploy-web-v1.2.3）；同一件事永遠用同一個鍵，不同的事用不同的鍵",
+                    },
+                    "operation": { "type": "string", "maxLength": OPERATION_MAX_CHARS, "description": "操作種類，例如 deploy、send_email、payment" },
+                    "target": { "type": "string", "maxLength": TARGET_MAX_CHARS, "description": "目標資源，例如 production、收件人或帳戶" },
+                    "request": {
+                        "type": "object",
+                        "description": format!("影響結果的參數（上限 {} KiB）；與操作、目標一起計算要求雜湊，同一個鍵的內容必須相同", REQUEST_MAX_BYTES / 1024),
+                    },
+                },
+                "required": ["idempotency_key", "operation", "target"],
+            },
+        },
+        {
+            "name": TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
+            "description": "回報已登記的外部操作結果。確定成功回 succeeded 並附回執；確定沒有生效回 failed；逾時、連線中斷或任何無法確定是否已生效的情形一律回 unknown（會建立裁定請求、暫停這個 Task，等使用者查證），不要自行重送。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "idempotency_key": { "type": "string", "maxLength": KEY_MAX_CHARS, "description": "登記時使用的冪等鍵" },
+                    "result": { "type": "string", "enum": ["succeeded", "failed", "unknown"], "description": "結果" },
+                    "receipt": { "type": "string", "maxLength": RECEIPT_MAX_CHARS, "description": "succeeded 時必填：外部系統的回執（例如部署編號、訊息識別）" },
+                    "reason": { "type": "string", "maxLength": OPERATION_REASON_MAX_CHARS, "description": "failed 或 unknown 時必填：原因" },
+                },
+                "required": ["idempotency_key", "result"],
+            },
+        },
     ])
 }
 
@@ -408,6 +447,8 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_REGISTER_ARTIFACT,
         TOOL_RECORD_LESSON_CANDIDATE,
         TOOL_SEARCH_KNOWLEDGE,
+        TOOL_BEGIN_EXTERNAL_OPERATION,
+        TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));

@@ -2278,25 +2278,115 @@
 - 影響：本票較早的 commit 中 migration 註解寫「第 22 個」「第 23 個」、AI 編號寫 AI-238～AI-244，是改號前的編號；以本票分支（合併前）建立過的開發資料庫需刪除重建。
 - 審閱：未審
 
-### AI-253：哪些事件計入哪一種預算；交接、恢復、取消與契約變更都不計入
+### AI-253：外部操作由 Worker 執行，送出前後都向 Runtime 登記；Runtime 不代為執行、不自動查證
+- 重要度：高
+- 時間／階段：2026-10-22，票 26 實作
+- 決策：新增兩個 Agent 工具：`begin_external_operation`（送出前以冪等鍵、操作種類、目標與參數登記，只有回 `proceed` 才可以送出）與 `record_external_operation_result`（送出後回報 `succeeded`＋回執、`failed`＋原因或 `unknown`＋原因）。外部操作仍由 Worker 用自己的工具執行（受 Workspace 授權與權限提示約束，與票 22、23 相同）；Runtime 只記錄 `external_operation`，判斷能不能再送、何時變成結果未知，不呼叫任何外部系統，也不自動查證。工具說明要求「無法確定是否生效一律回 unknown，不要自行重送」。
+- 理由：spec 的 Port 清單沒有外部操作的 Port，Runtime 也看不到 Worker 工具的執行結果（AI-182）；要讓「冪等鍵、要求雜湊、回執、結果未知」成立，唯一能取得這些事實的是 Worker 本身。登記放在送出之前，Runtime 才能在崩潰後知道「可能已經送出」。
+- 替代方案：Runtime 以 Outbox 加新的 Port 代為執行外部操作（每種外部系統都要 Adapter，遠超本票範圍）；只靠權限提示攔截（看得到要求、看不到結果，無法區分成功與未知）。
+- 影響：保證只涵蓋有登記的操作；Worker 不登記就直接送出的操作，Runtime 只能透過權限提示與授權約束。Context Builder（票 39）組 Prompt 時應提醒 Worker 使用這兩個工具。
+- 審閱：未審
+
+### AI-254：結果未知的時機與處置：未回報的操作在 Run 結束的同一個交易轉為未知，建立裁定、相關 Task 進入 waiting_decision
+- 重要度：高
+- 時間／階段：2026-10-22，票 26 實作
+- 決策：(1) 兩種情形變成 `unknown`：Worker 回報 `unknown`；Run 結束（結束回報、lease 核對後中斷、取消、完全退出、還原，全部經過 `runs::save`）時還有尚未回報結果的操作——在**同一個交易**中轉換，不另開步驟。(2) 每個未知操作建立一個裁定請求（識別 `decision_<操作>_a<嘗試>`，緊急程度 high），選項只有 `verified_done`「已查證：操作已經生效（不要重送）」與 `verified_not_done`「已查證：操作沒有生效（允許之後再執行一次）」，**不給建議**。資料庫的 `decision_request.kind` 以 CHECK 限定 `agent`／`permission`，所以種類記為 `agent`，與外部操作的關聯記在 `external_operation.decision_request_id`，沒有重建裁定表。(3) 相關 Task 若在 `running`、`ready` 或 `verifying` 就進入 `waiting_decision`；為此 Task 狀態機新增 `ready → waiting_decision`（Run 中斷時 Task 先被退回 ready，同一個交易再停下）。`blocked`、已在等裁定或已結束的 Task 維持原狀。(4) 回答時查證結果與 Task 恢復在同一個交易：`verified_done` → 操作 `succeeded`、之後同一個鍵回 `already_succeeded`；`verified_not_done` → 操作 `failed`、之後可以再嘗試一次。Task 依票 22 的規則回到 `ready` 並重新排隊。
+- 理由：驗收條件「結果未知時相關 Task 阻擋，獨立 Task 繼續」；D-15 把「結果未知外部操作的處置」列為必須送裁定。若在 Run 結束後另開步驟才標記未知，中間 Task 會短暫停在 ready，可能被 Scheduler 重新派出。不給建議是因為 Runtime 對結果一無所知，任何建議都可能讓使用者不查證就按下。
+- 替代方案：新增裁定種類 `external_operation`（要重建有觸發器與外鍵引用的 `decision_request` 表）；未知時讓 Task 進入 `blocked`（`blocked` 沒有「回答後恢復」的路徑，需要另做解除機制）；Run 結束後由 Supervisor 另一步驟掃描（有空檔）。
+- 影響：等待驗證中的 Task（Run 已成功）若有未知操作，回答後回到 `ready` 重新派工，而不是直接回到 `verifying`。`blocked` 的 Task 若被使用者改回 ready 再派出，新 Run 登記同一個鍵仍會得到 `result_unknown`，不會重送。
+- 審閱：未審
+
+### AI-255：冪等鍵與要求雜湊的規則：範圍是 Workspace，鍵相同內容不同一律拒絕，跨 Task 共用結果
+- 重要度：中
+- 時間／階段：2026-10-22，票 26 實作
+- 決策：冪等鍵在 Workspace 內唯一（`UNIQUE (workspace_id, idempotency_key)`）。要求雜湊是「操作種類、目標、參數（JSON，物件鍵排序）」的 SHA-256，不含冪等鍵。同一個鍵、雜湊不同回 409 `idempotency_key_conflict`，不覆寫。同一個鍵的登記結果：`succeeded` → `already_succeeded`（附回執，跨 Task 也一樣）；`failed` → 新的嘗試（`attempt` 加一，紀錄改屬目前的 Task 與 Run）；`in_progress` 且是同一個 Run → `proceed` 加 `existing: true`（登記的回應遺失時可安全重送）；`in_progress` 屬於另一個仍在執行的 Run → `in_progress_elsewhere`；`unknown` → `result_unknown`，且呼叫者的 Task 加入同一個裁定請求的阻擋範圍、進入 `waiting_decision`。回報結果只接受登記該操作的同一個 Run；重送同樣的結果冪等，改成別的結果 409 `external_operation_already_recorded`。`failed` 只代表「確定沒有生效」。欄位上限：鍵 200、操作種類 100、目標 500 字元、參數 16 KiB、回執 2000、原因 1000 字元。
+- 理由：與 `message_id`（AI-129）一致；Worker 換 Run、換帳號或 Runtime 重啟後重試同一件事時需要穩定的鍵。鍵相同內容不同多半是 Worker 誤用，覆寫會讓原本的回執失去意義。
+- 替代方案：鍵的範圍是 Task（不同 Task 重複部署同一版本時擋不住）；鍵相同內容不同時視為新操作（破壞冪等）。
+- 影響：不同的事必須用不同的鍵；工具說明已提示。
+- 審閱：未審
+
+### AI-256：Outbox 啟動路徑：寫入 launch intent 時重查准入；spawn 失敗先查證；無法查證時留在 starting，不中斷也不重派
+- 重要度：中
+- 時間／階段：2026-10-22，票 26 實作
+- 決策：(1) `BeginLaunch` 的交易除了票 25 的停止意圖，再以目前生效的授權、契約需要的能力與 Workspace 是否封存做一次准入（`authorization::admit`）；不成立就不寫入 launch intent，Run 以 `failed`（`launch_admission_denied：…`）結束、Outbox 視為處理完畢、Task 回 `ready`。為此 Run 狀態機新增 `queued → failed`。Supervisor 看到回傳的 Run 不是 `starting` 就不簽發憑證、不啟動。准入通過時 `run_launch_started` 事件記下依據的授權 revision。(2) `spawn` 回報失敗時先以 `command_id` 呼叫 `find`：找到（回執遺失）就補寫回執；`Ok(None)` 才判定 `launch_failed`；`find` 也失敗就留在 `starting`。(3) Runtime 重建後 Run 停在 `starting` 而 `find` 失敗時，維持既有行為：留在 `starting`、繼續持有寫入所有權，每次處理再查，沒有逾時上限。
+- 理由：GLOSSARY「准入」定義為啟動前最後一次檢查，建立 queued Run 不等於已准入；票面要求「每條路徑都先檢查停止意圖與有效准入」「無法證明程序是否已啟動時進入 reconciliation 而非重派」。spawn 的錯誤不一定代表沒有程序（Port 規格寫明回傳前就已標記 command_id）。
+- 替代方案：准入不成立時讓 Run 留在 queued 等授權恢復（每次處理都會重試且佔著寫入所有權）；改成 `cancelled`（語意是使用者取消）；`find` 持續失敗一段時間後中斷 Run（等於猜測沒有啟動，可能造成第二個 writer）。
+- 影響：ProcessControl 長期無法查證時，該 Task 會一直停在 `running`，需要使用者處理（目前只能取消 Run，取消同樣需要確認程序停止）。
+- 審閱：未審
+
+### AI-257：寫入故障：依 SQLite 錯誤代碼判定，試寫成功才解除；故障期間不啟動程序也不排程
+- 重要度：中
+- 時間／階段：2026-10-22，票 26 實作
+- 決策：(1) Store 的寫入佇列在每個寫入失敗時依錯誤代碼歸類：`SQLITE_FULL` → `disk_full`、`SQLITE_BUSY`／`SQLITE_LOCKED` → `busy`、`SQLITE_IOERR`／`SQLITE_READONLY`／`SQLITE_CANTOPEN` → `unwritable`；其他錯誤不算。故障狀態只存在記憶體（資料庫寫不進去），Runtime 重啟後由第一次失敗的寫入重新偵測。(2) 只有試寫單列表 `storage_probe` 成功才解除；沒有寫入任何東西的交易不算恢復。Supervisor 每次處理先試寫，故障期間不啟動任何程序（Outbox 第 1 步）也不排程，其他步驟（收事件、取消、核對 lease）照常。(3) 會寫入的 API 回 503，錯誤代碼是 `storage_disk_full`／`storage_busy`／`storage_unwritable`，訊息附處理方式；`GET /api/v1/health` 新增 `storage`（`dispatch_halted` 與故障的種類、摘要、處理方式、SQLite 原始訊息），Web UI 狀態列顯示。(4) 情境測試以 Store 的故障注入（`inject_write_fault`，產生與 SQLite 相同代碼的錯誤、走同一條歸類路徑）模擬；真實的 `SQLITE_FULL`（以 `max_page_count` 限制大小）與 `SQLITE_BUSY`（另一個連線持有 EXCLUSIVE 鎖）另有 Store 單元測試。
+- 理由：使用者故事 85「磁碟滿或資料庫不可寫時新派工停止並顯示可處理原因，不會產生無法追溯的副作用」；不啟動程序就不會有回執寫不回去的程序。harness 只替換 Port（D-04），Store 是真實的，所以在 Store 加測試用注入點，而不是另做 Port。
+- 替代方案：以真實的磁碟滿重現（不可控、會影響開發機）；任何寫入成功就解除（唯讀交易也會「成功」，造成誤判恢復與狀態閃爍）；故障時停止整個 Supervisor（取消與停止程序也會跟著停）。
+- 影響：busy timeout 是 5 秒（AI-30），被鎖住時 API 要等 5 秒才回 503。磁碟滿時日誌每秒記一次仍無法寫入。
+- 審閱：未審
+
+### AI-258：外部操作的 API、資料表與事件形狀（migration 25 `external_operation`）
+- 重要度：低
+- 時間／階段：2026-10-22，票 26 實作
+- 決策：Agent 工具 `POST /agent/v1/tools/begin_external_operation`（回 200 `{operation_id, status: proceed|already_succeeded|result_unknown|in_progress_elsewhere, attempt?, existing, receipt?, decision_request_id?, run_id?, message}`）與 `…/record_external_operation_result`（回 200 `{operation_id, status, decision_request_id?, message}`），MCP shim 一併提供（共 13 個工具）。桌面端點 `GET /api/v1/workspaces/{id}/external-operations` 回 `{operations}`。錯誤代碼：400 `external_operation_invalid`、404 `external_operation_not_found`、409 `idempotency_key_conflict`、`external_operation_not_in_progress`、`external_operation_already_recorded`、`run_report_stale`。資料表 `external_operation`（不可刪除）與 `storage_probe`。事件聚合 `external_operation`：`external_operation_begun`、`_succeeded`、`_failed`、`_result_unknown`、`_verified`。Web UI 本票只加狀態列的寫入故障提示；結果未知的操作透過既有的裁定中心呈現，沒有另做外部操作頁面。
+- 理由：沿用 Agent API 與裁定中心的既有形狀；登記的四種結果都是正常回應（不是錯誤），Worker 依 `status` 分流，與 `permission_prompt` 的等待裁定回 200 一致。
+- 替代方案：`result_unknown` 回 409（MCP shim 會把它包成工具錯誤，Worker 容易當成暫時失敗而重試）。
+- 影響：無。
+- 審閱：未審
+
+### AI-259：票 26 整合 rebuild/v1（票 14、38、20）：migration 順延為第 22 版、AI 編號順延為 AI-253～AI-259
+- 重要度：低
+- 時間／階段：2026-10-22，票 26 實作 run R072-26-impl
+- 決策：(1) 第一次整合：整合分支已有第 19 個 migration（票 14 `model_overrides_and_native_session`）與第 20 個（票 38 `guard`）。`supervisor.rs` 的衝突保留整合分支新增的啟動步驟（設定快照、`prepare`、步驟編號改為 5），再套上本票「spawn 失敗先查證」的邏輯；`Run` 多了 `native_session_id`，本票的 Domain 測試輔助補上 `None`。(2) 第二次整合：整合分支又併入票 20（第 21 個 migration `task_workdir_and_integration_queue`，AI-215～AI-226），本票的 `external_operation` 順延為第 22 個、排在最後；本票條目由 AI-215～AI-221 順延為 AI-253～AI-259，移到 AI-226 之後，條目內引用本票編號之處與 migration 序號一併更新。開發指南的目錄表與 harness 測試清單兩邊的新增內容都保留。程式碼沒有引用這些編號。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票分支整合前建過的開發資料庫（`external_operation` 記在第 19 或 21 版）需要刪除重建。
+- 審閱：未審
+
+### AI-260：票 26 整合 rebuild/v1（票 35、24、21）：migration 順延為第 25 個、AI 編號順延為 AI-253～AI-259
+- 重要度：低
+- 時間／階段：2026-10-22，票 26 整合 run R088-26-integrate
+- 決策：(1) 整合分支已有第 22 個 migration（票 35 `decision_center_full`，重建裁定四張表）、第 23 個（票 24 `run_admission`）與第 24 個（票 21 `worktree_cleanup`）。本票的 `external_operation` 順延為第 25 個、排在最後；它以外鍵引用 `decision_request (id)`，在票 35 重建該表之後才建立，不受重建影響；四者沒有共用的資料表，都會套用。(2) 本票條目 AI-227～AI-233 與整合分支票 35 的 AI-227～AI-237 重號，順延為 AI-253～AI-259，移到 AI-252 之後；條目內引用本票編號之處與 migration 序號一併改為現行編號（與 AI-226、AI-259 的處理相同），當時的整合經過照原文保留。整合分支的條目逐字未動；程式碼與文件沒有引用本票的編號。(3) 衝突合併：`DecisionRequest` 改用票 35 的形狀（目標版本、內容版本、延後、合併、連結），本票建立「結果未知」請求的 `requested_event` 改為走請求聚合的事件版本，`insert_request` 改寫票 35 的 24 欄；`Store::answer_decision` 改帶 `expected_revision` 與 `Resolution`，本票 store 與 harness 測試的作答輔助函式隨之改為先讀內容版本、再以「接受」作答（斷言不變）；`resolve_by_decision` 移到單筆與批次共用的 `apply_in`，批次作答同樣會結算外部操作；MCP shim 現在有 14 個工具（票 35 的 `controller_action` 加上本票的兩個），兩邊的工具清單測試合併並改為 14；開發指南的目錄表、Run 狀態與情境測試清單以整合分支為底補上本票內容。行為上的取捨另記於 AI-261、AI-262。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票分支建過的開發資料庫（`external_operation` 記在第 19、21、22 或 24 版）需要刪除重建。本票較早的 commit 訊息與 `.orchestration` 下的驗證紀錄（R087）提到的 AI-227～AI-233 是改號前的編號。
+- 審閱：未審
+
+### AI-261：啟動准入被拒的結束方式統一採用票 24：`interrupted`（`admission_denied`），取消本票的 `queued → failed`
+- 重要度：中
+- 時間／階段：2026-10-22，票 26 整合 run R088-26-integrate
+- 決策：本票（AI-256）與票 24（AI-238、AI-239）各自在 `BeginLaunch` 的交易中重查准入。整合時只保留票 24 的實作：准入被拒時 Run 以 `interrupted` 結束，`end_reason` 以 `admission_denied` 開頭，事件是 `run_admission_denied`，Task 回 `ready` 並在同一個交易重新排隊；派工 Outbox 同樣視為處理完畢，不寫 launch intent、不簽發憑證、不啟動程序。本票新增的 `queued → failed` 轉換、`LAUNCH_ADMISSION_DENIED` 常數與重複的 `admit_at_launch` 移除。本票的 Domain 測試與情境測試 `a_run_whose_authorization_is_revoked_before_launch_ends_without_starting_a_process` 改為斷言 `interrupted`／`admission_denied`；「沒有 launch intent、沒有 spawn、沒有憑證、Outbox 處理完畢」的斷言不變。開發指南〈Supervisor〉第 1 步同步改寫。
+- 理由：兩張票規範的是同一個時點（准入 = launch intent 持久化），只能有一種結果；票 24 已在整合分支，而且它的「自動重新排隊、以授權類別顯示等待原因」比本票的 `failed` 完整。准入被拒不是執行失敗，記成 `failed` 會被 Guard 的重試政策（票 38）當成失敗的 Run 計算。
+- 替代方案：保留本票的 `failed`（要改票 24 已合併的行為與測試）；兩種並存（同一個時點有兩種結果，無法判斷）。
+- 影響：AI-256 第 (1) 點關於 `queued → failed` 與 `launch_admission_denied` 的描述由本條取代，其餘照舊。
+- 審閱：未審
+
+### AI-262：外部操作的查證請求只能以「接受查證選項」或「延後」處理；不能合併、不會過期
+- 重要度：高
+- 時間／階段：2026-10-22，票 26 整合 run R088-26-integrate（處理 R087 驗證報告第 1 點）
+- 決策：票 35 讓裁定請求有六種處理方式，也可以合併與過期。「結果未知」的查證請求（AI-254）若被駁回、回答、要求調查或修改條件，請求會結案、Task 恢復，但外部操作仍停在 `unknown`、指向已結案的請求：同一個冪等鍵之後永遠回 `result_unknown`，也沒有人能再查證。因此：(1) `DecisionRequest` 新增 `external_operation_id`（不存在裁定表，由 Store 載入時依 `external_operation.decision_request_id` 對回，沒有改 schema）；有值時 `DecisionRequest::allowed_actions` 只回 `accept`、`defer`。Domain 的作答檢查與裁定中心顯示的 `allowed_actions` 都改用它，所以單筆、批次與 UI 一致，其他方式回 400 `decision_action_not_allowed`。選項本來就只有 `verified_done`／`verified_not_done`，「接受」一定落在其中一個。`modify` 也不允許：查證沒有可修改的條件，備註可以隨「接受」附上。(2) 合併：查證請求不能合併到別的請求，別的請求也不能合併進來（400 `decision_merge_invalid`），因為每個請求對應一個外部操作；需要對照時可以用連結。(3) 過期：查證請求不因目標 Task 的契約改版或 Task 結束而標為 `superseded`——外部操作有沒有生效與 Task 契約無關，過期會造成和 (1) 相同的卡死。(4) 新增 Domain 測試 `verification_requests_can_only_be_answered_by_accepting_an_option_or_deferred`、`verification_requests_never_go_stale_and_cannot_be_merged`，以及情境測試 `an_unknown_operation_can_only_be_closed_by_verifying_whether_it_took_effect`（單筆的四種方式與批次的駁回都被拒；延後之後請求仍待處理、操作仍 `unknown`、Task 仍等待；查證後才結案）。
+- 理由：驗收條件「外部操作結果未知時相關 Task 阻擋」與 D-15「結果未知外部操作的處置必須送裁定」；只有查證結果能讓操作離開 `unknown`。
+- 替代方案：新增裁定種類 `external_operation`（要再重建票 35 剛重建的 `decision_request` 表，CHECK 與觸發器都要改）；允許其他方式，並在結案時讓操作回到「可再查證」（要另做重新開啟請求的機制）；以請求識別的前綴判斷（脆弱）。
+- 影響：Web 裁定中心依 `allowed_actions` 只顯示「接受」與「延後」。合併選單只看種類，查證請求若被手動連結到同種類的請求，選單仍會列出合併目標，送出時由 Runtime 拒絕並顯示錯誤。權限提示的處理方式限制（AI-231）照舊。
+- 審閱：未審
+
+### AI-263：哪些事件計入哪一種預算；交接、恢復、取消與契約變更都不計入
 - 重要度：高
 - 時間／階段：2026-10-22，票 36 實作
-- 決策：(1) 實作失敗修正：Worker 以失敗結束（`RunOutcome::Failed`）、確定性檢查有任一項未通過。(2) 驗證不完整重驗：確定性檢查沒有未通過、但有取不到證據的項目（AI-254）。(3) 基礎設施重試：啟動失敗（`LaunchFailed`）、lease 過期後確認程序已不在（`ReconcileLease` 觀察到 `Dead`）。(4) 不計入：額度交接——目前還沒有交接流程（票 28、29），以「Adapter 回報額度用盡 `RateLimited { status: Exhausted }` 之後程序以失敗結束」視為突然限流，新增 `RunOutcome::QuotaLimited`，Run 記為 `interrupted`（`quota_limited：…`）、Task 回到 `ready`；恢復與停止——所有 `RunCommand::Interrupt`（`launch_outcome_unknown`、完全退出後程序已不在、完全退出停止、還原）；使用者取消；「契約在 Run 派工後變更」造成的驗證未通過（不是任何人的失敗）。只有 Task 還在 `running`／`verifying` 而實際發生轉換時才計入（使用者已取消的 Task 不計）。
+- 決策：(1) 實作失敗修正：Worker 以失敗結束（`RunOutcome::Failed`）、確定性檢查有任一項未通過。(2) 驗證不完整重驗：確定性檢查沒有未通過、但有取不到證據的項目（AI-264）。(3) 基礎設施重試：啟動失敗（`LaunchFailed`）、lease 過期後確認程序已不在（`ReconcileLease` 觀察到 `Dead`）。(4) 不計入：額度交接——目前還沒有交接流程（票 28、29），以「Adapter 回報額度用盡 `RateLimited { status: Exhausted }` 之後程序以失敗結束」視為突然限流，新增 `RunOutcome::QuotaLimited`，Run 記為 `interrupted`（`quota_limited：…`）、Task 回到 `ready`；恢復與停止——所有 `RunCommand::Interrupt`（`launch_outcome_unknown`、完全退出後程序已不在、完全退出停止、還原）；使用者取消；「契約在 Run 派工後變更」造成的驗證未通過（不是任何人的失敗）。只有 Task 還在 `running`／`verifying` 而實際發生轉換時才計入（使用者已取消的 Task 不計）。
 - 理由：spec D-16 只列了三種名稱。Worker 自己宣告失敗、或成果被檢查否決，是「實作」需要修正；平台啟動不了程序或程序無故消失是「基礎設施」；取不到證據既不是產品缺陷也不是通過（使用者故事 70）。交接、恢復與取消明文不計入，契約變更比照辦理。
 - 替代方案：Worker 以失敗結束也可能是 CLI 或 API 錯誤（偏基礎設施）；但目前 Adapter 分不出原因，一律算實作失敗較保守（預算較快用完、較早問使用者）。
 - 影響：票 28、29 實作交接時，應讓交接結束的舊 Run 走 `QuotaLimited` 或新的不計入路徑；票 31 的恢復嘗試若改用 `Interrupt` 以外的命令，需要明確標為不計入。
 - 審閱：未審
 
-### AI-254：「驗證不完整」的定義與重驗方式；整合驗證把不完整當成未通過
+### AI-264：「驗證不完整」的定義與重驗方式；整合驗證把不完整當成未通過
 - 重要度：中
 - 時間／階段：2026-10-22，票 36 實作
-- 決策：確定性檢查新增結果 `inconclusive`：命令無法啟動、被終止（沒有結束碼）、逾時 10 分鐘，檔案或成果檔讀取失敗。結束碼不符、檔案不存在、雜湊不符、成果未登記或與 manifest 不符仍是 `failed`。一次驗證中只要有 `failed` 就是未通過（實作失敗）；沒有 `failed` 但有 `inconclusive` 時，驗證紀錄的結果是 `inconclusive`，Task 留在 `verifying`，Supervisor 下一次處理就重新執行檢查（不另設延遲）。整合佇列的整合驗證把 `inconclusive` 視為未通過。`task_verification` 原本 `run_id` 唯一且結果只允許 passed／failed，改以 migration 25 重建：同一個 Run 最多一筆有結論（passed／failed）的紀錄，`inconclusive` 可以有多筆。
+- 決策：確定性檢查新增結果 `inconclusive`：命令無法啟動、被終止（沒有結束碼）、逾時 10 分鐘，檔案或成果檔讀取失敗。結束碼不符、檔案不存在、雜湊不符、成果未登記或與 manifest 不符仍是 `failed`。一次驗證中只要有 `failed` 就是未通過（實作失敗）；沒有 `failed` 但有 `inconclusive` 時，驗證紀錄的結果是 `inconclusive`，Task 留在 `verifying`，Supervisor 下一次處理就重新執行檢查（不另設延遲）。整合佇列的整合驗證把 `inconclusive` 視為未通過。`task_verification` 原本 `run_id` 唯一且結果只允許 passed／failed，改以 migration 26 重建：同一個 Run 最多一筆有結論（passed／failed）的紀錄，`inconclusive` 可以有多筆。
 - 理由：要計數「驗證不完整」必須先有這個結論；逾時歸為不完整，因為逾時本身不能證明產品錯誤（也可能是機器忙）。重驗不設延遲，是因為 spec 只對基礎設施重試規定退避；兩次重驗很快用完時會送裁定，由使用者處理環境問題。
 - 替代方案：逾時算未通過（產品可能卡死）；重驗也加退避。都可以之後再調。
 - 影響：票 13 的「無法執行／讀取失敗算未通過」改為不完整（原有 Domain 測試已更新）。票 45 會導入完整的 reason_code（environment_blocked 等），屆時可細分。
 - 審閱：未審
 
-### AI-255：計數的意義、用盡的時點，以及哪一種會自動重試
+### AI-265：計數的意義、用盡的時點，以及哪一種會自動重試
 - 重要度：中
 - 時間／階段：2026-10-22，票 36 實作
 - 決策：計數是「已用掉的重試次數」：第一次嘗試不算，每次計入的失敗讓計數加一，直到等於上限；已到上限後再發生一次才是「用盡」，此時計數停在上限、Task 進入 `blocked`。也就是實作最多執行 1＋3 次、驗證最多 1＋2 次、基礎設施最多 1＋5 次。只有基礎設施重試在預算內會自動排回派工佇列（優先序 0），並設定退避期限：第 n 次重試等 min(1 分鐘 × 2^(n−1), 10 分鐘)，即 1、2、4、8、10 分鐘；期限前留在佇列，等待原因 `backoff`／`retry_backoff`。實作失敗仍照票 10 回到 `ready`、不自動排隊（spec D-15 把「在預算內重派」交給 Controller）。
@@ -2305,7 +2395,7 @@
 - 影響：既有情境測試 `acceptance.rs` 的「程序死亡後重新派工」需要先等過 1 分鐘的退避期限（已更新）。使用者在退避期間手動派工也會留在佇列。
 - 審閱：未審
 
-### AI-256：用盡時的裁定請求沿用「Controller 動作」種類，核准即重設並讓 Task 繼續
+### AI-266：用盡時的裁定請求沿用「Controller 動作」種類，核准即重設並讓 Task 繼續
 - 重要度：中
 - 時間／階段：2026-10-22，票 36 實作
 - 決策：用盡時由 Runtime 在同一個交易建立裁定請求，種類用既有的 `authority`、事項 `next_step_after_budget`（spec D-15 的「預算用盡後的下一步」），fingerprint 與 Controller 動作相同（`next_step_after_budget:<Task>`），`run_id` 指向用盡預算的 Run（驗證時是受驗 Run），識別為 `dr_budget_<Run 識別或驗證紀錄識別>`，阻擋範圍是這個 Task，選項 `approve`（再給一輪這一種預算）與 `reject`（維持阻擋），沒有建議選項。核准（接受或修改條件選 `approve`）時：只重設用盡的那一種計數（基礎設施另外清掉退避期限），Task 從 `blocked` 回到 `ready` 並排回派工佇列；驗證不完整用盡的回到 `verifying` 重驗（`TaskStatus` 新增 `blocked → verifying` 轉換）；核准同時記為已使用（`decision_approval_use`），Controller 之後不能再拿它當單次核准。駁回或其他處理方式只記下裁定，Task 維持 `blocked`。核准的不是目前用盡的那個請求（之後又用盡而有新請求）時只記裁定，不重設。用盡期間使用者仍可用既有的 `POST ready` 把 Task 標回可派工（不擋），之後再失敗會立即再用盡並建立新的請求。
@@ -2314,7 +2404,7 @@
 - 影響：Controller（票 16、17）對同一個 Task 提出 `next_step_after_budget` 時，若預算請求還在等待，會拿到這個既有的請求。
 - 審閱：未審
 
-### AI-257：突然限流的判定只存在 Supervisor 記憶體中
+### AI-267：突然限流的判定只存在 Supervisor 記憶體中
 - 重要度：低
 - 時間／階段：2026-10-22，票 36 實作
 - 決策：Supervisor 收到某個 Run 的 `RateLimited { status: Exhausted }` 時，在記憶體中記下這個 Run；同一個 Run 之後以失敗結束時送出 `RunOutcome::QuotaLimited`，不計入預算。不寫入資料庫；Runtime 在兩個事件之間重建時，這次結束會被當成實作失敗。
@@ -2323,20 +2413,20 @@
 - 影響：票 28、29 實作交接時應以持久化的交接 phase 取代這個判定。
 - 審閱：未審
 
-### AI-258：預算的資料與 API 形狀（migration 25 `retry_budgets`）
+### AI-268：預算的資料與 API 形狀（migration 26 `retry_budgets`）
 - 重要度：低
 - 時間／階段：2026-10-22，票 36 實作
 - 決策：新表 `task_budget`（每個 Task 一列，從未計入的沒有列）：三種計數、`retry_not_before`、`exhausted`、`request_id`（參照裁定請求；兩者同時有或同時沒有）、`version`、`updated_at`；上限不寫進 CHECK（D-16 改動成本低，改數字不需要 migration）。事件聚合 `task_budget`（識別是 Task）：`task_budget_charged`、`task_budget_exhausted`、`task_budget_reset`。API：`GET tasks/{id}` 新增 `budget`、`GET tasks` 新增 `budgets`（`BudgetView`：`counters[{kind,label,used,limit}]`、`retry_not_before`、`exhausted`、`decision_request_id`）；排程等待類別新增 `backoff`。Web UI 在 Task 卡片有計數時才顯示「修正與重試預算」區塊、退避期限與用盡提示，並把不完整的驗證與整合檢查另外列出。
 - 理由：計數要能在 Runtime 重建後延續，也要與 Run／驗證的結果在同一個交易寫入；放在獨立的表，不改動 `task` 表與 Task 的版本。
 - 替代方案：每次由 Run 與驗證紀錄重新推算（重設要另外記錄起點，較複雜）。
 - 影響：與其他進行中的票合併時，migration 與 AI 編號可能需要順延。
-### AI-259：票 36 整合 rebuild/v1（票 24、21）：migration 順延為第 25 個、AI 編號改為 AI-253～AI-258、准入被拒不計入預算
+### AI-269：票 36 整合 rebuild/v1（票 24、21、26）：migration 順延為第 26 個、AI 編號改為 AI-263～AI-268、准入被拒不計入預算
 - 重要度：中
-- 時間／階段：2026-10-22，票 36 實作 run R086-36-impl（結束前整合）
-- 決策：(1) 整合分支已併入票 24（第 23 個 migration `run_admission`）與票 21（第 24 個 `worktree_cleanup`），本票的 `retry_budgets` 順延為第 25 個，排在最後；三者互不參照。migration 註解、開發指南與 AI-254、AI-258 中的序號改為 25；Store 的 migration 測試以名稱找出位置，不受序號影響。(2) 整合分支已用到 AI-252，本票條目 AI-238～AI-243 改為 AI-253～AI-258，移到 AI-252 之後，條目內互相引用的編號一併更新。(3) 票 24 新增的「啟動准入被拒」（`deny_admission`：Run `interrupted`、Task 回 `ready` 並重新排隊）不計入任何預算——授權不足不是失敗，與 AI-253 的「恢復、停止不計入」同一原則。(4) 衝突處兩邊都保留：`RunContext`（票 24 的 `settings_version` 與本票的 `budgets`）、`DecisionContext`（`authorizations` 與 `budgets`）、`run.rs` 模組說明、Web 工作面板（票 21 的清理狀態與本票的預算區塊、兩組測試）、開發指南的情境測試清單。票 21 的清理重試（AI-249）沿用與本票相同的退避數列，兩者各自計數、互不影響。
-- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-237、AI-252 同）。
+- 時間／階段：2026-10-22，票 36 實作 run R086-36-impl（結束前整合，兩次）
+- 決策：(1) 實作期間整合分支先後併入票 24（第 23 個 migration `run_admission`）、票 21（第 24 個 `worktree_cleanup`）與票 26（第 25 個 `external_operation`），本票的 `retry_budgets` 順延為第 26 個，排在最後；彼此不參照。migration 註解、開發指南與 AI-264、AI-268 中的序號改為 26；Store 的 migration 測試以名稱找出位置，不受序號影響。(2) 整合分支已用到 AI-262，本票條目改為 AI-263～AI-268，移到 AI-262 之後，條目內互相引用的編號一併更新；本票第一次整合時寫的整合條目由這一條取代。(3) 票 24 新增的「啟動准入被拒」（`deny_admission`：Run `interrupted`、Task 回 `ready` 並重新排隊）不計入任何預算——授權不足不是失敗，與 AI-263 的「恢復、停止不計入」同一原則。(4) 票 26 與本票都把「寫入新的裁定請求」抽成 `decisions::insert_request`，內容相同，只合併說明；外部操作結果未知時 Task 轉為 `waiting_decision` 的規則不碰 `blocked` 的 Task，所以預算用盡（`blocked`）與結果未知同時發生時 Task 維持 `blocked`，兩個裁定請求都會出現。程序意外消失同時是基礎設施重試，裁定恢復的 Task 仍要等過退避期限才再派；票 26 的情境測試 `a_crash_after_an_external_operation_was_sent_never_resends_it_and_holds_only_the_related_task` 因此在回答之後先把時鐘推過 1 分鐘（只加這一行，斷言不變）。(5) 其餘衝突兩邊都保留：`RunContext`（`settings_version` 與 `budgets`）、`DecisionContext`（`authorizations` 與 `budgets`）、`run.rs` 模組說明、Web 工作面板（清理狀態與預算區塊、兩組測試）、開發指南的模組表與情境測試清單。票 21 的清理重試（AI-249）沿用與本票相同的退避數列，兩者各自計數、互不影響。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-237、AI-252、AI-260 同）。
 - 替代方案：無（編號規則已定）；准入被拒也可算基礎設施重試，但那會讓撤銷授權消耗預算。
-- 影響：用本票分支建過的開發資料庫，`retry_budgets` 記在第 23 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-238～AI-243、migration 23 是本次改號前的編號。
+- 影響：用本票分支建過的開發資料庫，`retry_budgets` 記在第 23 或 25 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-238～AI-243、AI-253～AI-259 與 migration 23、25 是改號前的編號。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

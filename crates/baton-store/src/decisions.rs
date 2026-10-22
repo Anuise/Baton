@@ -367,6 +367,10 @@ fn apply_in(
             if change.changed() {
                 save(tx, &change, now)?;
             }
+            // 外部操作「結果未知」的請求：查證結果與 Task 恢復在同一個交易提交（票 26）
+            if let Some(decision) = &change.decision {
+                super::external_operations::resolve_by_decision(tx, workspace_id, decision, now)?;
+            }
             Ok(change.outcome)
         }
     })
@@ -463,6 +467,7 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
                 deadline_at: r.get::<_, Option<i64>>(12)?.map(Timestamp::from_millis),
                 permission: permission.map(|raw| json_column(13, &raw)).transpose()?,
                 authority: authority.map(|raw| json_column::<AuthorityDetail>(14, &raw)).transpose()?,
+                external_operation_id: None,
                 blocking: Vec::new(),
                 target: DecisionTarget {
                     task_id: r.get(15)?,
@@ -506,6 +511,20 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
             if let Some(request) = requests.iter_mut().find(|r| &r.id == from) {
                 request.links.push(to.clone());
             }
+        }
+    }
+
+    // 外部操作的查證請求（票 26）：操作記著它目前的查證請求
+    let external = conn
+        .prepare(
+            "SELECT decision_request_id, id FROM external_operation
+             WHERE workspace_id = ?1 AND decision_request_id IS NOT NULL",
+        )?
+        .query_map([workspace_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (request_id, operation_id) in external {
+        if let Some(request) = requests.iter_mut().find(|r| r.id == request_id) {
+            request.external_operation_id = Some(operation_id);
         }
     }
 
@@ -568,7 +587,7 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
     Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)?, artifacts, authorizations })
 }
 
-/// 寫入一個新的裁定請求與它的阻擋範圍（Runtime 因預算用盡而建立的請求也走這裡，票 36）。
+/// 寫入一個新的裁定請求與它的阻擋範圍（外部操作結果未知（票 26）與預算用盡（票 36）時由 Runtime 建立的請求也走這裡）。
 pub(crate) fn insert_request(tx: &Transaction<'_>, request: &DecisionRequest) -> rusqlite::Result<()> {
     // Domain 型別只含字串與數字，序列化不會失敗
     let options = serde_json::to_string(&request.options).expect("選項可序列化");

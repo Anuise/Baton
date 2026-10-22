@@ -309,6 +309,9 @@ pub struct DecisionRequest {
     pub deadline_at: Option<Timestamp>,
     pub permission: Option<PermissionDetail>,
     pub authority: Option<AuthorityDetail>,
+    /// 外部操作結果未知時由 Runtime 建立的查證請求：對應的外部操作（票 26）。只能以查證選項作答，見 `allowed_actions`。
+    #[serde(default)]
+    pub external_operation_id: Option<String>,
     /// 阻擋範圍：受影響的 Task（不在這裡的 Task 從頭到尾不受阻擋）。
     pub blocking: Vec<String>,
     pub target: DecisionTarget,
@@ -337,6 +340,15 @@ impl DecisionRequest {
 
     pub fn is_deferred(&self, now: Timestamp) -> bool {
         self.is_pending() && self.deferred_until.is_some_and(|d| d > now)
+    }
+
+    /// 這個請求可以用哪些處理方式。外部操作的查證請求只能接受「已生效／沒有生效」其中一個選項，或延後：
+    /// 其他方式會讓請求結案、外部操作卻一直停在結果未知，同一個冪等鍵就再也無法處理（票 26 整合）。
+    pub fn allowed_actions(&self) -> &'static [DecisionAction] {
+        if self.external_operation_id.is_some() {
+            return &[DecisionAction::Accept, DecisionAction::Defer];
+        }
+        self.kind.allowed_actions()
     }
 
     fn option(&self, id: &str) -> Option<&DecisionOption> {
@@ -800,6 +812,10 @@ impl DecisionContext<'_> {
 
     /// 目標版本已變更的原因；仍有效回傳 `None`。
     fn stale_reason(&self, request: &DecisionRequest) -> Option<String> {
+        // 外部操作有沒有生效與 Task 的契約、狀態無關：查證請求不會過期，否則外部操作會一直停在結果未知（票 26 整合）
+        if request.external_operation_id.is_some() {
+            return None;
+        }
         let target = &request.target;
         let Some(task) = self.task.task(&target.task_id) else {
             return Some("目標 Task 已不存在".to_string());
@@ -881,6 +897,7 @@ fn new_request(
         deadline_at: None,
         permission: None,
         authority: None,
+        external_operation_id: None,
         blocking: vec![target.id.clone()],
         target: DecisionTarget {
             task_id: target.id.clone(),
@@ -899,6 +916,20 @@ fn new_request(
     }
 }
 
+/// 請求建立的事件（請求聚合的第 1 版）；外部操作結果未知時由 Runtime 建立的請求也用它（票 26）。
+pub fn requested_event(request: &mut DecisionRequest, linked: &[String], now: Timestamp) -> DomainEvent {
+    let payload = serde_json::json!({
+        "kind": request.kind,
+        "run_id": request.run_id,
+        "task_id": request.task_id,
+        "question": request.question,
+        "blocking": request.blocking,
+        "target": request.target,
+        "linked": linked,
+    });
+    request.event(EVENT_DECISION_REQUESTED, now, payload)
+}
+
 /// 建立請求、讓目標 Task 進入 `waiting_decision`（只有 `running` 的 Task 會轉換），並和相似的待處理請求互相連結。
 fn open_request(
     ctx: &DecisionContext<'_>,
@@ -915,19 +946,7 @@ fn open_request(
         .filter(|r| r.is_pending() && r.id != request.id && r.similarity_key() == key)
         .map(|r| r.id.clone())
         .collect();
-    let requested = request.event(
-        EVENT_DECISION_REQUESTED,
-        now,
-        serde_json::json!({
-            "kind": request.kind,
-            "run_id": request.run_id,
-            "task_id": request.task_id,
-            "question": request.question,
-            "blocking": request.blocking,
-            "target": request.target,
-            "linked": similar,
-        }),
-    );
+    let requested = requested_event(&mut request, &similar, now);
     change.events.push(requested);
     for other in similar {
         change.new_links.push(link_pair(&request.id, &other));
@@ -1374,6 +1393,7 @@ pub fn budget_exhausted_request(
             fingerprint: format!("{}:{}", matter.as_str(), task.id),
             summary: truncate(&summary, SUMMARY_MAX_CHARS),
         }),
+        external_operation_id: None,
         blocking: vec![task.id.clone()],
         target: DecisionTarget { task_id: task.id.clone(), contract_version: task.contract_version, authorization_revision: None },
         revision: 1,
@@ -1563,7 +1583,7 @@ fn answer(
     if expected_revision != request.revision {
         return Err(DecisionError::RevisionMismatch { current: request.revision });
     }
-    if !request.kind.allowed_actions().contains(&action) {
+    if !request.allowed_actions().contains(&action) {
         return Err(DecisionError::ActionNotAllowed(action.label()));
     }
     let option_id = if action.needs_option() {
@@ -1678,6 +1698,9 @@ fn merge(
     }
     if source.kind == DecisionKind::Permission {
         return invalid("權限提示的單次批准各自綁定 Task 與操作，不能合併；可以改用連結");
+    }
+    if source.external_operation_id.is_some() || target.external_operation_id.is_some() {
+        return invalid("外部操作的查證請求各自對應一個外部操作，不能合併；可以改用連結");
     }
     if source.revision != expected_revision {
         return Err(DecisionError::RevisionMismatch { current: source.revision });
@@ -1884,7 +1907,7 @@ pub fn view(
             matter_label: a.matter.label().to_string(),
             summary: a.summary.clone(),
         }),
-        allowed_actions: if request.is_pending() { request.kind.allowed_actions().to_vec() } else { Vec::new() },
+        allowed_actions: if request.is_pending() { request.allowed_actions().to_vec() } else { Vec::new() },
         created_at: request.created_at,
         decision: decision.map(|d| DecisionResult {
             action: d.action,

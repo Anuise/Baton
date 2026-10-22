@@ -57,6 +57,7 @@ fn pending(id: &str, kind: DecisionKind, task_id: &str) -> DecisionRequest {
         deadline_at: None,
         permission: None,
         authority: None,
+        external_operation_id: None,
         blocking: vec![task_id.into()],
         target: DecisionTarget { task_id: task_id.into(), contract_version: 1, authorization_revision: None },
         revision: 1,
@@ -232,6 +233,57 @@ fn permission_requests_only_accept_reject_or_defer() {
     let refused = world.run(answer("d", 1, DecisionAction::Modify, Some("a"), Some("條件"))).unwrap_err();
     assert_eq!(refused.code(), "decision_action_not_allowed");
     assert!(world.run(answer("d", 1, DecisionAction::Reject, None, None)).is_ok());
+}
+
+/// 外部操作結果未知時的查證請求（票 26）：選項只有「已生效／沒有生效」。
+fn verification(id: &str, task_id: &str) -> DecisionRequest {
+    let mut request = pending(id, DecisionKind::Agent, task_id);
+    request.options = vec![option("verified_done"), option("verified_not_done")];
+    request.external_operation_id = Some(format!("extop_{id}"));
+    request
+}
+
+#[test]
+fn verification_requests_can_only_be_answered_by_accepting_an_option_or_deferred() {
+    let world = World::new(vec![task("t", TaskStatus::WaitingDecision, 1)], vec![verification("d", "t")]);
+    // 這些處理方式會讓請求結案、外部操作卻停在結果未知
+    for (action, option, note) in [
+        (DecisionAction::Reject, None, None),
+        (DecisionAction::Answer, None, Some("應該好了")),
+        (DecisionAction::Investigate, None, Some("去查部署紀錄")),
+        (DecisionAction::Modify, Some("verified_done"), Some("條件")),
+    ] {
+        let refused = world.run(answer("d", 1, action, option, note)).unwrap_err();
+        assert_eq!(refused.code(), "decision_action_not_allowed", "{action:?}");
+    }
+    assert_eq!(world.run(answer("d", 1, DecisionAction::Defer, None, None)).unwrap().outcome, DecisionOutcome::Deferred);
+    let accepted = world.run(answer("d", 1, DecisionAction::Accept, Some("verified_not_done"), Some("看過紀錄"))).unwrap();
+    assert_eq!(accepted.decision.unwrap().option_id.as_deref(), Some("verified_not_done"));
+    assert_eq!(accepted.resumed, vec!["t".to_string()]);
+
+    let view = view(&world.requests[0], &world.requests, &[], &[], &world.tasks, T1);
+    assert_eq!(view.allowed_actions, vec![DecisionAction::Accept, DecisionAction::Defer]);
+}
+
+#[test]
+fn verification_requests_never_go_stale_and_cannot_be_merged() {
+    // 契約已改版、另一個 Task 已取消：一般請求會過期，查證請求不會
+    let world = World::new(
+        vec![task("t1", TaskStatus::WaitingDecision, 2), task("t2", TaskStatus::Cancelled, 1), task("t3", TaskStatus::WaitingDecision, 1)],
+        vec![verification("d1", "t1"), verification("d2", "t2"), pending("d3", DecisionKind::Agent, "t3")],
+    );
+    assert_eq!(world.run(DecisionCommand::Refresh).unwrap().outcome, DecisionOutcome::Refreshed { superseded: vec![] });
+    let accepted = world.run(answer("d1", 1, DecisionAction::Accept, Some("verified_done"), None)).unwrap();
+    assert!(accepted.decision.is_some(), "契約改版後仍可以作答：{:?}", accepted.outcome);
+
+    let merge = |from: &str, into: &str| DecisionCommand::Merge {
+        request_id: from.into(),
+        expected_revision: 1,
+        into: into.into(),
+        into_expected_revision: 1,
+    };
+    assert_eq!(world.run(merge("d1", "d3")).unwrap_err().code(), "decision_merge_invalid");
+    assert_eq!(world.run(merge("d3", "d1")).unwrap_err().code(), "decision_merge_invalid");
 }
 
 #[test]

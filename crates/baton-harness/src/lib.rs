@@ -163,6 +163,17 @@ impl Harness {
         ports
     }
 
+    /// 目前 Runtime 的 Store（重建 Runtime 後是新的實例）；故障注入用。
+    pub fn store(&self) -> baton_store::Store {
+        self.runtime.as_ref().expect("Runtime 尚未啟動").supervisor().store().clone()
+    }
+
+    /// 讓目前 Runtime 的每個資料庫寫入都以指定的儲存故障失敗（磁碟滿、被鎖住、無法寫入）；`None` 恢復。
+    /// 重建 Runtime 後不再生效。
+    pub fn inject_storage_fault(&self, kind: Option<baton_domain::storage_health::StorageFaultKind>) {
+        self.store().inject_write_fault(kind);
+    }
+
     /// 目前 Runtime 的監聽位址。
     pub fn addr(&self) -> std::net::SocketAddr {
         self.runtime.as_ref().expect("Runtime 尚未啟動").local_addr()
