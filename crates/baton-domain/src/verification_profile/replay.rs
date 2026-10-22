@@ -33,6 +33,10 @@ pub struct ReplayIdentity {
     pub engine: String,
     /// 資料相容性：Profile 宣告的資料集版本與資料準備步驟的雜湊。
     pub data: String,
+    /// 目標或參數含本次驗證的佔位字（`{{run_id}}`、`{{state_dir}}`）：錄下的動作帶著代換後的值，換一次驗證就不再正確，
+    /// 所以這類步驟不重播也不保存錄製（review-notes #26）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_scoped: bool,
 }
 
 impl ReplayIdentity {
@@ -59,7 +63,7 @@ pub fn case_key(journey: &str, step: &str) -> String {
 }
 
 /// 旅程中一個目標導向步驟的錄製身分；不是目標導向動作或不屬於這條旅程時為 `None`。
-/// 使用 Profile 中的原文（佔位字尚未代換），所以每次驗證的 `{{run_id}}` 不會讓錄製失效。
+/// 使用 Profile 中的原文（佔位字尚未代換）；目標或參數含本次驗證的佔位字時標為 `run_scoped`，不重播也不錄製。
 pub fn identity(definition: &ProfileDefinition, journey: &Journey, step: &Step, engine: &str) -> Option<ReplayIdentity> {
     let super::Operation::Browser { action: BrowserAction::Act { goal, params, .. }, .. } = &step.operation else {
         return None;
@@ -76,6 +80,9 @@ pub fn identity(definition: &ProfileDefinition, journey: &Journey, step: &Step, 
         persona: hash_of(&serde_json::json!({ "persona": persona, "identity": journey.identity })),
         engine: engine.to_string(),
         data: hash_of(&serde_json::json!({ "dataset": definition.replay.dataset, "setup": definition.setup })),
+        run_scoped: std::iter::once(goal)
+            .chain(params.values())
+            .any(|text| text.contains(super::PLACEHOLDER_RUN_ID) || text.contains(super::PLACEHOLDER_STATE_DIR)),
     })
 }
 
@@ -148,7 +155,9 @@ pub fn decide(
     production: bool,
     replay_in_production: bool,
 ) -> ReplayDecision {
-    let Some(entry) = entry else { return ReplayDecision::Live { cache: CacheState::None, stale: Vec::new() } };
+    let Some(entry) = entry.filter(|_| !identity.run_scoped) else {
+        return ReplayDecision::Live { cache: CacheState::None, stale: Vec::new() };
+    };
     if entry.status == ReplayStatus::Stale {
         return ReplayDecision::Live { cache: CacheState::Stale, stale: Vec::new() };
     }
@@ -270,7 +279,9 @@ pub fn updates(bundle: &EvidenceBundle) -> Vec<ReplayUpdate> {
         .iter()
         .filter_map(|record| {
             let case_key = case_key(&record.journey, &record.step);
-            match (&record.recorded, record.stale_reasons.is_empty()) {
+            // 含本次驗證佔位字的步驟不保存錄製
+            let recorded = record.recorded.as_ref().filter(|r| !r.identity.run_scoped);
+            match (recorded, record.stale_reasons.is_empty()) {
                 (Some(recorded), _) => Some(ReplayUpdate::Record { case_key, recorded: recorded.clone() }),
                 (None, false) => Some(ReplayUpdate::MarkStale { case_key, reasons: record.stale_reasons.clone() }),
                 (None, true) => None,
