@@ -21,9 +21,11 @@ use std::time::Duration;
 use baton_api::{tool_path, CLIENT_HEADER, CLIENT_HEADER_VALUE};
 use baton_domain::agent::AGENT_TOKEN_ENV;
 use baton_domain::auth::Role;
+use baton_domain::guardian::JournalRecord;
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::Timestamp;
 use baton_ports::{AgentAdapter, Ports};
+use baton_guardian::{Guardian, GuardianStep, RuntimeHost};
 use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeOptions};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
@@ -99,9 +101,13 @@ impl HarnessBuilder {
             exit_timing: self.exit_timing,
             exits_seen: AtomicU64::new(0),
             full_text_search: self.full_text_search,
+            guardian: None,
+            guardian_script: GuardianScript::default(),
         };
-        harness.runtime =
-            Some(try_start_runtime(harness.data_dir.path(), &harness.ports(), harness.exit_timing, harness.full_text_search).await?);
+        harness.runtime = Some(
+            try_start_runtime(harness.data_dir.path(), &harness.ports(), harness.exit_timing, harness.full_text_search, None)
+                .await?,
+        );
         Ok(harness)
     }
 }
@@ -117,6 +123,27 @@ pub struct Harness {
     /// 目前這個 Runtime 實例已經等到結束的完全退出次數。
     exits_seen: AtomicU64,
     full_text_search: bool,
+    /// 程序內的監護（票 32）；`None` 表示沒有監護（從未啟動或已被殺掉）。
+    guardian: Option<Guardian>,
+    guardian_script: GuardianScript,
+}
+
+/// 監護啟動 Runtime 的一筆紀錄（票 32）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardianStart {
+    pub attempt_id: String,
+    /// `Ok` 是 Runtime 啟動並開始服務；`Err` 是程序啟動後很快就結束（啟動早期失敗、或遇到停止意圖不提供服務），附原因。
+    pub outcome: Result<(), String>,
+}
+
+/// 監護與程序內 Runtime 之間的腳本與紀錄。
+#[derive(Default)]
+struct GuardianScript {
+    /// 下一次監護啟動 Runtime 時，程序啟動了卻在匯入監護日誌之前就結束。
+    fail_next_start_early: bool,
+    /// 下一次監護查詢 Runtime 是否在執行時，先執行這個動作（重現「寫下日誌之後、最後核對之前」的競態）。
+    on_next_probe: Option<Box<dyn FnOnce(&Path) + Send>>,
+    starts: Vec<GuardianStart>,
 }
 
 /// 讓測試可用 `harness.clock`、`harness.process_control` 等直接取得 fake。
@@ -377,9 +404,122 @@ impl Harness {
 
     async fn start_again(&mut self) {
         let runtime =
-            try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search).await;
+            try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search, None).await;
         self.runtime = Some(runtime.unwrap_or_else(|e| panic!("Runtime 重啟失敗：{e}")));
         self.exits_seen.store(0, Ordering::SeqCst);
+    }
+
+    // ------------------------------------------------------------ 監護（票 32）
+
+    /// 模擬 Runtime 意外終止（程序被殺掉）而**沒有**任何人重新啟動它：丟棄 Runtime 而不記下正常結束。
+    /// 之後由監護（`guardian_step`）或使用者開 App（`open_app`）決定是否再啟動。
+    pub async fn kill_runtime(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.kill().await;
+        }
+    }
+
+    /// 模擬完全退出的停止流程結束後 Runtime 自行結束服務（有秩序的停止）。
+    pub async fn stop_runtime_after_exit(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown().await;
+        }
+    }
+
+    /// 目前有沒有 Runtime 在提供服務。
+    pub fn runtime_running(&self) -> bool {
+        self.runtime.is_some()
+    }
+
+    /// 模擬使用者開 App：沒有 Runtime 就以一般方式啟動（不是監護拉起的，不帶嘗試識別）。
+    pub async fn open_app(&mut self) {
+        if self.runtime.is_none() {
+            self.start_again().await;
+        }
+    }
+
+    /// 啟動程序內的監護，從「監看目前的 Runtime」開始；健康查詢會回報監護在執行。
+    pub fn start_guardian(&mut self) {
+        self.guardian = Some(Guardian::new(self.data_dir.path().to_path_buf(), self.fakes.clock.clone()));
+        self.fakes.guardian_probe.set_running(true);
+    }
+
+    /// 模擬監護程序被殺掉：不再有人自動重啟 Runtime；健康查詢會回報降級。
+    pub fn kill_guardian(&mut self) {
+        self.guardian = None;
+        self.fakes.guardian_probe.set_running(false);
+    }
+
+    /// 讓監護處理一次（何時發生由測試決定，時間由 fake Clock 決定）。監護啟動的 Runtime 會成為目前的 Runtime。
+    pub async fn guardian_step(&mut self) -> GuardianStep {
+        let mut guardian = self.guardian.take().expect("監護沒有在執行（先呼叫 start_guardian）");
+        let step = guardian.step(&mut HarnessHost { harness: self }).await;
+        if let GuardianStep::Finished(_) = &step {
+            // 監護結束就是程序結束
+            self.fakes.guardian_probe.set_running(false);
+        }
+        self.guardian = Some(guardian);
+        step
+    }
+
+    /// 下一次監護啟動 Runtime 時，程序啟動了卻在匯入監護日誌之前就結束（啟動早期失敗）。
+    pub fn fail_next_guardian_start_early(&mut self) {
+        self.guardian_script.fail_next_start_early = true;
+    }
+
+    /// 下一次監護查詢「Runtime 是否在執行」時先執行 `action`（收到資料目錄）。監護在寫下嘗試之後、啟動之前會再查詢一次，
+    /// 用它在那個時間點寫入生命週期檔，就能重現「完全退出／維護與監護啟動」的競態。
+    pub fn on_next_runtime_probe(&mut self, action: impl FnOnce(&Path) + Send + 'static) {
+        self.guardian_script.on_next_probe = Some(Box::new(action));
+    }
+
+    /// 監護啟動 Runtime 的紀錄，依時間順序。
+    pub fn guardian_starts(&self) -> Vec<GuardianStart> {
+        self.guardian_script.starts.clone()
+    }
+
+    /// 監護日誌目前的內容（監護寫在磁碟上的紀錄）。
+    pub fn guardian_journal(&self) -> Vec<JournalRecord> {
+        baton_guardian::files::read_journal(self.data_dir.path()).expect("無法讀取監護日誌")
+    }
+}
+
+/// 程序內的 RuntimeHost：監護「看到」的 Runtime 就是 Harness 目前的 Runtime。
+struct HarnessHost<'a> {
+    harness: &'a mut Harness,
+}
+
+#[async_trait::async_trait]
+impl RuntimeHost for HarnessHost<'_> {
+    async fn runtime_running(&mut self) -> bool {
+        if let Some(action) = self.harness.guardian_script.on_next_probe.take() {
+            action(self.harness.data_dir.path());
+        }
+        self.harness.runtime.is_some()
+    }
+
+    async fn start_runtime(&mut self, attempt_id: &str) -> Result<(), String> {
+        let harness = &mut *self.harness;
+        let outcome = if std::mem::take(&mut harness.guardian_script.fail_next_start_early) {
+            Err("模擬：Runtime 在匯入監護日誌之前就結束".to_string())
+        } else {
+            let started = try_start_runtime(
+                harness.data_dir.path(),
+                &harness.ports(),
+                harness.exit_timing,
+                harness.full_text_search,
+                Some(attempt_id.to_string()),
+            )
+            .await;
+            started.map(|runtime| {
+                harness.runtime = Some(runtime);
+                harness.exits_seen.store(0, Ordering::SeqCst);
+            })
+            .map_err(|e| e.to_string())
+        };
+        harness.guardian_script.starts.push(GuardianStart { attempt_id: attempt_id.to_string(), outcome });
+        // 程序本身有啟動起來；之後很快結束的情形由下一次 runtime_running 發現
+        Ok(())
     }
 }
 
@@ -388,6 +528,7 @@ async fn try_start_runtime(
     ports: &Ports,
     exit_timing: ExitTiming,
     full_text_search: bool,
+    guardian_attempt: Option<String>,
 ) -> Result<RunningRuntime, RuntimeError> {
     let config = RuntimeConfig {
         data_dir: data_dir.to_path_buf(),
@@ -402,6 +543,7 @@ async fn try_start_runtime(
         exit_timing,
         exit_linger: None,
         full_text_search,
+        guardian_attempt,
         ..RuntimeOptions::default()
     };
     Runtime::start_with(config, ports.clone(), options).await
