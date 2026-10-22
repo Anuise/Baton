@@ -117,6 +117,11 @@ impl Harness {
         self.data_dir.path()
     }
 
+    /// 成果儲存的根目錄（`<資料目錄>/artifacts`）；成果檔案、暫存檔與未登記的檔案都在其下。
+    pub fn artifacts_dir(&self) -> std::path::PathBuf {
+        self.data_dir.path().join(baton_domain::artifact::ARTIFACTS_DIR)
+    }
+
     /// 目前注入給 Runtime 的 Port（同一批 fake）。
     pub fn ports(&self) -> Ports {
         self.fakes.to_ports()

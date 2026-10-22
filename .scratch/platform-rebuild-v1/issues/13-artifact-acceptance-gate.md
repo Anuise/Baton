@@ -1,6 +1,6 @@
 # 13: 成果接受與最小完成驗證
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R042-13-impl，2026-10-22 16:37）
 Blocked by: 12
 
 **What to build:** Task 只能在「完成與驗證條件」有對應證據時進入 completed：Worker 回報結束後 Task 進入 verifying，以契約中宣告的確定性檢查（命令結束碼、檔案存在與雜湊等）或使用者手動接受完成驗證；成果接受交易同時校驗 Run generation、成果 manifest 與契約版本。Worker 宣稱成功或程序正常退出都不足以完成。

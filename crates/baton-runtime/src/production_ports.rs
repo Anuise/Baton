@@ -91,9 +91,26 @@ impl WorkspaceFs for LocalWorkspaceFs {
     async fn inspect_dirty(&self, _target: &Path) -> PortResult<DirtyState> {
         Err(PortError::NotImplemented("WorkspaceFs::inspect_dirty"))
     }
-    async fn write_artifact_atomic(&self, _path: &Path, _bytes: &[u8]) -> PortResult<()> {
-        Err(PortError::NotImplemented("WorkspaceFs::write_artifact_atomic"))
+    async fn write_artifact_atomic(&self, path: &Path, bytes: &[u8]) -> PortResult<()> {
+        let (path, bytes) = (path.to_path_buf(), bytes.to_vec());
+        blocking(move || write_file_atomic(&path, &bytes)).await
     }
+    async fn write_readonly_files(&self, dir: &Path, files: &[(String, Vec<u8>)]) -> PortResult<()> {
+        baton_ports::write_readonly_tree(dir, files)
+    }
+    async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>> {
+        let path = path.to_path_buf();
+        blocking(move || read_file_if_exists(&path)).await
+    }
+    async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
+        let dir = dir.to_path_buf();
+        blocking(move || list_files_recursive(&dir)).await
+    }
+}
+
+/// 檔案系統操作是阻塞的（含 fsync），放到阻塞執行緒池，不卡住 Runtime 的非同步工作。
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> PortResult<T> + Send + 'static) -> PortResult<T> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| PortError::Failed(format!("檔案工作被中斷：{e}")))?
 }
 
 /// 組出正式執行用的 Port 組合。
@@ -114,5 +131,17 @@ pub fn production_ports() -> Ports {
         // DPAPI 是真實實作：桌面憑證檔一定要受保護
         secret_protector: Arc::new(baton_credential::DpapiProtector),
         claude_env: Arc::new(ClaudeCli),
+        user_settings: Arc::new(user_settings_source()),
     }
+}
+
+/// 使用者平常使用的 Claude Code 設定位置：設定了 `CLAUDE_CONFIG_DIR` 就用該目錄（`.claude.json` 在其中），
+/// 否則是使用者家目錄下的 `.claude` 與 `.claude.json`。
+fn user_settings_source() -> DirUserSettingsSource {
+    let from_env = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    if let Some(dir) = from_env("CLAUDE_CONFIG_DIR") {
+        return DirUserSettingsSource::new(dir.clone(), dir.join(".claude.json"));
+    }
+    let home = from_env("USERPROFILE").or_else(|| from_env("HOME")).unwrap_or_default();
+    DirUserSettingsSource::new(home.join(".claude"), home.join(".claude.json"))
 }

@@ -9,21 +9,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    admission_check_path, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
+    admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview,
+    SHA256_HEADER, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
-    task_path, task_ready_path, tasks_path, workspace_lifecycle_path, workspace_resume_path, LifecycleStatus,
-    QueuedDispatch, SchedulingOverview, UpdateSchedulingSettingsRequest, UpdateWorkspaceLifecycleRequest,
-    WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
-    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
-    CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse,
-    LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus, SummaryRequest, TaskBoard, TaskDetail,
+    run_settings_snapshot_path, shared_settings_version_path, task_path, task_ready_path, tasks_path, workspace_lifecycle_path, workspace_resume_path, LifecycleStatus,
+    QueuedDispatch, UpdateWorkspaceLifecycleRequest, WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
+    SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
+    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AuthorizationView,
+    ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
+    ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PlatformResponse, ProfileList,
+    RunSettingsSnapshot, SetupStatus, SharedSettingsStatus, SnapshotRequest, SummaryRequest, TaskBoard, TaskDetail,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, PROFILES_PATH,
-    SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, WORKSPACES_PATH,
+    SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH, SHARED_SETTINGS_PATH,
+    SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
 };
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
 use baton_domain::run::RunView;
 use baton_domain::scheduler::CapacityMode;
+use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
@@ -41,8 +45,18 @@ pub enum DispatchOutcome {
 /// 一般請求等待回應的上限。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 下載成果（最多 10 MiB，仍要讀檔並重新計算雜湊）等待回應的上限。
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// 需要在本機執行 `claude`、`git` 的請求（核對登入、精靈檢查）等待回應的上限。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 下載到的成果內容，以及 Runtime 以 `X-Baton-Sha256` 回報的雜湊（Runtime 已與 manifest 核對過）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactDownload {
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+}
 
 /// 連線方式：連回既有的，或由本次呼叫啟動。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +297,67 @@ impl RuntimeClient {
         self.send_json::<(), _>(reqwest::Method::POST, &workspace_resume_path(workspace_id), None).await
     }
 
+    /// 共同設定的目前狀態：已採用的版本與最新版本。
+    pub async fn shared_settings(&self) -> Result<SharedSettingsStatus, ClientError> {
+        self.get_json(SHARED_SETTINGS_PATH).await
+    }
+
+    /// 預覽匯入：來源、排除項目與相對於目前版本的差異（不保存任何東西）。
+    pub async fn preview_settings_import(&self) -> Result<ImportPreview, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, SHARED_SETTINGS_PREVIEW_PATH, None).await
+    }
+
+    /// 採用預覽的內容成為新版本；來源在預覽後改變時回傳 `ClientError::Rejected`（`settings_source_changed`）。
+    pub async fn adopt_settings(&self, expected_hash: &str) -> Result<SettingsVersion, ClientError> {
+        let request = AdoptRequest { expected_hash: expected_hash.to_string() };
+        self.send_json(reqwest::Method::POST, SHARED_SETTINGS_ADOPT_PATH, Some(&request)).await
+    }
+
+    /// 讀取單一共同設定版本（含完整內容）。
+    pub async fn settings_version(&self, version: i64) -> Result<SettingsVersion, ClientError> {
+        self.get_json(&shared_settings_version_path(version)).await
+    }
+
+    /// 為 Run 產生唯讀設定快照；`version` 省略時使用最新版本，Run 已綁定版本時回傳同一個綁定。
+    pub async fn run_settings_snapshot(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+        version: Option<i64>,
+    ) -> Result<RunSettingsSnapshot, ClientError> {
+        let request = SnapshotRequest { version };
+        self.send_json(reqwest::Method::POST, &run_settings_snapshot_path(workspace_id, run_id), Some(&request)).await
+    }
+
+    /// 成果瀏覽：已登記的成果與全部版本，以及沒有 manifest 的未登記檔案。
+    pub async fn list_artifacts(&self, workspace_id: &str) -> Result<ArtifactList, ClientError> {
+        self.get_json(&artifacts_path(workspace_id)).await
+    }
+
+    /// 成果某個版本的預覽（Runtime 會先核對雜湊；不符回傳 `ClientError::Rejected`）。
+    pub async fn preview_artifact(
+        &self,
+        workspace_id: &str,
+        artifact_id: &str,
+        version: i64,
+    ) -> Result<ArtifactPreview, ClientError> {
+        self.get_json(&artifact_preview_path(workspace_id, artifact_id, version)).await
+    }
+
+    /// 下載成果某個版本；與其他呼叫一樣驗證桌面身分，內容與 manifest 不符時回傳 `ClientError::Rejected`。
+    pub async fn download_artifact(
+        &self,
+        workspace_id: &str,
+        artifact_id: &str,
+        version: i64,
+    ) -> Result<ArtifactDownload, ClientError> {
+        let path = artifact_content_path(workspace_id, artifact_id, version);
+        let response = self.request_ok::<()>(reqwest::Method::GET, &path, None, DOWNLOAD_TIMEOUT).await?;
+        let sha256 = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+        let bytes = response.bytes().await.map_err(|e| ClientError::Unreachable(e.to_string()))?.to_vec();
+        Ok(ArtifactDownload { bytes, sha256 })
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         self.send_json::<(), T>(reqwest::Method::GET, path, None).await
     }
@@ -304,6 +379,18 @@ impl RuntimeClient {
         body: Option<&B>,
         timeout: Duration,
     ) -> Result<T, ClientError> {
+        let response = self.request_ok(method, path, body, timeout).await?;
+        response.json().await.map_err(|e| ClientError::Unreachable(e.to_string()))
+    }
+
+    /// 送出請求（帶憑證與固定標頭）並回傳成功的回應；非 2xx 轉成 `ClientError::Rejected`。
+    async fn request_ok<B: serde::Serialize>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, ClientError> {
         let token = baton_credential::read_desktop_credential(&self.data_dir, &*self.protector)?;
         let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
         // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
@@ -322,7 +409,7 @@ impl RuntimeClient {
         let response = request.send().await.map_err(unreachable)?;
 
         if response.status().is_success() {
-            return response.json().await.map_err(unreachable);
+            return Ok(response);
         }
         let status = response.status();
         Err(match response.json::<ErrorBody>().await {

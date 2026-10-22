@@ -368,12 +368,24 @@ impl QuotaObserver for FakeQuotaObserver {
     }
 }
 
-/// 在暫存目錄中運作的 WorkspaceFs：成果寫入是真實的原子寫入，
+/// 模擬 Runtime 在成果寫入的某一點當掉：到了那一點就永遠不回來（呼叫端的 future 被丟棄即等同崩潰）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactWritePoint {
+    /// 暫存檔只寫了一半（沒有 fsync、沒有改名）。
+    MidWrite,
+    /// 暫存檔已完整寫入並 fsync，但還沒改名。
+    BeforeRename,
+    /// 已經原子改名，但呼叫端還沒拿到結果（所以 manifest 不會被提交）。
+    AfterRename,
+}
+
+/// 在暫存目錄中運作的 WorkspaceFs：成果寫入是真實的原子寫入（步驟與正式版相同），
 /// worktree 只在記憶體中追蹤（不依賴 git）。
 #[derive(Default)]
 pub struct FakeWorkspaceFs {
     worktrees: Mutex<HashSet<PathBuf>>,
     dirty: Mutex<HashSet<PathBuf>>,
+    artifact_hang: Mutex<Option<ArtifactWritePoint>>,
 }
 
 impl FakeWorkspaceFs {
@@ -383,6 +395,22 @@ impl FakeWorkspaceFs {
 
     pub fn has_worktree(&self, target: &Path) -> bool {
         lock(&self.worktrees).contains(target)
+    }
+
+    /// 下一次成果寫入在指定的點永遠不回來（只生效一次）。
+    pub fn hang_next_artifact_write_at(&self, point: ArtifactWritePoint) {
+        *lock(&self.artifact_hang) = Some(point);
+    }
+
+    /// 若下一次成果寫入被設定在這一點當掉，這裡就永遠不回來。
+    async fn crash_point(&self, point: ArtifactWritePoint) {
+        let hang = {
+            let mut armed = lock(&self.artifact_hang);
+            (*armed == Some(point)).then(|| armed.take())
+        };
+        if hang.is_some() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -422,13 +450,99 @@ impl WorkspaceFs for FakeWorkspaceFs {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(io)?;
         }
-        // 先寫暫存檔並 fsync，再改名，讀取端不會看到寫到一半的檔案
-        let temp = path.with_extension("tmp-write");
+        // 與正式版相同的步驟：先寫暫存檔並 fsync，再改名，讀取端不會看到寫到一半的目標檔；各步驟之間可以模擬崩潰
+        let temp = baton_ports::partial_path(path);
         let mut file = tokio::fs::File::create(&temp).await.map_err(io)?;
-        file.write_all(bytes).await.map_err(io)?;
+        let (first, rest) = bytes.split_at(bytes.len() / 2);
+        file.write_all(first).await.map_err(io)?;
+        file.flush().await.map_err(io)?;
+        self.crash_point(ArtifactWritePoint::MidWrite).await;
+        file.write_all(rest).await.map_err(io)?;
         file.sync_all().await.map_err(io)?;
         drop(file);
-        tokio::fs::rename(&temp, path).await.map_err(io)
+        self.crash_point(ArtifactWritePoint::BeforeRename).await;
+        tokio::fs::rename(&temp, path).await.map_err(io)?;
+        self.crash_point(ArtifactWritePoint::AfterRename).await;
+        Ok(())
+    }
+
+    async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>> {
+        baton_ports::read_file_if_exists(path)
+    }
+
+    async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
+        baton_ports::list_files_recursive(dir)
+    }
+
+    async fn write_readonly_files(&self, dir: &Path, files: &[(String, Vec<u8>)]) -> PortResult<()> {
+        baton_ports::write_readonly_tree(dir, files)
+    }
+}
+
+/// 使用者平常使用的 Claude Code 設定：一個暫存的「家目錄」，內含 `.claude\` 與 `.claude.json`。
+///
+/// 讀取走與正式版相同的 `DirUserSettingsSource`（真實讀檔），所以「原始設定檔位元組不變」可以直接比對檔案。
+/// 測試可以在其中放置登入資料（`.credentials.json`）來證明它永遠不會被讀取。
+pub struct FakeUserSettings {
+    home: tempfile::TempDir,
+    source: DirUserSettingsSource,
+}
+
+impl Default for FakeUserSettings {
+    fn default() -> Self {
+        let home = tempfile::tempdir().expect("無法建立暫存的使用者家目錄");
+        let source = DirUserSettingsSource::new(home.path().join(".claude"), home.path().join(".claude.json"));
+        std::fs::create_dir_all(home.path().join(".claude")).expect("無法建立 .claude");
+        Self { home, source }
+    }
+}
+
+impl FakeUserSettings {
+    pub fn home(&self) -> &Path {
+        self.home.path()
+    }
+
+    /// 寫入 `.claude\` 之下的檔案（模擬使用者自己編輯設定）。
+    pub fn write_in_config_dir(&self, name: &str, content: &str) {
+        std::fs::write(self.home.path().join(".claude").join(name), content).expect("無法寫入設定檔");
+    }
+
+    pub fn write_settings(&self, json: &str) {
+        self.write_in_config_dir("settings.json", json);
+    }
+
+    pub fn write_instructions(&self, text: &str) {
+        self.write_in_config_dir("CLAUDE.md", text);
+    }
+
+    /// `.claude.json`（在家目錄，與 `.claude\` 同層）。
+    pub fn write_user_state(&self, json: &str) {
+        std::fs::write(self.home.path().join(".claude.json"), json).expect("無法寫入 .claude.json");
+    }
+
+    /// 家目錄下全部檔案的相對路徑與位元組；用來證明匯入前後原始設定檔沒有任何變化（也沒有多出檔案）。
+    pub fn files(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).expect("無法列出目錄") {
+                let path = entry.expect("目錄項目").path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let relative = path.strip_prefix(root).expect("在根目錄之下").to_string_lossy().replace('\\', "/");
+                    out.insert(relative, std::fs::read(&path).expect("無法讀取檔案"));
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(self.home.path(), self.home.path(), &mut out);
+        out
+    }
+}
+
+#[async_trait]
+impl UserSettingsSource for FakeUserSettings {
+    async fn read(&self) -> PortResult<SourceFiles> {
+        self.source.read().await
     }
 }
 
@@ -666,6 +780,7 @@ pub struct FakePorts {
     pub platform_info: Arc<FakePlatformInfo>,
     pub secret_protector: Arc<FakeSecretProtector>,
     pub claude_env: Arc<FakeClaudeEnvironment>,
+    pub user_settings: Arc<FakeUserSettings>,
 }
 
 impl FakePorts {
@@ -679,6 +794,7 @@ impl FakePorts {
             platform_info: Arc::default(),
             secret_protector: Arc::default(),
             claude_env: Arc::default(),
+            user_settings: Arc::default(),
         }
     }
 
@@ -693,6 +809,7 @@ impl FakePorts {
             platform_info: self.platform_info.clone(),
             secret_protector: self.secret_protector.clone(),
             claude_env: self.claude_env.clone(),
+            user_settings: self.user_settings.clone(),
         }
     }
 }
