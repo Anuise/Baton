@@ -311,7 +311,8 @@ body {
 }
 
 .task-workdir,
-.task-integration {
+.task-integration,
+.task-handoff {
   display: grid;
   gap: 4px;
   padding: 6px 8px;
@@ -322,7 +323,8 @@ body {
 }
 
 .task-workdir-failed,
-.task-integration-failed {
+.task-integration-failed,
+.task-handoff-abandoned {
   background: #ffebe9;
   border-color: #ff8182;
 }
@@ -344,6 +346,7 @@ body {
 }
 
 .task-integration ul,
+.task-handoff ul,
 .integration-queue ol {
   padding-left: 18px;
 }
@@ -548,6 +551,26 @@ body {
 .profile-actions {
   display: flex;
   gap: 8px;
+}
+
+.profile-gate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 13px;
+}
+
+.profile-gate-paused,
+.profile-gate-draining {
+  padding: 6px 10px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c66;
+  border-radius: 6px;
+}
+
+.profile-gate-draining {
+  background: #ffebe9;
+  border-color: #ff8182;
 }
 
 .profile-quota {

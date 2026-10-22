@@ -646,4 +646,98 @@ describe("帳號頁", () => {
       expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("額度門檻", () => {
+    function withGate(quota_gate: AccountScheduling["quota_gate"]) {
+      return {
+        ...fakeClient([profile()]),
+        schedulingOverview: vi.fn(async () => schedulingOverview({ accounts: [accountScheduling({ quota_gate })] })),
+      };
+    }
+
+    /** 2023-11-15 01:13:20 UTC，比進入門檻的時間晚三小時。 */
+    const RESET_AT = CHECKED_AT + 3 * 60 * 60 * 1000;
+
+    const gateGroup = () => screen.findByRole("group", { name: "主要帳號 的額度門檻" });
+
+    it("paused：顯示停止派工、原因與當時用量、遲滯提示、重置時間與進入時間", async () => {
+      render(
+        <AccountsPage
+          client={withGate({
+            profile_id: "prof_1",
+            state: "paused",
+            reason: "stop_dispatch_threshold",
+            used: 0.78,
+            reset_at: RESET_AT,
+            since: CHECKED_AT,
+            version: 1,
+          })}
+          timeZone="UTC"
+        />,
+      );
+
+      const gate = await gateGroup();
+      expect(gate).toHaveClass("profile-gate-paused");
+      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：停止派工");
+      expect(within(gate).getByText(/^原因/)).toHaveTextContent("原因：達 75% 停止派工門檻（當時用量 78%）");
+      expect(within(gate).getByText("回到 60% 以下或重置後才恢復派工")).toBeInTheDocument();
+      expect(within(gate).getByText("重置時間：2023/11/15 01:13")).toBeInTheDocument();
+      expect(within(gate).getByText("自 2023/11/14 22:13 起")).toBeInTheDocument();
+    });
+
+    it("draining：顯示交接中與限流警告原因；用量與重置時間未知時不顯示", async () => {
+      render(
+        <AccountsPage
+          client={withGate({
+            profile_id: "prof_1",
+            state: "draining",
+            reason: "limit_warning",
+            used: null,
+            reset_at: null,
+            since: CHECKED_AT,
+            version: 2,
+          })}
+          timeZone="UTC"
+        />,
+      );
+
+      const gate = await gateGroup();
+      expect(gate).toHaveClass("profile-gate-draining");
+      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：交接中（draining）");
+      expect(within(gate).getByText(/^原因/)).toHaveTextContent(/^原因：Claude Code 回報限流警告$/);
+      expect(within(gate).getByText("回到 60% 以下或重置後才恢復派工")).toBeInTheDocument();
+      expect(within(gate).queryByText(/重置時間/)).not.toBeInTheDocument();
+    });
+
+    it("沒有門檻紀錄（null）時是可派工，不顯示原因與恢復提示", async () => {
+      render(<AccountsPage client={withGate(null)} timeZone="UTC" />);
+
+      const gate = await gateGroup();
+      expect(gate).toHaveClass("profile-gate-open");
+      expect(gate).toHaveTextContent(/^額度門檻：可派工$/);
+    });
+
+    it("已恢復（open）時顯示恢復的原因與時間，不顯示恢復提示", async () => {
+      render(
+        <AccountsPage
+          client={withGate({
+            profile_id: "prof_1",
+            state: "open",
+            reason: "recovered",
+            used: 0.55,
+            reset_at: null,
+            since: CHECKED_AT,
+            version: 3,
+          })}
+          timeZone="UTC"
+        />,
+      );
+
+      const gate = await gateGroup();
+      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：可派工");
+      expect(within(gate).getByText(/^原因/)).toHaveTextContent("原因：用量回到 60% 以下（當時用量 55%）");
+      expect(within(gate).getByText("自 2023/11/14 22:13 起")).toBeInTheDocument();
+      expect(within(gate).queryByText("回到 60% 以下或重置後才恢復派工")).not.toBeInTheDocument();
+    });
+  });
 });

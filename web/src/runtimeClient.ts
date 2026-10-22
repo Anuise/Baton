@@ -639,6 +639,55 @@ export interface TaskBoard {
   workdirs: WorkdirView[];
   /** 這個 Workspace 的整合佇列項目，依排入順序。 */
   integrations: IntegrationEntry[];
+  /** Workspace 全部交接，依建立順序；舊版 Runtime 沒有這個欄位，視為空陣列。 */
+  handoffs?: Handoff[];
+}
+
+/** 交接階段：requested 等待保存檢查點、stopping 停止舊程序、transferred 已轉移等待接手確認、confirmed 已確認、abandoned 已放棄。 */
+export type HandoffPhase = "requested" | "stopping" | "transferred" | "confirmed" | "abandoned";
+
+/** 交接要延續的 checkpoint（對應 Rust 的 CheckpointRef）；時間是 UTC 毫秒。 */
+export interface HandoffCheckpoint {
+  run_id: string;
+  generation: number;
+  summary: string;
+  details: string;
+  saved_at: number;
+}
+
+/** 接手的 Worker 對交接的確認（對應 Rust 的 HandoffConfirmation）。 */
+export interface HandoffConfirmation {
+  completed: string;
+  incomplete: string;
+  unknown_side_effects: string;
+}
+
+/** 一次跨帳號交接（對應 Rust 的 Handoff）；時間是 UTC 毫秒。 */
+export interface Handoff {
+  id: string;
+  workspace_id: string;
+  task_id: string;
+  from_run_id: string;
+  from_profile_id: string;
+  from_generation: number;
+  /** 承接帳號。 */
+  to_profile_id: string;
+  to_run_id: string | null;
+  to_generation: number | null;
+  phase: HandoffPhase;
+  /** 帳號門檻的原因代碼，例如 drain_threshold、limit_warning。 */
+  reason: string;
+  checkpoint: HandoffCheckpoint | null;
+  /** 舊程序怎麼停下的：stopped_gracefully、force_killed、exited、dead、already_ended。 */
+  stop_outcome: string | null;
+  confirmation: HandoffConfirmation | null;
+  abandoned_reason: string | null;
+  requested_at: number;
+  stopping_at: number | null;
+  transferred_at: number | null;
+  confirmed_at: number | null;
+  updated_at: number;
+  version: number;
 }
 
 /** Task 在平台登記的工作目錄（對應 Rust 的 WorkdirView）；時間是 UTC 毫秒。 */
@@ -1336,6 +1385,26 @@ export interface AccountScheduling {
   running: number;
   limit: number;
   runs: AccountRun[];
+  /** 額度門檻；`null` 代表帳號從未離開 open（可派工）。 */
+  quota_gate: QuotaGate | null;
+}
+
+/** 額度門檻狀態（spec D-13）：open 可派工、paused 停止派工、draining 停止派工且交接進行中的 Run。 */
+export type GateState = "open" | "paused" | "draining";
+
+/** 一個帳號目前的額度門檻（對應 Rust 的 QuotaGate）；時間是 UTC 毫秒。 */
+export interface QuotaGate {
+  profile_id: string;
+  state: GateState;
+  /** 進入這個狀態的原因代碼：stop_dispatch_threshold、drain_threshold、limit_warning、recovered、reset_observed、usage_unknown。 */
+  reason: string;
+  /** 轉換當下的判斷用量；未知為 null。 */
+  used: number | null;
+  /** 進入 paused／draining 時記下的重置時間；過了就恢復。 */
+  reset_at: number | null;
+  /** 進入這個狀態的時間。 */
+  since: number;
+  version: number;
 }
 
 /** 佇列中等待名額的 Task；`position` 從 1 起。 */
