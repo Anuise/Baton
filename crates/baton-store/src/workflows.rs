@@ -8,10 +8,12 @@
 //!   [`Store::revalidate_gates`] 在一個交易中重新查驗所有未完成 Workflow 已通過的 Gate，失效時追加 `invalidated` attempt、
 //!   退回最早失效的 Stage，驗證證據失效時自動排入重驗的驗證要求，並以工作事件通知 Controller。
 
+use baton_domain::authority::Matter;
 use baton_domain::context::StageItem;
+use baton_domain::decision::{ActionContent, ControllerOutcome, DecisionCommand, DecisionOutcome};
 use baton_domain::workdir::TaskKind;
 use baton_domain::workflow::{
-    self, AttemptOutcome, CheckedEvidence, ClaimedOutcome, Evidence, EvidenceRef, EvidenceStatus, MethodDefinition,
+    self, AttemptOutcome, BudgetDecision, CheckedEvidence, ClaimedOutcome, Evidence, EvidenceRef, EvidenceStatus, MethodDefinition,
     MethodVersion, Origin, PlaybookDefinition, PlaybookVersion, Recorder, Situation, StageAttempt, StageResultInput,
     StartInput, WorkflowChange, WorkflowError, WorkflowInstance, WorkflowNote, WorkflowStatus,
 };
@@ -354,6 +356,48 @@ fn check_evidence(
         }
     };
     Ok(CheckedEvidence { evidence, status, reviewers })
+}
+
+/// Stage 預算用盡後，證據齊全的回報要前進前依決策權限表判定「預算用盡後的下一步」（review-notes #20）：在記錄的同一個
+/// 交易中由 Controller 的這一輪送出（同一個 Stage 第一次建立裁定請求，之後回到同一個請求；核准在這次回報用掉）。
+/// 裁定請求必須掛在 Task 上，只綁定 Goal 的 Workflow 無法送出。
+fn budget_decision(
+    tx: &Transaction<'_>,
+    workflow: &WorkflowInstance,
+    playbook: &PlaybookVersion,
+    stage: &str,
+    controller_run_id: &str,
+    attempt_id: &str,
+    now: Timestamp,
+) -> StoreResult<BudgetDecision> {
+    let Some(task_id) = workflow.task_id.as_deref() else {
+        return Ok(BudgetDecision::Unavailable { reason: "這個 Workflow 只綁定 Goal，沒有可以掛裁定請求的 Task".to_string() });
+    };
+    let title = playbook.definition.stage(stage).map_or(stage, |s| s.title.as_str());
+    let summary = format!("讓 Workflow {} 的 Stage「{title}」在用盡預算後繼續", workflow.id);
+    let reason = "這個 Stage 已用盡失敗預算而阻擋；Controller 已附齊證據，要繼續必須由你裁定";
+    let content = match ActionContent::new(Matter::NextStepAfterBudget, Some(task_id), &summary, reason, Vec::new(), None) {
+        Ok(content) => content.with_subject(&format!("stage:{}:{stage}", workflow.id)),
+        Err(rejected) => return Ok(BudgetDecision::Unavailable { reason: rejected.to_string() }),
+    };
+    let command = DecisionCommand::ControllerGate {
+        request_id: format!("decision_{attempt_id}"),
+        audit_id: format!("authz_{attempt_id}"),
+        controller_run_id: controller_run_id.to_string(),
+        content,
+    };
+    Ok(match super::decisions::apply_in(tx, &workflow.workspace_id, command, now)? {
+        Ok(DecisionOutcome::Controller { outcome, .. }) => match outcome {
+            ControllerOutcome::Allowed | ControllerOutcome::Approved { .. } => BudgetDecision::Approved,
+            ControllerOutcome::RequiresDecision { request_id, .. } => BudgetDecision::Pending { request_id },
+            ControllerOutcome::Denied { request_id, .. } => BudgetDecision::Denied { request_id },
+            ControllerOutcome::HumanOnly => {
+                BudgetDecision::Unavailable { reason: "決策權限表把這個事項設為只能由使用者發起".to_string() }
+            }
+        },
+        Ok(other) => unreachable!("ControllerGate 只會得到 Controller 結果：{other:?}"),
+        Err(rejected) => BudgetDecision::Unavailable { reason: rejected.to_string() },
+    })
 }
 
 /// 寫回 Workflow 的變更：新 Workflow 插入，既有的以先前的 revision 條件更新。
@@ -852,7 +896,24 @@ impl Store {
                 let profile_id: Option<String> = tx
                     .query_row("SELECT profile_id FROM controller_run WHERE id = ?1", [&controller_run_id], |r| r.get(0))
                     .optional()?;
-                let input = StageResultInput { stage, expected_revision, outcome, evidence: checked, note, build, basis_overturned };
+                let mut input = StageResultInput {
+                    stage,
+                    expected_revision,
+                    outcome,
+                    evidence: checked,
+                    note,
+                    build,
+                    basis_overturned,
+                    budget_decision: BudgetDecision::NotRequested,
+                };
+                match workflow::needs_budget_decision(&workflow, &playbook, &prior, &input) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        input.budget_decision =
+                            budget_decision(tx, &workflow, &playbook, &input.stage, &controller_run_id, &attempt_id, now)?;
+                    }
+                    Err(rejected) => return Ok(Err(rejected.into())),
+                }
                 let recorder = Recorder { recorded_by: controller_run_id, profile_id };
                 let change = match workflow::record_result(&workflow, &playbook, &prior, input, attempt_id, recorder, now) {
                     Ok(change) => change,

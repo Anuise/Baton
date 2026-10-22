@@ -951,6 +951,25 @@ pub struct StageResultInput {
     pub build: Option<String>,
     /// Workflow 的 Task 依據的假設已被使用者推翻的說明（票 50）：有值時不能通過，必須先更新契約。
     pub basis_overturned: Option<String>,
+    /// Stage 預算用盡而阻擋時，「預算用盡後的下一步」裁定的狀態（見 [`needs_budget_decision`]）。
+    pub budget_decision: BudgetDecision,
+}
+
+/// Stage 預算用盡而阻擋後，證據齊全的 `passed` 回報要前進前，「預算用盡後的下一步」裁定的狀態
+/// （spec D-15 必須送裁定；review-notes #20）。由 Runtime 在記錄的同一個交易中依決策權限表判定。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BudgetDecision {
+    /// 沒有判定（預算沒有用盡時不需要）。
+    #[default]
+    NotRequested,
+    /// 使用者已核准這一次（這次回報用掉它）。
+    Approved,
+    /// 已建立裁定請求，等待使用者回答。
+    Pending { request_id: String },
+    /// 使用者沒有核准。
+    Denied { request_id: String },
+    /// 無法送出裁定（例如 Workflow 沒有綁定 Task）。
+    Unavailable { reason: String },
 }
 
 /// 這次變更的記錄者。
@@ -1138,20 +1157,7 @@ pub fn record_result(
     recorder: Recorder,
     now: Timestamp,
 ) -> Result<WorkflowChange, WorkflowError> {
-    let stage = current_stage(workflow, playbook, &input.stage, input.expected_revision)?;
-    let note = bounded(&input.note, NOTE_MAX_CHARS, "note ")?;
-    for offered in &input.evidence {
-        let check = stage.exit_checks.iter().find(|c| c.key == offered.evidence.check).ok_or_else(|| {
-            invalid(format!("Stage {} 沒有 exit check {}", stage.key, offered.evidence.check))
-        })?;
-        if check.requires != offered.evidence.reference.kind() {
-            return Err(invalid(format!(
-                "exit check {} 需要的證據種類是 {}",
-                check.key,
-                serde_json::to_value(check.requires).expect("可以序列化").as_str().unwrap_or_default()
-            )));
-        }
-    }
+    let (stage, note) = checked_stage(workflow, playbook, &input)?;
     let mut next = workflow.clone();
     let (outcome, missing, blocked_by) = match input.outcome {
         // 依據的假設已被推翻：舊成果不能在錯誤的前提下通過，先更新契約（票 50）
@@ -1160,6 +1166,12 @@ pub fn record_result(
             let reason = format!("Stage「{}」：Task 依據的假設已被推翻（{why}），請先依使用者的答案更新契約", stage.title);
             (AttemptOutcome::Blocked, Vec::new(), Some(reason))
         }
+        // 預算用盡後證據齊全也不能自行前進：必須經使用者裁定（review-notes #20）
+        ClaimedOutcome::Passed
+            if needs_decision(workflow, prior, stage, &input) && input.budget_decision != BudgetDecision::Approved =>
+        {
+            (AttemptOutcome::Blocked, Vec::new(), Some(budget_blocked_reason(stage, &input.budget_decision)))
+        }
         ClaimedOutcome::Passed => evaluate(stage, &input.evidence),
         ClaimedOutcome::Failed | ClaimedOutcome::Blocked if note.is_empty() => {
             return Err(invalid("回報失敗或阻擋時，請在 note 說明原因"));
@@ -1167,8 +1179,7 @@ pub fn record_result(
         ClaimedOutcome::Failed => (AttemptOutcome::Failed, Vec::new(), None),
         ClaimedOutcome::Blocked => (AttemptOutcome::Blocked, Vec::new(), None),
     };
-    let failures = prior.iter().filter(|a| a.stage_key == stage.key && a.outcome == AttemptOutcome::Failed).count() as u32
-        + u32::from(outcome == AttemptOutcome::Failed);
+    let failures = stage_failures(prior, &stage.key) + u32::from(outcome == AttemptOutcome::Failed);
     let exhausted = failures >= stage.budget.max_attempts;
     match outcome {
         AttemptOutcome::Passed => advance(&mut next, playbook, prior, &stage.key),
@@ -1226,6 +1237,67 @@ pub fn record_result(
     };
     let event = attempt_event(&next, &attempt);
     Ok(WorkflowChange { workflow: next, attempt: Some(attempt), events: vec![event] })
+}
+
+/// 確認回報可以記錄：目前的 Stage 與 revision、note 長度、每項證據對應的 exit check 與種類。回傳 Stage 與整理後的 note。
+fn checked_stage<'a>(
+    workflow: &WorkflowInstance,
+    playbook: &'a PlaybookVersion,
+    input: &StageResultInput,
+) -> Result<(&'a StageDefinition, String), WorkflowError> {
+    let stage = current_stage(workflow, playbook, &input.stage, input.expected_revision)?;
+    let note = bounded(&input.note, NOTE_MAX_CHARS, "note ")?;
+    for offered in &input.evidence {
+        let check = stage.exit_checks.iter().find(|c| c.key == offered.evidence.check).ok_or_else(|| {
+            invalid(format!("Stage {} 沒有 exit check {}", stage.key, offered.evidence.check))
+        })?;
+        if check.requires != offered.evidence.reference.kind() {
+            return Err(invalid(format!(
+                "exit check {} 需要的證據種類是 {}",
+                check.key,
+                serde_json::to_value(check.requires).expect("可以序列化").as_str().unwrap_or_default()
+            )));
+        }
+    }
+    Ok((stage, note))
+}
+
+/// 這個 Stage 累計失敗的次數（只有 failed 計入 Stage 預算）。
+fn stage_failures(prior: &[StageAttempt], stage: &str) -> u32 {
+    prior.iter().filter(|a| a.stage_key == stage && a.outcome == AttemptOutcome::Failed).count() as u32
+}
+
+fn needs_decision(workflow: &WorkflowInstance, prior: &[StageAttempt], stage: &StageDefinition, input: &StageResultInput) -> bool {
+    input.outcome == ClaimedOutcome::Passed
+        && input.basis_overturned.is_none()
+        && workflow.status == WorkflowStatus::Blocked
+        && stage_failures(prior, &stage.key) >= stage.budget.max_attempts
+        && evaluate(stage, &input.evidence).0 == AttemptOutcome::Passed
+}
+
+/// 這次回報要前進前，是否必須先經使用者裁定「預算用盡後的下一步」：目前 Stage 已用盡預算而阻擋，回報是證據齊全的
+/// `passed`（review-notes #20）。缺證據的回報本來就不會解除阻擋，不需要裁定。回報本身不能記錄時回傳同樣的錯誤。
+pub fn needs_budget_decision(
+    workflow: &WorkflowInstance,
+    playbook: &PlaybookVersion,
+    prior: &[StageAttempt],
+    input: &StageResultInput,
+) -> Result<bool, WorkflowError> {
+    let (stage, _) = checked_stage(workflow, playbook, input)?;
+    Ok(needs_decision(workflow, prior, stage, input))
+}
+
+fn budget_blocked_reason(stage: &StageDefinition, decision: &BudgetDecision) -> String {
+    let head = format!(
+        "Stage「{}」已用盡預算（{} 次）：證據已齊，但要繼續必須先經使用者裁定「預算用盡後的下一步」",
+        stage.title, stage.budget.max_attempts
+    );
+    match decision {
+        BudgetDecision::Pending { request_id } => format!("{head}；已建立裁定請求 {request_id}，使用者核准後再回報一次"),
+        BudgetDecision::Denied { request_id } => format!("{head}；使用者沒有核准繼續（裁定請求 {request_id}），請改用其他做法"),
+        BudgetDecision::Unavailable { reason } => format!("{head}；無法送出裁定：{reason}"),
+        BudgetDecision::NotRequested | BudgetDecision::Approved => head,
+    }
 }
 
 /// 使用者跳過目前的 Stage：必須附原因；裁定與安全 Gate 不能跳過。
