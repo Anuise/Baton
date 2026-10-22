@@ -99,7 +99,14 @@ Workspace API（桌面憑證才能使用）：`GET /api/v1/workspaces`（含已�
 | `PUT /api/v1/workspaces/{id}/authorization` | 確認並保存：新內容回 201 與新的 revision（含來源與時間）；內容與目前相同回 200；需要承認風險時必須帶 `acknowledged_risk: true`；修改既有授權而且擴大（新增能力、目標或移除限制）時必須帶 `acknowledged_expansion: true`，否則 400 `authorization_expansion_not_acknowledged`（第一次確認與縮小授權不需要，AI-183） |
 | `POST /api/v1/workspaces/{id}/admission-check` | Run 的准入檢查：`{ "required_capabilities": [...] }`；未確認回 409 `authorization_unconfirmed`，缺少能力回 409 `capability_not_granted` |
 
-revision 存在 append-only 的 `authorization_revision` 表（觸發器禁止更新與刪除），並在同一交易追加 `authorization_confirmed` 事件（聚合版本 = revision 編號）。准入判定 `authorization::admit` 由 `admission-check` 端點與派工交易（`RunCommand::Dispatch`）共用，不另寫准入邏輯。
+revision 存在 append-only 的 `authorization_revision` 表（觸發器禁止更新與刪除），並在同一交易追加 `authorization_confirmed` 事件（聚合版本 = revision 編號）。准入判定 `authorization::admit` 由 `admission-check` 端點、派工交易（`RunCommand::Dispatch`）與啟動准入（`RunCommand::BeginLaunch`）共用，不另寫准入邏輯。`admission-check` 也走寫入佇列，結果與授權更新依同一個持久化順序排列。
+
+**授權撤銷與啟動准入順序（R1-a，票 24）**：Run 的「准入」是 Supervisor 持久化 launch intent 的那一個交易（`BeginLaunch`），不是派工。授權更新與准入都經過單一寫入佇列，所以兩者的先後就是持久化順序，事件表的 `authorization_confirmed` 與 `run_launch_started`／`run_admission_denied` 的 `seq` 可以查驗：
+
+- 准入時以**當下生效**的授權重新檢查 Task 契約需要的能力。通過就把 Run 的 `authorization_revision` 改寫為當下的 revision，並記下 `admitted_at` 與 `settings_version`（`run` 表的兩欄，migration 19 `run_admission`）（已綁定快照的 Run 用它的綁定，否則是最新採用的共同設定版本）；之後不再改變。
+- 被拒（排隊中或已有派工 Outbox、但撤權發生在准入之前）：不寫 launch intent、不簽發憑證、不啟動程序；Run 以 `interrupted`（`end_reason` 以 `admission_denied` 開頭，事件 `run_admission_denied`）結束、釋放寫入所有權，Task 回到 `ready` 並在同一個交易中重新排隊，排程以「授權」類別顯示等待原因。
+- 已准入的 Run 沿用准入時的 revision：撤權不會停止它，權限提示也依它的 revision 判定（新增的範圍同樣不會套用到它）。恢復 Run、同一 Task 的新 Run 與其他工作一律在准入時取得新版，舊 Run 不能成為權限捷徑。
+- `GET …/authorization` 的 `legacy_runs` 列出「已准入、尚未結束、沿用較舊 revision，而且舊 revision 有目前已撤銷或縮小的能力」的 Run（`revoked_capabilities`、`cancel_requested`），授權畫面顯示「後續執行已停用，仍有 N 個 Run 沿用舊授權」與「暫停」（取消這個 Run，Task 回到可派工）／「取消」（取消 Task）入口；工作面板 `GET …/tasks` 帶目前的 `authorization_revision`，Run 卡片標示「沿用舊授權（revision X，目前 Y）」。
 
 ### Task、六項最小派工契約與工作面板
 
@@ -144,7 +151,7 @@ Goal 與 Task 的規則在 `baton_domain::task`（純邏輯：命令 + 目前狀
 
 Run 的規則在 `baton_domain::run`（純邏輯：命令 + 目前狀態 → 新狀態 + 事件 + Outbox），持久化在 `baton-store` 的 `runs.rs`，端點在 `baton-api` 的 `runs.rs`，啟動程序與核對在 `baton-runtime` 的 `supervisor.rs`。
 
-**Run 狀態**：`queued → starting → running → succeeded／failed／interrupted／cancelled`（`RunStatus::allowed_next`）。只有 `running` 之後才有程序身分；`starting` 代表 launch intent 已持久化但回執還沒寫回。
+**Run 狀態**：`queued → starting → running → succeeded／failed／interrupted／cancelled`（`RunStatus::allowed_next`）。只有 `running` 之後才有程序身分；`starting` 代表 launch intent 已持久化（也就是已准入）但回執還沒寫回。`queued` 的 Run 啟動准入被拒時直接進入 `interrupted`（見「授權撤銷與啟動准入順序」）。
 
 **派工交易**（Domain `RunCommand::Dispatch`，帶 Scheduler 選定的 `profile_id`）：在同一個交易中重新做完整准入檢查（`run::check_dispatch`：`task::admission_report`、`authorization::admit`、相依都已完成、沒有任何尚未釋放的 lease），然後建立 Run（`queued`，記下使用的帳號）、execution lease（世代 = 該 Task 的 Run 數 + 1）、派工 Outbox 項目，Task 進入 `running`。派工**不啟動程序**。誰來選帳號、容量不夠時怎麼辦，見下一節。
 
@@ -220,7 +227,7 @@ Worker 需要使用者決定的事，以及超出授權範圍的操作，都變�
 | `request_decision` | `question`、`reason`、`options`（2–8 個 `{id, label, tradeoff?}`）、`recommendation?`、`evidence?`、`urgency?`（`low`／`normal`／`high`）、`deadline_minutes?` | 建立請求；Task（`running` 時）進入 `waiting_decision`，Run 不結束。回 `{decision_request_id, status: "waiting_decision", existing, message}`；同一個 Run 對同一個問題重複提出時回到既有請求。內容無效 400 `decision_invalid`，不寫入任何東西 |
 | `permission_prompt` | `tool_name`、`input`（Claude Code `--permission-prompt-tool` 協定） | 授權範圍內：回 `{behavior: "allow", updatedInput, status: "auto_allowed"}` 並追加稽核事件 `permission_auto_allowed`。範圍外：建立裁定請求（選項固定為 `allow_once`、`deny`）並回 `{behavior: "deny", message: "等待裁定…", status: "waiting_decision", decision_request_id}`。使用者已回答時，同一個 Task 的同一個操作消耗一次答案：`approved`（允許）或 `denied`（拒絕）。先前的單次批准不能用時，等待裁定的回應另帶 `approval_check: {decision_request_id, result}`（`params_changed`、`target_changed`、`artifact_version_changed`…或 `used_result_unknown`） |
 
-**權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-138）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 Workspace **目前生效的授權 revision**；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。Bash 指令以 bash 規則斷詞（去掉引號；引號不成對或反斜線緊接引號一律無法歸類），每個子命令只接受白名單內的旗標，任何其他旗標（例如 `git commit --amend`、`git diff --output=…`、`npm install --prefix …`、`cargo test --manifest-path …`）都無法歸類；`-g`、`--global=…`、`--location=global` 等全域安裝的各種寫法歸為「全域安裝」；指令參數中像路徑的字詞必須在 Workspace 內。路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`），含 `:`（替代資料流）的元件、只有點的元件、`\\?\` 裝置路徑一律範圍外，`GIT~1` 視同 `.git`。單次批准的規則見 AI-139。
+**權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-138）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 **Run 准入時固定的授權 revision**（R1-a，票 24；准入時還沒有任何授權的 Run 一律範圍外）；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。Bash 指令以 bash 規則斷詞（去掉引號；引號不成對或反斜線緊接引號一律無法歸類），每個子命令只接受白名單內的旗標，任何其他旗標（例如 `git commit --amend`、`git diff --output=…`、`npm install --prefix …`、`cargo test --manifest-path …`）都無法歸類；`-g`、`--global=…`、`--location=global` 等全域安裝的各種寫法歸為「全域安裝」；指令參數中像路徑的字詞必須在 Workspace 內。路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`），含 `:`（替代資料流）的元件、只有點的元件、`\\?\` 裝置路徑一律範圍外，`GIT~1` 視同 `.git`。單次批准的規則見 AI-139。
 
 **單次批准（E1，票 23）**（`baton_domain::approval`，細節與取捨見 AI-180～AI-182）：權限提示的請求建立時就算好它綁定的**單一邏輯操作**——操作識別（工具名稱，Bash 另加程式與子命令，例如 `Bash:git push`）、目標資源（檔案路徑、網址，或指令中非旗標的參數）、重要參數（其餘輸入與旗標）、要求雜湊（工具名稱與輸入的 SHA-256）、成果版本（提出請求的 Task 已登記成果的最新版本，`名稱@版本`）；Claude Code 附上的 `description` 說明欄位不列入。「允許本次操作」只綁 Task，不綁 Run 或帳號，所以恢復後換帳號、換 Run 的 Worker 可以沿用；Worker 再次提示時**逐項核對**，任何一項不同就不消耗批准、改建新的請求，並在回應與新請求的 `permission.rejected_approval` 說明哪一項變了。批准用過一次就失效；之後再提出同一個操作時，Runtime 看不到上一次的結果，新的請求帶 `permission.prior_use`、建議拒絕、選項改為「已查證，允許再執行一次」，要求使用者先查證。單次批准從不改變 Workspace 授權；要永久放行得走「修改 Workspace 授權」（摘要的 `changes` 與 `acknowledged_expansion`），修改授權不會回答裁定請求。
 
@@ -556,7 +563,7 @@ Runtime 的環境設了 `CLAUDE_CONFIG_DIR` 時，改讀該目錄下的 `setting
 | `POST /api/v1/shared-settings/import-preview` | 預覽匯入，**不保存任何東西**：來源（路徑、是否存在、SHA-256）、排除清單、候選內容、`candidate_hash`、與最新版本的差異（`diff`，每項有類別、名稱、新增／移除／變更與前後內容）、`changed` |
 | `POST /api/v1/shared-settings/adopt` | `{ "expected_hash": <預覽的 candidate_hash> }`；重新讀取來源，雜湊相同才建立新版本，回 201 與完整版本 |
 | `GET /api/v1/shared-settings/versions/{version}` | 某個版本的完整內容、來源與排除清單 |
-| `POST /api/v1/workspaces/{id}/runs/{run_id}/settings-snapshot` | 為 Run 產生唯讀設定快照；JSON 本文 `{ "version"? }`（可為 `{}`，省略時用最新版本）；第一次建立回 201，之後回同一個綁定 200 |
+| `POST /api/v1/workspaces/{id}/runs/{run_id}/settings-snapshot` | 為 Run 產生唯讀設定快照；JSON 本文 `{ "version"? }`（可為 `{}`，省略時用最新版本；已准入的 Run 用准入時固定的 `settings_version`，指定別的版本回 409 `settings_snapshot_pinned`，票 24）；第一次建立回 201，之後回同一個綁定 200 |
 
 錯誤一律是 `{ "error", "message" }`：
 
@@ -657,7 +664,7 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - 完全退出：`POST /api/v1/lifecycle/exit` 之後以 `harness.wait_for_exit()` 等停止流程結束（Harness 的 Runtime 在退出後不會自行結束服務，由測試決定何時 `restart`）；`Harness::builder().exit_timing(..)` 縮短 30 + 10 秒的上限；`process_control.script_stop(identity, FakeStop::Result(..)／Hang／Fail(..))` 指定某個程序停不停得下來，`stop_graces()` 讀取每次停止收到的寬限期；`harness.lifecycle_file_path()` 是生命週期檔的位置。
 - `Harness::builder().without_full_text_search()`：以 `RuntimeOptions.full_text_search = false` 啟動，視同 FTS5 不可用，知識搜尋退回 LIKE（`search_mode = like_fallback`，日誌記錄降級）；之後 `harness.set_full_text_search(true)` 再 `harness.restart()`，即模擬 FTS5 恢復可用、啟動時重建索引。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`、`claude_env`：具體的 fake，可腳本化回應並讀取呼叫紀錄。`claude_env` 可設定 Claude Code／Git 是否存在與版本（`set_claude`、`set_git`、`fail_tool_probes`）、在某個設定目錄完成原生登入（`log_in`，會像真實的 Claude Code 一樣把登入資料寫進該目錄）、模擬環境變數覆蓋（`set_env_override`）、讓開啟登入終端機時順便登入（`script_terminal_login`），並記錄開啟過的終端機（`login_terminals`）。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；裁定中心與權限提示情境：`crates/baton-harness/tests/decisions.rs`；單次批准（E1）與修改授權情境：`crates/baton-harness/tests/one_off_approval.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`；知識、教訓與全文檢索（含降級）情境：`crates/baton-harness/tests/knowledge.rs`；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；裁定中心與權限提示情境：`crates/baton-harness/tests/decisions.rs`；單次批准（E1）與修改授權情境：`crates/baton-harness/tests/one_off_approval.rs`；授權撤銷與啟動准入順序情境：`crates/baton-harness/tests/authorization_revocation.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`；知識、教訓與全文檢索（含降級）情境：`crates/baton-harness/tests/knowledge.rs`；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 
