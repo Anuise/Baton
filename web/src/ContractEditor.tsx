@@ -1,3 +1,5 @@
+import { Fragment } from "react";
+
 import {
   CONTRACT_FIELDS,
   type Capability,
@@ -6,6 +8,7 @@ import {
   type ContractInput,
   type ContractReference,
   type TaskContract,
+  type VerificationCheck,
 } from "./runtimeClient";
 
 export const FIELD_LABELS: Record<ContractFieldName, string> = {
@@ -43,6 +46,8 @@ interface FieldDraft {
 export interface ContractDraft {
   fields: Record<ContractFieldName, FieldDraft>;
   capabilities: Capability[];
+  /** 每行一項確定性檢查，格式見 `CHECK_FORMATS`。 */
+  checks: string;
 }
 
 const emptyField = (): FieldDraft => ({ mode: "missing", text: "", references: "", reason: "", note: "" });
@@ -50,7 +55,7 @@ const emptyField = (): FieldDraft => ({ mode: "missing", text: "", references: "
 export function emptyDraft(): ContractDraft {
   const fields = {} as Record<ContractFieldName, FieldDraft>;
   for (const name of CONTRACT_FIELDS) fields[name] = emptyField();
-  return { fields, capabilities: [] };
+  return { fields, capabilities: [], checks: "" };
 }
 
 const referenceText = ({ kind, target, version }: ContractReference) => `${kind}:${target}@${version}`;
@@ -72,7 +77,47 @@ export function draftFromContract(contract: TaskContract): ContractDraft {
   const draft = emptyDraft();
   for (const name of CONTRACT_FIELDS) draft.fields[name] = fieldDraftOf(contract[name]);
   draft.capabilities = [...contract.required_capabilities];
+  draft.checks = contract.verification_checks.map(checkText).join("\n");
   return draft;
+}
+
+const CHECK_FORMATS = "command: 程式 引數…、command[結束碼]: 程式 引數…、file: 相對路徑 [sha256]、artifact: 成果名稱 [sha256]";
+
+/** 檢查的文字格式；與 `parseCheck` 互為反向。 */
+function checkText(check: VerificationCheck): string {
+  switch (check.kind) {
+    case "command": {
+      const prefix = check.expected_exit_code === 0 ? "command" : `command[${check.expected_exit_code}]`;
+      return `${prefix}: ${[check.program, ...check.args].join(" ")}`;
+    }
+    case "file":
+      return `file: ${check.path}${check.sha256 ? ` ${check.sha256}` : ""}`;
+    case "artifact":
+      return `artifact: ${check.name}${check.sha256 ? ` ${check.sha256}` : ""}`;
+  }
+}
+
+/** 解析一行確定性檢查；以空白分隔（不支援引號），格式不符時回傳錯誤說明。 */
+function parseCheck(line: string): VerificationCheck | { error: string } {
+  const match = /^(command|file|artifact)(?:\[(-?\d+)\])?:(.*)$/.exec(line);
+  if (!match) return { error: `格式錯誤「${line}」，應為 ${CHECK_FORMATS}` };
+  const [, kind, exitCode, rest] = match;
+  const tokens = rest.split(/\s+/).filter((token) => token !== "");
+  if (kind === "command") {
+    if (tokens.length === 0) return { error: `「${line}」缺少要執行的程式` };
+    const [program, ...args] = tokens;
+    return { kind: "command", program, args, expected_exit_code: exitCode === undefined ? 0 : Number(exitCode) };
+  }
+  const targetLabel = kind === "file" ? "相對路徑" : "成果名稱";
+  if (exitCode !== undefined) return { error: `「${line}」只有 command 可以指定結束碼` };
+  if (tokens.length === 0 || tokens.length > 2) {
+    return { error: `「${line}」應為 ${kind}: ${targetLabel} [sha256]（${targetLabel}不可含空白）` };
+  }
+  const [target, hash] = tokens;
+  // PowerShell 的 Get-FileHash 輸出大寫，這裡一律轉成 Runtime 要求的小寫
+  if (hash !== undefined && !/^[0-9a-fA-F]{64}$/.test(hash)) return { error: `「${line}」的 sha256 應為 64 位十六進位` };
+  const sha256 = hash === undefined ? null : hash.toLowerCase();
+  return kind === "file" ? { kind: "file", path: target, sha256 } : { kind: "artifact", name: target, sha256 };
 }
 
 function parseReference(line: string): ContractReference | null {
@@ -113,6 +158,14 @@ export function buildContract(draft: ContractDraft): { contract: ContractInput; 
     }
   }
   contract.required_capabilities = draft.capabilities;
+  const checks: VerificationCheck[] = [];
+  for (const line of nonEmptyLines(draft.checks)) {
+    const parsed = parseCheck(line);
+    if ("error" in parsed) errors.push(`確定性檢查：${parsed.error}`);
+    else checks.push(parsed);
+  }
+  // 省略即為空陣列：沒有檢查時不送這個欄位
+  if (checks.length > 0) contract.verification_checks = checks;
   return { contract, errors };
 }
 
@@ -122,7 +175,7 @@ interface Props {
   capabilities: { capability: Capability; label: string }[];
 }
 
-/** 六項最小派工契約與所需能力的編輯器；建立與編輯 Task 共用。 */
+/** 六項最小派工契約、確定性檢查與所需能力的編輯器；建立與編輯 Task 共用。 */
 export function ContractEditor({ draft, onChange, capabilities }: Props) {
   const change = (name: ContractFieldName, patch: Partial<FieldDraft>) =>
     onChange({ ...draft, fields: { ...draft.fields, [name]: { ...draft.fields[name], ...patch } } });
@@ -142,43 +195,58 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
           (mode) => mode !== "not_applicable" || !NOT_APPLICABLE_FORBIDDEN.has(name),
         );
         return (
-          <fieldset key={name}>
-            <legend>{label}</legend>
-            <label>
-              {label}：模式
-              <select value={field.mode} onChange={(e) => change(name, { mode: e.target.value as Mode })}>
-                {modes.map((mode) => (
-                  <option key={mode} value={mode}>
-                    {MODE_LABELS[mode]}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {field.mode === "filled" && (
-              <>
-                <label>
-                  {label}：內容
-                  <textarea value={field.text} onChange={(e) => change(name, { text: e.target.value })} />
-                </label>
-                <label>
-                  {label}：引用（每行 kind:target@version）
-                  <textarea value={field.references} onChange={(e) => change(name, { references: e.target.value })} />
-                </label>
-              </>
-            )}
-            {field.mode === "not_applicable" && (
+          <Fragment key={name}>
+            <fieldset>
+              <legend>{label}</legend>
               <label>
-                {label}：不適用的理由
-                <input value={field.reason} onChange={(e) => change(name, { reason: e.target.value })} />
+                {label}：模式
+                <select value={field.mode} onChange={(e) => change(name, { mode: e.target.value as Mode })}>
+                  {modes.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {MODE_LABELS[mode]}
+                    </option>
+                  ))}
+                </select>
               </label>
+              {field.mode === "filled" && (
+                <>
+                  <label>
+                    {label}：內容
+                    <textarea value={field.text} onChange={(e) => change(name, { text: e.target.value })} />
+                  </label>
+                  <label>
+                    {label}：引用（每行 kind:target@version）
+                    <textarea value={field.references} onChange={(e) => change(name, { references: e.target.value })} />
+                  </label>
+                </>
+              )}
+              {field.mode === "not_applicable" && (
+                <label>
+                  {label}：不適用的理由
+                  <input value={field.reason} onChange={(e) => change(name, { reason: e.target.value })} />
+                </label>
+              )}
+              {field.mode === "unknown" && (
+                <label>
+                  {label}：未知的說明（選填）
+                  <input value={field.note} onChange={(e) => change(name, { note: e.target.value })} />
+                </label>
+              )}
+            </fieldset>
+            {name === "done_criteria" && (
+              <fieldset>
+                <legend>確定性檢查</legend>
+                <p>
+                  Worker 成功結束後，Runtime 會執行這些檢查，全部通過才自動完成；也可以在驗證中手動接受成果。每行一項：
+                  {CHECK_FORMATS}（以空白分隔，不支援引號）。
+                </p>
+                <label>
+                  確定性檢查（每行一項）
+                  <textarea value={draft.checks} onChange={(e) => onChange({ ...draft, checks: e.target.value })} />
+                </label>
+              </fieldset>
             )}
-            {field.mode === "unknown" && (
-              <label>
-                {label}：未知的說明（選填）
-                <input value={field.note} onChange={(e) => change(name, { note: e.target.value })} />
-              </label>
-            )}
-          </fieldset>
+          </Fragment>
         );
       })}
       <fieldset>

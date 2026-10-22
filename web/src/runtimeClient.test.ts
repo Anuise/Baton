@@ -701,4 +701,50 @@ describe("Runtime 用戶端", () => {
     expect(result.sha256).toBe("cd".repeat(32));
     expect(await result.blob.text()).toBe("hello");
   });
+
+  const basis = { run_id: "run_1", generation: 2, contract_version: 3, artifacts: [{ artifact_id: "art_1", version: 1 }] };
+
+  it("HTTP 版讀取驗證資料與手動接受：接受時以 JSON 送出 basis 與附註", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.taskVerification("ws_1", "task_1");
+    await client.acceptTask("ws_1", "task_1", { basis, note: "已確認" });
+    await client.acceptTask("ws_1", "task_1", { basis });
+
+    const base = "/api/v1/workspaces/ws_1/tasks/task_1/verification";
+    expect(fetchFn).toHaveBeenNthCalledWith(1, base);
+    expect(fetchFn).toHaveBeenNthCalledWith(2, `${base}/accept`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ basis, note: "已確認" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(3, `${base}/accept`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ basis }),
+    });
+  });
+
+  it("HTTP 版接受被拒（409）時，以 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "acceptance_manifest_stale", message: "成果 manifest 已變更，請重新檢視後再接受" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    await expect(
+      createHttpClient(fetchFn as unknown as typeof fetch).acceptTask("ws_1", "task_1", { basis, note: null }),
+    ).rejects.toThrow("成果 manifest 已變更，請重新檢視後再接受");
+  });
+
+  it("Tauri 版以 task_verification 與 task_accept 指令讀取驗證資料與手動接受", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.taskVerification("ws_1", "task_1");
+    await client.acceptTask("ws_1", "task_1", { basis, note: null });
+
+    expect(invoke.mock.calls).toEqual([
+      ["task_verification", { workspaceId: "ws_1", taskId: "task_1" }],
+      ["task_accept", { workspaceId: "ws_1", taskId: "task_1", request: { basis, note: null } }],
+    ]);
+  });
 });

@@ -1,6 +1,6 @@
 # 20: Worktree、獨立輸出目錄與整合佇列
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R062-20-impl，2026-10-22 17:34）
 Blocked by: 13
 
 **What to build:** 開發類 Task 在平台建立並登記的獨立 git worktree 中執行；研究與文件 Task 使用獨立輸出目錄；目錄不可用時不派工並顯示原因。程式分支整合排入單一整合佇列，合併後執行整合驗證；未通過整合不能宣告完成。

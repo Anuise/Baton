@@ -1333,7 +1333,106 @@
 - 影響：無行為變更。
 - 審閱：未審
 
-### AI-148：完全退出停下的 Run 以 interrupted 結束，Task 退回 ready 並自動重新排隊；停不下來的保留寫入所有權
+### AI-148：確定性檢查放在契約內，第一版三種：命令結束碼、工作目錄內檔案、Task 成果
+- 重要度：高
+- 時間／階段：2026-10-22，票 13 實作
+- 決策：契約內容新增 `verification_checks`（與 `required_capabilities` 一樣隨契約版本保存，屬「完成與驗證條件」的機械可判定部分），最多 20 項，三種：(1) `command`：在受驗 Run 的工作目錄執行（不經過 shell），結束碼等於 `expected_exit_code`（預設 0）；(2) `file`：工作目錄內的相對路徑是存在的檔案，可選 `sha256`；(3) `artifact`：這個 Task 有這個名稱的成果，最新版本的檔案與 manifest 雜湊一致，可選 `sha256`。儲存契約時驗證（路徑不可含 `..`、磁碟代號、從根目錄開始；雜湊必須是 64 個十六進位字元並轉成小寫；成果名稱沿用成果登記的檔名規則），不合規回 400 `contract_invalid`。沒有宣告任何檢查不影響准入（`done_criteria` 文字仍必填），這種 Task 只能由使用者手動接受。Worker 的提示（`render_prompt`）會列出宣告的檢查。命令逾時 10 分鐘、被終止、無法啟動、檔案讀不到，一律判定「未通過」，不另分「環境故障」。
+- 理由：票面要求「契約中宣告的確定性檢查（命令結束碼、檔案存在與雜湊等）」；放進契約才有版本，Worker 也無法自行改寫完成標準（ADR-0011）。成果檢查讓「檔案存在與雜湊」也能套用在研究與文件這類沒有工作目錄產出的 Task。
+- 替代方案：把檢查寫成 `done_criteria` 的自由文字再由模型判讀（不確定性，違反「不採信 Worker 說法」）；另開一張「驗證設定」表（與契約版本脫鉤，改了也不會讓已派工的 Run 失效）；區分 `environment_blocked` 等 verdict（屬票 45 的 Verification Profile 範圍）。
+- 影響：契約 JSON 多一個欄位（舊資料沒有這欄時視為空陣列）。暫時性的環境問題（例如工具一時不在 PATH）會讓 Task 回到 ready，需要使用者重新派工；細分判定留給票 45～50。
+- 審閱：未審
+
+### AI-149：驗證命令以使用者身分在工作目錄執行；契約目前只能由桌面憑證寫入
+- 重要度：高
+- 時間／階段：2026-10-22，票 13 實作
+- 決策：新增 `CommandRunner` Port。正式版 `LocalCommandRunner` 以子程序直接執行（`CREATE_NO_WINDOW`、stdin 為 NUL、stdout／stderr 收集後保留結尾 16 KiB，證據再取結尾 4000 字元），逾時就丟棄等待並以 `kill_on_drop` 終止直接啟動的程序；**不放進 Job Object**，命令自己再開的子孫程序可能殘留。檔案檢查以 `WorkspaceFs::read_workspace_file` 讀取，只擋路徑字面上的逃逸，不處理工作目錄內指向外部的符號連結或 junction。命令輸出以 UTF-8 解讀（非 UTF-8 主控台輸出會變成替代字元）。
+- 理由：契約目前只能經桌面管理 API 建立與修改（Agent 憑證被 guard 擋下），所以「要執行什麼命令」由使用者決定，與使用者在終端機自己執行相同；完整的程序樹控管與路徑沙箱超出本票範圍。
+- 替代方案：把驗證命令放進 Job Object（需要把 `WindowsProcessControl` 的一次性執行版本抽出來，工作量大）；要求宣告命令檢查的契約必須有 `run_build_test` 能力（不同 Workspace 授權語意，而且驗證命令是 Runtime 自己執行、不是 Worker）。
+- 影響：**Controller 的 `update_task`／`propose_task` 工具（票 17）若能寫入 `verification_checks`，等於讓 Agent 決定 Runtime 以使用者身分執行的命令**；屆時必須經過裁定或授權（D-15「修改完成條件或驗收標準」本來就必須送裁定）。
+- 審閱：未審
+
+### AI-150：成果接受交易的三項校驗與「受驗 Run」的定義
+- 重要度：高
+- 時間／階段：2026-10-22，票 13 實作
+- 決策：受驗 Run = 該 Task 世代最大的 Run，而且它已 `succeeded`；沒有這樣的 Run 就沒有可接受的對象。接受基礎（basis）= 受驗 Run 的識別與世代、Task 目前的契約版本、成果 manifest（每個成果最新版本的 `artifact_id`＋版本）。自動檢查與手動接受都經同一個 Domain 判定（`verification::decide`）在單一寫入交易中校驗：Run 或世代不符 → 409 `acceptance_run_stale`；契約版本與檢視時不同，或不等於 Run 派工時的版本 → 409 `acceptance_contract_stale`；manifest 不同 → 409 `acceptance_manifest_stale`；拒絕時什麼都不寫。契約在 Run 派工後被改版時，Supervisor 不執行檢查，直接記一筆「未通過」（`note` 寫明版本），Task 回到 `ready`。資料庫另以唯一索引保證同一個 Run 最多一筆紀錄、同一個 Task 最多一筆「通過」。
+- 理由：票面要求「成果接受交易同時校驗 Run generation、成果 manifest 與契約版本」與「過期 Run 的成果回報不能推進 Task」。過期 Run 的成果登記與結束事件本來就因不是寫入所有者而被拒絕（AI-89、AI-107），這裡再擋住「依過期觀察的接受」，包括 Supervisor 執行檢查期間使用者先手動接受的競態。依舊契約完成的工作在新契約下被接受，等於讓完成條件被悄悄改寫。
+- 替代方案：manifest 只比對「成果是否存在」（無法發現檢視後被追加的新版本）；契約改版時讓 Task 停在 verifying 等使用者處理（沒有出口，只能取消）。
+- 影響：手動接受的請求必須帶回檢視時的 `basis`（UI 原樣送回）。契約在 verifying 時被修改會讓這次成果作廢並需要重新派工。
+- 審閱：未審
+
+### AI-151：檢查未通過 Task 回到 ready，不自動重派；沒有「手動駁回」
+- 重要度：中
+- 時間／階段：2026-10-22，票 13 實作
+- 決策：任何一項檢查未通過，Task 從 `verifying` 回到 `ready`（「可修正狀態」），證據（每項檢查的結果、輸出結尾、manifest）保存在驗證紀錄並顯示在工作面板。不自動放回派工佇列（沿用 AI-66、AI-96：沒有重試預算前不自動重派），也不計入任何預算（票 36）。重新派工時 Worker 的提示不含上次的失敗證據（Context Builder 屬票 39）。本票不提供「手動駁回」：沒有宣告檢查而成果不理想時，只能取消 Task 或修改契約。
+- 理由：`ready` 是既有狀態表中唯一能再派工的狀態；`blocked` 需要裁定流程（票 22），`pending` 會要求重新准入但契約並沒有變。手動駁回不在驗收條件內。
+- 替代方案：自動重新排隊（失敗會變成無限重派迴圈）；進入 `blocked` 並建立裁定（票 22／36 之後再評估）；提供駁回按鈕（多一條沒有要求的路徑）。
+- 影響：失敗後要使用者再按一次派工；新的 Worker 不知道上次為什麼沒通過，直到票 39 把驗證紀錄放進 context。
+- 審閱：未審
+
+### AI-152：手動接受只記錄桌面憑證指紋；允許在自動檢查進行中手動接受
+- 重要度：中
+- 時間／階段：2026-10-22，票 13 實作
+- 決策：`POST …/tasks/{task_id}/verification/accept` 屬管理 API，guard 只接受桌面憑證（Agent 憑證 403、無憑證 401）。接受者記為「桌面憑證雜湊的前 16 個十六進位字元」，寫進驗證紀錄與事件 `task_verification_recorded` 的 `accepted_by`，不記錄憑證本身。宣告了檢查的 Task 也可以手動接受（使用者優先）；與 Supervisor 的檢查結果競態時，先提交者生效，後者因 Task 已不是 verifying 而被拒絕，只留日誌。附註最多 1000 字元。
+- 理由：spec「只有經桌面管理憑證提交者才是人工正式裁定」；桌面憑證每次啟動輪替，指紋足以對應到哪一次 Runtime 啟動簽發的憑證，又不洩漏可用的憑證。
+- 替代方案：自動檢查進行中禁止手動接受（使用者要等最多 10 分鐘）；記錄完整憑證雜湊（沒有額外價值）。
+- 影響：目前只有一個桌面使用者，`accepted_by` 只能區分「哪一次啟動的桌面 App」；多使用者不在範圍內。
+- 審閱：未審
+
+### AI-153：驗證是 Supervisor 的最後一步；背景迴圈另開工作執行；崩潰後重新執行檢查
+- 重要度：中
+- 時間／階段：2026-10-22，票 13 實作
+- 決策：Supervisor 新增「驗證」步驟（在排程之後），找出 `verifying`、有受驗 Run、契約宣告了檢查（或契約已改版）的 Task，在交易外逐項取得事實，再以成果接受交易提交。背景迴圈把這一步放在另一個 tokio 工作執行（`verify_lock` 保證同時只有一輪），長時間的檢查不擋住啟動、取消與 lease 核對；`Supervisor::tick`（harness 的 `supervise()`）則等它做完，測試保持決定性。檢查途中 Runtime 崩潰時沒有任何紀錄，重啟後**重新執行全部檢查**（命令若有副作用會被執行兩次）。驗證結果寫入失敗（儲存層錯誤）時下一輪也會重新執行。
+- 理由：先核對、再恢復：沒有結論就不猜測通過或失敗；驗證命令本來就應該可重複執行（建置、測試）。
+- 替代方案：檢查前先持久化「驗證中」意圖（需要另一個狀態與恢復規則，對可重複的檢查沒有價值）；在 tick 內同步執行（10 分鐘的測試會讓取消與 lease 核對延後 10 分鐘）。
+- 影響：完全退出（票 25）需要一併停止進行中的驗證命令；目前 Runtime 停止時只靠 `kill_on_drop`。
+- 審閱：未審
+
+### AI-154：驗證紀錄的資料模型與 API 形狀（migration 16）
+- 重要度：低
+- 時間／階段：2026-10-22，票 13 實作
+- 決策：migration 16 `task_verification`（排在票 08 的 `shared_settings_version`、票 27 的 `quota`、票 18 的 `message_and_delivery`、票 22 的 `decision_request_and_decision` 之後）：識別、Workspace、Task、受驗 Run（唯一）、世代、契約版本、方式（`checks`／`manual`）、結果（`passed`／`failed`）、`evidence`（JSON：每項檢查結果、manifest、接受者、附註）、時間；觸發器禁止更新與刪除；部分唯一索引限制每個 Task 最多一筆 `passed`。端點：`GET …/tasks/{task_id}/verification`（`VerificationView`：basis、宣告的檢查、manifest、`automatic`、歷次紀錄）、`POST …/verification/accept`（`{ basis, note? }`）。工作面板 `GET …/tasks` 多回傳 `verifications`。Tauri 指令 `task_verification`、`task_accept`。驗證紀錄識別為 `ver_` 加 96 位元隨機值。
+- 理由：沿用 AI-74、AI-105 的追加式表與路徑慣例；把證據放在 JSON 欄位，避免為每項檢查另開一張表。
+- 替代方案：每項檢查一列（查詢單項較方便，但目前沒有這種查詢）。
+- 影響：本票原本是第 12 個 migration，整合 rebuild/v1（票 08、27）時順延為第 14 個，再整合票 18 時順延為第 15 個（見 AI-156），再整合票 22 時順延為第 16 個（見 AI-158）；以本票分支（合併前）建立過的開發資料庫需刪除重建。
+- 審閱：未審
+
+### AI-155：契約編輯器以文字行宣告檢查，路徑與名稱不能含空白
+- 重要度：低
+- 時間／階段：2026-10-22，票 13 實作
+- 決策：Web UI 契約編輯器的「確定性檢查」每行一項：`command: 程式 引數…`（預期結束碼 0）、`command[n]: …`（預期結束碼 n，可為負數）、`file: 相對路徑 [sha256]`、`artifact: 成果名稱 [sha256]`；引數以空白分隔、不支援引號，所以路徑、成果名稱與引數都不能含空白；大寫雜湊自動轉小寫；解析錯誤在送出時顯示且不送出；路徑是否在工作目錄內由 Runtime 判定。驗證失敗時 UI 只重新讀取驗證資料、不區分 409 的種類。
+- 理由：沿用契約引用以文字行輸入的做法（AI-65），不必為三種檢查各做一套表單。
+- 替代方案：結構化表單（含空白的路徑也能表達，但畫面複雜很多）。
+- 影響：需要含空白的路徑時只能直接呼叫 API。
+- 審閱：未審
+
+### AI-156：票 13 整合 rebuild/v1（票 18）：migration 第 15 版、AI 編號順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 13 修正（R054-13-fix）
+- 決策：rebuild/v1 已合併票 18（`message_and_delivery`，第 14 版），本票的 `task_verification` 順延為第 15 個 migration，排在 `message_and_delivery` 之後；本票的決策由 AI-128～AI-135 順延為 AI-138～AI-145（整合分支已用到 AI-137；R054 再整合票 22 時順延為 AI-148～AI-155，本條為 AI-156，見 AI-158），移到 AI-137 之後，內容不變，只把 AI-144（現為 AI-154）的 migration 編號改為 15 並在影響加註這次順延。`docs/development.md` 驗證紀錄段落的 migration 編號同步改為 15。其他檔案（API 路由、Domain 模組、GLOSSARY）由 git 自動合併，兩邊新增的內容都保留。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。驗證紀錄表只參照 `workspace`、`task`、`run`，與訊息表互不相依，先後順序不影響 schema。
+- 替代方案：把本票的 migration 插在 `message_and_delivery` 之前（會改動整合分支已存在的版本號，已套用的開發資料庫會錯位）。
+- 影響：以本票分支（合併前）建立過的開發資料庫需刪除重建。
+- 審閱：未審
+
+### AI-157：封存的 Workspace 中，verifying 的 Task 不再自動驗證
+- 重要度：中
+- 時間／階段：2026-10-22，票 13 修正（R054-13-fix）
+- 決策：`verification::pending_check` 在 Workspace 已封存（或不存在）時回傳 `None`，所以 Supervisor 的驗證步驟不再為它執行確定性檢查，`VerificationView.automatic` 也是 `false`。封存 API 仍不檢查 Task 狀態；這種 Task 會停在 `verifying`，因為成果接受交易（自動與手動）都以 `workspace_archived` 拒絕。
+- 理由：驗證 R051 發現封存後 `decide()` 一定拒絕提交，但待驗證清單沒排除封存的 Workspace，背景迴圈每秒重跑一次契約宣告的命令（每次最長 10 分鐘、可能有副作用）。在判定「是否待檢查」的同一個 Domain 函式排除，面板顯示與 Supervisor 行為就一致。
+- 替代方案：封存 API 拒絕有 verifying Task 的 Workspace（改變 Workspace 封存的既有語意，超出本票）；封存時把 verifying 的 Task 改回 ready 或取消（多一條狀態轉移與事件，沒有要求）；允許封存後仍接受成果（與「封存後不再變更」的既有規則衝突）。
+- 影響：若之後提供「取消封存」，這些 Task 會重新成為待驗證項目並照常執行檢查。
+- 審閱：未審
+
+### AI-158：票 13 整合 rebuild/v1（票 22）：migration 第 16 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 13 修正（R054-13-fix）
+- 決策：R054 修正期間 rebuild/v1 合併了票 22（`decision_request_and_decision`，第 15 版，AI-138～AI-147），本票的 `task_verification` 順延為第 16 個 migration；本票的條目由 AI-138～AI-147 順延為 AI-148～AI-157，移到整合分支的 AI-147 之後，內容不變，只更新 AI-154 的 migration 編號與 AI-154、AI-156 中互相引用的編號。衝突合併方式：API 路由、前端 `TaskClient`／`DecisionClient` 型別與 HTTP／Tauri 用戶端、Tauri 的 `baton_api` 匯入、`App.test.tsx` 的假用戶端都兩邊保留；`docs/development.md` 的 crate 表以整合分支的列為準，再加回本票的 `verification.rs`、`CommandRunner`、`task_verification`、「成果接受」，驗證紀錄段落的 migration 編號改為 16。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布。驗證紀錄表與裁定表都只參照 `workspace`、`task`、`run`，互不相依，順序不影響 schema。
+- 替代方案：把本票的 migration 插在裁定表之前（會改動整合分支已存在的版本號）。
+- 影響：以本票分支（合併前）建立過的開發資料庫需刪除重建。
+- 審閱：未審
+
+### AI-159：完全退出停下的 Run 以 interrupted 結束，Task 退回 ready 並自動重新排隊；停不下來的保留寫入所有權
 - 重要度：高
 - 時間／階段：2026-10-22，票 25 實作
 - 決策：程序確認停止（`StoppedGracefully`／`ForceKilled`）或根本沒有程序（`queued`、啟動中但以 command_id 找不到）的 Run，以 `interrupted`（`end_reason = stopped_by_full_exit`）結束並釋放寫入所有權；Task 只在仍是 `running` 時退回 `ready`（`blocked`、`verifying` 等不動），並在**同一個交易**中重新放進派工佇列（優先序 0，原本的優先序已不存在）。使用者先前已要求取消的 Run 則完成取消（Task 不重新排隊）。`StillAlive`、停止呼叫失敗、到總上限仍沒有結果的記為停止異常，Run 維持 `running` 並保留 lease。重新開啟核對時，這些 Run 的程序若確定已不在，以 `process_gone_after_full_exit` 中斷、Task 回 `ready` 但**不**自動重新排隊；仍存活的維持原狀（不會再啟動第二個 Worker）。
@@ -1342,7 +1441,7 @@
 - 影響：被停下的 Task 在重新開啟前一直排隊、等待原因是 `runtime_stopping`；停止異常的 Task 在核對前保持 `running`。重新排隊不保留原本的優先序。
 - 審閱：未審
 
-### AI-149：停止意圖的保存方式與阻擋點：單列狀態加各 Workspace 暫停，擋在 Scheduler 與 launch intent
+### AI-160：停止意圖的保存方式與阻擋點：單列狀態加各 Workspace 暫停，擋在 Scheduler 與 launch intent
 - 重要度：高
 - 時間／階段：2026-10-22，票 25 實作
 - 決策：停止意圖存在單列表 `runtime_lifecycle`（`phase` = `running`／`stopping`／`stopped`、`version`、最近一次停止報告 JSON），`stopping` 與 `stopped` 都算停止意圖生效，直到重新開啟。要求退出的同一個交易中，把每個使用中的 Workspace 標為暫停（`workspace_lifecycle.paused_since`）。阻擋點只有兩個：（1）Scheduler 的 `Capacity.halt`（`lifecycle::dispatch_halt`），`place` 一看到就回等待，所以佇列重試、額度恢復後的派工、API 的新派工要求與未來的交接（票 28 以 `SlotKind::Handoff` 呼叫同一個 `place`）都被擋；（2）寫入 launch intent（`BeginLaunch`）的交易再檢查一次（`RunError::LaunchHalted`），擋住停止意圖寫入前就已派出、還沒啟動的 Run。等待原因新增第七類 `lifecycle`（`runtime_stopping`、`awaiting_resume`）。上次退出後尚未重新開啟（`stopped`）時再按「完全退出」，視為新的退出要求（版本加一），停止中則冪等。
@@ -1351,7 +1450,7 @@
 - 影響：交接（票 28）與重試預算（票 36）只要經過 `scheduler::place`／`evaluate` 就自動遵守停止意圖；若另闢直接呼叫 `RunCommand::Dispatch` 的路徑，必須先呼叫 `lifecycle::dispatch_halt`。
 - 審閱：未審
 
-### AI-150：重新開啟的流程：先核對再解除；資料庫與生命週期檔取保守者；以版本防止清掉新的退出要求
+### AI-161：重新開啟的流程：先核對再解除；資料庫與生命週期檔取保守者；以版本防止清掉新的退出要求
 - 重要度：中
 - 時間／階段：2026-10-22，票 25 實作
 - 決策：Runtime 啟動時讀資料庫與 `<資料目錄>\lifecycle.json`：只有檔案有停止意圖、或檔案存在卻讀不懂（毀損）都視為停止，並把停止意圖補記進資料庫（同時暫停每個使用中的 Workspace、記一筆說明）；只有資料庫有時把它鏡像回檔案。停止意圖仍生效時，Supervisor 的第一次 `tick` 先核對（處理啟動中的 Run：以 command_id 找回或中斷；對每個有程序身分的 Run 不論 lease 是否過期都 `inspect`，`Dead` 才中斷），再以「啟動時看到的生命週期版本」做條件式重新開啟：版本已改變（核對期間使用者又按了完全退出）就不重新開啟。重新開啟後把檔案改寫為沒有停止抑制。
@@ -1360,7 +1459,7 @@
 - 影響：Runtime 啟動到第一次處理之間（正式執行約 1 秒），API 仍回報停止意圖生效、「繼續工作」回 409。重新開啟時寫檔失敗只記日誌：下次啟動時會再被視為停止（較保守），使用者需要再次重新開啟。
 - 審閱：未審
 
-### AI-151：「保存並停止」的通知方式：Agent 回報的回應帶 `stop_requested`，強制力仍靠程序樹終止
+### AI-162：「保存並停止」的通知方式：Agent 回報的回應帶 `stop_requested`，強制力仍靠程序樹終止
 - 重要度：中
 - 時間／階段：2026-10-22，票 25 實作
 - 決策：停止意圖生效後，`report_progress`、`save_checkpoint`、`report_blocked` 的成功回應帶 `stop_requested: true`（平常是 `false`），Worker 據此保存 checkpoint 並結束。Runtime 不另外對程序送出任何訊號；停止流程對每個 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`：寬限期內等程序自行結束，逾時以 Job Object 終止整棵程序樹（AI-72）。
@@ -1369,7 +1468,7 @@
 - 影響：Worker 在寬限期內沒有回報就收不到通知，只能被終止；Context Builder（票 39）與真實 Adapter（票 14）的 Worker 提示需要寫明「回應出現 `stop_requested` 時保存 checkpoint 並結束」。30 秒是否足夠屬 Validation Required。
 - 審閱：未審
 
-### AI-152：40 秒上限的實作與停止流程結束後的收尾
+### AI-163：40 秒上限的實作與停止流程結束後的收尾
 - 重要度：中
 - 時間／階段：2026-10-22，票 25 實作
 - 決策：全部 Run 的 `stop` 並行執行，寬限期 30 秒（ProcessControl 在之後 10 秒內終止並確認，AI-72 的既有行為），Runtime 另以 `寬限期 + 確認上限 = 40 秒` 的真實時間作為安全網：到時還沒回來的停止記為停止異常 `stop_unconfirmed`。停止期限（`deadline_at`）以 Clock 記在停止報告中。停止流程期間握住 Supervisor 的 tick 鎖。結束後 Runtime 再提供 API 5 秒（讓 App 讀到最終結果）才結束服務；測試 harness 不自行結束（`exit_linger: None`），以 `exit_timing` 縮短上限測試卡住的情境。
@@ -1378,7 +1477,7 @@
 - 影響：從按下「完全退出」到 Runtime 結束最長約 45 秒；第 40 秒才回來的 `ForceKilled` 若剛好晚於安全網，會被記為 `stop_unconfirmed`（保守）。
 - 審閱：未審
 
-### AI-153：桌面殼：關窗隱藏到系統匣、完全退出由 Web UI 顯示進度，殼有 60 秒後備
+### AI-164：桌面殼：關窗隱藏到系統匣、完全退出由 Web UI 顯示進度，殼有 60 秒後備
 - 重要度：中
 - 時間／階段：2026-10-22，票 25 實作
 - 決策：關閉主視窗改為隱藏（`prevent_close` + `hide`），App 留在系統匣；系統匣選單有停用的狀態項目（每 3 秒以 `GET /api/v1/lifecycle` 更新：運作中與進行中 Run 數、完全退出中、已停止、無法連線）、「開啟 Baton」（左鍵點圖示亦同）與「完全退出」。「完全退出」顯示主視窗並對 Web UI 發 `baton://full-exit-requested`；Web UI 呼叫 `lifecycle_exit`、每 0.5 秒輪詢並顯示每個 Run 的停止結果與期限倒數；沒有停止異常約 1 秒後自動 `app_quit`，有異常則列出並等使用者按「關閉 Baton」；輪詢時 Runtime 已結束也視為完成。要求退出本身失敗時顯示原因與「重試」「返回」，不自動結束 App。殼在按下後 60 秒若 App 仍未結束，自行送出完全退出（冪等）再結束 App。HTTP 版用戶端（瀏覽器開發用）的 `app_quit` 與事件監聽是 no-op。
@@ -1387,16 +1486,16 @@
 - 影響：沒有單一執行個體機制，App 隱藏在系統匣時再執行一次執行檔會開出第二個 App（兩者連同一個 Runtime，不會有第二個 Runtime 或 Worker）；可在後續票加入 `tauri-plugin-single-instance`。系統匣與關窗行為只有編譯與元件測試，Windows 上的實際操作屬 Validation Required（已寫入 `docs/development.md`，建議列入票 51）。
 - 審閱：未審
 
-### AI-154：生命週期 API、資料表與事件的形狀
+### AI-165：生命週期 API、資料表與事件的形狀
 - 重要度：低
 - 時間／階段：2026-10-22，票 25 實作
 - 決策：端點：`GET /api/v1/lifecycle`（階段、`stop_intent_active`、時間參數、進行中或最近一次的停止報告、進行中 Run 數、各使用中 Workspace 的 `auto_resume_after_exit`／`paused_since`／`awaiting_resume`）、`POST /api/v1/lifecycle/exit`（202）、`PUT /api/v1/workspaces/{id}/lifecycle`（`{ auto_resume_after_exit }`）、`POST /api/v1/workspaces/{id}/resume`（停止意圖生效時 409 `stop_intent_active`）。停止報告的每個 Run：`outcome` = `pending`／`not_started`／`stopped_gracefully`／`force_killed`／`anomaly`，異常再帶 `anomaly` = `still_alive`／`stop_failed`／`stop_unconfirmed` 與說明。migration 16：`runtime_lifecycle`（單列）與 `workspace_lifecycle`（沒有列的 Workspace 等同預設：自動續跑關閉、未暫停）。事件：`full_exit_requested`、`full_exit_completed`（含異常清單）、`runtime_reopened`（含續跑與等待的 Workspace）、`workspace_paused_by_exit`、`workspace_resumed`、`workspace_auto_resume_changed`；停止進度的逐筆更新不追加事件。UI：Workspace 清單每列有「完全退出後自動續跑」勾選與暫停中的「繼續工作」，等待原因第七類標籤為「完全退出」。
 - 理由：一個總覽端點同時供系統匣、退出進度與 Workspace 清單使用；進度更新很頻繁，事件只記開始、結束與重新開啟。
 - 替代方案：把 Workspace 設定放進 `Workspace` 本身（要改 Workspace 狀態機、API 與既有測試）；停止進度用 SSE（事件串流目前還沒有實際事件，輪詢已足夠）。
-- 影響：migration 若與平行開發的票衝突，依 AI-75／AI-86 的方式順延（整合時已順延為第 16 個，見 AI-155、AI-156、AI-158）。「跨登入自動續跑」（使用者故事 17 的另一個設定）屬票 33，屆時加在同一張 `workspace_lifecycle` 表。
+- 影響：migration 若與平行開發的票衝突，依 AI-75／AI-86 的方式順延（整合時已順延為第 17 個，見 AI-166、AI-167、AI-169、AI-170）。「跨登入自動續跑」（使用者故事 17 的另一個設定）屬票 33，屆時加在同一張 `workspace_lifecycle` 表。
 - 審閱：未審
 
-### AI-155：票 25 整合 rebuild/v1（票 12、08）：migration 與 AI 編號順延
+### AI-166：票 25 整合 rebuild/v1（票 12、08）：migration 與 AI 編號順延
 - 重要度：中
 - 時間／階段：2026-10-22，票 25 實作（合併 rebuild/v1）
 - 決策：(1) 整合分支已有 `artifact`（第 11 版）與 `shared_settings_version`（第 12 版），本票的 `lifecycle` migration 順延為第 13 版；三者沒有共用資料表。(2) 本票原本的 AI-103～AI-109 與整合分支的票 12、08 條目重號，順延為 AI-121～AI-127（內文沒有互相引用，只把 AI-127 的 migration 編號改為 13）；整合分支的條目沒有改動。(3) `baton-api`、`baton-client`、Tauri 殼、Web UI 與 `docs/development.md` 兩邊新增的端點、指令、型別、樣式與段落全部保留（生命週期與成果、共同設定並存）。
@@ -1405,31 +1504,40 @@
 - 影響：開發中的本機資料庫若套用過本票舊版本號的 migration，需要重建。
 - 審閱：未審
 
-### AI-156：票 25 再次整合 rebuild/v1（票 27）：migration 第 14 版、AI 編號再順延
+### AI-167：票 25 再次整合 rebuild/v1（票 27）：migration 第 14 版、AI 編號再順延
 - 重要度：中
 - 時間／階段：2026-10-22，票 25 修正 run R049（合併 rebuild/v1）
 - 決策：(1) 整合分支已先合併票 27，其 migration `quota` 是第 13 版，本票的 `lifecycle` 順延為第 14 版（排在 `quota` 之後；兩者沒有共用資料表）。(2) 本票條目原本的 AI-121～AI-128 與票 27 的 AI-121～AI-127 重號，順延為 AI-128～AI-135，移到票 27 條目之後；條目內的交互引用（AI-127 中的「見 AI-128」→ AI-134 中的「見 AI-135、AI-136」）與 migration 編號（AI-134 的 13 → 14、`docs/development.md`）同步更新，記錄歷史編號的敘述（AI-135）保留原文。原 AI-127、AI-128 缺少的審閱行與空行在順延時補上。(3) 其餘衝突兩邊都保留：Supervisor 同時有生命週期（重新開啟、完全退出）與額度輪詢、Adapter 額度事件；`baton-api`、`baton-client`、`baton-domain`、`baton-store` 的模組與匯出、Tauri 指令（`app_quit` 與 `profile_set_quota_limits`）、開發指南的 crate 表與情境測試清單合併為同時描述兩張票。
-- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-155 同）。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-166 同）。
 - 替代方案：把兩個 migration 合併成一個（會改動整合分支已有的第 13 版）。
 - 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 13 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
-### AI-157：完全退出的 40 秒從要求退出時算起；生命週期檔在回應前寫入，等 Supervisor 的鎖也有上限
+### AI-168：完全退出的 40 秒從要求退出時算起；生命週期檔在回應前寫入，等 Supervisor 的鎖也有上限
 - 重要度：高
 - 時間／階段：2026-10-22，票 25 修正 run R049（驗證 R047 未通過）
-- 決策：修正 AI-152「停止流程期間握住 tick 鎖」造成的延遲：(1) `POST /api/v1/lifecycle/exit` 持久化資料庫後、回應 202 前就把停止意圖寫進生命週期檔（寫入失敗只記日誌，停止流程開始時再鏡像一次並把失敗記在停止報告的 notes）。(2) 停止流程的期限改由停止報告持久化的 `deadline_at` 減去 Clock 的目前時間換算成真實時間，等 tick 鎖的時間也算在內。(3) Supervisor 增加「完全退出進行中」的旗標；處理取消時呼叫 `ProcessControl::stop` 以 `select!` 同時等這個旗標，一看到就放棄等待並讓出 tick 鎖，該 Run 由停止流程再要求停止一次（同一個寬限期、共用總上限）。(4) 其他握鎖的處理卡住（例如 Port 的 spawn 不回來）時，等鎖以期限為上限；到期限仍拿不到鎖就**不**要求任何程序停止（不能在另一個處理進行中停止程序或結束 Run），把全部尚未結束的 Run 記為 `stop_unconfirmed`、保留寫入所有權，退出照常進入 `stopped`。
+- 決策：修正 AI-163「停止流程期間握住 tick 鎖」造成的延遲：(1) `POST /api/v1/lifecycle/exit` 持久化資料庫後、回應 202 前就把停止意圖寫進生命週期檔（寫入失敗只記日誌，停止流程開始時再鏡像一次並把失敗記在停止報告的 notes）。(2) 停止流程的期限改由停止報告持久化的 `deadline_at` 減去 Clock 的目前時間換算成真實時間，等 tick 鎖的時間也算在內。(3) Supervisor 增加「完全退出進行中」的旗標；處理取消時呼叫 `ProcessControl::stop` 以 `select!` 同時等這個旗標，一看到就放棄等待並讓出 tick 鎖，該 Run 由停止流程再要求停止一次（同一個寬限期、共用總上限）。(4) 其他握鎖的處理卡住（例如 Port 的 spawn 不回來）時，等鎖以期限為上限；到期限仍拿不到鎖就**不**要求任何程序停止（不能在另一個處理進行中停止程序或結束 Run），把全部尚未結束的 Run 記為 `stop_unconfirmed`、保留寫入所有權，退出照常進入 `stopped`。
 - 理由：驗收條件要求退出在 40 秒內結束；取消中的 `stop` 最長 30 + 10 秒且依序處理，Port 卡住時更永遠不結束，桌面殼的 60 秒後備會先關掉 App，使用者看不到停止異常。spec D-25 要求停止意圖先寫入資料庫與生命週期檔再開始停止，不應排在鎖後面。讓出鎖而不是不握鎖，是因為停止流程仍需要與 `launch_pending` 互斥：否則可能把啟動中的 Run 結束後，那個 spawn 才完成。
 - 替代方案：處理取消時完全不握 tick 鎖、改在背景任務停止程序（現有情境測試依賴「一次 `supervise` 就確認取消」的確定性，改動面大）；停止流程完全不拿 tick 鎖（啟動中的 Run 會有競態）；只把等鎖加上逾時、不讓出（取消卡住時其他 Run 一個都沒被要求停止）。
 - 影響：從按下「完全退出」到停止流程結束最長 40 秒（加上資料庫寫入），Runtime 結束仍再加 5 秒。被讓出的取消在停止流程中可能收到第二次 `stop`（Port 的 `stop` 必須可重複呼叫且可中途放棄；Windows 實作是輪詢 Job 內的程序數再 `TerminateJobObject`，放棄等待不留下半套狀態，重複呼叫沒有副作用）。Clock 被調整時，期限以持久化值為準（Clock 已過期限則不再等待，全部記為無法確認）。
 - 審閱：未審
 
-### AI-158：票 25 第三次整合 rebuild/v1（票 18、22）：migration 第 16 版、AI 編號再順延
+### AI-169：票 25 第三次整合 rebuild/v1（票 18、22）：migration 第 16 版、AI 編號再順延
 - 重要度：中
 - 時間／階段：2026-10-22，票 25 修正 run R049（合併 rebuild/v1）
 - 決策：(1) 整合分支在本次修正期間先後併入票 18（`message_and_delivery`，migration 14）與票 22（`decision_request_and_decision`，migration 15），本票的 `lifecycle` 順延為第 16 版，排在最後；彼此沒有共用資料表。(2) 整合分支已用到 AI-147（AI-135、AI-136 空號，依規則不回填），本票條目原本的 AI-128～AI-137 順延為 AI-148～AI-157，移到票 22 條目之後；條目內的交互引用（AI-154 的「見 AI-155、AI-156、AI-158」、AI-156 的「與 AI-155 同」、AI-157 的「修正 AI-152」）與 migration 編號（AI-154、`docs/development.md` 改為 16）同步更新，記錄歷史編號的敘述（AI-155、AI-156 的決策內文）保留原文。(3) 其餘衝突兩邊都保留：`baton-api`／`baton-domain`／`baton-store` 的模組與匯出、`RuntimeClient` 的生命週期與裁定方法、Tauri 的型別匯入；Web UI 的 `AppClient`（HTTP 與 Tauri 兩種實作）同時有生命週期與裁定方法，`App` 同時掛上 `ExitProgress` 與 `DecisionCenter`，`WorkspaceSidebar` 採票 22 的參數（含裁定入口）並保留自動續跑說明，`styles.css` 兩邊新增的區塊依序並存，元件測試兩邊都保留；開發指南的 crate 表與情境測試清單合併為同時描述三張票。
-- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-155、AI-156 同）。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-166、AI-167 同）。
 - 替代方案：把本票條目放進 AI-135、AI-136 的空號（會與條目順序脫節，且其他平行的票也可能想用）。
 - 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 13 或 14 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-170：票 25 第四次整合 rebuild/v1（票 13）：migration 第 17 版、AI 編號再順延、Supervisor 同時有生命週期與驗證
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 整合 run R063-25-integrate
+- 決策：(1) 整合分支已併入票 13，其 migration `task_verification` 是第 16 版，本票的 `lifecycle` 順延為第 17 版，排在最後；兩者沒有共用資料表，都會套用。(2) 整合分支已用到 AI-158（票 13 的 AI-148～AI-158），本票條目原本的 AI-148～AI-158 順延為 AI-159～AI-169，移到票 13 條目之後；條目內的交互引用（AI-165 的「見 AI-166、AI-167、AI-169、AI-170」與 migration 編號 17、AI-167 的「與 AI-166 同」、AI-168 的「修正 AI-163」、AI-169 理由中的「AI-166、AI-167」）與 `docs/development.md` 的 migration 編號同步更新；記錄歷史編號的敘述（AI-166、AI-167、AI-169 的決策內文）保留原文。程式碼與票面沒有引用這些編號。(3) 其餘衝突兩邊都保留：`Supervisor::new` 同時接收成果根目錄（票 13）與 `LifecycleSettings`（本票）；`supervise_once` 先做重新開啟再做原本的六個步驟（註解改為「七個步驟」），驗證仍是最後一步（開發指南改為「第 8 步」）；`baton-api` 的說明、`baton-client` 與 Tauri 的型別匯入、Web UI `AppClient` 的 HTTP／Tauri 實作（生命週期與驗證方法）、`fixtures.ts`（生命週期與驗證的測試資料）、`App.test.tsx` 的假用戶端（工作面板加 `verifications: []`，並保留生命週期方法）、開發指南的 crate 表都合併為同時描述兩張票。(4) 停止意圖生效期間不阻擋確定性檢查：驗證不是新 Run，不在票 25「新派工、交接與重試」的阻擋範圍；Runtime 結束時驗證命令隨 `kill_on_drop` 終止，重新開啟後依票 13 的規則重新執行檢查（AI-153）。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-166、AI-167、AI-169 同）。
+- 替代方案：停止意圖生效時也暫停驗證（屬新行為，超出整合範圍；需要時另開票）。
+- 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 16 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

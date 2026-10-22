@@ -11,3 +11,10 @@
 - `crates/baton-client/tests/artifacts_client.rs::app_download_of_a_missing_version_or_a_tampered_file_is_rejected_with_the_runtime_code`：R043 在全套測試中於派工時失敗一次，單獨重跑皆通過，根因未查。
 - `web/src/App.test.tsx`「選到 Workspace 後可在授權設定與工作面板之間切換」：R056 冷啟動時在預設 1 秒等待內找不到按鈕，重跑皆通過。
 - 要求：查出根因並修正（例如等待條件或共用狀態），不可只拉長逾時或標記略過。
+
+## 3. 驗證命令的程序樹與路徑檢查（票 13）
+- 驗證命令沒有放進 Job Object，逾時後由它再開的子孫程序可能殘留；檔案檢查不處理指向工作目錄外的符號連結或 junction（docs/development.md「已知限制」）。最終修正時評估是否沿用票 10 的 Job Object 與路徑正規化。
+
+## 4. 完全退出的兩個邊界（票 25）
+- `request_exit`（API）與 Supervisor 的 `mirror_lifecycle_file` 共用同一個 `baton-lifecycle…tmp` 暫存檔名，同時寫入時一方 rename 會失敗；改為各自唯一的暫存檔名。
+- `run_full_exit` 裡的 `process_of`（`ProcessControl.find`／`ensure_managed`）不受 40 秒期限約束，find 卡住時退出可能超時；納入同一個期限。
