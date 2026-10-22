@@ -916,6 +916,27 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 
 **端點**（桌面角色）：`GET /api/v1/workspaces/{id}/conversation`（`{ conversation_id, busy, active_run, next_wake_at, turns, runs }`；Workspace 不存在 404 `workspace_not_found`）、`POST /api/v1/workspaces/{id}/conversation/messages`（`{ "text" }` → 201 `{ turn, busy }`；空白 400 `message_empty`、超過 20000 字 400 `message_too_long`、已封存 409 `workspace_archived`）。送出訊息從不同步喚起 Controller。暫停與取消（Run／Task 的取消、Workspace 暫停、完全退出）不經過對話佇列，由 Runtime 直接處理（DR-20261022-01）。事件：`conversation_created`、`conversation_input_received`、`conversation_inputs_dispatched`、`conversation_inputs_processed`、`conversation_inputs_released`、`controller_run_launch_started`、`controller_run_started`、`controller_run_native_session_bound`、`controller_run_succeeded`、`controller_run_failed`、`controller_run_interrupted`。情境測試在 `crates/baton-harness/tests/conversation.rs`。
 
+### Controller 跨帳號交接
+
+票 30 讓 Controller 沿用 Worker 的交接協議（票 28、issue §5.2）換帳號。規則在 `baton_domain::conversation`（`handoff_stop_due`、`handoff_reason_for`、`TurnOutcome::HandedOff`、`wait_for_account`），持久化在 `baton-store` 的 `conversations.rs`（migration 31 `controller_handoff`），推進在 Supervisor 的 Controller 步驟。Controller 的一輪很短，所以沒有另外的交接紀錄表：安全邊界就是一輪的結束，交接記在承接的那一輪上。
+
+| 協議步驟 | Controller 的對應 |
+| --- | --- |
+| 1. 要求（先選定承接帳號） | 上一輪的帳號（conversation 最近的 Session 的帳號）門檻為 `paused`／`draining` 或無法使用時，下一輪的帳號由排程另選。進行中的一輪所在帳號進入 `draining` 時，只有找得到承接帳號才繼續下一步，否則留在原帳號 |
+| 2. 安全邊界 | 讓進行中的一輪自己結束：從帳號進入 `draining`（或這一輪開始，取較晚者）起最多等 `CHECKPOINT_WAIT_MS`（2 分鐘），之後才以 `stop_grace` 要求舊程序停止；先查證，已不在就不再停止 |
+| 3. 轉移 | 舊程序**確認停止**後，下一次 tick 把串流讀乾淨仍沒有結果，這一輪才以 `interrupted`、`end_reason` = `handed_off：…`（事件 `controller_run_handed_off`）結束，輸入退回 `pending` 且**不退避**；同一次 tick 的喚起在承接帳號上以新的 Controller Session（`account_changed`）開始下一輪，Controller Run 記下 `handoff`（`from_run_id`、`from_profile_id`、`reason`），conversation 記事件 `controller_handoff_transferred`。停不下來就維持原狀、下一次再要求，B1 保證不會有第二輪 |
+| 4. 確認 | 承接的那一輪保存了結果（`succeeded`），conversation 記事件 `controller_handoff_confirmed` |
+
+**限流與當掉**：一輪沒有保存結果就結束（程序以失敗結束、程序已不在），而它收到過 CLI 的額度用盡訊號、或帳號門檻（依最新額度推進後）是 `draining` 時，一律以 `handed_off` 結束，不算 Controller 的失敗、不退避。所以突然限流、為交接而停止、以及停止途中 Runtime 當掉重建後由存活核對找回的一輪，都走同一條路。完全退出時停止的一輪仍是一般的中斷。
+
+**換帳號的原因**（`handoff.reason`）：上一個帳號門檻 `draining` → `quota_draining`；`paused` 或用量 ≥75% → `quota_near_limit`；其他（未核對、已封存等）→ `account_unavailable`。換過帳號之後新的 Session 在承接帳號上，之後的輪次留在那裡原生接續，不會自動換回。
+
+**重建**：新的（含替代的）Controller Session 的 Prompt 除了角色說明、紀錄缺口與最近 40 則已處理的對話，另附 Workspace 最近 20 筆已做成的決策（問題 → 選項名稱、備註）與尚未結束的 Task 各自最近一筆被接受的檢查點摘要（最多 20 筆），都標明只作為背景；由 Store 在喚起的同一個交易中載入。沿用原生 Session 時不附。未處理的指示依到達順序只列一次，被中斷過的註明「可能已部分處理」。
+
+**沒有可用帳號**：輸入（使用者訊息、工作事件）照常保存為 `pending`，不喚起 Controller；Supervisor 以排程的等待原因寫入 conversation 的 `wait_code`／`wait_message`／`wait_since`（原因不變時不寫入，改變時保留開始等待的時間，事件 `conversation_controller_waiting`），下一輪開始時清除。Controller 不佔 Worker 的名額，所以 Worker、取消、裁定等其餘功能不受影響。
+
+**端點**：`GET /api/v1/workspaces/{id}/conversation` 多了 `waiting`（`{ code, message, since }`；只有輸入已到期卻沒有喚起時才有，其餘為 `null`），`runs[]` 多了 `handoff`（`{ from_run_id, from_profile_id, reason }` 或 `null`）。「對話」分頁顯示等待原因，Controller 回覆旁標示交接來源、原因與「已確認」，被交接出去的一輪標示「已交接」。情境測試在 `crates/baton-harness/tests/controller_handoff.rs`。
+
 ### 本機 API 的存取防護
 
 Runtime 同時監聽 IPv4 與 IPv6 loopback（`127.0.0.1:<port>`、`[::1]:<port>`），拒絕非 loopback 的監聽位址。所有端點（含 `/api/v1/events` 串流與未知路徑）都要求：
