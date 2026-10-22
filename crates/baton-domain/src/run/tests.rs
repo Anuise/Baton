@@ -119,7 +119,7 @@ impl World {
     fn dispatch(&mut self, task_id: &str, now: Timestamp) -> Result<String, RunError> {
         self.next_run += 1;
         let run_id = format!("run{}", self.next_run);
-        self.step(RunCommand::Dispatch { run_id: run_id.clone(), task_id: task_id.into() }, now)?;
+        self.step(RunCommand::Dispatch { run_id: run_id.clone(), task_id: task_id.into(), profile_id: "p1".into() }, now)?;
         Ok(run_id)
     }
 
@@ -183,7 +183,7 @@ fn terminal_run_statuses_have_no_exit_and_every_active_status_can_end() {
 fn dispatch_creates_queued_run_lease_and_outbox_and_moves_task_to_running() {
     let mut world = World::new(&["t1"]);
 
-    let change = world.step(RunCommand::Dispatch { run_id: "r1".into(), task_id: "t1".into() }, T0).unwrap();
+    let change = world.step(RunCommand::Dispatch { run_id: "r1".into(), task_id: "t1".into(), profile_id: "p1".into() }, T0).unwrap();
 
     let run = change.run.unwrap();
     assert_eq!((run.status, run.generation, run.task_id.as_str()), (RunStatus::Queued, 1, "t1"));
@@ -565,7 +565,7 @@ proptest! {
                 }
                 Op::Dispatch(i) => {
                     world.next_run += 1;
-                    RunCommand::Dispatch { run_id: format!("run{}", world.next_run), task_id: task_ids[i % 3].into() }
+                    RunCommand::Dispatch { run_id: format!("run{}", world.next_run), task_id: task_ids[i % 3].into(), profile_id: "p1".into() }
                 }
                 Op::BeginLaunch(i) => match run_of(&world, i) { Some((run_id, _)) => RunCommand::BeginLaunch { command_id: format!("cmd-{run_id}"), run_id }, None => continue },
                 Op::Receipt(i) => match run_of(&world, i) { Some((run_id, _)) => RunCommand::RecordReceipt { run_id, process: process(5) }, None => continue },

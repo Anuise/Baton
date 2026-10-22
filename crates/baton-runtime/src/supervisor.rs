@@ -1,12 +1,14 @@
 //! Supervisor：launch intent → 啟動 → 回執 → 就緒 → 停止；程序身分核對（spec 「程序與模組架構」）。
 //!
-//! 每次 `tick` 依序做四件事，而且每一件都是冪等的、只信任資料庫中持久化的狀態：
+//! 每次 `tick` 依序做五件事，而且每一件都是冪等的、只信任資料庫中持久化的狀態：
 //! 1. **啟動**派工 Outbox 裡的 Run：先在交易中持久化 launch intent 與 command_id，才在交易外 spawn，
 //!    再把回執寫回。Runtime 在中間任何一點當掉，下一次 tick 都用 command_id 找回原程序，**絕不重新啟動**；
 //!    找不到程序時把 Run 標為 interrupted，交給使用者重新派工，而不是猜測「應該沒啟動」。
 //! 2. **收事件**：接上 Adapter 的事件串流，heartbeat 續約 lease，結束事件只讓 Run 結束，不把 Task 標為 completed。
 //! 3. **取消**：對要求取消的 Run 停止整個程序樹；確認停止之後才完成取消、釋放寫入所有權。
 //! 4. **核對 lease**：lease 過期只是「該去看看」：向 ProcessControl 查證，確認死亡才中斷 Run，存活就續約，不確定就維持原狀。
+//! 5. **排程**：前面幾步可能釋放了帳號與全域名額，於是讓佇列中等待的 Task 依優先序逐一嘗試派出（票 19）；
+//!    派出的 Run 在同一次 `tick` 就啟動。
 //!
 //! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
 //! 由測試在想要的時刻呼叫 `tick`，搭配 fake Clock 就能完全決定性地重現任何時序。
@@ -16,9 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::LogSink;
+use baton_domain::profile::ProfileStatus;
 use baton_domain::run::{ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus};
 use baton_ports::{
-    AdapterEvent, AgentHandle, Liveness, Ports, ProcessIdentity, RunSpec, SpawnSpec, StopResult,
+    observe_quota, AdapterEvent, AgentHandle, Liveness, Ports, ProcessIdentity, RunSpec, SpawnSpec, StopResult,
 };
 use baton_store::{ExecutingRun, PendingLaunch, Store};
 use futures::stream::BoxStream;
@@ -81,6 +84,9 @@ impl Supervisor {
         self.pump_events().await;
         self.process_cancellations().await;
         self.check_leases().await;
+        if self.schedule_queue().await {
+            self.launch_pending().await;
+        }
     }
 
     fn note(&self, message: &str) {
@@ -91,6 +97,34 @@ impl Supervisor {
     async fn apply(&self, run: &Run, command: RunCommand) {
         if let Err(error) = self.store.apply_run_command(run.workspace_id.clone(), command, self.ports.clock.now()).await {
             self.note(&format!("Run {} 的命令沒有套用：{error}", run.id));
+        }
+    }
+
+    // ------------------------------------------------------------ 排程
+
+    /// 讓佇列中等待的 Task 依序嘗試派出；回傳這次有沒有派出新的 Run。
+    async fn schedule_queue(&self) -> bool {
+        let profiles = match self.store.list_profiles().await {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                self.note(&format!("無法讀取帳號 Profile：{error}"));
+                return false;
+            }
+        };
+        let active: Vec<String> =
+            profiles.iter().filter(|p| p.status == ProfileStatus::Active).map(|p| p.id.clone()).collect();
+        let quota = observe_quota(&*self.ports.quota_observer, &active).await;
+        match self.store.schedule(None, quota, self.ports.clock.now(), new_run_id).await {
+            Ok(outcome) => {
+                for started in &outcome.started {
+                    self.note(&format!("Task {} 取得名額，以帳號 {} 派出 Run {}", started.task_id, started.profile_id, started.run_id));
+                }
+                !outcome.started.is_empty()
+            }
+            Err(error) => {
+                self.note(&format!("排程失敗：{error}"));
+                false
+            }
         }
     }
 
@@ -328,8 +362,17 @@ fn identity_of(process: &ProcessRecord) -> ProcessIdentity {
 
 /// 每次啟動的識別：96 位元隨機值；取不到系統亂數時回傳 `None`。
 fn new_command_id() -> Option<String> {
+    new_prefixed_id("cmd")
+}
+
+/// 排程派出的 Run 的識別（與 API 派工使用相同格式）。
+fn new_run_id() -> Option<String> {
+    new_prefixed_id("run")
+}
+
+fn new_prefixed_id(prefix: &str) -> Option<String> {
     let mut entropy = [0u8; 12];
     getrandom::fill(&mut entropy).ok()?;
     let hex: String = entropy.iter().map(|b| format!("{b:02x}")).collect();
-    Some(format!("cmd_{hex}"))
+    Some(format!("{prefix}_{hex}"))
 }

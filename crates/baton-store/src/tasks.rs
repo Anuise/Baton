@@ -268,6 +268,10 @@ pub(crate) fn save_task(tx: &Transaction<'_>, task: &Task) -> rusqlite::Result<(
             task.updated_at.as_millis(),
         ],
     )?;
+    // 離開 ready（派工、取消、被改契約退回 pending）就不再排隊
+    if task.status != TaskStatus::Ready {
+        tx.execute("DELETE FROM dispatch_request WHERE task_id = ?1", [&task.id])?;
+    }
     Ok(())
 }
 

@@ -87,7 +87,7 @@ fn load_notice_acknowledgement(conn: &Connection) -> rusqlite::Result<Option<Tim
     Ok(millis.map(Timestamp::from_millis))
 }
 
-fn load_profiles(conn: &Connection) -> rusqlite::Result<Vec<AccountProfile>> {
+pub(crate) fn load_profiles(conn: &Connection) -> rusqlite::Result<Vec<AccountProfile>> {
     let mut statement = conn.prepare(
         "SELECT id, name, config_dir, expected_account, status, verification, version, created_at, archived_at
          FROM account_profile ORDER BY rowid",
