@@ -1070,6 +1070,57 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版讀取、重新比對專案理解，並以 JSON 送出投影協調", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const request = { path: "GLOSSARY.md", action: "overwrite" as const, expected_external_hash: null };
+
+    await client.understanding("ws/1");
+    await client.syncUnderstanding("ws_1");
+    await client.reconcileProjection("ws_1", request);
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/workspaces/ws%2F1/understanding"],
+      ["/api/v1/workspaces/ws_1/understanding/sync", { method: "POST" }],
+      [
+        "/api/v1/workspaces/ws_1/understanding/projections/reconcile",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      ],
+    ]);
+  });
+
+  it("HTTP 版投影協調被拒時保留 Runtime 的說明與錯誤代碼", async () => {
+    const body = { error: "projection_changed", message: "投影檔在檢視後又被修改" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .reconcileProjection("ws_1", { path: "GLOSSARY.md", action: "keep_external", expected_external_hash: "abc" })
+      .catch((e: unknown) => e);
+
+    expect((error as Error).message).toBe("投影檔在檢視後又被修改");
+    expect(errorCode(error)).toBe("projection_changed");
+  });
+
+  it("Tauri 版以指令與 camelCase 參數讀取專案理解與協調投影", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+    const request = { path: "docs/adr/0001-a.md", action: "keep_external" as const, expected_external_hash: "abc" };
+
+    await client.understanding("ws_1");
+    await client.syncUnderstanding("ws_1");
+    await client.reconcileProjection("ws_1", request);
+
+    expect(invoke.mock.calls).toEqual([
+      ["workspace_understanding", { workspaceId: "ws_1" }],
+      ["workspace_understanding_sync", { workspaceId: "ws_1" }],
+      ["workspace_projection_reconcile", { workspaceId: "ws_1", request }],
+    ]);
+  });
+
   const basis = { run_id: "run_1", generation: 2, contract_version: 3, artifacts: [{ artifact_id: "art_1", version: 1 }] };
 
   it("HTTP 版讀取驗證資料與手動接受：接受時以 JSON 送出 basis 與附註", async () => {

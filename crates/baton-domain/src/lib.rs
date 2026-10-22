@@ -43,6 +43,7 @@ pub mod storage_location;
 pub mod task;
 pub mod time;
 pub mod timeline;
+pub mod understanding;
 pub mod verification;
 pub mod workdir;
 pub mod workspace;

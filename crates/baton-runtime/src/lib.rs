@@ -230,6 +230,7 @@ impl Runtime {
             shutdown: stop_rx.clone(),
             exit_timing: options.exit_timing,
             exit_signal,
+            projection_lock: Arc::default(),
         });
         let task = tokio::spawn(async move {
             let _store = store; // 與 serve 同生命週期：停止後才釋放資料庫連線

@@ -242,6 +242,7 @@ pub(crate) async fn create(
     };
     let now = state.clock.now();
     let entry = state.store.create_knowledge(input, now).await?;
+    crate::understanding::sync_after_knowledge_change(&state, &entry).await;
     Ok((StatusCode::CREATED, Json(view(entry, now))))
 }
 
@@ -261,6 +262,7 @@ async fn apply(
 ) -> Result<Json<KnowledgeEntryView>, ApiError> {
     let now = state.clock.now();
     let entry = state.store.apply_knowledge_command(&id, expected_revision, command, now).await?;
+    crate::understanding::sync_after_knowledge_change(state, &entry).await;
     Ok(Json(view(entry, now)))
 }
 

@@ -20,6 +20,7 @@ use baton_domain::knowledge::{
     TOOL_SEARCH_KNOWLEDGE,
 };
 use baton_domain::message::{INBOX_MAX_LIMIT, MAX_RECIPIENTS};
+use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING};
 use baton_mcp_shim::{serve, ShimConfig};
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -154,6 +155,8 @@ async fn tools_list_has_the_twenty_one_tools_with_their_required_fields() {
             TOOL_DISPATCH_TASK,
             TOOL_CANCEL_TASK,
             TOOL_PROPOSE_DECISION_REQUEST,
+            TOOL_RECORD_UNDERSTANDING,
+            TOOL_GET_PROJECT_UNDERSTANDING,
         ]
     );
     for tool in tools {
@@ -252,6 +255,8 @@ async fn tools_list_has_the_twenty_one_tools_with_their_required_fields() {
         TOOL_DISPATCH_TASK,
         TOOL_CANCEL_TASK,
         TOOL_PROPOSE_DECISION_REQUEST,
+        TOOL_RECORD_UNDERSTANDING,
+        TOOL_GET_PROJECT_UNDERSTANDING,
     ] {
         let tool = tools.iter().find(|t| t["name"] == name).unwrap();
         assert!(tool["description"].as_str().unwrap().contains("Controller 專屬"), "{name}");
@@ -278,6 +283,13 @@ async fn tools_list_has_the_twenty_one_tools_with_their_required_fields() {
     assert_eq!(proposal["properties"]["blocking"]["type"], "array");
     assert_eq!(proposal["properties"]["blocking"]["minItems"], 1);
     assert_eq!(proposal["properties"]["blocking"]["maxItems"], BLOCKING_MAX_TASKS);
+    let understanding = schema(TOOL_RECORD_UNDERSTANDING);
+    assert_eq!(understanding["required"], json!(["section", "key"]));
+    assert_eq!(understanding["properties"]["section"]["enum"], json!(["brief", "glossary", "map"]));
+    assert_eq!(understanding["properties"]["status"]["enum"], json!(["confirmed", "hypothesis", "unknown", "retired"]));
+    assert_eq!(understanding["properties"]["status"]["default"], "hypothesis");
+    assert_eq!(understanding["properties"]["sources"]["type"], "array");
+    assert_eq!(schema(TOOL_GET_PROJECT_UNDERSTANDING), json!({"type":"object","properties":{}}));
 }
 
 #[tokio::test]
@@ -297,6 +309,12 @@ async fn controller_tools_forward_to_their_paths_with_credentials_and_unchanged_
             json!({"question":"要哪一家雲端？","reason":"影響成本","options":[{"id":"a","label":"甲"},{"id":"b","label":"乙"}],"blocking":["t1"]}),
             r#"{"decision_request_id":"d1","status":"waiting_decision"}"#,
         ),
+        (
+            TOOL_RECORD_UNDERSTANDING,
+            json!({"section":"glossary","key":"Run","text":"一次程序執行","status":"confirmed","sources":[{"path":"GLOSSARY.md","line":30}]}),
+            r#"{"changed":true}"#,
+        ),
+        (TOOL_GET_PROJECT_UNDERSTANDING, json!({}), r#"{"items":[]}"#),
     ];
     for (tool, arguments, response) in cases {
         let (url, log) = spawn_stub(200, response).await;
