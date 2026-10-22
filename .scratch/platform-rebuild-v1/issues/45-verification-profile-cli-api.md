@@ -1,6 +1,6 @@
 # 45: Verification Profile 與 CLI／API 驗證 Adapter
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R131-45-impl，2026-10-23 00:32）
 Blocked by: 43
 
 **What to build:** 專案維護 Verification Profile（啟動命令、doctor、就緒條件、資料準備、斷言、證據保存、teardown）與 Feature Map；實作 CLI／API Verification Adapter（spec D-29）：操作與判定分離、程式斷言優先；每步驟保存 verdict 與 reason_code（passed、product_failure、inconclusive、environment_blocked、auth_blocked、budget_exhausted、automation_unsupported）；Evidence Bundle 綁定 build、revision、需求與 profile 版本。清理只移除本 Run 的狀態並保留證據。
