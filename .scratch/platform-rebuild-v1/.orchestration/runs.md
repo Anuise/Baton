@@ -92,4 +92,5 @@
 | R088-26-integrate | 26 | integrate | Work-3 | 2026-10-22 18:53 | 2026-10-22 19:11 | DONE，依 AI-109 直接合併（改用票 24 的准入行為，AI-261） |
 | R089-21-verify | 21 | verify | Work-8 | 2026-10-22 18:57 | 2026-10-22 19:02 | PASS |
 | R090-15-verify | 15 | verify | Work-9 | 2026-10-22 18:58 | 2026-10-22 19:06 | PASS（基底早於票 21，依 AI-109 整合後合併） |
-| R091-15-integrate | 15 | integrate | Work-8 | 2026-10-22 19:06 | | |
+| R091-15-integrate | 15 | integrate | Work-8 | 2026-10-22 19:06 | 2026-10-22 19:11 | DONE（8b6aa3b），但票 26 隨後合併，需再整合 |
+| R092-15-integrate | 15 | integrate | Work-8 | 2026-10-22 19:11 | | |
