@@ -29,6 +29,7 @@ mod artifacts;
 mod profiles;
 mod runs;
 mod scheduling;
+mod shared_settings;
 mod tasks;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
@@ -355,6 +356,33 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'artifact_version 是追加式資料表，不可更新'); END;
         CREATE TRIGGER artifact_version_no_delete BEFORE DELETE ON artifact_version
         BEGIN SELECT RAISE(ABORT, 'artifact_version 是追加式資料表，不可刪除'); END;",
+    },
+    // 共同設定的每個採用版本不可變（改設定 = 採用新版本）；Run 與版本的綁定一經建立也不可更改（spec D-09）
+    Migration {
+        name: "shared_settings_version",
+        sql: "CREATE TABLE shared_settings_version (
+            version INTEGER PRIMARY KEY CHECK (version >= 1),
+            content_hash TEXT NOT NULL,
+            bundle TEXT NOT NULL CHECK (json_valid(bundle)),
+            sources TEXT NOT NULL CHECK (json_valid(sources)),
+            exclusions TEXT NOT NULL CHECK (json_valid(exclusions)),
+            adopted_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER shared_settings_version_no_update BEFORE UPDATE ON shared_settings_version
+        BEGIN SELECT RAISE(ABORT, 'shared_settings_version 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER shared_settings_version_no_delete BEFORE DELETE ON shared_settings_version
+        BEGIN SELECT RAISE(ABORT, 'shared_settings_version 是追加式資料表，不可刪除'); END;
+        CREATE TABLE run_settings_snapshot (
+            run_id TEXT PRIMARY KEY REFERENCES run (id),
+            version INTEGER NOT NULL REFERENCES shared_settings_version (version),
+            content_hash TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER run_settings_snapshot_no_update BEFORE UPDATE ON run_settings_snapshot
+        BEGIN SELECT RAISE(ABORT, 'run_settings_snapshot 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER run_settings_snapshot_no_delete BEFORE DELETE ON run_settings_snapshot
+        BEGIN SELECT RAISE(ABORT, 'run_settings_snapshot 是追加式資料表，不可刪除'); END;",
     },
 ];
 

@@ -6,10 +6,10 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`） |
-| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`）、PlatformInfo、SecretProtector、ClaudeEnvironment；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`） |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run 與成果瀏覽）、`/api/v1/scheduling`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`） |
+| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`，以及 `write_readonly_files`：把一組檔案寫成唯讀目錄）、PlatformInfo、SecretProtector、ClaudeEnvironment、UserSettingsSource（唯讀讀取使用者平常使用的 Claude Code 設定，只有白名單內的三個檔案）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照與成果瀏覽）、`/api/v1/scheduling`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-mcp-shim` | MCP 工具 shim（`baton-mcp-shim.exe`）：Claude Code 以 stdio 啟動，把工具呼叫轉送到 Runtime 的 Agent API；只依賴 `baton-domain` |
@@ -311,6 +311,73 @@ powershell -NoProfile -File scripts/with-msvc.ps1 cargo test -p baton-runtime --
 ```
 
 登入終端機會開啟真正的視窗，自動化測試不涵蓋；需要在 Windows 上手動按「在終端機登入」確認視窗出現、`CLAUDE_CONFIG_DIR` 是該 Profile 的目錄、登入後「重新核對」顯示原生登入與帳號（Validation Required）。
+
+### 共同設定與 Run 設定快照
+
+所有帳號的 Agent 應該有一致的行為基準，但每個 Profile 的 `CLAUDE_CONFIG_DIR` 只承載登入與 Session 狀態（spec D-09、使用者故事 6）。所以共同設定從使用者平常使用的 Claude Code 設定**匯入**，使用者在預覽中看到來源、排除項目與差異並**採用**後，成為不可變的**版本**；每個 Run 啟動時再把它准入的版本寫成該 Run 專屬的唯讀快照目錄。規則在 `baton_domain::shared_settings`（純邏輯），讀檔走 `UserSettingsSource` Port，持久化在 `baton-store` 的 `shared_settings.rs`，端點在 `baton-api` 的 `shared_settings.rs`。使用者的原始設定檔只被讀取、從不被修改（情境測試比對匯入前後的位元組）。
+
+**資料來源（白名單）**：`UserSettingsSource` 只讀下列三個檔案，Port 上沒有寫入能力，也沒有「列出目錄」之類的入口。
+
+| 檔案 | 取用內容 |
+| --- | --- |
+| `~\.claude\settings.json` | 偏好、hooks、plugins 與市集 |
+| `~\.claude\CLAUDE.md` | 全域指示（全文） |
+| `~\.claude.json` | **只取 `mcpServers`** |
+
+Runtime 的環境設了 `CLAUDE_CONFIG_DIR` 時，改讀該目錄下的 `settings.json`、`CLAUDE.md` 與 `.claude.json`（Claude Code 在這種情況下把 `.claude.json` 放在設定目錄之內）。**`.credentials.json` 永遠不讀；`.claude.json` 的其他欄位（登入帳號、使用者識別等）整份不讀**，不是讀進來再過濾。檔案不存在不是錯誤（該類別為空）；格式不是有效的 JSON 物件、不是 UTF-8 或預期是物件的欄位不是物件時，整次匯入失敗，不猜測、不部分匯入。
+
+**匯入類別**（`SettingsBundle`，每類各自保存）：偏好（`settings.json` 中除下列以外的欄位，含 `permissions` 與 `env` 中非登入的變數）、指示（`CLAUDE.md`）、hooks（依事件名稱分項）、MCP 伺服器（依伺服器名稱分項）、plugins（`enabledPlugins`）與市集（`extraKnownMarketplaces`）。內容雜湊是排序後標準 JSON 的 SHA-256，與來源檔的排版、鍵順序無關。
+
+**秘密處理**（匯入結果不得含任何登入秘密；測試以掃描驗證）：
+
+- 登入相關欄位一律排除：`settings.json` 的 `apiKeyHelper`、`awsAuthRefresh`、`awsCredentialExport`、`forceLoginMethod`、`forceLoginOrgUUID`、`otelHeadersHelper`、`oauthAccount`、`primaryApiKey`、`customApiKeyResponses`；`env` 中名稱以 `ANTHROPIC_`、`CLAUDE_CODE_OAUTH`、`CLAUDE_CODE_USE_`、`AWS_`、`GOOGLE_APPLICATION_CREDENTIALS` 開頭的變數（這些會改變實際認證來源，讓 Profile 的原生登入失效）。原因代碼 `login_related`。
+- **名稱像秘密**的字串欄位（名稱含 `apikey`、`secret`、`password`、`credential`、`authorization`、`cookie`、`token`（不含複數 `tokens`，例如 `MAX_OUTPUT_TOKENS` 是用量上限）等，忽略大小寫與 `-`、`_`）：只丟掉該欄位，其餘內容保留。原因代碼 `secret_key`。
+- **內容像秘密**的字串（已知服務金鑰前綴如 `sk-ant-`、`ghp_`、`xoxb-`、`AKIA…`、JWT、`Bearer` 加長字串、PEM 私鑰、網址中的 `user:password@`、`--api-key=…` 這類參數）：該項目**整個排除**（整個 hook 事件、整個 MCP 伺服器、整份 `CLAUDE.md`），因為無法確定其餘內容是否安全。原因代碼 `secret_value`。
+- `${VAR}` 形式的環境變數參照（可帶 `Bearer ` 前綴）視為非秘密並保留，因為它不含秘密本身。
+- 排除紀錄只有「來源、項目路徑（例如 `env.ANTHROPIC_API_KEY`、`mcpServers.gh.env.GITHUB_TOKEN`）、原因」，**絕不含值**；來源只記錄檔案路徑與位元組的 SHA-256。
+
+**限制（誠實說明）**：「名稱像秘密」與「內容像秘密」都是啟發式規則，只看形狀、不查證，**不保證抓得到所有秘密**。名稱不像秘密、內容也不符合已知格式的秘密（例如自訂格式的內部 token 放在 `CLAUDE.md` 或 hook 指令中）會被匯入。防線因此是三層：來源白名單（根本不讀登入檔）、登入欄位排除，最後才是啟發式遮蔽；採用前使用者應檢視預覽中的內容。
+
+桌面憑證專用的端點（Agent 憑證得到 403）：
+
+| 端點 | 用途 |
+| --- | --- |
+| `GET /api/v1/shared-settings` | 已採用的版本摘要（由舊到新，含各類別項目數與排除數）與最新版本 `current` |
+| `POST /api/v1/shared-settings/import-preview` | 預覽匯入，**不保存任何東西**：來源（路徑、是否存在、SHA-256）、排除清單、候選內容、`candidate_hash`、與最新版本的差異（`diff`，每項有類別、名稱、新增／移除／變更與前後內容）、`changed` |
+| `POST /api/v1/shared-settings/adopt` | `{ "expected_hash": <預覽的 candidate_hash> }`；重新讀取來源，雜湊相同才建立新版本，回 201 與完整版本 |
+| `GET /api/v1/shared-settings/versions/{version}` | 某個版本的完整內容、來源與排除清單 |
+| `POST /api/v1/workspaces/{id}/runs/{run_id}/settings-snapshot` | 為 Run 產生唯讀設定快照；JSON 本文 `{ "version"? }`（可為 `{}`，省略時用最新版本）；第一次建立回 201，之後回同一個綁定 200 |
+
+錯誤一律是 `{ "error", "message" }`：
+
+| 代碼 | 狀態 | 情境 |
+| --- | --- | --- |
+| `settings_source_changed` | 409 | 採用時來源已和預覽不同（`expected_hash` 不符）；請重新預覽、確認差異後再採用 |
+| `settings_source_invalid` | 422 | 來源檔格式不是預期的（無效 JSON、不是物件、不是 UTF-8） |
+| `settings_source_unreadable` | 500 | 來源檔存在但無法讀取（例如權限） |
+| `settings_version_not_found` | 404 | 指定的版本不存在（讀版本、或快照指定了不存在的版本） |
+| `shared_settings_not_adopted` | 409 | 還沒有採用任何版本，卻要求最新版本的快照 |
+| `settings_snapshot_pinned` | 409 | Run 已固定使用某版本，要求改用別的版本 |
+| `settings_snapshot_failed` | 500 | 無法寫入快照目錄 |
+
+**版本不可變**：版本存在追加式的 `shared_settings_version` 表（版本號從 1 連續遞增；觸發器禁止更新與刪除），採用時在同一交易追加 `shared_settings_adopted` 事件（`aggregate_type = 'shared_settings'`，聚合版本 = 版本號）。**每次採用都建立新版本**，即使內容與目前版本相同（預覽的 `changed` 會告知這一點）；舊版本內容永遠不變。**採用必須帶預覽的 `candidate_hash`**：使用者採用的一定是他看過的內容，預覽之後來源檔有任何改變，採用就被拒絕。
+
+**Run 設定快照**：`settings-snapshot` 把版本渲染成 `<資料目錄>\run-settings\<run_id>\`，只包含有內容的類別檔案，外加清單：
+
+| 檔案 | 內容 |
+| --- | --- |
+| `settings.json` | 偏好、hooks、plugins 與市集 |
+| `mcp.json` | `{ "mcpServers": … }` |
+| `CLAUDE.md` | 全域指示 |
+| `manifest.json` | 版本、內容雜湊與上列每個檔案的 SHA-256（供核對） |
+
+渲染完全由版本內容決定（鍵排序、固定縮排），同一版本永遠得到相同的位元組；`bundle_from_snapshot_files` 可從目錄還原內容核對版本雜湊。寫入由 `WorkspaceFs::write_readonly_files` 完成：先寫到同層的 `<run_id>.staging`、每個檔案 `fsync` 並設為唯讀屬性，才改名成正式目錄，最後把目錄也設為唯讀，所以讀取端不會看到寫到一半的目錄。Run 與版本的綁定存在追加式的 `run_settings_snapshot` 表（觸發器禁止更新與刪除）：**Run 第一次產生快照時綁定版本，之後再採用新版本也不影響它**；再次呼叫回傳同一個綁定，要求別的版本回 409 `settings_snapshot_pinned`。快照端點目前由 API 呼叫，Run 准入流程尚未自動呼叫它。
+
+> **Validation Required**（spec D-09）：
+>
+> - 快照目錄在 Windows 上只靠**檔案的唯讀屬性**保護：它能阻止直接覆寫檔案（情境測試驗證），但**不阻止刪除檔案**（實測 Rust 標準函式庫的刪除會忽略唯讀屬性，Node 的 `unlink` 也會先取消它）、**目錄本身無法阻止新增檔案**，唯讀屬性也不是安全邊界（同一 Windows 使用者可以取消它）。快照檔的內容雜湊記在 `manifest.json`，可用來偵測被竄改或刪除，但目前沒有任何流程自動核對（AI-114）。
+> - Claude Code 是否能完全阻擋使用者層設定（`~\.claude\settings.json` 等）的合併與熱重載，**尚未實測**；在實測之前不可宣稱 Run 的設定已被固定。無法維持時，依 D-09 必須阻擋並顯示，不宣稱固定成功。
+> - Adapter 啟動 Run 時如何以設定參數把快照檔傳給 Claude Code，**尚未接上**（屬後續票，正式執行檔的 AgentAdapter 仍是「尚未實作」）。
 
 ### 本機 API 的存取防護
 

@@ -181,6 +181,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         platform_info: Arc::new(WindowsPlatformInfo),
         secret_protector: protector.clone(),
         claude_env: Arc::new(NativeLoginEnv),
+        user_settings: Arc::new(baton_ports::DirUserSettingsSource::new("unused", "unused")),
     };
     let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
     let runtime = Runtime::start_with(
