@@ -61,3 +61,7 @@
 
 ## 16. Controller 工具與 spec D-05 的落差（票 17，AI-327）
 - Controller 憑證目前只能呼叫 6 個 Controller 工具與 `permission_prompt`；spec D-05 列為共同工具的 `search_knowledge`、`send_message`、`read_inbox` 對 Controller 不可用，`accept_artifact` 與 Controller 版 `record_lesson_candidate` 尚未實作。確認後續票是否涵蓋，否則補上或在 spec 註記。
+
+## 17. 時間線查詢效能與歸屬（票 41）
+- `read_timeline` 每次讀全庫的 TIMELINE_AGGREGATES 事件與全部 task，在 Rust 端過濾；事件量大時會變慢，改為 SQL 端依 Workspace／Task 篩選。
+- 擋多個 Task 的裁定請求只歸屬到發起的 Task，其他被擋的 Task 時間線看不到。
