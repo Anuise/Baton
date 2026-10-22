@@ -14,6 +14,7 @@ use baton_api::{
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_path, task_ready_path, tasks_path, QueuedDispatch,
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
+    BackupStatus, BACKUPS_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PlatformResponse, ProfileList,
@@ -259,6 +260,11 @@ impl RuntimeClient {
     /// 排程總覽：容量、各帳號進行中的 Run、佇列與等待原因。
     pub async fn scheduling(&self) -> Result<SchedulingOverview, ClientError> {
         self.get_json(SCHEDULING_PATH).await
+    }
+
+    /// 設定頁的備份狀態：現有備份（由新到舊）與最新一次還原演練（票 40）。
+    pub async fn backups(&self) -> Result<BackupStatus, ClientError> {
+        self.get_json(BACKUPS_PATH).await
     }
 
     /// 切換容量預設（較高並行／保留交接容量），回傳切換後的排程總覽。

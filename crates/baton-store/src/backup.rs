@@ -209,18 +209,18 @@ fn artifact_entries(conn: &Connection) -> BackupResult<Vec<ArtifactFileEntry>> {
     Ok(entries)
 }
 
-/// 把成果複製成以雜湊命名的副本；已經有相同大小的副本就沿用（成果不可變）。
+/// 把成果複製成以雜湊命名的副本；已經有內容相符的副本就沿用（成果不可變），損毀的副本以成果檔案重寫。
 /// 成果檔案不見了或內容與 manifest 不符時不複製：備份照常完成，還原演練會把它報告為雜湊不一致。
 fn store_blob(source: &Path, blobs: &Path, entry: &ArtifactFileEntry) -> BackupResult<()> {
+    let matches = |bytes: &[u8]| bytes.len() as i64 == entry.size_bytes && sha256_hex(bytes) == entry.sha256;
     let target = blobs.join(&entry.sha256);
-    if std::fs::metadata(&target).is_ok_and(|m| m.len() as i64 == entry.size_bytes) {
+    if std::fs::read(&target).is_ok_and(|existing| matches(&existing)) {
         return Ok(());
     }
-    let Ok(bytes) = std::fs::read(source) else { return Ok(()) };
-    if bytes.len() as i64 != entry.size_bytes || sha256_hex(&bytes) != entry.sha256 {
-        return Ok(());
+    match std::fs::read(source) {
+        Ok(bytes) if matches(&bytes) => write_atomic(&target, &bytes),
+        _ => Ok(()),
     }
-    write_atomic(&target, &bytes)
 }
 
 /// 先寫暫存、fsync、再改名（已存在的目標會被取代）。

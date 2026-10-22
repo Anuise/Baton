@@ -10,7 +10,7 @@ use std::time::Duration;
 use baton_api::{
     AdmissionReport, ArtifactList, ArtifactPreview, AuthorizationView, ConfirmAuthorizationRequest, CreateProfileRequest,
     CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview, LoginTerminalResponse, PlatformResponse,
-    ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
+    BackupStatus, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOutcome, RuntimeClient};
 use baton_credential::DpapiProtector;
@@ -427,6 +427,15 @@ async fn scheduling_overview(link: State<'_, RuntimeLink>) -> Result<SchedulingO
     link.client.scheduling().await.map_err(|e| e.to_string())
 }
 
+/// Web UI 讀取設定頁的備份狀態：現有備份與最新一次還原演練（票 40）。
+#[tauri::command]
+async fn backup_status(link: State<'_, RuntimeLink>) -> Result<BackupStatus, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.backups().await.map_err(|e| e.to_string())
+}
+
 /// Web UI 切換容量預設（`reserve_handoff` 或 `higher_concurrency`）。
 #[tauri::command]
 async fn scheduling_set_mode(link: State<'_, RuntimeLink>, mode: CapacityMode) -> Result<SchedulingOverview, String> {
@@ -549,6 +558,7 @@ fn main() {
             run_cancel,
             scheduling_overview,
             scheduling_set_mode,
+            backup_status,
             artifact_list,
             artifact_preview,
             artifact_download,
