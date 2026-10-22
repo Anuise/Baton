@@ -43,6 +43,8 @@ pub struct LocalBrowserDriver {
     /// Node.js 執行檔（CreateProcessW 依 PATH 尋找）。
     program: String,
     sessions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Runner>>>>,
+    /// 各 Session 實際使用的引擎（Runner 開啟時回報；票 48）。
+    engines: Mutex<HashMap<String, String>>,
     next_session: AtomicU64,
     /// Session 識別的前綴：每個 Runtime 實例不同，承接者才能分辨一個 Session 是不是目前的 Runtime 開啟的（票 49）。
     prefix: String,
@@ -53,6 +55,7 @@ impl Default for LocalBrowserDriver {
         Self {
             program: "node".to_string(),
             sessions: Mutex::default(),
+            engines: Mutex::default(),
             next_session: AtomicU64::new(1),
             prefix: format!("browser-{}-", crate::verification_driver::instance_tag()),
         }
@@ -156,6 +159,9 @@ impl BrowserDriver for LocalBrowserDriver {
         if response.get("ok").and_then(Value::as_bool) != Some(true) {
             return Err(failed(message_of(&response)));
         }
+        if let Some(engine) = response.get("engine").and_then(Value::as_str) {
+            self.engines.lock().expect("引擎表不會中毒").insert(id.clone(), engine.to_string());
+        }
         self.sessions.lock().expect("Session 表不會中毒").insert(id.clone(), Arc::new(tokio::sync::Mutex::new(runner)));
         Ok(BrowserSession(id))
     }
@@ -184,6 +190,7 @@ impl BrowserDriver for LocalBrowserDriver {
 
     async fn close(&self, session: &BrowserSession) -> PortResult<Vec<BrowserFile>> {
         let runner = self.sessions.lock().expect("Session 表不會中毒").remove(&session.0);
+        self.engines.lock().expect("引擎表不會中毒").remove(&session.0);
         let Some(runner) = runner else {
             // 這個 Runtime 開啟、已經關閉的 Session：重複關閉無害。其他 Runtime 開啟的 Session 無法確認已關閉
             return if session.0.starts_with(&self.prefix) {
@@ -212,6 +219,10 @@ impl BrowserDriver for LocalBrowserDriver {
             files.push(BrowserFile { kind: kind.to_string(), name, bytes });
         }
         Ok(files)
+    }
+
+    fn engine(&self, session: &BrowserSession) -> Option<String> {
+        self.engines.lock().expect("引擎表不會中毒").get(&session.0).cloned()
     }
 }
 

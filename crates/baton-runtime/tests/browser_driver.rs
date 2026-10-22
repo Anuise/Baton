@@ -91,6 +91,9 @@ async fn a_session_drives_a_real_browser_and_returns_its_trace_and_video() {
         }
         Err(error) => panic!("{error}"),
     };
+    // 回報實際使用的引擎（票 48 錄製身分的一部分）
+    let engine = driver.engine(&session).expect("開啟後回報引擎");
+    assert!(engine.starts_with("playwright ") && engine.contains("chromium"), "{engine}");
 
     // 導覽：狀態碼、標題、可見文字、可見性與遮罩截圖
     let goto = BrowserCommand::Goto { url: format!("http://{site}/login") };
@@ -143,6 +146,7 @@ async fn a_session_drives_a_real_browser_and_returns_its_trace_and_video() {
     let again = driver.step(&session, step(BrowserCommand::Goto { url: format!("http://{site}/login") }, &[], None)).await;
     assert!(again.is_err());
     assert!(driver.close(&session).await.unwrap().is_empty());
+    assert_eq!(driver.engine(&session), None, "關閉後不再回報引擎");
 }
 
 /// 以 Windows 內建的 bsdtar 解開 trace，確認輸入過的密碼（含表單編碼）沒有留在任何項目中。

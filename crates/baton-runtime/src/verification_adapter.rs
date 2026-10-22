@@ -14,6 +14,15 @@
 //!   證據檔案含有值或可能記錄了輸入的秘密時不保存。
 //! - 語意 judge：輸入只有當前畫面與 Profile 中的固定預期；模型限流之後同一次嘗試不再呼叫模型。
 //!
+//! 已驗證動作重播（票 48）：
+//! - 目標導向動作（`act`）先查這個案例的錄製：身分一致、狀態 valid、不是正式環境（或步驟個別允許）時重播錄製的動作，
+//!   仍實際執行並重新檢查後置條件；動作無法完成或後置條件明確不成立時把錄製標為 stale。身分不一致時標為 stale、不沿用。
+//! - 沒有可用的錄製時由模型依當前畫面規劃一個具體動作（只能點擊、輸入或按鍵）；步驟通過而且有不靠模型的斷言成立，
+//!   才把這個動作錄製下來。錄製的變更隨 Bundle 一起保存。
+//! - `no_live_model`：這次驗證的模型 Port 換成一律拒絕的實作，而且每個需要模型的地方在呼叫前就擋下（記為
+//!   `live_model_disabled`，計入 `blocked_model_calls`），所以不會有任何即時模型呼叫。
+//! - 用量分開計算：實際的模型呼叫、模型決定的動作、重播的動作與被擋下的模型呼叫。
+//!
 //! 嘗試與交接（票 49，規則在 `baton_domain::verification_attempt`）：
 //! - 每個完成的步驟與判定、build、啟動的服務與瀏覽器 Session（只有識別）、證據檔案、完成的旅程都依序寫入這次嘗試的日誌；
 //!   外部操作（`external` 的旅程步驟）在送出前寫入，寫不進去就不送出。
@@ -24,9 +33,15 @@
 //!   旅程依 `plan_journey` 沿用、從新的 fixture 整條重跑，或不重送已開始的外部操作。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+
 use baton_domain::artifact::sha256_hex;
+use baton_domain::verification_profile::replay::{
+    self, ActionRecord, ActionSource, CacheState, RecordedAction, ReplayDecision, ReplayEntry, VerificationUsage,
+};
 use baton_domain::handoff::GateState;
 use baton_domain::verification_attempt::{self as va, Attempt, AttemptStatus, JournalEntry, JourneyPlan, Takeover};
 use baton_domain::verification_profile::{
@@ -35,8 +50,9 @@ use baton_domain::verification_profile::{
     Step, StepRecord, Verdict,
 };
 use baton_ports::{
-    BrowserCommand, BrowserOutcome, BrowserSession, BrowserSessionRequest, BrowserStep, CommandOutput, CommandRequest,
-    HttpOutcome, HttpRequest, JudgeAccount, JudgeOutcome, JudgeRequest, PageSnapshot, Ports, ServiceHandle, ServiceRequest,
+    ActionPlan, ActionRequest, BrowserCommand, BrowserOutcome, BrowserSession, BrowserSessionRequest, BrowserStep,
+    CommandOutput, CommandRequest, HttpOutcome, HttpRequest, JudgeAccount, JudgeOutcome, JudgeRequest, PageSnapshot,
+    PortResult, Ports, SemanticJudge, ServiceHandle, ServiceRequest,
 };
 use baton_store::{PendingVerificationRun, Store, StoreResult};
 
@@ -51,7 +67,7 @@ pub struct ExecutionContext<'a> {
     pub data_dir: &'a Path,
     /// 成果儲存的根目錄；證據檔案寫在其下的 `verification\`。
     pub artifacts_root: &'a Path,
-    /// 語意 judge 使用的帳號；沒有可用帳號時為 `None`（需要 judge 的斷言無法判定）。
+    /// 模型呼叫（語意 judge 與動作規劃）使用的帳號；沒有可用帳號時為 `None`（需要模型的斷言與動作無法判定）。
     pub judge_account: Option<JudgeAccount>,
     /// 控制資料庫：寫入這次嘗試的日誌、判斷有沒有承接帳號（票 49）。
     pub store: &'a Store,
@@ -82,6 +98,30 @@ pub async fn judge_accounts(store: &Store, excluded: &[String]) -> StoreResult<V
         .collect())
 }
 
+/// `no_live_model` 時取代模型 Port 的實作：一律拒絕，不呼叫任何模型（票 48）。
+struct NoLiveModel;
+
+const NO_LIVE_MODEL: &str = "no_live_model：這次驗證禁止即時模型呼叫";
+
+#[async_trait]
+impl SemanticJudge for NoLiveModel {
+    async fn judge(&self, _request: JudgeRequest) -> PortResult<JudgeOutcome> {
+        Ok(JudgeOutcome::Unavailable { reason: NO_LIVE_MODEL.into() })
+    }
+
+    async fn plan(&self, _request: ActionRequest) -> PortResult<ActionPlan> {
+        Ok(ActionPlan::Unavailable { reason: NO_LIVE_MODEL.into() })
+    }
+}
+
+/// 最近一次觀察到的畫面（動作規劃的輸入）。
+#[derive(Default)]
+struct PageView {
+    url: String,
+    title: String,
+    text: String,
+}
+
 /// 目前旅程的瀏覽器 Session。
 struct Browser {
     session: BrowserSession,
@@ -92,6 +132,10 @@ struct Browser {
     secret_shown: bool,
     /// 截圖時遮住的 selector（政策指定的，加上輸入過秘密的欄位）。
     mask: Vec<String>,
+    /// Runner 回報的引擎（錄製身分的一部分）。
+    engine: String,
+    /// 最近一次觀察到的畫面。
+    page: PageView,
 }
 
 /// 執行中的一次驗證。
@@ -106,11 +150,19 @@ struct Execution<'a> {
     artifacts_root: PathBuf,
     /// 剩餘的操作次數（不含 teardown）。
     budget: u32,
-    /// 剩餘的模型呼叫次數。
+    /// 剩餘的模型呼叫次數（語意判斷與動作規劃共用）。
     model_budget: u32,
     judge_account: Option<JudgeAccount>,
-    /// 這次嘗試中模型已經限流：之後的語意判斷不再呼叫模型。
+    /// 這次嘗試中模型已經限流：之後的語意判斷與動作規劃不再呼叫模型。
     judge_rate_limited: bool,
+    /// 模型 Port；`no_live_model` 時是一律拒絕的實作。
+    model: Arc<dyn SemanticJudge>,
+    /// 禁止即時模型呼叫（票 48）。
+    no_live_model: bool,
+    /// 這個 Workspace 目標導向動作的錄製。
+    replay: &'a [ReplayEntry],
+    actions: Vec<ActionRecord>,
+    usage: VerificationUsage,
     store: &'a Store,
     attempt: u32,
     /// 這個要求中限流過的帳號（不能承接）。
@@ -154,14 +206,47 @@ fn redact(text: &str, policy: &EvidencePolicy) -> String {
     text
 }
 
-fn browser_command(action: &BrowserAction) -> BrowserCommand {
-    match action.clone() {
+/// 具體的瀏覽器操作；目標導向動作沒有對應的操作（由 `run_act` 先規劃或取出錄製）。
+fn browser_command(action: &BrowserAction) -> Option<BrowserCommand> {
+    Some(match action.clone() {
         BrowserAction::Goto { url } => BrowserCommand::Goto { url },
         BrowserAction::Click { selector } => BrowserCommand::Click { selector },
         BrowserAction::Fill { selector, text } => BrowserCommand::Fill { selector, text },
         BrowserAction::Press { selector, key } => BrowserCommand::Press { selector, key },
         BrowserAction::WaitFor { selector } => BrowserCommand::WaitFor { selector },
+        BrowserAction::Act { .. } => return None,
+    })
+}
+
+/// 模型規劃的操作轉成可錄製的動作。
+fn planned_action(command: &BrowserCommand) -> BrowserAction {
+    match command.clone() {
+        BrowserCommand::Goto { url } => BrowserAction::Goto { url },
+        BrowserCommand::Click { selector } => BrowserAction::Click { selector },
+        BrowserCommand::Fill { selector, text } => BrowserAction::Fill { selector, text },
+        BrowserCommand::Press { selector, key } => BrowserAction::Press { selector, key },
+        BrowserCommand::WaitFor { selector } => BrowserAction::WaitFor { selector },
     }
+}
+
+/// 動作的一行描述（證據中保存遮蔽後的版本）。
+fn action_description(action: &BrowserAction) -> String {
+    Operation::Browser { action: action.clone(), timeout_ms: None }.describe()
+}
+
+/// 沒有執行操作的步驟紀錄，附上說明與來源代碼。
+fn not_run_with(
+    phase: Phase,
+    journey: &str,
+    step: &Step,
+    (verdict, reason_code, engine_code): (Verdict, &str, Option<&str>),
+    output: &str,
+    policy: &EvidencePolicy,
+) -> StepRecord {
+    let mut record = vp::not_run(phase, Some(journey), step, verdict, reason_code, policy);
+    record.engine_code = engine_code.map(str::to_string);
+    record.output = vp::sanitize(output, policy);
+    record
 }
 
 impl Execution<'_> {
@@ -190,8 +275,11 @@ impl Execution<'_> {
                 }
             }
             Operation::Browser { action, .. } => {
+                let Some(command) = browser_command(&action) else {
+                    return (Observation::Unsupported { reason: "目標導向動作需要先規劃或重播".into() }, None);
+                };
                 let entered_secret = !operation.secret_keys().is_empty();
-                return self.observe_browser(&action, entered_secret, operation.filled_selector(), timeout, assertions).await;
+                return self.observe_browser(command, entered_secret, operation.filled_selector(), timeout, assertions).await;
             }
             Operation::Manual { instruction } => {
                 Observation::Unsupported { reason: format!("Adapter 無法自動執行人工步驟：{instruction}") }
@@ -203,7 +291,7 @@ impl Execution<'_> {
     /// 執行瀏覽器操作，觀察當前畫面，再以畫面做語意判斷。畫面顯示秘密時，這個 Session 標記為顯示過秘密。
     async fn observe_browser(
         &mut self,
-        action: &BrowserAction,
+        command: BrowserCommand,
         entered_secret: bool,
         filled: Option<&str>,
         timeout: Duration,
@@ -228,7 +316,7 @@ impl Execution<'_> {
             })
             .collect();
         let step = BrowserStep {
-            command: browser_command(action),
+            command,
             timeout,
             visible: visible.clone(),
             screenshot_mask: screenshots.then(|| browser.mask.clone()),
@@ -236,6 +324,7 @@ impl Execution<'_> {
         let session = browser.session.clone();
         match self.ports.browser_driver.step(&session, step).await {
             Ok(BrowserOutcome::Done { mut page }) => {
+                self.remember(&page);
                 let screenshot = self.screenshot(&mut page);
                 let judgements = self.judge(assertions, &page).await;
                 let observation = Observation::Page {
@@ -248,12 +337,27 @@ impl Execution<'_> {
                 (observation, screenshot)
             }
             Ok(BrowserOutcome::ActionFailed { error, message, page }) => {
+                if let Some(page) = &page {
+                    self.remember(page);
+                }
                 let screenshot = page.and_then(|mut p| self.screenshot(&mut p));
                 (Observation::ActionFailed { error, message }, screenshot)
             }
             Ok(BrowserOutcome::Unreachable { reason }) => (Observation::Unreachable { reason }, None),
             Ok(BrowserOutcome::TimedOut) => (Observation::TimedOut { output: String::new() }, None),
             Err(error) => (Observation::ActionFailed { error: "RunnerError".into(), message: error.to_string() }, None),
+        }
+    }
+
+    /// 記下目前 Session 最近一次的畫面（已遮蔽秘密），作為之後動作規劃的輸入。
+    fn remember(&mut self, page: &PageSnapshot) {
+        let view = PageView {
+            url: redact(&page.url, &self.policy),
+            title: redact(&page.title, &self.policy),
+            text: redact(&page.text, &self.policy).chars().take(vp::JUDGE_PAGE_TEXT_MAX_CHARS).collect(),
+        };
+        if let Some(browser) = self.browser.as_mut() {
+            browser.page = view;
         }
     }
 
@@ -271,13 +375,17 @@ impl Execution<'_> {
         let mut judgements = Vec::new();
         for assertion in assertions {
             let Assertion::Judge { expectation } = assertion else { continue };
-            let judgement = if self.judge_rate_limited {
+            let judgement = if self.no_live_model {
+                self.usage.blocked_model_calls += 1;
+                Judgement::LiveModelDisabled
+            } else if self.judge_rate_limited {
                 Judgement::RateLimited
             } else if self.model_budget == 0 {
                 Judgement::BudgetExhausted
             } else if let Some(account) = self.judge_account.clone() {
                 let profile_id = account.profile_id.clone();
                 self.model_budget -= 1;
+                self.usage.live_model_calls += 1;
                 let text: String = redact(&page.text, &self.policy).chars().take(vp::JUDGE_PAGE_TEXT_MAX_CHARS).collect();
                 let request = JudgeRequest {
                     account,
@@ -287,7 +395,7 @@ impl Execution<'_> {
                     page_title: redact(&page.title, &self.policy),
                     page_text: text,
                 };
-                match self.ports.semantic_judge.judge(request).await {
+                match self.model.judge(request).await {
                     Ok(JudgeOutcome::Decided { satisfied, rationale }) => Judgement::Decided { satisfied, rationale },
                     Ok(JudgeOutcome::RateLimited { .. }) => {
                         self.judge_rate_limited = true;
@@ -327,18 +435,156 @@ impl Execution<'_> {
                 return self.skip(phase, journey, step, Verdict::Inconclusive, va::REASON_JOURNAL_UNAVAILABLE).await;
             }
         }
+        if let (true, Some(journey)) = (operation.is_act(), journey) {
+            return self.run_act(phase, journey, step, &operation).await;
+        }
         if automated {
             self.budget -= 1;
         }
         let (observation, screenshot) = self.observe(&operation, &step.assertions).await;
         let record = vp::judge_step(phase, journey, step, &operation, observation, 1, &self.policy);
+        self.keep_screenshot(journey, step, &record, screenshot).await;
+        self.push(record).await
+    }
+
+    /// 依政策保存步驟的截圖。
+    async fn keep_screenshot(&mut self, journey: Option<&str>, step: &Step, record: &StepRecord, screenshot: Option<Screenshot>) {
         if let Some(Screenshot { bytes, shows_secret }) = screenshot {
             if self.policy.screenshots == ScreenshotPolicy::EveryStep || record.verdict != Verdict::Passed {
                 let name = format!("{}-{}.png", journey.unwrap_or("profile"), step.key);
                 self.store_artifact(EvidenceArtifactKind::Screenshot, journey, Some(&step.key), name, bytes, shows_secret).await;
             }
         }
+    }
+
+    /// 目標導向動作（票 48）：有可用的錄製時重播，否則由模型規劃；`operation` 已代換佔位字。操作預算已確認足夠。
+    async fn run_act(&mut self, phase: Phase, journey: &str, step: &Step, operation: &Operation) -> Verdict {
+        let definition = self.definition;
+        let Operation::Browser { action: BrowserAction::Act { goal, params, replay_in_production }, .. } = operation else {
+            unreachable!("run_act 只處理目標導向動作");
+        };
+        let engine = self.browser.as_ref().map_or(replay::UNKNOWN_ENGINE.to_string(), |b| b.engine.clone());
+        let identity = definition
+            .journey(journey)
+            .and_then(|j| replay::identity(definition, j, step, &engine))
+            .expect("目標導向步驟屬於這條旅程");
+        let case_key = replay::case_key(journey, &step.key);
+        let entry = self.replay.iter().find(|e| e.case_key == case_key);
+        let mut action_record = ActionRecord {
+            journey: journey.to_string(),
+            step: step.key.clone(),
+            goal: vp::sanitize(&identity.goal, &self.policy),
+            cache: CacheState::None,
+            source: None,
+            action: None,
+            stale_reasons: Vec::new(),
+            recorded: None,
+        };
+        let timeout = Duration::from_millis(operation.effective_timeout_ms());
+        let decision = replay::decide(entry, &identity, definition.replay.production, *replay_in_production);
+        let (action, source) = match decision {
+            ReplayDecision::Replay(action) => {
+                action_record.cache = CacheState::Valid;
+                self.usage.replayed_actions += 1;
+                (action, ActionSource::Replay)
+            }
+            ReplayDecision::Live { cache, stale } => {
+                action_record.cache = cache;
+                action_record.stale_reasons = stale;
+                match self.plan(goal, params).await {
+                    Ok(action) => {
+                        self.usage.live_actions += 1;
+                        (action, ActionSource::Live)
+                    }
+                    Err((verdict, output)) => {
+                        let record = not_run_with(phase, journey, step, verdict, &output, &self.policy);
+                        self.actions.push(action_record);
+                        return self.push(record).await;
+                    }
+                }
+            }
+        };
+        self.budget -= 1;
+        let description = action_description(&action);
+        let shown = vp::sanitize(&description, &self.policy);
+        action_record.source = Some(source);
+        action_record.action = Some(shown.clone());
+        let command = browser_command(&action).expect("錄製與規劃的動作都是具體操作");
+        let (observation, screenshot) = self.observe_browser(command, false, None, timeout, &step.assertions).await;
+        let record = vp::judge_step(phase, Some(journey), step, operation, observation, 1, &self.policy);
+        match source {
+            ActionSource::Replay if replay::disproven(&record) => {
+                action_record.stale_reasons.push("postcondition_failed".into());
+            }
+            // 只錄製被後續有效斷言證明、而且不含秘密的動作
+            ActionSource::Live if replay::proven(&record) && shown == description => {
+                action_record.recorded = Some(RecordedAction { identity, action });
+            }
+            _ => {}
+        }
+        let record = replay::settle(record, source);
+        self.keep_screenshot(Some(journey), step, &record, screenshot).await;
+        self.actions.push(action_record);
         self.push(record).await
+    }
+
+    /// 由模型依當前畫面為目標規劃一個具體動作；無法規劃時回傳 (判定, reason_code, engine_code) 與說明。
+    #[allow(clippy::type_complexity)]
+    async fn plan(
+        &mut self,
+        goal: &str,
+        params: &std::collections::BTreeMap<String, String>,
+    ) -> Result<BrowserAction, ((Verdict, &'static str, Option<&'static str>), String)> {
+        if self.no_live_model {
+            self.usage.blocked_model_calls += 1;
+            let reason = "no_live_model：沒有可用的錄製，而且這次驗證不呼叫模型".to_string();
+            return Err(((Verdict::Inconclusive, "live_model_disabled", Some("model:disabled")), reason));
+        }
+        if self.judge_rate_limited {
+            return Err(((Verdict::Inconclusive, "planner_rate_limited", Some("model:rate_limited")), "模型限流，沒有規劃".into()));
+        }
+        if self.model_budget == 0 {
+            let reason = "模型呼叫預算已用盡，沒有規劃".to_string();
+            return Err(((Verdict::BudgetExhausted, "model_call_budget_exhausted", Some("model:budget_exhausted")), reason));
+        }
+        let unavailable = |reason: String| ((Verdict::Inconclusive, "planner_unavailable", Some("model:unavailable")), reason);
+        let Some(account) = self.judge_account.clone() else {
+            return Err(unavailable("沒有可用的帳號規劃動作".into()));
+        };
+        let profile_id = account.profile_id.clone();
+        self.model_budget -= 1;
+        self.usage.live_model_calls += 1;
+        let page = self.browser.as_ref().map(|b| &b.page);
+        let request = ActionRequest {
+            account,
+            goal: goal.to_string(),
+            params: params.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            persona: self.persona.clone(),
+            page_url: page.map(|p| p.url.clone()).unwrap_or_default(),
+            page_title: page.map(|p| p.title.clone()).unwrap_or_default(),
+            page_text: page.map(|p| p.text.clone()).unwrap_or_default(),
+        };
+        match self.model.plan(request).await {
+            Ok(ActionPlan::Planned { command, .. }) => {
+                let action = planned_action(&command);
+                if replay::plannable(&action) {
+                    Ok(action)
+                } else {
+                    Err(unavailable(format!("模型選了不允許的動作：{}", action_description(&action))))
+                }
+            }
+            Ok(ActionPlan::Unachievable { rationale }) => {
+                Err(((Verdict::Inconclusive, "act_not_achievable", Some("model:unachievable")), rationale))
+            }
+            Ok(ActionPlan::RateLimited { .. }) => {
+                // 與語意 judge 相同（票 49）：另有帳號可以接手時，這個步驟之後交接
+                self.judge_rate_limited = true;
+                self.hand_off_if_possible(profile_id).await;
+                Err(((Verdict::Inconclusive, "planner_rate_limited", Some("model:rate_limited")), "模型限流，沒有規劃".into()))
+            }
+            Ok(ActionPlan::Unavailable { reason }) => Err(unavailable(reason)),
+            Err(error) => Err(unavailable(error.to_string())),
+        }
     }
 
     /// 就緒條件：最多嘗試 `attempts` 次，兩次之間等待 `interval_ms`；只保存最後一次的觀察與總次數。
@@ -517,7 +763,10 @@ impl Execution<'_> {
                 self.record(JournalEntry::BrowserOpened { journey: journey.to_string(), session: session.0.clone() }).await;
                 let mask = self.policy.mask.clone();
                 let journey = journey.to_string();
-                self.browser = Some(Browser { session, journey, secret_entered: false, secret_shown: false, mask });
+                let engine = self.ports.browser_driver.engine(&session).unwrap_or_else(|| replay::UNKNOWN_ENGINE.to_string());
+                let page = PageView::default();
+                self.browser =
+                    Some(Browser { session, journey, secret_entered: false, secret_shown: false, mask, engine, page });
                 true
             }
             Err(error) => {
@@ -678,6 +927,9 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
     // 較長的值先遮蔽，避免較短的值只遮掉其中一段
     policy.redact.sort_by_key(|s| std::cmp::Reverse(s.chars().count()));
 
+    let no_live_model = request.no_live_model;
+    // no_live_model：模型 Port 換成一律拒絕的實作，即使有遺漏的呼叫也不會到達模型
+    let model: Arc<dyn SemanticJudge> = if no_live_model { Arc::new(NoLiveModel) } else { ports.semantic_judge.clone() };
     let mut run = Execution {
         ports,
         definition,
@@ -690,6 +942,11 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         model_budget: definition.budget.max_model_calls,
         judge_account: context.judge_account,
         judge_rate_limited: false,
+        model,
+        no_live_model,
+        replay: &item.replay,
+        actions: Vec::new(),
+        usage: VerificationUsage::default(),
         store: context.store,
         attempt: context.attempt.attempt,
         excluded: va::rate_limited_accounts(context.previous),
@@ -894,6 +1151,9 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         reason_code,
         cleanup: CleanupRecord { state_dir: run.state_dir, state_dir_removed, service_stopped, problems },
         artifacts: run.artifacts,
+        no_live_model,
+        actions: run.actions,
+        usage: run.usage,
         attempts: va::summarize(&attempts, &sources),
         started_at,
         finished_at,

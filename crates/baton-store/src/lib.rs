@@ -1687,6 +1687,26 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER verification_journal_no_delete BEFORE DELETE ON verification_journal
         BEGIN SELECT RAISE(ABORT, 'verification_journal 是追加式資料表，不可刪除'); END;",
     },
+    // 已驗證動作重播（票 48，第 44 個 migration）：驗證要求記下是否禁止即時模型呼叫；目標導向動作的錄製每個 Workspace、
+    // 每個案例（旅程/步驟）一筆，只保存被後續有效斷言證明的動作，附上錄製身分；不一致或重播被推翻時標為 stale（附原因）。
+    Migration {
+        name: "verified_action_replay",
+        sql: "ALTER TABLE verification_request ADD COLUMN no_live_model INTEGER NOT NULL DEFAULT 0 CHECK (no_live_model IN (0, 1));
+        CREATE TABLE replay_action (
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            case_key TEXT NOT NULL,
+            identity TEXT NOT NULL CHECK (json_valid(identity)),
+            action TEXT NOT NULL CHECK (json_valid(action)),
+            status TEXT NOT NULL CHECK (status IN ('valid', 'stale')),
+            stale_reasons TEXT NOT NULL CHECK (json_valid(stale_reasons)),
+            bundle_id TEXT NOT NULL REFERENCES evidence_bundle (id),
+            recorded_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, case_key),
+            -- stale 一定附原因，valid 沒有原因
+            CHECK ((status = 'stale') = (json_array_length(stale_reasons) > 0))
+        );",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，

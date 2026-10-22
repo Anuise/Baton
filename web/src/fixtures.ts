@@ -1304,6 +1304,7 @@ export function verificationRequest(overrides: Partial<VerificationRequest> = {}
     status: "queued",
     bundle_id: null,
     created_at: CHECKED_AT,
+    no_live_model: false,
     ...overrides,
   };
 }
@@ -1511,6 +1512,110 @@ export function webEvidenceBundle(overrides: Partial<EvidenceBundle> = {}): Evid
         size_bytes: 4096,
       },
     ],
+    ...overrides,
+  });
+}
+
+/**
+ * 測試用的含重播 Evidence Bundle（票 48，搭配 web Profile）：「管理訂單」的「確認訂單」由模型即時決定並錄製；
+ * 「瀏覽商品」的「加入購物車」重播已驗證的錄製；「結帳」的錄製因引擎與資料相容性改變而標為 stale，
+ * 又遇到模型限流，沒有執行任何動作（證據不足）。
+ */
+export function replayEvidenceBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
+  return evidenceBundle({
+    id: "vbun_replay",
+    build: null,
+    journeys: [
+      {
+        key: "orders",
+        title: "管理訂單",
+        representative: true,
+        persona: "admin",
+        identity: "clerk",
+        verdict: "passed",
+        reason_code: "all_steps_passed",
+      },
+      {
+        key: "browse",
+        title: "瀏覽商品",
+        representative: false,
+        persona: "shopper",
+        verdict: "inconclusive",
+        reason_code: "planner_rate_limited",
+      },
+    ],
+    steps: [
+      verificationStepRecord({
+        journey: "orders",
+        key: "confirm",
+        title: "確認訂單",
+        operation: "瀏覽器依目標動作：確認第一筆訂單",
+        engine_code: undefined,
+        assertions: [{ assertion: { kind: "visible", selector: "#confirmed" }, passed: true, actual: "可見" }],
+        output: "",
+      }),
+      verificationStepRecord({
+        journey: "browse",
+        key: "add_to_cart",
+        title: "加入購物車",
+        operation: "瀏覽器依目標動作：把第一項商品加入購物車",
+        engine_code: undefined,
+        assertions: [{ assertion: { kind: "visible", selector: "#cart-count" }, passed: true, actual: "可見" }],
+        output: "",
+      }),
+      verificationStepRecord({
+        journey: "browse",
+        key: "checkout",
+        title: "結帳",
+        operation: "瀏覽器依目標動作：完成結帳",
+        verdict: "inconclusive",
+        reason_code: "planner_rate_limited",
+        engine_code: "model:rate_limited",
+        assertions: [],
+        output: "模型限流，沒有規劃",
+      }),
+    ],
+    verdict: "inconclusive",
+    reason_code: "planner_rate_limited",
+    covered_features: ["orders"],
+    uncovered: [],
+    actions: [
+      {
+        journey: "orders",
+        step: "confirm",
+        goal: "確認第一筆訂單",
+        cache: "none",
+        source: "live",
+        action: "瀏覽器點擊「#order-1 .confirm」",
+        recorded: {
+          identity: {
+            case: "case_hash",
+            goal: "確認第一筆訂單",
+            params: "params_hash",
+            persona: "persona_hash",
+            engine: "playwright 1.50 chromium 133",
+            data: "data_hash",
+          },
+          action: { kind: "click", selector: "#order-1 .confirm" },
+        },
+      },
+      {
+        journey: "browse",
+        step: "add_to_cart",
+        goal: "把第一項商品加入購物車",
+        cache: "valid",
+        source: "replay",
+        action: "瀏覽器點擊「#product-1 .add」",
+      },
+      {
+        journey: "browse",
+        step: "checkout",
+        goal: "完成結帳",
+        cache: "mismatch",
+        stale_reasons: ["engine_changed", "data_changed"],
+      },
+    ],
+    usage: { live_model_calls: 2, live_actions: 1, replayed_actions: 1, blocked_model_calls: 0 },
     ...overrides,
   });
 }

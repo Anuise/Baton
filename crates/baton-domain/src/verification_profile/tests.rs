@@ -54,6 +54,7 @@ fn definition() -> ProfileDefinition {
         secrets: Vec::new(),
         personas: Vec::new(),
         identities: Vec::new(),
+        replay: ReplayPolicy::default(),
     }
 }
 
@@ -270,6 +271,9 @@ fn a_profile_version_is_proven_only_by_a_passed_representative_journey_of_that_v
         uncovered: Vec::new(),
         cleanup: CleanupRecord { state_dir: String::new(), state_dir_removed: true, service_stopped: None, problems: Vec::new() },
         artifacts: Vec::new(),
+        no_live_model: false,
+        actions: Vec::new(),
+        usage: replay::VerificationUsage::default(),
         attempts: Vec::new(),
         started_at: Timestamp::from_millis(1),
         finished_at: Timestamp::from_millis(2),
