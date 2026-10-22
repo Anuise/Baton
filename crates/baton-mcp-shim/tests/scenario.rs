@@ -25,6 +25,7 @@ use baton_domain::workflow::{
     EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
     TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
 };
+use baton_domain::verification_profile::{Verdict, TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION};
 use baton_mcp_shim::{serve, ShimConfig};
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -130,7 +131,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_twenty_six_tools_with_their_required_fields() {
+async fn tools_list_has_the_twenty_eight_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -164,6 +165,8 @@ async fn tools_list_has_the_twenty_six_tools_with_their_required_fields() {
             TOOL_START_WORKFLOW,
             TOOL_RECORD_STAGE_RESULT,
             TOOL_GET_WORKFLOWS,
+            TOOL_RUN_VERIFICATION,
+            TOOL_GET_VERIFICATION,
         ]
     );
     for tool in tools {
@@ -267,6 +270,8 @@ async fn tools_list_has_the_twenty_six_tools_with_their_required_fields() {
         TOOL_START_WORKFLOW,
         TOOL_RECORD_STAGE_RESULT,
         TOOL_GET_WORKFLOWS,
+        TOOL_RUN_VERIFICATION,
+        TOOL_GET_VERIFICATION,
     ] {
         let tool = tools.iter().find(|t| t["name"] == name).unwrap();
         assert!(tool["description"].as_str().unwrap().contains("Controller 專屬"), "{name}");
@@ -318,11 +323,21 @@ async fn tools_list_has_the_twenty_six_tools_with_their_required_fields() {
     assert_eq!(stage["properties"]["evidence"]["type"], "array");
     assert_eq!(stage["properties"]["evidence"]["maxItems"], WORKFLOW_EVIDENCE_MAX);
     assert_eq!(stage["properties"]["evidence"]["items"]["required"], json!(["check"]));
-    for field in ["artifact_id", "decision_request_id", "task_id"] {
+    for field in ["artifact_id", "decision_request_id", "task_id", "evidence_bundle_id"] {
         assert_eq!(stage["properties"]["evidence"]["items"]["properties"][field]["type"], "string", "{field}");
     }
     assert_eq!(stage["properties"]["note"]["maxLength"], WORKFLOW_NOTE_MAX_CHARS);
     assert_eq!(schema(TOOL_GET_WORKFLOWS), json!({"type":"object","properties":{}}));
+    let run = schema(TOOL_RUN_VERIFICATION);
+    assert_eq!(run["required"], Value::Null);
+    assert_eq!(run["properties"]["task_id"]["type"], "string");
+    assert_eq!(run["properties"]["journeys"]["type"], "array");
+    assert_eq!(run["properties"]["journeys"]["items"]["type"], "string");
+    let run_description = tools.iter().find(|t| t["name"] == TOOL_RUN_VERIFICATION).unwrap()["description"].as_str().unwrap();
+    for verdict in Verdict::ALL.map(Verdict::as_str) {
+        assert!(run_description.contains(verdict), "{verdict}");
+    }
+    assert_eq!(schema(TOOL_GET_VERIFICATION), json!({"type":"object","properties":{}}));
 }
 
 #[tokio::test]
@@ -359,6 +374,12 @@ async fn controller_tools_forward_to_their_paths_with_credentials_and_unchanged_
             r#"{"outcome":"passed","current_stage":"diagnosis","revision":2}"#,
         ),
         (TOOL_GET_WORKFLOWS, json!({}), r#"{"playbooks":[],"workflows":[]}"#),
+        (
+            TOOL_RUN_VERIFICATION,
+            json!({"task_id":"task_1","journeys":["login"]}),
+            r#"{"id":"vreq_1","journeys":["login"],"status":"queued"}"#,
+        ),
+        (TOOL_GET_VERIFICATION, json!({}), r#"{"profile":null,"requests":[],"bundles":[]}"#),
     ];
     for (tool, arguments, response) in cases {
         let (url, log) = spawn_stub(200, response).await;
