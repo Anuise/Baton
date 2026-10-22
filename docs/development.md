@@ -1279,6 +1279,26 @@ Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journ
 
 測試：`crates/baton-harness/tests/gate_invalidation.rs`（情境測試）、`crates/baton-domain/src/workflow/gate_tests.rs`、`crates/baton-domain/src/decision/tests.rs`、`crates/baton-domain/src/task.rs`、`web/src/WorkflowPage.test.tsx`。
 
+### 探索測試到可重現缺陷（票 47）
+
+探索的結果先是疑點，只有 Runtime 以重現案例確認過的才是缺陷（issue #3 §10.3）。規則在 `baton_domain::exploration`，持久化在 `baton-store` 的 `exploration.rs`（migration 43 `exploration_findings`），重現沿用票 45／46 的驗證要求與 Verification Adapter，不新增 Port。細節與取捨見 ai-decisions 的票 47 條目。
+
+- **章程**：Controller 以 `define_exploration_charter` 替探索 Task 定章程：`area`、`role`、`goal`、`forbidden_side_effects`（至少一項）、`max_steps`（1～1000）、`max_model_calls`（0～100）。只追加版本，內容相同不新增。章程是 Worker Prompt 的必要項目（context receipt 的 `charter`）；沒有章程的 Task 不能回報疑點（409 `exploration_charter_required`）。
+- **疑點**：Worker 以 `report_exploration_finding` 回報 `title`、`steps`、`expected`、`actual`（必填）與 `feature`、`environment`、`evidence`（選填；`feature` 必須在目前 Profile 的 Feature Map 中，`evidence` 必須是這個 Workspace 已登記的成果或 Evidence Bundle），一律先是 `suspected`。狀態：`suspected`（疑點）、`confirmed`（已確認缺陷）、`unverified_risk`（未驗風險）、`excluded`（已排除）、`fixed`（已修復、納入回歸）、`regressed`（回歸失敗）。
+- **重現**：Controller 以 `reproduce_exploration_finding` 提出案例（與 Profile 旅程同格式的 `journey`，識別由 Runtime 改成 `finding.<疑點>`；Profile 的旅程識別不能含 `.`，不會撞名）。Runtime 以目前的 Profile 排入驗證要求：代表旅程當對照，加上案例；章程的 `max_steps`、`max_model_calls` 與 Profile 的預算取較小者。判定：對照全部 `passed` 而且案例是 `product_failure` → `confirmed`（記下案例、Bundle 與失敗的步驟）；案例 `passed` → `unverified_risk`；其他（環境、授權、證據不足、預算、無法自動化、對照未通過、案例沒有執行）→ 狀態不變（`inconclusive`）。同一個疑點一次只能有一個排隊中的重現（409 `exploration_reproduction_pending`）。
+- **修復與回歸**：`confirmed`／`regressed` 再呼叫 `reproduce_exploration_finding`（不帶 `journey`，或帶完全相同的案例）是修復驗證；確認時的案例通過 → `fixed`。`fixed` 與 `regressed` 的案例在**每一個**一般驗證要求（桌面、`run_verification`、Gate 重驗）都會加入，指定旅程也排除不掉；案例有對應功能時一併算進 Bundle 的 `covered_features`。回歸案例 `product_failure` → `regressed`（仍在回歸範圍內），再通過 → `fixed`。回歸案例與目前的 Profile 不相容時以一個人工步驟代替（`automation_unsupported`），驗證不能通過、也不會判成缺陷。還沒修好的 `confirmed` 案例不加入一般驗證。
+- **只用於診斷**：重現與修復驗證的 Bundle 不能作為 Stage 的 `verification` 證據（查驗為 `not_passed`）。
+- **分流**：`triage_exploration_finding` 的 `action`：`exclude`（`reason`：`environment`、`seed_data`、`tool_limitation`、`expected_design`，附 `rationale`）、`mark_unverified`（只有疑點）、`reopen`（只有已排除）。`expected_design` 依決策權限表的「產品方向」送裁定（409 `requires_decision`），使用者核准後以相同內容再呼叫一次才排除，`exclusion.decision_request_id` 記下裁定請求。已確認的缺陷（`confirmed`、`fixed`、`regressed`）不能排除、不能改為未驗風險、不能更換案例（409 `exploration_defect_locked`）。
+- **不能刪除或竄改**：章程與重現紀錄只追加；疑點不可刪除，回報內容與確認時的案例不可更改；資料表的 CHECK 讓「有案例 ⇔ 是缺陷」「已排除 ⇔ 有排除原因」，所以直接改資料庫也不能把疑點標成 `confirmed` 或把缺陷標成 `excluded`。
+
+| 端點（桌面） | 說明 |
+| --- | --- |
+| `GET /api/v1/workspaces/{id}/exploration` | `{ workspace_id, charters, findings }`：各探索 Task 目前的章程（附 `task_title`）與全部疑點（附 `task_title` 與 `attempts`，新的在前） |
+
+Controller 工具（Controller 專屬）：`define_exploration_charter`（新增回 201、相同回 200 `{ charter, created }`）、`triage_exploration_finding`（`{ finding, message }`）、`reproduce_exploration_finding`（201 `{ finding, attempt, request, message }`）、`get_exploration`。Worker 工具：`report_exploration_finding`（201 疑點）。錯誤碼：`exploration_invalid`（422）、`exploration_finding_not_found`（404）、`exploration_charter_required`、`exploration_defect_locked`、`exploration_transition_refused`、`exploration_reproduction_pending`（409）。事件：`exploration_charter_defined`、`exploration_finding_reported`、`exploration_finding_status_changed`、`exploration_reproduction_requested`、`exploration_reproduction_judged`。桌面殼指令：`workspace_exploration`（`RuntimeClient::exploration_overview`）。UI 在側欄的「探索」（`web/src/ExplorationPage.tsx`）：章程，以及分開的「已確認缺陷」「疑點（未經重現）」「未驗風險」「已修復・納入回歸」「已排除」與每個疑點的重現紀錄。
+
+測試：`crates/baton-harness/tests/exploration_to_reproduction.rs`（情境測試）、`crates/baton-domain/src/exploration/tests.rs`、`crates/baton-domain/src/context/tests.rs`、`crates/baton-mcp-shim/tests/scenario.rs`、`crates/baton-client/tests/exploration_client.rs`、`web/src/ExplorationPage.test.tsx`。
+
 ### 本機 API 的存取防護
 
 Runtime 同時監聽 IPv4 與 IPv6 loopback（`127.0.0.1:<port>`、`[::1]:<port>`），拒絕非 loopback 的監聽位址。所有端點（含 `/api/v1/events` 串流與未知路徑）都要求：
