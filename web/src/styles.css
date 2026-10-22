@@ -581,3 +581,63 @@ body {
 .artifact-unregistered ul {
   padding-left: 18px;
 }
+
+.backup-settings {
+  display: grid;
+  gap: 8px;
+}
+
+.backup-settings h2,
+.backup-settings h3,
+.backup-settings p {
+  margin: 0;
+}
+
+.backup-settings h3 {
+  font-size: 14px;
+}
+
+.backup-policy {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.backup-drill {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.backup-drill-passed {
+  color: #1a7f37;
+  font-weight: 600;
+}
+
+.backup-drill-failed {
+  padding: 4px 6px;
+  background: #ffebe9;
+  border: 1px solid #cf222e;
+  border-radius: 4px;
+  color: #cf222e;
+  font-weight: 600;
+}
+
+.backup-checks,
+.backup-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.backup-check-failed {
+  color: #cf222e;
+  font-weight: 600;
+}
+
+.backup-settings > [role="alert"] {
+  color: #cf222e;
+}

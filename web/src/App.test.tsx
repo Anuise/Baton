@@ -28,6 +28,7 @@ const client = {
   }),
   getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [] })),
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
+  backupStatus: vi.fn(async () => ({ backups: [], latest_drill: null })),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({

@@ -2,6 +2,9 @@ import type {
   AccountProfile,
   AccountRun,
   AccountScheduling,
+  BackupStatus,
+  BackupSummary,
+  DrillReport,
   ImportPreview,
   PlatformResponse,
   QuotaAssessment,
@@ -288,6 +291,46 @@ export function schedulingOverview(overrides: Partial<SchedulingOverview> = {}):
     },
     accounts: [accountScheduling()],
     queue: [],
+    ...overrides,
+  };
+}
+
+/** 測試用的備份摘要：CHECKED_AT 的每日備份，含 2 個成果檔案，同時是每日與每週保留。 */
+export function backupSummary(overrides: Partial<BackupSummary> = {}): BackupSummary {
+  return {
+    id: `${CHECKED_AT}-daily`,
+    trigger: "daily",
+    created_at: CHECKED_AT,
+    artifact_count: 2,
+    retained_as: ["daily", "weekly"],
+    ...overrides,
+  };
+}
+
+/** 測試用的還原演練結果：演練 backupSummary() 那份備份，五項核對全部通過、沒有中斷的 Run。 */
+export function drillReport(overrides: Partial<DrillReport> = {}): DrillReport {
+  return {
+    backup_id: `${CHECKED_AT}-daily`,
+    backup_created_at: CHECKED_AT,
+    performed_at: CHECKED_AT + 3_600_000,
+    passed: true,
+    checks: [
+      { kind: "restore", passed: true, detail: "已還原到暫存目錄" },
+      { kind: "database_integrity", passed: true, detail: "integrity_check 回報 ok" },
+      { kind: "foreign_keys", passed: true, detail: "沒有違反外鍵的資料" },
+      { kind: "artifact_hashes", passed: true, detail: "2 個成果檔案的 SHA-256 都相符" },
+      { kind: "artifact_relations", passed: true, detail: "成果版本都對得上檔案" },
+    ],
+    interrupted_runs: 0,
+    ...overrides,
+  };
+}
+
+/** 測試用的備份狀態：一份備份與一次通過的還原演練。 */
+export function backupStatus(overrides: Partial<BackupStatus> = {}): BackupStatus {
+  return {
+    backups: [backupSummary()],
+    latest_drill: drillReport(),
     ...overrides,
   };
 }
