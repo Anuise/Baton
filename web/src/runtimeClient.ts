@@ -735,6 +735,140 @@ export interface ArtifactClient {
   downloadArtifact(workspaceId: string, artifactId: string, version: number): Promise<ArtifactDownload>;
 }
 
+/** 知識條目的種類：決策、教訓、知識。 */
+export type KnowledgeKind = "decision" | "lesson" | "fact";
+/** 候選、已驗證、已撤銷、已淘汰、已被取代。 */
+export type KnowledgeStatus = "candidate" | "verified" | "revoked" | "retired" | "superseded";
+/** 適用範圍：全域、Workspace、Goal、Task。 */
+export type ScopeKind = "global" | "workspace" | "goal" | "task";
+/** `like_fallback` 表示全文檢索無法使用，已退回逐筆比對。 */
+export type SearchMode = "full_text" | "like_fallback";
+
+export interface KnowledgeScope {
+  kind: ScopeKind;
+  workspace_id: string | null;
+  goal_id: string | null;
+  task_id: string | null;
+}
+
+export type KnowledgeSource = { kind: "user" } | { kind: "agent"; run_id: string; generation: number; task_id: string };
+
+/** 教訓欄位：觸發條件、根因或待驗假說、解法。 */
+export interface LessonDetail {
+  trigger: string;
+  root_cause: string;
+  resolution: string;
+}
+
+export interface KnowledgeContent {
+  title: string;
+  body: string;
+  tags: string[];
+  evidence: string[];
+  lesson: LessonDetail | null;
+}
+
+/** 知識條目（Rust 以 flatten 攤平在同一層）；`effective` 是「已驗證且現在在有效期間內」。 */
+export interface KnowledgeEntryView {
+  id: string;
+  kind: KnowledgeKind;
+  scope: KnowledgeScope;
+  status: KnowledgeStatus;
+  source: KnowledgeSource;
+  valid_from: number;
+  valid_until: number | null;
+  version: number;
+  revision: number;
+  supersedes: string | null;
+  superseded_by: string | null;
+  status_reason: string | null;
+  content: KnowledgeContent;
+  created_at: number;
+  updated_at: number;
+  effective: boolean;
+}
+
+export interface KnowledgeList {
+  search_mode: SearchMode;
+  /** 最多 100 筆，依 updated_at 由新到舊。 */
+  entries: KnowledgeEntryView[];
+}
+
+export interface KnowledgeVersion {
+  version: number;
+  content: KnowledgeContent;
+  note: string | null;
+  created_at: number;
+}
+
+/** 變更歷史；`event_type` 例如 knowledge_created、knowledge_revoked（payload.reason）。 */
+export interface KnowledgeEvent {
+  revision: number;
+  event_type: string;
+  occurred_at: number;
+  payload: unknown;
+}
+
+export interface KnowledgeDetail {
+  entry: KnowledgeEntryView;
+  /** 由舊到新。 */
+  versions: KnowledgeVersion[];
+  /** 由舊到新。 */
+  history: KnowledgeEvent[];
+}
+
+/** 列表查詢：`workspaceId` 省略時只列全域條目；`q` 空白時不過濾；`includeInactive` 為 true 時連無效條目一起回傳。 */
+export interface KnowledgeListQuery {
+  workspaceId?: string;
+  q?: string;
+  includeInactive: boolean;
+}
+
+export interface CreateKnowledgeRequest {
+  kind: KnowledgeKind;
+  scope: { kind: ScopeKind; workspace_id?: string; goal_id?: string; task_id?: string };
+  title: string;
+  body?: string;
+  tags?: string[];
+  evidence?: string[];
+  /** 只有教訓可以帶。 */
+  lesson?: LessonDetail;
+  valid_from?: number;
+  valid_until?: number;
+  supersedes?: string;
+}
+
+/** 修正：以完整的新內容追加新版本；`valid_until` 省略表示沒有期限。 */
+export interface CorrectKnowledgeRequest {
+  expected_revision: number;
+  title: string;
+  body?: string;
+  tags?: string[];
+  evidence?: string[];
+  lesson?: LessonDetail;
+  valid_until?: number;
+  note?: string;
+}
+
+/** 撤銷或淘汰（都要說明原因）。 */
+export interface KnowledgeReasonRequest {
+  expected_revision: number;
+  reason: string;
+}
+
+/** 知識與教訓（只有桌面憑證能用）。 */
+export interface KnowledgeClient {
+  listKnowledge(query: KnowledgeListQuery): Promise<KnowledgeList>;
+  /** 使用者建立的條目直接是已驗證。 */
+  createKnowledge(request: CreateKnowledgeRequest): Promise<KnowledgeEntryView>;
+  knowledgeDetail(id: string): Promise<KnowledgeDetail>;
+  /** 候選 → 已驗證。 */
+  confirmKnowledge(id: string, expectedRevision: number): Promise<KnowledgeEntryView>;
+  correctKnowledge(id: string, request: CorrectKnowledgeRequest): Promise<KnowledgeEntryView>;
+  revokeKnowledge(id: string, request: KnowledgeReasonRequest): Promise<KnowledgeEntryView>;
+  retireKnowledge(id: string, request: KnowledgeReasonRequest): Promise<KnowledgeEntryView>;
+}
+
 /** 並行容量的預設：保留交接容量（預設）或較高並行。 */
 export type SchedulingMode = "reserve_handoff" | "higher_concurrency";
 
@@ -989,7 +1123,8 @@ export type AppClient = RuntimeClient &
   DecisionClient &
   SchedulingClient &
   ArtifactClient &
-  SharedSettingsClient;
+  SharedSettingsClient &
+  KnowledgeClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
 export function errorCode(error: unknown): string | null {
@@ -1014,6 +1149,17 @@ const decisionPath = (workspaceId: string, requestId: string) =>
   `${workspacePath(workspaceId)}/decisions/${encodeURIComponent(requestId)}`;
 const artifactVersionPath = (workspaceId: string, artifactId: string, version: number) =>
   `${workspacePath(workspaceId)}/artifacts/${encodeURIComponent(artifactId)}/versions/${version}`;
+const KNOWLEDGE_PATH = "/api/v1/knowledge";
+const knowledgePath = (id: string) => `${KNOWLEDGE_PATH}/${encodeURIComponent(id)}`;
+
+/** 列表查詢字串：未指定的 workspace_id 與空白的 q 不送出。 */
+function knowledgeListPath({ workspaceId, q, includeInactive }: KnowledgeListQuery): string {
+  const params = new URLSearchParams();
+  if (workspaceId !== undefined) params.set("workspace_id", workspaceId);
+  if (q !== undefined && q.trim() !== "") params.set("q", q);
+  params.set("include_inactive", String(includeInactive));
+  return `${KNOWLEDGE_PATH}?${params.toString()}`;
+}
 
 /** 直接以 HTTP 查詢（開發時用瀏覽器開啟，由 Vite 代理到 Runtime）。 */
 export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
@@ -1145,6 +1291,14 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       if (!response.ok) throw await failure(response);
       return { blob: await response.blob(), sha256: response.headers.get("X-Baton-Sha256") ?? "" };
     },
+    listKnowledge: (query) => send(knowledgeListPath(query)),
+    createKnowledge: (request) => send(KNOWLEDGE_PATH, { method: "POST", body: request }),
+    knowledgeDetail: (id) => send(knowledgePath(id)),
+    confirmKnowledge: (id, expectedRevision) =>
+      send(`${knowledgePath(id)}/confirm`, { method: "POST", body: { expected_revision: expectedRevision } }),
+    correctKnowledge: (id, request) => send(`${knowledgePath(id)}/correct`, { method: "POST", body: request }),
+    revokeKnowledge: (id, request) => send(`${knowledgePath(id)}/revoke`, { method: "POST", body: request }),
+    retireKnowledge: (id, request) => send(`${knowledgePath(id)}/retire`, { method: "POST", body: request }),
   };
 }
 
@@ -1228,6 +1382,15 @@ export function createTauriClient(invoke: Invoke): AppClient {
       const bytes = Uint8Array.from(atob(content_base64), (char) => char.charCodeAt(0));
       return { blob: new Blob([bytes]), sha256 };
     },
+    listKnowledge: ({ workspaceId, q, includeInactive }) =>
+      call<KnowledgeList>("knowledge_list", { workspaceId, q, includeInactive }),
+    createKnowledge: (request) => call<KnowledgeEntryView>("knowledge_create", { request }),
+    knowledgeDetail: (id) => call<KnowledgeDetail>("knowledge_detail", { id }),
+    confirmKnowledge: (id, expectedRevision) =>
+      call<KnowledgeEntryView>("knowledge_confirm", { id, request: { expected_revision: expectedRevision } }),
+    correctKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_correct", { id, request }),
+    revokeKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_revoke", { id, request }),
+    retireKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_retire", { id, request }),
   };
 }
 

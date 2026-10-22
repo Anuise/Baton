@@ -10,6 +10,7 @@ pub mod authorization;
 pub mod config;
 pub mod decision;
 pub mod event;
+pub mod knowledge;
 pub mod message;
 pub mod permission;
 pub mod platform;

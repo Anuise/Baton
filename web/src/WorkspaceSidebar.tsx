@@ -19,6 +19,8 @@ interface Props {
   pendingDecisions?: Record<string, number>;
   /** 使用者要開啟某個 Workspace 的成果與驗證。 */
   onOpenArtifacts?: (workspace: Workspace) => void;
+  /** 使用者要開啟某個 Workspace 的知識。 */
+  onOpenKnowledge?: (workspace: Workspace) => void;
 }
 
 function reasonOf(error: unknown): string {
@@ -34,6 +36,7 @@ export function WorkspaceSidebar({
   onOpenDecisions,
   pendingDecisions,
   onOpenArtifacts,
+  onOpenKnowledge,
 }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
@@ -116,6 +119,9 @@ export function WorkspaceSidebar({
                 )}
                 <button type="button" aria-label={`成果與驗證 ${workspace.name}`} onClick={() => onOpenArtifacts?.(workspace)}>
                   成果與驗證
+                </button>
+                <button type="button" aria-label={`知識 ${workspace.name}`} onClick={() => onOpenKnowledge?.(workspace)}>
+                  知識
                 </button>
                 <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
                   封存
