@@ -9,10 +9,12 @@ publish.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+base64 = "0.22"
 baton-api = { path = "../crates/baton-api" }
 baton-client = { path = "../crates/baton-client" }
 baton-credential = { path = "../crates/baton-credential" }
 baton-domain = { path = "../crates/baton-domain" }
 baton-store = { path = "../crates/baton-store" }
+serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["sync"] }

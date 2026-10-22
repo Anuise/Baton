@@ -222,4 +222,25 @@ describe("左側 Workspace 清單", () => {
     expect(screen.getAllByText(/待裁定/)).toHaveLength(1);
     expect(screen.getByText("待裁定 3")).toBeInTheDocument();
   });
+
+  it("每個 Workspace 都有「成果與驗證」入口，不會觸發授權設定或工作面板", async () => {
+    const onSelect = vi.fn();
+    const onOpenTasks = vi.fn();
+    const onOpenArtifacts = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenTasks={onOpenTasks}
+        onOpenArtifacts={onOpenArtifacts}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "成果與驗證 筆記" }));
+
+    expect(onOpenArtifacts).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenTasks).not.toHaveBeenCalled();
+  });
 });

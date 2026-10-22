@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { AccountsPage } from "./AccountsPage";
+import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { DecisionCenter } from "./DecisionCenter";
 import { PlatformPage } from "./PlatformPage";
@@ -11,8 +12,8 @@ import { createRuntimeClient, type AppClient, type HealthResponse, type PendingD
 import { TaskBoard } from "./TaskBoard";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選到某個 Workspace 後，主區顯示它的授權設定、工作面板或裁定中心。 */
-type Opened = { view: "authorization" | "tasks" | "decisions"; workspace: Workspace };
+/** 使用者選到某個 Workspace 後，主區顯示它的授權設定、工作面板、裁定中心或成果與驗證。 */
+type Opened = { view: "authorization" | "tasks" | "decisions" | "artifacts"; workspace: Workspace };
 
 export function App() {
   const [client, setClient] = useState<AppClient | null>(null);
@@ -44,6 +45,7 @@ export function App() {
               setPendingVersion((version) => version + 1);
             }}
             pendingDecisions={pendingByWorkspace}
+            onOpenArtifacts={(workspace) => setOpened({ view: "artifacts", workspace })}
           />
         )}
         <main className="main">
@@ -61,6 +63,7 @@ export function App() {
               onChange={() => setPendingVersion((version) => version + 1)}
             />
           )}
+          {client && opened?.view === "artifacts" && <ArtifactsPage client={client} workspace={opened.workspace} />}
           {client && <PlatformPage client={client} />}
         </main>
       </div>

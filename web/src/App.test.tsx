@@ -28,6 +28,7 @@ const client = {
   getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [] })),
   listDecisions: vi.fn(async () => ({ pending_count: 1, decisions: [decisionView()] })),
   pendingDecisions: vi.fn(async () => ({ pending_count: 1, by_workspace: [{ workspace_id: "ws_1", pending_count: 1 }] })),
+  listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({
@@ -62,5 +63,18 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "裁定：筆記" })).toBeInTheDocument();
     expect(client.listDecisions).toHaveBeenCalledWith("ws_1");
     expect(screen.getByRole("heading", { name: "要保留舊的目錄結構嗎？" })).toBeInTheDocument();
+  });
+
+  it("可從 Workspace 清單開啟成果與驗證，並切回其他檢視", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "成果與驗證 筆記" }));
+    expect(await screen.findByRole("heading", { name: "成果與驗證：筆記" })).toBeInTheDocument();
+    expect(client.listArtifacts).toHaveBeenCalledWith("ws_1");
+
+    await user.click(screen.getByRole("button", { name: "工作面板 筆記" }));
+    expect(await screen.findByRole("heading", { name: "工作面板：筆記" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "成果與驗證：筆記" })).not.toBeInTheDocument();
   });
 });

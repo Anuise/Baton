@@ -17,6 +17,8 @@ interface Props {
   onOpenDecisions?: (workspace: Workspace) => void;
   /** 各 Workspace 的待裁定數（workspace id → 數量）；沒有的視為 0。 */
   pendingDecisions?: Record<string, number>;
+  /** 使用者要開啟某個 Workspace 的成果與驗證。 */
+  onOpenArtifacts?: (workspace: Workspace) => void;
 }
 
 function reasonOf(error: unknown): string {
@@ -24,7 +26,15 @@ function reasonOf(error: unknown): string {
 }
 
 /** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace。 */
-export function WorkspaceSidebar({ client, timeZone, onSelect, onOpenTasks, onOpenDecisions, pendingDecisions }: Props) {
+export function WorkspaceSidebar({
+  client,
+  timeZone,
+  onSelect,
+  onOpenTasks,
+  onOpenDecisions,
+  pendingDecisions,
+  onOpenArtifacts,
+}: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
@@ -104,6 +114,9 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, onOpenTasks, onOp
                 {(pendingDecisions?.[workspace.id] ?? 0) > 0 && (
                   <span className="decision-badge">待裁定 {pendingDecisions?.[workspace.id]}</span>
                 )}
+                <button type="button" aria-label={`成果與驗證 ${workspace.name}`} onClick={() => onOpenArtifacts?.(workspace)}>
+                  成果與驗證
+                </button>
                 <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
                   封存
                 </button>

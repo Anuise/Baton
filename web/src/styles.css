@@ -588,3 +588,98 @@ body {
 .decision-form [role="alert"] {
   color: #cf222e;
 }
+
+.artifacts-page {
+  display: grid;
+  gap: 12px;
+}
+
+.artifacts-page h2,
+.artifacts-page h3 {
+  margin: 0;
+}
+
+.artifacts-page h3 {
+  font-size: 14px;
+}
+
+.artifact-card,
+.artifact-unregistered {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.artifact-card p,
+.artifact-card ul,
+.artifact-unregistered p,
+.artifact-unregistered ul {
+  margin: 0;
+}
+
+.artifact-versions {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.artifact-version {
+  display: grid;
+  gap: 4px;
+  padding: 6px 8px;
+  background: #f6f8fa;
+  border-radius: 6px;
+}
+
+.artifact-task {
+  color: #656d76;
+}
+
+.artifact-sha,
+.artifact-path {
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.artifact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.artifact-warning {
+  padding: 4px 6px;
+  background: #ffebe9;
+  border: 1px solid #cf222e;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.artifact-card [role="alert"] {
+  color: #cf222e;
+}
+
+.artifact-preview pre {
+  margin: 0;
+  max-height: 320px;
+  padding: 6px 8px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  white-space: pre-wrap;
+}
+
+.artifact-unregistered {
+  background: #fff8c5;
+  border-color: #d4a72c;
+}
+
+.artifact-unregistered ul {
+  padding-left: 18px;
+}

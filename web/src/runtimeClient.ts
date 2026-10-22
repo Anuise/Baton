@@ -186,6 +186,60 @@ export interface SetupStatus {
   ready: boolean;
 }
 
+/** 版本的檔案現況：`missing`／`size_mismatch` 代表磁碟上的檔案與登記不符，不可信。 */
+export type ArtifactFileStatus = "ok" | "missing" | "size_mismatch";
+
+/** 成果的單一版本（對應 Rust 的 ArtifactVersionView）；時間是 UTC 毫秒。 */
+export interface ArtifactVersionView {
+  version: number;
+  description: string;
+  size_bytes: number;
+  /** 64 位小寫十六進位。 */
+  sha256: string;
+  storage_path: string;
+  produced_by_run_id: string;
+  produced_by_generation: number;
+  created_at: number;
+  file_status: ArtifactFileStatus;
+}
+
+/** 成果與它的全部版本（由舊到新）。 */
+export interface ArtifactView {
+  id: string;
+  workspace_id: string;
+  task_id: string;
+  name: string;
+  created_at: number;
+  versions: ArtifactVersionView[];
+}
+
+/** 寫入中途中斷留下、沒有 manifest 的檔案：不是成果。`staging` 內容不完整；`unregistered` 完整但沒登記。 */
+export interface UnregisteredFile {
+  storage_path: string;
+  size_bytes: number;
+  kind: "staging" | "unregistered";
+}
+
+export interface ArtifactList {
+  artifacts: ArtifactView[];
+  unregistered_files: UnregisteredFile[];
+}
+
+export interface ArtifactPreview {
+  artifact_id: string;
+  version: number;
+  name: string;
+  size_bytes: number;
+  sha256: string;
+  preview: { kind: "text"; text: string; truncated: boolean } | { kind: "binary" };
+}
+
+/** 下載到的內容與 Runtime 回報的雜湊（`X-Baton-Sha256`）。 */
+export interface ArtifactDownload {
+  blob: Blob;
+  sha256: string;
+}
+
 export interface RuntimeClient {
   getHealth(): Promise<HealthResponse>;
   getPlatform(): Promise<PlatformResponse>;
@@ -524,6 +578,13 @@ export interface DecisionClient {
   pendingDecisions(): Promise<PendingDecisions>;
 }
 
+/** 成果瀏覽（只有桌面憑證能用）：下載與其他端點走同一套帶憑證的機制。 */
+export interface ArtifactClient {
+  listArtifacts(workspaceId: string): Promise<ArtifactList>;
+  previewArtifact(workspaceId: string, artifactId: string, version: number): Promise<ArtifactPreview>;
+  downloadArtifact(workspaceId: string, artifactId: string, version: number): Promise<ArtifactDownload>;
+}
+
 /** 並行容量的預設：保留交接容量（預設）或較高並行。 */
 export type SchedulingMode = "reserve_handoff" | "higher_concurrency";
 
@@ -617,7 +678,8 @@ export type AppClient = RuntimeClient &
   TaskClient &
   AccountClient &
   DecisionClient &
-  SchedulingClient;
+  SchedulingClient &
+  ArtifactClient;
 
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
@@ -631,6 +693,8 @@ const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURICo
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
 const decisionPath = (workspaceId: string, requestId: string) =>
   `${workspacePath(workspaceId)}/decisions/${encodeURIComponent(requestId)}`;
+const artifactVersionPath = (workspaceId: string, artifactId: string, version: number) =>
+  `${workspacePath(workspaceId)}/artifacts/${encodeURIComponent(artifactId)}/versions/${version}`;
 
 /** 直接以 HTTP 查詢（開發時用瀏覽器開啟，由 Vite 代理到 Runtime）。 */
 export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
@@ -738,6 +802,14 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     answerDecision: (workspaceId, requestId, optionId, note) =>
       send(`${decisionPath(workspaceId, requestId)}/answer`, { method: "POST", body: { option_id: optionId, note } }),
     pendingDecisions: () => send(PENDING_DECISIONS_PATH),
+    listArtifacts: (workspaceId) => send(`${workspacePath(workspaceId)}/artifacts`),
+    previewArtifact: (workspaceId, artifactId, version) =>
+      send(`${artifactVersionPath(workspaceId, artifactId, version)}/preview`),
+    async downloadArtifact(workspaceId, artifactId, version) {
+      const response = await fetchFn(`${artifactVersionPath(workspaceId, artifactId, version)}/content`);
+      if (!response.ok) throw await failure(response);
+      return { blob: await response.blob(), sha256: response.headers.get("X-Baton-Sha256") ?? "" };
+    },
   };
 }
 
@@ -794,6 +866,19 @@ export function createTauriClient(invoke: Invoke): AppClient {
     answerDecision: (workspaceId, requestId, optionId, note) =>
       call<AnswerResponse>("decision_answer", { workspaceId, requestId, optionId, note }),
     pendingDecisions: () => call<PendingDecisions>("decisions_pending"),
+    listArtifacts: (workspaceId) => call<ArtifactList>("artifact_list", { workspaceId }),
+    previewArtifact: (workspaceId, artifactId, version) =>
+      call<ArtifactPreview>("artifact_preview", { workspaceId, artifactId, version }),
+    async downloadArtifact(workspaceId, artifactId, version) {
+      // 桌面殼帶憑證取回內容，以 base64 交給 Web UI（Tauri 指令的回傳值是 JSON）
+      const { sha256, content_base64 } = await call<{ sha256: string; content_base64: string }>("artifact_download", {
+        workspaceId,
+        artifactId,
+        version,
+      });
+      const bytes = Uint8Array.from(atob(content_base64), (char) => char.charCodeAt(0));
+      return { blob: new Blob([bytes]), sha256 };
+    },
   };
 }
 

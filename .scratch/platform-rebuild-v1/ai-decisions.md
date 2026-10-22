@@ -946,7 +946,70 @@
 - 影響：本票原本是第 8 個 migration，整合 rebuild/v1（票 11 已有第 8、9 個）時順延為第 10 個；AI 編號同樣由 AI-87～AI-94 順延為 AI-95～AI-102。
 - 審閱：未審
 
-### AI-103：權限提示的判定是保守的詞法判定；範圍外或看不懂一律建立裁定請求
+### AI-103：`register_artifact` 的內容以參數內嵌傳入，不接受 Worker 指定的路徑
+- 重要度：高
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：Worker 呼叫 `register_artifact` 時，內容直接放在參數裡：`content`（UTF-8 文字）或 `content_base64`（二進位），二選一；單一成果最多 10 MiB（`ARTIFACT_MAX_BYTES`）。Runtime 不讀取請求中的任何檔案路徑。
+- 理由：Worker 是不完全可信的程序，若登記時可指定路徑，Runtime 會替它讀取該路徑的檔案並存進成果儲存，再經由成果下載交出去，等於讓 Worker 藉 Runtime 的身分讀走工作目錄以外的檔案（例如其他帳號的登入資料目錄）。內嵌內容讓「Worker 能提供的資料」只限於它自己放進參數的位元組。
+- 替代方案：接受 Workspace／worktree 內的相對路徑，由 Runtime 讀取。可以支援大型檔案，但必須先有 worktree 的位置規則與路徑逃逸（符號連結、junction、`..`）防護，屬於票 20 之後再評估。
+- 影響：大型成果（超過 10 MiB，例如影片、資料集）目前無法登記；JSON 內嵌會使 MCP 本文約為內容的 1.4 倍（Base64），Runtime 的登記路由因此把本文上限設為 32 MiB。若日後要支援大檔，需新增「由 Runtime 讀取受限路徑」的第二條路徑並另行審閱。**Validation Required（票 14）**：Claude Code 對單一 MCP 工具呼叫的參數大小是否有自己的上限，需要以真實 Worker 驗證。
+- 審閱：未審
+
+### AI-104：成果檔案的儲存位置、寫入順序與「未登記檔案」不自動刪除
+- 重要度：中
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：成果存放在 `<資料目錄>\artifacts\<workspace_id>\blob_<隨機>`，每個版本一個獨立檔案、檔名與成果名稱無關。寫入順序是：暫存檔 `<檔名>.partial` → fsync → 原子改名 → 在單一交易提交 manifest 與事件。中途中斷只會留下「未登記檔案」：`.partial` 暫存檔（`staging`，內容不完整）或已改名但 manifest 未提交的檔案（`unregistered`，內容完整但不算成果）。`GET …/artifacts` 的 `unregistered_files` 列出它們，恢復時可辨識；Runtime **不自動刪除**，也不在啟動時搬移。`WorkspaceFs` Port 新增 `read_artifact`、`list_artifact_files`，`write_artifact_atomic` 補上正式實作；fake 在三個點（`MidWrite`、`BeforeRename`、`AfterRename`）可模擬崩潰。
+- 理由：「已登記」只由 manifest 決定，而 manifest 一定在檔案完整落地之後才提交，所以不需要「恢復時修復」就能保證已登記的成果完整。spec 非目標明列「自動刪除正式 Artifact」，未登記檔案雖不是成果，但是否刪除涉及使用者資料，先保守地只顯示。
+- 替代方案：啟動時自動刪除 `.partial`（暫存檔一定無用，刪除安全）；先只顯示是因為清理屬於票 21／40 的範圍，且不刪除不影響正確性。
+- 影響：崩潰多次後儲存區會累積殘留檔案，直到後續票加入清理或備份流程；列表每次都會掃描 Workspace 的成果目錄（成果數量大時需要改成索引）。
+- 審閱：未審
+
+### AI-105：成果與版本的識別：同 Workspace、同 Task、同名是同一個成果
+- 重要度：中
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：成果以（Workspace、Task、名稱）唯一識別；再次登記同名成果只追加新版本（版本號從 1 起連續遞增），不同名稱是另一個成果。Task 與產生者（Run、世代）一律取自憑證所屬的 Run，請求不能指定。`artifact`、`artifact_version` 是追加式資料表（觸發器禁止更新與刪除，`storage_path` 唯一），每個版本追加事件 `artifact_registered`（`aggregate_type = 'artifact'`，聚合版本 = 成果版本號）。同一個 Run 重送相同內容不去重，會產生新版本。
+- 理由：票面要求「同一成果新版本不覆寫舊版本」，需要一個穩定的「同一成果」定義；Worker 重新產生報告時自然會沿用同一個檔名。以 Task 為界避免不同 Task 同名互相混成同一個成果。
+- 替代方案：由 Worker 在登記時提供成果識別（容易被亂用或撞名）；以內容雜湊去重（Worker 重送會被悄悄合併，但無法表達「再次確認同一內容」，且增加判斷）。
+- 影響：不同 Task 之間沒有版本關係；Task 重派後的新 Run 仍歸入同一個成果（同 Task 同名）。票 13 的驗證 Gate 若需要「某個版本被接受」的狀態，要另建紀錄，不可改寫版本表。
+- 審閱：未審
+
+### AI-106：預覽與下載重新核對雜湊；列表只比對大小；桌面殼以 base64 傳遞下載內容
+- 重要度：中
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：預覽與下載每次都重新讀檔、計算 SHA-256 並比對大小，與 manifest 不符回 409 `artifact_integrity_failed`，檔案不存在回 409 `artifact_file_missing`，不交出內容。列表的 `file_status`（`ok`／`missing`／`size_mismatch`）只比對存在與大小，避免列表為每個版本讀整個檔案。管理 API 只接受桌面憑證（既有 `guard` 規則），Agent 憑證不能下載；成果一律以 Workspace 為界，跨 Workspace 或不存在一律回 404 `artifact_not_found`。Tauri 殼的 `artifact_download` 指令把內容以 base64 放在 JSON 回傳值裡交給 Web UI（Web UI 再核對 `X-Baton-Sha256` 與 manifest 雜湊）。
+- 理由：票面要求「manifest 雜湊與檔案一致」且「下載同樣驗證身分」；成果檔案放在使用者可編輯的資料目錄，事後被改動或截斷是可能的，交出不可信的內容比拒絕更糟。base64 是 Tauri JSON 指令最簡單的作法，上限 10 MiB 時約 14 MiB，可接受。
+- 替代方案：列表也計算雜湊（成本高）；以 `tauri::ipc::Response` 回傳原始位元組（省 33% 傳輸，但前端與殼都要另一套處理）；預覽時不核對（較快，但預覽可能顯示被竄改的內容）。
+- 影響：大成果的預覽與下載每次都要讀整個檔案。使用者要「忽略完整性失敗仍想取回檔案」沒有入口，需要時直接從資料目錄取得。
+- 審閱：未審
+
+### AI-107：成果登記的限制值與未涵蓋的行為
+- 重要度：低
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：名稱必須是檔名（不含路徑分隔字元、控制字元與 Windows 不允許的 `:*?"<>|`，不可是 `.`／`..`，最多 200 字元）；描述最多 1000 字元；預覽最多 64 KiB 並在字元邊界截斷，含 NUL 或不是有效 UTF-8 者視為 `binary`。登記**不改變 Task 狀態**（接受成果屬票 13 的驗證 Gate）、**不續約 lease**（只有三個回報工具與 Heartbeat 續約）；過期世代的登記回 409 `run_report_stale`，不寫入任何檔案、也不像三個回報工具那樣留稽核紀錄。
+- 理由：數值是預設值，改起來便宜；不續約 lease 與不留稽核都是為了讓本票只做票面要求的事，避免提早決定後續票的語意。
+- 替代方案：登記同時視為存活訊號並續約 lease；過期世代的登記也留稽核（需要保存被拒絕的內容，成果可達 10 MiB，不適合放進追加式資料表）。
+- 影響：Worker 若長時間只登記成果而不回報進度，lease 仍會照原本的規則過期並被核對。
+- 審閱：未審
+
+### AI-108：票 12 整合 rebuild/v1（票 19）：migration 與 AI 編號順延、衝突合併方式
+- 重要度：低
+- 時間／階段：2026-10-22，票 12 整合（R036-12-integrate）
+- 決策：票 12 的 migration `artifact` 原本是第 10 個，與票 19 的 `scheduling`（migration 10）重號，順延為第 11 個，排在 `scheduling` 之後；兩者互不參照（`artifact_version.run_id` 只參照 `run.id`），所以先後順序不影響 schema。票 12 的 AI 編號由 AI-95～AI-99 順延為 AI-103～AI-107，內容不變；程式碼與文件沒有引用這些編號，不需同步。其餘衝突（API 路由、Tauri 指令清單、`AppClient` 型別、開發指南的 crate 表與章節）一律兩邊都保留：路由與指令並列，`AppClient` 同時包含 `SchedulingClient` 與 `ArtifactClient`，開發指南「多帳號並行排程與容量」在前、「成果儲存與成果瀏覽」在後。票 19 起派工必須有可派工帳號、`dispatch_task` 改回傳 `DispatchOutcome`，所以本票的 `crates/baton-harness/tests/artifacts.rs` 與 `crates/baton-client/tests/artifacts_client.rs` 在共用設定中加上 `harness.add_account`（與票 19 調整 `agent_api.rs` 的方式相同），並把派工結果拆成 `Started`；測試的斷言不變。
+- 理由：整合分支已有的 migration 與 AI 編號不可變動；已套用的資料庫以 migration 序號判斷，只能把後合併的一方往後排。
+- 替代方案：把兩個 migration 合併成一個（會改動整合分支已有的 migration 10，已套用的開發資料庫會漏掉其中一半）。
+- 影響：以票 12 分支（合併前）建立過的開發資料庫，其 `schema_migrations` 第 10 筆是 `artifact`，與整合後的 `scheduling` 不一致，需刪除重建；尚無發布版本，不提供轉換。
+- 審閱：未審
+
+### AI-109：已驗證通過的票，整合後不再重驗
+- 重要度：中
+- 時間／階段：2026-10-22，票 08、12、18、22 合併
+- 決策：票的驗證 run 判定 PASS 之後，若因其他票先合併而需要整合 run，整合 run 跑完全部測試且通過，就直接合併，不再派重新驗證。驗證 FAIL 後的修正 run 仍要重新驗證。
+- 理由：08、12、18、22 都把 migration 排在第 11 個、AI 編號都從 AI-103 起，每合併一張，其餘都要再整合；若每次整合後都重驗，驗證 run 的數量會隨平行票數成倍增加。整合 run 不改票的行為，且被要求不可刪除或弱化任何測試。
+- 替代方案：照 AI-75 每次整合後重驗（較保險、額度消耗大）；或把會動到 Store／API 的票改成循序派工（降低並行度）。
+- 影響：整合過程若引入行為缺陷（例如 R037 發現的「排程流程不再附上未讀摘要」），只能靠整合 run 自己的測試與判斷抓出；最終的 code-review 會再檢查一次整合分支。
+- 審閱：未審
+
+### AI-110：權限提示的判定是保守的詞法判定；範圍外或看不懂一律建立裁定請求
 - 重要度：高
 - 時間／階段：2026-10-22，票 22 實作
 - 決策：`permission_prompt` 先把「工具名稱＋輸入」歸類成 Workspace 授權的能力（`baton_domain::permission`），再對照**目前生效（最新）的授權 revision**：(1) 檔案工具（Read／Glob／Grep／LS → 讀取；Edit／MultiEdit／Write／NotebookEdit → 編輯）的路徑必須落在該能力的授權目標目錄內（詞法正規化：不分大小寫、斜線方向、`.`／`..`；相對路徑以 Workspace 目錄為基準；`..` 逃出根目錄、`~` 開頭、UNC 與其他磁碟都算範圍外），寫入 `.git` 一律範圍外（授權限制「不修改 Git 歷史」）；(2) WebFetch 只允許公開 http／https（本機、內網、IPv6 字面位址都算範圍外），WebSearch 需要「讀取公開網頁」；(3) Bash 只認一小張白名單（`cargo`／`npm`／`pnpm`／`yarn`／`pytest`／`go`／`dotnet` 的建置、測試、安裝子命令，`git status|diff|log|show`、`git add|commit`、`git push`），含任何 shell 組合語法（`; & | < > \` $ ( ) { } * ?`、換行）的指令、全域安裝旗標以外的未知子命令、不認得的程式一律無法歸類；(4) 未知工具、缺少必要欄位、尚未確認任何授權，全部範圍外。範圍外建立裁定請求並回「等待裁定」，不是回傳錯誤。
@@ -955,7 +1018,7 @@
 - 影響：保守的代價是 Worker 常用的 `cargo test 2>&1 | tail`、`ls`、`cat`、`curl` 這類指令每次都會變成裁定請求；使用者可用「允許這一次」，或日後把常見指令加進白名單／在 Adapter 的預先允許清單（票 14）列出。詞法判定不解析符號連結，授權目錄內指向外部的連結不會在這裡被攔下（Workspace 目錄本來就不是安全邊界，ADR-0002）。Adapter 預先允許的工具清單與 `--permission-prompt-tool` 參數屬票 14，這裡只定義 Runtime 端的判定。
 - 審閱：未審
 
-### AI-104：範圍外的權限提示只有兩個選項；「允許這一次」是單次批准，且由同一 Task 的同一操作消耗一次
+### AI-111：範圍外的權限提示只有兩個選項；「允許這一次」是單次批准，且由同一 Task 的同一操作消耗一次
 - 重要度：高
 - 時間／階段：2026-10-22，票 22 實作
 - 決策：權限提示建立的裁定請求固定兩個選項 `allow_once`（允許這一次）與 `deny`（拒絕），**沒有**「永遠允許」或「擴大授權」選項；高風險能力或無法歸類的操作建議 `deny`，其餘不給建議。使用者回答之後，**同一個 Task** 再次提出**同一個操作**（工具名稱＋輸入的指紋相同）時，這次提示消耗那個批准：`allow_once` → 回 allow（`status: approved`），`deny` → 回 deny（`status: denied`），消耗紀錄存在追加式的 `decision_approval_use`，每個請求最多消耗一次；消耗之後再提示同一個操作要重新裁定。同一個 Task 對同一個操作在請求仍待處理時重複提示，回到既有請求（不重複建立）。
@@ -964,7 +1027,7 @@
 - 影響：批准以 Task 為界，Task 取消後批准自然失效；擴大 Workspace 授權仍只能由使用者在授權設定頁做。使用者想永久放行某類操作要去改授權。
 - 審閱：未審
 
-### AI-105：裁定請求對 Task 與 Run 的影響：只有 `running` 的 Task 進入 `waiting_decision`，Run 不結束；恢復條件是「沒有其他待處理請求」
+### AI-112：裁定請求對 Task 與 Run 的影響：只有 `running` 的 Task 進入 `waiting_decision`，Run 不結束；恢復條件是「沒有其他待處理請求」
 - 重要度：中
 - 時間／階段：2026-10-22，票 22 實作
 - 決策：(1) 請求建立時，只有提出請求的 Run 所屬的 Task 在 `running` 時才轉成 `waiting_decision`（`blocking` 欄位記下受影響的 Task，Agent 提出的請求目前永遠只有那一個 Task）；Task 已是別的狀態（例如 `blocked`）時請求照常建立，Task 不動。(2) **Run 不因此結束**（與 AI-90 的 `report_blocked` 一致）：Worker 依 D-08 保存 checkpoint 後自行結束，或繼續做不需要這項裁定的事；Run 結束時 Task 不在 `running`，所以不會被拉到 `verifying` 或 `ready`。(3) 回答時，每個 `blocking` 的 Task 只有在「仍是 `waiting_decision`，而且沒有任何其他待處理請求也阻擋它」時才回到 `ready`；已取消或已離開 `waiting_decision` 的 Task 不動。(4) 只有仍是 execution lease 持有者的 Run 能提出請求（沿用 `is_current_writer`），已結束或被接替的 Run 提出請求回 409 `run_report_stale`，不建立任何東西。(5) 回到 `ready` 之後不會自動派工：舊 Run 若還活著、還持有 lease，派工會因 `execution_conflict` 被拒；派工本身仍由使用者或排程（票 19）發起。
@@ -973,25 +1036,25 @@
 - 影響：`waiting_decision` 的 Task 在使用者沒有回答之前不會有任何出口（取消除外）；「受影響的 Task 自動排程」由票 19 的 Scheduler 看到 `ready` 後處理。Controller 專屬的 `propose_decision_request`（可阻擋多個 Task）屬票 16、17，Domain 的 `blocking` 已經是清單，不需要改資料模型。
 - 審閱：未審
 
-### AI-106：逾時不是同意——期限只標示「已逾期」，沒有任何因時間而發生的狀態變化
+### AI-113：逾時不是同意——期限只標示「已逾期」，沒有任何因時間而發生的狀態變化
 - 重要度：高
 - 時間／階段：2026-10-22，票 22 實作
 - 決策：`request_decision` 可帶 `deadline_minutes`（1 分鐘到 30 天，從 Runtime 的 Clock 起算，存成 UTC 時間）；請求的投影帶 `overdue`（待處理且現在超過期限）。**沒有任何命令或背景處理會因為時間流逝而回答請求、放行權限提示或讓 Task 恢復**；逾期後使用者仍可回答，回答才會恢復 Task。權限提示建立的請求沒有期限。測試涵蓋：推進 fake Clock 數天、重啟 Runtime、再次 supervise，請求仍是 pending、Task 仍是 `waiting_decision`；同一個權限提示放三天後仍回「等待裁定」。
 - 理由：使用者故事 55「我的沉默不會變成授權」是安全邊界，不是可調參數；把「逾期」做成純顯示欄位，可以保證沒有程式路徑能把時間當成同意。
-- 替代方案：逾期自動採用建議選項或自動拒絕（前者是沉默即同意；後者會讓 Task 無人知曉地失敗，也需要新的狀態）；逾期把請求標為 expired（spec 的 expired／superseded 屬完整裁定中心，見 AI-108）。
+- 替代方案：逾期自動採用建議選項或自動拒絕（前者是沉默即同意；後者會讓 Task 無人知曉地失敗，也需要新的狀態）；逾期把請求標為 expired（spec 的 expired／superseded 屬完整裁定中心，見 AI-115）。
 - 影響：Agent 看不到使用者的期限壓力以外的任何回饋；使用者錯過的請求會一直留在待處理清單（以緊急程度與建立時間排序，逾期者有標示）。
 - 審閱：未審
 
-### AI-107：裁定的資料結構、交易邊界與喚醒 Outbox
+### AI-114：裁定的資料結構、交易邊界與喚醒 Outbox
 - 重要度：中
 - 時間／階段：2026-10-22，票 22 實作
-- 決策：(1) migration 11（`decision_request_and_decision`，排在票 19 的 `scheduling` 之後）新增 `decision_request`（只能從 `pending` 改成 `answered`，其餘欄位由觸發器鎖住、不可刪除）、`decision_request_block`（阻擋範圍）、`decision`（追加式，`decided_by` 以 CHECK 限定為 `desktop`，所以連程式寫錯也寫不進非桌面的裁定）、`decision_approval_use`（追加式）。(2) 回答在**同一個交易**寫入裁定、請求狀態、受影響 Task 的狀態與事件、喚醒 Outbox。(3) 喚醒 Outbox 的 `kind` 是 `decision_wake:<請求識別>`（Outbox 的唯一鍵是 `(kind, run_id)`，同一個 Run 可以提出多個請求，所以種類帶上請求識別；沒有改既有資料表），`run_id` 是提出請求的 Run，內容有 Workspace、請求、選項、阻擋的與實際恢復的 Task。**本票沒有消費者**：Controller 的事件迴圈（票 16 之後）會讀它，`delivered_at` 保持空白。(4) 事件：請求聚合 `decision_request`（v1 `decision_requested`、v2 `decision_answered`、v3 `permission_approval_used`），自動允許的權限提示每筆一個獨立聚合 `permission_audit`（`permission_auto_allowed`，內容含 Run、Task、工具、摘要、能力與授權 revision；不節流）。(5) 回答同樣的選項重送是冪等的（200、不再追加任何東西）；不同的選項回 409 `decision_already_answered`；未知選項 400 `decision_option_unknown`；請求內容無效 400 `decision_invalid`。
+- 決策：(1) migration 12（`decision_request_and_decision`，排在票 12 的 `artifact`（migration 11）之後）新增 `decision_request`（只能從 `pending` 改成 `answered`，其餘欄位由觸發器鎖住、不可刪除）、`decision_request_block`（阻擋範圍）、`decision`（追加式，`decided_by` 以 CHECK 限定為 `desktop`，所以連程式寫錯也寫不進非桌面的裁定）、`decision_approval_use`（追加式）。(2) 回答在**同一個交易**寫入裁定、請求狀態、受影響 Task 的狀態與事件、喚醒 Outbox。(3) 喚醒 Outbox 的 `kind` 是 `decision_wake:<請求識別>`（Outbox 的唯一鍵是 `(kind, run_id)`，同一個 Run 可以提出多個請求，所以種類帶上請求識別；沒有改既有資料表），`run_id` 是提出請求的 Run，內容有 Workspace、請求、選項、阻擋的與實際恢復的 Task。**本票沒有消費者**：Controller 的事件迴圈（票 16 之後）會讀它，`delivered_at` 保持空白。(4) 事件：請求聚合 `decision_request`（v1 `decision_requested`、v2 `decision_answered`、v3 `permission_approval_used`），自動允許的權限提示每筆一個獨立聚合 `permission_audit`（`permission_auto_allowed`，內容含 Run、Task、工具、摘要、能力與授權 revision；不節流）。(5) 回答同樣的選項重送是冪等的（200、不再追加任何東西）；不同的選項回 409 `decision_already_answered`；未知選項 400 `decision_option_unknown`；請求內容無效 400 `decision_invalid`。
 - 理由：「裁定已存、Task 還卡住」的中間狀態不能被觀察到（驗收條件）；不改 Outbox 的唯一鍵可避免與同時進行的票互相衝突；稽核事件與狀態變更同交易才能保證記錄與實際行為一致。
 - 替代方案：用新的 `wake` 資料表（多一張沒有消費者的表）；重建 Outbox 表移除唯一鍵（動到其他票也在使用的表）；自動允許只記日誌（日誌可被輪替、不在備份範圍，也不能和 Run 關聯查詢）。
 - 影響：自動允許每次都追加事件，讀取密集的 Worker 會讓事件表成長較快，需要之後的清理／彙總策略（與事件表清理一併處理）；`decision_wake` 項目在 Controller 票實作前會累積。
 - 審閱：未審
 
-### AI-108：本票的裁定中心只做最小版本，其餘留給「裁定中心完整功能」
+### AI-115：本票的裁定中心只做最小版本，其餘留給「裁定中心完整功能」
 - 重要度：中
 - 時間／階段：2026-10-22，票 22 實作
 - 決策：本票做：Agent 以 `request_decision` 提出、權限提示轉接、待處理清單與單筆詳情、單筆回答、受影響 Task 恢復、喚醒 Outbox、狀態列與導覽的待處理數。**不做**（spec 第三階段的完整裁定中心）：`expected_revision` 校驗與 `superseded`／過期標記、批次回答、相似請求合併或互相連結、`goal_revision`、決策權限表（D-15）的強制檢查、Decision 的適用範圍／有效期間／supersedes、Controller 專屬的 `propose_decision_request`。選項限制：2–8 個、識別限英數字與底線連字號；問題 500、原因 1000、選項名稱 200、取捨 500、證據最多 10 項各 500 字元、備註 1000 字元。Agent 工具另外去重：同一個 Run 對同一個問題在仍待處理時重複提出，回到既有請求並標示 `existing: true`。
@@ -1000,13 +1063,22 @@
 - 影響：Decision 目前只保存「選了哪個選項與備註」，Context Builder（票 15、28）要載入決策時從 `decision` 與請求讀取；完整版會在同一組資料表上追加欄位或新表，不需要重建。
 - 審閱：未審
 
-### AI-109：Agent 工具與權限提示回應的形狀（遵循 Claude Code 的 permission-prompt 協定，待票 14 驗證）
+### AI-116：Agent 工具與權限提示回應的形狀（遵循 Claude Code 的 permission-prompt 協定，待票 14 驗證）
 - 重要度：中
 - 時間／階段：2026-10-22，票 22 實作
 - 決策：新增兩個 Agent 工具：`request_decision`（欄位 `question`、`reason`、`options[{id,label,tradeoff?}]`、`recommendation?`、`evidence?`、`urgency?`、`deadline_minutes?`；回 `{decision_request_id, status: "waiting_decision", existing, message}`）與 `permission_prompt`（欄位 `tool_name`、`input`，可另帶 `tool_use_id`；回 `{behavior: "allow"|"deny", updatedInput?, message?, status, decision_request_id?, authorization_revision?}`）。回應遵循 Claude Code `--permission-prompt-tool` 的形狀（`behavior`／`updatedInput`／`message`），允許時原樣帶回輸入；等待裁定與拒絕都是 HTTP 200 的 `behavior: "deny"`（MCP 結果不是 `isError`），`status` 區分 `auto_allowed`、`approved`、`waiting_decision`、`denied`。Agent API 沒有任何回答或批准的工具；桌面 API 一律在 `/api/v1/` 下，Agent 憑證被 guard 擋成 403 `role_not_allowed`。桌面端點：`GET workspaces/{id}/decisions`、`GET …/decisions/{rid}`、`POST …/decisions/{rid}/answer`（`{option_id, note?}`）、全域 `GET /api/v1/decisions/pending`。
 - 理由：沿用已知協定可讓票 14 的 Adapter 直接把 `permission_prompt` 指給 `--permission-prompt-tool`；`deny` 不用 `isError` 是因為它是正常的協定回覆，不是工具故障。
 - 替代方案：自訂回應格式再由 shim 轉換（多一層轉換就多一處可能不一致）。
 - 影響：**Validation Required（票 14，以真實 Claude Code 驗證）**：(a) CLI 是否接受 `behavior` 之外的額外欄位、是否要求 `updatedInput` 一定存在；(b) 收到 `deny` 的 Worker 是否真的能繼續做其他步驟而不重試相同操作；(c) 被阻擋的權限提示是否需要 `tool_use_id` 才能對應。若與協定衝突，只需要修改 `PermissionResponse` 的序列化，Domain 判定不受影響。前端的 Tauri 指令名稱（`decision_list`／`decision_detail`／`decision_answer`／`decisions_pending`）與 HTTP 路徑一一對應。
+- 審閱：未審
+
+### AI-117：票 22 整合 rebuild/v1（票 12）：migration 與 AI 編號順延、衝突合併方式
+- 重要度：低
+- 時間／階段：2026-10-22，票 22 實作（修正 run R041）
+- 決策：票 22 的 migration `decision_request_and_decision` 原本是第 11 個，與票 12 的 `artifact`（migration 11）重號，順延為第 12 個，排在 `artifact` 之後；兩者互不參照。票 22 的 AI 編號由 AI-103～AI-109 順延為 AI-110～AI-116，內容不變，開發指南的引用同步改號；整合分支既有條目不動。其餘衝突一律兩邊都保留：API 路由、Tauri 指令、MCP 工具清單（共 7 個）、`AppClient`（同時包含 `DecisionClient`、`SchedulingClient`、`ArtifactClient`）、側欄入口（「裁定」與「成果與驗證」並列）、開發指南的 crate 表與測試清單。
+- 理由：不可修改整合分支已有的 migration 與 AI 條目；兩張票的功能彼此獨立。
+- 替代方案：合併兩個 migration（已套用的開發資料庫會漏掉其中一半）。
+- 影響：無行為變更。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

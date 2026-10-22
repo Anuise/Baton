@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    admission_check_path, authorization_path, authorization_summary_path, decision_answer_path, decision_path,
-    decisions_path, goals_path, run_cancel_path,
+    admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, authorization_path,
+    authorization_summary_path, decision_answer_path, decision_path, decisions_path, goals_path, run_cancel_path,
+    ArtifactList, ArtifactPreview, SHA256_HEADER,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     task_path, task_ready_path, tasks_path, QueuedDispatch, SchedulingOverview, UpdateSchedulingSettingsRequest,
     SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
@@ -44,8 +45,18 @@ pub enum DispatchOutcome {
 /// 一般請求等待回應的上限。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// 下載成果（最多 10 MiB，仍要讀檔並重新計算雜湊）等待回應的上限。
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// 需要在本機執行 `claude`、`git` 的請求（核對登入、精靈檢查）等待回應的上限。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 下載到的成果內容，以及 Runtime 以 `X-Baton-Sha256` 回報的雜湊（Runtime 已與 manifest 核對過）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactDownload {
+    pub bytes: Vec<u8>,
+    pub sha256: String,
+}
 
 /// 連線方式：連回既有的，或由本次呼叫啟動。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +298,35 @@ impl RuntimeClient {
         self.get_json(PENDING_DECISIONS_PATH).await
     }
 
+    /// 成果瀏覽：已登記的成果與全部版本，以及沒有 manifest 的未登記檔案。
+    pub async fn list_artifacts(&self, workspace_id: &str) -> Result<ArtifactList, ClientError> {
+        self.get_json(&artifacts_path(workspace_id)).await
+    }
+
+    /// 成果某個版本的預覽（Runtime 會先核對雜湊；不符回傳 `ClientError::Rejected`）。
+    pub async fn preview_artifact(
+        &self,
+        workspace_id: &str,
+        artifact_id: &str,
+        version: i64,
+    ) -> Result<ArtifactPreview, ClientError> {
+        self.get_json(&artifact_preview_path(workspace_id, artifact_id, version)).await
+    }
+
+    /// 下載成果某個版本；與其他呼叫一樣驗證桌面身分，內容與 manifest 不符時回傳 `ClientError::Rejected`。
+    pub async fn download_artifact(
+        &self,
+        workspace_id: &str,
+        artifact_id: &str,
+        version: i64,
+    ) -> Result<ArtifactDownload, ClientError> {
+        let path = artifact_content_path(workspace_id, artifact_id, version);
+        let response = self.request_ok::<()>(reqwest::Method::GET, &path, None, DOWNLOAD_TIMEOUT).await?;
+        let sha256 = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+        let bytes = response.bytes().await.map_err(|e| ClientError::Unreachable(e.to_string()))?.to_vec();
+        Ok(ArtifactDownload { bytes, sha256 })
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         self.send_json::<(), T>(reqwest::Method::GET, path, None).await
     }
@@ -308,6 +348,18 @@ impl RuntimeClient {
         body: Option<&B>,
         timeout: Duration,
     ) -> Result<T, ClientError> {
+        let response = self.request_ok(method, path, body, timeout).await?;
+        response.json().await.map_err(|e| ClientError::Unreachable(e.to_string()))
+    }
+
+    /// 送出請求（帶憑證與固定標頭）並回傳成功的回應；非 2xx 轉成 `ClientError::Rejected`。
+    async fn request_ok<B: serde::Serialize>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, ClientError> {
         let token = baton_credential::read_desktop_credential(&self.data_dir, &*self.protector)?;
         let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
         // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
@@ -326,7 +378,7 @@ impl RuntimeClient {
         let response = request.send().await.map_err(unreachable)?;
 
         if response.status().is_success() {
-            return response.json().await.map_err(unreachable);
+            return Ok(response);
         }
         let status = response.status();
         Err(match response.json::<ErrorBody>().await {
