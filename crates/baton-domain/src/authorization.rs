@@ -415,6 +415,8 @@ pub fn revoked_capabilities(admitted: &AuthorizationRevision, current: &Authoriz
     changes(admitted, &current.grants)
         .changes
         .into_iter()
+        // 新增的能力（連同它的限制）是擴大，不是撤銷
+        .filter(|c| !c.new_capability)
         .filter(|c| c.removed_capability || !c.removed_targets.is_empty() || !c.added_restrictions.is_empty())
         .map(|c| c.capability)
         .collect()
@@ -903,7 +905,7 @@ mod tests {
         grants.retain(|g| g.capability != Capability::RunBuildTest);
         grants.iter_mut().find(|g| g.capability == Capability::WriteFiles).unwrap().targets = vec!["C:/work/app/docs".into()];
         grants.iter_mut().find(|g| g.capability == Capability::ReadFiles).unwrap().restrictions.push("只讀 docs".into());
-        grants.push(grant(Capability::Deploy, &["C:/work/app"], &[]));
+        grants.push(grant(Capability::Deploy, &["C:/work/app"], &["只部署到測試環境"]));
         let (current, _) = created(confirm(&workspace(), Some(&admitted), request(None, grants, true), T2).unwrap());
 
         assert_eq!(
