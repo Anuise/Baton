@@ -85,7 +85,7 @@ fn api_error(status: StatusCode, code: &'static str, message: &str) -> ApiError 
 }
 
 /// 憑證的範圍；請求聲稱的 Workspace 或 Run 與它不一致就拒絕。
-fn scope_of(record: &CredentialRecord, claims: &Claims) -> Result<AgentScope, ApiError> {
+pub(crate) fn scope_of(record: &CredentialRecord, claims: &Claims) -> Result<AgentScope, ApiError> {
     // guard 已經確保 Agent 憑證一定有範圍；沒有就當作無效，不退回任何預設
     let scope = record
         .scope

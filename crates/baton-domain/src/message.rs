@@ -11,12 +11,16 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::event::DomainEvent;
 use crate::Timestamp;
 
 /// 訊息事件的聚合類型；`aggregate_id` 是訊息（或被忽略的嘗試）的識別。
 pub const MESSAGE_AGGREGATE: &str = "message";
 /// 嘗試用訊息變更 Task 歸屬或範圍，已被忽略並轉給 Controller 的事件。
 pub const EVENT_MESSAGE_SCOPE_CHANGE_IGNORED: &str = "message_scope_change_ignored";
+
+/// 範圍變更嘗試被忽略的原因代碼（回給 Worker，也寫進事件）。
+pub const SCOPE_CHANGE_REASON: &str = "scope_change_not_allowed";
 
 pub const SUBJECT_MAX_CHARS: usize = 200;
 pub const BODY_MAX_BYTES: usize = 16 * 1024;
@@ -109,11 +113,14 @@ pub enum MessageError {
     IdConflict(String),
     #[error("這個 Run 已經不是目前的寫入所有者（已結束或已被接替）")]
     StaleSender,
+    #[error("這個 Run 已經結束或已被接替，憑證已失效")]
+    Revoked,
 }
 
 impl MessageError {
     pub fn code(&self) -> &'static str {
         match self {
+            MessageError::Revoked => "credential_revoked",
             MessageError::RecipientNotFound(_) => "recipient_not_found",
             MessageError::ReplyTargetNotFound(_) => "reply_target_not_found",
             MessageError::IdConflict(_) => "message_id_conflict",
@@ -283,6 +290,31 @@ pub struct Sender {
     pub task_id: String,
     pub generation: i64,
     pub is_current: bool,
+}
+
+impl ScopeChangeAttempt {
+    /// 給 Controller 的事件：訊息沒有被交付，Task 的歸屬與範圍不變。
+    pub fn into_event(self, sender: &Sender, attempt_id: String, now: Timestamp) -> DomainEvent {
+        DomainEvent {
+            aggregate_type: MESSAGE_AGGREGATE,
+            aggregate_id: attempt_id,
+            aggregate_version: 1,
+            event_type: EVENT_MESSAGE_SCOPE_CHANGE_IGNORED,
+            occurred_at: now,
+            payload: serde_json::json!({
+                "workspace_id": sender.workspace_id,
+                "run_id": sender.run_id,
+                "task_id": sender.task_id,
+                "generation": sender.generation,
+                "attempted_kind": self.attempted_kind,
+                "attempted_fields": self.attempted_fields,
+                "recipients": self.recipients,
+                "subject": self.subject,
+                "body_excerpt": self.body_excerpt,
+                "reason": SCOPE_CHANGE_REASON,
+            }),
+        }
+    }
 }
 
 /// 判定送出需要的、已經載入的狀態。
