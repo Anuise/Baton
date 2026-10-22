@@ -120,6 +120,7 @@ const HANDOFF_PHASE_LABELS: Record<HandoffPhase, string> = {
   transferred: "已交接，等待接手確認",
   confirmed: "已交接並確認",
   abandoned: "交接已放棄",
+  waiting_resource: "等待資源：所有合適帳號都受限",
 };
 
 /** 額度門檻原因代碼的顯示文字（帳號頁的門檻與交接原因共用）；未知代碼原樣顯示。 */
@@ -127,13 +128,21 @@ export const GATE_REASON_LABELS: Record<string, string> = {
   stop_dispatch_threshold: "達 75% 停止派工門檻",
   drain_threshold: "達 85% 交接門檻",
   limit_warning: "Claude Code 回報限流警告",
+  limit_reached: "Claude Code 回報已達上限（突然限流）",
   recovered: "用量回到 60% 以下",
   reset_observed: "已過重置時間",
   usage_unknown: "用量未知（訊號已失效）",
 };
 
-/** Run 的狀態文字：因交接而結束的 Run 標成「已交接」，不是一般的中斷。 */
-const runStatusLabel = (run: RunView) => (run.end_reason === "handed_off" ? "已交接" : RUN_STATUS_LABELS[run.status]);
+/** 交接相關的結束原因與狀態文字：這些 Run 不是一般的中斷，也不另列結束原因。 */
+const HANDOFF_END_REASON_LABELS: Record<string, string> = {
+  handed_off: "已交接",
+  handed_off_waiting_resource: "已停止（等待資源）",
+};
+
+/** Run 的狀態文字：因交接（或突然限流而等待資源）結束的 Run 用交接的說法，不是一般的中斷。 */
+const runStatusLabel = (run: RunView) =>
+  (run.end_reason !== null ? HANDOFF_END_REASON_LABELS[run.end_reason] : undefined) ?? RUN_STATUS_LABELS[run.status];
 
 /** 整合項目尚未結束（排隊中或處理中）。 */
 const isIntegrationActive = (status: IntegrationStatus) => status !== "integrated" && status !== "failed";
@@ -737,7 +746,7 @@ function RunStatusLine({
           沿用舊授權（revision {run.authorization_revision}，目前 {authorizationRevision}）
         </p>
       )}
-      {run.end_reason && run.end_reason !== "handed_off" && <p>結束原因：{run.end_reason}</p>}
+      {run.end_reason && !(run.end_reason in HANDOFF_END_REASON_LABELS) && <p>結束原因：{run.end_reason}</p>}
       {run.lease && <p>最後心跳：{formatTimestamp(run.lease.last_heartbeat_at, timeZone)}</p>}
       {isRunActive(run.status) && run.cancel_requested_at !== null && <p>取消中，等待程序停止…</p>}
       {run.latest_progress && (
@@ -769,7 +778,7 @@ function RunStatusLine({
 
 /**
  * Task 最新的跨帳號交接（spec D-21）：階段、從哪個帳號到哪個帳號與原因、延續的 checkpoint；
- * 確認後列出接手者確認的三欄，放棄時顯示原因。
+ * 確認後列出接手者確認的三欄，放棄時顯示原因；等待資源時說明預計重新評估的時間、依據與等待原因。
  */
 function HandoffSummary({
   handoff,
@@ -787,7 +796,9 @@ function HandoffSummary({
         交接：<strong>{HANDOFF_PHASE_LABELS[handoff.phase]}</strong>
       </p>
       <p>
-        從 {profileNameOf(handoff.from_profile_id)} 交接到 {profileNameOf(handoff.to_profile_id)}（
+        從 {profileNameOf(handoff.from_profile_id)}{" "}
+        {/* 突然限流而所有帳號都受限時尚未選定承接帳號（空字串），不顯示空的帳號名 */}
+        {handoff.to_profile_id === "" ? "交接，尚未選定承接帳號" : `交接到 ${profileNameOf(handoff.to_profile_id)}`}（
         {GATE_REASON_LABELS[handoff.reason] ?? handoff.reason}）
       </p>
       {checkpoint && (
@@ -803,6 +814,32 @@ function HandoffSummary({
         </ul>
       )}
       {handoff.phase === "abandoned" && handoff.abandoned_reason && <p>放棄原因：{handoff.abandoned_reason}</p>}
+      {handoff.phase === "waiting_resource" && <WaitingResourceSummary handoff={handoff} timeZone={timeZone} />}
+    </div>
+  );
+}
+
+/** 等待資源：預計重新評估的時間、依據（帳號重置時間後 1 分鐘，或未知時退避輪詢）與最近一次評估的等待原因。 */
+function WaitingResourceSummary({ handoff, timeZone }: { handoff: Handoff; timeZone?: string }) {
+  // 舊版 Runtime 沒有等待欄位，視為 null／0／空陣列
+  const nextCheckAt = handoff.next_check_at ?? null;
+  const resetAt = handoff.wait_reset_at ?? null;
+  const reasons = handoff.wait_reasons ?? [];
+  return (
+    <div className="task-handoff-waiting" role="group" aria-label="等待資源">
+      {nextCheckAt !== null && <p>預計 {formatTimestamp(nextCheckAt, timeZone)} 重新評估</p>}
+      <p>
+        {resetAt !== null
+          ? `依帳號重置時間（${formatTimestamp(resetAt, timeZone)}）後 1 分鐘`
+          : `重置時間未知，退避輪詢（第 ${(handoff.wait_attempts ?? 0) + 1} 次評估）`}
+      </p>
+      {reasons.length > 0 && (
+        <ul>
+          {reasons.map((reason, index) => (
+            <li key={`${reason.code}-${reason.profile_id ?? index}`}>{reason.message}</li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

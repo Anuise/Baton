@@ -672,8 +672,11 @@ export interface BudgetView {
   decision_request_id: string | null;
 }
 
-/** 交接階段：requested 等待保存檢查點、stopping 停止舊程序、transferred 已轉移等待接手確認、confirmed 已確認、abandoned 已放棄。 */
-export type HandoffPhase = "requested" | "stopping" | "transferred" | "confirmed" | "abandoned";
+/**
+ * 交接階段：requested 等待保存檢查點、stopping 停止舊程序、transferred 已轉移等待接手確認、confirmed 已確認、abandoned 已放棄、
+ * waiting_resource 突然限流而所有合適帳號都受限（舊程序已停止，等資源恢復再接手）。
+ */
+export type HandoffPhase = "requested" | "stopping" | "transferred" | "confirmed" | "abandoned" | "waiting_resource";
 
 /** 交接要延續的 checkpoint（對應 Rust 的 CheckpointRef）；時間是 UTC 毫秒。 */
 export interface HandoffCheckpoint {
@@ -699,12 +702,12 @@ export interface Handoff {
   from_run_id: string;
   from_profile_id: string;
   from_generation: number;
-  /** 承接帳號。 */
+  /** 承接帳號；空字串表示尚未選定（突然限流而所有帳號都受限時）。 */
   to_profile_id: string;
   to_run_id: string | null;
   to_generation: number | null;
   phase: HandoffPhase;
-  /** 帳號門檻的原因代碼，例如 drain_threshold、limit_warning。 */
+  /** 帳號門檻的原因代碼，例如 drain_threshold、limit_warning、limit_reached（Claude Code 回報已達上限＝突然限流）。 */
   reason: string;
   checkpoint: HandoffCheckpoint | null;
   /** 舊程序怎麼停下的：stopped_gracefully、force_killed、exited、dead、already_ended。 */
@@ -715,6 +718,16 @@ export interface Handoff {
   stopping_at: number | null;
   transferred_at: number | null;
   confirmed_at: number | null;
+  /** 進入等待資源的時間。以下等待欄位舊版 Runtime 沒有，視為 null／0／空陣列。 */
+  waiting_at?: number | null;
+  /** 預計重新評估的時間；waiting_resource 時一定有值。 */
+  next_check_at?: number | null;
+  /** 已重新評估但仍受限的次數（退避的指數）；0 表示還沒重新評估過。 */
+  wait_attempts?: number;
+  /** 依據的帳號重置時間（最早的那個）；null 表示重置時間未知、以退避輪詢。 */
+  wait_reset_at?: number | null;
+  /** 最近一次評估時不能派給任何帳號的原因。 */
+  wait_reasons?: WaitReason[];
   updated_at: number;
   version: number;
 }
@@ -1426,7 +1439,7 @@ export type GateState = "open" | "paused" | "draining";
 export interface QuotaGate {
   profile_id: string;
   state: GateState;
-  /** 進入這個狀態的原因代碼：stop_dispatch_threshold、drain_threshold、limit_warning、recovered、reset_observed、usage_unknown。 */
+  /** 進入這個狀態的原因代碼：stop_dispatch_threshold、drain_threshold、limit_warning、limit_reached（突然限流）、recovered、reset_observed、usage_unknown。 */
   reason: string;
   /** 轉換當下的判斷用量；未知為 null。 */
   used: number | null;
