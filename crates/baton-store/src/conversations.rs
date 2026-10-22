@@ -335,7 +335,8 @@ pub(crate) fn enqueue_work_events(tx: &Transaction<'_>, change: &RunChange, now:
 
 // ---------------------------------------------------------------- 重建背景（票 30）
 
-/// 新的（含替代的）Controller Session 重建背景：Workspace 最近做成的決策，以及尚未結束的 Task 最近一筆被接受的檢查點。
+/// 新的（含替代的）Controller Session 重建背景：Workspace 最近做成的決策、尚未結束的 Task 最近一筆被接受的檢查點，
+/// 以及未完成的 Workflow 與目前 Stage（票 43）。
 fn load_background(conn: &Connection, workspace_id: &str) -> rusqlite::Result<ControllerBackground> {
     let mut decisions = conn
         .prepare(
@@ -377,7 +378,8 @@ fn load_background(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Co
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     checkpoints.reverse();
-    Ok(ControllerBackground { decisions, checkpoints })
+    let workflows = super::workflows::workflow_notes(conn, workspace_id)?;
+    Ok(ControllerBackground { decisions, checkpoints, workflows })
 }
 
 /// Controller 提出的裁定請求被回答或過期（票 17）：在同一個交易中成為該 Workspace conversation 的工作事件。

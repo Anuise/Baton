@@ -65,6 +65,7 @@ fn inputs<'a>(task: &'a Task, knowledge: &'a [KnowledgeEntry]) -> ContextInputs<
         run_id: "run_1",
         task,
         contract: CONTRACT,
+        stage: None,
         handoff: None,
         checkpoint: None,
         knowledge,
@@ -329,4 +330,24 @@ fn the_receipt_records_the_version_actually_rendered_and_the_prompt_hash() {
     assert_eq!((item.version, item.title.as_str()), (Some(2), "修正後的標題"));
     assert!(built.prompt.contains("〔les_1 v2〕修正後的標題"));
     assert_eq!(built.receipt.prompt_sha256, crate::artifact::sha256_hex(built.prompt.as_bytes()));
+}
+
+#[test]
+fn the_current_workflow_stage_is_a_required_item_right_after_the_contract() {
+    let task = task();
+    let stage = StageItem {
+        workflow_id: "wf_1".into(),
+        revision: 3,
+        title: "Stage「最小化」".into(),
+        text: "
+
+目前的流程階段：Stage「最小化」".into(),
+    };
+    let mut tight = inputs(&task, &[]);
+    tight.stage = Some(&stage);
+    tight.budget_tokens = 1;
+    let built = build(&tight);
+    assert!(built.prompt.starts_with(&format!("{CONTRACT}{}", stage.text)), "{}", built.prompt);
+    let item = &built.receipt.items[1];
+    assert_eq!((item.kind, item.ref_id.as_str(), item.version, item.status), (ItemKind::Stage, "wf_1", Some(3), ItemStatus::Loaded));
 }

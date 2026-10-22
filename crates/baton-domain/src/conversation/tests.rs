@@ -3,7 +3,7 @@ use crate::session::{ResumeCapability, SessionState};
 
 const T0: Timestamp = Timestamp::from_millis(1_000_000);
 const DIR: &str = "C:\\work\\app";
-const NO_BACKGROUND: ControllerBackground = ControllerBackground { decisions: Vec::new(), checkpoints: Vec::new() };
+const NO_BACKGROUND: ControllerBackground = ControllerBackground { decisions: Vec::new(), checkpoints: Vec::new(), workflows: Vec::new() };
 
 fn at(offset_ms: i64) -> Timestamp {
     Timestamp::from_millis(T0.as_millis() + offset_ms)
@@ -390,6 +390,7 @@ fn a_new_session_is_rebuilt_from_decisions_and_checkpoints_but_a_resumed_one_is_
     let background = ControllerBackground {
         decisions: vec![DecisionNote { question: "要用哪個資料庫？".into(), choice: "SQLite".into(), note: Some("先求簡單".into()) }],
         checkpoints: vec![CheckpointNote { task_id: "task_1".into(), task_title: "整理資料".into(), summary: "完成三家".into() }],
+        workflows: Vec::new(),
     };
     let change = begin_turn(&state, &[], &background, begin("ctl_1", None), at(5_000)).unwrap();
     let prompt = change.run.unwrap().prompt;

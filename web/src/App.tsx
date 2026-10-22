@@ -22,11 +22,21 @@ import { TaskBoard } from "./TaskBoard";
 import { TimelinePage } from "./TimelinePage";
 import { UpdateNotice } from "./UpdateNotice";
 import { UpdateSettings } from "./UpdateSettings";
+import { WorkflowPage } from "./WorkflowPage";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線或專案理解。 */
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線、專案理解或流程。 */
 type Opened = {
-  view: "authorization" | "conversation" | "tasks" | "decisions" | "artifacts" | "knowledge" | "timeline" | "understanding";
+  view:
+    | "authorization"
+    | "conversation"
+    | "tasks"
+    | "decisions"
+    | "artifacts"
+    | "knowledge"
+    | "timeline"
+    | "understanding"
+    | "workflows";
   workspace: Workspace;
 };
 
@@ -65,6 +75,7 @@ export function App() {
             onOpenKnowledge={(workspace) => setOpened({ view: "knowledge", workspace })}
             onOpenTimeline={(workspace) => setOpened({ view: "timeline", workspace })}
             onOpenUnderstanding={(workspace) => setOpened({ view: "understanding", workspace })}
+            onOpenWorkflows={(workspace) => setOpened({ view: "workflows", workspace })}
           />
         )}
         <main className="main">
@@ -100,6 +111,10 @@ export function App() {
           {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 的協調提示與錯誤 */}
           {client && opened?.view === "understanding" && (
             <ProjectUnderstandingPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 的跳過原因與錯誤 */}
+          {client && opened?.view === "workflows" && (
+            <WorkflowPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
           )}
           {client && <PlatformPage client={client} />}
         </main>

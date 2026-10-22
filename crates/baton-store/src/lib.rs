@@ -54,6 +54,7 @@ mod timeline;
 mod understanding;
 mod verification;
 mod workdirs;
+mod workflows;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use cleanup::{CleanupApplyError, CleanupWork};
@@ -85,6 +86,7 @@ pub use timeline::TimelineError;
 pub use understanding::UnderstandingApplyError;
 pub use verification::{AcceptanceApplyError, PendingVerification};
 pub use workdirs::WorkdirCandidate;
+pub use workflows::{WorkflowApplyError, WorkflowBinding, WorkflowDetail};
 
 /// 控制資料庫檔名，位於資料目錄之下。
 pub const DB_FILE_NAME: &str = "control.sqlite";
@@ -1396,6 +1398,90 @@ const MIGRATIONS: &[Migration] = &[
             version INTEGER NOT NULL CHECK (version >= 1),
             updated_at INTEGER NOT NULL
         );",
+    },
+    // 方法登錄、Playbook 與 Workflow（票 43，第 39 個 migration）：方法與 Playbook 的版本只追加、不可覆寫；
+    // Workflow 固定開始時的 Playbook 版本（之後不能改），Stage 以 key 識別，每次回報結果追加一筆 stage_attempt。
+    Migration {
+        name: "methods_and_workflows",
+        sql: "CREATE TABLE method_version (
+            id TEXT PRIMARY KEY,
+            key TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            definition TEXT NOT NULL CHECK (json_valid(definition)),
+            content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+            origin TEXT NOT NULL CHECK (origin IN ('builtin', 'user')),
+            created_at INTEGER NOT NULL,
+            UNIQUE (key, version)
+        );
+        CREATE TRIGGER method_version_no_update BEFORE UPDATE ON method_version
+        BEGIN SELECT RAISE(ABORT, 'method_version 不可原地覆寫'); END;
+        CREATE TRIGGER method_version_no_delete BEFORE DELETE ON method_version
+        BEGIN SELECT RAISE(ABORT, 'method_version 不可刪除'); END;
+        CREATE TABLE playbook_version (
+            id TEXT PRIMARY KEY,
+            key TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            situation TEXT NOT NULL CHECK (situation IN ('ambiguous', 'feature', 'defect', 'migration', 'performance',
+                'investigation', 'exploratory_testing')),
+            definition TEXT NOT NULL CHECK (json_valid(definition)),
+            content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+            origin TEXT NOT NULL CHECK (origin IN ('builtin', 'user')),
+            created_at INTEGER NOT NULL,
+            UNIQUE (key, version)
+        );
+        CREATE TRIGGER playbook_version_no_update BEFORE UPDATE ON playbook_version
+        BEGIN SELECT RAISE(ABORT, 'playbook_version 不可原地覆寫'); END;
+        CREATE TRIGGER playbook_version_no_delete BEFORE DELETE ON playbook_version
+        BEGIN SELECT RAISE(ABORT, 'playbook_version 不可刪除'); END;
+        CREATE TABLE workflow_instance (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            goal_id TEXT NOT NULL REFERENCES goal (id),
+            task_id TEXT REFERENCES task (id),
+            playbook_version_id TEXT NOT NULL REFERENCES playbook_version (id),
+            situation TEXT NOT NULL,
+            route_reason TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('active', 'blocked', 'completed')),
+            current_stage TEXT,
+            blocked_reason TEXT,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            created_by TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            CHECK ((status = 'completed') = (current_stage IS NULL)),
+            CHECK ((status = 'blocked') = (blocked_reason IS NOT NULL))
+        );
+        CREATE INDEX workflow_instance_workspace ON workflow_instance (workspace_id, status);
+        -- 同一個 Task 同時最多一個未完成的 Workflow
+        CREATE UNIQUE INDEX workflow_instance_open_task ON workflow_instance (task_id)
+            WHERE task_id IS NOT NULL AND status <> 'completed';
+        -- 進行中的 Workflow 維持原版本：固定的 Playbook 版本與綁定不能改
+        CREATE TRIGGER workflow_instance_pinned BEFORE UPDATE ON workflow_instance
+        WHEN NEW.playbook_version_id <> OLD.playbook_version_id OR NEW.workspace_id <> OLD.workspace_id
+          OR NEW.goal_id <> OLD.goal_id OR NEW.task_id IS NOT OLD.task_id OR NEW.revision <= OLD.revision
+        BEGIN SELECT RAISE(ABORT, 'workflow_instance 的 Playbook 版本與綁定不可更改，revision 只增不減'); END;
+        CREATE TRIGGER workflow_instance_no_delete BEFORE DELETE ON workflow_instance
+        BEGIN SELECT RAISE(ABORT, 'workflow_instance 不可刪除'); END;
+        CREATE TABLE stage_attempt (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL REFERENCES workflow_instance (id),
+            stage_key TEXT NOT NULL,
+            attempt INTEGER NOT NULL CHECK (attempt >= 1),
+            outcome TEXT NOT NULL CHECK (outcome IN ('passed', 'incomplete', 'blocked', 'failed', 'skipped')),
+            evidence TEXT NOT NULL CHECK (json_valid(evidence)),
+            missing TEXT NOT NULL CHECK (json_valid(missing)),
+            note TEXT NOT NULL,
+            recorded_by TEXT NOT NULL,
+            profile_id TEXT,
+            created_at INTEGER NOT NULL,
+            -- 跳過一定有原因
+            CHECK (outcome <> 'skipped' OR length(trim(note)) > 0),
+            UNIQUE (workflow_id, stage_key, attempt)
+        );
+        CREATE TRIGGER stage_attempt_no_update BEFORE UPDATE ON stage_attempt
+        BEGIN SELECT RAISE(ABORT, 'stage_attempt 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER stage_attempt_no_delete BEFORE DELETE ON stage_attempt
+        BEGIN SELECT RAISE(ABORT, 'stage_attempt 是追加式資料表，不可刪除'); END;",
     },
 ];
 

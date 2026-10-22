@@ -478,6 +478,27 @@ describe("左側 Workspace 清單", () => {
     expect(onOpenTimeline).not.toHaveBeenCalled();
   });
 
+  it("每個 Workspace 都有「流程」入口，不會觸發其他檢視", async () => {
+    const onSelect = vi.fn();
+    const onOpenUnderstanding = vi.fn();
+    const onOpenWorkflows = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenUnderstanding={onOpenUnderstanding}
+        onOpenWorkflows={onOpenWorkflows}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "流程 筆記" }));
+
+    expect(onOpenWorkflows).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenUnderstanding).not.toHaveBeenCalled();
+  });
+
   it("每個 Workspace 都有「對話」入口，不會觸發其他檢視", async () => {
     const onSelect = vi.fn();
     const onOpenTasks = vi.fn();

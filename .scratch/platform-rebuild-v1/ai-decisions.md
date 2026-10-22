@@ -3456,6 +3456,94 @@
 - 影響：用本票較早的分支（migration 37 是 `maintenance`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R127）提到的 AI-362～AI-370、migration 37 是改號前的編號，分別對應現在的 AI-371～AI-379、migration 38。
 - 審閱：未審
 
+### AI-381：七個內建 Playbook 的 Stage 內容、Gate 分類與證據種類
+- 重要度：中
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：依 issue §9.1 的表格，每個流程步驟成為一個 Stage（key 用英文、title 用表格原文），另內建 12 個方法（設計問答、領域詞彙、替代設計、垂直切片、行為測試、真實介面驗證、雙軸審查、重現與最小化、可否證假說、基線量測、一手來源研究、探索章程）。每個 Stage 至少一項 exit check，證據只有三種且都由 Runtime 查驗：已登記的成果（artifact）、已回答的裁定（decision）、已通過成果接受的 Task（task_accepted）。Gate 分類：「裁定」是裁定 Gate；真實介面驗證、獨立審查、整合、原案例與回歸驗證、契約核對、同條件比較、探索測試的重現確認與修復回歸是安全 Gate；其餘為一般 Stage。預算一律最多失敗 3 次；驗證類 Stage 失敗回到實作或假說 Stage。
+- 理由：issue 只給流程名稱，沒有逐步的完成條件；以「登記成果」作為多數 Stage 的證據最通用，也能被 Runtime 查驗，不接受文字宣告。
+- 替代方案：每個 Stage 設計專屬的結構化證據（例如測試報告格式）。成本高，且票 44～50（雙軸 Review、Verification Profile、Gate 失效）會再細化。
+- 影響：內容放在 `crates/baton-domain/src/workflow/builtin.rs`；修改後 Runtime 啟動會追加新版本，進行中的 Workflow 不受影響。
+- 審閱：未審
+
+### AI-382：「非開發工作不套用開發流程」以 Task 的工作種類判斷；情境由 Controller 指定
+- 重要度：中
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：Controller 以 `start_workflow` 指定情境（七種之一）與理由，Router 選該情境 Playbook 的最新版本。綁定的 Task 是研究或文件（票 20 的 TaskKind）時，開發情境（功能、缺陷、遷移、效能、探索測試）一律拒絕（`playbook_not_applicable`），只能用調查或需求釐清。只綁 Goal 的 Workflow 不受此限制。同一個 Task 同時最多一個未完成的 Workflow。
+- 理由：Task 的工作種類是 Runtime 已有、由 Controller 或使用者明確決定的事實，比從標題文字推斷可靠；情境判斷屬於 D-15「選擇 Playbook 與方法版本」，Controller 可自主處理。
+- 替代方案：Router 依 Task 標題與契約關鍵字自動判斷情境。容易誤判，且難以測試。
+- 影響：研究或文件 Task 不會被套用含「修改程式」的流程；Controller 若誤把開發工作建成研究 Task，需要另建 development Task。
+- 審閱：未審
+
+### AI-383：每種情境一個 Playbook；使用者只能發布既有 Playbook 的新版本，不能改情境
+- 重要度：中
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：Playbook 以 key 識別，版本只追加（資料表 trigger 禁止更新與刪除），識別為 `pbv_<key>_v<版本>`。使用者以 `POST /api/v1/playbooks` 發布新版本：驗證通過才追加，內容相同不新增。只能升級已存在的 key，而且不能改變情境，所以每種情境永遠只有一個 Playbook，Router 的選擇是唯一的。內建內容變更時，以「與上一個內建版本比較」決定是否追加，因此使用者發布的較新版本不會因重啟而被內建內容蓋過（但內建內容日後真的改變時，新的內建版本會成為最新）。
+- 理由：「版本不可原地覆寫」與「Router 依情境選擇」都需要明確且可預測的對應。
+- 替代方案：允許新增自訂 Playbook，並由 Controller 指定 key。需要額外的選擇規則與 UI，超出本票。
+- 影響：UI 目前只顯示 Workflow 與「已有新版」，沒有發布 Playbook 的畫面（以 API 發布）。
+- 審閱：未審
+
+### AI-384：Stage 推進的判定規則與預算計算
+- 重要度：中
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：Controller 回報 `passed` 時，每項 exit check 都有查驗通過的證據才記為 passed 並前進；有裁定尚未回答的記 blocked（Workflow 阻擋，之後以已回答的裁定再回報即可解除）；其餘記 incomplete（留在原 Stage，列出缺少的證據與原因）。`failed` 與 `blocked` 必須附說明。只有 failed 計入 Stage 預算；累計失敗達上限時 Workflow 阻擋，且之後缺證據的回報不會解除阻擋，只有附齊證據的 passed 才繼續。每次回報都追加一筆 stage_attempt，必須帶目前的 revision，而且只能回報目前 Stage。
+- 理由：符合 issue §9.2「缺少必要證據時記錄 incomplete 或 blocked」與 §11.5「Stage 推進校驗 workflow_revision」；incomplete 不扣預算，避免 Controller 因證據還沒登記就被阻擋。
+- 替代方案：預算用盡時強制送裁定。需要與裁定中心整合（建立裁定請求並在回答後解除），本票先以阻擋與原因呈現，留給後續票。
+- 影響：預算用盡後若 Controller 補齊證據，Workflow 會繼續，不需要使用者介入。
+- 審閱：未審
+
+### AI-385：只有使用者能在桌面跳過 Stage；裁定與安全 Gate 連使用者也不能跳過
+- 重要度：高
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：Controller 沒有跳過工具；使用者在流程視圖附原因跳過一般 Stage（`POST …/workflows/{id}/skip`），原因保存在 stage_attempt（記錄者 `desktop`）。裁定 Gate 與安全 Gate 一律拒絕跳過（`stage_not_skippable`）。「使用者明定的裁定或安全門檻」以 Playbook 版本中的 `gate` 欄位表達：使用者可發布把某些 Stage 標為 Gate 的新版本。
+- 理由：spec D-15 把「跳過 Stage 或 Gate」列為必須送裁定的事項；直接讓使用者操作就是人工裁定，不需要先建裁定請求。安全與裁定門檻依票面「不能跳過」，連使用者也不行，避免以跳過繞過驗證。
+- 替代方案：Controller 以工具提出跳過請求、建立裁定、使用者回答後才跳過。流程較完整，但需要裁定中心新增一種請求種類，本票先不做。
+- 影響：Controller 想跳過時只能以 propose_decision_request 詢問使用者，由使用者在流程視圖操作。
+- 審閱：未審
+
+### AI-386：allowed_actions 與 entry_conditions 本票只宣告並交給 Agent，不用來收窄權限
+- 重要度：中
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：Stage 的 `allowed_actions`、`entry_conditions`、`expected_outputs` 與 exit check 說明會放進 Worker Prompt（Context Builder 的必要項目）與 Controller 的工具回應，但不參與 D-08 的允許工具清單或權限提示判定。進入條件由 Runtime 以 Stage 順序保證（只能回報目前 Stage），文字條件不另行機器檢查。Gate 失效與重驗（票 50）、雙軸 Review（票 44）、每階段用量指標的 `stage` 欄位都不在本票。
+- 理由：權限推導牽涉 Workspace 授權、Task 委託與 Claude Code 權限參數，屬於 Policy 的改動，超出本票範圍；先讓宣告可見、可測。
+- 替代方案：把 allowed_actions 映射成 Claude Code 的工具白名單。需要定義動作到工具的對照表，且會影響既有 Run 准入測試。
+- 影響：Worker 若做了 Stage 未允許的動作，目前只靠 Workspace 授權與權限提示攔截。
+- 審閱：未審
+
+### AI-387：方法與 Playbook 內容只存控制資料庫；內建版本的登錄不追加事件
+- 重要度：低
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：方法與 Playbook 的完整定義以 JSON 存在 `method_version`／`playbook_version`，附內容的 SHA-256，沒有另存為 Artifact。Runtime 啟動時登錄內建內容不追加事件（版本列本身就是不可變紀錄），使用者發布的 Playbook 版本才追加 `playbook_version_published` 事件；Workflow 開始與每次 stage attempt 都追加事件。
+- 理由：spec 提到原文留存於成果儲存，但內建內容來自程式碼本身，沒有外部原文；每次啟動都追加事件會讓既有「事件數量」的測試與時間線產生雜訊。
+- 替代方案：把定義寫成 Artifact 並在資料庫只存參照。需要成果儲存支援非 Task 的成果，改動較大。
+- 影響：備份與還原沿用控制資料庫即可涵蓋方法與 Playbook。
+- 審閱：未審
+
+### AI-388：換帳號後從目前 Stage 接續：Controller 背景與 Worker Prompt 都帶入目前 Stage
+- 重要度：中
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：Workflow 與 Run、帳號無關，狀態只在控制資料庫。新的 Controller Session（含換帳號的替代 Session）在背景中看到「進行中的 Workflow」：Workflow 識別、Playbook 與版本、revision、目前 Stage 與已完成的 Stage，並被要求不要重跑。Worker Run 的 Prompt 在契約之後加入目前 Stage 的說明（Context Builder 的必要項目，receipt 中 `kind = stage`），交接的 successor 收到的是同一個 Stage。stage_attempt 記下 Controller 那一輪的帳號，方便看出跨帳號的接續。
+- 理由：issue §9.2「禁止只因換帳號就從頭跑完所有流程」；持久化的目前 Stage 加上 Prompt 中的明確說明，讓新 Session 不需要記憶就能接續。
+- 替代方案：只靠 `get_workflows` 工具讓 Controller 自己查。新 Session 可能不會先查，風險較高。
+- 影響：Controller 背景 Prompt 會變長（每個未完成的 Workflow 一行）。
+- 審閱：未審
+
+### AI-389：流程的資料形狀、API、錯誤碼、migration 39 與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：migration 39 `methods_and_workflows` 建立 `method_version`、`playbook_version`、`workflow_instance`（固定 Playbook 版本與綁定的 trigger、同一 Task 最多一個未完成的部分唯一索引）與 `stage_attempt`（只追加）。Controller 工具 `start_workflow`、`record_stage_result`、`get_workflows`；桌面 API `GET/POST /api/v1/playbooks`、`GET /api/v1/workspaces/{id}/workflows`、`POST …/workflows/{workflow_id}/skip`；錯誤碼 `workflow_invalid`、`playbook_invalid`、`playbook_not_applicable`、`playbook_not_found`、`workflow_not_found`、`stage_not_current`、`workflow_revision_mismatch`、`stage_not_skippable`、`workflow_completed`、`workflow_exists`。Workflow 至少綁一個 Goal（只給 Task 時由 Task 決定 Goal）。UI 在側欄每個 Workspace 的「流程」，桌面殼指令 `workspace_workflows`、`workflow_skip_stage`。
+- 理由：沿用票 42 的模式（Controller 專屬工具 + 桌面檢視 API + 側欄入口）。
+- 替代方案：把流程放進「工作」分頁的 Task 詳細面板。Goal 層級的 Workflow 沒有對應的 Task，放不進去。
+- 影響：與同時進行的票整合時，migration 編號可能需要順延（見 AI-390）。
+### AI-390：票 43 整合 rebuild/v1（票 34）：`methods_and_workflows` 順延為第 39 個 migration、AI 編號改為 AI-381～AI-389
+- 重要度：低
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：票 34 先合併進整合分支，佔用了第 38 個 migration（`maintenance`）與 AI-371～AI-380。本票的 migration 改排在 `maintenance` 之後成為第 39 個，AI 決策改編為 AI-381～AI-389（內容不變）。Web UI、開發指南的衝突兩邊都保留。
+- 理由：已合併的 migration 順序不能改變，否則既有資料庫的 `schema_migrations` 會對不上。
+- 替代方案：無。
+- 影響：無行為差異。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

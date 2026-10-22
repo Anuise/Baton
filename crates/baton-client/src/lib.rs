@@ -25,6 +25,7 @@ use baton_api::{
     ApplyUpdateRequest, MaintenanceRequestBody, UpdateStatusView, MAINTENANCE_PATH, UPDATES_PATH, UPDATE_APPLY_PATH,
     metrics_path, timeline_path, MetricsResponse, TimelineResponse,
     projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, UnderstandingView,
+    workflow_skip_path, workflows_path, PlaybookCatalog, SkipStageRequest, WorkflowList, WorkflowView, PLAYBOOKS_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
@@ -672,6 +673,26 @@ impl RuntimeClient {
         request: &ReconcileRequest,
     ) -> Result<UnderstandingView, ClientError> {
         self.send_json(reqwest::Method::POST, &projection_reconcile_path(workspace_id), Some(request)).await
+    }
+
+    /// 流程視圖（票 43）：這個 Workspace 的 Workflow、所選 Playbook 版本、Stage 與 attempt。
+    pub async fn workflows(&self, workspace_id: &str) -> Result<WorkflowList, ClientError> {
+        self.get_json(&workflows_path(workspace_id)).await
+    }
+
+    /// 使用者附原因跳過目前的 Stage（裁定與安全 Gate 不能跳過）。
+    pub async fn skip_stage(
+        &self,
+        workspace_id: &str,
+        workflow_id: &str,
+        request: &SkipStageRequest,
+    ) -> Result<WorkflowView, ClientError> {
+        self.send_json(reqwest::Method::POST, &workflow_skip_path(workspace_id, workflow_id), Some(request)).await
+    }
+
+    /// Playbook 與方法的全部版本。
+    pub async fn playbooks(&self) -> Result<PlaybookCatalog, ClientError> {
+        self.get_json(PLAYBOOKS_PATH).await
     }
 
     /// 回報一次沒被 Guard 攔下的重犯。

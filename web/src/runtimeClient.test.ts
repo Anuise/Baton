@@ -1164,6 +1164,53 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版讀取 Workflow，並以 JSON 送出跳過 Stage", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const request = { stage: "requirements_contract", expected_revision: 3, reason: "需求已在 issue 中寫明" };
+
+    await client.workflows("ws/1");
+    await client.skipStage("ws_1", "wf/1", request);
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/workspaces/ws%2F1/workflows"],
+      [
+        "/api/v1/workspaces/ws_1/workflows/wf%2F1/skip",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        },
+      ],
+    ]);
+  });
+
+  it("HTTP 版跳過 Stage 被拒時保留 Runtime 的說明與錯誤代碼", async () => {
+    const body = { error: "stage_not_skippable", message: "裁定 Gate 不能跳過" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .skipStage("ws_1", "wf_1", { stage: "decision", expected_revision: 1, reason: "不需要" })
+      .catch((e: unknown) => e);
+
+    expect((error as Error).message).toBe("裁定 Gate 不能跳過");
+    expect(errorCode(error)).toBe("stage_not_skippable");
+  });
+
+  it("Tauri 版以指令與 camelCase 參數讀取 Workflow 與跳過 Stage", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+    const request = { stage: "requirements_contract", expected_revision: 3, reason: "需求已在 issue 中寫明" };
+
+    await client.workflows("ws_1");
+    await client.skipStage("ws_1", "wf_1", request);
+
+    expect(invoke.mock.calls).toEqual([
+      ["workspace_workflows", { workspaceId: "ws_1" }],
+      ["workflow_skip_stage", { workspaceId: "ws_1", workflowId: "wf_1", request }],
+    ]);
+  });
+
   const basis = { run_id: "run_1", generation: 2, contract_version: 3, artifacts: [{ artifact_id: "art_1", version: 1 }] };
 
   it("HTTP 版讀取驗證資料與手動接受：接受時以 JSON 送出 basis 與附註", async () => {

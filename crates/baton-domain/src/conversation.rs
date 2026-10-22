@@ -105,6 +105,8 @@ pub struct ControllerBackground {
     pub decisions: Vec<DecisionNote>,
     /// 尚未結束的 Task 最近一筆被接受的檢查點，依保存時間。
     pub checkpoints: Vec<CheckpointNote>,
+    /// 未完成的 Workflow 與目前 Stage，依建立時間（票 43）。
+    pub workflows: Vec<crate::workflow::WorkflowNote>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -691,7 +693,10 @@ pub fn build_prompt(
              專案理解：先以 get_project_understanding 查看；Workspace 首次接入專案（還沒有任何項目）時，\
              先從 repo 與文件找答案，以 record_understanding 逐項建立 Project Brief、Glossary 與 Project Map，之後持續維護。\
              每項附來源（Workspace 內的檔案路徑，或附版本的外部來源）；只有被來源支持的描述才標為 confirmed，\
-             推測與未確認的關係標為 hypothesis，不知道的標為 unknown。\n",
+             推測與未確認的關係標為 hypothesis，不知道的標為 unknown。\n\
+             工作方法：開始一項工作時以 start_workflow 依情境（功能、缺陷、調查等）選 Playbook，研究與文件工作不套用開發流程；\
+             以 record_stage_result 附證據（已登記的成果、已回答的裁定、已通過接受的 Task）回報目前 Stage，只有文字不會推進；\
+             以 get_workflows 查看進度。已完成的 Stage 不要重跑，從目前 Stage 接續。\n",
         );
         if let Some(gap) = history_gap {
             prompt.push_str(&format!("\n注意：{gap}\n"));
@@ -720,6 +725,13 @@ pub fn build_prompt(
             for checkpoint in &background.checkpoints {
                 let (title, id, summary) = (&checkpoint.task_title, &checkpoint.task_id, &checkpoint.summary);
                 prompt.push_str(&format!("- Task「{title}」（{id}）：{summary}\n"));
+            }
+        }
+        if !background.workflows.is_empty() {
+            prompt.push_str("\n## 進行中的 Workflow（從目前 Stage 接續，已完成的 Stage 不要重跑）\n\n");
+            for workflow in &background.workflows {
+                prompt.push_str(&workflow.render());
+                prompt.push('\n');
             }
         }
     }
