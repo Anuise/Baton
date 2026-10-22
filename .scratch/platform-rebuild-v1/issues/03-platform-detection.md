@@ -1,6 +1,6 @@
 # 03: Windows 平台辨識與支援狀態
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R007-03-impl，2026-10-22 13:57）
 Blocked by: 01
 
 **What to build:** Runtime 啟動時辨識 Windows 功能版本、build、版本別與原生架構（DR-20261021-08），判定為正式支援（Windows 11 x64 Home／Pro 25H2、26H2）或非正式支援；App 的平台狀態頁與狀態列顯示結果，非正式支援時顯示警告但不阻擋使用。支援期限資料以內建表格提供並標示來源與查閱日期，過期時採 L1 警告。
