@@ -11,6 +11,7 @@ pub mod product;
 pub mod profile;
 pub mod setup;
 pub mod run;
+pub mod shared_settings;
 pub mod storage_location;
 pub mod task;
 pub mod time;
