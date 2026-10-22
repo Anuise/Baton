@@ -8,10 +8,11 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Router;
 use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT};
 use baton_domain::agent::{
-    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT,
-    TOOL_PERMISSION_PROMPT,
+    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, BLOCKING_MAX_TASKS, RUNTIME_URL_ENV, TOOL_ADD_DEPENDENCY, TOOL_CANCEL_TASK,
+    TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_DISPATCH_TASK, TOOL_GET_TASK_CONTRACT,
+    TOOL_PERMISSION_PROMPT, TOOL_PROPOSE_DECISION_REQUEST, TOOL_PROPOSE_TASK,
     TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT,
-    TOOL_SEND_MESSAGE,
+    TOOL_SEND_MESSAGE, TOOL_UPDATE_TASK,
 };
 use baton_domain::artifact::{ARTIFACT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS, TOOL_REGISTER_ARTIFACT};
 use baton_domain::knowledge::{
@@ -124,7 +125,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_fifteen_tools_with_their_required_fields() {
+async fn tools_list_has_the_twenty_one_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -147,6 +148,12 @@ async fn tools_list_has_the_fifteen_tools_with_their_required_fields() {
             TOOL_BEGIN_EXTERNAL_OPERATION,
             TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
             TOOL_CONFIRM_HANDOFF,
+            TOOL_PROPOSE_TASK,
+            TOOL_UPDATE_TASK,
+            TOOL_ADD_DEPENDENCY,
+            TOOL_DISPATCH_TASK,
+            TOOL_CANCEL_TASK,
+            TOOL_PROPOSE_DECISION_REQUEST,
         ]
     );
     for tool in tools {
@@ -236,6 +243,89 @@ async fn tools_list_has_the_fifteen_tools_with_their_required_fields() {
     assert_eq!(search["properties"]["query"]["type"], "string");
     assert_eq!(search["properties"]["query"]["maxLength"], QUERY_MAX_CHARS);
     assert!(search.get("required").is_none(), "query 可省略（等同空字串）");
+
+    // Controller 專屬工具：shim 不依角色過濾，所以描述必須寫明
+    for name in [
+        TOOL_PROPOSE_TASK,
+        TOOL_UPDATE_TASK,
+        TOOL_ADD_DEPENDENCY,
+        TOOL_DISPATCH_TASK,
+        TOOL_CANCEL_TASK,
+        TOOL_PROPOSE_DECISION_REQUEST,
+    ] {
+        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+        assert!(tool["description"].as_str().unwrap().contains("Controller 專屬"), "{name}");
+    }
+    let propose = schema(TOOL_PROPOSE_TASK);
+    assert_eq!(propose["required"], json!(["title"]));
+    assert_eq!(propose["properties"]["kind"]["enum"], json!(["development", "research", "document"]));
+    assert_eq!(propose["properties"]["kind"]["default"], "research");
+    assert_eq!(propose["properties"]["contract"]["type"], "object");
+    for field in ["goal_id", "goal_title"] {
+        assert_eq!(propose["properties"][field]["type"], "string", "{field}");
+    }
+    let update = schema(TOOL_UPDATE_TASK);
+    assert_eq!(update["required"], json!(["task_id", "contract"]));
+    assert_eq!(update["properties"]["note"]["type"], "string");
+    assert_eq!(schema(TOOL_ADD_DEPENDENCY)["required"], json!(["task_id", "depends_on"]));
+    let dispatch = schema(TOOL_DISPATCH_TASK);
+    assert_eq!(dispatch["required"], json!(["task_id"]));
+    assert_eq!(dispatch["properties"]["priority"]["type"], "integer");
+    assert_eq!(schema(TOOL_CANCEL_TASK)["required"], json!(["task_id"]));
+    let proposal = schema(TOOL_PROPOSE_DECISION_REQUEST);
+    assert_eq!(proposal["required"], json!(["question", "reason", "options", "blocking"]));
+    assert_eq!(proposal["properties"]["options"], decision["properties"]["options"]);
+    assert_eq!(proposal["properties"]["blocking"]["type"], "array");
+    assert_eq!(proposal["properties"]["blocking"]["minItems"], 1);
+    assert_eq!(proposal["properties"]["blocking"]["maxItems"], BLOCKING_MAX_TASKS);
+}
+
+#[tokio::test]
+async fn controller_tools_forward_to_their_paths_with_credentials_and_unchanged_arguments() {
+    let cases = [
+        (
+            TOOL_PROPOSE_TASK,
+            json!({"title":"調查競品","goal_title":"市場分析","kind":"research","contract":{"objective":{"status":"filled","text":"列出三家競品"},"inputs":{"status":"unknown"},"required_capabilities":[]}}),
+            r#"{"task_id":"t1","goal_id":"g1","status":"pending"}"#,
+        ),
+        (TOOL_UPDATE_TASK, json!({"task_id":"t1","contract":{"objective":{"status":"unknown"}},"note":"補充"}), r#"{"version":2}"#),
+        (TOOL_ADD_DEPENDENCY, json!({"task_id":"t2","depends_on":"t1"}), r#"{"created":true}"#),
+        (TOOL_DISPATCH_TASK, json!({"task_id":"t1","priority":5}), r#"{"status":"queued"}"#),
+        (TOOL_CANCEL_TASK, json!({"task_id":"t2"}), r#"{"status":"cancelled"}"#),
+        (
+            TOOL_PROPOSE_DECISION_REQUEST,
+            json!({"question":"要哪一家雲端？","reason":"影響成本","options":[{"id":"a","label":"甲"},{"id":"b","label":"乙"}],"blocking":["t1"]}),
+            r#"{"decision_request_id":"d1","status":"waiting_decision"}"#,
+        ),
+    ];
+    for (tool, arguments, response) in cases {
+        let (url, log) = spawn_stub(200, response).await;
+
+        let reply = call(&url, tool_call(14, tool, arguments.clone())).await;
+
+        assert_eq!(reply["result"]["isError"], false, "{tool}");
+        assert_eq!(reply["result"]["content"][0]["text"], response);
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 1, "{tool}");
+        let request = &log[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, format!("{AGENT_TOOLS_PREFIX}/{tool}"));
+        assert_eq!(request.headers["authorization"], format!("Bearer {TOKEN}"));
+        assert_eq!(request.headers["x-baton-client"], "baton-desktop");
+        assert_eq!(serde_json::from_slice::<Value>(&request.body).unwrap(), arguments, "{tool}");
+    }
+}
+
+#[tokio::test]
+async fn a_worker_calling_a_controller_tool_gets_the_controller_only_error() {
+    let (url, _) = spawn_stub(403, r#"{"error":"controller_only","message":"只有 Controller 可以使用這個工具"}"#).await;
+
+    let reply = call(&url, tool_call(15, TOOL_DISPATCH_TASK, json!({"task_id":"t1"}))).await;
+
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(reply.get("error").is_none());
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("controller_only") && text.contains("403"), "{text}");
 }
 
 #[tokio::test]

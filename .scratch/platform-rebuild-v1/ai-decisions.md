@@ -2944,7 +2944,79 @@
 - 影響：用本票較早的分支（migration 31 是 `handoff_waiting_resource`）建過的開發資料庫需要刪除重建。
 - 審閱：未審
 
-### AI-327：時間線的範圍、順序與恢復事件的歸屬
+### AI-327：Controller 憑證是綁定 Controller 那一輪的 Agent 憑證；入口防護依工具路徑分流 Worker 與 Controller
+- 重要度：高
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：(1) 不新增憑證角色，Controller 憑證仍是 Agent 角色，另以 `credential.controller_run_id`（第 31 個 migration）綁定 Workspace 與 Controller 的一輪（`ControllerScope`）；Supervisor 在 `launch_controller` 的 `spawn` 之前簽發，只經 `BATON_AGENT_TOKEN` 交給程序，取代票 16 的佔位值（AI-306）。沒有時間上限，有效與否取決於那一輪是否仍是 `starting`／`running`（Runtime 重啟後進行中的一輪仍可用，結束後 401 `credential_revoked`）。(2) `guard` 在解析請求前依路徑分流：Controller 憑證只能呼叫 6 個 Controller 工具與 `permission_prompt`，其他工具 403 `worker_only`；Worker 憑證呼叫 Controller 工具 403 `controller_only`；處理函式內另有同樣的檢查。(3) 回應票 16 的 Comment 與 AI-161、AI-227：`record_lesson_candidate`、`controller_action` **維持開放給 Worker 憑證、不收窄**，Controller 憑證也不能呼叫它們。
+- 理由：新增角色要重建 `credential` 表的 CHECK，並讓每個 Agent 端點同時接受兩種角色；以範圍區分改動最小。收窄 `record_lesson_candidate`／`controller_action` 會改變票 37、35 已驗收的行為與測試，而本票的 Controller 工具已由 Runtime 推導事項（AI-331），Controller 不需要自報事項的 `controller_action`。
+- 替代方案：新增 `controller` 角色；把兩個工具收窄為 Controller 專屬並改寫票 35、37 的測試。
+- 影響：Worker 仍可提交候選教訓、仍可呼叫 `controller_action`（只是判定，不執行動作）。Controller 要提交候選教訓需要日後另開 Controller 版本的工具。MCP shim 對兩種角色列出同一份工具清單（描述註明 Controller 專屬），由 Runtime 拒絕。
+- 審閱：未審
+
+### AI-328：「依賴未回答問題」以 Controller 的提問（`propose_decision_request`）表達，依賴的 Task 多一個准入缺項 `decision_pending`
+- 重要度：高
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：票面只列 5 個工具，但驗收條件「依賴未回答問題的 Task 不會被派出」需要 Runtime 知道「問題」與「依賴它的 Task」，所以一併實作 spec D-05 列出、沒有任何票負責的 `propose_decision_request`：Controller 提出問題、選項與 `blocking`（1–20 個依賴答案的 Task，只能是 `pending`／`ready`）。(1) 這些 Task 狀態不變（不進入 `waiting_decision`），而是在 `task::admission_report` 多一個缺項 `decision_pending`，所以使用者手動標記 ready、Controller 的 `dispatch_task`、Scheduler 派工都被同一個准入檢查擋下；不依賴答案的 Task 照常派出。(2) 回答後缺項消失，但 Task **不會自動排隊或轉為 ready**，回答成為對話的工作事件喚醒 Controller，由它依答案更新契約後再派工。(3) Controller 的提問不會因契約變更而過期（Controller 依答案補契約是預期中的事），只有依賴的 Task 全部結束才過期。(4) 同一個問題（正規化後相同）仍待處理時回既有請求，新列出的 Task 併入阻擋範圍。只有 Controller 的提問（`kind: agent`）會阻擋准入，Controller 的權限表請求不會（見 AI-330、AI-331）。
+- 理由：契約欄位標 `unknown` 也能擋派工，但 Runtime 無法分辨「等使用者回答」與「Controller 還沒寫」，問題也不會出現在裁定中心；沿用裁定請求讓使用者在同一個地方回答，且准入檢查對使用者與 Controller 一致。Worker 請求的「回答後自動恢復」不適用：依賴答案的 Task 通常要先依答案改契約。
+- 替代方案：只用契約的 `unknown` 欄位表達缺口、問題寫在對話回覆中；讓依賴的 Task 轉為 `waiting_decision`（回答後會自動 ready 並派工，可能繞過准入）。
+- 影響：票面工具清單多了一個；裁定中心會出現 `origin: controller` 的請求。已派工的 Task 不能標為依賴答案（要先取消或等它結束）。
+- 審閱：未審
+
+### AI-329：Controller 提出的裁定請求記在同一張表（`origin`），回答或過期時成為對話的工作事件而不是喚醒 Outbox
+- 重要度：高
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：(1) `decision_request` 新增 `origin`（`worker`／`controller`）；Controller 的請求 `run_id` 是 Controller 的一輪、`task_id` 是目標 Task。`run_id` 原本是對 `run` 的外鍵，所以第 31 個 migration `controller_tools` 重建 `decision_request` 與 `decision_approval_use`，改由觸發器依來源檢查提出者存在（Worker → `run`、Controller → `controller_run`）；權限提示只能由 Worker 提出（CHECK）。(2) 重建被其他資料表參照的表時外鍵必須關閉，所以 `migrate` 新增 `FOREIGN_KEYS_OFF_MIGRATIONS` 清單：在交易外關閉 `foreign_keys`、套用後提交前以 `foreign_key_check` 核對、再開回（SQLite 官方的重建程序），子表不必跟著重建。(3) 回答或過期時，Worker 的請求照舊寫喚醒 Outbox；Controller 的請求改為在同一個交易中寫入該 Workspace conversation 的工作事件（`source = decision_wake:<請求>:<revision>`），喚醒 Controller。這是 AI-301「哪些事件喚醒 Controller」之外新增的一種。(4) Controller 與 Worker 的請求不能合併（阻擋方式不同），仍可連結。
+- 理由：另建 Controller 專用的請求表會讓裁定中心的清單、批次、合併、過期都要處理兩種來源；喚醒 Outbox 以外鍵指向 Worker 的 Run，Controller 沒有 Run，且 Controller 本來就由對話事件驅動。
+- 替代方案：另建 `controller_decision_request` 表；在 migration 中連同所有子表一起重建（外鍵開著）。
+- 影響：既有資料庫升級時重建兩張表（既有請求一律 `origin = worker`）；之後其他票若要重建被參照的表，可以把 migration 名稱加入同一個清單。
+- 審閱：未審
+
+### AI-330：超出授權在 `dispatch_task` 時判定並送裁定；核准不會擴大授權
+- 重要度：中
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：(1) `propose_task`／`update_task` 與使用者建立 Task 一樣允許暫存不完整或需要未授權能力的契約（回應附准入檢查的缺項）；真正「要讓 Task 執行」的 `dispatch_task` 才判定：准入缺項含 `capability_not_granted` 時，由 Runtime 推導事項 `exceed_authorization`，經決策權限表（內建必須送裁定、不能放寬）建立 `kind: authority`、`origin: controller` 的裁定請求，回 409 `requires_decision`（附 `decision_request_id`、`existing`），不建立 Run。同一個 Task 仍待處理時回既有請求。(2) 使用者核准只記錄決定、消耗一次，**不擴大 Workspace 授權**：授權仍未涵蓋時回 409 `authorization_not_expanded`，要使用者到授權頁修改授權（選項的取捨文字寫明這點）；使用者拒絕回 409 `decision_denied`。(3) 使用者在工作面板手動派工同一個 Task 時沿用既有回應（`task_admission_denied`），不建立請求。
+- 理由：spec 使用者故事 15 要求「允許本次操作」與「修改 Workspace 授權」分開；讓裁定直接放行 Run 的准入，等於用一次性批准擴大授權，而且 Run 內的權限提示仍以授權判定。建立 Task 時就送裁定，會讓仍在拆工、之後會縮小範圍的草稿也打擾使用者。
+- 替代方案：核准後以單次批准讓這個 Task 的 Run 通過准入；在 `propose_task` 時就送裁定。
+- 影響：使用者核准後還要另外修改授權才能派出；Controller 會在對話中收到回答事件後重試派工。
+- 審閱：未審
+
+### AI-331：修改完成條件的推導規則：只有已派工過的 Task、而且改掉已填寫的完成條件或驗證檢查
+- 重要度：中
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：依 AI-227 的要求由 Runtime 依實際變更推導 `modify_done_criteria`：`update_task` 對**已有任何 Run** 的 Task，原本已填寫的 `done_criteria` 被改掉（文字或引用不同），或 `verification_checks` 有任何不同時，先以決策權限表判定（沿用票 35 的單次核准：使用者核准後，下一次對同一個 Task 的這類變更消耗它）；沒有可用的核准時不寫入、回 409 `requires_decision`。還沒派工的 Task、補上原本缺少或未知的完成條件不算修改。這類請求待處理時不另外擋 Task 的准入（避免擋住預算內的重派）。
+- 理由：漸進拆工時 Controller 本來就會反覆修改還沒派工的草稿；一旦 Worker 依某個完成條件做過，改動完成條件才是 D-15「修改完成條件或驗收標準」所指的情況。
+- 替代方案：任何完成條件的變更都送裁定；或只看 Task 是否曾經 ready。
+- 影響：Controller 可以在派工前任意調整自己草擬的完成條件；使用者手動修改契約不受影響（桌面端點不經決策權限表）。
+- 審閱：未審
+
+### AI-332：Controller 的權限提示一律拒絕，不建立裁定請求
+- 重要度：中
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：`permission_prompt` 收到 Controller 憑證時一律回 `{behavior: "deny", status: "controller_denied"}` 與說明（改用 Controller 工具把工作交給 Worker），不依授權判定、也不建立裁定請求。Controller 因此不能執行指令、寫檔、寫資料庫或自己啟動 `claude`；不需要權限提示的唯讀工具（例如 Read、Grep）仍由 Claude Code 自己決定。
+- 理由：票面要求「Controller 不能直接寫資料庫或建立未受管理的 Worker」；Controller 的工作是協調，實作與調查交給受管理的 Worker。送裁定會讓使用者被 Controller 的每個操作打擾，而且核准後仍是未受管理的執行。
+- 替代方案：Controller 的權限提示依 Workspace 授權判定（與 Worker 相同）。
+- 影響：Controller 無法自己執行任何指令或寫入（包括寫 Project Brief 之類的文件）；票 42 等需要 Controller 產出文件時，要以 Worker 或新的工具完成。
+- 審閱：未審
+
+### AI-333：Controller 工具的回應形狀與幾個細節
+- 重要度：低
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：(1) `propose_task` 以 `goal_id`（既有 Goal）或 `goal_title`（建立新 Goal）二擇一，兩者在同一個交易中判定與寫入（`Store::propose_task`），任一個被拒絕就都不寫，不會留下空的 Goal；其他不是剛好一個時 400 `goal_choice_invalid`。(2) 建立、修改、加相依、取消都回 `{task, goal_id, changed, admission}`，`admission` 與工作面板的准入預覽相同。(3) `dispatch_task` 對 pending 的 Task 先轉為 ready 再派工（使用者要分兩步），之後與桌面派工端點共用 `runs::dispatch_now`；回 201 `{status: "started", run}` 或 202 `{status: "queued", task_id, priority, reasons}`。(4) Controller 建立的 Task 不另外記錄來源（Task 事件不帶操作者）。(5) Controller 的 Prompt 角色說明補上「只以工具提出變更」與「邊釐清、邊調查」的原則。
+- 理由：MCP shim 只把錯誤的 `error` 與 `message` 交給模型，所以錯誤訊息本身要含缺項與裁定請求識別；一次派工減少 Controller 的工具呼叫次數。
+- 替代方案：要求 Controller 先建立 Goal 再建立 Task；Task 事件記錄操作者。
+- 影響：時間線（票 41）若要區分 Controller 與使用者建立的 Task，需要另外補上操作者。
+- 審閱：未審
+
+### AI-334：票 17 整合 rebuild/v1（票 32、29）：migration 順延為第 33 個、AI 編號改為 AI-327～AI-333
+- 重要度：低
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：(1) 整合分支已併入票 32（第 31 個 migration `guardian_journal`）與票 29（第 32 個 `handoff_waiting_resource`），本票的 `controller_tools` 順延為第 33 個、排在最後；三者沒有共用的資料表。migration 註解與開發指南的「migration 31 `controller_tools`」改為 33。(2) 本票條目原寫成 AI-312～AI-318，與整合分支的票 32、29 條目同號，現改為 AI-327～AI-333，移到 AI-326 之後，條目內引用本票編號之處一併更新；整合分支的條目逐字未動。(3) 衝突合併：Store 的 migration 先放票 32、29 再放本票；開發指南目錄表以整合分支的列為底，補回本票在 `baton-domain`（依賴未決答案的准入缺項、Controller 提出的請求）與 `baton-api`（`controller.rs`）的描述，情境測試清單兩邊都保留。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票分支（本次合併前）建過的開發資料庫，`controller_tools` 記在第 31 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-312～AI-318 與 migration 31 是改號前的編號。
+- 審閱：未審
+
+### AI-335：時間線的範圍、順序與恢復事件的歸屬
 - 重要度：中
 - 時間／階段：2026-10-22，票 41 實作
 - 決策：時間線直接讀追加式 `event` 表，不另建資料表，依事件表的提交序號 `seq` 排序。上時間線的事件分十類：票面要求的派工（Run 的建立、准入拒絕、啟動、結束、取消）、交接（`handoff` 聚合與 `run_handed_off`）、裁定（裁定請求聚合）、恢復、驗證（`task_verification_recorded`）、清理（`worktree_cleanup` 聚合），以及指標需要的 Task 狀態、外部操作、教訓重犯、用量。Run 的進度、checkpoint、lease 續約、原生 Session 綁定與權限／決策權限表的稽核事件不上時間線。Task 歸屬依聚合決定（見 docs〈事件時間線與觀測指標〉）；外部操作以事件當時的 Run 判定 Task（操作重試時紀錄上的 `task_id` 會被改成新的 Task）。恢復事件屬於整個 Runtime，出現在每個 Workspace 的時間線上，`task_ids` 是它任何一次嘗試處置過、屬於該 Workspace 的 Task；依 Task 過濾 = 未過濾時間線中 `task_ids` 含該 Task 的事件，順序不變。
@@ -2953,7 +3025,7 @@
 - 影響：Workspace 很多事件時一次回傳全部，沒有分頁；需要時再加 `after_seq` 之類的參數。新的事件種類要上時間線，須加到 `baton_domain::timeline::category_of`。
 - 審閱：未審
 
-### AI-328：各項觀測指標的定義，全部只由時間線事件計算
+### AI-336：各項觀測指標的定義，全部只由時間線事件計算
 - 重要度：中
 - 時間／階段：2026-10-22，票 41 實作
 - 決策：`baton_domain::metrics::compute(時間線事件)` 是純函式，`GET …/metrics` 回傳的就是它對未過濾時間線的結果。定義：工作完成率 = 最後狀態為 `completed` 的 Task ÷ 建立的 Task（不含已取消）；交接成功率 = 到達 `handoff_transferred` 的交接 ÷ 已結束（轉移或放棄）的交接，另列已確認接手與進行中；恢復耗時 = `runtime_crash_detected` → 最後成功的那次嘗試的 `recovery_attempt_completed`（工作重新排隊），不含 10 分鐘穩定觀察，未成功的算 `pending`；裁定等待時間 = `decision_requested` → 第一次 `decision_answered`，延後不中斷計時，被取代或合併的不計，未回答的算 `pending`；教訓重犯率 = 有重犯事件的 Task ÷ 建立的 Task，另列攔下與回報次數。沒有資料時比率與平均是 `null`，UI 顯示「無資料」。指標是 Workspace 層級（不依 Task 過濾）。
@@ -2962,7 +3034,7 @@
 - 影響：這些定義改起來只要改 `metrics.rs` 與 docs，不影響資料。
 - 審閱：未審
 
-### AI-329：「重複操作事件」= 另一個 Run 以同一個冪等鍵要求再執行而被擋下；新增 `external_operation_duplicate_blocked`
+### AI-337：「重複操作事件」= 另一個 Run 以同一個冪等鍵要求再執行而被擋下；新增 `external_operation_duplicate_blocked`
 - 重要度：中
 - 時間／階段：2026-10-22，票 41 實作
 - 決策：外部操作登記（`begin_external_operation`）回 `already_succeeded`、`result_unknown` 或 `in_progress_elsewhere` 時，在同一個交易追加 `external_operation_duplicate_blocked`（`aggregate_type = 'external_operation_duplicate'`，每次擋下各是一個聚合，識別是這次登記新配的操作識別，不改動原操作的版本；內容含原操作、冪等鍵、`status`、Run、Task）。同一個 Run 重送登記（回應遺失）不算。指標「重複操作事件」= 這個事件的次數，依狀態分開，另列變成結果未知的次數（可能重複的風險）。
@@ -2971,7 +3043,7 @@
 - 影響：原本不寫入的這三種登記現在會寫一筆事件，所以控制資料庫寫入故障時它們也回 503（Worker 稍後重試即可）；Worker 反覆以同一個鍵登記，每次都記一筆。
 - 審閱：未審
 
-### AI-330：用量與 Context 使用量改由不可刪除的 `run_usage_reported` 事件計算；Context = 輸入 + 快取建立 + 快取讀取
+### AI-338：用量與 Context 使用量改由不可刪除的 `run_usage_reported` 事件計算；Context = 輸入 + 快取建立 + 快取讀取
 - 重要度：中
 - 時間／階段：2026-10-22，票 41 實作
 - 決策：`Store::record_quota_usage` 在同一個交易追加 `run_usage_reported`（`aggregate_type = 'run_usage'`，`aggregate_id` = Run，版本是這個 Run 第幾次回報），內容 `{ run_id, task_id, profile_id, tokens, context_tokens }`。`AdapterEvent::UsageReported` 加上 `context_tokens: Option<u64>`；真實 Adapter 取 `result.usage` 的 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`，沒有這些欄位為 `None`（未知，不填零）。Context 使用量 = 每個 Run 的 `context_tokens` 加總後的平均與最大，沒有回報的 Run 另計 `runs_unknown`。
@@ -2980,7 +3052,7 @@
 - 影響：Port 的 `UsageReported` 形狀改變（fake 與契約測試已更新，契約測試要求正常完成時回報 Context）。**Validation Required**：真實 `result.usage` 的欄位以票 14 記錄的樣本為準。
 - 審閱：未審
 
-### AI-331：第一版沒有 Stage，「每階段用量」全部歸在「未分階段」
+### AI-339：第一版沒有 Stage，「每階段用量」全部歸在「未分階段」
 - 重要度：中
 - 時間／階段：2026-10-22，票 41 實作
 - 決策：每階段用量依用量事件內容的 `stage` 分組；第一版沒有 Workflow／Stage（票 43），事件沒有這個欄位，全部歸在 `stage: null`，UI 顯示「未分階段」。票 43 加入 Stage 後，在 `run_usage_reported` 帶上 Run 所屬的 Stage 即可分開，指標不必改。
@@ -2989,7 +3061,7 @@
 - 影響：目前這項指標只有一個分組；票 43 實作時要記得在用量事件帶 `stage`。
 - 審閱：未審
 
-### AI-332：「服務端額度」只採用 Claude Code 回報的帳號層級用量；看不到一律是未知
+### AI-340：「服務端額度」只採用 Claude Code 回報的帳號層級用量；看不到一律是未知
 - 重要度：低
 - 時間／階段：2026-10-22，票 41 實作
 - 決策：指標回應附 `server_quota`：每個使用中帳號的五小時與七日已用比例，只取該視窗來自 CLI 限流訊號的已觀測用量，其次是外部觀測器的已觀測樣本；本機推估（方案上限 ÷ 本機累計）不是服務端額度，不採用。沒有就是 `null`，UI 顯示「未知」。
@@ -2998,7 +3070,7 @@
 - 影響：大多數時間服務端額度會是未知，直到 CLI 送出帶數字的限流訊號。
 - 審閱：未審
 
-### AI-333：Controller Run 的用量計入它的 Workspace，但不屬於任何 Task
+### AI-341：Controller Run 的用量計入它的 Workspace，但不屬於任何 Task
 - 重要度：低
 - 時間／階段：2026-10-22，票 41 實作（整合 rebuild/v1 的票 16 之後）
 - 決策：票 16 的 Controller Run 也會回報用量；它的 `run_usage_reported` 沒有 Task，時間線依 `controller_run.workspace_id` 歸到該 Workspace（`task_ids` 為空），計入用量與 Context 指標，依 Task 過濾時不出現。沒有指定 Task 的重犯同樣依它記下的 Workspace 歸屬。
@@ -3007,13 +3079,22 @@
 - 影響：用量指標的 Run 數包含 Controller Run。
 - 審閱：未審
 
-### AI-334：時間線與指標的 API、桌面殼指令與 UI 位置
+### AI-342：時間線與指標的 API、桌面殼指令與 UI 位置
 - 重要度：低
 - 時間／階段：2026-10-22，票 41 實作
 - 決策：`GET /api/v1/workspaces/{id}/timeline?task_id=`（`{ workspace_id, task_id, events }`）與 `GET /api/v1/workspaces/{id}/metrics`（`{ workspace_id, metrics, server_quota }`），桌面憑證；Workspace 不存在 404 `workspace_not_found`，Task 不屬於該 Workspace 404 `task_not_found`。桌面殼指令 `workspace_timeline`、`workspace_metrics`（經 `RuntimeClient::timeline`／`metrics`）。UI 在側欄每個 Workspace 加「時間線」按鈕，分頁上方是觀測指標、下方是事件清單與「依 Task 過濾」選擇器（選項取自未過濾時間線出現過的 Task，過濾由 Runtime 做）。
 - 理由：沿用其他 Workspace 分頁（成果、知識、對話）的路徑、錯誤格式與側欄入口慣例（spec D-21 的「時間線」主區分頁）。
 - 替代方案：全域時間線（跨 Workspace）；以 SSE 推送新事件（`/api/v1/events` 目前只有保活）。
 - 影響：時間線分頁不會自動更新，重新開啟或切換過濾才重新讀取。
+- 審閱：未審
+
+### AI-343：票 41 整合 rebuild/v1（票 17）：AI 編號改為 AI-335～AI-342，沒有 migration 要順延
+- 重要度：低
+- 時間／階段：2026-10-22，票 41 整合（run R116-41-integrate）
+- 決策：(1) 整合分支併入票 17（第 33 個 migration `controller_tools`，AI-327～AI-334）。本票沒有新增 migration（時間線直接讀事件表，見 AI-335），所以不必順延，第 33 個 migration 由票 17 套用。(2) 本票條目原寫成 AI-327～AI-334，與票 17 的條目同號，現改為 AI-335～AI-342，移到票 17 的 AI-334 之後；本票程式碼與文件沒有引用這些編號，條目內也沒有互相引用，只改標題；整合分支的條目逐字未動。(3) 衝突只有開發指南：目錄表以整合分支的列為底，補回本票在 `baton-domain`（`timeline.rs`、`metrics.rs`）、`baton-store`（`timeline.rs`）與 `baton-api`（timeline／metrics 路由）的描述；情境測試清單兩邊都保留（`controller_tools.rs` 與 `timeline_and_metrics.rs`）。`ai-decisions.md` 與 Rust 程式碼由 git 自動合併。(4) 票 17 讓 Controller 也能提出裁定請求（`decision_request.origin = 'controller'`，`run_id` 指向 `controller_run`）；時間線仍依 `decision_request.task_id` 歸屬 Task，這類事件的 `run_id` 是 Controller Run 的識別。不為此改動時間線。
+- 理由：已進入整合分支的條目編號不可改動，順延尚未合併的本票；本 run 只做整合，不新增功能。
+- 替代方案：無（編號規則已定）。
+- 影響：本票較早的 commit 與驗證報告（R114）提到的 AI-327～AI-334 是改號前的編號，分別對應現在的 AI-335～AI-342。時間線若要區分 Controller 與 Worker 提出的裁定，日後可在事件內容帶上 `origin`。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

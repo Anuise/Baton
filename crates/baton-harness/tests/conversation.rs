@@ -319,7 +319,10 @@ async fn a_session_replacement_keeps_the_conversation_and_runs_pending_instructi
     assert_eq!(spawn.args[1..], ["--resume".to_string(), "native-ctl-1".to_string()]);
     assert_eq!(spawn.working_dir.as_deref(), Some(path.as_str()), "Controller 在 Workspace 目錄執行");
     let token = spawn.env.iter().find(|(name, _)| name == baton_domain::agent::AGENT_TOKEN_ENV).map(|(_, v)| v.as_str());
-    assert_eq!(token, Some("controller-credential-not-issued"), "本票不簽發 Controller 憑證，只給佔位值");
+    // 票 17 起每一輪都簽發自己的 Controller 憑證（256 位元 token），不再是佔位值
+    let token = token.expect("Controller 程序應該收到憑證");
+    assert!(token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()), "{token}");
+    assert!(!prompt_of(&harness, &ws, &second_id).await.contains(token), "憑證不進 Prompt");
     assert!(!prompt_of(&harness, &ws, &second_id).await.contains("第一則指示"), "接續原生 Session 時不重送已處理的對話");
     reply_and_exit(&harness, &second_id, "native-ctl-1", "第二則完成");
     harness.supervise().await;
