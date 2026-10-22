@@ -444,6 +444,29 @@ function RunStatusLine({ run, accountName, timeZone }: { run: RunView; accountNa
       {run.end_reason && <p>結束原因：{run.end_reason}</p>}
       {run.lease && <p>最後心跳：{formatTimestamp(run.lease.last_heartbeat_at, timeZone)}</p>}
       {isRunActive(run.status) && run.cancel_requested_at !== null && <p>取消中，等待程序停止…</p>}
+      {run.latest_progress && (
+        <p>
+          最新進度：{run.latest_progress.summary}（{formatTimestamp(run.latest_progress.reported_at, timeZone)}）
+        </p>
+      )}
+      {run.latest_checkpoint && (
+        <div>
+          <p>
+            Checkpoint：{run.latest_checkpoint.summary}（{formatTimestamp(run.latest_checkpoint.saved_at, timeZone)}）
+          </p>
+          {run.latest_checkpoint.details !== "" && (
+            <details>
+              <summary>細節</summary>
+              {run.latest_checkpoint.details}
+            </details>
+          )}
+        </div>
+      )}
+      {run.blocked && (
+        <p role="alert">
+          受阻：{run.blocked.reason}（{formatTimestamp(run.blocked.reported_at, timeZone)}）
+        </p>
+      )}
     </div>
   );
 }

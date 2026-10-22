@@ -1,8 +1,10 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、帳號 Profile 管理與首次啟動精靈端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
-//! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、帳號 Profile 管理與首次啟動精靈端點與事件串流；
+//! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
+mod agent;
 mod authorization;
 mod guard;
 mod profiles;
@@ -20,6 +22,7 @@ use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
+use baton_domain::agent::{TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
 use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, QuotaObserver, WorkspaceFs};
@@ -28,6 +31,7 @@ use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
 
+pub use agent::{tool_path, ReportAck, TaskContractResponse};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
     AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
@@ -145,6 +149,11 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
         .route(SCHEDULING_PATH, get(scheduling::view))
         .route(SCHEDULING_SETTINGS_PATH, axum::routing::put(scheduling::update_settings))
+        // Agent API：只接受 Agent 憑證（guard 依路徑前綴決定所需角色）
+        .route(&tool_path(TOOL_GET_TASK_CONTRACT), post(agent::get_task_contract))
+        .route(&tool_path(TOOL_REPORT_PROGRESS), post(agent::report_progress))
+        .route(&tool_path(TOOL_SAVE_CHECKPOINT), post(agent::save_checkpoint))
+        .route(&tool_path(TOOL_REPORT_BLOCKED), post(agent::report_blocked))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

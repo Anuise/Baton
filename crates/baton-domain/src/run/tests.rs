@@ -369,6 +369,113 @@ fn reports_from_an_old_generation_or_a_finished_run_change_nothing() {
     assert_eq!(world.run(&second).status, RunStatus::Running);
 }
 
+// ---------------------------------------------------------------- Worker 回報（Agent API）
+
+fn report(run_id: &str, generation: i64, content: ReportContent) -> RunCommand {
+    RunCommand::Report { run_id: run_id.into(), generation, content }
+}
+
+#[test]
+fn a_progress_report_renews_the_lease_and_is_recorded_for_audit() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    let content = ReportContent::progress("完成一半").unwrap();
+
+    let change = world.step(report(&run_id, 1, content.clone()), later(45_000)).unwrap();
+
+    assert_eq!(world.lease(&run_id).expires_at, later(45_000 + LEASE_DURATION_MS));
+    let record = change.report.expect("被接受的回報要留下稽核紀錄");
+    assert_eq!((record.run_id.as_str(), record.generation, record.accepted), (run_id.as_str(), 1, true));
+    assert_eq!(record.content, content);
+    assert_eq!(change.events.iter().map(|e| e.event_type).collect::<Vec<_>>(), [EVENT_RUN_PROGRESS_REPORTED]);
+    assert_eq!(world.run(&run_id).status, RunStatus::Running);
+}
+
+#[test]
+fn a_checkpoint_event_carries_only_the_summary_not_the_details() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+
+    let change = world.step(report(&run_id, 1, ReportContent::checkpoint("寫完第一章", "很長的細節").unwrap()), T0).unwrap();
+
+    let payload = change.events[0].payload.to_string();
+    assert!(payload.contains("寫完第一章") && !payload.contains("很長的細節"));
+}
+
+#[test]
+fn a_blocked_report_moves_a_running_task_to_blocked_and_a_later_exit_does_not_revive_it() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+
+    let change = world.step(report(&run_id, 1, ReportContent::blocked("缺少 API 金鑰").unwrap()), T0).unwrap();
+    assert_eq!(change.task.as_ref().map(|t| t.status), Some(TaskStatus::Blocked));
+    assert_eq!(world.task("t1").status, TaskStatus::Blocked);
+    assert_eq!(world.run(&run_id).status, RunStatus::Running, "回報受阻不結束 Run，程序結束才結束");
+
+    world.step(RunCommand::Finish { run_id, generation: 1, outcome: RunOutcome::Succeeded }, T0).unwrap();
+    assert_eq!(world.task("t1").status, TaskStatus::Blocked, "Run 結束不把受阻的 Task 拉回 verifying 或 ready");
+}
+
+#[test]
+fn reports_from_a_superseded_or_finished_run_are_refused_and_change_nothing() {
+    let mut world = World::new(&["t1"]);
+    let first = world.running("t1", T0);
+    world.step(RunCommand::Interrupt { run_id: first.clone(), reason: "核對".into() }, T0).unwrap();
+    let second = world.running("t1", T0);
+    let before = world.clone();
+
+    for content in [
+        ReportContent::progress("遲到的進度").unwrap(),
+        ReportContent::checkpoint("遲到的 checkpoint", "").unwrap(),
+        ReportContent::blocked("遲到的受阻").unwrap(),
+    ] {
+        assert_eq!(world.step(report(&first, 1, content.clone()), later(1)), Err(RunError::StaleReport));
+        // 世代對不上目前的 Run 也一樣
+        assert_eq!(world.step(report(&second, 1, content), later(1)), Err(RunError::StaleReport));
+    }
+    assert!(world == before);
+    assert_eq!(world.task("t1").status, TaskStatus::Running);
+}
+
+#[test]
+fn a_report_before_the_launch_intent_is_refused() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.dispatch("t1", T0).unwrap();
+
+    let result = world.step(report(&run_id, 1, ReportContent::progress("太早").unwrap()), T0);
+
+    assert!(matches!(result, Err(RunError::TransitionInvalid { .. })));
+}
+
+#[test]
+fn the_run_view_shows_the_latest_accepted_report_of_each_kind_only() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    let at = |ms: i64, accepted: bool, content: ReportContent| ReportRecord {
+        workspace_id: "w1".into(),
+        run_id: run_id.clone(),
+        generation: 1,
+        accepted,
+        content,
+        received_at: later(ms),
+    };
+    let reports = vec![
+        at(1, true, ReportContent::progress("第一步").unwrap()),
+        at(2, true, ReportContent::progress("第二步").unwrap()),
+        at(3, false, ReportContent::progress("過期世代的進度").unwrap()),
+        at(4, true, ReportContent::checkpoint("存檔", "細節").unwrap()),
+    ];
+
+    let view = RunView::new(world.run(&run_id).clone(), None, &reports);
+
+    assert_eq!(view.latest_progress, Some(ProgressNote { summary: "第二步".into(), reported_at: later(2) }));
+    assert_eq!(
+        view.latest_checkpoint,
+        Some(CheckpointNote { summary: "存檔".into(), details: "細節".into(), saved_at: later(4) })
+    );
+    assert_eq!(view.blocked, None);
+}
+
 // ---------------------------------------------------------------- heartbeat 與 lease
 
 #[test]

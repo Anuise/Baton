@@ -81,6 +81,16 @@
 - **關係**：接收 Controller 與 Worker 的工具呼叫與使用者的管理操作；是控制資料的唯一寫入者；與 Guardian 分開；與 Runtime 內部管理 Agent 程序的 supervisor 是不同概念。
 - **避免使用**：daemon、server、backend、engine、orchestrator。
 
+### Agent 憑證
+- **定義**：Runtime 在 Run 准入時為該 Run 簽發的範圍憑證，綁定一個 Workspace、一個 Run 與一個權限世代（generation），只能使用 Agent 的工具介面，不能操作使用者的管理功能。只交給該 Run 的程序，不寫進 Prompt、設定檔或日誌。
+- **關係**：身分與範圍一律取自憑證，不採信請求自稱的 Workspace 或 Run；有效與否取決於該 Run 是否仍是 Task 的寫入所有者（見 execution lease）：Run 結束或被接替後，它不能再改變任何狀態，過期世代的回報只保留為稽核紀錄；由 MCP shim 代 Worker 出示給 Runtime；與桌面 App 的憑證分開，兩者不能互相取代。
+- **避免使用**：token、API key、密鑰（泛稱）、session（Session 是對話脈絡，不是憑證）。
+
+### MCP shim
+- **定義**：Worker 程序用來呼叫 Runtime 工具介面的轉接元件，把 Worker 的工具呼叫（讀取任務契約、回報進度、保存 checkpoint、回報受阻）轉送給 Runtime。本身不保存狀態、不做判斷。
+- **關係**：隨 Worker Run 啟動，帶著該 Run 的 Agent 憑證；Runtime 才是驗證與寫入的一方；執行工具的整合（Adapter）負責把它設定給 Worker。
+- **避免使用**：proxy、bridge、plugin、MCP server（泛稱，shim 只是其中一個提供平台工具的實作）。
+
 ### Guardian（監護程序）
 - **定義**：獨立的輕量程序，在同一次 Windows 使用者登入期間監看 Runtime，只對已確認意外終止的 Runtime 做有限次自動重啟。不派工、不裁定、不寫控制資料。
 - **關係**：與 Runtime 共用同一個恢復事件的三次額度；完全退出、更新、解除安裝時被抑制；自身故障時 Runtime 繼續工作並顯示保護降級。

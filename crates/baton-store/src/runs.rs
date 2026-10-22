@@ -129,7 +129,7 @@ impl Store {
             let mut executing = Vec::with_capacity(rows.len());
             for (run, payload) in rows {
                 let lease = load_lease(conn, &run.id)?;
-                executing.push(ExecutingRun { view: RunView { run, lease }, payload });
+                executing.push(ExecutingRun { view: RunView::new(run, lease, &[]), payload });
             }
             Ok(executing)
         })
@@ -178,7 +178,9 @@ pub(crate) fn views(loaded: &Loaded) -> Vec<RunView> {
     loaded
         .runs
         .iter()
-        .map(|run| RunView { run: run.clone(), lease: loaded.leases.iter().find(|l| l.run_id == run.id).cloned() })
+        .map(|run| {
+            RunView::new(run.clone(), loaded.leases.iter().find(|l| l.run_id == run.id).cloned(), &loaded.reports)
+        })
         .collect()
 }
 
@@ -338,6 +340,9 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
     }
     if let Some(item) = &change.outbox {
         save_outbox(tx, item)?;
+    }
+    if let Some(report) = &change.report {
+        super::agent::save_report(tx, report)?;
     }
     if let Some(run_id) = &change.outbox_delivered {
         tx.execute(

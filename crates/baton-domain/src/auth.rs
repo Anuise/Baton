@@ -9,7 +9,7 @@ use crate::Timestamp;
 /// token 的原始熵位元數（256 位元）。
 pub const TOKEN_ENTROPY_BYTES: usize = 32;
 
-/// 憑證角色；管理 API 只接受桌面角色，Agent 角色供後續的票使用。
+/// 憑證角色；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Desktop,
@@ -33,14 +33,26 @@ impl Role {
     }
 }
 
+/// Agent 憑證的範圍：Run 准入時簽發，綁定 Workspace、Run 與世代（spec D-22）。
+/// Runtime 一律以它判定資源歸屬，不信任請求內填寫的 Workspace 或 Run。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentScope {
+    pub workspace_id: String,
+    pub run_id: String,
+    /// 簽發時 Run 取得寫入所有權的世代。
+    pub generation: i64,
+}
+
 /// 一筆已簽發的憑證；只含 token 的雜湊，不含 token 本身。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialRecord {
     pub token_hash: String,
     pub role: Role,
     pub issued_at: Timestamp,
-    /// `None` 表示沒有時間上限（桌面憑證靠「下次啟動輪替」失效）。
+    /// `None` 表示沒有時間上限（桌面憑證靠「下次啟動輪替」失效；Agent 憑證的有效性取決於 Run 是否仍是寫入所有者）。
     pub expires_at: Option<Timestamp>,
+    /// 只有 Agent 憑證有範圍；桌面憑證為 `None`。
+    pub scope: Option<AgentScope>,
 }
 
 impl CredentialRecord {
@@ -113,6 +125,7 @@ mod tests {
             role: Role::Desktop,
             issued_at: Timestamp::from_millis(0),
             expires_at: expires_at.map(Timestamp::from_millis),
+            scope: None,
         }
     }
 

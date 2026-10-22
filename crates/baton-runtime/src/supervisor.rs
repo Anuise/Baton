@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::LogSink;
+use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
+use baton_domain::auth::AgentScope;
 use baton_domain::profile::ProfileStatus;
 use baton_domain::run::{ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus};
 use baton_ports::{
@@ -29,6 +31,8 @@ use futures::{FutureExt, StreamExt};
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
+use crate::CredentialIssuer;
+
 /// 受控停止的預設寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
 
@@ -39,6 +43,10 @@ pub struct Supervisor {
     store: Store,
     ports: Ports,
     log: LogSink,
+    /// Run 准入時簽發 Agent 憑證。
+    credentials: CredentialIssuer,
+    /// 交給 MCP shim 的 Runtime 位址（loopback IP 字面值加實際埠）。
+    runtime_url: String,
     /// 要求程序停止時給它的寬限期。
     stop_grace: Duration,
     /// 同一時間只有一個 tick 在進行（背景迴圈與測試呼叫不會交錯）。
@@ -50,11 +58,20 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    pub fn new(store: Store, ports: Ports, log: LogSink, stop_grace: Duration) -> Arc<Self> {
+    pub fn new(
+        store: Store,
+        ports: Ports,
+        log: LogSink,
+        credentials: CredentialIssuer,
+        runtime_url: String,
+        stop_grace: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store,
             ports,
             log,
+            credentials,
+            runtime_url,
             stop_grace,
             tick_lock: Mutex::new(()),
             streams: Mutex::new(HashMap::new()),
@@ -166,10 +183,23 @@ impl Supervisor {
         if let Err(error) = self.store.apply_run_command(item.run.workspace_id.clone(), begin, self.ports.clock.now()).await {
             return self.note(&format!("Run {} 無法寫入 launch intent，不啟動程序：{error}", item.run.id));
         }
-        // 2. 交易外啟動程序
-        let spec = self.ports.agent_adapter.spawn_spec(&self.run_spec(&item, &command_id));
+        // 2. Run 准入：簽發綁定這個 Run 與世代的 Agent 憑證，只經環境變數交給 MCP shim。
+        //    憑證不進 Prompt、指令列、設定檔或日誌；啟動前失敗就不啟動（下一次 tick 會把 Run 標為 interrupted）
+        let scope = AgentScope {
+            workspace_id: item.run.workspace_id.clone(),
+            run_id: item.run.id.clone(),
+            generation: item.run.generation,
+        };
+        let token = match self.credentials.issue_agent(scope).await {
+            Ok(token) => token,
+            Err(error) => return self.note(&format!("Run {} 無法簽發 Agent 憑證，不啟動程序：{error}", item.run.id)),
+        };
+        // 3. 交易外啟動程序
+        let mut spec = self.ports.agent_adapter.spawn_spec(&self.run_spec(&item, &command_id));
+        spec.env.push((AGENT_TOKEN_ENV.to_string(), token));
+        spec.env.push((RUNTIME_URL_ENV.to_string(), self.runtime_url.clone()));
         match self.ports.process_control.spawn(spec).await {
-            // 3. 回執寫回；寫回之前當掉的話，下一次 tick 以 command_id 找回
+            // 4. 回執寫回；寫回之前當掉的話，下一次 tick 以 command_id 找回
             Ok(receipt) => {
                 let command = RunCommand::RecordReceipt {
                     run_id: item.run.id.clone(),

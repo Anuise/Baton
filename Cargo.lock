@@ -236,6 +236,7 @@ dependencies = [
  "baton-api",
  "baton-credential",
  "baton-domain",
+ "baton-mcp-shim",
  "baton-ports",
  "baton-runtime",
  "baton-store",
@@ -245,6 +246,18 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "baton-mcp-shim"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "baton-domain",
+ "reqwest 0.12.28",
+ "serde_json",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

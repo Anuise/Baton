@@ -29,7 +29,7 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, GetProcessTimes, OpenProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESTDHANDLES,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESTDHANDLES,
     STARTUPINFOW,
 };
 
@@ -148,6 +148,28 @@ fn command_line(spec: &SpawnSpec) -> Vec<u16> {
     }
     cmd.push(0);
     cmd
+}
+
+/// 環境變數區塊：Runtime 自己的環境加上 `spec.env`（同名以 `spec.env` 為準）。
+/// 沒有額外變數時回傳 `None`，讓子程序直接繼承。
+fn environment_block(spec: &SpawnSpec) -> Option<Vec<u16>> {
+    if spec.env.is_empty() {
+        return None;
+    }
+    let mut vars: Vec<(String, String)> = std::env::vars_os()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+        .filter(|(k, _)| !spec.env.iter().any(|(name, _)| name.eq_ignore_ascii_case(k)))
+        .collect();
+    vars.extend(spec.env.iter().cloned());
+    // Windows 要求區塊依名稱排序（不分大小寫）
+    vars.sort_by_key(|(k, _)| k.to_uppercase());
+    let mut block = Vec::new();
+    for (name, value) in vars {
+        block.extend(format!("{name}={value}").encode_utf16());
+        block.push(0);
+    }
+    block.push(0);
+    Some(block)
 }
 
 /// 程序建立時間（Unix epoch 毫秒）。
@@ -298,7 +320,9 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
     let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let mut cmd = command_line(spec);
     let dir = spec.working_dir.as_deref().map(wide);
-    // SAFETY：cmd 是可寫、NUL 結尾的緩衝區；dir 為 NUL 結尾或 NULL；startup 與 info 皆為有效結構。
+    let environment = environment_block(spec);
+    // SAFETY：cmd 是可寫、NUL 結尾的緩衝區；environment 是以雙 NUL 結尾的 Unicode 環境區塊或 NULL；
+    // dir 為 NUL 結尾或 NULL；startup 與 info 皆為有效結構。
     let ok = unsafe {
         CreateProcessW(
             std::ptr::null(),
@@ -306,8 +330,8 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
             std::ptr::null(),
             std::ptr::null(),
             1,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW,
-            std::ptr::null(),
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            environment.as_ref().map_or(std::ptr::null(), |e| e.as_ptr() as *const c_void),
             dir.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
             &startup,
             &mut info,

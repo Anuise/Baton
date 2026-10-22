@@ -17,7 +17,7 @@
 4. 程式碼註解用繁體中文；識別字用英文。
 5. 平行化：先由你自己定好本票的介面與型別（domain 型別、API 契約），再把彼此獨立、不改同一批檔案的部分（例如前端 UI、harness 情境測試、文件）交給 subagent（Task 工具）同時做。**同時存在的 subagent 最多 3 個**；有相依或會改同一檔案的工作不要拆。subagent 的成果由你整合、跑測試、commit。
 6. 遇到不明確之處自己決定、繼續做，並在 `ai-decisions.md` 的「## Spec 決策審閱紀錄」之前追加新條目（AI-NN 接續最大編號，格式照檔頭），標明重要度與「票 {{NN}} 實作」，最後一行一律是 `- 審閱：未審`。不能修改既有條目。
-7. 小步 commit 到 `{{BRANCH}}`，訊息用 conventional commits 格式，結尾加上 `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`。
+7. 小步 commit 到 `{{BRANCH}}`，訊息用 conventional commits 格式，結尾加上 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。
 8. 結束前：`git merge rebuild/v1`（若整合分支有新 commit），解決衝突，確認全部測試通過，工作樹乾淨。
 9. 不要 push，不要動 `main` 或 `rebuild/v1`。
 
