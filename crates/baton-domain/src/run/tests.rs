@@ -1208,6 +1208,28 @@ fn a_run_reporting_a_native_session_driven_by_another_run_is_asked_to_stop() {
     assert_eq!(second_session.native_session_id, None, "同一個原生 Session 不會綁到第二個平台 Session");
 }
 
+#[test]
+fn a_run_reporting_a_native_session_owned_by_a_suspended_session_is_not_bound_and_is_asked_to_stop() {
+    // 暫停中的 Session 之後可能被另一個 Run 以 --resume 接續：後到的 Run 不能繼續驅動同一個原生 Session（review-notes #11）
+    let mut world = World::new(&["t1", "t2"]);
+    let first = world.running("t1", T0);
+    bind(&mut world, &first, "sess-a").unwrap();
+    world.step(RunCommand::Interrupt { run_id: first.clone(), reason: "x".into() }, later(500)).unwrap();
+    let suspended = world.run(&first).agent_session_id.clone().unwrap();
+    let suspended = world.sessions.iter().find(|s| s.id == suspended).unwrap();
+    assert_eq!((suspended.state, suspended.driver_run_id.as_deref()), (session::SessionState::Suspended, None));
+    let second = world.running("t2", T0);
+
+    let change = bind(&mut world, &second, "sess-a").unwrap();
+
+    assert_eq!(world.run(&second).native_session_id, None, "原生識別屬於另一個平台 Session，不綁到這個 Run");
+    assert_eq!(world.run(&second).cancel_requested_at, Some(later(1_000)));
+    let events = run_events(&change);
+    assert!(events.iter().any(|e| e.event_type == EVENT_RUN_NATIVE_SESSION_CONFLICT));
+    let cancel = events.into_iter().find(|e| e.event_type == EVENT_RUN_CANCEL_REQUESTED).unwrap();
+    assert_eq!(cancel.payload["reason"], session::NATIVE_SESSION_IN_USE);
+}
+
 // ---------------------------------------------------------------- 修正與重試預算（票 36）
 
 fn used(world: &World, task_id: &str) -> (u32, u32, u32) {

@@ -819,6 +819,7 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                 }
                 None => BindOutcome::Bound,
             };
+            let in_use = matches!(outcome, BindOutcome::InUse { .. });
             match &run.native_session_id {
                 Some(bound) if *bound == native_session_id => {}
                 Some(bound) => {
@@ -826,13 +827,23 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                     let payload = serde_json::json!({ "bound": bound, "reported": native_session_id });
                     edit.push(EVENT_RUN_NATIVE_SESSION_CONFLICT, payload);
                 }
+                None if in_use => {
+                    // 原生識別已屬於另一個平台 Session：不綁到這個 Run，衝突留下事件供查核
+                    let payload = serde_json::json!({
+                        "bound": null,
+                        "reported": native_session_id,
+                        "reason": session::NATIVE_SESSION_IN_USE,
+                    });
+                    edit.push(EVENT_RUN_NATIVE_SESSION_CONFLICT, payload);
+                }
                 None => {
                     edit.push(EVENT_RUN_NATIVE_SESSION_BOUND, serde_json::json!({ "native_session_id": native_session_id }));
                     edit.run.native_session_id = Some(native_session_id);
                 }
             }
-            // 同一個原生 Session 正由另一個 Run 驅動：後到的這個 Run 必須停下，不能有兩個執行者
-            if matches!(outcome, BindOutcome::InUse { driven: true, .. }) && edit.run.cancel_requested_at.is_none() {
+            // 同一個原生 Session 已屬於另一個平台 Session：正由別的 Run 驅動，或暫停中、之後可能被別的 Run 接續。
+            // 後到的這個 Run 都必須停下，不能有兩個執行者
+            if in_use && edit.run.cancel_requested_at.is_none() {
                 edit.run.cancel_requested_at = Some(now);
                 edit.push(EVENT_RUN_CANCEL_REQUESTED, serde_json::json!({ "reason": session::NATIVE_SESSION_IN_USE }));
             }
