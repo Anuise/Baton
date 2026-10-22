@@ -72,7 +72,7 @@
 | R068-23-integrate | 23 | integrate | Work-8 | 2026-10-22 17:53 | 2026-10-22 17:57 | DONE，依 AI-109 直接合併 |
 | R069-14-integrate | 14 | integrate | Work-3 | 2026-10-22 17:55 | 2026-10-22 18:04 | DONE（c075bae..459b666），但票 40 隨後合併，需再整合 |
 | R070-40-integrate | 40 | integrate | Work-9 | 2026-10-22 17:55 | 2026-10-22 18:04 | DONE，依 AI-109 直接合併 |
-| R071-24-impl | 24 | impl | Work-8 | 2026-10-22 17:57 | | |
+| R071-24-impl | 24 | impl | Work-8 | 2026-10-22 17:57 | 2026-10-22 18:28 | DONE（428faee..53b2ac3） |
 | R072-26-impl | 26 | impl | Work-9 | 2026-10-22 18:04 | | |
 | R073-14-integrate | 14 | integrate | Work-3 | 2026-10-22 18:04 | 2026-10-22 18:09 | DONE（37d997a） |
 | R074-14-verify | 14 | verify | Work-3 | 2026-10-22 18:09 | 2026-10-22 18:18 | PASS |
@@ -82,3 +82,4 @@
 | R078-38-integrate | 38 | integrate | Work-9 | 2026-10-22 18:19 | 2026-10-22 18:24 | DONE，依 AI-109 直接合併 |
 | R079-35-verify | 35 | verify | Work-3 | 2026-10-22 18:22 | | |
 | R080-20-integrate | 20 | integrate | Work-8 | 2026-10-22 18:24 | | |
+| R081-24-verify | 24 | verify | Work-8 | 2026-10-22 18:28 | | |
