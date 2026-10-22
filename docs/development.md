@@ -6,10 +6,10 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、帳號額度門檻（遲滯、draining）與主動交接的 phase 狀態機、冷卻與安全邊界（`handoff.rs`）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`：版本校驗、六種處理方式、合併與連結、Controller 動作判定）、決策權限表（`authority.rs`，spec D-15）、權限提示的歸類與授權判定（`permission.rs`）、單次批准（E1）的綁定與核對（`approval.rs`）、備份的觸發／保留／還原演練核對（`backup.rs`）、知識條目與教訓的可信狀態轉換、版本、取代關係、可見範圍與搜尋關鍵字（`knowledge.rs`）、Guard 規則、啟用停用、Run 准入時的違反判定與重犯事件（`guard.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔）、Task 工作目錄（worktree／輸出目錄）的位置與登記（`workdir.rs`）、單一整合佇列的狀態機（`integration.rs`）、外部操作的冪等鍵、要求雜湊、回執與結果未知（`external_operation.rs`）、控制資料庫寫入故障的種類與處理方式（`storage_health.rs`）、Agent Session 的沿用／替換決定、條件綁定與對話紀錄的去重和遮蔽（`session.rs`）、Controller 長期對話的輸入、喚起與輪次（`conversation.rs`）、修正與重試預算的計數／退避／重設（`budget.rs`，spec D-16）、Runtime 意外崩潰後的自動恢復（`recovery.rs`：恢復事件、每輪三次嘗試與退避、穩定觀察、用盡與人工重試的輪次、派工阻擋、監護嘗試的匯入）、監護程序的規則（`guardian.rs`：監護日誌紀錄、恢復狀態鏡像、抑制判定、重啟規劃、監護狀態）、跨 Windows 登入的啟動與續跑（`login.rs`：登入時自動啟動的偏好、各 Workspace 的跨登入自動續跑、登入邊界判定與暫停） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約、依賴未決答案的准入缺項（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、帳號額度門檻（遲滯、draining）與主動交接的 phase 狀態機、冷卻與安全邊界、突然限流與等待資源的重新評估時間（`handoff.rs`）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`：版本校驗、六種處理方式、合併與連結、Controller 動作判定、Controller 提出的請求）、決策權限表（`authority.rs`，spec D-15）、權限提示的歸類與授權判定（`permission.rs`）、單次批准（E1）的綁定與核對（`approval.rs`）、備份的觸發／保留／還原演練核對（`backup.rs`）、知識條目與教訓的可信狀態轉換、版本、取代關係、可見範圍與搜尋關鍵字（`knowledge.rs`）、Guard 規則、啟用停用、Run 准入時的違反判定與重犯事件（`guard.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔）、Task 工作目錄（worktree／輸出目錄）的位置與登記（`workdir.rs`）、單一整合佇列的狀態機（`integration.rs`）、外部操作的冪等鍵、要求雜湊、回執與結果未知（`external_operation.rs`）、控制資料庫寫入故障的種類與處理方式（`storage_health.rs`）、Agent Session 的沿用／替換決定、條件綁定與對話紀錄的去重和遮蔽（`session.rs`）、Controller 長期對話的輸入、喚起與輪次（`conversation.rs`）、修正與重試預算的計數／退避／重設（`budget.rs`，spec D-16）、Runtime 意外崩潰後的自動恢復（`recovery.rs`：恢復事件、每輪三次嘗試與退避、穩定觀察、用盡與人工重試的輪次、派工阻擋、監護嘗試的匯入）、監護程序的規則（`guardian.rs`：監護日誌紀錄、恢復狀態鏡像、抑制判定、重啟規劃、監護狀態）、跨 Windows 登入的啟動與續跑（`login.rs`：登入時自動啟動的偏好、各 Workspace 的跨登入自動續跑、登入邊界判定與暫停）、事件時間線的分類與依 Task 過濾（`timeline.rs`）、由時間線事件計算的觀測指標（`metrics.rs`） |
 | `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`，以及 `write_readonly_files`：把一組檔案寫成唯讀目錄）、PlatformInfo、SecretProtector、ClaudeEnvironment、CommandRunner（驗證命令）、UserSettingsSource（唯讀讀取使用者平常使用的 Claude Code 設定，只有白名單內的三個檔案）、GuardianProbe（監護程序是否還在，只用於顯示降級）、LoginSession（目前 Windows 登入工作階段的識別）、StartupRegistration（登入時自動啟動的 HKCU Run 登記）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、額度門檻與交接紀錄（`handoffs.rs`：`quota_gate`、`handoff`）、裁定請求／裁定／單次批准／連結與 Workspace 決策權限表（`decisions.rs`）、備份／還原／還原演練（`backup.rs`）、知識條目與版本（`knowledge.rs`：`knowledge_entry`、`knowledge_entry_version`，以及每次開啟時重建的全文檢索索引 `knowledge_fts`）、Guard 與重犯事件（`guards.rs`：`guard`、`lesson_recurrence`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`）、外部操作（`external_operations.rs`：`external_operation`，Run 結束與回答裁定的同一個交易中結算）、寫入故障的歸類與試寫（`health.rs`：`storage_probe`）、Agent Session 與對話紀錄段落（`sessions.rs`：`agent_session`、`session_events` 檢視、`transcript_segment`）、Controller 對話（`conversations.rs`：`conversation`、`conversation_turn`、`controller_run`）、修正與重試預算（`budgets.rs`：`task_budget`）、崩潰恢復事件與嘗試（`recovery.rs`：`recovery_event`、`recovery_attempt`，以及 `runtime_boot.ended_cleanly_at` 正常結束標記；監護日誌的匯入紀錄 `guardian_journal_import` 與給監護看的恢復狀態鏡像）、跨登入（`lifecycle.rs`：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`／`paused_by`、`login_startup`） |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照、成果瀏覽與成果接受）、`/api/v1/scheduling`、`/api/v1/lifecycle`（含 `/api/v1/lifecycle/login-startup` 與 `/api/v1/workspaces/{id}/login-resume`）、`/api/v1/recovery`、`/api/v1/decisions/pending`、`/api/v1/decisions/batch`（與 `/api/v1/workspaces/{id}/decisions`、`/api/v1/workspaces/{id}/decision-authority`）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/backups`（備份與還原演練狀態）、`/api/v1/knowledge`、`/api/v1/guards`（與 `/api/v1/knowledge/{id}/recurrences`）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `controller_action`、`register_artifact`、`confirm_handoff`；`knowledge.rs` 的 `record_lesson_candidate`、`search_knowledge`） |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、額度門檻與交接紀錄（`handoffs.rs`：`quota_gate`、`handoff`）、裁定請求／裁定／單次批准／連結與 Workspace 決策權限表（`decisions.rs`）、備份／還原／還原演練（`backup.rs`）、知識條目與版本（`knowledge.rs`：`knowledge_entry`、`knowledge_entry_version`，以及每次開啟時重建的全文檢索索引 `knowledge_fts`）、Guard 與重犯事件（`guards.rs`：`guard`、`lesson_recurrence`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`）、外部操作（`external_operations.rs`：`external_operation`，Run 結束與回答裁定的同一個交易中結算）、寫入故障的歸類與試寫（`health.rs`：`storage_probe`）、Agent Session 與對話紀錄段落（`sessions.rs`：`agent_session`、`session_events` 檢視、`transcript_segment`）、Controller 對話（`conversations.rs`：`conversation`、`conversation_turn`、`controller_run`）、修正與重試預算（`budgets.rs`：`task_budget`）、崩潰恢復事件與嘗試（`recovery.rs`：`recovery_event`、`recovery_attempt`，以及 `runtime_boot.ended_cleanly_at` 正常結束標記；監護日誌的匯入紀錄 `guardian_journal_import` 與給監護看的恢復狀態鏡像）、跨登入（`lifecycle.rs`：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`／`paused_by`、`login_startup`）、時間線的讀取與 Task 歸屬（`timeline.rs`，唯讀，沒有自己的資料表） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照、成果瀏覽與成果接受）、`/api/v1/scheduling`、`/api/v1/lifecycle`（含 `/api/v1/lifecycle/login-startup` 與 `/api/v1/workspaces/{id}/login-resume`）、`/api/v1/recovery`、`/api/v1/decisions/pending`、`/api/v1/decisions/batch`（與 `/api/v1/workspaces/{id}/decisions`、`/api/v1/workspaces/{id}/decision-authority`）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/backups`（備份與還原演練狀態）、`/api/v1/knowledge`、`/api/v1/guards`（與 `/api/v1/knowledge/{id}/recurrences`）、`/api/v1/workspaces/{id}/timeline` 與 `/api/v1/workspaces/{id}/metrics`、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `controller_action`、`register_artifact`、`confirm_handoff`；`knowledge.rs` 的 `record_lesson_candidate`、`search_knowledge`；`controller.rs` 的 Controller 專屬工具） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`，`RuntimeOptions` 含 `full_text_search`；含啟動時核對停止意圖、判定上次是否意外終止，與完全退出的執行者）、Supervisor（`supervisor.rs`，含完全退出的停止流程與重新開啟、崩潰恢復的嘗試、主動交接）、Claude Code Adapter（`claude_adapter.rs`）、備份排程（`backup.rs`）、確定性檢查的執行（`verifier.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe`（`baton-runtime restore …` 還原備份） |
 | `crates/baton-guardian` | 監護程序（`baton-guardian.exe`，票 32）：監護狀態機 `Guardian`（以 `RuntimeHost` 抽象 Runtime）、監護日誌／恢復狀態鏡像／生命週期檔／程序身分的檔案讀寫（`files.rs`）、以程序識別碼與記錄時間確認程序還在（`process.rs`）、正式版的 `ProcessHost`、登入啟動入口（`launcher.rs`，`baton-guardian.exe --login`，票 33）；不依賴 `baton-store`（不開控制資料庫） |
@@ -161,11 +161,11 @@ Run 的規則在 `baton_domain::run`（純邏輯：命令 + 目前狀態 → 新
 **Supervisor**（`Supervisor::tick`，每次依序做八件事，全部冪等、只信任資料庫）：
 
 1. 啟動派工 Outbox 的 Run（Outbox Dispatcher，至少一次交付、以 `command_id` 去重）：先在交易中持久化 launch intent 與 `command_id`（`starting`），才在交易外 `spawn`，再把回執（PID + 建立時間 + 指令雜湊）寫回（`running`）。寫入 launch intent 的交易再檢查一次停止意圖（`launch_halted`）與**准入**（目前生效的授權仍涵蓋契約需要的能力、Workspace 沒有封存）；准入不成立時 Run 以 `interrupted`（`admission_denied：…`）結束、Outbox 視為處理完畢，不簽發憑證也不啟動程序（見「授權撤銷與啟動准入順序」）。`spawn` 回報失敗時先以 `command_id` 呼叫 `ProcessControl::find` 查證：找到（例如回執在傳回途中遺失）就補寫回執；確定沒有才判定 `launch_failed`；無法查證就留在 `starting` 等下一次核對。Runtime 在任何一點當掉，重建後以 `command_id` 找回原程序並補寫回執，**不重複啟動**；找不到就把 Run 標為 `interrupted`（`launch_outcome_unknown`），不自動重送，由使用者重新派工；`find` 本身失敗（無法證明程序在不在）時 Run 留在 `starting`、繼續持有寫入所有權，**不中斷也不重派**，直到查得到為止。控制資料庫無法寫入時（見〈外部操作與寫入故障〉）這一步與第 6、7 步都暫停。
-2. 收 Adapter 事件：`Heartbeat` 續約 lease（間隔 15 秒、有效 60 秒，spec D-31）；`RateLimited`、`UsageReported` 記為該 Run 帳號的額度觀測（見「額度觀測」）；`Exited` 只結束 Run（成功 → Task `verifying`，失敗 → Task 回到 `ready`），**不會**把 Task 標為 `completed`；正在交接的 Run 結束時不論結束碼都視同舊程序已停止，直接轉移給 successor（見〈檢查點與主動交接〉）。
+2. 收 Adapter 事件：`Heartbeat` 續約 lease（間隔 15 秒、有效 60 秒，spec D-31）；`RateLimited`、`UsageReported` 記為該 Run 帳號的額度觀測（見「額度觀測」）；`Exited` 只結束 Run（成功 → Task `verifying`，失敗 → Task 回到 `ready`），**不會**把 Task 標為 `completed`；正在交接的 Run 結束時不論結束碼都視同舊程序已停止，直接轉移給 successor；帳號已達上限（突然限流）之後以失敗結束、還沒有交接的 Run，在這一步建立交接並轉移（或等待資源）（見〈檢查點與主動交接〉）。
 3. 取消：要求取消的 Run 先記下意圖（`cancel_requested_at`），Supervisor 停止整個程序樹，確認之後才完成取消、釋放 lease、Task 回到 `ready`；還沒啟動的 Run 立即取消。取消 Task 會在同一個交易中要求取消它進行中的 Run。
 4. 核對 lease：過期只觸發核對（`inspect`）：確認 `Dead` 才中斷 Run，`Alive` 續約，`Unknown` 維持原狀。
 5. 額度：輪詢到期（每個帳號每 5 分鐘）的外部額度觀測器並重新推估（見「額度觀測」）。
-6. 交接：推進帳號的額度門檻，為 draining 帳號上執行中的 Run 建立交接、在安全邊界要求舊程序停止、確認停止後轉移給 successor（見〈檢查點與主動交接〉）。
+6. 交接：推進帳號的額度門檻，重新評估到期的等待資源交接，為 draining 帳號上執行中的 Run 建立交接、在安全邊界要求舊程序停止、確認停止後轉移給 successor（見〈檢查點與主動交接〉）。
 7. 排程：前面幾步可能釋放了名額，於是讓派工佇列依序再試一次（見下一節）；交接與排程派出的 Run 在同一次 `tick` 就啟動。
 8. 驗證：對 `verifying` 且契約宣告了確定性檢查的 Task 執行檢查並提交結果（見「成果接受與最小完成驗證」）；背景迴圈把這一步放在另一個工作執行。
 
@@ -191,7 +191,7 @@ Worker 不直接碰資料庫或管理 API：它的程序啟動時帶著一組**�
 
 **MCP 設定**：`baton_domain::agent::mcp_config_json(shim 路徑)` 產生的設定只含 shim 指令與 `${BATON_AGENT_TOKEN}`、`${BATON_RUNTIME_URL}` 的參照，由 Claude Code 展開；真實 AgentAdapter 為每個 Run 把它寫成 `runs\<run_id>\mcp.json`。
 
-**兩組 API 分流**：`POST /agent/v1/tools/{工具}` 只接受 Agent 角色，管理 API（`/api/v1/…`）只接受桌面角色；`guard` 依路徑前綴 `/agent/v1/` 決定所需角色，角色不符回 403 `role_not_allowed`，Agent 憑證沒有範圍回 401 `credential_invalid`。身分與資源歸屬一律取自憑證；請求可以選擇帶 `workspace_id`／`run_id`，與憑證不一致就回 403 `agent_scope_mismatch`，不會悄悄改用請求裡的值。
+**兩組 API 分流**：`POST /agent/v1/tools/{工具}` 只接受 Agent 角色，管理 API（`/api/v1/…`）只接受桌面角色；`guard` 依路徑前綴 `/agent/v1/` 決定所需角色，角色不符回 403 `role_not_allowed`，Agent 憑證沒有範圍回 401 `credential_invalid`。身分與資源歸屬一律取自憑證；請求可以選擇帶 `workspace_id`／`run_id`，與憑證不一致就回 403 `agent_scope_mismatch`，不會悄悄改用請求裡的值。Agent 角色另有 Controller 憑證（票 17，綁定 Controller 的一輪）：它只能使用 Controller 專屬的工具，呼叫下表的 Worker 工具回 403 `worker_only`；Worker 憑證呼叫 Controller 工具回 403 `controller_only`，見〈Controller 拆工與派工工具（票 17）〉。
 
 | 工具 | 請求 | 行為 |
 | --- | --- | --- |
@@ -281,7 +281,7 @@ Runtime 無法撤回的外部操作（部署、發訊、付費、遠端寫入）
 
 結果未知期間，同一個鍵的登記一律回 `result_unknown`；別的 Task 用了同一個鍵也一樣，而且該 Task 被加入同一個請求的阻擋範圍，一起等查證。其他 Task 不受影響。使用者回答時，查證結果與 Task 恢復（回到 `ready` 並重新排隊）在同一個交易提交：`verified_done` → 操作 `succeeded`（回執記為「使用者查證已生效」加備註），之後同一個鍵回 `already_succeeded`；`verified_not_done` → 操作 `failed`，之後同一個鍵可以再執行一次（嘗試次數加一）。這種查證請求（裁定的 `external_operation_id` 指向操作）只能以「接受」其中一個選項或「延後」處理，其他方式回 400 `decision_action_not_allowed`；不能合併（400 `decision_merge_invalid`，可以改用連結），也不會因目標 Task 的契約或狀態改變而過期——否則請求結案了，操作卻一直停在 `unknown`。
 
-桌面端點 `GET /api/v1/workspaces/{id}/external-operations` 回傳 `{ operations }`（依建立順序，含狀態、嘗試次數、回執、原因與裁定請求）。事件（`aggregate_type = 'external_operation'`）：`external_operation_begun`、`external_operation_succeeded`、`external_operation_failed`、`external_operation_result_unknown`、`external_operation_verified`。資料表（migration 25 `external_operation`）：`external_operation`（`(workspace_id, idempotency_key)` 唯一、不可刪除）與 `storage_probe`。
+桌面端點 `GET /api/v1/workspaces/{id}/external-operations` 回傳 `{ operations }`（依建立順序，含狀態、嘗試次數、回執、原因與裁定請求）。事件（`aggregate_type = 'external_operation'`）：`external_operation_begun`、`external_operation_succeeded`、`external_operation_failed`、`external_operation_result_unknown`、`external_operation_verified`；另一個 Run 的重複登記被擋下時追加 `external_operation_duplicate_blocked`（`aggregate_type = 'external_operation_duplicate'`，見〈事件時間線與觀測指標〉）。資料表（migration 25 `external_operation`）：`external_operation`（`(workspace_id, idempotency_key)` 唯一、不可刪除）與 `storage_probe`。
 
 **寫入故障（磁碟滿、資料庫被鎖住）**：Store 的寫入佇列依 SQLite 錯誤代碼歸類每個失敗的寫入（`baton_store::storage_fault_of`）：`SQLITE_FULL` → `disk_full`、`SQLITE_BUSY`／`SQLITE_LOCKED` → `busy`、I/O 錯誤或唯讀 → `unwritable`；其他錯誤（例如約束違反）不算。有故障時：
 
@@ -359,7 +359,7 @@ Runtime 無法撤回的外部操作（部署、發訊、付費、遠端寫入）
 | --- | --- | --- | --- |
 | `open` | 用量回到 < 60%、用量變成未知（訊號已在重置時間失效），或已過進入時記下的重置時間；60%～75% 之間維持原狀 | `recovered`、`usage_unknown`、`reset_observed` | 可派工 |
 | `paused` | 用量 ≥ 75% | `stop_dispatch_threshold` | 不派新工作，進行中的 Run 繼續；等待原因 `quota_near_limit` |
-| `draining` | 用量 ≥ 85%，或目前有 CLI 的限流警告（或已達上限）；已在 draining 的帳號沒有過重置時間前，用量降到 75%～85% 也不退回 `paused` | `drain_threshold`、`limit_warning` | 不派新工作，另把進行中的 Run 交接出去；等待原因 `quota_draining` |
+| `draining` | 用量 ≥ 85%，或目前有 CLI 的限流警告（或已達上限）；已在 draining 的帳號沒有過重置時間前，用量降到 75%～85% 也不退回 `paused` | `drain_threshold`、`limit_warning`、`limit_reached`（CLI 回報已達上限＝突然限流；已在 draining 的帳號撞到上限時原因也改成它） | 不派新工作，另把進行中的 Run 交接出去；等待原因 `quota_draining` |
 
 門檻在 `baton_api::quota::current` 每次被呼叫時推進（Supervisor 每次處理、排程端點），狀態改變才寫入 `quota_gate`（記下原因、轉換當下的用量、進入 paused／draining 時的重置時間）並追加 `quota_gate_changed` 事件（`aggregate_type = 'quota_gate'`，payload 含 `from`／`to`／`reason`／`used`／`reset_at`）。
 
@@ -371,26 +371,29 @@ Runtime 無法撤回的外部操作（部署、發訊、付費、遠端寫入）
 | `stopping`（步驟 2） | 到了安全邊界，而且承接帳號仍有名額（可改用別的可派帳號）；否則留在 `requested` 下一次再判定 | 要延續的 checkpoint（Task 最新一筆被接受的 checkpoint，任一世代） | 要求舊程序停止（`ProcessControl::stop`，寬限期 `stop_grace`） |
 | `transferred`（步驟 3、4） | 舊程序**確認停止**：`StoppedGracefully`／`ForceKilled`、`inspect` 為 `Dead`，或 Worker 在 `requested`／`stopping` 中自行結束（`stop_outcome` = `stopped_gracefully`／`force_killed`／`dead`／`exited`） | 單一交易：舊 Run `interrupted`（`handed_off`）、successor Run 與派工 Outbox、交接紀錄前進（`to_run_id`、`to_generation`、`stop_outcome`、`transferred_at`） | 一般的 Outbox 啟動 successor（同一次 `tick`） |
 | `confirmed`（步驟 5） | successor Worker 呼叫 `confirm_handoff` | 確認內容（已完成、未完成、未知副作用）與 `confirmed_at` | 無 |
-| `abandoned` | 舊 Run 已由別的路徑結束（取消、程序消失、完全退出；原因 `from_run_ended：…`）、舊 Run 已不持有 `from_generation` 的 lease（`generation_changed`），或轉移時沒有承接帳號（`no_successor：…`） | `abandoned_reason` | 沒有承接帳號時 Task 已在同一個交易排回派工佇列，由一般排程接手 |
+| `abandoned` | 舊 Run 已由別的路徑結束（取消、程序消失、完全退出；原因 `from_run_ended：…`）、舊 Run 已不持有 `from_generation` 的 lease（`generation_changed`），或轉移時沒有承接帳號（`no_successor：…`）；等待資源時 Task 已不在 `waiting_resource`（例如被取消，`task_left_waiting_resource：…`） | `abandoned_reason` | 沒有承接帳號時 Task 已在同一個交易排回派工佇列，由一般排程接手 |
+| `waiting_resource`（票 29） | 突然限流的交接在轉移時，所有合適帳號都受限（名額以舊 Run 結束後計） | 單一交易：舊 Run `interrupted`（`handed_off_waiting_resource`，`RunCommand::ParkForResource`）並釋放 lease、Task 進入 `waiting_resource`、要延續的 checkpoint、`waiting_at`、`next_check_at`、`wait_reset_at`、`wait_attempts`、`wait_reasons` | 到了 `next_check_at` 才重新評估：有承接帳號就以單一交易讓 Task 回到 `ready`、派出 successor（Prompt 附上最近的有效 checkpoint）並轉移（`transferred`）；仍受限就重新排定（事件 `handoff_wait_rescheduled`） |
 
 - **不會有兩個 writer**：舊程序確認停止之前不建立 successor。`stop` 回 `StillAlive` 或停止失敗時交接留在 `stopping`、舊 Run 繼續持有寫入所有權，下一次再試；完全退出開始時交給停止流程處理。
 - **轉移是單一交易**（`Store::transfer_handoff`）：條件更新檢查舊 Run 仍持有 `from_generation` 的 lease → `RunCommand::HandOff` 結束舊 Run（`interrupted`、`end_reason` = `handed_off`、事件 `run_handed_off`）並釋放 lease、Task 回到 `ready` → 以 `SlotKind::Handoff` 選承接帳號（優先選定的那個）並 `RunCommand::Dispatch` 派出 successor（完整的派工檢查）→ successor 的 Prompt 附上 `handoff::successor_prompt` 的交接段落（舊 Run 與世代、checkpoint 摘要與細節，沒有 checkpoint 時要求從工作目錄判斷，並要求先核對再呼叫 `confirm_handoff`）→ 交接紀錄前進。已轉移過時原樣回傳（冪等）。
 - **安全邊界**（`at_safe_boundary`）：舊 Run 在要求之後保存了 checkpoint，或等滿 `CHECKPOINT_WAIT_MS`（2 分鐘）。Worker 透過回報回應的 `stop_requested`／`handoff_requested` 得知要保存 checkpoint 並結束；它自行結束就直接轉移，不必等到 `stopping`。
-- **冷卻**：同一個 Task 兩次換帳號至少間隔 10 分鐘（`HANDOFF_COOLDOWN_MS`，從上一次的 `transferred_at` 起算；放棄的交接不算）。
+- **冷卻**：同一個 Task 兩次換帳號至少間隔 10 分鐘（`HANDOFF_COOLDOWN_MS`，從上一次的 `transferred_at` 起算；放棄的交接不算）。突然限流不受冷卻限制（spec D-13）。
+- **突然限流**（票 29，門檻原因 `limit_reached`）：舊 Worker 已無法呼叫模型，所以交接不等 checkpoint（安全邊界立即成立，以最近的有效 checkpoint 為準，不依賴最後一輪摘要）、不需要先有承接帳號（`to_profile_id` 可以是空字串）。CLI 仍在等待額度時 Supervisor 查證並停止它；CLI 自行以失敗結束時，Supervisor 在收事件時以 `Store::request_sudden_handoff` 建立交接並直接轉移（判斷依據是持久化的門檻，不是記憶體中的旗標）。successor 的 Prompt 說明舊 Worker 沒有最後一輪的進度或摘要。
+- **全部受限時等待資源**：重新評估的時間由 `handoff::next_resource_check` 決定——每個合適帳號不能接手時的重置時間（門檻關閉的帳號取門檻記下的 `reset_at`，其餘如名額已滿為未知）中，最早而尚未過去者之後 1 分鐘；有任何未知（或根本沒有可用帳號）時另算退避 `5 分鐘 × 2^wait_attempts`、上限 60 分鐘，兩者取較早者。`Store::resume_resource_waits` 在 Supervisor 的第 6 步處理：停止意圖生效或 Workspace 等待「繼續工作」時不派工也不重新排定（資源恢復不會解除完全退出；解除後的下一次處理就重新評估）；派工檢查沒過（Guard、工作目錄）時什麼都不寫、以那個原因重新排定。等待資源不計入任何預算。
 - **交接不是失敗**：舊 Run 以 `handed_off` 結束，不計入任何修正或重試預算（spec D-16）。
-- **一次只有一個**：一個 Run、一個 Task 同時最多一個進行中（`requested`、`stopping`）的交接（Domain 的候選判定排除已在交接中的 Run，資料庫另有唯一索引 `handoff_one_in_flight_per_run`、`handoff_one_in_flight_per_task`）。
+- **一次只有一個**：一個 Run、一個 Task 同時最多一個進行中（`requested`、`stopping`）的交接；一個 Task 也最多一個等待資源的交接（Domain 的候選判定排除已在交接中的 Run，資料庫另有唯一索引 `handoff_one_in_flight_per_run`、`handoff_one_in_flight_per_task`）。
 - **不交接的時候**：控制資料庫無法寫入時整個第 6 步暫停；完全退出的停止意圖生效或 Workspace 等待「繼續工作」時找不到承接帳號（交接也是派工，經過 `Capacity.halt`）；崩潰恢復擋住派工時（恢復事件 `waiting`、`attempting`、`exhausted`）Supervisor 略過整個第 6 步，舊程序交給恢復嘗試停止。
-- **崩潰恢復**：外部副作用都在 phase 持久化之後，Runtime 重建後依 phase 繼續：`requested` 重新判定；`stopping` 先 `inspect`（已經 `Dead` 就不再要求停止）再要求停止；`transferred` 的 successor 走一般的啟動 Outbox，以 `command_id` 找回程序、不重複啟動。
+- **崩潰恢復**：外部副作用都在 phase 持久化之後，Runtime 重建後依 phase 繼續：`requested` 重新判定；`stopping` 先 `inspect`（已經 `Dead` 就不再要求停止）再要求停止；`transferred` 的 successor 走一般的啟動 Outbox，以 `command_id` 找回程序、不重複啟動；`waiting_resource` 保留原本排定的 `next_check_at`。
 
 | 端點／工具 | 用途 |
 | --- | --- |
 | `confirm_handoff`（Agent 工具） | 本文 `{ "completed", "incomplete", "unknown_side_effects" }`，三欄必填（去掉前後空白；沒有就寫「無」）、各 4000 字元上限（`CONFIRMATION_MAX_CHARS`）；回 `{ "confirmed": true, "handoff" }`，重複確認是冪等的。400 `handoff_confirmation_empty`、`handoff_confirmation_too_long`；不是等待確認的 successor 409 `handoff_not_pending`；已不是寫入所有者 409 `run_report_stale` |
 | `GET /api/v1/scheduling` | `accounts[].quota_gate`：帳號的門檻（`state`、`reason`、`used`、`reset_at`、`since`、`version`；從未離開 `open` 為 `null`） |
-| `GET /api/v1/workspaces/{id}/tasks` | 工作面板多了 `handoffs`：Workspace 內全部交接，依建立順序（phase、舊／新 Run 與帳號、世代、checkpoint、停止結果、確認內容、放棄原因與各 phase 的時間） |
+| `GET /api/v1/workspaces/{id}/tasks` | 工作面板多了 `handoffs`：Workspace 內全部交接，依建立順序（phase、舊／新 Run 與帳號、世代、checkpoint、停止結果、確認內容、放棄原因與各 phase 的時間；等待資源時另有 `waiting_at`、預計重新評估的 `next_check_at`、`wait_attempts`、`wait_reset_at`（未知為 `null`）與 `wait_reasons`）。Web UI 的工作卡片在等待資源時顯示預計重評時間、依據與等待原因 |
 
-事件：`quota_gate_changed`、`handoff_requested`、`handoff_stopping`、`handoff_transferred`、`handoff_confirmed`、`handoff_abandoned`，以及 Run 的 `run_handed_off`。資料表（migration 29 `quota_gate_and_handoff`）：`quota_gate`（每個帳號一列）與 `handoff`（`to_run_id` 只在 `transferred`／`confirmed` 有值，以 CHECK 保證）。
+事件：`quota_gate_changed`、`handoff_requested`、`handoff_stopping`、`handoff_transferred`、`handoff_confirmed`、`handoff_abandoned`、`handoff_waiting_resource`、`handoff_wait_rescheduled`，以及 Run 的 `run_handed_off`（等待資源時 `end_reason` 是 `handed_off_waiting_resource`）。資料表（migration 29 `quota_gate_and_handoff`，migration 32 `handoff_waiting_resource` 重建 `handoff` 加入 `waiting_resource` 與等待欄位）：`quota_gate`（每個帳號一列）與 `handoff`（`to_run_id` 只在 `transferred`／`confirmed` 有值、`waiting_resource` 一定有 `next_check_at`，以 CHECK 保證）。
 
-測試：`crates/baton-harness/tests/handoff.rs`（情境測試）、`crates/baton-domain/src/handoff/tests.rs`。
+測試：`crates/baton-harness/tests/handoff.rs`、`crates/baton-harness/tests/sudden_limit.rs`（情境測試）、`crates/baton-domain/src/handoff/tests.rs`。
 
 ### 成果儲存與成果瀏覽
 
@@ -507,7 +510,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 | 驗證不完整重驗（`verification`） | 2 | 確定性檢查結果 `inconclusive`（取不到證據） |
 | 基礎設施重試（`infrastructure`） | 5 | 啟動失敗（`launch_failed`）；lease 過期後確認程序已不在（`process_dead_after_lease_expired`） |
 
-**不計入任何一種**：突然限流（Adapter 回報額度用盡 `RateLimited { status: exhausted }` 之後程序以失敗結束 → Run `interrupted`，`end_reason` 為 `quota_limited：…`，Task 回到 `ready`）、恢復與完全退出的中斷（`Interrupt`：`launch_outcome_unknown`、完全退出、還原）、取消，以及「契約在派工後變更」造成的未通過。
+**不計入任何一種**：突然限流（Adapter 回報額度用盡 `RateLimited { status: exhausted }` 之後程序以失敗結束 → 交接給其他帳號或等待資源，見〈檢查點與主動交接〉；建立交接失敗時退回 `RunOutcome::QuotaLimited`：Run `interrupted`，`end_reason` 為 `quota_limited：…`，Task 回到 `ready`）、恢復與完全退出的中斷（`Interrupt`：`launch_outcome_unknown`、完全退出、還原）、取消，以及「契約在派工後變更」造成的未通過。
 
 **預算內**：計數加一，Task 照原本的轉換（實作失敗回 `ready`、不完整留在 `verifying`）。基礎設施重試另外自動排回派工佇列，並設定退避期限 `retry_not_before`（1、2、4、8、10 分鐘，上限 10 分鐘）；期限前排程的等待原因是 `backoff`／`retry_backoff`。實作失敗不會自動重新排隊（由 Controller 在預算內重派或使用者派工）。
 
@@ -515,7 +518,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 資料表 `task_budget`（migration 27 `retry_budgets`；從未計入的 Task 沒有列）。事件聚合 `task_budget`（聚合識別是 Task）：`task_budget_charged`、`task_budget_exhausted`、`task_budget_reset`。`GET tasks/{task_id}` 回傳 `budget`、`GET tasks` 回傳 `budgets`（`BudgetView`：三項 `counters`（`kind`、`label`、`used`、`limit`）、`retry_not_before`、`exhausted`、`decision_request_id`）；Web UI 在 Task 卡片顯示計數、退避期限與用盡提示。
 
-**已知限制**：突然限流的判定只記在 Supervisor 的記憶體中，Runtime 在「回報額度用盡」與「程序結束」之間重建的話，這次結束會被當成實作失敗（交接的票 28、29 會改為持久化的交接流程）。
+突然限流的判定以持久化的額度門檻（`limit_reached`）為準（票 29），Runtime 在「回報額度用盡」與「程序結束」之間重建也一樣；Supervisor 記憶體中的旗標只在建立交接失敗時作為退路。
 
 ### 備份與還原演練
 
@@ -583,6 +586,50 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 **Validation Required**：30 秒寬限 + 10 秒確認在真實 Claude Code 與 Windows Job Object 上是否足夠；系統匣、關窗隱藏與停止進度畫面只有編譯與元件測試，需在 Windows 上手動確認（按「完全退出」→ 進度 → App 結束、資料目錄出現 `lifecycle.json`）。
 
+### 事件時間線與觀測指標
+
+「時間線」分頁（`web/src/TimelinePage.tsx`，側欄的「時間線」）呈現 Workspace 內派工、交接、裁定、恢復、驗證與清理事件，可依 Task 過濾；上方是由同一份事件計算的觀測指標（spec 使用者故事 92、93）。分類在 `baton_domain::timeline`，指標在 `baton_domain::metrics`（純函式），讀取在 `baton-store` 的 `timeline.rs`，端點在 `baton-api` 的 `timeline.rs`。沒有新的資料表：時間線直接讀追加式的 `event` 表。
+
+**時間線上的事件**（`category`）：
+
+| `category` | 事件 |
+| --- | --- |
+| `dispatch` | Run 的 `run_created`、`run_admission_denied`、`run_launch_started`、`run_started`、`run_succeeded`、`run_failed`、`run_interrupted`、`run_cancel_requested`、`run_cancelled`（進度、checkpoint、lease 續約、原生 Session 綁定不上時間線） |
+| `handoff` | `handoff` 聚合的全部事件與 Run 的 `run_handed_off` |
+| `decision` | `decision_request` 聚合的 `decision_requested`、`decision_answered`、`decision_deferred`、`decision_superseded`、`decision_merged`、`decision_merge_received`、`decision_linked` |
+| `recovery` | `recovery_event` 聚合的全部事件 |
+| `verification` | `task_verification_recorded` |
+| `cleanup` | `worktree_cleanup` 聚合的全部事件 |
+| `task`、`external_operation`、`lesson`、`usage` | 指標用到的事件：`task_created`／`task_status_changed`；外部操作的全部事件（含 `external_operation_duplicate_blocked`）；`lesson_recurrence_recorded`；`run_usage_reported` |
+
+**Task 歸屬**：Run、交接、裁定請求依各自資料表的 `task_id`；Task 與清理的聚合識別就是 Task；外部操作、重犯、用量依事件內容的 `task_id`／`run_id`（外部操作重試時操作紀錄的 `task_id` 會換成新的 Task，所以以事件當時的 Run 為準）。恢復事件屬於整個 Runtime，出現在每個 Workspace 的時間線上，`task_ids` 是它任何一次嘗試處置過、屬於這個 Workspace 的 Task。不屬於任何 Task 的事件依它記下的 Workspace 歸屬：沒有指定 Task 的重犯、Controller Run 的用量（票 16；計入 Workspace 的用量指標，`task_ids` 為空）。別的 Workspace 的事件不會出現。依 Task 過濾 = 未過濾的時間線中 `task_ids` 含這個 Task 的事件，順序不變。
+
+**新事件**：
+- `run_usage_reported`（`aggregate_type = 'run_usage'`，`aggregate_id` = Run，版本是這個 Run 第幾次回報）：每次記下 Run 的用量（`record_quota_usage`）時在同一個交易追加，內容 `{ run_id, task_id, profile_id, tokens, context_tokens }`。`quota_usage` 會在 8 天後刪除，指標改由這個不可刪除的事件計算。`context_tokens` 由 Adapter 的 `AdapterEvent::UsageReported.context_tokens` 提供（真實 Adapter：`result.usage` 的輸入 + 快取建立 + 快取讀取；沒有這些欄位為 `null`）。
+- `external_operation_duplicate_blocked`（`aggregate_type = 'external_operation_duplicate'`，每次擋下各是一個聚合，識別是這次登記新配的操作識別，不改動原操作的版本）：另一個 Run 以同一個冪等鍵登記，回 `already_succeeded`、`result_unknown` 或 `in_progress_elsewhere` 時追加，內容含原操作、冪等鍵、`status`、Run 與 Task。同一個 Run 重送登記（回應遺失）不算。
+
+**指標**（`metrics::compute`，沒有資料時比率與平均是 `null`，UI 顯示「無資料」，不填零）：
+
+| 指標 | 定義 |
+| --- | --- |
+| 工作完成率 | 最後狀態為 `completed` 的 Task ÷ 建立的 Task（不含已取消） |
+| 交接成功率 | 到達 `handoff_transferred` 的交接 ÷ 已結束（轉移或放棄）的交接；另列確認接手數與進行中數 |
+| 恢復耗時 | `runtime_crash_detected` → 最後成功的那次嘗試的 `recovery_attempt_completed`（工作重新排隊），不含 10 分鐘穩定觀察；尚未成功的恢復事件算在 `pending` |
+| 重複操作事件 | `external_operation_duplicate_blocked` 的次數，依擋下時的狀態分開；另列變成結果未知的次數 |
+| 裁定等待時間 | `decision_requested` → 第一次 `decision_answered`；未回答的算在 `pending`，被取代或合併的不計 |
+| 教訓重犯率 | 有 `lesson_recurrence_recorded` 的 Task ÷ 建立的 Task；另列攔下與回報的次數 |
+| 每階段用量 | `run_usage_reported` 的 token 依 Stage 加總；第一版沒有 Workflow／Stage，全部歸在「未分階段」（`stage: null`） |
+| Context 使用量 | 每個 Run 的 `context_tokens` 加總後的平均與最大；沒有回報 Context 的 Run 另計 `runs_unknown` |
+
+| 端點（桌面憑證） | 用途 |
+| --- | --- |
+| `GET /api/v1/workspaces/{id}/timeline?task_id=` | `{ workspace_id, task_id, events }`，事件依 `seq`（事件表的提交序號）遞增：`seq`、`occurred_at`（UTC 毫秒）、`category`、`aggregate_type`、`aggregate_id`、`event_type`、`task_ids`、`run_id`、`payload`。Workspace 不存在 404 `workspace_not_found`；Task 不屬於這個 Workspace 404 `task_not_found` |
+| `GET /api/v1/workspaces/{id}/metrics` | `{ workspace_id, metrics, server_quota }`：`metrics` 是 `metrics::compute(未過濾的時間線)`，所以拿時間線重新計算一定得到相同的數字；`server_quota` 是每個使用中帳號的服務端額度（`five_hour_used`、`seven_day_used`），只採用 Claude Code 回報的帳號層級用量或外部觀測器的已觀測樣本，本機推估不算；看不到為 `null`，UI 顯示「未知」 |
+
+桌面殼指令：`workspace_timeline`（`workspaceId`、`taskId`）、`workspace_metrics`（`workspaceId`），經 `RuntimeClient::timeline`／`metrics`。
+
+測試：`crates/baton-harness/tests/timeline_and_metrics.rs`（情境測試）、`crates/baton-domain/src/metrics/tests.rs`、`crates/baton-client/tests/timeline_client.rs`、`web/src/TimelinePage.test.tsx`。
+
 ### Runtime 意外崩潰後的自動恢復
 
 依 ADR-0005（DR-20261021-05）。規則在 `baton_domain::recovery`，持久化在 `baton_store` 的 `recovery.rs`，執行在 Supervisor。
@@ -641,7 +688,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 ### 跨 Windows 登入的啟動與續跑
 
-依 ADR-0007（DR-20261021-07）與 spec D-25。規則在 `baton_domain::login`（純邏輯），持久化在 `baton-store` 的 `lifecycle.rs`（migration 32：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`／`paused_by`、`login_startup`），啟動入口在 `baton-guardian` 的 `launcher.rs`，Windows 實作在 `baton-runtime` 的 `windows_login.rs`。
+依 ADR-0007（DR-20261021-07）與 spec D-25。規則在 `baton_domain::login`（純邏輯），持久化在 `baton-store` 的 `lifecycle.rs`（migration 35：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`／`paused_by`、`login_startup`），啟動入口在 `baton-guardian` 的 `launcher.rs`，Windows 實作在 `baton-runtime` 的 `windows_login.rs`。
 
 **兩項設定，都預設關閉**，與 DR-01 的「完全退出後自動續跑」分開保存與顯示，變更都不會立即啟停目前的工作：
 - 「登入 Windows 時自動啟動 Baton」：目前使用者層級的偏好。開啟時 Runtime 在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 登記值 `Baton` = `"<安裝資料夾>\baton-guardian.exe" --login --data-dir "<資料目錄>" --port <埠>`；先改登記、成功才保存偏好。Runtime 每次啟動都讓登記跟偏好一致（被刪掉就補回）。完全退出不改變偏好也不移除登記（停止抑制另存於生命週期檔）。
@@ -955,7 +1002,7 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 
 **資料**：每個 Workspace 一個 `conversation`（識別由 Workspace 導出，第一則使用者訊息到達時建立）；`conversation_turn` 依 `seq` 記錄使用者訊息（`user_message`）、工作事件（`work_event`）與 Controller 回覆（`controller_reply`），輸入帶處理狀態 `pending`（UI 顯示「已收到／待處理」）→ `processing` → `processed`，並記錄處理它的 `controller_run_id` 與交付次數 `attempts`；`controller_run` 是 Controller 的一輪（一次 `claude -p`），只綁 conversation 與 Workspace、不綁 Task，所以不佔 execution lease、不影響任何 Task 狀態。
 
-**事件驅動（A1）**：只有兩種輸入會喚醒 Controller：使用者訊息，以及 Worker 的成果或阻礙（Run 的 `run_succeeded`、`run_failed`、`run_blocked_reported`，在產生該事件的同一個交易中成為工作事件；同一個事件來源只會成為一個輸入）。Workspace 還沒有 conversation 時（使用者沒有找過 Controller）不建立工作事件。沒有待處理輸入就不喚醒，沒有任何定時巡查。
+**事件驅動（A1）**：只有兩種輸入會喚醒 Controller：使用者訊息，以及 Worker 的成果或阻礙（Run 的 `run_succeeded`、`run_failed`、`run_blocked_reported`，在產生該事件的同一個交易中成為工作事件；同一個事件來源只會成為一個輸入）。Controller 自己提出的裁定請求被回答或過期時，也在同一個交易中成為工作事件（票 17）。Workspace 還沒有 conversation 時（使用者沒有找過 Controller）不建立工作事件。沒有待處理輸入就不喚醒，沒有任何定時巡查。
 
 **喚起**：第一則待處理輸入到達後等 5 秒（合併視窗），期間到達的輸入併入同一輪。同一個 conversation 任何時刻最多一輪未結束（B1；資料庫的唯一索引 `controller_run_one_active` 也保證）。忙碌時新的輸入只保存，不中斷進行中的一輪；本輪結束後，下一輪先處理**全部**待處理的使用者訊息（依到達順序），沒有使用者訊息時才處理工作事件。帳號：只用核對無誤、額度門檻為 `open`（票 28 的遲滯：`paused`／`draining` 不接新的一輪）且用量未達停止派工門檻的帳號，可派時留在上一輪的帳號（才能原生接續）；Controller 不佔 Worker 的並行名額。完全退出的停止意圖生效或 Workspace 暫停時不喚起。
 
@@ -970,9 +1017,73 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 
 退回 `pending` 的輸入（中斷或程序以失敗結束）在上一輪結束後退避重新交付（1、2、4… 分鐘，上限 10 分鐘），Prompt 註明「可能已部分處理，請先核對目前狀態」。完全退出時 Controller 的輪次與 Worker 一起在寬限期內停止，確認停止的同樣以 `interrupted` 結束、輸入退回 `pending`，重新開啟後再喚起。
 
-**Session 與 Prompt**：Controller Session 是 `agent_session` 中 `role = controller`、`conversation_id` 有值、`task_id` 為空的 Session，沿用與替換規則與票 15 相同（`session::plan_launch_for`）。沿用原生 Session 時 Prompt 只有本輪的輸入（`--resume`）；新的或替代的 Session 另附角色說明與最近 40 則已處理的對話，明示「只作為背景，不要重新執行」，所以換 Session 後 conversation 不變、未處理的指示只交付一次。Controller 在 Workspace 目錄執行，模型取 Workspace 的 Controller 覆寫（spec D-30）。本票不簽發 Controller 的 Agent 憑證（`credential.run_id` 只能指向 Worker 的 Run），程序的 `BATON_AGENT_TOKEN` 是佔位值 `controller-credential-not-issued`，也不套用共同設定快照；Controller 工具由票 17 提供。
+**Session 與 Prompt**：Controller Session 是 `agent_session` 中 `role = controller`、`conversation_id` 有值、`task_id` 為空的 Session，沿用與替換規則與票 15 相同（`session::plan_launch_for`）。沿用原生 Session 時 Prompt 只有本輪的輸入（`--resume`）；新的或替代的 Session 另附角色說明與最近 40 則已處理的對話，明示「只作為背景，不要重新執行」，所以換 Session 後 conversation 不變、未處理的指示只交付一次。Controller 在 Workspace 目錄執行，模型取 Workspace 的 Controller 覆寫（spec D-30），不套用共同設定快照。Controller 的 Agent 憑證與工具由票 17 提供（取代本票的佔位值 `controller-credential-not-issued`），見〈Controller 拆工與派工工具（票 17）〉。
 
 **端點**（桌面角色）：`GET /api/v1/workspaces/{id}/conversation`（`{ conversation_id, busy, active_run, next_wake_at, turns, runs }`；Workspace 不存在 404 `workspace_not_found`）、`POST /api/v1/workspaces/{id}/conversation/messages`（`{ "text" }` → 201 `{ turn, busy }`；空白 400 `message_empty`、超過 20000 字 400 `message_too_long`、已封存 409 `workspace_archived`）。送出訊息從不同步喚起 Controller。暫停與取消（Run／Task 的取消、Workspace 暫停、完全退出）不經過對話佇列，由 Runtime 直接處理（DR-20261022-01）。事件：`conversation_created`、`conversation_input_received`、`conversation_inputs_dispatched`、`conversation_inputs_processed`、`conversation_inputs_released`、`controller_run_launch_started`、`controller_run_started`、`controller_run_native_session_bound`、`controller_run_succeeded`、`controller_run_failed`、`controller_run_interrupted`。情境測試在 `crates/baton-harness/tests/conversation.rs`。
+
+### Controller 拆工與派工工具（票 17）
+
+票 17 實作 spec D-05、D-15 與 ADR-0010：Controller 拆工、補契約、加相依、派工與取消，全部透過 Controller 專屬的 Agent 工具**提出**，由 Runtime 驗證後才接受；Controller 不直接寫資料庫、不能執行指令，也不能自己啟動 Worker。端點在 `baton-api` 的 `controller.rs`，規則在 `baton_domain::task`（`DecisionHold`、准入缺項 `decision_pending`）與 `baton_domain::decision`（`DecisionOrigin`、`ControllerQuestion`、`ControllerGate`、`ConversationNotice`），持久化在 `baton-store`（`tasks.rs` 的 `propose_task`、`decisions.rs` 的 `controller_question`／`controller_gate`、`conversations.rs` 的 `enqueue_notice`／`controller_run_active`），工具定義在 `crates/baton-mcp-shim`。
+
+**Controller 憑證**：Supervisor 喚起 Controller 的一輪時（`launch_controller`：Controller Run 已以 `starting` 持久化、`prepare` 之後、`spawn` 之前）呼叫 `CredentialIssuer::issue_controller`，簽發 Agent 角色、綁定 Workspace 與那一輪的憑證（`ControllerScope`，存在 `credential.controller_run_id`，每一輪最多一張）；簽發失敗就不啟動，這一輪以失敗結束、輸入退回待處理。交給程序的方式與 Worker 相同：只經環境變數 `BATON_AGENT_TOKEN`（與 `BATON_RUNTIME_URL`），資料庫只存雜湊。它沒有時間上限，有效與否取決於那一輪是否仍是 `starting`／`running`。取代票 16 的佔位值 `controller-credential-not-issued`。
+
+**角色分流**（`guard` 接受帶 Worker 範圍或 Controller 範圍的 Agent 憑證，兩者都沒有仍是 401 `credential_invalid`；它在解析請求之前就依工具路徑分流（`baton_domain::agent::CONTROLLER_TOOLS`），處理函式內另有同樣的檢查；shim 對兩種角色列出同一份工具清單，Controller 工具的說明註明「Controller 專屬」，由 Runtime 依憑證拒絕）：
+
+| 憑證 | 呼叫 | 結果 |
+| --- | --- | --- |
+| Controller | 6 個 Controller 工具 | 那一輪仍是 `starting`／`running` 才接受，結束後 401 `credential_revoked`；請求帶的 `workspace_id`／`run_id`（Controller 的一輪）與憑證不一致 403 `agent_scope_mismatch` |
+| Controller | Worker 工具（`get_task_contract`、三個回報工具、`request_decision`、`controller_action`、`register_artifact`、知識、外部操作、訊息、`confirm_handoff`） | 403 `worker_only`：不能冒充 Worker 的 Run 回報或寫入 |
+| Controller | `permission_prompt` | 一律 `{behavior: "deny", status: "controller_denied"}`，不建立裁定請求：Controller 不能直接執行指令、寫資料或自己啟動 Worker |
+| Worker | 6 個 Controller 工具 | 403 `controller_only` |
+
+**工具**（`POST /agent/v1/tools/{工具}`；`propose_task`、`update_task`、`add_dependency`、`cancel_task` 成功時回 `{task, goal_id, changed, admission: {admissible, missing}}`，`admission` 與工作面板的准入預覽相同；其他錯誤與對應的桌面端點相同）：
+
+| 工具 | 請求 | 行為 |
+| --- | --- | --- |
+| `propose_task` | `title`、`goal_id`（既有 Goal）與 `goal_title`（建立新 Goal）二擇一、`kind?`（`development`／`research`（預設）／`document`）、`contract?` | 201；Task 一律 `pending`，契約可以先不完整。需要建立 Goal 時，Goal 與 Task 在同一個交易判定與寫入，任一個被拒絕就什麼都不寫。`goal_id`／`goal_title` 不是剛好一個 400 `goal_choice_invalid` |
+| `update_task` | `task_id`、`contract`（整份取代）、`note?` | 200；內容相同 `changed: false`、不新增版本；ready 的 Task 改契約退回 pending。已派工過的 Task 改完成條件或驗證檢查先經決策權限表（`modify_done_criteria`，見下） |
+| `add_dependency` | `task_id`、`depends_on` | 200；自我相依 400 `dependency_self`、循環 409 `dependency_cycle`，重複新增是冪等的 |
+| `dispatch_task` | `task_id`、`priority?` | `pending`／`ready` 的 Task 先做完整准入檢查：缺少授權能力時經決策權限表（`exceed_authorization`，見下），其他缺項 409 `task_admission_denied`（附 `missing`）；pending 的 Task 通過後先轉為 ready。之後走與桌面派工端點相同的流程：201 `{status: "started", run}` 或 202 `{status: "queued", task_id, priority, reasons}` |
+| `cancel_task` | `task_id` | 200；與桌面取消相同，進行中的 Run 在同一個交易中被要求取消 |
+| `propose_decision_request` | `question`、`reason`、`options`（2–8 個 `{id, label, tradeoff?}`）、`recommendation?`、`evidence?`、`urgency?`、`deadline_minutes?`、`blocking`（1–20 個依賴這個答案的 Task，只能是 `pending`／`ready`） | 201 `{decision_request_id, status: "waiting_decision", existing: false, message}`；同一個問題（正規化後相同）仍待處理時 200、`existing: true`，新列出的 Task 併入既有請求的阻擋範圍。內容無效或 `blocking` 不符 400 `decision_invalid`，Task 不存在 404 `task_not_found` |
+
+**准入相同**：Controller 建立與修改的 Task 走與工作面板相同的 `task::decide`、`task::admission_report`；`dispatch_task` 與桌面的 `POST tasks/{task_id}/dispatch` 共用 `runs::dispatch_now`（準備工作目錄、Scheduler 選帳號、派工交易），所以 Controller 派出的 Task 不會繞過任何准入、相依、Guard 或容量判定。
+
+**依決策權限表推導事項**（AI-227 要求不信任 Agent 自報的 `matter`）：Controller 工具不帶事項，由 Runtime 依實際變更推導，再以 `ControllerGate` 判定（規則同 `controller_action`，但提出者是 Controller 的一輪、目標 Task 必填）。兩個事項內建都是「必須送裁定」，Workspace 不能放寬：
+
+| 事項 | 何時推導 | 核准之後 |
+| --- | --- | --- |
+| `exceed_authorization` | `dispatch_task` 時准入缺項含 `capability_not_granted` | 核准用掉一次，但**不會擴大授權**：Workspace 授權仍未涵蓋時 409 `authorization_not_expanded`，要使用者到授權頁修改授權後再派工 |
+| `modify_done_criteria` | `update_task` 對已有任何 Run 的 Task：原本已填寫的 `done_criteria` 被改掉（文字或引用不同），或 `verification_checks` 有任何不同；補上原本缺少或未知的完成條件不算 | 下一次對同一個 Task 的這類變更消耗它，照常寫入新版本 |
+
+沒有可用的核准時變更不執行，建立 `kind: authority`、`origin: controller` 的裁定請求（同一個 Task 同一事項仍待處理時回既有請求），回 409 `requires_decision`（`{error, message, status: "requires_decision", matter, decision_request_id, existing}`）；使用者拒絕時消耗一次，回 409 `decision_denied`。核准的使用記在 `decision_approval_use`（`run_id` 是 Controller 的一輪）。
+
+**漸進拆工**（ADR-0010「邊釐清、邊調查」）：`propose_decision_request` 建立 `kind: agent`、`origin: controller` 的請求，阻擋範圍是 `blocking`。Task 的狀態不變（不進入 `waiting_decision`），而是在回答前多一個准入缺項 `decision_pending`（`task.rs` 的 `DecisionHold`，由 `baton-store` 的 `tasks.rs` 只載入 Controller 待回答的提問；Controller 的 `exceed_authorization`／`modify_done_criteria` 請求不另外擋准入，分別由授權檢查與 `update_task` 判定），所以不能標為 ready、不能派工；不依賴答案的 Task 照常派出。回答後缺項消失，但 Task 不會自動排隊，由 Controller 依答案更新契約後再派工。過期規則（`stale_reason`）：Controller 的提問問的是使用者的決定，不會因為契約變更而過期，只有依賴它的 Task 全部結束（或不存在）時才過期；Controller 的權限表請求仍依目標 Task 的契約版本過期。Controller 與 Worker 提出的請求不能合併（400 `decision_merge_invalid`，可以改用連結）。裁定中心的請求詳情帶 `origin`。
+
+**喚醒 Controller**：Controller 提出的請求（含被合併進來的）被回答或過期時，`decision::wake` 不寫喚醒 Outbox，而是產生 `ConversationNotice`，在**同一個交易中**成為該 Workspace conversation 的工作事件（`conversations.rs` 的 `enqueue_notice`，`source` = `decision_wake:<請求>:<revision>`，同一個結果只成為一個輸入；內容由 `notice_content` 產生：處理方式、選項、說明與依賴的 Task，或過期原因），由〈Controller 長期對話與事件驅動〉的事件迴圈喚起下一輪。
+
+**資料**（migration 33 `controller_tools`）：`credential.controller_run_id`（參照 `controller_run`，唯一）；重建 `decision_request`，加 `origin`（`worker`／`controller`，既有資料為 `worker`；權限提示只能由 Worker 提出），`run_id` 不再是對 `run` 的外鍵，改由觸發器 `decision_request_origin` 依來源檢查（Worker → `run`、Controller → `controller_run`）；重建 `decision_approval_use`，`run_id` 同樣改由觸發器檢查（`run` 或 `controller_run`）。這個 migration 列在 `FOREIGN_KEYS_OFF_MIGRATIONS`：`migrate` 在交易外關閉 `foreign_keys`、`apply_migration` 套用後提交前以 `foreign_key_check` 核對沒有任何違反，再開回 `foreign_keys`。情境測試在 `crates/baton-harness/tests/controller_tools.rs`。
+
+### Controller 跨帳號交接
+
+票 30 讓 Controller 沿用 Worker 的交接協議（票 28、issue §5.2）換帳號。規則在 `baton_domain::conversation`（`handoff_stop_due`、`handoff_reason_for`、`TurnOutcome::HandedOff`、`wait_for_account`），持久化在 `baton-store` 的 `conversations.rs`（migration 34 `controller_handoff`），推進在 Supervisor 的 Controller 步驟。Controller 的一輪很短，所以沒有另外的交接紀錄表：安全邊界就是一輪的結束，交接記在承接的那一輪上。
+
+| 協議步驟 | Controller 的對應 |
+| --- | --- |
+| 1. 要求（先選定承接帳號） | 上一輪的帳號（conversation 最近的 Session 的帳號）門檻為 `paused`／`draining` 或無法使用時，下一輪的帳號由排程另選。進行中的一輪所在帳號進入 `draining` 時，只有找得到承接帳號才繼續下一步，否則留在原帳號 |
+| 2. 安全邊界 | 讓進行中的一輪自己結束：從帳號進入 `draining`（或這一輪開始，取較晚者）起最多等 `CHECKPOINT_WAIT_MS`（2 分鐘），之後才以 `stop_grace` 要求舊程序停止；先查證，已不在就不再停止 |
+| 3. 轉移 | 舊程序**確認停止**後，下一次 tick 把串流讀乾淨仍沒有結果，這一輪才以 `interrupted`、`end_reason` = `handed_off：…`（事件 `controller_run_handed_off`）結束，輸入退回 `pending` 且**不退避**；同一次 tick 的喚起在承接帳號上以新的 Controller Session（`account_changed`）開始下一輪，Controller Run 記下 `handoff`（`from_run_id`、`from_profile_id`、`reason`），conversation 記事件 `controller_handoff_transferred`。停不下來就維持原狀、下一次再要求，B1 保證不會有第二輪 |
+| 4. 確認 | 承接的那一輪保存了結果（`succeeded`），conversation 記事件 `controller_handoff_confirmed` |
+
+**限流與當掉**：一輪沒有保存結果就結束（程序以失敗結束、程序已不在），而它收到過 CLI 的額度用盡訊號、或帳號門檻（依最新額度推進後）是 `draining` 時，一律以 `handed_off` 結束，不算 Controller 的失敗、不退避。所以突然限流、為交接而停止、以及停止途中 Runtime 當掉重建後由存活核對找回的一輪，都走同一條路。完全退出時停止的一輪仍是一般的中斷。
+
+**換帳號的原因**（`handoff.reason`）：上一個帳號門檻 `draining` → `quota_draining`；`paused` 或用量 ≥75% → `quota_near_limit`；其他（未核對、已封存等）→ `account_unavailable`。換過帳號之後新的 Session 在承接帳號上，之後的輪次留在那裡原生接續，不會自動換回。
+
+**重建**：新的（含替代的）Controller Session 的 Prompt 除了角色說明、紀錄缺口與最近 40 則已處理的對話，另附 Workspace 最近 20 筆已做成的決策（問題 → 選項名稱、備註）與尚未結束的 Task 各自最近一筆被接受的檢查點摘要（最多 20 筆），都標明只作為背景；由 Store 在喚起的同一個交易中載入。沿用原生 Session 時不附。未處理的指示依到達順序只列一次，被中斷過的註明「可能已部分處理」。
+
+**沒有可用帳號**：輸入（使用者訊息、工作事件）照常保存為 `pending`，不喚起 Controller；Supervisor 以排程的等待原因寫入 conversation 的 `wait_code`／`wait_message`／`wait_since`（原因不變時不寫入，改變時保留開始等待的時間，事件 `conversation_controller_waiting`），下一輪開始時清除。Controller 不佔 Worker 的名額，所以 Worker、取消、裁定等其餘功能不受影響。
+
+**端點**：`GET /api/v1/workspaces/{id}/conversation` 多了 `waiting`（`{ code, message, since }`；只有輸入已到期卻沒有喚起時才有，其餘為 `null`），`runs[]` 多了 `handoff`（`{ from_run_id, from_profile_id, reason }` 或 `null`）。「對話」分頁顯示等待原因，Controller 回覆旁標示交接來源、原因與「已確認」，被交接出去的一輪標示「已交接」。情境測試在 `crates/baton-harness/tests/controller_handoff.rs`。
 
 ### 本機 API 的存取防護
 
@@ -1045,7 +1156,7 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - 完全退出：`POST /api/v1/lifecycle/exit` 之後以 `harness.wait_for_exit()` 等停止流程結束（Harness 的 Runtime 在退出後不會自行結束服務，由測試決定何時 `restart`）；`Harness::builder().exit_timing(..)` 縮短 30 + 10 秒的上限；`process_control.script_stop(identity, FakeStop::Result(..)／Hang／Fail(..))` 指定某個程序停不停得下來，`stop_graces()` 讀取每次停止收到的寬限期；`harness.lifecycle_file_path()` 是生命週期檔的位置。
 - `Harness::builder().without_full_text_search()`：以 `RuntimeOptions.full_text_search = false` 啟動，視同 FTS5 不可用，知識搜尋退回 LIKE（`search_mode = like_fallback`，日誌記錄降級）；之後 `harness.set_full_text_search(true)` 再 `harness.restart()`，即模擬 FTS5 恢復可用、啟動時重建索引。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`、`claude_env`：具體的 fake，可腳本化回應並讀取呼叫紀錄。`claude_env` 可設定 Claude Code／Git 是否存在與版本（`set_claude`、`set_git`、`fail_tool_probes`）、在某個設定目錄完成原生登入（`log_in`，會像真實的 Claude Code 一樣把登入資料寫進該目錄）、模擬環境變數覆蓋（`set_env_override`）、讓開啟登入終端機時順便登入（`script_terminal_login`），並記錄開啟過的終端機（`login_terminals`）。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；裁定中心與權限提示情境：`crates/baton-harness/tests/decisions.rs`；完整裁定中心（版本校驗、六種處理方式、批次、合併連結、決策權限表）情境：`crates/baton-harness/tests/decision_center_full.rs`；單次批准（E1）與修改授權情境：`crates/baton-harness/tests/one_off_approval.rs`；授權撤銷與啟動准入順序情境：`crates/baton-harness/tests/authorization_revocation.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`；檢查點與主動交接情境：`crates/baton-harness/tests/handoff.rs`；知識、教訓與全文檢索（含降級）情境：`crates/baton-harness/tests/knowledge.rs`；Guard 與重犯事件情境：`crates/baton-harness/tests/guards.rs`；Outbox 核對、外部操作與寫入故障情境：`crates/baton-harness/tests/outbox_and_external_ops.rs`；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`；Worktree、輸出目錄與整合佇列情境：`crates/baton-harness/tests/worktrees.rs`；Worktree 自動清理情境：`crates/baton-harness/tests/worktree_cleanup.rs`；修正與重試預算情境：`crates/baton-harness/tests/retry_budgets.rs`；Runtime 意外崩潰後的自動恢復情境：`crates/baton-harness/tests/crash_recovery.rs`；監護程序、有限自動重啟與降級情境：`crates/baton-harness/tests/guardian.rs`，重開 App 只補監護：`crates/baton-client/tests/guardian_client.rs`。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；裁定中心與權限提示情境：`crates/baton-harness/tests/decisions.rs`；完整裁定中心（版本校驗、六種處理方式、批次、合併連結、決策權限表）情境：`crates/baton-harness/tests/decision_center_full.rs`；單次批准（E1）與修改授權情境：`crates/baton-harness/tests/one_off_approval.rs`；授權撤銷與啟動准入順序情境：`crates/baton-harness/tests/authorization_revocation.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`；檢查點與主動交接情境：`crates/baton-harness/tests/handoff.rs`；突然限流與等待資源情境：`crates/baton-harness/tests/sudden_limit.rs`；知識、教訓與全文檢索（含降級）情境：`crates/baton-harness/tests/knowledge.rs`；Guard 與重犯事件情境：`crates/baton-harness/tests/guards.rs`；Outbox 核對、外部操作與寫入故障情境：`crates/baton-harness/tests/outbox_and_external_ops.rs`；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`；Worktree、輸出目錄與整合佇列情境：`crates/baton-harness/tests/worktrees.rs`；Worktree 自動清理情境：`crates/baton-harness/tests/worktree_cleanup.rs`；修正與重試預算情境：`crates/baton-harness/tests/retry_budgets.rs`；Runtime 意外崩潰後的自動恢復情境：`crates/baton-harness/tests/crash_recovery.rs`；監護程序、有限自動重啟與降級情境：`crates/baton-harness/tests/guardian.rs`，重開 App 只補監護：`crates/baton-client/tests/guardian_client.rs`；Controller 拆工與派工工具、漸進拆工情境：`crates/baton-harness/tests/controller_tools.rs`；事件時間線與觀測指標情境：`crates/baton-harness/tests/timeline_and_metrics.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 

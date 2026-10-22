@@ -24,6 +24,8 @@ interface Props {
   onOpenArtifacts?: (workspace: Workspace) => void;
   /** 使用者要開啟某個 Workspace 的知識。 */
   onOpenKnowledge?: (workspace: Workspace) => void;
+  /** 使用者要開啟某個 Workspace 的時間線與觀測指標。 */
+  onOpenTimeline?: (workspace: Workspace) => void;
 }
 
 function reasonOf(error: unknown): string {
@@ -48,6 +50,7 @@ export function WorkspaceSidebar({
   pendingDecisions,
   onOpenArtifacts,
   onOpenKnowledge,
+  onOpenTimeline,
 }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
@@ -211,6 +214,9 @@ export function WorkspaceSidebar({
                 </button>
                 <button type="button" aria-label={`知識 ${workspace.name}`} onClick={() => onOpenKnowledge?.(workspace)}>
                   知識
+                </button>
+                <button type="button" aria-label={`時間線 ${workspace.name}`} onClick={() => onOpenTimeline?.(workspace)}>
+                  時間線
                 </button>
                 <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
                   封存

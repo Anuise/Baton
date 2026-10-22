@@ -13,6 +13,9 @@
 //!    在安全邊界（舊 Worker 保存了 checkpoint 或等滿上限）先持久化 `stopping` 再要求舊程序停止，**確認停止**（或程序自行結束）
 //!    之後以單一交易結束舊 Run、建立 successor Run 並把世代轉給它；停不下來就留在 `stopping`，successor 不會被建立。
 //!    每個 phase 都先持久化，Runtime 在任何一點重建後都從持久化的 phase 繼續。
+//!    突然限流（票 29，CLI 回報帳號已達上限）不受冷卻限制、不等 checkpoint；程序已自行結束時在收事件的這一步就建立交接並轉移。
+//!    轉移時所有合適帳號都受限，Task 進入 `waiting_resource`，到了重新評估的時間（重置後 1 分鐘，或 5～60 分鐘的退避）
+//!    才再找承接帳號；停止意圖或 Workspace 等待「繼續工作」時不派工。
 //! 6. **排程**：前面幾步可能釋放了帳號與全域名額，於是讓佇列中等待的 Task 依優先序逐一嘗試派出（票 19）；
 //!    派出的 Run 在同一次 `tick` 就啟動。派出之前先為排隊的 Task 準備工作目錄（worktree 或輸出目錄，票 20），
 //!    目錄不可用時不派工，等待原因就是登記的失敗原因。
@@ -30,6 +33,9 @@
 //! 10. **Controller**（票 16）：在收事件之後處理 Controller 的輪次。啟動中的一輪以 command_id 找回原程序（找不到就中斷，
 //!     輸入退回待處理）；執行中的一輪收事件，程序結束時在一個交易中保存結果（輸入標為已處理、寫入回覆）；
 //!     最後喚起有待處理輸入、合併視窗（5 秒）已到期而且沒有一輪進行中的 conversation。沒有輸入就什麼都不做。
+//!     跨帳號交接（票 30）：帳號進入 draining 時，進行中的一輪最多再等 2 分鐘（而且要有承接帳號）才要求停止；
+//!     確認停止、或一輪因額度沒有保存結果就結束時以 `handed_off` 結束，輸入不退避地在承接帳號上的新一輪交付。
+//!     下一輪不在上一個 Controller Session 的帳號上執行時記為交接；沒有可用帳號時記下等待原因。
 //!
 //! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
 //! 由測試在想要的時刻呼叫 `tick`，搭配 fake Clock 就能完全決定性地重現任何時序。
@@ -53,9 +59,9 @@ use std::time::Duration;
 
 use baton_api::{quota, LogSink, RunSettings};
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
-use baton_domain::auth::AgentScope;
+use baton_domain::auth::{AgentScope, ControllerScope};
 use baton_domain::cleanup::{self, CleanupCommand, CleanupStatus, Inspection};
-use baton_domain::conversation::{BeginTurn, ControllerRun, ControllerRunStatus, TurnOutcome};
+use baton_domain::conversation::{self, BeginTurn, ControllerHandoff, ControllerRun, ControllerRunStatus, TurnOutcome};
 use baton_domain::integration::{self, AdvanceResult, IntegrationCommand, IntegrationStatus, MergeResult};
 use baton_domain::lifecycle::{
     ExitReport, ExitTiming, LifecycleFile, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
@@ -90,11 +96,6 @@ pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
 /// 受控停止的預設寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
-
-/// Controller 程序的 Agent 憑證環境變數：本票還沒有 Controller 憑證（`credential.run_id` 只能指向 Worker 的 Run），
-/// 但 Run 的 MCP 設定以 `${BATON_AGENT_TOKEN}` 參照它，未設定時 CLI 可能無法解析設定，所以給一個不是秘密的佔位值；
-/// 工具呼叫會被 Agent API 以未授權拒絕。票 17 簽發 Controller 憑證後取代。
-const CONTROLLER_TOKEN_PLACEHOLDER: &str = "controller-credential-not-issued";
 
 /// 背景迴圈沒有被喚醒時，最久多久檢查一次。
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(1);
@@ -700,8 +701,8 @@ impl Supervisor {
                 let observation = baton_domain::quota::observe_signal(profile_id, run_id, &signal, now);
                 self.store.record_quota_signal(observation).await
             }
-            AdapterEvent::UsageReported { tokens, raw } => {
-                self.store.record_quota_usage(profile_id.to_string(), run_id.to_string(), tokens, raw, now).await
+            AdapterEvent::UsageReported { tokens, context_tokens, raw } => {
+                self.store.record_quota_usage(profile_id.to_string(), run_id.to_string(), tokens, context_tokens, raw, now).await
             }
             _ => return,
         };
@@ -745,7 +746,7 @@ impl Supervisor {
                 return false;
             }
         };
-        let mut transferred = false;
+        let mut transferred = self.resume_resource_waits(quota.clone(), now).await;
         for work in works {
             let stopping = match work.handoff.phase {
                 HandoffPhase::Stopping => true,
@@ -770,6 +771,62 @@ impl Supervisor {
             }
         }
         transferred
+    }
+
+    /// 等待資源的交接（票 29）：到了重新評估的時間就找承接帳號，有就派出 successor。回傳這次有沒有建立 successor。
+    async fn resume_resource_waits(&self, quota: HashMap<String, f64>, now: Timestamp) -> bool {
+        let changed = match self.store.resume_resource_waits(quota, now, new_run_id).await {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.note(&format!("無法重新評估等待資源的交接：{error}"));
+                return false;
+            }
+        };
+        let mut transferred = false;
+        for handoff in changed {
+            match handoff.phase {
+                HandoffPhase::Transferred => {
+                    transferred = true;
+                    self.note(&format!(
+                        "交接 {}：資源恢復，由帳號 {} 的 Run {} 從檢查點接手",
+                        handoff.id,
+                        handoff.to_profile_id,
+                        handoff.to_run_id.as_deref().unwrap_or("")
+                    ));
+                }
+                HandoffPhase::WaitingResource => self.note(&format!(
+                    "交接 {}：所有合適帳號仍受限，第 {} 次重新評估排在 {}",
+                    handoff.id,
+                    handoff.wait_attempts,
+                    handoff.next_check_at.map_or(0, Timestamp::as_millis)
+                )),
+                _ => self.note(&format!(
+                    "交接 {} 已放棄：{}",
+                    handoff.id,
+                    handoff.abandoned_reason.as_deref().unwrap_or_default()
+                )),
+            }
+        }
+        transferred
+    }
+
+    /// 突然限流的 Run 已自行結束、還沒有交接：先依最新的額度推進門檻，再為它建立交接（帳號不是突然限流時沒有）。
+    async fn request_sudden_handoff(&self, run_id: &str) -> Option<baton_domain::handoff::Handoff> {
+        let now = self.ports.clock.now();
+        let quota = match quota::current(&self.store, &*self.ports.quota_observer, now).await {
+            Ok(status) => quota::known_used(&status),
+            Err(error) => {
+                self.note(&format!("無法取得額度觀測，Run {run_id} 照一般結束處理：{error}"));
+                return None;
+            }
+        };
+        match self.store.request_sudden_handoff(run_id, quota, now, || new_prefixed_id("hof")).await {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                self.note(&format!("無法為突然限流的 Run {run_id} 建立交接，照一般結束處理：{error}"));
+                None
+            }
+        }
     }
 
     /// 要求交接中的舊程序停止；**確認停止**才轉移（停不下來或停止失敗就留在 stopping，下一次再試，不會有第二個 writer）。
@@ -835,6 +892,14 @@ impl Supervisor {
                     handoff.to_generation.unwrap_or_default()
                 ));
                 true
+            }
+            Ok(handoff) if handoff.phase == HandoffPhase::WaitingResource => {
+                self.note(&format!(
+                    "交接 {handoff_id}：Run {} 已停止（{stop_outcome}），所有合適帳號都受限，Task 等待資源，預計 {} 重新評估",
+                    handoff.from_run_id,
+                    handoff.next_check_at.map_or(0, Timestamp::as_millis)
+                ));
+                false
             }
             Ok(handoff) => {
                 let reason = handoff.abandoned_reason.unwrap_or_default();
@@ -1153,6 +1218,17 @@ impl Supervisor {
                                 finished = true;
                                 break;
                             }
+                            // 帳號已達上限後以失敗結束（突然限流，票 29）：不依賴最後一輪摘要，以最近的有效 checkpoint
+                            // 交給其他帳號接手，或在所有帳號都受限時等待資源
+                            Ok(None) if !success => {
+                                if let Some(handoff) = self.request_sudden_handoff(&run_id).await {
+                                    self.last_errors.lock().await.remove(&run_id);
+                                    self.quota_limited.lock().await.remove(&run_id);
+                                    transferred |= self.transfer_handoff(&handoff.id, "exited").await;
+                                    finished = true;
+                                    break;
+                                }
+                            }
                             Ok(None) => {}
                             // 讀不到交接紀錄：照一般的結束處理（Domain 仍以世代與狀態把關）
                             Err(error) => self.note(&format!("Run {run_id} 無法確認是否在交接中，照一般結束處理：{error}")),
@@ -1278,18 +1354,100 @@ impl Supervisor {
             Ok(executing) => executing,
             Err(error) => return self.note(&format!("無法讀取進行中的 Controller Run：{error}")),
         };
-        for run in executing {
+        for run in &executing {
             match run.status {
-                ControllerRunStatus::Starting => self.recover_controller_launch(&run).await,
-                ControllerRunStatus::Running => self.pump_controller(&run).await,
+                ControllerRunStatus::Starting => self.recover_controller_launch(run).await,
+                ControllerRunStatus::Running => self.pump_controller(run).await,
                 _ => {}
             }
         }
+        self.stop_controllers_for_handoff(&executing).await;
         self.wake_controllers().await;
     }
 
+    /// 交接的安全邊界（票 30）：帳號在 draining、這一輪已有 `CHECKPOINT_WAIT_MS` 可以自己結束、而且有承接帳號時，
+    /// 要求舊程序停止。先查證程序：已不在就不再停止。確認停止後，下一次 tick 把串流讀乾淨仍沒有結果才以 `handed_off`
+    /// 結束（`pump_controller`），之後的喚起在承接帳號上進行。停不下來就維持原狀、下一次再要求，不會有第二輪（B1）。
+    async fn stop_controllers_for_handoff(&self, executing: &[ControllerRun]) {
+        let running: Vec<&ControllerRun> = executing.iter().filter(|r| r.status == ControllerRunStatus::Running).collect();
+        if running.is_empty() {
+            return;
+        }
+        let now = self.ports.clock.now();
+        let quota_used = match quota::current(&self.store, &*self.ports.quota_observer, now).await {
+            Ok(status) => quota::known_used(&status),
+            Err(error) => return self.note(&format!("無法取得額度觀測，這次不為 Controller 交接：{error}")),
+        };
+        let gates = match self.store.quota_gates().await {
+            Ok(gates) => gates,
+            Err(error) => return self.note(&format!("無法讀取額度門檻：{error}")),
+        };
+        let (profiles, settings) = match (self.store.list_profiles().await, self.store.scheduler_settings().await) {
+            (Ok(profiles), Ok(settings)) => (profiles, settings),
+            (Err(error), _) | (_, Err(error)) => return self.note(&format!("無法讀取帳號與排程設定：{error}")),
+        };
+        let gate_states: HashMap<String, GateState> = gates.iter().map(|(id, g)| (id.clone(), g.state)).collect();
+        for run in running {
+            let Some(gate) = gates.get(&run.profile_id) else { continue };
+            if !conversation::handoff_stop_due(run, gate.state, gate.since, now) {
+                continue;
+            }
+            let already_gone = self.controller_streams.lock().await.get(&run.id).is_some_and(|s| s.process_gone);
+            let Some(process) = run.process.as_ref().filter(|_| !already_gone) else { continue };
+            // 先選定承接帳號才停止（同 Worker 的交接）：找不到就留在原帳號繼續
+            let capacity = Capacity {
+                profiles: &profiles,
+                settings: &settings,
+                active_runs: &[],
+                quota_used: &quota_used,
+                quota_gates: &gate_states,
+                halt: None,
+            };
+            if !matches!(scheduler::place_preferring(&capacity, SlotKind::Handoff, None), Placement::Place { .. }) {
+                continue;
+            }
+            self.adopt_controller(run).await;
+            let identity = identity_of(process);
+            let stopped = match self.ports.process_control.inspect(&identity).await {
+                Ok(Liveness::Dead) => true,
+                _ => {
+                    self.note(&format!("帳號 {} 進入 draining：要求 Controller Run {} 停止以交接", run.profile_id, run.id));
+                    matches!(
+                        self.ports.process_control.stop(&identity, self.stop_grace).await,
+                        Ok(StopResult::StoppedGracefully | StopResult::ForceKilled)
+                    )
+                }
+            };
+            if !stopped {
+                self.note(&format!("Controller Run {} 的程序還沒確認停止，交接稍後再試", run.id));
+                continue;
+            }
+            if let Some(stream) = self.controller_streams.lock().await.get_mut(&run.id) {
+                stream.process_gone = true;
+            }
+        }
+    }
+
+    /// 一輪的帳號是否已受限（票 30）：這一輪收到過額度用盡的訊號，或帳號的門檻（依最新的額度推進後）是 draining。
+    async fn controller_account_limited(&self, run: &ControllerRun, saw_exhausted: bool) -> bool {
+        if saw_exhausted {
+            return true;
+        }
+        let now = self.ports.clock.now();
+        if let Err(error) = quota::current(&self.store, &*self.ports.quota_observer, now).await {
+            self.note(&format!("無法取得額度觀測：{error}"));
+        }
+        match self.store.quota_gates().await {
+            Ok(gates) => gates.get(&run.profile_id).is_some_and(|g| g.state == GateState::Draining),
+            Err(error) => {
+                self.note(&format!("無法讀取額度門檻：{error}"));
+                false
+            }
+        }
+    }
+
     /// Controller Run 的 `RunSpec`：全部來自持久化的 launch intent，所以重建後組出相同的啟動指令。
-    /// Controller 不綁 Task（`task_id` 為空）、在 Workspace 目錄執行；本票不簽發 Agent 憑證、不套用共同設定快照。
+    /// Controller 不綁 Task（`task_id` 為空）、在 Workspace 目錄執行；不套用共同設定快照（Controller 憑證在 `launch_controller` 簽發）。
     async fn controller_spec(&self, run: &ControllerRun) -> Result<RunSpec, String> {
         Ok(RunSpec {
             run_id: run.id.clone(),
@@ -1339,15 +1497,26 @@ impl Supervisor {
                 match scheduler::place_preferring(&capacity, SlotKind::Handoff, wake.preferred_profile_id.as_deref()) {
                     Placement::Place { profile_id } => profile_id,
                     Placement::Wait(reasons) => {
-                        let reasons: Vec<String> = reasons.into_iter().map(|r| r.message).collect();
-                        self.note(&format!(
-                            "對話 {} 有待處理的輸入，但沒有可用的帳號：{}",
-                            wake.conversation_id,
-                            reasons.join("；")
-                        ));
+                        // 輸入維持待處理；記下等待原因給「對話」分頁（票 30）
+                        let code = reasons.first().map_or_else(|| "no_account".to_string(), |r| r.code.clone());
+                        let message = reasons.into_iter().map(|r| r.message).collect::<Vec<_>>().join("；");
+                        self.note(&format!("對話 {} 有待處理的輸入，但沒有可用的帳號：{message}", wake.conversation_id));
+                        if let Err(error) = self.store.record_controller_wait(&wake.conversation_id, code, message, now).await {
+                            self.note(&format!("對話 {} 的等待原因沒有記下：{error}", wake.conversation_id));
+                        }
                         continue;
                     }
                 };
+            // 不在上一個 Controller Session 的帳號上執行：這一輪承接換帳號（票 30）
+            let handoff = wake.preferred_profile_id.as_ref().filter(|p| **p != profile_id).map(|from| ControllerHandoff {
+                from_run_id: wake.previous_run_id.clone(),
+                from_profile_id: from.clone(),
+                reason: conversation::handoff_reason_for(
+                    quota_gates.get(from).copied().unwrap_or_default(),
+                    quota_used.get(from).copied(),
+                )
+                .to_string(),
+            });
             let resume_check = match self.controller_resume_check(&wake, &profile_id).await {
                 Ok(check) => check,
                 Err(error) => {
@@ -1365,6 +1534,7 @@ impl Supervisor {
                 working_dir: wake.working_dir.clone(),
                 model: wake.model.clone(),
                 resume_check,
+                handoff,
             };
             // 喚起的邊界：launch intent、輸入標為處理中與 Session 的決定在同一個交易中持久化之後，才啟動程序
             match self.store.begin_controller_run(&wake.conversation_id, begin, now).await {
@@ -1410,8 +1580,18 @@ impl Supervisor {
             let reason = format!("無法準備 Controller Run 的啟動檔案：{error}");
             return self.finish_controller(run, TurnOutcome::Failed { reason }).await;
         }
+        // Controller 憑證（票 17）：綁定這一輪，只經環境變數交給 MCP shim；它只能使用 Controller 專屬的工具，
+        // 這一輪結束後失效。簽發失敗就不啟動，這一輪以失敗結束、輸入退回待處理
+        let scope = ControllerScope { workspace_id: run.workspace_id.clone(), controller_run_id: run.id.clone() };
+        let token = match self.credentials.issue_controller(scope).await {
+            Ok(token) => token,
+            Err(error) => {
+                let reason = format!("無法簽發 Controller 憑證：{error}");
+                return self.finish_controller(run, TurnOutcome::Failed { reason }).await;
+            }
+        };
         let mut spawn = self.ports.agent_adapter.spawn_spec(&spec);
-        spawn.env.push((AGENT_TOKEN_ENV.to_string(), CONTROLLER_TOKEN_PLACEHOLDER.to_string()));
+        spawn.env.push((AGENT_TOKEN_ENV.to_string(), token));
         spawn.env.push((RUNTIME_URL_ENV.to_string(), self.runtime_url.clone()));
         let lookup = spawn.clone();
         let receipt = match self.ports.process_control.spawn(spawn).await {
@@ -1508,10 +1688,15 @@ impl Supervisor {
                         TurnOutcome::Succeeded { reply: stream.reply.join("\n\n") }
                     } else {
                         let reason = stream.last_error.clone().unwrap_or_else(|| "程序以失敗結束".into());
-                        TurnOutcome::Failed { reason }
+                        // 帳號受限而失敗：交接給其他帳號，不是 Controller 的失敗（票 30）
+                        let limited = self.controller_account_limited(run, stream.quota_limited).await;
+                        TurnOutcome::Failed { reason }.handed_off_if(limited)
                     });
                 }
                 event @ (AdapterEvent::RateLimited { .. } | AdapterEvent::UsageReported { .. }) => {
+                    if matches!(event, AdapterEvent::RateLimited { status: LimitStatus::Exhausted, .. }) {
+                        stream.quota_limited = true;
+                    }
                     self.record_quota_event(&run.profile_id, &run.id, event).await;
                 }
                 AdapterEvent::Heartbeat | AdapterEvent::Transcript { .. } | AdapterEvent::Started { native_session_id: None } => {}
@@ -1526,7 +1711,10 @@ impl Supervisor {
             // 程序確定不在而串流已讀乾淨（或已結束），仍沒有結束事件：結果不會再來，中斷這一輪
             if stream.process_gone || self.controller_process_is_dead(run).await {
                 let reason = "結果沒有保存而程序已不在：輸入退回待處理".to_string();
-                return self.finish_controller(run, TurnOutcome::Interrupted { reason }).await;
+                // 帳號受限（含為交接而停止）時以交接結束，輸入不退避地交給承接帳號（票 30）
+                let limited = self.controller_account_limited(run, stream.quota_limited).await;
+                let outcome = TurnOutcome::Interrupted { reason }.handed_off_if(limited);
+                return self.finish_controller(run, outcome).await;
             }
         } else if now >= stream.quiet_since.plus_millis(LEASE_DURATION_MS) {
             // 存活中或無法確定時，再等一個 lease 才查證下一次
@@ -1883,11 +2071,21 @@ struct ControllerStream {
     quiet_since: Timestamp,
     /// ProcessControl 已確認程序不在；下一次讀乾淨串流仍沒有結束事件就中斷這一輪。
     process_gone: bool,
+    /// 這一輪收到過額度用盡的訊號（突然限流）；沒有保存結果就結束時以交接結束（票 30）。
+    quota_limited: bool,
 }
 
 impl ControllerStream {
     fn new(events: BoxStream<'static, AdapterEvent>, now: Timestamp) -> Self {
-        Self { events, reply: Vec::new(), last_error: None, outcome: None, quiet_since: now, process_gone: false }
+        Self {
+            events,
+            reply: Vec::new(),
+            last_error: None,
+            outcome: None,
+            quiet_since: now,
+            process_gone: false,
+            quota_limited: false,
+        }
     }
 }
 

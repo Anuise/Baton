@@ -684,8 +684,11 @@ export interface BudgetView {
   decision_request_id: string | null;
 }
 
-/** 交接階段：requested 等待保存檢查點、stopping 停止舊程序、transferred 已轉移等待接手確認、confirmed 已確認、abandoned 已放棄。 */
-export type HandoffPhase = "requested" | "stopping" | "transferred" | "confirmed" | "abandoned";
+/**
+ * 交接階段：requested 等待保存檢查點、stopping 停止舊程序、transferred 已轉移等待接手確認、confirmed 已確認、abandoned 已放棄、
+ * waiting_resource 突然限流而所有合適帳號都受限（舊程序已停止，等資源恢復再接手）。
+ */
+export type HandoffPhase = "requested" | "stopping" | "transferred" | "confirmed" | "abandoned" | "waiting_resource";
 
 /** 交接要延續的 checkpoint（對應 Rust 的 CheckpointRef）；時間是 UTC 毫秒。 */
 export interface HandoffCheckpoint {
@@ -711,12 +714,12 @@ export interface Handoff {
   from_run_id: string;
   from_profile_id: string;
   from_generation: number;
-  /** 承接帳號。 */
+  /** 承接帳號；空字串表示尚未選定（突然限流而所有帳號都受限時）。 */
   to_profile_id: string;
   to_run_id: string | null;
   to_generation: number | null;
   phase: HandoffPhase;
-  /** 帳號門檻的原因代碼，例如 drain_threshold、limit_warning。 */
+  /** 帳號門檻的原因代碼，例如 drain_threshold、limit_warning、limit_reached（Claude Code 回報已達上限＝突然限流）。 */
   reason: string;
   checkpoint: HandoffCheckpoint | null;
   /** 舊程序怎麼停下的：stopped_gracefully、force_killed、exited、dead、already_ended。 */
@@ -727,6 +730,16 @@ export interface Handoff {
   stopping_at: number | null;
   transferred_at: number | null;
   confirmed_at: number | null;
+  /** 進入等待資源的時間。以下等待欄位舊版 Runtime 沒有，視為 null／0／空陣列。 */
+  waiting_at?: number | null;
+  /** 預計重新評估的時間；waiting_resource 時一定有值。 */
+  next_check_at?: number | null;
+  /** 已重新評估但仍受限的次數（退避的指數）；0 表示還沒重新評估過。 */
+  wait_attempts?: number;
+  /** 依據的帳號重置時間（最早的那個）；null 表示重置時間未知、以退避輪詢。 */
+  wait_reset_at?: number | null;
+  /** 最近一次評估時不能派給任何帳號的原因。 */
+  wait_reasons?: WaitReason[];
   updated_at: number;
   version: number;
 }
@@ -1438,7 +1451,7 @@ export type GateState = "open" | "paused" | "draining";
 export interface QuotaGate {
   profile_id: string;
   state: GateState;
-  /** 進入這個狀態的原因代碼：stop_dispatch_threshold、drain_threshold、limit_warning、recovered、reset_observed、usage_unknown。 */
+  /** 進入這個狀態的原因代碼：stop_dispatch_threshold、drain_threshold、limit_warning、limit_reached（突然限流）、recovered、reset_observed、usage_unknown。 */
   reason: string;
   /** 轉換當下的判斷用量；未知為 null。 */
   used: number | null;
@@ -1730,6 +1743,24 @@ export interface ConversationTurn {
 
 export type ControllerRunStatus = "starting" | "running" | "succeeded" | "failed" | "interrupted";
 
+/** 這一輪是 Controller 換帳號後的第一輪：新的 Controller Session 從保存的對話、決策與檢查點重建（票 30）。 */
+export interface ControllerRunHandoff {
+  from_run_id: string | null;
+  from_profile_id: string;
+  /** "quota_draining"、"quota_near_limit" 或 "account_unavailable"。 */
+  reason: string;
+}
+
+/** Controller 有到期的待處理輸入但沒有可用帳號；訊息已保存、等待中。 */
+export interface ControllerWait {
+  /** 例如 "quota_draining"、"quota_near_limit"、"profile_unverified"、"no_account"。 */
+  code: string;
+  /** 給使用者看的說明；多個原因以「；」串接。 */
+  message: string;
+  /** 開始等待的時間（UTC 毫秒）。 */
+  since: number;
+}
+
 /** Controller 的一輪（一次 `claude -p`）；時間是 UTC 毫秒。 */
 export interface ControllerRun {
   id: string;
@@ -1748,6 +1779,8 @@ export interface ControllerRun {
   native_session_id: string | null;
   process: { pid: number; created_at_millis: number; command_hash: string } | null;
   end_reason: string | null;
+  /** 換帳號後的第一輪才有，其餘是 null。 */
+  handoff: ControllerRunHandoff | null;
   created_at: number;
   updated_at: number;
   started_at: number | null;
@@ -1763,6 +1796,8 @@ export interface ConversationView {
   active_run: ControllerRun | null;
   /** 不忙碌且有待處理輸入時，預計喚醒 Controller 的時間（UTC 毫秒）。 */
   next_wake_at: number | null;
+  /** 有到期的待處理輸入但沒有可用帳號時的等待原因；忙碌時一定是 null。 */
+  waiting: ControllerWait | null;
   /** 依 seq 由小到大。 */
   turns: ConversationTurn[];
   /** 全部 Controller Run，依建立順序。 */
@@ -1847,6 +1882,137 @@ export interface RecoveryClient {
   retryRecovery(): Promise<RecoveryStatusView>;
 }
 
+/** 時間線事件的類別：派工、交接、裁定、恢復、驗證、清理、工作狀態、外部操作、教訓重犯、用量。 */
+export type TimelineCategory =
+  | "dispatch"
+  | "handoff"
+  | "decision"
+  | "recovery"
+  | "verification"
+  | "cleanup"
+  | "task"
+  | "external_operation"
+  | "lesson"
+  | "usage";
+
+/** 時間線上的一個事件（對應 Rust 的 TimelineEntry）；時間是 UTC 毫秒。 */
+export interface TimelineEvent {
+  seq: number;
+  occurred_at: number;
+  category: TimelineCategory;
+  aggregate_type: string;
+  aggregate_id: string;
+  event_type: string;
+  /** 事件相關的 Task；可能是空陣列。 */
+  task_ids: string[];
+  run_id: string | null;
+  payload: unknown;
+}
+
+/** Workspace 的時間線；`events` 依 `seq` 遞增。`task_id` 是過濾條件，未過濾為 null。 */
+export interface TimelineResponse {
+  workspace_id: string;
+  task_id: string | null;
+  events: TimelineEvent[];
+}
+
+/** 比率；`rate` 為 null 代表分母為 0（沒有資料）。 */
+export interface MetricRatio {
+  numerator: number;
+  denominator: number;
+  rate: number | null;
+}
+
+/** 耗時統計；沒有已完成的樣本時平均與最大值為 null。 */
+export interface DurationStats {
+  count: number;
+  /** 尚未結束（仍在等待）的件數。 */
+  pending: number;
+  average_ms: number | null;
+  max_ms: number | null;
+}
+
+export interface TaskCompletionMetrics {
+  completion: MetricRatio;
+  cancelled: number;
+}
+
+export interface HandoffMetrics {
+  success: MetricRatio;
+  abandoned: number;
+  confirmed: number;
+  in_flight: number;
+}
+
+export interface DuplicateOperationMetrics {
+  blocked: number;
+  already_succeeded: number;
+  result_unknown: number;
+  in_progress_elsewhere: number;
+  unknown_outcomes: number;
+}
+
+export interface LessonRecurrenceMetrics {
+  rate: MetricRatio;
+  recurrences: number;
+  prevented: number;
+  reported: number;
+}
+
+/** 一個階段的用量；`stage` 為 null 代表未分階段。 */
+export interface StageUsage {
+  stage: string | null;
+  tokens: number;
+  runs: number;
+}
+
+export interface UsageMetrics {
+  total_tokens: number;
+  runs: number;
+  by_stage: StageUsage[];
+}
+
+export interface ContextMetrics {
+  runs_known: number;
+  runs_unknown: number;
+  average_tokens: number | null;
+  max_tokens: number | null;
+}
+
+/** 觀測指標（對應 Rust 的 Metrics）：全部由時間線事件計算而來。 */
+export interface Metrics {
+  events: number;
+  task_completion: TaskCompletionMetrics;
+  handoff: HandoffMetrics;
+  recovery: DurationStats;
+  duplicate_operations: DuplicateOperationMetrics;
+  decision_wait: DurationStats;
+  lesson_recurrence: LessonRecurrenceMetrics;
+  usage: UsageMetrics;
+  context: ContextMetrics;
+}
+
+/** 帳號的服務端額度（Claude Code 回報的帳號層級已用比例 0–1）；null 代表看不到。 */
+export interface ServerQuota {
+  profile_id: string;
+  name: string;
+  five_hour_used: number | null;
+  seven_day_used: number | null;
+}
+
+export interface MetricsResponse {
+  workspace_id: string;
+  metrics: Metrics;
+  server_quota: ServerQuota[];
+}
+
+/** 時間線與觀測指標（只有桌面憑證能用）。 */
+export interface ObservabilityClient {
+  /** `taskId` 指定時由 Runtime 只回傳該 Task 的事件。 */
+  timeline(workspaceId: string, taskId?: string): Promise<TimelineResponse>;
+  metrics(workspaceId: string): Promise<MetricsResponse>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -1861,6 +2027,7 @@ export type AppClient = RuntimeClient &
   RecoveryClient &
   KnowledgeClient &
   GuardClient &
+  ObservabilityClient &
   ConversationClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
@@ -1896,6 +2063,9 @@ const KNOWLEDGE_PATH = "/api/v1/knowledge";
 const knowledgePath = (id: string) => `${KNOWLEDGE_PATH}/${encodeURIComponent(id)}`;
 const GUARDS_PATH = "/api/v1/guards";
 const guardPath = (id: string) => `${GUARDS_PATH}/${encodeURIComponent(id)}`;
+/** 未指定 Task 時不送出 task_id。 */
+const timelinePath = (workspaceId: string, taskId?: string) =>
+  `${workspacePath(workspaceId)}/timeline${taskId === undefined ? "" : `?task_id=${encodeURIComponent(taskId)}`}`;
 
 /** 列表查詢字串：未指定的 workspace_id 與空白的 q 不送出。 */
 function knowledgeListPath({ workspaceId, q, includeInactive }: KnowledgeListQuery): string {
@@ -2085,6 +2255,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     listRecurrences: (lessonId) => send(`${knowledgePath(lessonId)}/recurrences`),
     reportRecurrence: (lessonId, request) =>
       send(`${knowledgePath(lessonId)}/recurrences`, { method: "POST", body: request }),
+    timeline: (workspaceId, taskId) => send(timelinePath(workspaceId, taskId)),
+    metrics: (workspaceId) => send(`${workspacePath(workspaceId)}/metrics`),
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
@@ -2215,6 +2387,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     disableGuard: (id, expectedRevision) => call<GuardView>("guard_disable", { id, expectedRevision }),
     listRecurrences: (id) => call<RecurrenceList>("knowledge_recurrences", { id }),
     reportRecurrence: (id, request) => call<Recurrence>("knowledge_report_recurrence", { id, request }),
+    timeline: (workspaceId, taskId) => call<TimelineResponse>("workspace_timeline", { workspaceId, taskId }),
+    metrics: (workspaceId) => call<MetricsResponse>("workspace_metrics", { workspaceId }),
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),

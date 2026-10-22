@@ -300,6 +300,143 @@ fn the_successor_prompt_carries_the_checkpoint_and_asks_for_confirmation() {
     assert!(successor_prompt(&handoff, None).contains("沒有保存任何檢查點"));
 }
 
+// --- 突然限流與等待資源（票 29） ---
+
+fn draining_for(profile: &str, reason: &str) -> HashMap<String, QuotaGate> {
+    let mut gates = gates(&[(profile, GateState::Draining)]);
+    gates.get_mut(profile).unwrap().reason = reason.into();
+    gates
+}
+
+fn quota_reason(code: &str) -> WaitReason {
+    WaitReason {
+        category: crate::scheduler::WaitCategory::Quota,
+        code: code.into(),
+        message: format!("{code} 的說明"),
+        profile_id: Some("p2".into()),
+        guard: None,
+    }
+}
+
+#[test]
+fn an_exhausted_signal_drains_as_a_sudden_limit_and_a_warning_does_not() {
+    let gate = walk(&[(assessed(LimitStatus::Exhausted, None, None, T0), T0)]).unwrap();
+    assert_eq!((gate.state, gate.reason.as_str()), (GateState::Draining, GATE_REASON_LIMIT_REACHED));
+    assert!(is_sudden_limit(&gate.reason));
+    let warned = walk(&[(assessed(LimitStatus::Warning, None, None, T0), T0)]).unwrap();
+    assert!(!is_sudden_limit(&warned.reason), "警告還能繼續工作，照一般交接");
+    // 警告之後撞到上限：原因改為突然限流（狀態不變也要寫入）
+    let upgraded =
+        walk(&[(assessed(LimitStatus::Warning, None, None, at(0)), at(0)), (assessed(LimitStatus::Exhausted, None, None, at(1)), at(1))])
+            .unwrap();
+    assert_eq!((upgraded.state, upgraded.reason.as_str(), upgraded.version), (GateState::Draining, GATE_REASON_LIMIT_REACHED, 2));
+}
+
+#[test]
+fn a_sudden_limit_skips_the_switch_cooldown() {
+    let first = running("r1", "p1", "t1", 1);
+    let successor = running("r2", "p2", "t1", 2);
+    let (stopping, _) = begin_stop(&requested(&first, at(0)), None, at(1)).unwrap().unwrap();
+    let (moved, _) = transfer(&stopping, &successor, None, "stopped_gracefully", at(2)).unwrap();
+    let runs = vec![successor];
+
+    assert!(candidates(&runs, &draining_for("p2", "drain_threshold"), &[moved.clone()], at(3)).is_empty(), "冷卻中");
+    let picked = candidates(&runs, &draining_for("p2", GATE_REASON_LIMIT_REACHED), &[moved], at(3));
+    assert_eq!(picked.len(), 1, "突然限流不受冷卻限制（spec D-13）");
+    assert_eq!(picked[0].1, GATE_REASON_LIMIT_REACHED);
+}
+
+#[test]
+fn a_sudden_limit_does_not_wait_for_a_last_checkpoint() {
+    let run = running("r1", "p1", "t1", 1);
+    let (handoff, _) = request("hof_1".into(), &run, "", GATE_REASON_LIMIT_REACHED, at(10));
+    assert_eq!(handoff.to_profile_id, "", "沒有承接帳號也要交接：舊 Worker 已無法工作");
+    assert!(at_safe_boundary(&handoff, None, at(10)), "不等最後一輪的 checkpoint");
+}
+
+#[test]
+fn the_next_check_is_one_minute_after_the_earliest_known_reset() {
+    let (next, reset) = next_resource_check(&[Some(at(90)), Some(at(30))], 0, at(0));
+    assert_eq!((next, reset), (at(31), Some(at(30))));
+    // 已過的重置時間不算（帳號仍受限）：改以退避
+    let (next, reset) = next_resource_check(&[Some(at(-5))], 0, at(0));
+    assert_eq!((next, reset), (at(5), None));
+}
+
+#[test]
+fn without_a_reset_time_the_check_backs_off_from_five_to_sixty_minutes() {
+    let minutes: Vec<i64> = (0..7)
+        .map(|attempts| (next_resource_check(&[None], attempts, at(0)).0.as_millis() - at(0).as_millis()) / MINUTE)
+        .collect();
+    assert_eq!(minutes, [5, 10, 20, 40, 60, 60, 60]);
+    assert_eq!(next_resource_check(&[], 0, at(0)), (at(5), None), "沒有任何可用帳號也是未知");
+    // 部分帳號重置時間未知：取較早者
+    assert_eq!(next_resource_check(&[Some(at(3)), None], 0, at(0)), (at(4), Some(at(3))));
+    assert_eq!(next_resource_check(&[Some(at(30)), None], 0, at(0)), (at(5), Some(at(30))));
+}
+
+#[test]
+fn a_stopped_sudden_limit_waits_for_resources_then_transfers_from_the_wait() {
+    let run = running("r1", "p1", "t1", 1);
+    let saved = latest_checkpoint(&[checkpoint("r1", 1, "做到一半", at(1))], &[run.clone()], "t1");
+    let (handoff, _) = request("hof_1".into(), &run, "", GATE_REASON_LIMIT_REACHED, at(2));
+    let (stopping, _) = begin_stop(&handoff, saved.clone(), at(2)).unwrap().unwrap();
+
+    let reasons = vec![quota_reason("quota_draining")];
+    let (waiting, event) =
+        wait_for_resource(&stopping, saved.clone(), "exited", &[Some(at(30))], reasons.clone(), at(3)).unwrap();
+    assert_eq!((waiting.phase, event.event_type, waiting.version), (HandoffPhase::WaitingResource, EVENT_HANDOFF_WAITING_RESOURCE, 3));
+    assert_eq!((waiting.waiting_at, waiting.next_check_at, waiting.wait_reset_at), (Some(at(3)), Some(at(31)), Some(at(30))));
+    assert_eq!((waiting.wait_attempts, waiting.wait_reasons.clone()), (0, reasons.clone()));
+    assert_eq!((waiting.checkpoint.clone(), waiting.stop_outcome.as_deref()), (saved.clone(), Some("exited")));
+    assert!(!waiting.phase.is_in_flight(), "舊 Run 已結束，不再是寫入者");
+    assert_eq!(event.payload["next_check_at"], at(31).as_millis());
+
+    // 重新評估仍受限：重置時間未知時退避加倍
+    let (again, event) = reschedule_wait(&waiting, &[None], reasons.clone(), at(31)).unwrap();
+    assert_eq!((event.event_type, again.wait_attempts, again.next_check_at, again.wait_reset_at), (EVENT_HANDOFF_WAIT_RESCHEDULED, 1, Some(at(41)), None));
+    assert!(reschedule_wait(&stopping, &[None], reasons, at(4)).is_err(), "只有等待中的交接能重新排定");
+
+    // 資源恢復：由新帳號的 successor 從等待中的 checkpoint 接手
+    let successor = running("r2", "p3", "t1", 2);
+    let (moved, _) = transfer(&again, &successor, saved.clone(), "exited", at(41)).unwrap();
+    assert_eq!((moved.phase, moved.to_profile_id.as_str(), moved.to_run_id.as_deref()), (HandoffPhase::Transferred, "p3", Some("r2")));
+    assert_eq!(moved.checkpoint, saved);
+    // 等待中也可以放棄（例如使用者取消了 Task）
+    assert_eq!(abandon(&again, "task_cancelled", at(42)).unwrap().0.phase, HandoffPhase::Abandoned);
+}
+
+#[test]
+fn the_sudden_limit_prompt_does_not_rely_on_a_last_summary() {
+    let run = running("r1", "p1", "t1", 1);
+    let (handoff, _) = request("hof_1".into(), &run, "", GATE_REASON_LIMIT_REACHED, at(0));
+    let prompt = successor_prompt(&handoff, None);
+    assert!(prompt.contains("已達上限") && prompt.contains("最後一輪"), "{prompt}");
+    assert!(prompt.contains("confirm_handoff"));
+    assert!(!successor_prompt(&requested(&run, at(0)), None).contains("已達上限"));
+}
+
+#[test]
+fn only_a_waiting_resource_task_is_resumed_to_ready() {
+    let mut task = crate::task::Task {
+        id: "t1".into(),
+        workspace_id: "ws".into(),
+        goal_id: "g1".into(),
+        title: "整理資料".into(),
+        kind: Default::default(),
+        status: crate::task::TaskStatus::WaitingResource,
+        version: 4,
+        contract_version: 1,
+        created_at: T0,
+        updated_at: T0,
+    };
+    let (ready, events) = resume_task(&task, at(5)).unwrap();
+    assert_eq!(ready.status, crate::task::TaskStatus::Ready);
+    assert_eq!((ready.version, events.len()), (task.version + 1, 1));
+    task.status = crate::task::TaskStatus::Cancelled;
+    assert!(resume_task(&task, at(5)).is_none());
+}
+
 #[test]
 fn names_round_trip() {
     for phase in HandoffPhase::ALL {

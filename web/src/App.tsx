@@ -18,11 +18,12 @@ import { SharedSettingsPage } from "./SharedSettingsPage";
 import { StatusBar } from "./StatusBar";
 import { createRuntimeClient, type AppClient, type HealthResponse, type PendingDecisions, type Workspace } from "./runtimeClient";
 import { TaskBoard } from "./TaskBoard";
+import { TimelinePage } from "./TimelinePage";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證或知識。 */
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識或時間線。 */
 type Opened = {
-  view: "authorization" | "conversation" | "tasks" | "decisions" | "artifacts" | "knowledge";
+  view: "authorization" | "conversation" | "tasks" | "decisions" | "artifacts" | "knowledge" | "timeline";
   workspace: Workspace;
 };
 
@@ -59,6 +60,7 @@ export function App() {
             pendingDecisions={pendingByWorkspace}
             onOpenArtifacts={(workspace) => setOpened({ view: "artifacts", workspace })}
             onOpenKnowledge={(workspace) => setOpened({ view: "knowledge", workspace })}
+            onOpenTimeline={(workspace) => setOpened({ view: "timeline", workspace })}
           />
         )}
         <main className="main">
@@ -84,6 +86,10 @@ export function App() {
           )}
           {client && opened?.view === "artifacts" && <ArtifactsPage client={client} workspace={opened.workspace} />}
           {client && opened?.view === "knowledge" && <KnowledgePage client={client} workspace={opened.workspace} />}
+          {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 的 Task 過濾 */}
+          {client && opened?.view === "timeline" && (
+            <TimelinePage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
           {client && <PlatformPage client={client} />}
         </main>
       </div>

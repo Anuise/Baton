@@ -58,3 +58,14 @@
 ## 15. 監護程序的邊界（票 32）
 - 監護寫下 Attempt 後、寫入 Withdrawn 前，若 App 拉起的 Runtime 先匯入日誌，撤回的嘗試會被多算一次（`crates/baton-guardian/src/lib.rs:152-165`、`import_guardian_journal`）。
 - `crates/baton-guardian/src/process.rs:265-267` 的 `OpenProcess` 失敗（例如權限不足）被當成程序已結束，與「只認確認過的終止」不一致。
+
+## 16. Controller 工具與 spec D-05 的落差（票 17，AI-327）
+- Controller 憑證目前只能呼叫 6 個 Controller 工具與 `permission_prompt`；spec D-05 列為共同工具的 `search_knowledge`、`send_message`、`read_inbox` 對 Controller 不可用，`accept_artifact` 與 Controller 版 `record_lesson_candidate` 尚未實作。確認後續票是否涵蓋，否則補上或在 spec 註記。
+
+## 17. 時間線查詢效能與歸屬（票 41）
+- `read_timeline` 每次讀全庫的 TIMELINE_AGGREGATES 事件與全部 task，在 Rust 端過濾；事件量大時會變慢，改為 SQL 端依 Workspace／Task 篩選。
+- 擋多個 Task 的裁定請求只歸屬到發起的 Task，其他被擋的 Task 時間線看不到。
+
+## 18. Controller 交接（票 30）
+- `stop_controllers_for_handoff`（`supervisor.rs`）找承接帳號時傳入 `active_runs: &[]`，沒考慮各帳號目前並行量；承接帳號滿載時可能停掉舊輪後才發現放不下。
+- 補情境測試：唯一帳號 draining 且 Controller 有一輪在執行時，等滿 2 分鐘不停止、留在原帳號（M7）。

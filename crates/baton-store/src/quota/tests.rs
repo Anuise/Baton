@@ -35,7 +35,7 @@ async fn a_profile_without_observations_is_unknown() {
 async fn usage_and_plan_limits_produce_a_persisted_estimate_that_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with_profile(dir.path(), "p1").await;
-    store.record_quota_usage("p1".into(), "run_1".into(), 3_000, "{\"usage\":{}}".into(), T1).await.unwrap();
+    store.record_quota_usage("p1".into(), "run_1".into(), 3_000, None, "{\"usage\":{}}".into(), T1).await.unwrap();
     assert_eq!(store.quota_status(T1).await.unwrap()["p1"].assessment.used, None, "沒有方案上限就是未知");
 
     store.set_quota_plan_limits("p1".into(), limits(Some(10_000), None), T1).await.unwrap();
@@ -127,7 +127,7 @@ async fn the_latest_signal_and_external_sample_are_judged_together() {
 async fn polling_deletes_observations_and_usage_older_than_the_retention_except_the_latest_of_each_kind() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with_profile(dir.path(), "p1").await;
-    store.record_quota_usage("p1".into(), "run_1".into(), 10, "raw".into(), T1).await.unwrap();
+    store.record_quota_usage("p1".into(), "run_1".into(), 10, None, "raw".into(), T1).await.unwrap();
     let signal = RateLimitSignal { window: None, status: LimitStatus::Allowed, used: None, reset_at: None, raw: "r".into() };
     store.record_quota_signal(quota::observe_signal("p1", "run_1", &signal, T1)).await.unwrap();
     let later = T1.plus_millis(QUOTA_RETENTION_MILLIS + 1);

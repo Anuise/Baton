@@ -280,6 +280,33 @@ pub struct AuthorityDetail {
     pub fingerprint: String,
 }
 
+/// 裁定請求的提出者（票 17）。Controller 提出的請求沒有 Worker 的 Run：回答或過期時不寫喚醒 Outbox，
+/// 而是成為該 Workspace conversation 的工作事件，喚醒 Controller。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionOrigin {
+    #[default]
+    Worker,
+    Controller,
+}
+
+impl DecisionOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DecisionOrigin::Worker => "worker",
+            DecisionOrigin::Controller => "controller",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "worker" => Some(DecisionOrigin::Worker),
+            "controller" => Some(DecisionOrigin::Controller),
+            _ => None,
+        }
+    }
+}
+
 /// 請求建立時的目標版本；之後任一項改變，請求就不能再套用（`superseded`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DecisionTarget {
@@ -293,9 +320,13 @@ pub struct DecisionTarget {
 pub struct DecisionRequest {
     pub id: String,
     pub workspace_id: String,
-    /// 提出請求的 Run 與 Task。
+    /// 提出請求的 Run 與 Task。Controller 提出的請求（票 17）`run_id` 是 Controller 的一輪（`controller_run`），
+    /// `task_id` 是目標 Task。
     pub run_id: String,
     pub task_id: String,
+    /// 提出者是 Worker 還是 Controller（票 17）。
+    #[serde(default)]
+    pub origin: DecisionOrigin,
     pub kind: DecisionKind,
     pub status: DecisionStatus,
     pub question: String,
@@ -420,6 +451,15 @@ pub struct WakeItem {
     pub run_id: String,
     pub payload: Value,
     pub created_at: Timestamp,
+}
+
+/// Controller 提出的請求被回答或過期時，交給該 Workspace conversation 的工作事件（票 17）。
+/// Store 在同一個交易中寫入；`source` 讓同一個結果只成為一個輸入。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationNotice {
+    pub workspace_id: String,
+    pub source: String,
+    pub content: String,
 }
 
 // ---------------------------------------------------------------- Agent 提出請求的內容
@@ -559,6 +599,12 @@ pub enum DecisionCommand {
     },
     /// Controller 嘗試一個動作（`controller_action`），依決策權限表判定。`request_id`、`audit_id` 由呼叫端產生。
     ControllerAction { request_id: String, audit_id: String, run_id: String, generation: i64, content: ActionContent },
+    /// Controller 的一輪（票 17）向使用者提問，`blocking` 是依賴這個答案的 Task（只能是 pending 或 ready）。
+    /// 呼叫端已確認那一輪還沒結束。
+    ControllerQuestion { request_id: String, controller_run_id: String, content: RequestContent, blocking: Vec<String> },
+    /// Controller 的工具在執行變更前由 Runtime 依實際變更推導出事項（票 17），依決策權限表判定；規則同 `ControllerAction`，
+    /// 但提出者是 Controller 的一輪、目標 Task 必填。呼叫端已確認那一輪還沒結束。
+    ControllerGate { request_id: String, audit_id: String, controller_run_id: String, content: ActionContent },
     /// 使用者（桌面憑證）處理一個請求。
     Answer {
         request_id: String,
@@ -667,6 +713,8 @@ pub struct DecisionChange {
     /// 因核准「預算用盡後的下一步」而重設的預算（票 36）。
     pub budgets: Vec<TaskBudget>,
     pub outbox: Vec<WakeItem>,
+    /// Controller 提出的請求結束時要交給 conversation 的工作事件（票 17）。
+    pub notices: Vec<ConversationNotice>,
     pub events: Vec<DomainEvent>,
     pub outcome: DecisionOutcome,
 }
@@ -684,6 +732,7 @@ impl DecisionChange {
             resumed: Vec::new(),
             budgets: Vec::new(),
             outbox: Vec::new(),
+            notices: Vec::new(),
             events: Vec::new(),
             outcome,
         }
@@ -698,6 +747,7 @@ impl DecisionChange {
             || self.approval_use.is_some()
             || !self.tasks.is_empty()
             || !self.outbox.is_empty()
+            || !self.notices.is_empty()
             || !self.events.is_empty()
     }
 }
@@ -816,6 +866,12 @@ impl DecisionContext<'_> {
         if request.external_operation_id.is_some() {
             return None;
         }
+        // Controller 的提問（票 17）問的是使用者的決定，不是某個契約版本：Controller 依答案補契約是預期中的事，
+        // 所以契約變更不會讓它過期；只有依賴它的 Task 全部結束（或不存在）時才過期
+        if request.origin == DecisionOrigin::Controller && request.kind == DecisionKind::Agent {
+            let open = request.blocking.iter().any(|id| self.task.task(id).is_some_and(|t| !t.status.is_terminal()));
+            return (!open).then(|| "依賴這個答案的 Task 都已結束".to_string());
+        }
         let target = &request.target;
         let Some(task) = self.task.task(&target.task_id) else {
             return Some("目標 Task 已不存在".to_string());
@@ -856,7 +912,17 @@ pub fn decide(ctx: &DecisionContext<'_>, command: DecisionCommand, now: Timestam
             permission_prompt(ctx, request_id, audit_id, &run_id, generation, &tool_name, input, now)
         }
         DecisionCommand::ControllerAction { request_id, audit_id, run_id, generation, content } => {
-            controller_action(ctx, request_id, audit_id, &run_id, generation, content, now)
+            let (run, caller) = ctx.current_run(&run_id, generation)?;
+            controller_action(ctx, request_id, audit_id, Requester::Worker(run), caller, content, now)
+        }
+        DecisionCommand::ControllerQuestion { request_id, controller_run_id, content, blocking } => {
+            controller_question(ctx, request_id, &controller_run_id, content, blocking, now)
+        }
+        DecisionCommand::ControllerGate { request_id, audit_id, controller_run_id, content } => {
+            let task_id = content.task_id.clone().ok_or_else(|| DecisionError::Invalid("必須指定目標 Task".into()))?;
+            let target = ctx.task.task(&task_id).ok_or_else(|| DecisionError::TaskNotFound(task_id.clone()))?;
+            let requester = Requester::Controller { run_id: &controller_run_id, workspace_id: ctx.task.workspace_id };
+            controller_action(ctx, request_id, audit_id, requester, target, content, now)
         }
         DecisionCommand::Answer { request_id, expected_revision, resolution, decided_by, batch_id } => {
             answer(ctx, &request_id, expected_revision, resolution, &decided_by, batch_id, now)
@@ -869,11 +935,49 @@ pub fn decide(ctx: &DecisionContext<'_>, command: DecisionCommand, now: Timestam
     }
 }
 
+/// 請求的提出者：Worker 的 Run，或 Controller 的一輪（票 17）。
+#[derive(Clone, Copy)]
+enum Requester<'a> {
+    Worker(&'a Run),
+    Controller { run_id: &'a str, workspace_id: &'a str },
+}
+
+impl Requester<'_> {
+    fn run_id(&self) -> &str {
+        match self {
+            Requester::Worker(run) => &run.id,
+            Requester::Controller { run_id, .. } => run_id,
+        }
+    }
+
+    fn workspace_id(&self) -> &str {
+        match self {
+            Requester::Worker(run) => &run.workspace_id,
+            Requester::Controller { workspace_id, .. } => workspace_id,
+        }
+    }
+
+    fn origin(&self) -> DecisionOrigin {
+        match self {
+            Requester::Worker(_) => DecisionOrigin::Worker,
+            Requester::Controller { .. } => DecisionOrigin::Controller,
+        }
+    }
+
+    /// 權限提示依 Run 准入時固定的 revision 判定（R1-a，票 24）；Controller 沒有准入的 revision。
+    fn authorization_revision(&self) -> Option<i64> {
+        match self {
+            Requester::Worker(run) => run.authorization_revision,
+            Requester::Controller { .. } => None,
+        }
+    }
+}
+
 /// 新請求的共同欄位；`blocking` 只有目標 Task。
 #[allow(clippy::too_many_arguments)]
 fn new_request(
     id: String,
-    run: &Run,
+    requester: &Requester<'_>,
     caller: &Task,
     target: &Task,
     kind: DecisionKind,
@@ -883,9 +987,10 @@ fn new_request(
 ) -> DecisionRequest {
     DecisionRequest {
         id,
-        workspace_id: run.workspace_id.clone(),
-        run_id: run.id.clone(),
+        workspace_id: requester.workspace_id().to_string(),
+        run_id: requester.run_id().to_string(),
         task_id: caller.id.clone(),
+        origin: requester.origin(),
         kind,
         status: DecisionStatus::Pending,
         question,
@@ -903,7 +1008,7 @@ fn new_request(
             task_id: target.id.clone(),
             contract_version: target.contract_version,
             // 權限提示依 Run 准入時固定的 revision 判定（R1-a，票 24），記下的就是那一版
-            authorization_revision: (kind == DecisionKind::Permission).then_some(run.authorization_revision).flatten(),
+            authorization_revision: (kind == DecisionKind::Permission).then_some(requester.authorization_revision()).flatten(),
         },
         revision: 1,
         event_version: 0,
@@ -991,7 +1096,7 @@ fn request(
         return Ok(DecisionChange::new(DecisionOutcome::Requested { request_id: existing.id.clone(), existing: true }));
     }
     let mut record =
-        new_request(request_id.clone(), run, task, task, DecisionKind::Agent, content.question, content.reason, now);
+        new_request(request_id.clone(), &Requester::Worker(run), task, task, DecisionKind::Agent, content.question, content.reason, now);
     record.options = content.options;
     record.recommendation = content.recommendation;
     record.evidence = content.evidence;
@@ -1015,14 +1120,14 @@ fn unused_answer<'a>(
 fn consume(
     answered: &DecisionRequest,
     decision: &Decision,
-    run: &Run,
+    run_id: &str,
     now: Timestamp,
     outcome: DecisionOutcome,
     detail: Value,
 ) -> DecisionChange {
     let mut change = DecisionChange::new(outcome);
-    change.approval_use = Some(ApprovalUse { request_id: answered.id.clone(), run_id: run.id.clone(), used_at: now });
-    let mut payload = serde_json::json!({ "run_id": run.id, "action": decision.action, "option_id": decision.option_id });
+    change.approval_use = Some(ApprovalUse { request_id: answered.id.clone(), run_id: run_id.to_string(), used_at: now });
+    let mut payload = serde_json::json!({ "run_id": run_id, "action": decision.action, "option_id": decision.option_id });
     if let (Some(target), Value::Object(extra)) = (payload.as_object_mut(), detail) {
         target.extend(extra);
     }
@@ -1131,7 +1236,7 @@ fn permission_prompt(
         return Ok(consume(
             answered,
             decision,
-            run,
+            &run.id,
             now,
             DecisionOutcome::Permission(outcome),
             serde_json::json!({ "tool_name": tool_name, "summary": summary, "binding": current }),
@@ -1194,7 +1299,8 @@ fn permission_prompt(
         }
         _ => None,
     };
-    let mut record = new_request(request_id.clone(), run, task, task, DecisionKind::Permission, question, reason_text, now);
+    let mut record =
+        new_request(request_id.clone(), &Requester::Worker(run), task, task, DecisionKind::Permission, question, reason_text, now);
     record.options = vec![
         DecisionOption {
             id: OPTION_ALLOW_ONCE.to_string(),
@@ -1237,16 +1343,16 @@ fn permission_prompt(
     open_request(ctx, record, task, now, DecisionOutcome::Permission(PermissionOutcome::Waiting { request_id, message, check }))
 }
 
+/// `caller` 是提出者的 Task：Worker 是自己的 Task，Controller 沒有自己的 Task，就是目標 Task。
 fn controller_action(
     ctx: &DecisionContext<'_>,
     request_id: String,
     audit_id: String,
-    run_id: &str,
-    generation: i64,
+    requester: Requester<'_>,
+    caller: &Task,
     content: ActionContent,
     now: Timestamp,
 ) -> Result<DecisionChange, DecisionError> {
-    let (run, caller) = ctx.current_run(run_id, generation)?;
     let target = match &content.task_id {
         Some(id) => ctx.task.task(id).ok_or_else(|| DecisionError::TaskNotFound(id.clone()))?,
         None => caller,
@@ -1262,7 +1368,8 @@ fn controller_action(
             event_type,
             now,
             serde_json::json!({
-                "run_id": run.id,
+                "run_id": requester.run_id(),
+                "origin": requester.origin(),
                 "task_id": target.id,
                 "matter": matter,
                 "authority": authority,
@@ -1303,7 +1410,7 @@ fn controller_action(
         return Ok(consume(
             answered,
             decision,
-            run,
+            requester.run_id(),
             now,
             decided(outcome),
             serde_json::json!({ "matter": matter, "summary": content.summary }),
@@ -1312,12 +1419,18 @@ fn controller_action(
 
     let question = format!("Controller 要「{}」：{}，核准嗎？", matter.label(), content.summary);
     let reason = format!("依決策權限表，「{}」必須由你裁定，Controller 不能自行處理。Controller 的理由：{}", matter.label(), content.reason);
-    let mut record = new_request(request_id.clone(), run, caller, target, DecisionKind::Authority, question, reason, now);
+    let mut record = new_request(request_id.clone(), &requester, caller, target, DecisionKind::Authority, question, reason, now);
+    // 超出授權（票 17）：裁定只記錄使用者的決定，不會擴大 Workspace 授權；要派出這個 Task 必須另外修改授權
+    let approve_tradeoff = if matter == Matter::ExceedAuthorization {
+        "核准不會擴大 Workspace 授權：請另外到授權頁加入這個 Task 需要的能力，Controller 才能派出它；用過一次就失效"
+    } else {
+        "只對這個 Task 的這一次動作有效，用過一次就失效；不會改變決策權限表"
+    };
     record.options = vec![
         DecisionOption {
             id: OPTION_APPROVE.to_string(),
             label: "核准這一次".to_string(),
-            tradeoff: Some("只對這個 Task 的這一次動作有效，用過一次就失效；不會改變決策權限表".to_string()),
+            tradeoff: Some(approve_tradeoff.to_string()),
         },
         DecisionOption {
             id: OPTION_REJECT.to_string(),
@@ -1329,6 +1442,67 @@ fn controller_action(
     record.urgency = content.urgency;
     record.authority = Some(AuthorityDetail { matter, summary: content.summary, fingerprint });
     open_request(ctx, record, target, now, decided(ControllerOutcome::RequiresDecision { request_id, existing: false }))
+}
+
+/// Controller 向使用者提問（票 17，ADR-0010「邊釐清、邊調查」）：`blocking` 列出依賴這個答案的 Task，
+/// 它們在使用者回答之前不能進入 ready 或派工（`task::admission_report` 的 `decision_pending`）；狀態不變。
+/// 同一個問題（正規化後相同）仍在等待時回到既有的請求，新列出的 Task 一併加入阻擋範圍。
+fn controller_question(
+    ctx: &DecisionContext<'_>,
+    request_id: String,
+    controller_run_id: &str,
+    content: RequestContent,
+    blocking: Vec<String>,
+    now: Timestamp,
+) -> Result<DecisionChange, DecisionError> {
+    if blocking.is_empty() || blocking.len() > crate::agent::BLOCKING_MAX_TASKS {
+        return Err(DecisionError::Invalid(format!(
+            "blocking 必須列出 1 到 {} 個依賴這個答案的 Task",
+            crate::agent::BLOCKING_MAX_TASKS
+        )));
+    }
+    let mut tasks: Vec<&Task> = Vec::new();
+    for id in &blocking {
+        let task = ctx.task.task(id).ok_or_else(|| DecisionError::TaskNotFound(id.clone()))?;
+        if !matches!(task.status, TaskStatus::Pending | TaskStatus::Ready) {
+            return Err(DecisionError::Invalid(format!(
+                "Task「{}」（{}）目前是 {}：只有還沒派工的 Task（pending、ready）能標為依賴這個答案",
+                task.title,
+                task.id,
+                task.status.as_str()
+            )));
+        }
+        if !tasks.iter().any(|t| t.id == task.id) {
+            tasks.push(task);
+        }
+    }
+    let key = normalize_question(&content.question);
+    if let Some(existing) = ctx.requests.iter().find(|r| {
+        r.is_pending()
+            && r.origin == DecisionOrigin::Controller
+            && r.kind == DecisionKind::Agent
+            && normalize_question(&r.question) == key
+    }) {
+        let mut change =
+            DecisionChange::new(DecisionOutcome::Requested { request_id: existing.id.clone(), existing: true });
+        change.new_blocks = tasks
+            .iter()
+            .filter(|t| !existing.blocking.contains(&t.id))
+            .map(|t| (existing.id.clone(), t.id.clone()))
+            .collect();
+        return Ok(change);
+    }
+    let target = tasks[0];
+    let requester = Requester::Controller { run_id: controller_run_id, workspace_id: ctx.task.workspace_id };
+    let mut record =
+        new_request(request_id.clone(), &requester, target, target, DecisionKind::Agent, content.question, content.reason, now);
+    record.blocking = tasks.iter().map(|t| t.id.clone()).collect();
+    record.options = content.options;
+    record.recommendation = content.recommendation;
+    record.evidence = content.evidence;
+    record.urgency = content.urgency;
+    record.deadline_at = content.deadline_minutes.map(|m| now.plus_millis(m * 60_000));
+    open_request(ctx, record, target, now, DecisionOutcome::Requested { request_id, existing: false })
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -1358,6 +1532,7 @@ pub fn budget_exhausted_request(
         workspace_id: task.workspace_id.clone(),
         run_id: run.id.clone(),
         task_id: task.id.clone(),
+        origin: DecisionOrigin::Worker,
         kind: DecisionKind::Authority,
         status: DecisionStatus::Pending,
         question: truncate(&format!("Task「{}」的{label}預算（{limit} 次）已用完，下一步怎麼做？", task.title), QUESTION_MAX_CHARS),
@@ -1487,16 +1662,50 @@ fn resume_tasks(
     Ok(resumed)
 }
 
-/// 喚醒 Outbox：請求本身與被合併進來的請求（各自的 Run）都要叫醒。
-fn wake_items(ctx: &DecisionContext<'_>, request: &DecisionRequest, payload: &Value, now: Timestamp) -> Vec<WakeItem> {
-    let mut items = vec![WakeItem { kind: wake_kind(&request.id), run_id: request.run_id.clone(), payload: payload.clone(), created_at: now }];
+/// 喚醒提出者：請求本身與被合併進來的請求都要叫醒。Worker 提出的寫喚醒 Outbox（各自的 Run）；
+/// Controller 提出的（票 17）成為 conversation 的工作事件，由 Controller 的事件迴圈喚起下一輪。
+fn wake(ctx: &DecisionContext<'_>, request: &DecisionRequest, payload: &Value, change: &mut DecisionChange, now: Timestamp) {
+    let mut wake_one = |target: &DecisionRequest, payload: Value| match target.origin {
+        DecisionOrigin::Worker => change.outbox.push(WakeItem {
+            kind: wake_kind(&target.id),
+            run_id: target.run_id.clone(),
+            payload,
+            created_at: now,
+        }),
+        DecisionOrigin::Controller => change.notices.push(ConversationNotice {
+            workspace_id: target.workspace_id.clone(),
+            source: format!("{}{}:{}", OUTBOX_WAKE_PREFIX, target.id, target.revision + 1),
+            content: notice_content(target, &payload),
+        }),
+    };
+    wake_one(request, payload.clone());
     for source in ctx.requests.iter().filter(|r| r.merged_into.as_deref() == Some(request.id.as_str())) {
         let mut payload = payload.clone();
         payload["request_id"] = Value::String(source.id.clone());
         payload["merged_into"] = Value::String(request.id.clone());
-        items.push(WakeItem { kind: wake_kind(&source.id), run_id: source.run_id.clone(), payload, created_at: now });
+        wake_one(source, payload);
     }
-    items
+}
+
+/// Controller 提出的請求結束時給 Controller 看的工作事件內容（票 17）。
+fn notice_content(request: &DecisionRequest, payload: &Value) -> String {
+    let head = format!("你提出的裁定請求「{}」（{}）", request.question, request.id);
+    let tasks = request.blocking.join("、");
+    if payload["superseded"].as_bool() == Some(true) {
+        let reason = payload["reason"].as_str().unwrap_or_default();
+        return format!("{head}已過期，不能再套用：{reason}。受影響的 Task：{tasks}");
+    }
+    let action = payload["action"].as_str().and_then(DecisionAction::parse);
+    let mut text = format!("{head}已由使用者處理：{}", action.map_or("（未知的處理方式）", |a| a.label()));
+    if let Some(option) = payload["option_id"].as_str() {
+        let label = request.option(option).map_or(option, |o| o.label.as_str());
+        text.push_str(&format!("，選項「{label}」（{option}）"));
+    }
+    if let Some(note) = payload["note"].as_str() {
+        text.push_str(&format!("；說明：{note}"));
+    }
+    text.push_str(&format!("。依賴這個答案的 Task：{tasks}；請依答案更新契約後再派工"));
+    text
 }
 
 /// 把一批待處理請求標為 `superseded`，恢復只被它們阻擋的 Task，並叫醒提出者。
@@ -1523,7 +1732,7 @@ fn supersede(
             "task_ids": request.blocking,
             "resumed_task_ids": resumed.iter().filter(|t| request.blocking.contains(t)).collect::<Vec<_>>(),
         });
-        change.outbox.extend(wake_items(ctx, request, &payload, now));
+        wake(ctx, request, &payload, change, now);
         change.updated.push(updated);
     }
     Ok(resumed)
@@ -1670,7 +1879,7 @@ fn answer(
         "task_ids": request.blocking,
         "resumed_task_ids": resumed,
     });
-    change.outbox = wake_items(ctx, request, &payload, now);
+    wake(ctx, request, &payload, &mut change, now);
     change.updated.push(updated);
     change.outcome = DecisionOutcome::Answered { resumed_task_ids: resumed };
     Ok(change)
@@ -1695,6 +1904,10 @@ fn merge(
     }
     if source.kind != target.kind {
         return invalid("只能合併同一種類的裁定請求");
+    }
+    // Controller 的提問以「待處理」阻擋 Task 的准入（票 17），Worker 的請求以 waiting_decision 阻擋：兩者不能互相合併
+    if source.origin != target.origin {
+        return invalid("Controller 與 Worker 提出的裁定請求不能合併；可以改用連結");
     }
     if source.kind == DecisionKind::Permission {
         return invalid("權限提示的單次批准各自綁定 Task 與操作，不能合併；可以改用連結");
@@ -1800,6 +2013,9 @@ pub struct DecisionView {
     pub workspace_id: String,
     pub run_id: String,
     pub task_id: String,
+    /// 提出者是 Worker 還是 Controller（票 17）。
+    #[serde(default)]
+    pub origin: DecisionOrigin,
     pub task_title: String,
     pub kind: DecisionKind,
     pub status: DecisionStatus,
@@ -1862,6 +2078,7 @@ pub fn view(
         id: request.id.clone(),
         workspace_id: request.workspace_id.clone(),
         run_id: request.run_id.clone(),
+        origin: request.origin,
         task_id: request.task_id.clone(),
         task_title: title_of(&request.task_id),
         kind: request.kind,

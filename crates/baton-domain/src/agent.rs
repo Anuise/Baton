@@ -32,6 +32,25 @@ pub const TOOL_SEND_MESSAGE: &str = "send_message";
 pub const TOOL_READ_INBOX: &str = "read_inbox";
 /// 交接（票 28）：successor Worker 確認接手。
 pub const TOOL_CONFIRM_HANDOFF: &str = "confirm_handoff";
+/// 票 17：Controller 專屬的拆工與派工工具（只接受 Controller 憑證）。
+pub const TOOL_PROPOSE_TASK: &str = "propose_task";
+pub const TOOL_UPDATE_TASK: &str = "update_task";
+pub const TOOL_ADD_DEPENDENCY: &str = "add_dependency";
+pub const TOOL_DISPATCH_TASK: &str = "dispatch_task";
+pub const TOOL_CANCEL_TASK: &str = "cancel_task";
+/// 票 17：Controller 向使用者提出裁定請求，並指明哪些 Task 依賴這個答案（spec D-05）。
+pub const TOOL_PROPOSE_DECISION_REQUEST: &str = "propose_decision_request";
+/// Controller 專屬的工具；Controller 憑證只能使用這些工具（與 `permission_prompt`），Worker 憑證不能使用它們。
+pub const CONTROLLER_TOOLS: [&str; 6] = [
+    TOOL_PROPOSE_TASK,
+    TOOL_UPDATE_TASK,
+    TOOL_ADD_DEPENDENCY,
+    TOOL_DISPATCH_TASK,
+    TOOL_CANCEL_TASK,
+    TOOL_PROPOSE_DECISION_REQUEST,
+];
+/// Controller 一次指明的依賴 Task 數上限。
+pub const BLOCKING_MAX_TASKS: usize = 20;
 
 /// 進度與 checkpoint 摘要、受阻原因的長度上限（字元數）。
 pub const SUMMARY_MAX_CHARS: usize = 500;

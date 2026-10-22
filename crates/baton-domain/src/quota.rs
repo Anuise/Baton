@@ -274,6 +274,37 @@ pub fn change_plan_limits(
     }))
 }
 
+/// Run 回報用量的事件（票 41）：`quota_usage` 會在保留期滿後刪除，觀測指標改由這個不可刪除的事件計算。
+pub const USAGE_AGGREGATE: &str = "run_usage";
+pub const EVENT_RUN_USAGE_REPORTED: &str = "run_usage_reported";
+
+/// 一個 Run 回報一次用量的事件。聚合是 Run 的用量流（`aggregate_id` = Run 識別），`version` 是這個 Run 第幾次回報。
+/// `context_tokens` 是模型讀入的 Context（輸入 + 快取建立 + 快取讀取）；Adapter 看不到時為 `None`（未知，不填零）。
+pub fn usage_reported_event(
+    run_id: &str,
+    task_id: Option<&str>,
+    profile_id: &str,
+    version: i64,
+    tokens: u64,
+    context_tokens: Option<u64>,
+    now: Timestamp,
+) -> DomainEvent {
+    DomainEvent {
+        aggregate_type: USAGE_AGGREGATE,
+        aggregate_id: run_id.to_string(),
+        aggregate_version: version,
+        event_type: EVENT_RUN_USAGE_REPORTED,
+        occurred_at: now,
+        payload: serde_json::json!({
+            "run_id": run_id,
+            "task_id": task_id,
+            "profile_id": profile_id,
+            "tokens": tokens,
+            "context_tokens": context_tokens,
+        }),
+    }
+}
+
 /// 一個 Run 的結果訊息回報的用量。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
