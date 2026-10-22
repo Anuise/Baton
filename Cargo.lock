@@ -234,6 +234,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "baton-guardian"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "baton-domain",
+ "baton-ports",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "baton-harness"
 version = "0.1.0"
 dependencies = [
