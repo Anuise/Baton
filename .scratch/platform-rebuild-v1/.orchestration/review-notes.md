@@ -82,3 +82,6 @@
 
 ## 22. 變更路徑比對（票 44）
 - 檔名含 `"`、`\` 或控制字元時，git 即使設 `core.quotepath=false` 仍會加引號，`touches` 比對會漏判而把受影響的審查軸當成可沿用；改用 `git diff -z`。
+
+## 23. 票 50 的小問題
+- `crates/baton-harness/tests/gate_invalidation.rs:54` 未使用的 `error_code`（dead_code 警告）；413-414 行取得 `/decisions` 清單後沒有斷言，「重新整理時判定過期」只有 domain 單元測試在驗。
