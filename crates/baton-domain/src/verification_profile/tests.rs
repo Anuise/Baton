@@ -345,6 +345,13 @@ fn web_profiles_declare_secrets_by_reference_and_bind_personas_and_identities_se
     let mut exit_on_browser = web_definition();
     exit_on_browser.identities[0].check.assertions.push(Assertion::ExitCode { equals: 0 });
     assert!(validate(&exit_on_browser).is_err());
+    // 瀏覽器 Session 只在旅程中存在：前置階段與 teardown 不能使用瀏覽器操作
+    let mut browser_setup = web_definition();
+    browser_setup.setup = vec![step("seed", goto("http://127.0.0.1:3000/seed"), vec![Assertion::Contains { text: "ok".into() }])];
+    assert!(validate(&browser_setup).unwrap_err().to_string().contains("旅程"));
+    let mut browser_teardown = web_definition();
+    browser_teardown.teardown = vec![goto("http://127.0.0.1:3000/reset")];
+    assert!(validate(&browser_teardown).is_err());
 }
 
 #[test]

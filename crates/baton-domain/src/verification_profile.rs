@@ -797,6 +797,17 @@ fn check_secrets_personas_identities(definition: &ProfileDefinition) -> Result<(
     if definition.interface != Interface::Web && operations.iter().any(|o| matches!(o, Operation::Browser { .. })) {
         return Err(invalid("只有 web 介面的 Profile 可以使用瀏覽器操作"));
     }
+    // 瀏覽器 Session 只在旅程（含登入與身分核對）中存在
+    let mut outside_journeys = definition
+        .doctor
+        .iter()
+        .chain(definition.readiness.iter().map(|r| &r.step))
+        .chain(&definition.setup)
+        .map(|s| &s.operation)
+        .chain(&definition.teardown);
+    if outside_journeys.any(|o| matches!(o, Operation::Browser { .. })) {
+        return Err(invalid("瀏覽器操作只能用在旅程與登入身分中；doctor、就緒、資料準備與 teardown 請改用命令或 HTTP"));
+    }
     check_count(&definition.secrets, "秘密參照")?;
     for secret in &definition.secrets {
         if !valid_key(&secret.key) {
