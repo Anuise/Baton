@@ -25,6 +25,9 @@ pub const TOOL_REPORT_BLOCKED: &str = "report_blocked";
 /// 票 22：裁定請求與權限提示轉接。
 pub const TOOL_REQUEST_DECISION: &str = "request_decision";
 pub const TOOL_PERMISSION_PROMPT: &str = "permission_prompt";
+/// Worker 間訊息（票 18）。
+pub const TOOL_SEND_MESSAGE: &str = "send_message";
+pub const TOOL_READ_INBOX: &str = "read_inbox";
 
 /// 進度與 checkpoint 摘要、受阻原因的長度上限（字元數）。
 pub const SUMMARY_MAX_CHARS: usize = 500;

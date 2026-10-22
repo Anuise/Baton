@@ -27,6 +27,7 @@ use tokio::sync::oneshot;
 mod agent;
 mod artifacts;
 mod decisions;
+mod messages;
 mod profiles;
 mod quota;
 mod runs;
@@ -36,6 +37,7 @@ mod tasks;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, PendingByWorkspace};
+pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
@@ -431,6 +433,42 @@ const MIGRATIONS: &[Migration] = &[
             profile_id TEXT PRIMARY KEY,
             polled_at INTEGER NOT NULL
         );",
+    },
+    // Worker 間訊息與每個收件 Task 的交付（票 18）。訊息本身追加式；交付只會填入 delivered_at、read_at。
+    // 交付以 (workspace, message_id, 收件 Task) 為主鍵：同一則訊息對同一個收件人不可能有第二份
+    Migration {
+        name: "message_and_delivery",
+        sql: "CREATE TABLE message (
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            message_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            in_reply_to TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('note', 'question', 'answer', 'result')),
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            sender_run_id TEXT NOT NULL REFERENCES run (id),
+            sender_task_id TEXT NOT NULL REFERENCES task (id),
+            sender_generation INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, message_id)
+        );
+        CREATE TRIGGER message_no_update BEFORE UPDATE ON message
+        BEGIN SELECT RAISE(ABORT, 'message 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER message_no_delete BEFORE DELETE ON message
+        BEGIN SELECT RAISE(ABORT, 'message 是追加式資料表，不可刪除'); END;
+        CREATE TABLE message_delivery (
+            workspace_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            recipient_task_id TEXT NOT NULL REFERENCES task (id),
+            delivered_at INTEGER,
+            read_at INTEGER,
+            PRIMARY KEY (workspace_id, message_id, recipient_task_id),
+            FOREIGN KEY (workspace_id, message_id) REFERENCES message (workspace_id, message_id)
+        );
+        CREATE INDEX message_delivery_inbox ON message_delivery (recipient_task_id, read_at);
+        CREATE TRIGGER message_delivery_no_delete BEFORE DELETE ON message_delivery
+        BEGIN SELECT RAISE(ABORT, 'message_delivery 不可刪除'); END;",
     },
     // 裁定請求與裁定（票 22）。請求只能從 pending 改成 answered（其餘欄位不可變）、不可刪除；
     // 裁定與單次批准的消耗紀錄是追加式；decided_by 在資料庫層就只允許桌面憑證

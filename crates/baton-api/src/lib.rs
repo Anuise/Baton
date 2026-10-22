@@ -9,6 +9,7 @@ mod artifacts;
 mod authorization;
 mod decisions;
 mod guard;
+mod messages;
 mod profiles;
 pub mod quota;
 mod runs;
@@ -27,8 +28,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::agent::{
-    TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION,
-    TOOL_SAVE_CHECKPOINT,
+    TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
+    TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
@@ -47,6 +48,7 @@ pub use artifacts::{
     artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview, ArtifactRegistered,
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
+pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
     AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
@@ -192,6 +194,8 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_REQUEST_DECISION), post(agent::request_decision))
         .route(&tool_path(TOOL_PERMISSION_PROMPT), post(agent::permission_prompt))
         .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
+        .route(&tool_path(TOOL_SEND_MESSAGE), post(messages::send_message))
+        .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

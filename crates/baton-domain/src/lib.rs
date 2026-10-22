@@ -9,6 +9,7 @@ pub mod authorization;
 pub mod config;
 pub mod decision;
 pub mod event;
+pub mod message;
 pub mod permission;
 pub mod platform;
 pub mod product;

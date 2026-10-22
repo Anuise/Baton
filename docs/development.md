@@ -217,7 +217,7 @@ Worker 需要使用者決定的事，以及超出授權範圍的操作，都變�
 | `request_decision` | `question`、`reason`、`options`（2–8 個 `{id, label, tradeoff?}`）、`recommendation?`、`evidence?`、`urgency?`（`low`／`normal`／`high`）、`deadline_minutes?` | 建立請求；Task（`running` 時）進入 `waiting_decision`，Run 不結束。回 `{decision_request_id, status: "waiting_decision", existing, message}`；同一個 Run 對同一個問題重複提出時回到既有請求。內容無效 400 `decision_invalid`，不寫入任何東西 |
 | `permission_prompt` | `tool_name`、`input`（Claude Code `--permission-prompt-tool` 協定） | 授權範圍內：回 `{behavior: "allow", updatedInput, status: "auto_allowed"}` 並追加稽核事件 `permission_auto_allowed`。範圍外：建立裁定請求（選項固定為 `allow_once`、`deny`）並回 `{behavior: "deny", message: "等待裁定…", status: "waiting_decision", decision_request_id}`。使用者已回答時，同一個 Task 的同一個操作消耗一次答案：`approved`（允許）或 `denied`（拒絕） |
 
-**權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-128）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 Workspace **目前生效的授權 revision**；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。Bash 指令以 bash 規則斷詞（去掉引號；引號不成對或反斜線緊接引號一律無法歸類），每個子命令只接受白名單內的旗標，任何其他旗標（例如 `git commit --amend`、`git diff --output=…`、`npm install --prefix …`、`cargo test --manifest-path …`）都無法歸類；`-g`、`--global=…`、`--location=global` 等全域安裝的各種寫法歸為「全域安裝」；指令參數中像路徑的字詞必須在 Workspace 內。路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`），含 `:`（替代資料流）的元件、只有點的元件、`\\?\` 裝置路徑一律範圍外，`GIT~1` 視同 `.git`。單次批准的規則見 AI-129。
+**權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-138）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 Workspace **目前生效的授權 revision**；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。Bash 指令以 bash 規則斷詞（去掉引號；引號不成對或反斜線緊接引號一律無法歸類），每個子命令只接受白名單內的旗標，任何其他旗標（例如 `git commit --amend`、`git diff --output=…`、`npm install --prefix …`、`cargo test --manifest-path …`）都無法歸類；`-g`、`--global=…`、`--location=global` 等全域安裝的各種寫法歸為「全域安裝」；指令參數中像路徑的字詞必須在 Workspace 內。路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`），含 `:`（替代資料流）的元件、只有點的元件、`\\?\` 裝置路徑一律範圍外，`GIT~1` 視同 `.git`。單次批准的規則見 AI-139。
 
 **桌面端點**（桌面憑證專用）：
 
@@ -228,15 +228,15 @@ Worker 需要使用者決定的事，以及超出授權範圍的操作，都變�
 | `POST …/decisions/{request_id}/answer` | `{option_id, note?}`；200 回 `{decision, resumed_task_ids}`。同樣的答案重送是冪等的；不同的答案 409 `decision_already_answered`；未知選項 400 `decision_option_unknown`；找不到 404 `decision_not_found` |
 | `GET /api/v1/decisions/pending` | `{pending_count, by_workspace}`，給狀態列的「待裁定數」 |
 
-資料表（migration 14）：`decision_request`（只能由 `pending` 改成 `answered`）、`decision_request_block`、`decision`（追加式）、`decision_approval_use`（追加式）。回答時追加的喚醒 Outbox 項目種類是 `decision_wake:<請求識別>`，**目前沒有消費者**（Controller 的事件迴圈在後續的票）。事件：`decision_requested`、`decision_answered`、`permission_approval_used`（聚合 `decision_request`），以及自動允許的 `permission_auto_allowed`（每筆一個 `permission_audit` 聚合）。
+資料表（migration 15）：`decision_request`（只能由 `pending` 改成 `answered`）、`decision_request_block`、`decision`（追加式）、`decision_approval_use`（追加式）。回答時追加的喚醒 Outbox 項目種類是 `decision_wake:<請求識別>`，**目前沒有消費者**（Controller 的事件迴圈在後續的票）。事件：`decision_requested`、`decision_answered`、`permission_approval_used`（聚合 `decision_request`），以及自動允許的 `permission_auto_allowed`（每筆一個 `permission_audit` 聚合）。
 
-本票只做最小版本：沒有 `expected_revision`／過期標記、批次回答、相似請求合併、決策權限表的強制檢查（AI-133）。權限提示的 CLI 參數與回應格式相容性是 **Validation Required**（票 14，AI-134）。
+本票只做最小版本：沒有 `expected_revision`／過期標記、批次回答、相似請求合併、決策權限表的強制檢查（AI-143）。權限提示的 CLI 參數與回應格式相容性是 **Validation Required**（票 14，AI-144）。
 
 ### 多帳號並行排程與容量
 
 規則在 `baton_domain::scheduler`（純邏輯：事實 → 要派給誰或為什麼等），持久化在 `baton-store` 的 `scheduling.rs`，端點在 `baton-api` 的 `scheduling.rs` 與 `runs.rs`，佇列的定期重試在 `Supervisor::schedule_queue`。
 
-**一個派工要求怎麼處理**（`Store::schedule`，單一交易）：先用目前狀態判定一次，「不是等一等就好」的錯誤（Task 不是 ready、找不到、契約失效）原樣拒絕且什麼都不寫；否則記入 `dispatch_request` 佇列，再依「優先序高者先、同優先序先要求者先」逐一嘗試派出每個排隊中的 Task（每個 Task 各自判定，被相依擋住的不會擋住後面的）。派出 = 選帳號 + `RunCommand::Dispatch`；等待 = 留在佇列。Task 離開 `ready`（派出、取消、改契約）時 `save_task` 一併把它移出佇列。Run 失敗後 Task 回到 `ready`，**不會**自動重新排隊（沒有重試預算前不自動重派）；裁定後恢復的 Task 例外，回答時就重新排隊（AI-130）。
+**一個派工要求怎麼處理**（`Store::schedule`，單一交易）：先用目前狀態判定一次，「不是等一等就好」的錯誤（Task 不是 ready、找不到、契約失效）原樣拒絕且什麼都不寫；否則記入 `dispatch_request` 佇列，再依「優先序高者先、同優先序先要求者先」逐一嘗試派出每個排隊中的 Task（每個 Task 各自判定，被相依擋住的不會擋住後面的）。派出 = 選帳號 + `RunCommand::Dispatch`；等待 = 留在佇列。Task 離開 `ready`（派出、取消、改契約）時 `save_task` 一併把它移出佇列。Run 失敗後 Task 回到 `ready`，**不會**自動重新排隊（沒有重試預算前不自動重派）；裁定後恢復的 Task 例外，回答時就重新排隊（AI-140）。
 
 **容量**（`CapacityMode`，設定頁切換，`PUT /api/v1/scheduling/settings`）：
 
