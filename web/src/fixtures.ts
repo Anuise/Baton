@@ -128,6 +128,9 @@ export function runView(overrides: Partial<RunView> = {}): RunView {
     started_at: null,
     ended_at: null,
     lease: null,
+    latest_progress: null,
+    latest_checkpoint: null,
+    blocked: null,
     ...overrides,
   };
 }
