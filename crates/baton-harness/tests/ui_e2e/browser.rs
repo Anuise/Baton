@@ -106,7 +106,9 @@ impl Browser {
         let mut driver = Driver { child, stdin, stdout, next_id: 0 };
         let response = driver.request(json!({ "op": "open", "timeoutMs": ACTION_TIMEOUT.as_millis() as u64 }), BROWSER_TIMEOUT).await;
         if response["ok"] != true {
-            let _ = driver.child.wait().await;
+            // 關閉 stdin 讓 driver 自行結束；先等它結束再失敗，不留下程序
+            drop(driver.stdin);
+            let _ = tokio::time::timeout(BROWSER_TIMEOUT, driver.child.wait()).await;
             panic!(
                 "UI E2E 無法開啟瀏覽器：{}；請設定 BATON_PLAYWRIGHT_DIR 指向已安裝 playwright 與其瀏覽器的目錄",
                 response["message"]
