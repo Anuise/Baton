@@ -114,7 +114,8 @@ impl Store {
                 .collect();
             let mut created = Vec::new();
             for (run, reason) in candidates {
-                let placement = successor_placement(tx, &run.workspace_id, &quota_used, None, None)?;
+                // 舊 Run 會在轉移時結束，不佔名額（與轉移時的計算一致）
+                let placement = successor_placement(tx, &run.workspace_id, &quota_used, None, Some(&run.id))?;
                 let profile_id = match placement {
                     Placement::Place { profile_id } => profile_id,
                     // 突然限流：舊 Worker 已無法工作，沒有承接帳號也要停下它（之後等待資源）；停止意圖生效時不交接
@@ -243,7 +244,7 @@ impl Store {
     }
 
     /// 步驟 2：到了安全邊界（要求之後保存了 checkpoint，或等滿上限）而且承接帳號仍有名額，就記下 checkpoint 並進入 `stopping`。
-    /// 舊 Run 已由別的路徑結束時放棄交接。回傳有改變的交接；條件還不成立時回傳 `None`（下一次再判定）。
+    /// 舊 Run 已由別的路徑結束或已被要求取消時放棄交接。回傳有改變的交接；條件還不成立時回傳 `None`（下一次再判定）。
     pub async fn begin_handoff_stop(
         &self,
         id: &str,
@@ -265,6 +266,10 @@ impl Store {
                     let reason = ended_reason(from_run);
                     return Ok(abandon_in(tx, &current, &reason, now).map(Some));
                 }
+                // 使用者已要求取消：取消優先，放棄交接；程序由取消流程停止並確認
+                if from_run.cancel_requested_at.is_some() {
+                    return Ok(abandon_in(tx, &current, CANCEL_REQUESTED_REASON, now).map(Some));
+                }
                 let checkpoint = handoff::latest_checkpoint(&loaded.reports, &loaded.runs, &current.task_id);
                 // 突然限流（交接時的原因，或之後帳號才撞到上限）：舊 Worker 已無法工作，不等 checkpoint、也不需要承接帳號
                 let sudden = handoff::is_sudden_limit(&current.reason) || gate_is_sudden(tx, &current.from_profile_id)?;
@@ -272,8 +277,13 @@ impl Store {
                     return Ok(Ok(None));
                 }
                 // 沒有承接帳號就先不要求舊程序停止：寧可留在原帳號，也不讓 Task 停在沒有 writer 的狀態
-                let placement =
-                    successor_placement(tx, &current.workspace_id, &quota_used, Some(&current.to_profile_id), None)?;
+                let placement = successor_placement(
+                    tx,
+                    &current.workspace_id,
+                    &quota_used,
+                    Some(&current.to_profile_id),
+                    Some(&from_run.id),
+                )?;
                 if !sudden && matches!(placement, Placement::Wait(_)) {
                     return Ok(Ok(None));
                 }
@@ -293,7 +303,7 @@ impl Store {
 
     /// 步驟 3、4：舊程序已確認停止（`stop_outcome`）。單一交易：舊 Run 以 `handed_off` 結束並釋放寫入所有權，
     /// 以條件更新（舊 Run 仍持有 `from_generation` 的 lease）把世代轉給新建立的 successor Run，交接進入 `transferred`。
-    /// 舊 Run 已由別的路徑結束、或沒有承接帳號時放棄交接（後者把 Task 排回派工佇列）。已轉移過時原樣回傳（冪等）。
+    /// 舊 Run 已由別的路徑結束、或沒有承接帳號時放棄交接（後者把 Task 排回派工佇列）；已被要求取消時完成取消並放棄交接。已轉移過時原樣回傳（冪等）。
     pub async fn transfer_handoff(
         &self,
         id: &str,
@@ -322,6 +332,15 @@ impl Store {
                 let lease = loaded.leases.iter().find(|l| l.run_id == from_run.id);
                 if !run::is_current_writer(from_run, lease, current.from_generation) {
                     return Ok(abandon_in(tx, &current, "generation_changed", now));
+                }
+                // 使用者已要求取消：舊程序已確認停止，同一個交易中完成取消（不計預算、不重新排隊）並放棄交接
+                if from_run.cancel_requested_at.is_some() {
+                    let command = RunCommand::ConfirmCancelled { run_id: from_run.id.clone() };
+                    match decide_in(&loaded, &workspace_id, &loaded.tasks, command, now) {
+                        Ok(change) => save(tx, &change, now)?,
+                        Err(rejected) => return Ok(Err(rejected.into())),
+                    }
+                    return Ok(abandon_in(tx, &current, CANCEL_REQUESTED_REASON, now));
                 }
                 // 突然限流而所有合適帳號都受限（名額以舊 Run 結束後計）：舊 Run 結束、Task 進入 waiting_resource，
                 // 保存要延續的 checkpoint 並排定重新評估（票 29）
@@ -471,6 +490,9 @@ impl Store {
         self.read(move |conn| Ok(load_handoffs_where(conn, "workspace_id = ?1", [workspace_id])?)).await
     }
 }
+
+/// 舊 Run 已被要求取消時的放棄原因（取消優先於交接）。
+const CANCEL_REQUESTED_REASON: &str = "from_run_cancel_requested";
 
 /// 舊 Run 已由別的路徑結束時的放棄原因。
 fn ended_reason(run: &Run) -> String {
@@ -746,3 +768,6 @@ fn save_handoff(tx: &Transaction<'_>, h: &Handoff) -> rusqlite::Result<()> {
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
