@@ -291,13 +291,13 @@ impl Store {
     }
 }
 
-/// 派工前的檢查在排隊期間不再通過、又不是授權或相依這類可以等的原因（例如前一個 Run 還沒確認停止）：
-/// 保留在佇列並如實顯示，歸為「狀態不明」。
 /// 佇列中這個 Task 的預算（退避期限）；找不到 Task 時沒有退避（之後的判定會把它移出佇列）。
 fn backoff_budget(loaded: &super::tasks::Loaded, task_id: &str) -> Option<TaskBudget> {
     loaded.tasks.iter().find(|t| t.id == task_id).map(|t| TaskBudget::of(&loaded.budgets, t))
 }
 
+/// 派工前的檢查在排隊期間不再通過、又不是授權或相依這類可以等的原因（例如前一個 Run 還沒確認停止）：
+/// 保留在佇列並如實顯示，歸為「狀態不明」。
 pub(crate) fn failed_check(error: &RunError) -> WaitReason {
     WaitReason {
         category: WaitCategory::StateUnknown,
