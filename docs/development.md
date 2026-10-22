@@ -588,7 +588,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 事件：`runtime_lifecycle` 聚合有 `full_exit_requested`、`full_exit_completed`、`runtime_reopened`；`workspace_lifecycle` 聚合有 `workspace_paused_by_exit`、`workspace_resumed`、`workspace_auto_resume_changed`。
 
-**Validation Required**：30 秒寬限 + 10 秒確認在真實 Claude Code 與 Windows Job Object 上是否足夠；系統匣、關窗隱藏與停止進度畫面只有編譯與元件測試，需在 Windows 上手動確認（按「完全退出」→ 進度 → App 結束、資料目錄出現 `lifecycle.json`）。
+**Validation Required**：30 秒寬限 + 10 秒確認在真實 Claude Code 與 Windows Job Object 上是否足夠；系統匣與關窗隱藏只有編譯與元件測試；「完全退出 → 進度 → App 結束、資料目錄出現 `lifecycle.json`」已由 `scripts/smoke-desktop.mjs` 以頁面內事件自動確認；系統匣選單本身仍需在 Windows 上手動確認。
 
 ### 事件時間線與觀測指標
 
@@ -688,7 +688,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 | `runtime.json`／`guardian.json` | Runtime／監護 | 程序識別碼與記錄時間 |
 | `guardian.log` | 監護 | 診斷文字，不參與任何判斷 |
 
-**Validation Required**：監護在 Windows 上偵測 Runtime 結束、以 `baton-guardian.exe` 拉起 `baton-runtime.exe`、登出時監護與 Runtime 一起結束，以及每秒輪詢的負擔，都只有單元測試與 harness 情境測試，需在 Windows 上手動確認（工作管理員結束 `baton-runtime.exe` → 監護重新啟動它 → 恢復面板出現同一次嘗試；結束 `baton-guardian.exe` → 狀態列顯示降級 → 重開 App 只補監護）。
+**Validation Required**：監護在 Windows 上偵測 Runtime 結束、以 `baton-guardian.exe` 拉起 `baton-runtime.exe`、登出時監護與 Runtime 一起結束，以及每秒輪詢的負擔，都只有單元測試與 harness 情境測試，其中「強制結束 `baton-runtime.exe` → 監護重新啟動它 → 恢復面板出現同一次嘗試」已由 `scripts/smoke-desktop.mjs` 自動確認，其餘需在 Windows 上手動確認（結束 `baton-guardian.exe` → 狀態列顯示降級 → 重開 App 只補監護）。
 
 ### 跨 Windows 登入的啟動與續跑
 
@@ -1374,7 +1374,7 @@ pnpm --filter web test
 node scripts/smoke-desktop.mjs
 ```
 
-它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕。這個測試會開啟視窗，所以不納入 `pnpm test`。
+它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕、強制結束 Runtime（不結束監護）後監護重新拉起它且恢復面板與狀態列顯示恢復事件、以頁面內的 Tauri 事件（與系統匣送出的 `baton://full-exit-requested` 相同）觸發完全退出後顯示停止進度，最後 App、Runtime 與監護都結束。系統匣選單本身與殼端 60 秒的後備流程沒有涵蓋。spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」需要真實的 Worker／Controller 執行（裁定請求只能由 Agent 憑證建立），不在冒煙測試範圍，由 harness 情境測試涵蓋（見 ai-decisions AI-455）。這個測試會開啟視窗，所以不納入 `pnpm test`。
 
 ### 安裝程式冒煙測試
 
