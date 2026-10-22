@@ -13,13 +13,16 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use baton_domain::auth::{hash_token, Role};
+use baton_domain::auth::{hash_token, CredentialRecord, Role};
 
 use crate::{ApiState, ErrorBody};
 
 /// 每個請求都必須帶的自訂標頭。跨網站請求帶自訂標頭會觸發 CORS 預檢，而預檢一律被拒絕。
 pub const CLIENT_HEADER: &str = "x-baton-client";
 pub const CLIENT_HEADER_VALUE: &str = "baton-desktop";
+
+/// Agent API 的路徑前綴：這個前綴之下只接受 Agent 角色，其餘路徑只接受桌面角色。
+const AGENT_API_PREFIX: &str = "/agent/v1/";
 
 /// Tauri WebView 的 origin（Windows 預設為 http，啟用 https 方案時為 https；其他平台為 tauri 方案）。
 const APP_ORIGINS: [&str; 3] = ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"];
@@ -77,7 +80,7 @@ impl Denial {
             Denial::CredentialMissing => "請求沒有帶 Bearer 憑證",
             Denial::CredentialInvalid => "憑證無效（Runtime 可能已重新啟動，請重新讀取桌面憑證）",
             Denial::CredentialExpired => "憑證已過期",
-            Denial::RoleNotAllowed => "這個憑證的角色不能使用管理 API",
+            Denial::RoleNotAllowed => "這個憑證的角色不能使用這組 API",
             Denial::Internal => "Runtime 內部錯誤，無法驗證憑證",
         }
     }
@@ -91,26 +94,35 @@ impl IntoResponse for Denial {
 }
 
 /// 所有路由共用的防護；通過後才交給路由處理，並記錄請求結果（路徑只記路由樣板，不含實際 URL）。
-pub(crate) async fn guard(State(state): State<Arc<ApiState>>, request: Request, next: Next) -> Response {
+pub(crate) async fn guard(State(state): State<Arc<ApiState>>, mut request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let route = request
         .extensions()
         .get::<MatchedPath>()
         .map_or_else(|| "(unmatched)".to_string(), |p| p.as_str().to_string());
 
-    // 只借出標頭與方法：整個 Request 含有不可跨 await 共享的 Body
-    let outcome = check(&state, request.method(), request.headers()).await;
+    // 只借出標頭、方法與路徑：整個 Request 含有不可跨 await 共享的 Body
+    let outcome = check(&state, request.method(), request.headers(), request.uri().path()).await;
+    let reason = outcome.as_ref().err().map_or("ok", |denial| denial.code());
     let response = match outcome {
-        Ok(()) => next.run(request).await,
+        Ok(record) => {
+            // 讓 Agent API 的處理函式取得已驗證的憑證（含範圍）
+            request.extensions_mut().insert(record);
+            next.run(request).await
+        }
         Err(denial) => denial.into_response(),
     };
 
-    let reason = outcome.err().map_or("ok", Denial::code);
     (state.log)(&format!("{method} {route} -> {} {reason}", response.status().as_u16()));
     response
 }
 
-async fn check(state: &ApiState, method: &Method, headers: &HeaderMap) -> Result<(), Denial> {
+async fn check(
+    state: &ApiState,
+    method: &Method,
+    headers: &HeaderMap,
+    path: &str,
+) -> Result<CredentialRecord, Denial> {
     let host = headers.get(HOST).and_then(|v| v.to_str().ok()).unwrap_or_default();
     if !host_allowed(host, state.allowed_port) {
         return Err(Denial::HostNotAllowed);
@@ -137,11 +149,16 @@ async fn check(state: &ApiState, method: &Method, headers: &HeaderMap) -> Result
     if record.is_expired(state.clock.now()) {
         return Err(Denial::CredentialExpired);
     }
-    // 目前所有端點都是管理 API，只有桌面角色可用；Agent API 由後續的票以獨立路由加入
-    if record.role != Role::Desktop {
+    // 管理 API 與 Agent API 分開路由、分開憑證：各自只接受自己的角色
+    let required = if path.starts_with(AGENT_API_PREFIX) { Role::Agent } else { Role::Desktop };
+    if record.role != required {
         return Err(Denial::RoleNotAllowed);
     }
-    Ok(())
+    // Agent 憑證一定要有範圍；沒有範圍的 Agent 憑證不能退回任何預設
+    if record.role == Role::Agent && record.scope.is_none() {
+        return Err(Denial::CredentialInvalid);
+    }
+    Ok(record)
 }
 
 /// Host 必須是 loopback 的 IP 字面值加上 Runtime 實際監聽的埠（防 DNS rebinding）。

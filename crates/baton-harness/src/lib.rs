@@ -16,7 +16,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-use baton_api::{CLIENT_HEADER, CLIENT_HEADER_VALUE};
+use baton_api::{tool_path, CLIENT_HEADER, CLIENT_HEADER_VALUE};
+use baton_domain::agent::AGENT_TOKEN_ENV;
 use baton_domain::auth::Role;
 use baton_domain::Timestamp;
 use baton_ports::Ports;
@@ -132,6 +133,44 @@ impl Harness {
     pub async fn issue_credential(&self, role: Role, ttl: Option<Duration>) -> String {
         let runtime = self.runtime.as_ref().expect("Runtime 尚未啟動");
         runtime.credentials().issue(role, ttl).await.expect("無法簽發憑證")
+    }
+
+    /// 這個 Run 的 Worker 啟動時收到的 Agent 憑證：取自 fake ProcessControl 記錄的啟動環境變數，
+    /// 與真實 Worker 的 MCP shim 拿到的是同一個值；Run 還沒有被啟動時為 `None`。
+    pub fn agent_credential(&self, run_id: &str) -> Option<String> {
+        self.fakes
+            .process_control
+            .spawned()
+            .into_iter()
+            .find(|spec| spec.args.first().map(String::as_str) == Some(run_id))
+            .and_then(|spec| spec.env.into_iter().find(|(name, _)| name == AGENT_TOKEN_ENV))
+            .map(|(_, token)| token)
+    }
+
+    /// Runtime 的 loopback 位址（MCP shim 的 `BATON_RUNTIME_URL`）。
+    pub fn runtime_url(&self) -> String {
+        format!("http://{}", self.addr())
+    }
+
+    /// 以給定的 bearer 憑證呼叫 Agent 工具（與 MCP shim 相同的請求），回傳狀態碼與 JSON 本文；
+    /// 不論成功與否都不會讓測試失敗。
+    pub async fn call_tool(
+        &self,
+        token: &str,
+        tool: &str,
+        body: serde_json::Value,
+    ) -> (reqwest::StatusCode, serde_json::Value) {
+        let response = self
+            .request(reqwest::Method::POST, &tool_path(tool))
+            .bearer_auth(token)
+            .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+            .json(&body)
+            .send()
+            .await
+            .expect("HTTP 請求失敗");
+        let status = response.status();
+        let bytes = response.bytes().await.expect("無法讀取回應");
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
     }
 
     /// 日誌檔的全部內容；日誌尚未建立時為空字串。

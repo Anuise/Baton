@@ -9,6 +9,7 @@ members = [
     "crates/baton-runtime",
     "crates/baton-harness",
     "crates/baton-client",
+    "crates/baton-mcp-shim",
     "src-tauri",
 ]
 # 桌面殼編譯時需要已建置的 web/dist，因此不納入預設成員；以 `pnpm build` 建置
@@ -21,6 +22,7 @@ default-members = [
     "crates/baton-runtime",
     "crates/baton-harness",
     "crates/baton-client",
+    "crates/baton-mcp-shim",
 ]
 
 [workspace.package]

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::PortResult;
 
 /// 啟動程序所需的描述。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SpawnSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -14,6 +14,22 @@ pub struct SpawnSpec {
     /// 這次啟動的識別：Supervisor 在啟動前先持久化，ProcessControl 以它標記受管的程序，
     /// Runtime 重建後可用 `find` 找回原執行，不重複啟動（spec D-10）。
     pub command_id: String,
+    /// 額外交給子程序的環境變數（例如 Agent 憑證），同名時蓋過 Runtime 自己的環境。
+    /// 不納入 `command_hash`，也不會出現在 `Debug` 輸出，避免憑證進入日誌。
+    pub env: Vec<(String, String)>,
+}
+
+impl std::fmt::Debug for SpawnSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env_names: Vec<&str> = self.env.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("SpawnSpec")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("working_dir", &self.working_dir)
+            .field("command_id", &self.command_id)
+            .field("env", &env_names)
+            .finish()
+    }
 }
 
 /// 啟動指令雜湊（SHA-256，十六進位小寫）：program 與每個引數以 NUL 分隔後計算。

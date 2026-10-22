@@ -129,7 +129,7 @@ impl Store {
             let mut executing = Vec::with_capacity(rows.len());
             for (run, payload) in rows {
                 let lease = load_lease(conn, &run.id)?;
-                executing.push(ExecutingRun { view: RunView { run, lease }, payload });
+                executing.push(ExecutingRun { view: RunView::new(run, lease, &[]), payload });
             }
             Ok(executing)
         })
@@ -138,7 +138,7 @@ impl Store {
 }
 
 /// 在已載入的狀態上判定一個 Run 命令；`tasks` 允許呼叫端換成「Task 已經先改變」的版本（取消連動）。
-fn decide_in(
+pub(crate) fn decide_in(
     loaded: &Loaded,
     workspace_id: &str,
     tasks: &[Task],
@@ -178,7 +178,9 @@ pub(crate) fn views(loaded: &Loaded) -> Vec<RunView> {
     loaded
         .runs
         .iter()
-        .map(|run| RunView { run: run.clone(), lease: loaded.leases.iter().find(|l| l.run_id == run.id).cloned() })
+        .map(|run| {
+            RunView::new(run.clone(), loaded.leases.iter().find(|l| l.run_id == run.id).cloned(), &loaded.reports)
+        })
         .collect()
 }
 
@@ -266,7 +268,7 @@ fn load_lease(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<Execut
 }
 
 /// 把 Domain 的結果寫進同一個交易：Run、lease、Outbox、Task 與事件。
-fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> rusqlite::Result<()> {
+pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> rusqlite::Result<()> {
     if let Some(run) = &change.run {
         let (pid, process_created_at, command_hash) = match &run.process {
             Some(p) => (Some(p.pid), Some(p.created_at_millis), Some(p.command_hash.as_str())),
@@ -326,6 +328,9 @@ fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> rusqlite::R
     }
     if let Some(item) = &change.outbox {
         save_outbox(tx, item)?;
+    }
+    if let Some(report) = &change.report {
+        super::agent::save_report(tx, report)?;
     }
     if let Some(run_id) = &change.outbox_delivered {
         tx.execute(
