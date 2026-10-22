@@ -34,6 +34,7 @@ pub mod product;
 pub mod profile;
 pub mod quota;
 pub mod recovery;
+pub mod review;
 pub mod setup;
 pub mod run;
 pub mod scheduler;

@@ -313,6 +313,18 @@ fn worktrees(repo: &Path) -> PortResult<Vec<Worktree>> {
     Ok(found)
 }
 
+/// `from` 到 `to` 之間變更的檔案（相對 repo 根目錄，`/` 分隔；改名時新舊路徑都列出），票 44 用來證明審查不受影響。
+/// 任一個 revision 不存在是錯誤。revision 以 `--end-of-options` 隔開，不會被當成選項。
+pub fn git_changed_paths(repo: &Path, from: &str, to: &str) -> PortResult<Vec<String>> {
+    for rev in [from, to] {
+        if resolve(repo, rev)?.is_none() {
+            return Err(PortError::Failed(format!("{} 中找不到 revision {rev}", repo.display())));
+        }
+    }
+    let listed = checked(git(repo).args(["diff", "--name-only", "--no-renames", "--end-of-options", from, to]))?;
+    Ok(listed.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+}
+
 /// 分支目前的完整 sha；分支不存在是錯誤。
 fn branch_tip(repo: &Path, branch: &str) -> PortResult<String> {
     resolve(repo, &format!("refs/heads/{branch}"))?
@@ -849,5 +861,25 @@ mod tests {
         git_remove_worktree(&repo, &dir, &trash).unwrap();
         assert!(!dir.exists() && !trash.exists());
         assert_eq!(tip(&repo, &branch), tip_before);
+    }
+
+    #[test]
+    fn changed_paths_lists_files_between_two_revisions_including_both_sides_of_a_rename() {
+        let (_temp, repo) = init_repo();
+        let first = commit_file(&repo, "a.txt", "a
+", "a");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        commit_file(&repo, "src/b.rs", "b
+", "b");
+        sh(&repo, &["mv", "a.txt", "c.txt"]);
+        sh(&repo, &["commit", "-q", "-m", "rename"]);
+        let last = sh(&repo, &["rev-parse", "HEAD"]);
+
+        let mut changed = git_changed_paths(&repo, &first, &last).unwrap();
+        changed.sort();
+        assert_eq!(changed, ["a.txt", "c.txt", "src/b.rs"]);
+        assert!(git_changed_paths(&repo, &last, &last).unwrap().is_empty());
+        assert!(git_changed_paths(&repo, &first, "no-such-revision").is_err());
+        assert!(git_changed_paths(&repo, "--output=x", &last).is_err(), "不能被當成選項");
     }
 }

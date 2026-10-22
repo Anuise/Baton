@@ -36,6 +36,12 @@ use baton_domain::understanding::{
     ItemStatus, Section, KEY_MAX_CHARS as UNDERSTANDING_KEY_MAX_CHARS, SOURCES_MAX as UNDERSTANDING_SOURCES_MAX,
     TEXT_MAX_CHARS as UNDERSTANDING_TEXT_MAX_CHARS, TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING,
 };
+use baton_domain::review::{
+    Classification, CONTRACTS_MAX, DESIGN_MAX_CHARS, DETAIL_MAX_CHARS, FINDINGS_MAX, PATHS_MAX, PATH_MAX_CHARS,
+    REASON_MAX_CHARS as REVIEW_REASON_MAX_CHARS, REVISION_MAX_CHARS, SOURCE_MAX_CHARS,
+    SUMMARY_MAX_CHARS as REVIEW_SUMMARY_MAX_CHARS, TITLE_MAX_CHARS as FINDING_TITLE_MAX_CHARS, TOOL_CLASSIFY_FINDING,
+    TOOL_GET_REVIEWS, TOOL_REPORT_DESIGN_DEVIATION, TOOL_RESOLVE_DESIGN_DEVIATION, TOOL_SUBMIT_REVIEW,
+};
 use baton_domain::workflow::{
     Situation, EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
     TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
@@ -634,7 +640,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_RECORD_STAGE_RESULT,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：以證據回報目前 Stage 的結果。Runtime 依證據判定，不接受只有文字的「做完了」：outcome=passed 時每項 exit check 都要有經 Runtime 查驗的證據（artifact_id 是已登記的成果、decision_request_id 是已回答的裁定、task_id 是已通過成果接受的 Task、evidence_bundle_id 是判定為 passed 且依據目前 Profile 版本與需求版本的 Evidence Bundle），否則記為 incomplete（缺證據，留在原 Stage）或 blocked（裁定尚未回答）。failed 與 blocked 需要在 note 說明原因；failed 依 failure_route 處理，累計失敗達預算時 Workflow 被阻擋。只能回報目前 Stage（已通過的 Stage 不重跑，stage_not_current），必須帶讀到的 revision（不同時回 workflow_revision_mismatch，請重新讀取）。跳過 Stage 只能由使用者在桌面進行。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：以證據回報目前 Stage 的結果。Runtime 依證據判定，不接受只有文字的「做完了」：outcome=passed 時每項 exit check 都要有經 Runtime 查驗的證據（artifact_id 是已登記的成果、decision_request_id 是已回答的裁定、task_id 是已通過成果接受的 Task、review_id 是非作者 reviewer 提交且 Standards 與 Spec 兩軸都通過的審查、evidence_bundle_id 是判定為 passed 且依據目前 Profile 版本與需求版本的 Evidence Bundle；審查類 exit check 每一軸需要足夠數量的不同 reviewer，作者自己的摘要不算），否則記為 incomplete（缺證據，留在原 Stage）或 blocked（裁定尚未回答，或缺少獨立 reviewer 時 Gate 保持關閉）。failed 與 blocked 需要在 note 說明原因；failed 依 failure_route 處理，累計失敗達預算時 Workflow 被阻擋。只能回報目前 Stage（已通過的 Stage 不重跑，stage_not_current），必須帶讀到的 revision（不同時回 workflow_revision_mismatch，請重新讀取）。跳過 Stage 只能由使用者在桌面進行。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -649,7 +655,7 @@ fn tool_definitions() -> Value {
                     "evidence": {
                         "type": "array",
                         "maxItems": WORKFLOW_EVIDENCE_MAX,
-                        "description": "證據；每項指明 exit check，並剛好提供 artifact_id、decision_request_id、task_id 或 evidence_bundle_id 其中一個",
+                        "description": "證據；每項指明 exit check，並剛好提供 artifact_id、decision_request_id、task_id、review_id 或 evidence_bundle_id 其中一個",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -657,6 +663,10 @@ fn tool_definitions() -> Value {
                                 "artifact_id": { "type": "string", "description": "已登記的成果（register_artifact）" },
                                 "decision_request_id": { "type": "string", "description": "已回答的裁定請求" },
                                 "task_id": { "type": "string", "description": "已通過成果接受的 Task" },
+                                "review_id": {
+                                    "type": "string",
+                                    "description": "非作者 reviewer 提交、兩軸都通過的雙軸審查（submit_review）；每一軸需要 exit check 要求數量的不同 reviewer，不足時 Gate 保持關閉（blocked）",
+                                },
                                 "evidence_bundle_id": { "type": "string", "description": "判定為 passed 的 Evidence Bundle（見 get_verification）" },
                             },
                             "required": ["check"],
@@ -671,6 +681,93 @@ fn tool_definitions() -> Value {
             "name": TOOL_GET_WORKFLOWS,
             "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取可用的 Playbook（每個情境的最新版本：key、title、situation、applicability、version）與這個 Workspace 的 Workflow（目前 Stage、revision，以及每個 Stage 的 entry_conditions、expected_outputs、allowed_actions、budget、exit_checks、failure_route、gate 與 attempt 歷史）。換帳號或新的 Session 後從這裡接續，不要從頭跑。",
             "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            "name": TOOL_SUBMIT_REVIEW,
+            "description": "reviewer 提交對另一個 Task 的雙軸審查：Standards（是否符合規範，對照 standards_source）與 Spec（是否符合規格，對照被審 Task 目前的契約版本 spec_version）各自記錄與判定。作者不能審查自己的工作：被審 Task 的任何 Run，或沿用作者 Session 的 Run 提交會被拒絕（reviewer_is_author）；作者自己的摘要不是審查證據。spec_version 不是被審 Task 目前的契約版本時回 review_spec_outdated，請重新讀取契約後依目前版本審查。每一軸寫下檢查了什麼（summary）、審過的檔案或目錄（paths，之後要沿用這一軸時需要）與發現的問題（findings）；finding 由 Controller 分類處理，一軸的 finding 全部經使用者同意駁回才算通過。某一軸可用 reuse_from 沿用先前審查的同一軸（此時 summary、paths、findings 必須留空），只有能證明不受影響時 Runtime 才接受：同一個被審 Task、那一軸已通過、規格版本（Spec）或規範來源（Standards）相同、有記錄 paths，而且 Runtime 以 Git 計算兩個 candidate 之間變更的檔案沒有碰到那些 paths；否則回 review_reuse_rejected，請重新審查這一軸。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject_task_id": { "type": "string", "description": "被審的 Task（作者）" },
+                    "base_revision": { "type": "string", "maxLength": REVISION_MAX_CHARS, "description": "審查的基準 revision（例如 commit），不可含空白或以 - 開頭" },
+                    "candidate_revision": { "type": "string", "maxLength": REVISION_MAX_CHARS, "description": "被審的 candidate revision（例如 commit），不可含空白或以 - 開頭" },
+                    "spec_version": { "type": "integer", "minimum": 1, "description": "對照的規格版本：被審 Task 目前的契約版本" },
+                    "standards_source": { "type": "string", "maxLength": SOURCE_MAX_CHARS, "description": "規範來源（例如 AGENTS.md@<commit>）" },
+                    "standards": review_axis_schema("Standards 軸：是否符合規範（standards_source）"),
+                    "spec": review_axis_schema("Spec 軸：是否符合規格（被審 Task 的契約）"),
+                },
+                "required": ["subject_task_id", "base_revision", "candidate_revision", "spec_version", "standards_source", "standards", "spec"],
+            },
+        },
+        {
+            "name": TOOL_REPORT_DESIGN_DEVIATION,
+            "description": "實作必須偏離 Design Package（已登記為成果的設計）時回報，不要默默偏離。design_version 必須是設計成果目前的最新版本，否則回 design_outdated，請對照目前的設計重新回報。proposed_design 是接受後的完整設計內容；Controller 接受偏離需要使用者裁定，使用者核准後它會成為設計的下一個版本，拒絕時實作必須依照目前的設計。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "design_artifact_id": { "type": "string", "description": "Design Package 所在的成果" },
+                    "design_version": { "type": "integer", "minimum": 1, "description": "偏離時對照的設計版本（必須是目前的最新版本）" },
+                    "deviation": { "type": "string", "maxLength": DETAIL_MAX_CHARS, "description": "偏離了什麼" },
+                    "reason": { "type": "string", "maxLength": REVIEW_REASON_MAX_CHARS, "description": "為什麼必須偏離" },
+                    "affected_contracts": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": PATH_MAX_CHARS },
+                        "maxItems": CONTRACTS_MAX,
+                        "description": "受影響的契約（介面、資料格式、需求條款…）（選填）",
+                    },
+                    "proposed_design": {
+                        "type": "string",
+                        "maxLength": DESIGN_MAX_CHARS,
+                        "description": "接受後的完整設計內容（整份，不是差異）；使用者核准後成為設計的下一個版本",
+                    },
+                },
+                "required": ["design_artifact_id", "design_version", "deviation", "reason", "proposed_design"],
+            },
+        },
+        {
+            "name": TOOL_CLASSIFY_FINDING,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：依理由與證據分類一項審查 finding。fix（需要修正）可以自主處理，修正後要重新審查；dismiss（駁回）與 needs_decision（需要裁定）必須由使用者裁定：Runtime 回 requires_decision 並建立裁定請求，finding 標為 awaiting_decision，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用（核准駁回時 finding 變成 dismissed，沒有核准時改為 fix）。已駁回的 finding 不能再改分類（finding_resolved）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "finding_id": { "type": "string", "description": "要分類的 finding（見 get_reviews）" },
+                    "classification": {
+                        "type": "string",
+                        "enum": Classification::ALL.map(Classification::as_str),
+                        "description": "fix（需要修正，可自主處理）、dismiss（駁回，需使用者裁定）、needs_decision（需要使用者裁定）",
+                    },
+                    "reason": { "type": "string", "maxLength": REVIEW_REASON_MAX_CHARS, "description": "分類的理由與證據" },
+                    "evidence": { "type": "array", "items": { "type": "string" }, "description": "支持判斷的證據（選填）" },
+                },
+                "required": ["finding_id", "classification", "reason"],
+            },
+        },
+        {
+            "name": TOOL_RESOLVE_DESIGN_DEVIATION,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：處理 Worker 回報的設計偏離。reject（拒絕，實作必須依照目前的設計）可以自主處理；accept（接受）必須由使用者裁定：Runtime 回 requires_decision 並建立裁定請求，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用（核准時設計成果追加新版本，內容是偏離提出的設計；沒有核准時偏離改為已拒絕）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "deviation_id": { "type": "string", "description": "要處理的設計偏離（見 get_reviews）" },
+                    "resolution": {
+                        "type": "string",
+                        "enum": ["accept", "reject"],
+                        "description": "accept（接受，需使用者裁定）或 reject（拒絕，可自主處理）",
+                    },
+                    "reason": { "type": "string", "maxLength": REVIEW_REASON_MAX_CHARS, "description": "處理的理由" },
+                },
+                "required": ["deviation_id", "resolution", "reason"],
+            },
+        },
+        {
+            "name": TOOL_GET_REVIEWS,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取這個 Workspace 的雙軸審查與設計偏離，最新的在前。每份審查列出兩軸各自是否通過（passed）、finding 與其狀態、整份是否通過，以及過期原因（stale_reason：規格版本已改變，或已有對較新 candidate 的審查；仍有效時為 null）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "只列出與這個 Task 相關的審查與設計偏離（選填）" },
+                },
+            },
         },
         {
             "name": TOOL_RUN_VERIFICATION,
@@ -693,6 +790,38 @@ fn tool_definitions() -> Value {
             "inputSchema": { "type": "object", "properties": {} },
         },
     ])
+}
+
+/// submit_review 每一軸的欄位（Standards 與 Spec 相同）。
+fn review_axis_schema(description: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": format!("{description}；用 reuse_from 沿用先前審查的這一軸時，其他欄位留空"),
+        "properties": {
+            "summary": { "type": "string", "maxLength": REVIEW_SUMMARY_MAX_CHARS, "description": "檢查了什麼、對照什麼" },
+            "paths": {
+                "type": "array",
+                "items": { "type": "string", "maxLength": PATH_MAX_CHARS },
+                "maxItems": PATHS_MAX,
+                "description": "審過的檔案或目錄（相對 repo 根目錄，. 代表整個 repo）；沒有記錄時這一軸之後不能被沿用",
+            },
+            "findings": {
+                "type": "array",
+                "maxItems": FINDINGS_MAX,
+                "description": "發現的問題；沒有就給空陣列",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "maxLength": FINDING_TITLE_MAX_CHARS, "description": "問題的簡短標題" },
+                        "detail": { "type": "string", "maxLength": DETAIL_MAX_CHARS, "description": "詳細說明（選填）" },
+                        "location": { "type": "string", "maxLength": PATH_MAX_CHARS, "description": "位置，例如 src/export.rs:42（選填）" },
+                    },
+                    "required": ["title"],
+                },
+            },
+            "reuse_from": { "type": "string", "description": "沿用先前審查（review id）的這一軸（選填）" },
+        },
+    })
 }
 
 /// propose_task 與 update_task 的契約欄位說明（六項最小契約，見 ADR-0011）。
@@ -728,6 +857,11 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_START_WORKFLOW,
         TOOL_RECORD_STAGE_RESULT,
         TOOL_GET_WORKFLOWS,
+        TOOL_SUBMIT_REVIEW,
+        TOOL_REPORT_DESIGN_DEVIATION,
+        TOOL_CLASSIFY_FINDING,
+        TOOL_RESOLVE_DESIGN_DEVIATION,
+        TOOL_GET_REVIEWS,
         TOOL_RUN_VERIFICATION,
         TOOL_GET_VERIFICATION,
     ];

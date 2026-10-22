@@ -1211,6 +1211,22 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版讀取審查與設計偏離", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+
+    await createHttpClient(fetchFn as unknown as typeof fetch).reviews("ws/1");
+
+    expect(fetchFn.mock.calls).toEqual([["/api/v1/workspaces/ws%2F1/reviews"]]);
+  });
+
+  it("Tauri 版以指令與 camelCase 參數讀取審查與設計偏離", async () => {
+    const invoke = vi.fn(async () => ({}));
+
+    await createTauriClient(invoke as never).reviews("ws_1");
+
+    expect(invoke.mock.calls).toEqual([["workspace_reviews", { workspaceId: "ws_1" }]]);
+  });
+
   it("HTTP 版讀取驗證概況與 Evidence Bundle，並以 JSON 發布 Profile 與要求執行", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);

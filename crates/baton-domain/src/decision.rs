@@ -550,6 +550,9 @@ pub struct ActionContent {
     pub reason: String,
     pub evidence: Vec<String>,
     pub urgency: Urgency,
+    /// 同一個 Task 內的操作對象（例如某個 review finding、某個設計偏離，票 44）；有的話只有同一個對象才視為同一個操作，
+    /// 核准不會被同一個 Task 的其他對象用掉。
+    pub subject: Option<String>,
 }
 
 impl ActionContent {
@@ -568,7 +571,14 @@ impl ActionContent {
             reason: clean_text("理由", reason, REASON_MAX_CHARS)?,
             evidence: clean_evidence(evidence)?,
             urgency: urgency.unwrap_or(Urgency::Normal),
+            subject: None,
         })
+    }
+
+    /// 指定操作對象（見 `subject`）。
+    pub fn with_subject(mut self, subject: &str) -> Self {
+        self.subject = Some(subject.to_string());
+        self
     }
 }
 
@@ -1392,7 +1402,10 @@ fn controller_action(
         Authority::RequiresDecision => {}
     }
 
-    let fingerprint = format!("{}:{}", matter.as_str(), target.id);
+    let fingerprint = match &content.subject {
+        Some(subject) => format!("{}:{}:{subject}", matter.as_str(), target.id),
+        None => format!("{}:{}", matter.as_str(), target.id),
+    };
     let same_operation = |r: &DecisionRequest| {
         r.kind == DecisionKind::Authority && r.authority.as_ref().is_some_and(|a| a.fingerprint == fingerprint)
     };

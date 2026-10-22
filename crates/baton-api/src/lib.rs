@@ -32,6 +32,7 @@ mod understanding;
 mod verification;
 mod verification_profiles;
 pub mod workdirs;
+mod reviews;
 mod workflows;
 mod workspaces;
 
@@ -55,6 +56,9 @@ use baton_domain::guardian::GuardianStatus;
 use baton_domain::storage_health::StorageHealth;
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING};
+use baton_domain::review::{
+    TOOL_CLASSIFY_FINDING, TOOL_GET_REVIEWS, TOOL_REPORT_DESIGN_DEVIATION, TOOL_RESOLVE_DESIGN_DEVIATION, TOOL_SUBMIT_REVIEW,
+};
 use baton_domain::verification_profile::{TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION};
 use baton_domain::workflow::{TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
@@ -126,6 +130,9 @@ pub use timeline::{metrics_path, timeline_path, MetricsResponse, ServerQuota, Ti
 pub use understanding::{
     projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, RecordUnderstandingResponse,
     SourceView, UnderstandingItemView, UnderstandingView,
+};
+pub use reviews::{
+    reviews_path, AxisView, ClassifyFindingResponse, DeviationView, ResolveDeviationResponse, ReviewList, ReviewView,
 };
 pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
 pub use verification_profiles::{
@@ -296,6 +303,7 @@ pub fn router(state: ApiState) -> Router {
         .route(PLAYBOOKS_PATH, get(workflows::catalog).post(workflows::publish))
         .route(workflows::WORKFLOWS_ROUTE, get(workflows::list))
         .route(workflows::SKIP_ROUTE, post(workflows::skip))
+        .route(reviews::REVIEWS_ROUTE, get(reviews::list))
         .route(verification_profiles::VERIFICATION_ROUTE, get(verification_profiles::overview))
         .route(verification_profiles::PROFILE_ROUTE, post(verification_profiles::publish))
         .route(verification_profiles::RUNS_ROUTE, post(verification_profiles::run))
@@ -361,6 +369,11 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_START_WORKFLOW), post(workflows::start_workflow))
         .route(&tool_path(TOOL_RECORD_STAGE_RESULT), post(workflows::record_stage_result))
         .route(&tool_path(TOOL_GET_WORKFLOWS), post(workflows::get_workflows))
+        .route(&tool_path(TOOL_SUBMIT_REVIEW), post(reviews::submit_review))
+        .route(&tool_path(TOOL_REPORT_DESIGN_DEVIATION), post(reviews::report_design_deviation))
+        .route(&tool_path(TOOL_CLASSIFY_FINDING), post(reviews::classify_review_finding))
+        .route(&tool_path(TOOL_RESOLVE_DESIGN_DEVIATION), post(reviews::resolve_design_deviation))
+        .route(&tool_path(TOOL_GET_REVIEWS), post(reviews::get_reviews))
         .route(&tool_path(TOOL_RUN_VERIFICATION), post(verification_profiles::run_verification))
         .route(&tool_path(TOOL_GET_VERIFICATION), post(verification_profiles::get_verification))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法

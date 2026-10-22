@@ -422,7 +422,23 @@ async fn skipping_a_stage_keeps_the_reason_and_decision_or_safety_gates_cannot_b
     workflow = body["workflow"].clone();
     workflow = w.pass_with_artifact(&token, &worker, &workflow).await;
     workflow = w.pass_with_artifact(&token, &worker, &workflow).await;
-    workflow = w.pass_with_artifact(&token, &worker, &workflow).await;
+    // 獨立審查需要非作者 reviewer 的雙軸審查（票 44）：證據 Worker 是另一個 Task，可以擔任 reviewer
+    assert_eq!(workflow["current_stage"], "independent_review");
+    let axis = json!({ "summary": "已審查", "paths": ["src"], "findings": [] });
+    let review = json!({
+        "subject_task_id": task,
+        "base_revision": "base",
+        "candidate_revision": "c1",
+        "spec_version": 1,
+        "standards_source": "AGENTS.md",
+        "standards": axis,
+        "spec": axis,
+    });
+    let (status, reviewed) = w.h().call_tool(&worker, "submit_review", review).await;
+    assert_eq!(status, StatusCode::CREATED, "{reviewed}");
+    let (_, body) = w.record(&token, &workflow, "passed", json!([{ "check": "review", "review_id": reviewed["id"] }]), "").await;
+    assert_eq!(body["attempt"]["outcome"], "passed", "{body}");
+    workflow = body["workflow"].clone();
     // 整合是安全 Gate，需要 Task 通過成果接受
     assert_eq!(workflow["current_stage"], "integration");
     let (status, body) = w.skip(&workflow, "integration", "直接合併").await;

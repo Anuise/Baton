@@ -1860,6 +1860,65 @@ body {
   align-items: center;
 }
 
+.review-page {
+  display: grid;
+  gap: 12px;
+}
+
+.review-page h3 {
+  margin: 0;
+}
+
+.review {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.review h4,
+.review h5,
+.review p {
+  margin: 0;
+}
+
+.review-badge {
+  font-weight: 600;
+}
+
+.review-passed .review-badge,
+.deviation-accepted .review-badge,
+.axis-passed h5 {
+  color: #1a7f37;
+}
+
+.review-failed .review-badge,
+.axis-failed h5 {
+  color: #cf222e;
+}
+
+.review-stale .review-badge,
+.deviation-awaiting_decision .review-badge {
+  color: #9a6700;
+}
+
+.review-axis {
+  display: grid;
+  gap: 4px;
+  padding-left: 8px;
+  border-left: 3px solid #d0d7de;
+  font-size: 13px;
+}
+
+.review-reused {
+  color: #656d76;
+}
+
+.review-finding {
+  overflow-wrap: anywhere;
+}
+
 .verification-page {
   display: grid;
   gap: 12px;
