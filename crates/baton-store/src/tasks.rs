@@ -6,6 +6,7 @@
 use baton_domain::authorization::AuthorizationRevision;
 use baton_domain::agent::ReportRecord;
 use baton_domain::budget::{self, BudgetView, TaskBudget};
+use baton_domain::decision::{self, DecisionAction, DecisionOption};
 use baton_domain::guard::ActiveGuard;
 use baton_domain::run::{ExecutionLease, Run, RunView};
 use baton_domain::session::AgentSession;
@@ -13,7 +14,7 @@ use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
 use baton_domain::workdir::{TaskKind, Workdir, WorkdirView};
 use baton_domain::task::{
-    DecisionHold,
+    Assumption, DecisionHold, Overturn,
     self, ContractContent, Dependency, Goal, MissingItem, Task, TaskChange, TaskCommand, TaskContext, TaskContract,
     TaskError, TaskStatus, TaskView,
 };
@@ -86,6 +87,8 @@ pub(crate) struct Loaded {
     pub(crate) budgets: Vec<TaskBudget>,
     /// Controller 提出、尚未回答的裁定請求所阻擋的 Task（票 17）。
     pub(crate) decision_holds: Vec<DecisionHold>,
+    /// 裁定請求作為 Task 依據（假設）的狀態（票 50）。
+    pub(crate) assumptions: Vec<Assumption>,
 }
 
 impl Loaded {
@@ -99,6 +102,7 @@ impl Loaded {
             dependencies: &self.dependencies,
             contracts: &self.contracts,
             decision_holds: &self.decision_holds,
+            assumptions: &self.assumptions,
         }
     }
 }
@@ -326,6 +330,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
             Ok(DecisionHold { task_id: r.get(0)?, request_id: r.get(1)?, question: r.get(2)? })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let assumptions = load_assumptions(conn, workspace_id)?;
     Ok(Loaded {
         workspace,
         authorization,
@@ -342,7 +347,34 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
         sessions,
         budgets,
         decision_holds,
+        assumptions,
     })
+}
+
+/// 這個 Workspace 每個裁定請求作為 Task 依據（假設）的狀態：裁定與建議不同就是推翻（票 50）。
+pub(crate) fn load_assumptions(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<Assumption>> {
+    conn.prepare(
+        "SELECT r.id, r.revision, r.question, r.options, r.recommendation, d.action, d.option_id, d.decided_at
+         FROM decision_request r LEFT JOIN decision d ON d.request_id = r.id
+         WHERE r.workspace_id = ?1 ORDER BY r.rowid",
+    )?
+    .query_map([workspace_id], |r| {
+        let options: Vec<DecisionOption> = json_column(3, &r.get::<_, String>(3)?)?;
+        let recommendation: Option<String> = r.get(4)?;
+        let action: Option<String> = r.get(5)?;
+        let option_id: Option<String> = r.get(6)?;
+        let decided_at: Option<i64> = r.get(7)?;
+        let question: String = r.get(2)?;
+        let overturned = match (action.as_deref().and_then(DecisionAction::parse), decided_at) {
+            (Some(action), Some(at)) => {
+                decision::describe_overturn(&question, &options, recommendation.as_deref(), action, option_id.as_deref())
+                    .map(|reason| Overturn { decided_at: Timestamp::from_millis(at), reason })
+            }
+            _ => None,
+        };
+        Ok(Assumption { request_id: r.get(0)?, revision: r.get(1)?, overturned })
+    })?
+    .collect()
 }
 
 fn contract_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskContract> {

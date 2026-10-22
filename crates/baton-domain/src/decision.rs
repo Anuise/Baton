@@ -1778,17 +1778,34 @@ pub fn overturns_assumption(recommendation: Option<&str>, action: DecisionAction
 
 /// 推翻假設的說明（給受影響的 Task 與請求看）；裁定確認了建議時為 `None`。
 pub fn overturn_reason(request: &DecisionRequest, decision: &Decision) -> Option<String> {
-    if !overturns_assumption(request.recommendation.as_deref(), decision.action, decision.option_id.as_deref()) {
+    describe_overturn(
+        &request.question,
+        &request.options,
+        request.recommendation.as_deref(),
+        decision.action,
+        decision.option_id.as_deref(),
+    )
+}
+
+/// 同 [`overturn_reason`]，以請求與裁定的欄位計算（Store 載入假設狀態時用）。
+pub fn describe_overturn(
+    question: &str,
+    options: &[DecisionOption],
+    recommendation: Option<&str>,
+    action: DecisionAction,
+    option_id: Option<&str>,
+) -> Option<String> {
+    if !overturns_assumption(recommendation, action, option_id) {
         return None;
     }
-    let label = |id: &str| request.option(id).map_or(id.to_string(), |o| o.label.clone());
-    let chosen = match &decision.option_id {
-        Some(option) => format!("{}「{}」", decision.action.label(), label(option)),
-        None => decision.action.label().to_string(),
+    let label = |id: &str| options.iter().find(|o| o.id == id).map_or(id.to_string(), |o| o.label.clone());
+    let chosen = match option_id {
+        Some(option) => format!("{}「{}」", action.label(), label(option)),
+        None => action.label().to_string(),
     };
-    Some(match &request.recommendation {
-        Some(recommended) => format!("使用者對「{}」的裁定是{chosen}，不是建議的「{}」", request.question, label(recommended)),
-        None => format!("使用者對「{}」的裁定是{chosen}", request.question),
+    Some(match recommendation {
+        Some(recommended) => format!("使用者對「{question}」的裁定是{chosen}，不是建議的「{}」", label(recommended)),
+        None => format!("使用者對「{question}」的裁定是{chosen}"),
     })
 }
 

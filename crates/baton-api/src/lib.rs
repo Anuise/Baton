@@ -65,7 +65,7 @@ use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
 use baton_ports::{
     ClaudeEnvironment, Clock, GuardianProbe, PlatformInfo, QuotaObserver, StartupRegistration, UserSettingsSource,
-    WorkspaceFs,
+    VerificationDriver, WorkspaceFs,
 };
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
@@ -245,6 +245,8 @@ pub struct ApiState {
     pub updates: Arc<dyn UpdateControl>,
     /// 專案理解投影檔的比對與寫入一次只做一個（票 42）。
     pub projection_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 驗證 Adapter 的 Port（票 45）；回報 Stage 結果前以它觀察受驗目錄目前的 build（票 50）。
+    pub verification_driver: Arc<dyn VerificationDriver>,
 }
 
 pub fn router(state: ApiState) -> Router {
