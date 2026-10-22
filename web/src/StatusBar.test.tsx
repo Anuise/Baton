@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { supportedPlatform, unofficialPlatform } from "./fixtures";
+import { recoveryEvent, recoveryStatus, supportedPlatform, unofficialPlatform } from "./fixtures";
 import { StatusBar } from "./StatusBar";
 import type { HealthResponse, PlatformResponse, RuntimeClient } from "./runtimeClient";
 
@@ -138,6 +138,60 @@ describe("頂部狀態列", () => {
     await settle();
 
     expect(screen.getByText("待裁定：0")).toBeInTheDocument();
+  });
+
+  describe("崩潰恢復事件", () => {
+    it("恢復進行中時顯示本輪次數，並在輪詢時更新", async () => {
+      const client = {
+        ...clientReturning("ok"),
+        recoveryStatus: vi
+          .fn()
+          .mockResolvedValueOnce(recoveryStatus({ event: recoveryEvent({ status: "attempting", attempts_used: 1 }) }))
+          .mockResolvedValue(recoveryStatus({ event: recoveryEvent({ status: "waiting", attempts_used: 2 }) })),
+      };
+      render(<StatusBar client={client} pollMs={5000} />);
+
+      await settle();
+      expect(screen.getByText("恢復中（1/3）")).toBeInTheDocument();
+
+      await settle(5000);
+      expect(screen.getByText("恢復中（2/3）")).toBeInTheDocument();
+    });
+
+    it("恢復額度用盡時顯示用盡", async () => {
+      const event = recoveryEvent({ status: "exhausted", attempts_used: 3 });
+      const client = { ...clientReturning("ok"), recoveryStatus: vi.fn(async () => recoveryStatus({ event, can_retry: true })) };
+      render(<StatusBar client={client} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.getByText("恢復額度用盡")).toBeInTheDocument();
+    });
+
+    it("沒有恢復事件或已恢復時不顯示", async () => {
+      const recovery = vi
+        .fn()
+        .mockResolvedValueOnce(recoveryStatus())
+        .mockResolvedValue(recoveryStatus({ event: recoveryEvent({ status: "succeeded", closed_at: 1 }) }));
+      render(<StatusBar client={{ ...clientReturning("ok"), recoveryStatus: recovery }} pollMs={5000} />);
+
+      await settle();
+      expect(screen.queryByText(/恢復/)).not.toBeInTheDocument();
+
+      await settle(5000);
+      expect(recovery).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText(/恢復/)).not.toBeInTheDocument();
+    });
+
+    it("讀不到恢復狀態時不顯示該欄位，也不影響 Runtime 狀態", async () => {
+      const client = { ...clientReturning("ok"), recoveryStatus: vi.fn(async () => Promise.reject(new Error("boom"))) };
+      render(<StatusBar client={client} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.queryByText(/恢復/)).not.toBeInTheDocument();
+      expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+    });
   });
 
   describe("控制資料庫儲存故障", () => {

@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
 
 import { platformStatusLabel } from "./PlatformPage";
-import type { DecisionClient, HealthResponse, PendingDecisions, PlatformResponse, RuntimeClient } from "./runtimeClient";
+import type {
+  DecisionClient,
+  HealthResponse,
+  PendingDecisions,
+  PlatformResponse,
+  RecoveryClient,
+  RecoveryStatusView,
+  RuntimeClient,
+} from "./runtimeClient";
 
 type RuntimeStatus =
   | { state: "checking" }
@@ -9,8 +17,8 @@ type RuntimeStatus =
   | { state: "offline"; reason: string };
 
 interface Props {
-  /** 有 `pendingDecisions` 時才顯示待裁定數。 */
-  client: RuntimeClient & Partial<Pick<DecisionClient, "pendingDecisions">>;
+  /** 有 `pendingDecisions` 時才顯示待裁定數；有 `recoveryStatus` 時才顯示恢復事件狀態。 */
+  client: RuntimeClient & Partial<Pick<DecisionClient, "pendingDecisions">> & Partial<Pick<RecoveryClient, "recoveryStatus">>;
   /** 重新檢查的間隔（毫秒）。 */
   pollMs?: number;
   onHealth?: (health: HealthResponse | null) => void;
@@ -27,6 +35,8 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
   const [platform, setPlatform] = useState<PlatformResponse | null>(null);
   // null：尚未取得或讀取失敗，不顯示待裁定數
   const [pending, setPending] = useState<PendingDecisions | null>(null);
+  // null：尚未取得或讀取失敗，不顯示恢復事件狀態
+  const [recovery, setRecovery] = useState<RecoveryStatusView | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,6 +53,8 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
           setPending(pending);
           onPending?.(pending);
         }
+        const recovery = (await client.recoveryStatus?.().catch(() => null)) ?? null;
+        if (!cancelled) setRecovery(recovery);
       } catch (error) {
         if (cancelled) return;
         setStatus({ state: "offline", reason: error instanceof Error ? error.message : String(error) });
@@ -75,6 +87,14 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
       {status.state === "running" && pending !== null && (
         <span className={`status status-decisions${pending.pending_count > 0 ? " status-decisions-pending" : ""}`}>
           待裁定：{pending.pending_count}
+        </span>
+      )}
+      {/* 恢復事件未結束時固定顯示（spec D-21）；已恢復就不再佔位 */}
+      {status.state === "running" && recovery?.event != null && recovery.event.status !== "succeeded" && (
+        <span className={`status status-recovery status-recovery-${recovery.event.status}`}>
+          {recovery.event.status === "exhausted"
+            ? "恢復額度用盡"
+            : `恢復中（${recovery.event.attempts_used}/${recovery.max_attempts}）`}
         </span>
       )}
       {status.state === "running" && status.health.storage?.dispatch_halted && (
