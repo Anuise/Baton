@@ -428,6 +428,58 @@ body {
   gap: 8px;
 }
 
+.profile-quota {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 13px;
+}
+
+.quota-used {
+  font-weight: 600;
+}
+
+.quota-incomplete {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 6px 10px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c66;
+  border-radius: 6px;
+}
+
+.quota-windows {
+  flex-basis: 100%;
+  margin: 0;
+  padding-left: 16px;
+}
+
+.quota-windows li {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.quota-window-label {
+  font-weight: 600;
+}
+
+.quota-limits {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.quota-limits-hint {
+  color: #656d76;
+}
+
 .profile-form {
   display: flex;
   flex-direction: column;

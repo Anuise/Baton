@@ -26,6 +26,7 @@ function fakeClient(initial: SchedulingOverview = schedulingOverview()) {
       };
       return current;
     }),
+    setQuotaLimits: vi.fn(async () => current),
   };
   return client;
 }

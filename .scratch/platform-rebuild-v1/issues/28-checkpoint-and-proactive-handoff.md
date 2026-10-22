@@ -18,3 +18,5 @@ Blocked by: 27, 15
 - [ ] 以主要 seam（Runtime harness，spec D-04）撰寫的情境測試涵蓋本票行為並通過；本票所做的 AI 決策已追加至 ai-decisions.md
 
 ## Comments
+
+- 2026-10-22 主控：票 27 驗證 R046 的觀察——`crates/baton-domain/src/quota.rs` 判斷視窗是否缺少已觀測用量時用 `judged_used().is_none()`，沒有數字的 warning 訊號會回 `Some(0.75)` 而被當成完整，與 AI-124 不一致。請在本票改成「`used.is_some()` 或 `status == Exhausted`」並補 Domain 測試。
