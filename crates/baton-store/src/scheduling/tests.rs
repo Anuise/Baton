@@ -160,7 +160,7 @@ async fn waiting_requests_queue_by_priority_and_leave_the_queue_when_the_task_is
     store.apply_task_command("w1".into(), TaskCommand::Cancel { task_id: "t2".into() }, T2).await.unwrap();
 
     assert_eq!(queued_task_ids(dir.path()), vec!["t1".to_string()]);
-    let snapshot = store.scheduling_snapshot(HashMap::new()).await.unwrap();
+    let snapshot = store.scheduling_snapshot(HashMap::new(), T2).await.unwrap();
     assert_eq!(snapshot.queue.len(), 1);
     assert_eq!(snapshot.queue[0].0.task_id, "t1");
 }
@@ -170,10 +170,10 @@ async fn waiting_reasons_are_recomputed_from_the_current_state_instead_of_stored
     let dir = tempfile::tempdir().unwrap();
     let store = store_with_ready_tasks(dir.path(), &["t1"]).await;
     store.schedule(request("t1", 0), HashMap::new(), T2, run_ids()).await.unwrap();
-    let before = store.scheduling_snapshot(HashMap::new()).await.unwrap();
+    let before = store.scheduling_snapshot(HashMap::new(), T2).await.unwrap();
 
     add_profile(&store, "p1").await;
-    let after = store.scheduling_snapshot(HashMap::new()).await.unwrap();
+    let after = store.scheduling_snapshot(HashMap::new(), T2).await.unwrap();
 
     assert_eq!(before.queue[0].1[0].code, "no_account");
     assert!(after.queue[0].1.is_empty(), "有了可用帳號，原因就消失（等排程處理）");

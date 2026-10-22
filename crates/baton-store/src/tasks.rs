@@ -5,6 +5,7 @@
 
 use baton_domain::authorization::AuthorizationRevision;
 use baton_domain::agent::ReportRecord;
+use baton_domain::guard::ActiveGuard;
 use baton_domain::run::{ExecutionLease, Run, RunView};
 use baton_domain::verification::VerificationRecord;
 use baton_domain::task::{
@@ -58,6 +59,8 @@ pub(crate) struct Loaded {
     pub(crate) leases: Vec<ExecutionLease>,
     /// 每個 Run 每種回報最新一筆被接受的回報（給面板顯示用）。
     pub(crate) reports: Vec<ReportRecord>,
+    /// Run 准入時要檢查的 Guard；只有派工路徑以 `guards::load_active_guards` 填入，其他路徑是空的（票 38）。
+    pub(crate) guards: Vec<ActiveGuard>,
 }
 
 impl Loaded {
@@ -233,7 +236,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
     let runs = super::runs::load_runs(conn, workspace_id)?;
     let leases = super::runs::load_leases(conn, workspace_id)?;
     let reports = super::agent::load_latest_reports(conn, workspace_id)?;
-    Ok(Loaded { workspace, authorization, goals, tasks, dependencies, contracts, runs, leases, reports })
+    Ok(Loaded { workspace, authorization, goals, tasks, dependencies, contracts, runs, leases, reports, guards: Vec::new() })
 }
 
 fn contract_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskContract> {

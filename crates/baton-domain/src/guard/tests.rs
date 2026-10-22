@@ -266,12 +266,14 @@ fn a_prevented_recurrence_points_at_the_lesson_and_guard_and_is_keyed_by_task_co
     let lesson = lesson();
     let guards = [active(guard_for(&lesson, preflight()), lesson)];
     let violation = violations(&guards, &task("t1"), &contract("x", vec![]), &[]).remove(0);
-    let (recurrence, event) = prevented(&violation, &task("t1"), T1);
+    let (recurrence, event) = prevented(&violation.source(), &violation.message, &task("t1"), T1);
     assert_eq!(recurrence.kind, RecurrenceKind::Prevented);
     assert_eq!(recurrence.lesson_id, "k1");
     assert_eq!(recurrence.guard_id.as_deref(), Some("g1"));
     assert_eq!((recurrence.task_id.as_deref(), recurrence.contract_version), (Some("t1"), Some(1)));
-    assert_eq!(recurrence.id, prevented(&violation, &task("t1"), T0).0.id, "同一個 Guard、Task 與契約版本只記一次");
+    assert_eq!(recurrence.message, violation.message);
+    let again = prevented(&violation.source(), &violation.message, &task("t1"), T0).0;
+    assert_eq!(recurrence.id, again.id, "同一個 Guard、Task 與契約版本只記一次");
     assert_eq!(event.event_type, EVENT_RECURRENCE_RECORDED);
     assert_eq!(event.payload["lesson_id"], "k1");
 }

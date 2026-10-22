@@ -382,17 +382,18 @@ fn recurrence_event(recurrence: &Recurrence) -> DomainEvent {
     }
 }
 
-/// Guard 攔下一個 Task 的重犯事件。識別由 Guard、Task 與契約版本決定，所以佇列每次重試看到同一個違反只會記一次。
-pub fn prevented(violation: &GuardViolation, task: &Task, now: Timestamp) -> (Recurrence, DomainEvent) {
+/// Guard 攔下一個 Task 的重犯事件（`message` 是擋下的原因）。識別由 Guard、Task 與契約版本決定，
+/// 所以佇列每次重試看到同一個違反只會記一次。
+pub fn prevented(source: &GuardSource, message: &str, task: &Task, now: Timestamp) -> (Recurrence, DomainEvent) {
     let recurrence = Recurrence {
-        id: format!("rec-{}-{}-v{}", violation.guard_id, task.id, task.contract_version),
-        lesson_id: violation.lesson_id.clone(),
-        guard_id: Some(violation.guard_id.clone()),
+        id: format!("rec-{}-{}-v{}", source.guard_id, task.id, task.contract_version),
+        lesson_id: source.lesson_id.clone(),
+        guard_id: Some(source.guard_id.clone()),
         workspace_id: Some(task.workspace_id.clone()),
         task_id: Some(task.id.clone()),
         contract_version: Some(task.contract_version),
         kind: RecurrenceKind::Prevented,
-        message: violation.message.clone(),
+        message: message.to_string(),
         occurred_at: now,
     };
     let event = recurrence_event(&recurrence);

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{BlockedNote, CheckpointNote, ProgressNote, ReportContent, ReportRecord};
 use crate::authorization::{self, AdmissionDenied};
 use crate::event::DomainEvent;
+use crate::guard::{self, ActiveGuard, GuardViolation};
 use crate::task::{
     self, ContractContent, ContractField, ContractFieldName, MissingItem, Task, TaskContext, TaskStatus, Versioned,
 };
@@ -331,6 +332,8 @@ pub enum RunError {
     AdmissionDenied(Vec<MissingItem>),
     #[error(transparent)]
     AdmissionRejected(#[from] AdmissionDenied),
+    #[error("Guard 擋下了派工：{}", join_violations(.0))]
+    GuardViolated(Vec<GuardViolation>),
     #[error("還有相依的 Task 沒有完成：{}", .0.join("、"))]
     DependenciesUnfinished(Vec<String>),
     #[error("Task {task_id} 已經有 Run {run_id} 持有寫入所有權，不能同時派第二個")]
@@ -351,6 +354,10 @@ fn join_messages(items: &[MissingItem]) -> String {
     items.iter().map(|i| i.message.as_str()).collect::<Vec<_>>().join("；")
 }
 
+fn join_violations(items: &[GuardViolation]) -> String {
+    items.iter().map(|v| format!("{}（來源教訓「{}」）", v.message, v.lesson_title)).collect::<Vec<_>>().join("；")
+}
+
 impl RunError {
     /// 穩定的機器可讀代碼，API 與 UI 依它判斷錯誤種類。
     pub fn code(&self) -> &'static str {
@@ -361,6 +368,7 @@ impl RunError {
             RunError::TaskNotReady(_) => "task_not_ready",
             RunError::AdmissionDenied(_) => "task_admission_denied",
             RunError::AdmissionRejected(_) => "admission_rejected",
+            RunError::GuardViolated(_) => "guard_violated",
             RunError::DependenciesUnfinished(_) => "dependencies_unfinished",
             RunError::ExecutionConflict { .. } => "execution_conflict",
             RunError::TransitionInvalid { .. } => "run_transition_invalid",
@@ -379,6 +387,8 @@ pub struct RunContext<'a> {
     pub task: &'a TaskContext<'a>,
     pub runs: &'a [Run],
     pub leases: &'a [ExecutionLease],
+    /// Run 准入時要檢查的 Guard（Store 已篩出「啟用且來源教訓現在有效」者；範圍由 `guard::violations` 判定）。
+    pub guards: &'a [ActiveGuard],
 }
 
 impl RunContext<'_> {
@@ -671,7 +681,7 @@ struct Checked<'a> {
 }
 
 /// 派工的前置檢查（與帳號、容量無關）：Task 必須是 `ready`、沒有人持有寫入所有權、准入檢查通過（授權可能在
-/// ready 之後被撤銷，AI-61）、相依都已完成。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
+/// ready 之後被撤銷，AI-61）、適用的 Guard 都沒有違反（票 38）、相依都已完成。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
 pub fn check_dispatch(ctx: &RunContext<'_>, task_id: &str) -> Result<(), RunError> {
     check_dispatch_inner(ctx, task_id).map(|_| ())
 }
@@ -697,6 +707,11 @@ fn check_dispatch_inner<'a>(ctx: &'a RunContext<'a>, task_id: &str) -> Result<Ch
         ctx.task.authorization,
         &contract.content.required_capabilities,
     )?;
+    // 已驗證教訓轉成的 Guard：在 Run 准入時檢查，違反就不派（票 38）
+    let violations = guard::violations(ctx.guards, task, contract, ctx.runs);
+    if !violations.is_empty() {
+        return Err(RunError::GuardViolated(violations));
+    }
     // 相依是否完成是派工時才檢查的條件（AI-61）
     let unfinished: Vec<String> = ctx
         .task
