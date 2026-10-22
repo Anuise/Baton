@@ -180,3 +180,24 @@ fn the_unread_summary_lists_subjects_but_never_bodies_and_notes_the_overflow() {
     assert!(text.contains("[question] API 的欄位名稱（來自 Task「後端」，m1）"));
     assert!(text.contains("另有 2 則"));
 }
+
+#[test]
+fn a_scope_change_attempt_becomes_a_controller_event_that_names_who_tried_what() {
+    let attempt = ScopeChangeAttempt {
+        attempted_kind: Some("reassign".into()),
+        attempted_fields: vec!["owner".into()],
+        recipients: vec!["task_b".into()],
+        subject: "改歸屬".into(),
+        body_excerpt: "請改成我負責".into(),
+    };
+
+    let event = attempt.into_event(&sender(true), "msg_attempt".into(), NOW);
+
+    assert_eq!((event.aggregate_type, event.aggregate_id.as_str(), event.aggregate_version), ("message", "msg_attempt", 1));
+    assert_eq!(event.event_type, EVENT_MESSAGE_SCOPE_CHANGE_IGNORED);
+    assert_eq!(event.occurred_at, NOW);
+    assert_eq!(event.payload["task_id"], "task_a");
+    assert_eq!(event.payload["run_id"], "run_a");
+    assert_eq!(event.payload["attempted_fields"], serde_json::json!(["owner"]));
+    assert_eq!(event.payload["reason"], SCOPE_CHANGE_REASON);
+}

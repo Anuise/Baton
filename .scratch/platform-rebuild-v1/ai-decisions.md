@@ -865,6 +865,46 @@
 - 影響：標頭值若在 `guard.rs` 改變，shim 內的常數要同步。**Validation Required（票 14）**：以真實 Claude Code 驗證協定協商、工具清單顯示與 `isError` 的呈現；shim 的實際輸出沒有 Claude Code 端的契約測試。
 - 審閱：未審
 
+### AI-94：訊息的收件人是同一個 Workspace 的 Task；收件匣跟著 Task，不跟著 Run
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：`send_message` 的 `to` 是同一個 Workspace 內其他 Task 的 id（1 到 10 個，去除重複，不能含自己的 Task）；收件 Task 不必有進行中的 Run。每個收件 Task 一筆交付（主鍵 workspace＋message_id＋收件 Task）。`read_inbox` 只回傳寄給「憑證所屬 Run 的 Task」的訊息：交接或重試後的新 Run（新世代）會接到前一個 Run 沒讀完的訊息；自己寄出的訊息不在自己的收件匣。收件 Task 不存在或屬於別的 Workspace 一律回 404 `recipient_not_found`，不洩漏別的 Workspace 是否有那個 Task。`in_reply_to` 只能指向寄件者自己寄過或收到的訊息，否則回 404 `reply_target_not_found`。Controller 與使用者目前不是收件人（Controller 的訊息通道由後續票處理）。
+- 理由：Task 才是跨 Run 穩定的歸屬單位（glossary：交接會結束舊 Run 並建立 successor Run，兩者屬同一個 Task）；若收件匣綁 Run，交接時未讀訊息會遺失。Worker 不知道別人的 run id，用 Task id 也和 `get_task_contract` 回傳的 `task_id` 一致。
+- 替代方案：收件人用 run id（交接就遺失訊息、也要求收件人已經在跑）；廣播給整個 Workspace（Worker 會被無關訊息淹沒，也更難界定「自己範圍」）。
+- 影響：Worker 要知道對方的 task id（來源：Prompt 或 Controller 提供）；本票沒有「列出同 Workspace 的 Task」工具，由 Controller 在 Prompt 中提供。收件 Task 已完成或取消時訊息仍會存入但不會被讀到。
+
+### AI-95：`message_id` 是寄件者提供的冪等鍵，範圍是 Workspace
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：`message_id` 為選填（字元 `A-Za-z0-9_-.:`、1 到 128）。有提供時它就是去重鍵，唯一範圍是（Workspace、message_id）：同一個寄件 Task 以同一個 `message_id` 重送完全相同的內容（類型、主旨、本文、`in_reply_to`、收件人集合）→ 200 `duplicate: true`，回傳原本的訊息，不新增訊息或交付，寄件 Run 換世代重送也算；同一個 `message_id` 但內容不同、或是別的 Task 使用 → 409 `message_id_conflict`。沒有提供時 Runtime 產生 `msg_…`（這種請求每次都是新訊息，沒有重送保護）。不同 Workspace 可以使用相同的 `message_id`，彼此看不到對方。`thread_id` 由 Runtime 決定（新訊息＝自己的 `message_id`，回覆＝沿用被回覆訊息的 `thread_id`），`correlation_id` 可由寄件者指定，預設沿用被回覆訊息的、否則等於 `message_id`。
+- 理由：驗收條件「重複送出的訊息只交付一次」與「每個收件人以 message_id 去重」；Worker 重試工具呼叫（逾時、shim 重送）時需要穩定的冪等鍵，Runtime 無法替沒有鍵的請求猜測是不是重送。資料庫層以（workspace、message_id、收件 Task）主鍵保證同一則訊息對同一個收件人不可能有兩份。Workspace 為範圍與整個平台「所有範圍查詢都以 Workspace 為界」一致，也不會因 id 衝突洩漏別的 Workspace 的資訊。
+- 替代方案：全域唯一的 `message_id`（跨 Workspace 的衝突會洩漏存在性）；以內容雜湊自動去重（合法的連續相同訊息會被吞掉）；不允許 Worker 指定 `thread_id`（採用，避免加入別人的對話串）。
+- 影響：工具說明建議 Worker 重送時帶同一個 `message_id`。寄件 Task 相同但內容不同的重送會得到 409，而不是悄悄覆蓋。
+
+### AI-96：「以訊息變更範圍」的判定方式與處理：看類型與欄位名稱，200 忽略並轉成事件
+- 重要度：高
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：訊息本文是自由文字，Runtime 不解讀語意。被視為「想改變範圍或歸屬」的只有兩種明確訊號：`kind` 為 `scope_change`、`reassign`、`reassign_task`、`change_scope`、`update_contract`，或請求中出現 `task_id`、`contract`、`scope`、`assignee`、`assign_to`、`reassign_to`、`new_scope`、`owner` 任一欄位。這類請求：不儲存、不交付，HTTP 200 回 `{accepted:false, ignored:true, reason:"scope_change_not_allowed"}`，並追加一筆事件 `message_scope_change_ignored`（aggregate_type `message`，payload 含 workspace、run、寄件 Task、世代、嘗試的類型與欄位、收件人、主旨、本文前 500 字元）給 Controller。寄件 Run 已不是目前的寫入所有者時同樣回 409 `run_report_stale`，不記事件。正常訊息的合法類型只有 `note`、`question`、`answer`、`result`，其他值 400 `message_invalid`。訊息工具沒有任何路徑能修改 Task、契約、Run 或授權：訊息只寫 `message`、`message_delivery` 兩張表。
+- 理由：驗收條件要求「嘗試以訊息變更範圍時被忽略並轉為給 Controller 的事件」。從本文判斷語意不可靠（誤判合法協作、漏判改寫措辭），所以只處理結構上明確的嘗試；其餘訊息即使文字上在要求改範圍，也只是收件 Worker 讀到的文字，不會改變任何契約（範圍的唯一來源仍是 Task 契約，ADR-0011）。用 200 而不是錯誤，是讓 Worker 知道「沒有被執行」但不會把它當作故障重試。
+- 替代方案：用 4xx 拒絕（Worker 可能當成暫時性錯誤重試，而且不會產生 Controller 事件）；對本文做關鍵字偵測（誤判率高）；把嘗試存成一般訊息但標記（收件人仍會讀到，違反「被忽略」）。
+- 影響：Controller 消費 `message_scope_change_ignored` 事件的邏輯由 Controller 相關的票實作；本票只保證事件存在且內容足夠。訊息本文本身若含有誘導收件 Worker 超出範圍的文字，防護是 Worker 的契約與授權檢查，不在本票。
+
+### AI-97：交付狀態、Run 啟動時的未讀摘要與「不中途插話」
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：每筆交付有三種狀態：`pending`（已存入，收件人還沒看到）、`delivered`（出現在某個 Run 啟動時的未讀摘要裡）、`read`（收件人用 `read_inbox` 取走全文；`read_inbox` 直接讀取尚未 delivered 的訊息時一併補上 delivered 時間）。狀態由 `delivered_at`、`read_at` 兩個時間推導，不另存狀態欄。派工當下（`apply_run_command` 處理 Dispatch 的同一個交易）把收件 Task 的未讀訊息摘要附在 Prompt 末端：第一行 `未讀訊息：N 則（…）`，之後每則 `- [類型] 主旨（來自 Task「標題」，message_id）`，最多 10 則，超過加一行 `…另有 M 則`，**不含本文**；摘要列出的訊息標為 delivered；沒有未讀時 Prompt 不變。Prompt 在派工時固定並存入 Outbox（Runtime 重啟後重組出相同指令），所以派工之後才送來的訊息只能靠 `read_inbox` 取得；Runtime 不在 Worker 執行中途注入。`read_inbox` 預設只回未讀（依送出順序、最多 `limit`，預設 50、上限 100）並標為已讀；`include_read: true` 連已讀的一起回傳（每則有 `already_read`）；`unread_remaining` 是讀完之後仍未讀的數量。
+- 理由：D-27 規定拉取式交付與「Context Builder 在每次 Run 啟動時附上未讀摘要」。Context Builder 尚未存在（`render_prompt` 仍是最小版本，AI-73），所以摘要在 Store 派工交易內附加，與派工的其他寫入同一個交易、也和 Prompt 同時固定；Context Builder 加入後把這段納入它即可。摘要不含本文以免大量訊息撐大 Prompt，也避免把不受信任的訊息文字直接放進 Prompt 的指令區。
+- 替代方案：啟動時（Supervisor 啟動程序那一刻）才重新計算摘要（Prompt 不再固定，與「重啟後重組相同指令」衝突）；讀取時只記單一 `read` 狀態（無法區分「已提示」與「已取走」）。
+- 影響：派工到實際啟動之間送達的訊息不在摘要裡，Worker 開始工作前仍應呼叫 `read_inbox`（工具說明這麼寫）。派工交易需要查詢訊息表，多一次小查詢。
+
+### AI-98：訊息的其他限制與資料表命名
+- 重要度：低
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：資料表命名沿用單數慣例：`message`（追加式，禁止更新與刪除）、`message_delivery`（禁止刪除，只會填入 `delivered_at`、`read_at`），不照票文的複數 `messages`／`message_deliveries`。限制：主旨 1 到 200 字元、本文最多 16 KiB、收件人最多 10 個。`send_message` 只接受目前仍是寫入所有者的 Run（已結束或被接替 → 409 `run_report_stale`，什麼都不儲存，也不留稽核）；`read_inbox` 在 Run 結束或被接替後 401 `credential_revoked` 且不改變已讀狀態；兩者都沿用「請求聲稱的 Workspace／Run 與憑證不一致 → 403 `agent_scope_mismatch`」。`send_message` 不續約 lease（只有回報進度、checkpoint、受阻才是存活訊號）。`read_inbox` 的 `include_read` 搭配 `limit` 時回傳最舊的幾則。
+- 理由：與既有資料表命名一致（`agent_report`、`event`、`run`）；上限與 Worker 回報的上限同量級，避免訊息成為塞大量資料的通道。寄出的訊息不是 Worker 在「做事」的證明，不該延長 lease；被接替的 Run 遲到的訊息沒有決策價值，所以不像回報那樣留稽核。
+- 替代方案：照票文用複數表名；過期世代的訊息也存稽核（會讓舊 Worker 的內容留在別人的收件匣旁邊，沒有明確用途）。
+- 影響：若之後需要稽核被拒絕的訊息，需另開票加入。
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
