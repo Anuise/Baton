@@ -1,6 +1,6 @@
 # 04: 本機 API 身分驗證與網頁存取防護
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R008-04-impl，2026-10-22 13:57）
 Blocked by: 01
 
 **What to build:** Runtime API 只綁定 IPv4／IPv6 loopback；所有端點（含 SSE 串流）要求 bearer token 與固定自訂標頭，檢查 Host 與 Origin，拒絕 CORS 預檢（spec D-23）。桌面管理憑證於每次 Runtime 啟動時輪替並寫入 DPAPI 保護檔，App 自動讀取連線，使用者不需複製密鑰（spec D-22）。資料庫或記憶體只存 token 雜湊。為後續 Agent 憑證預留角色欄位（桌面／Agent）。
