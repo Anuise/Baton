@@ -1,0 +1,98 @@
+//! 正式執行環境使用的 Port。
+//!
+//! 目前只有系統時鐘是真實實作；其餘 Port 的正式版由後續的票提供，
+//! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
+
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use baton_domain::Timestamp;
+use baton_ports::*;
+use futures::stream::BoxStream;
+
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Timestamp {
+        let millis = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        Timestamp::from_millis(millis as i64)
+    }
+}
+
+struct Unavailable;
+
+#[async_trait]
+impl ProcessControl for Unavailable {
+    async fn spawn(&self, _spec: SpawnSpec) -> PortResult<Receipt> {
+        Err(PortError::NotImplemented("ProcessControl"))
+    }
+    async fn inspect(&self, _identity: &ProcessIdentity) -> PortResult<Liveness> {
+        Err(PortError::NotImplemented("ProcessControl"))
+    }
+    async fn stop(&self, _identity: &ProcessIdentity, _grace: Duration) -> PortResult<StopResult> {
+        Err(PortError::NotImplemented("ProcessControl"))
+    }
+}
+
+#[async_trait]
+impl AgentAdapter for Unavailable {
+    async fn launch(&self, _spec: RunSpec) -> PortResult<AgentHandle> {
+        Err(PortError::NotImplemented("AgentAdapter"))
+    }
+    fn events(&self, _handle: &AgentHandle) -> BoxStream<'static, AdapterEvent> {
+        Box::pin(futures::stream::empty())
+    }
+    async fn resume_capability(&self, _session: &SessionRef) -> PortResult<Capability> {
+        Err(PortError::NotImplemented("AgentAdapter"))
+    }
+}
+
+#[async_trait]
+impl QuotaObserver for Unavailable {
+    async fn observe(&self, _profile: &ProfileRef) -> PortResult<QuotaSample> {
+        Err(PortError::NotImplemented("QuotaObserver"))
+    }
+}
+
+#[async_trait]
+impl WorkspaceFs for Unavailable {
+    async fn create_worktree(&self, _repo: &Path, _branch: &str, _target: &Path) -> PortResult<()> {
+        Err(PortError::NotImplemented("WorkspaceFs"))
+    }
+    async fn remove_worktree(&self, _target: &Path) -> PortResult<()> {
+        Err(PortError::NotImplemented("WorkspaceFs"))
+    }
+    async fn inspect_dirty(&self, _target: &Path) -> PortResult<DirtyState> {
+        Err(PortError::NotImplemented("WorkspaceFs"))
+    }
+    async fn write_artifact_atomic(&self, _path: &Path, _bytes: &[u8]) -> PortResult<()> {
+        Err(PortError::NotImplemented("WorkspaceFs"))
+    }
+}
+
+impl PlatformInfo for Unavailable {
+    fn snapshot(&self) -> PlatformSnapshot {
+        // 平台辨識由票 03 實作；在那之前一律回報未知，不假裝支援
+        PlatformSnapshot {
+            os_build: "unknown".into(),
+            edition: "unknown".into(),
+            native_arch: "unknown".into(),
+            support_status: SupportStatus::Unknown,
+        }
+    }
+}
+
+/// 組出正式執行用的 Port 組合。
+pub fn production_ports() -> Ports {
+    let unavailable = Arc::new(Unavailable);
+    Ports {
+        clock: Arc::new(SystemClock),
+        process_control: unavailable.clone(),
+        agent_adapter: unavailable.clone(),
+        quota_observer: unavailable.clone(),
+        workspace_fs: unavailable.clone(),
+        platform_info: unavailable,
+    }
+}
