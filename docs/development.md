@@ -325,9 +325,9 @@ Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 
 
 **完全退出**（系統匣 → Web UI 的 `ExitProgress` → `POST /api/v1/lifecycle/exit`）：
 
-1. API 在一個交易中持久化停止意圖（`phase = stopping`，期限 = 要求時間 + 40 秒），並暫停每個使用中的 Workspace，回應 202。重複要求是冪等的。
+1. API 在一個交易中持久化停止意圖（`phase = stopping`，期限 = 要求時間 + 40 秒），並暫停每個使用中的 Workspace；接著把停止意圖鏡像到 `<資料目錄>\lifecycle.json`（暫存檔 + fsync + 改名），回應 202。重複要求是冪等的。
 2. 停止意圖生效後，所有會建立新 Run 的路徑都被擋住：Scheduler 的 `Capacity.halt`（佇列重試、額度恢復後的派工、交接都經過 `scheduler::place`），以及寫入 launch intent（`BeginLaunch`）的交易（`launch_halted`，代碼 `launch_halted`）。被擋住的 Task 留在佇列，等待原因是第七類 `lifecycle`（`runtime_stopping`；Workspace 暫停時是 `awaiting_resume`）。
-3. 停止流程（Runtime 背景）：先把停止意圖鏡像到 `<資料目錄>\lifecycle.json`（暫存檔 + fsync + 改名），再對每個尚未結束的 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`（ProcessControl 在寬限期後以 Job Object 終止程序樹，並在 10 秒內確認），全部並行，總上限 40 秒。期間 Supervisor 的 tick 被鎖住，不會啟動任何程序。Worker 透過 Agent 回報的回應 `stop_requested: true` 得知要保存並停止。
+3. 停止流程（Runtime 背景）：再鏡像一次生命週期檔（API 寫入失敗時補上），等 Supervisor 的 tick 鎖（正在停止已取消 Run 的處理看到完全退出就讓出），再對每個尚未結束的 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`（ProcessControl 在寬限期後以 Job Object 終止程序樹，並在 10 秒內確認），全部並行。總上限 40 秒從持久化的期限算起，等鎖的時間也算在內；到期限仍拿不到鎖時不要求任何程序停止，全部記為 `stop_unconfirmed`。拿到鎖後握到結束，不會啟動任何程序。Worker 透過 Agent 回報的回應 `stop_requested: true` 得知要保存並停止。
 4. 程序確認停止（或根本沒有程序）的 Run 以 `interrupted`（`stopped_by_full_exit`）結束、釋放寫入所有權，Task 退回 `ready` 並重新排入派工佇列；使用者先前已要求取消的 Run 則完成取消。`StillAlive`、停止呼叫失敗、到總上限仍沒有結果的記為**停止異常**（`still_alive`／`stop_failed`／`stop_unconfirmed`），Run 保留寫入所有權。完全退出不會把任何 Task 標為取消或完成。
 5. 進度（每個 Run 的結果）寫在 `runtime_lifecycle.last_exit`，結束時進入 `stopped` 並追加 `full_exit_completed`（含異常清單）。Runtime 再提供 API 5 秒（讓 App 讀最終結果）後結束。App 沒有停止異常就自動結束；有異常則列出並等使用者按「關閉 Baton」。
 
