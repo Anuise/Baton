@@ -101,10 +101,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // 只使用這個 Run 的 MCP 設定：Baton 的 shim，加上快照中的共同 MCP 伺服器
         args.extend(["--strict-mcp-config", "--mcp-config"].map(String::from));
         args.push(self.file(&spec.run_id, RUN_MCP_FILE));
+        // 只依綁定的版本決定要傳哪些快照檔，不讀檔案系統（啟動指令與它的雜湊在重建後必須相同）
         let snapshot = |name: &str| {
             let dir = spec.settings_dir.as_deref()?;
-            let path = Path::new(dir).join(name);
-            path.is_file().then(|| path.to_string_lossy().into_owned())
+            spec.settings_files.iter().any(|file| file == name).then(|| Path::new(dir).join(name).to_string_lossy().into_owned())
         };
         if let Some(shared_mcp) = snapshot(MCP_FILE) {
             args.push(shared_mcp);
@@ -540,6 +540,11 @@ mod tests {
             working_dir: Some("C:\\work\\app".into()),
             config_dir: Some("C:\\Baton\\profiles\\prof_1".into()),
             settings_dir: settings_dir.map(|d| d.to_string_lossy().into_owned()),
+            // 有快照時預設三類設定都有內容
+            settings_files: match settings_dir {
+                Some(_) => [SETTINGS_FILE, MCP_FILE, INSTRUCTIONS_FILE].map(String::from).to_vec(),
+                None => Vec::new(),
+            },
             model: model.map(Into::into),
             resume_native_session_id: None,
         }
@@ -589,6 +594,33 @@ mod tests {
         let mcp_at = spec.args.iter().position(|a| a == "--mcp-config").unwrap();
         assert_eq!(spec.args[mcp_at + 2], path(MCP_FILE), "共同 MCP 伺服器接在 Baton 的設定之後：{:?}", spec.args);
         assert_eq!(value_after(&spec.args, "--model"), Some("claude-opus-5-5"));
+    }
+
+    /// 要傳哪些快照檔只看 Run 綁定的版本（`settings_files`），不看檔案系統：快照目錄在 Run 啟動後被刪，
+    /// Runtime 重建時組出的啟動指令（與它的雜湊）仍與啟動時相同（review-notes #6）。
+    #[test]
+    fn the_snapshot_files_passed_come_from_the_run_spec_and_not_from_the_file_system() {
+        let data = tempfile::tempdir().unwrap();
+        let snapshot = data.path().join("run-settings").join("run_1");
+        let adapter = adapter(data.path(), &[]);
+        let spec = RunSpec {
+            settings_files: [SETTINGS_FILE, INSTRUCTIONS_FILE].map(String::from).to_vec(),
+            ..run_spec(Some(&snapshot), None)
+        };
+
+        let before = adapter.spawn_spec(&spec);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        for name in [SETTINGS_FILE, MCP_FILE, INSTRUCTIONS_FILE] {
+            std::fs::write(snapshot.join(name), "{}").unwrap();
+        }
+        let after = adapter.spawn_spec(&spec);
+
+        let path = |name: &str| snapshot.join(name).to_string_lossy().into_owned();
+        assert_eq!(value_after(&before.args, "--settings"), Some(path(SETTINGS_FILE).as_str()), "快照目錄不存在也照綁定的版本傳");
+        assert_eq!(value_after(&before.args, "--append-system-prompt-file"), Some(path(INSTRUCTIONS_FILE).as_str()));
+        assert!(!before.args.contains(&path(MCP_FILE)), "版本沒有共同 MCP 伺服器就不傳：{:?}", before.args);
+        assert_eq!(after, before, "檔案系統的狀態不影響啟動指令");
+        assert_eq!(baton_ports::command_hash(&after), baton_ports::command_hash(&before));
     }
 
     #[test]

@@ -996,6 +996,23 @@ impl Supervisor {
     async fn run_spec(&self, run: &Run, payload: &LaunchPayload, command_id: &str) -> Result<RunSpec, String> {
         let config_dir = self.config_dir_of(&run.profile_id).await?;
         let pin = self.store.run_settings_pin(&run.id).await.map_err(|e| format!("無法讀取設定快照的綁定：{e}"))?;
+        // 快照中有哪些設定檔由綁定的版本決定（不讀檔案系統），重建後組出相同的啟動指令
+        let settings_files = match &pin {
+            Some(pin) => {
+                let version = self
+                    .store
+                    .settings_version(pin.version)
+                    .await
+                    .map_err(|e| format!("無法讀取共同設定版本 {}：{e}", pin.version))?
+                    .ok_or_else(|| format!("找不到 Run 綁定的共同設定版本 {}", pin.version))?;
+                baton_domain::shared_settings::snapshot_files(&version)
+                    .into_iter()
+                    .map(|file| file.name)
+                    .filter(|name| name != baton_domain::shared_settings::MANIFEST_FILE)
+                    .collect()
+            }
+            None => Vec::new(),
+        };
         Ok(RunSpec {
             run_id: run.id.clone(),
             task_id: payload.task_id.clone(),
@@ -1004,6 +1021,7 @@ impl Supervisor {
             working_dir: Some(payload.working_dir.clone()),
             config_dir: Some(config_dir),
             settings_dir: pin.map(|p| p.directory),
+            settings_files,
             model: payload.model.clone(),
             resume_native_session_id: run.resume_native_session_id.clone(),
         })
@@ -1461,6 +1479,7 @@ impl Supervisor {
             working_dir: Some(run.working_dir.clone()),
             config_dir: Some(self.config_dir_of(&run.profile_id).await?),
             settings_dir: None,
+            settings_files: Vec::new(),
             model: run.model.clone(),
             resume_native_session_id: run.resume_native_session_id.clone(),
         })
