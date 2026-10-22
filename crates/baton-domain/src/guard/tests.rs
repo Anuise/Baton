@@ -297,3 +297,17 @@ fn reported_recurrences_need_a_verified_lesson_and_a_note() {
     candidate.status = knowledge::KnowledgeStatus::Candidate;
     assert_eq!(report("rec3".into(), &candidate, None, "x", T1).unwrap_err().code(), "lesson_ineligible");
 }
+
+#[test]
+fn a_recurrence_cannot_be_reported_on_a_task_the_lesson_does_not_cover() {
+    // R151 第 26 項：其他 Workspace（或範圍外的 Task）的時間線與成效數字不能被灌入重犯
+    let elsewhere = lesson_in(workspace_scope("w2"));
+    let error = report("rec1".into(), &elsewhere, Some(&task("t1")), "又忘了寫回滾", T1).unwrap_err();
+    assert_eq!(error.code(), "guard_invalid");
+    let other_task = lesson_in(task_scope("w1", "g1", "t9"));
+    assert_eq!(report("rec2".into(), &other_task, Some(&task("t1")), "x", T1).unwrap_err().code(), "guard_invalid");
+
+    // 全域教訓涵蓋任何 Task；不指定 Task 時不檢查
+    assert!(report("rec3".into(), &lesson_in(KnowledgeScope::global()), Some(&task("t1")), "x", T1).is_ok());
+    assert!(report("rec4".into(), &elsewhere, None, "x", T1).is_ok());
+}

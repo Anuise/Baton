@@ -400,7 +400,7 @@ pub fn prevented(source: &GuardSource, message: &str, task: &Task, now: Timestam
     (recurrence, event)
 }
 
-/// 使用者回報一次沒被攔下的重犯；教訓必須是已驗證的教訓（過期的也可以），可指定相關 Task。
+/// 使用者回報一次沒被攔下的重犯；教訓必須是已驗證的教訓（過期的也可以），可指定相關 Task（必須在教訓的適用範圍內）。
 pub fn report(
     id: String,
     lesson: &KnowledgeEntry,
@@ -418,6 +418,13 @@ pub fn report(
     }
     if note.chars().count() > NOTE_MAX_CHARS {
         return Err(GuardError::Invalid(format!("說明最多 {NOTE_MAX_CHARS} 個字元")));
+    }
+    // 與派工時的 Guard 判定相同：教訓的範圍要涵蓋這個 Task，否則會灌進無關 Workspace 的時間線與成效數字
+    if let Some(task) = task {
+        let audience = Audience::Run { workspace_id: &task.workspace_id, goal_id: &task.goal_id, task_id: &task.id };
+        if !audience.can_see(&lesson.scope) {
+            return Err(GuardError::Invalid(format!("教訓的適用範圍不包含 Task {}", task.id)));
+        }
     }
     let recurrence = Recurrence {
         id,
