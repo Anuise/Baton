@@ -17,11 +17,11 @@ use baton_api::{
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
-    RecoveryStatusView, MetricsResponse, TimelineResponse, RunContextView,
+    RecoveryStatusView, MetricsResponse, TimelineResponse, RunContextView, UpdateStatusView,
 };
 use baton_client::{
-    ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, Connection, DispatchOutcome,
-    RuntimeClient,
+    ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, ClientError, Connection,
+    DispatchOutcome, RuntimeClient,
 };
 use baton_credential::DpapiProtector;
 use baton_store::{AnswerResult, DecisionList};
@@ -34,6 +34,7 @@ use baton_domain::profile::ProfileView;
 use baton_domain::quota::PlanLimits;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
 use baton_domain::lifecycle::LifecyclePhase;
+use baton_domain::maintenance::{MaintenanceKind, MaintenancePhase};
 use baton_domain::run::RunView;
 use baton_domain::verification::VerificationView;
 use baton_domain::scheduler::CapacityMode;
@@ -70,6 +71,15 @@ const RUNTIME_EXE: &str = "baton-runtime.exe";
 /// 監護執行檔與 Runtime 放在同一個資料夾（票 32）。
 const GUARDIAN_EXE: &str = "baton-guardian.exe";
 
+/// 套用更新前等待 Runtime 結束的上限（Runtime 在維護就緒約 5 秒後結束；安裝程式的 PREINSTALL 掛勾還會再等一次）。
+const UPDATE_RUNTIME_EXIT_WAIT: Duration = Duration::from_secs(20);
+
+/// 等待 Runtime 結束時的查詢間隔。
+const UPDATE_RUNTIME_EXIT_POLL: Duration = Duration::from_millis(250);
+
+/// Tauri NSIS 安裝程式的參數：被動模式（只顯示進度）、更新模式（保留捷徑與登入啟動登記）、完成後重新開啟 App。
+const UPDATE_INSTALLER_ARGS: [&str; 3] = ["/P", "/UPDATE", "/R"];
+
 struct RuntimeLink {
     /// 每次呼叫都重新讀取 DPAPI 保護的桌面憑證；憑證只在殼內處理，不交給 Web UI
     client: RuntimeClient,
@@ -77,6 +87,9 @@ struct RuntimeLink {
     envs: Vec<(String, String)>,
     /// 啟動流程只做一次；結果（成功或失敗原因）供之後的健康查詢使用
     startup: OnceCell<Result<Connection, String>>,
+    /// 最後一次看到的「準備套用」的更新安裝程式（票 34）：Runtime 在維護就緒約 5 秒後結束，
+    /// 使用者因停止異常而稍後才按「安裝」時，殼仍知道要執行哪個已驗證的檔案
+    ready_package: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl RuntimeLink {
@@ -89,7 +102,12 @@ impl RuntimeLink {
         ];
         let data_dir = config.data_dir.clone();
         let client = RuntimeClient::new(config.bind, config.data_dir, Arc::new(DpapiProtector));
-        Ok(Self { client, data_dir, envs, startup: OnceCell::new() })
+        Ok(Self { client, data_dir, envs, startup: OnceCell::new(), ready_package: std::sync::Mutex::new(None) })
+    }
+
+    /// 記下更新狀態中「準備套用」的安裝程式；不是這個狀態時清除。
+    fn remember(&self, status: &UpdateStatusView) {
+        *self.ready_package.lock().unwrap_or_else(|e| e.into_inner()) = ready_package_of(status);
     }
 
     /// 連回既有的 Runtime，沒有就啟動一個；只會執行一次。
@@ -828,6 +846,83 @@ async fn workspace_resume(
     link.client.resume_workspace(&workspace_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 讀取更新狀態：檢查結果（只通知）與進行中的維護（票 34）。
+#[tauri::command]
+async fn update_status(link: State<'_, RuntimeLink>) -> Result<UpdateStatusView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    let status = link.client.updates().await.map_err(|e| e.to_string())?;
+    link.remember(&status);
+    Ok(status)
+}
+
+/// Web UI 的「同意更新」：Runtime 下載並驗證簽章後開始維護；之後以 `update_status` 查詢維護進度。
+#[tauri::command]
+async fn update_apply(link: State<'_, RuntimeLink>, version: String) -> Result<UpdateStatusView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.apply_update(&version).await.map_err(|e| e.to_string())
+}
+
+/// 維護就緒後套用更新：等 Runtime 結束，以更新模式執行已驗證簽章的安裝程式，再結束 App（安裝完成後由安裝程式重新開啟）。
+#[tauri::command]
+async fn update_install(app: AppHandle, link: State<'_, RuntimeLink>) -> Result<(), String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    let package = match link.client.updates().await {
+        Ok(status) => {
+            link.remember(&status);
+            ready_package_of(&status)
+        }
+        // Runtime 已在維護就緒後結束：用最後一次看到的「準備套用」的安裝程式
+        Err(ClientError::Unreachable(_)) => link.ready_package.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let package = match package {
+        Some(path) if path.is_file() => path,
+        Some(_) => return Err("找不到已下載的更新安裝程式".to_string()),
+        None => return Err("更新尚未準備好，無法套用".to_string()),
+    };
+    // Runtime 在維護就緒後會自行結束；等到它不再回應才執行安裝程式，逾時也繼續（安裝程式的掛勾會再等 Runtime 與監護結束）
+    let deadline = tokio::time::Instant::now() + UPDATE_RUNTIME_EXIT_WAIT;
+    while tokio::time::Instant::now() < deadline {
+        if matches!(link.client.health().await, Err(ClientError::Unreachable(_))) {
+            break;
+        }
+        tokio::time::sleep(UPDATE_RUNTIME_EXIT_POLL).await;
+    }
+    spawn_installer(&package).map_err(|e| format!("無法執行更新安裝程式：{e}"))?;
+    app.exit(0);
+    Ok(())
+}
+
+/// 更新的維護已「準備套用」時，已驗證簽章的安裝程式路徑。
+fn ready_package_of(status: &UpdateStatusView) -> Option<PathBuf> {
+    match &status.maintenance {
+        Some(m) if m.kind == MaintenanceKind::Update && m.phase == MaintenancePhase::Ready => {
+            m.package_path.as_ref().map(PathBuf::from)
+        }
+        _ => None,
+    }
+}
+
+/// 以脫離 App 的方式執行安裝程式：App 隨後結束，安裝程式繼續執行。
+fn spawn_installer(package: &std::path::Path) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(package);
+    command.args(UPDATE_INSTALLER_ARGS);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+    command.spawn().map(drop)
+}
+
 /// 完全退出流程的最後一步：真正結束 App（關閉視窗只會隱藏到系統匣）。
 #[tauri::command]
 fn app_quit(app: AppHandle) {
@@ -1146,6 +1241,9 @@ fn main() {
             workspace_resume,
             recovery_status,
             recovery_retry,
+            update_status,
+            update_apply,
+            update_install,
             app_quit,
             profile_set_quota_limits,
             knowledge_list,

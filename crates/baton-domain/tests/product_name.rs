@@ -24,3 +24,9 @@ fn installer_is_per_user_nsis() {
     assert_eq!(conf["bundle"]["targets"], serde_json::json!(["nsis"]));
     assert_eq!(conf["bundle"]["windows"]["nsis"]["installMode"], "currentUser");
 }
+
+/// 更新以 Runtime 回報的版本與更新清單比較（票 34）：安裝程式的版本必須就是 workspace 的版本。
+#[test]
+fn installer_version_matches_the_workspace_version() {
+    assert_eq!(tauri_conf()["version"], env!("CARGO_PKG_VERSION"));
+}

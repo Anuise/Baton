@@ -217,6 +217,7 @@ dependencies = [
  "baton-domain",
  "baton-store",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
