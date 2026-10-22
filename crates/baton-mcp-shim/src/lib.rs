@@ -46,7 +46,13 @@ use baton_domain::workflow::{
     Situation, EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
     TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
 };
-use baton_domain::verification_profile::{TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION};
+use baton_domain::verification_profile::{
+    LIST_MAX as PROFILE_LIST_MAX, TEXT_MAX_CHARS as PROFILE_TEXT_MAX_CHARS, TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION,
+};
+use baton_domain::exploration::{
+    MAX_MODEL_CALLS_LIMIT, MAX_STEPS_LIMIT, TOOL_DEFINE_EXPLORATION_CHARTER, TOOL_GET_EXPLORATION,
+    TOOL_REPORT_EXPLORATION_FINDING, TOOL_REPRODUCE_EXPLORATION_FINDING, TOOL_TRIAGE_EXPLORATION_FINDING,
+};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -789,6 +795,113 @@ fn tool_definitions() -> Value {
             "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取這個 Workspace 的驗證概況：目前的 Verification Profile 版本（旅程、Feature Map）與是否已被證明可用（proven_by 為 null 表示這個版本還沒實際跑過並通過代表旅程）、未覆蓋範圍、驗證要求與 Evidence Bundle（每個步驟的判定：passed、product_failure、inconclusive、environment_blocked、auth_blocked、budget_exhausted、automation_unsupported，只有 passed 是通過）。Profile 只有使用者能在桌面發布；沒有 Profile 時請使用者建立。",
             "inputSchema": { "type": "object", "properties": {} },
         },
+        {
+            "name": TOOL_DEFINE_EXPLORATION_CHARTER,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：為探索 Task 定下（或改版）探索章程：區域、使用者角色、目標、禁止的副作用、步數與成本上限。探索 Task 必須先有章程，沒有章程的 Task 不能回報疑點；章程會放進 Worker 的 Prompt，上限也套用在 Runtime 執行的重現上。章程只追加版本，內容與目前版本相同時不新增版本（回應的 created 為 false）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "探索 Task" },
+                    "area": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "要探索的區域" },
+                    "role": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "扮演的使用者角色" },
+                    "goal": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "這次探索的目標" },
+                    "forbidden_side_effects": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS },
+                        "minItems": 1,
+                        "maxItems": PROFILE_LIST_MAX,
+                        "description": "禁止的副作用（例如「不得送出真實付款」），至少一項",
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_STEPS_LIMIT,
+                        "description": "步數上限：Worker 探索的操作步數上限，也是 Runtime 執行這個章程下的重現時的操作次數上限",
+                    },
+                    "max_model_calls": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": MAX_MODEL_CALLS_LIMIT,
+                        "description": "成本上限：Runtime 執行重現時的語意判斷（模型呼叫）次數上限",
+                    },
+                },
+                "required": ["task_id", "area", "role", "goal", "forbidden_side_effects", "max_steps", "max_model_calls"],
+            },
+        },
+        {
+            "name": TOOL_REPORT_EXPLORATION_FINDING,
+            "description": "探索 Worker 在自己 Task 的探索章程下回報疑點（Controller 呼叫會被拒絕，worker_only）。疑點不是缺陷：回報後一律先是 suspected，由 Controller 以 Runtime 執行的重現案例確認後才成為已確認缺陷。Task 還沒有章程時回 exploration_charter_required。保留可重現的步驟、預期、實際觀察、環境與證據，不要只寫結論。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "疑點的簡短標題" },
+                    "feature": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "對應的 Feature Map 功能（選填）" },
+                    "steps": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS },
+                        "minItems": 1,
+                        "maxItems": PROFILE_LIST_MAX,
+                        "description": "重現步驟，至少一項",
+                    },
+                    "expected": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "預期的行為" },
+                    "actual": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "實際觀察" },
+                    "environment": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "環境（版本、資料、瀏覽器等）（選填）" },
+                    "evidence": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS },
+                        "maxItems": PROFILE_LIST_MAX,
+                        "description": "證據：Workspace 中已登記的成果或 Evidence Bundle 的識別（畫面、trace 等）（選填）",
+                    },
+                },
+                "required": ["title", "steps", "expected", "actual"],
+            },
+        },
+        {
+            "name": TOOL_TRIAGE_EXPLORATION_FINDING,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：分流一個探索疑點。exclude（排除，必須附 reason：environment 環境、seed_data 測試資料、tool_limitation 工具限制、expected_design 預期設計）、mark_unverified（無法重現或無法驗證，保留為未驗風險 unverified_risk）、reopen（重新開啟已排除的疑點）。已確認的缺陷（confirmed、fixed、regressed）不能排除或改為未驗風險（exploration_defect_locked），修復後以 reproduce_exploration_finding 驗證。排除為 expected_design 是產品取捨，必須由使用者裁定：Runtime 依決策權限表回 requires_decision 並建立裁定請求，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用。排除的疑點仍保留紀錄，可以 reopen；任何疑點都不能刪除。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "finding_id": { "type": "string", "description": "要分流的疑點（見 get_exploration）" },
+                    "action": {
+                        "type": "string",
+                        "enum": ["exclude", "mark_unverified", "reopen"],
+                        "description": "exclude（排除）、mark_unverified（改為未驗風險）、reopen（重新開啟已排除的疑點）",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "enum": ["environment", "seed_data", "tool_limitation", "expected_design"],
+                        "description": "排除原因（只用於 exclude，此時必填）：environment（環境）、seed_data（測試資料）、tool_limitation（工具限制）、expected_design（預期設計，需使用者裁定）",
+                    },
+                    "rationale": { "type": "string", "maxLength": PROFILE_TEXT_MAX_CHARS, "description": "理由與證據" },
+                },
+                "required": ["finding_id", "action", "rationale"],
+            },
+        },
+        {
+            "name": TOOL_REPRODUCE_EXPLORATION_FINDING,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：要求 Runtime 重現一個探索疑點，或驗證已確認缺陷的修復；結果以 get_exploration 查看。疑點（suspected）或未驗風險（unverified_risk）必須提供 journey：對應原症狀、以產品行為斷言預期行為的重現案例。Runtime 在目前 Verification Profile 的環境中執行它，並同時執行代表旅程當對照；對照全部通過、而且案例以產品行為斷言失敗（product_failure）才升為 confirmed。環境、授權、證據不足、預算用盡都不算缺陷，疑點維持原狀；案例通過（無法重現）則保留為 unverified_risk。已確認的缺陷（confirmed、regressed）只能以確認時的案例驗證修復，不要提供不同的 journey（會回 exploration_defect_locked）；通過後成為 fixed 並納入正常回歸：之後每次驗證都會執行這個案例，失敗會變成 regressed。已排除的疑點要先 reopen；同一個疑點已有排隊中的重現時回 exploration_reproduction_pending。重現的 Evidence Bundle 只用於診斷，不能當作 Stage 的 verification 證據。回應含 request（排入的驗證要求）與這次的重現紀錄。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "finding_id": { "type": "string", "description": "要重現的疑點（見 get_exploration）" },
+                    "journey": {
+                        "type": "object",
+                        "description": "重現案例：與 Verification Profile 旅程相同格式的物件 { key, title, persona?, identity?, steps: [{ key, title?, operation, assertions }] }（operation 與 assertions 的格式見 get_verification 中 Profile 的旅程）；key 會由 Runtime 改成 finding.<疑點>。疑點或未驗風險必填；驗證修復時省略（Runtime 使用確認時的案例）",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "在哪個 Task 的工作目錄中執行（選填；預設是回報疑點的 Task，驗證修復時指定修復的 Task）",
+                    },
+                },
+                "required": ["finding_id"],
+            },
+        },
+        {
+            "name": TOOL_GET_EXPLORATION,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取這個 Workspace 的探索概況：各探索 Task 目前的章程，以及全部疑點（新的在前）與它們的重現紀錄。疑點狀態是 suspected（疑點）、confirmed（已確認缺陷）、unverified_risk（未驗風險）、excluded（已排除）、fixed（已修復，納入回歸）或 regressed（回歸失敗）。",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
     ])
 }
 
@@ -864,6 +977,11 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_GET_REVIEWS,
         TOOL_RUN_VERIFICATION,
         TOOL_GET_VERIFICATION,
+        TOOL_DEFINE_EXPLORATION_CHARTER,
+        TOOL_REPORT_EXPLORATION_FINDING,
+        TOOL_TRIAGE_EXPLORATION_FINDING,
+        TOOL_REPRODUCE_EXPLORATION_FINDING,
+        TOOL_GET_EXPLORATION,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));
