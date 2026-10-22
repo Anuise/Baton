@@ -1376,7 +1376,7 @@ Runtime harness 的資料目錄建在暫存區的 `baton-harness\` 之下（`h<�
 node scripts/smoke-desktop.mjs
 ```
 
-它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕、強制結束 Runtime（不結束監護）後監護重新拉起它且恢復面板與狀態列顯示恢復事件、以頁面內的 Tauri 事件（與系統匣送出的 `baton://full-exit-requested` 相同）觸發完全退出後顯示停止進度，最後 App、Runtime 與監護都結束。系統匣選單本身與殼端 60 秒的後備流程沒有涵蓋。spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」需要真實的 Worker／Controller 執行（裁定請求只能由 Agent 憑證建立），不在冒煙測試範圍，由 harness 情境測試涵蓋（見 ai-decisions AI-455）。這個測試會開啟視窗，所以不納入 `pnpm test`。
+它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕、強制結束 Runtime（不結束監護）後監護重新拉起它且恢復面板與狀態列顯示恢復事件、以頁面內的 Tauri 事件（與系統匣送出的 `baton://full-exit-requested` 相同）觸發完全退出後顯示停止進度，最後 App、Runtime 與監護都結束。系統匣選單本身與殼端 60 秒的後備流程沒有涵蓋。spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」需要真實的 Worker／Controller 執行（裁定請求只能由 Agent 憑證建立），不在冒煙測試範圍，由 harness 情境測試涵蓋（見 ai-decisions AI-480）。這個測試會開啟視窗，所以不納入 `pnpm test`。
 
 ### 安裝程式冒煙測試
 
