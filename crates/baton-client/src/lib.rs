@@ -9,11 +9,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationView,
-    ConfirmAuthorizationRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse, PlatformResponse, SummaryRequest,
-    WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, WORKSPACES_PATH,
+    admission_check_path, authorization_path, authorization_summary_path, goals_path, task_admission_check_path,
+    task_cancel_path, task_contract_path, task_dependencies_path, task_path, task_ready_path, tasks_path,
+    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
+    CreateGoalRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse, PlatformResponse,
+    SummaryRequest, TaskBoard, TaskDetail, UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE,
+    HEALTH_PATH, PLATFORM_PATH, WORKSPACES_PATH,
 };
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
+use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
@@ -114,6 +118,61 @@ impl RuntimeClient {
         request: &AdmissionCheckRequest,
     ) -> Result<Admission, ClientError> {
         self.send_json(reqwest::Method::POST, &admission_check_path(workspace_id), Some(request)).await
+    }
+
+    /// 工作面板：Workspace 內全部 Goal 與 Task。
+    pub async fn task_board(&self, workspace_id: &str) -> Result<TaskBoard, ClientError> {
+        self.get_json(&tasks_path(workspace_id)).await
+    }
+
+    pub async fn create_goal(&self, workspace_id: &str, title: &str) -> Result<Goal, ClientError> {
+        let request = CreateGoalRequest { title: title.to_string() };
+        self.send_json(reqwest::Method::POST, &goals_path(workspace_id), Some(&request)).await
+    }
+
+    pub async fn create_task(&self, workspace_id: &str, request: &CreateTaskRequest) -> Result<TaskView, ClientError> {
+        self.send_json(reqwest::Method::POST, &tasks_path(workspace_id), Some(request)).await
+    }
+
+    /// 單一 Task 與契約版本歷史。
+    pub async fn task_detail(&self, workspace_id: &str, task_id: &str) -> Result<TaskDetail, ClientError> {
+        self.get_json(&task_path(workspace_id, task_id)).await
+    }
+
+    /// 整份取代契約；內容相同時不新增版本。
+    pub async fn update_task_contract(
+        &self,
+        workspace_id: &str,
+        task_id: &str,
+        contract: ContractContent,
+        note: Option<String>,
+    ) -> Result<TaskView, ClientError> {
+        let request = UpdateContractRequest { contract, note };
+        self.send_json(reqwest::Method::PUT, &task_contract_path(workspace_id, task_id), Some(&request)).await
+    }
+
+    pub async fn add_task_dependency(
+        &self,
+        workspace_id: &str,
+        task_id: &str,
+        depends_on: &str,
+    ) -> Result<TaskView, ClientError> {
+        let request = AddDependencyRequest { depends_on: depends_on.to_string() };
+        self.send_json(reqwest::Method::POST, &task_dependencies_path(workspace_id, task_id), Some(&request)).await
+    }
+
+    /// 准入檢查的唯讀預覽。
+    pub async fn check_task_admission(&self, workspace_id: &str, task_id: &str) -> Result<AdmissionReport, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &task_admission_check_path(workspace_id, task_id), None).await
+    }
+
+    /// pending → ready；准入檢查未通過時回傳 `ClientError::Rejected`（`task_admission_denied`，訊息列出缺項）。
+    pub async fn mark_task_ready(&self, workspace_id: &str, task_id: &str) -> Result<TaskView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &task_ready_path(workspace_id, task_id), None).await
+    }
+
+    pub async fn cancel_task(&self, workspace_id: &str, task_id: &str) -> Result<TaskView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &task_cancel_path(workspace_id, task_id), None).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
