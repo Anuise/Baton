@@ -120,11 +120,18 @@ pub struct RuntimeClient {
     addr: SocketAddr,
     data_dir: PathBuf,
     protector: Arc<dyn SecretProtector>,
+    /// 共用的 HTTP 用戶端：App 每 0.5 秒輪詢一次，重用連線池裡的連線。
+    http: reqwest::Client,
 }
 
 impl RuntimeClient {
     pub fn new(addr: SocketAddr, data_dir: PathBuf, protector: Arc<dyn SecretProtector>) -> Self {
-        Self { addr, data_dir, protector }
+        // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(300))
+            .build()
+            .expect("建立 HTTP 用戶端（沒有 TLS，只有本機連線設定）不會失敗");
+        Self { addr, data_dir, protector, http }
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -793,11 +800,8 @@ impl RuntimeClient {
     ) -> Result<reqwest::Response, ClientError> {
         let token = baton_credential::read_desktop_credential(&self.data_dir, &*self.protector)?;
         let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
-        // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
-        let mut request = reqwest::Client::builder()
-            .connect_timeout(Duration::from_millis(300))
-            .build()
-            .map_err(unreachable)?
+        let mut request = self
+            .http
             .request(method, format!("http://{}{path}", self.addr))
             .bearer_auth(token)
             .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
