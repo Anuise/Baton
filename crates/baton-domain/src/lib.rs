@@ -8,6 +8,7 @@ pub mod artifact;
 pub mod auth;
 pub mod authority;
 pub mod claude_code;
+pub mod cleanup;
 pub mod authorization;
 pub mod backup;
 pub mod config;

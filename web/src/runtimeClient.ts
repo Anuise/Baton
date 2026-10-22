@@ -661,6 +661,34 @@ export interface WorkdirView {
   ready_at: number | null;
   /** 在這個目錄中執行過的 Run，依建立順序。 */
   run_ids: string[];
+  /** worktree 的清理登記；Task 尚未完成並整合、或是輸出目錄時為 null。 */
+  cleanup: WorktreeCleanup | null;
+}
+
+/**
+ * worktree 清理狀態：pending 待清理（failure 不為 null 時表示上一次失敗、會在 next_attempt_at 自動重試）、
+ * removing 清理中、cleaned 已清理、failed 清理失敗（重試用完，不再自動重試，worktree 保留）。
+ */
+export type CleanupStatus = "pending" | "removing" | "cleaned" | "failed";
+
+/** 開發 Task 完成並整合後的 worktree 清理登記（對應 Rust 的 WorktreeCleanup）；時間是 UTC 毫秒。 */
+export interface WorktreeCleanup {
+  task_id: string;
+  workspace_id: string;
+  /** 要移除的 worktree。 */
+  path: string;
+  /** 平台分支。 */
+  branch: string;
+  status: CleanupStatus;
+  version: number;
+  /** 已開始過的嘗試次數。 */
+  attempts: number;
+  /** 最近一次失敗的原因（給使用者看）。 */
+  failure: string | null;
+  requested_at: number;
+  /** pending 時下一次自動重試的時間。 */
+  next_attempt_at: number | null;
+  finished_at: number | null;
 }
 
 export type IntegrationStatus = "queued" | "merging" | "verifying" | "advancing" | "integrated" | "failed";

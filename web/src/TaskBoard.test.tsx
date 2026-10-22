@@ -10,6 +10,7 @@ import {
   verificationRecord,
   verificationView,
   workdirView,
+  worktreeCleanup,
 } from "./fixtures";
 import { TaskBoard, type TaskBoardClient } from "./TaskBoard";
 import {
@@ -1636,5 +1637,109 @@ describe("Task 種類、工作目錄與整合佇列", () => {
     await user.click(within(panel).getByRole("button", { name: "檢視驗證" }));
 
     expect(await within(panel).findByText("最新整合項目：未通過整合（第 1 次 Run）")).toBeInTheDocument();
+  });
+});
+
+describe("worktree 清理", () => {
+  const completedDevTask = () =>
+    task("task_1", "加登入頁", { kind: "development", status: "completed", contract: filledContract("task_1") });
+  const cleanupRegion = () => within(card("加登入頁")).getByRole("status", { name: "清理狀態" });
+
+  it("已完成的 Task 待清理且上次失敗：同時顯示 Task 已完成、待清理、失敗原因與自動重試時間", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [completedDevTask()],
+        integrations: [integrationEntry({ status: "integrated" })],
+        workdirs: [
+          workdirView({
+            cleanup: worktreeCleanup({
+              attempts: 1,
+              failure: "檔案可能被其他程式占用，請關閉後再試",
+              next_attempt_at: T0 + 5 * 60_000,
+            }),
+          }),
+        ],
+      }),
+    );
+
+    // Task 完成與清理狀態分開顯示：卡片仍在「已完成」欄
+    expect(within(column("已完成（1）")).getByRole("article", { name: "加登入頁" })).toBeInTheDocument();
+    const region = cleanupRegion();
+    expect(region).toHaveTextContent("待清理");
+    expect(region).toHaveTextContent("上次清理失敗：檔案可能被其他程式占用，請關閉後再試");
+    expect(region).toHaveTextContent("將於 2023/11/14 22:18 自動重試");
+    expect(within(region).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("待清理且沒有失敗時只顯示「待清理」；清理中顯示「清理中」", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [completedDevTask(), task("task_2", "修 bug", { kind: "development", status: "completed" })],
+        workdirs: [
+          // 剛登記的待清理：下一次嘗試時間就是登記時間，還沒有失敗，不顯示重試時間
+          workdirView({ cleanup: worktreeCleanup({ next_attempt_at: T0 }) }),
+          workdirView({
+            task_id: "task_2",
+            path: "C:\\work\\app\\.baton\\worktrees\\task_2",
+            branch: "baton/task_2",
+            cleanup: worktreeCleanup({ task_id: "task_2", status: "removing", attempts: 1 }),
+          }),
+        ],
+      }),
+    );
+
+    expect(cleanupRegion()).toHaveTextContent("待清理");
+    expect(cleanupRegion()).not.toHaveTextContent("上次清理失敗");
+    expect(cleanupRegion()).not.toHaveTextContent("自動重試");
+    expect(within(card("修 bug")).getByRole("status", { name: "清理狀態" })).toHaveTextContent("清理中");
+  });
+
+  it("清理失敗：以 alert 顯示原因且 worktree 保留，Task 仍顯示已完成", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [completedDevTask()],
+        workdirs: [
+          workdirView({
+            cleanup: worktreeCleanup({
+              status: "failed",
+              attempts: 3,
+              failure: "worktree 中有 2 個未保存的變更",
+              finished_at: T0,
+            }),
+          }),
+        ],
+      }),
+    );
+
+    expect(within(column("已完成（1）")).getByRole("article", { name: "加登入頁" })).toBeInTheDocument();
+    const region = cleanupRegion();
+    expect(region).toHaveTextContent("清理失敗");
+    expect(within(region).getByRole("alert")).toHaveTextContent("清理失敗，worktree 已保留：worktree 中有 2 個未保存的變更");
+    expect(region).not.toHaveTextContent("自動重試");
+    // worktree 保留：路徑不標成已移除
+    expect(within(card("加登入頁")).getByRole("group", { name: "工作目錄" })).not.toHaveTextContent("已移除");
+  });
+
+  it("已清理：顯示清理完成時間，worktree 路徑標成已移除", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [completedDevTask()],
+        workdirs: [workdirView({ cleanup: worktreeCleanup({ status: "cleaned", attempts: 1, finished_at: T0 }) })],
+      }),
+    );
+
+    expect(cleanupRegion()).toHaveTextContent("已清理（2023/11/14 22:13）");
+    expect(within(cleanupRegion()).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(card("加登入頁")).getByRole("group", { name: "工作目錄" })).not.toHaveTextContent("已就緒");
+    expect(within(card("加登入頁")).getByRole("group", { name: "工作目錄" })).toHaveTextContent(
+      "Worktree：C:\\work\\app\\.baton\\worktrees\\task_1（已移除）",
+    );
+  });
+
+  it("沒有清理登記時不顯示清理狀態", async () => {
+    await renderBoard(fakeClient({ tasks: [completedDevTask()], workdirs: [workdirView()] }));
+
+    expect(within(card("加登入頁")).getByRole("group", { name: "工作目錄" })).not.toHaveTextContent("已移除");
+    expect(within(card("加登入頁")).queryByRole("status", { name: "清理狀態" })).not.toBeInTheDocument();
   });
 });

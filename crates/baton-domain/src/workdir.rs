@@ -156,12 +156,15 @@ impl Workdir {
     }
 }
 
-/// 面板與 API 看到的工作目錄：登記內容加上曾在其中執行的 Run（依建立順序）。
+/// 面板與 API 看到的工作目錄：登記內容加上曾在其中執行的 Run（依建立順序）與 worktree 的清理狀態（票 21）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkdirView {
     #[serde(flatten)]
     pub workdir: Workdir,
     pub run_ids: Vec<String>,
+    /// 清理登記；還沒有登記（Task 尚未完成並整合，或是輸出目錄）時為 `None`。
+    #[serde(default)]
+    pub cleanup: Option<crate::cleanup::WorktreeCleanup>,
 }
 
 // ---------------------------------------------------------------- 計畫

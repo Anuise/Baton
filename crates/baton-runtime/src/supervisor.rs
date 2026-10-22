@@ -19,6 +19,9 @@
 //! 8. **整合**（票 20）：在驗證之後、同一個工作中依序處理單一整合佇列，一次一個項目：先持久化「開始合併」，
 //!    在整合目錄合併、執行整合驗證，通過才把目標分支前移並讓 Task 完成。崩潰後停在合併或驗證的項目從合併重做，
 //!    停在前移的項目以同一個合併結果重試前移（前移是冪等的）。
+//! 9. **清理**（票 21）：在整合之後、同一個工作中，把已完成並整合、Run 全部結束的開發 Task 的 worktree 登記為待清理，
+//!    再處理到期的清理：先持久化「清理中」，重新核對安全條件（仍是平台登記的 worktree、沒有未保存或歸屬不明的檔案），
+//!    符合才移除；失敗時記下原因、依退避有限重試，Task 仍是已完成。崩潰後停在清理中的登記重新核對後接續。
 //!
 //! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
 //! 由測試在想要的時刻呼叫 `tick`，搭配 fake Clock 就能完全決定性地重現任何時序。
@@ -37,6 +40,7 @@ use std::time::Duration;
 use baton_api::{quota, LogSink, RunSettings};
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::AgentScope;
+use baton_domain::cleanup::{self, CleanupCommand, CleanupStatus, Inspection};
 use baton_domain::integration::{self, AdvanceResult, IntegrationCommand, IntegrationStatus, MergeResult};
 use baton_domain::lifecycle::{
     ExitReport, ExitTiming, LifecycleFile, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
@@ -50,9 +54,9 @@ use baton_domain::verification::AcceptanceCommand;
 use baton_domain::Timestamp;
 use baton_ports::{
     AdapterEvent, AdvanceOutcome, AgentHandle, Liveness, MergeOutcome, Ports, ProcessIdentity, RunSpec, SpawnSpec,
-    StopResult,
+    StopResult, WorktreeState,
 };
-use baton_store::{ExecutingRun, IntegrationWork, PendingLaunch, Store};
+use baton_store::{CleanupWork, ExecutingRun, IntegrationWork, PendingLaunch, Store};
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{watch, Mutex, Notify};
@@ -157,6 +161,7 @@ impl Supervisor {
                     tokio::spawn(async move {
                         verifier.verify_pending().await;
                         verifier.integrate_pending().await;
+                        verifier.clean_pending().await;
                         drop(guard);
                     });
                 }
@@ -164,12 +169,13 @@ impl Supervisor {
         })
     }
 
-    /// 處理目前所有待辦（含驗證與整合）；每個步驟的失敗只記日誌，下一次 tick 會自然重試。
+    /// 處理目前所有待辦（含驗證、整合與清理）；每個步驟的失敗只記日誌，下一次 tick 會自然重試。
     pub async fn tick(&self) {
         self.supervise_once().await;
         let _serial = self.verify_lock.lock().await;
         self.verify_pending().await;
         self.integrate_pending().await;
+        self.clean_pending().await;
     }
 
     /// 驗證以外的七個步驟。
@@ -874,6 +880,69 @@ impl Supervisor {
         }
     }
 
+    // ------------------------------------------------------------ 清理
+
+    /// 把符合條件的 worktree 登記為待清理，再處理到期的清理；呼叫端負責持有 `verify_lock`（與驗證、整合同一個工作）。
+    async fn clean_pending(&self) {
+        let now = self.ports.clock.now();
+        match self.store.request_cleanups(now).await {
+            Ok(requested) => {
+                for cleanup in requested {
+                    self.note(&format!("Task {} 已完成並整合，worktree {} 登記為待清理", cleanup.task_id, cleanup.path));
+                }
+            }
+            Err(error) => return self.note(&format!("無法登記待清理的 worktree：{error}")),
+        }
+        let due = match self.store.due_cleanups(now).await {
+            Ok(due) => due,
+            Err(error) => return self.note(&format!("無法讀取待清理的 worktree：{error}")),
+        };
+        for work in due {
+            self.clean(work).await;
+        }
+    }
+
+    /// 一次清理嘗試：先持久化「清理中」，重新核對安全條件，符合才移除，再記錄結果。
+    async fn clean(&self, work: CleanupWork) {
+        let task_id = work.cleanup.task_id.clone();
+        let begin = CleanupCommand::Begin { task_id: task_id.clone() };
+        let begun = match self.store.apply_cleanup(begin, self.ports.clock.now()).await {
+            Ok(change) => change.cleanup,
+            Err(error) => return self.note(&format!("Task {task_id} 的清理沒有開始：{error}")),
+        };
+        let repo = PathBuf::from(&work.workspace.path);
+        let target = PathBuf::from(&begun.path);
+        let result = match self.ports.workspace_fs.inspect_worktree(&repo, &target).await {
+            Err(error) => Err(format!("無法核對 worktree {}：{error}", begun.path)),
+            Ok(state) => match cleanup::check_safety(&begun, &inspection_of(state)) {
+                Err(reason) => Err(reason),
+                Ok(()) => {
+                    let trash = cleanup::trash_dir(&work.workspace, &task_id);
+                    self.ports
+                        .workspace_fs
+                        .remove_worktree(&repo, &target, std::path::Path::new(&trash))
+                        .await
+                        .map_err(|error| format!("無法移除 worktree {}：{error}", begun.path))
+                }
+            },
+        };
+        let finish = CleanupCommand::Finish { task_id: task_id.clone(), result };
+        match self.store.apply_cleanup(finish, self.ports.clock.now()).await {
+            Ok(change) => {
+                let cleanup = change.cleanup;
+                match (cleanup.status, &cleanup.failure) {
+                    (CleanupStatus::Cleaned, _) => self.note(&format!("Task {task_id} 的 worktree {} 已清理", cleanup.path)),
+                    (CleanupStatus::Failed, Some(reason)) => {
+                        self.note(&format!("Task {task_id} 的 worktree 清理失敗，不再自動重試：{reason}"))
+                    }
+                    (_, Some(reason)) => self.note(&format!("Task {task_id} 的 worktree 這次沒有清理，稍後重試：{reason}")),
+                    _ => {}
+                }
+            }
+            Err(error) => self.note(&format!("Task {task_id} 的清理結果沒有記錄：{error}")),
+        }
+    }
+
     // ------------------------------------------------------------ 取消
 
     async fn process_cancellations(&self) {
@@ -944,6 +1013,15 @@ impl Supervisor {
         if self.ports.process_control.find(&spec).await.is_ok() {
             self.adopted.lock().await.insert(run.id.clone());
         }
+    }
+}
+
+/// 把 WorkspaceFs 核對到的狀態轉成 Domain 的型別。
+fn inspection_of(state: WorktreeState) -> Inspection {
+    match state {
+        WorktreeState::Missing => Inspection::Missing,
+        WorktreeState::Registered { branch, unsaved } => Inspection::Registered { branch, unsaved },
+        WorktreeState::Foreign => Inspection::Foreign,
     }
 }
 
