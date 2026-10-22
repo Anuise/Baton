@@ -17,6 +17,7 @@ use baton_credential::DpapiProtector;
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
 use baton_domain::profile::ProfileView;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
+use baton_domain::run::RunView;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use tauri::{Manager, State};
@@ -363,6 +364,32 @@ async fn task_cancel(
     link.client.cancel_task(&workspace_id, &task_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 對 ready 的 Task 派工；回傳 queued 的 Run（程序由 Supervisor 之後才啟動）。
+#[tauri::command]
+async fn task_dispatch(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+) -> Result<RunView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.dispatch_task(&workspace_id, &task_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 要求取消 Run；已啟動的 Run 要等程序確認停止才會變 cancelled。
+#[tauri::command]
+async fn run_cancel(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    run_id: String,
+) -> Result<RunView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.cancel_run(&workspace_id, &run_id).await.map_err(|e| e.to_string())
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
@@ -392,7 +419,9 @@ fn main() {
             task_dependency_add,
             task_admission_check,
             task_ready,
-            task_cancel
+            task_cancel,
+            task_dispatch,
+            run_cancel
         ])
         .setup(|app| {
             // 不等 Web UI 來問：App 一開啟就連回或啟動 Runtime

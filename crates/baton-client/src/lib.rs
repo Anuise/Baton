@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    admission_check_path, authorization_path, authorization_summary_path, goals_path, task_admission_check_path,
-    task_cancel_path, task_contract_path, task_dependencies_path, task_path, task_ready_path, tasks_path,
+    admission_check_path, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
+    task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
+    task_path, task_ready_path, tasks_path,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
     CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse,
     LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus, SummaryRequest, TaskBoard, TaskDetail,
@@ -19,6 +20,7 @@ use baton_api::{
 };
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
+use baton_domain::run::RunView;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
@@ -220,6 +222,16 @@ impl RuntimeClient {
 
     pub async fn cancel_task(&self, workspace_id: &str, task_id: &str) -> Result<TaskView, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &task_cancel_path(workspace_id, task_id), None).await
+    }
+
+    /// 對 ready 的 Task 派工：回傳 `queued` 的 Run（程序由 Supervisor 之後才啟動）；被拒絕時回傳 `ClientError::Rejected`。
+    pub async fn dispatch_task(&self, workspace_id: &str, task_id: &str) -> Result<RunView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &task_dispatch_path(workspace_id, task_id), None).await
+    }
+
+    /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。
+    pub async fn cancel_run(&self, workspace_id: &str, run_id: &str) -> Result<RunView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &run_cancel_path(workspace_id, run_id), None).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {

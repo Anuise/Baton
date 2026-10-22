@@ -4,6 +4,8 @@
 //! 真實 Axum HTTP API），只替換 Port。`restart` 丟棄 Runtime 實例、保留資料目錄後重建，
 //! 並沿用同一組 fake，用來模擬重啟。
 //!
+//! Supervisor 不在背景自行運轉：測試呼叫 `supervise` 才讓它處理一次，時間則由 fake Clock 決定。
+//!
 //! `get_json` 與桌面 App 一樣：每次從憑證檔讀取目前的桌面憑證再帶上標頭，
 //! 所以重啟後會自動使用新憑證；要測試拒絕情境時改用 `request` 自行組裝請求。
 
@@ -18,7 +20,7 @@ use baton_api::{CLIENT_HEADER, CLIENT_HEADER_VALUE};
 use baton_domain::auth::Role;
 use baton_domain::Timestamp;
 use baton_ports::Ports;
-use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError};
+use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeOptions};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 
@@ -186,6 +188,12 @@ impl Harness {
         .expect("無法開啟控制資料庫")
     }
 
+    /// 讓 Supervisor 處理目前所有待辦一次：啟動派工 Outbox 裡的 Run、收 Adapter 事件、處理取消、核對過期的 lease。
+    /// Harness 不啟動 Supervisor 的背景迴圈，所以每一步都由測試決定何時發生（搭配 fake Clock 就完全決定性）。
+    pub async fn supervise(&self) {
+        self.runtime.as_ref().expect("Runtime 尚未啟動").supervisor().tick().await;
+    }
+
     /// 模擬重啟：丟棄目前的 Runtime，保留資料目錄與 fake，重新建立。
     pub async fn restart(&mut self) {
         if let Some(runtime) = self.runtime.take() {
@@ -202,5 +210,6 @@ async fn try_start_runtime(data_dir: &Path, ports: &Ports) -> Result<RunningRunt
         // 埠 0 讓作業系統配置；每個 Harness 與每次重建都不會互相衝突
         bind: "127.0.0.1:0".parse().expect("固定位址"),
     };
-    Runtime::start(config, ports.clone()).await
+    // 測試自己決定何時讓 Supervisor 動作（`Harness::supervise`），所以不啟動背景迴圈
+    Runtime::start_with(config, ports.clone(), RuntimeOptions { background_supervisor: false, ..RuntimeOptions::default() }).await
 }

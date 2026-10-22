@@ -98,7 +98,7 @@ async fn every_port_can_be_driven_through_its_fake() {
     // ProcessControl
     let receipt = ports
         .process_control
-        .spawn(SpawnSpec { program: "claude".into(), args: vec![], working_dir: None })
+        .spawn(SpawnSpec { program: "claude".into(), args: vec![], working_dir: None, command_id: "cmd-1".into() })
         .await
         .unwrap();
     assert_eq!(ports.process_control.inspect(&receipt.identity).await.unwrap(), Liveness::Alive);
@@ -115,7 +115,13 @@ async fn every_port_can_be_driven_through_its_fake() {
     harness.agent_adapter.script_events("run-1", vec![AdapterEvent::Exited { success: true }]);
     let handle = ports
         .agent_adapter
-        .launch(RunSpec { run_id: "run-1".into(), prompt: "hi".into() })
+        .launch(RunSpec {
+            run_id: "run-1".into(),
+            task_id: "task-1".into(),
+            command_id: "cmd-1".into(),
+            prompt: "hi".into(),
+            working_dir: None,
+        })
         .await
         .unwrap();
     let events: Vec<_> = futures::StreamExt::collect(ports.agent_adapter.events(&handle)).await;

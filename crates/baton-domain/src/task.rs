@@ -374,11 +374,11 @@ pub struct TaskContext<'a> {
 }
 
 impl TaskContext<'_> {
-    fn task(&self, id: &str) -> Option<&Task> {
+    pub(crate) fn task(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
     }
 
-    fn contract_of(&self, task: &Task) -> Option<&TaskContract> {
+    pub(crate) fn contract_of(&self, task: &Task) -> Option<&TaskContract> {
         self.contracts.iter().find(|c| c.task_id == task.id && c.version == task.contract_version)
     }
 
@@ -600,14 +600,14 @@ fn clean_title(raw: &str) -> Option<String> {
 }
 
 /// 目前狀態之後的下一個事件版本。
-struct Versioned<'a> {
-    task: &'a mut Task,
-    events: Vec<DomainEvent>,
-    now: Timestamp,
+pub(crate) struct Versioned<'a> {
+    pub(crate) task: &'a mut Task,
+    pub(crate) events: Vec<DomainEvent>,
+    pub(crate) now: Timestamp,
 }
 
 impl Versioned<'_> {
-    fn push(&mut self, event_type: &'static str, payload: serde_json::Value) {
+    pub(crate) fn push(&mut self, event_type: &'static str, payload: serde_json::Value) {
         self.task.version += 1;
         self.task.updated_at = self.now;
         self.events.push(DomainEvent {
@@ -620,7 +620,7 @@ impl Versioned<'_> {
         });
     }
 
-    fn change_status(&mut self, to: TaskStatus, reason: &str) -> Result<(), TaskError> {
+    pub(crate) fn change_status(&mut self, to: TaskStatus, reason: &str) -> Result<(), TaskError> {
         let from = self.task.status;
         if !from.can_transition_to(to) {
             return Err(TaskError::TransitionInvalid { from, to });

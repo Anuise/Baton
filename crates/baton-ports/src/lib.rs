@@ -18,7 +18,7 @@ pub use agent::{AdapterEvent, AgentAdapter, AgentHandle, Capability, RunSpec, Se
 pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, ToolProbe};
 pub use clock::Clock;
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
-pub use process::{Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
+pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
 pub use secret::SecretProtector;
 pub use workspace_fs::{directory_state, DirectoryState, DirtyState, WorkspaceFs};
