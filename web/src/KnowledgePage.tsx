@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
+import { FIELD_LABELS } from "./ContractEditor";
 import { formatTimestamp } from "./time";
 import {
+  CONTRACT_FIELDS,
   errorCode,
+  type Capability,
+  type ContractFieldName,
   type CorrectKnowledgeRequest,
+  type GuardClient,
+  type GuardRule,
+  type GuardView,
   type KnowledgeClient,
   type KnowledgeContent,
   type KnowledgeDetail,
@@ -11,11 +18,14 @@ import {
   type KnowledgeKind,
   type KnowledgeStatus,
   type LessonDetail,
+  type Recurrence,
   type Workspace,
 } from "./runtimeClient";
 
+type Client = KnowledgeClient & GuardClient;
+
 interface Props {
-  client: KnowledgeClient;
+  client: Client;
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
@@ -25,6 +35,8 @@ type ListState =
   | { state: "loading" }
   | { state: "ready"; degraded: boolean; effective: KnowledgeEntryView[]; all: KnowledgeEntryView[] }
   | { state: "failed"; reason: string };
+
+type GuardsState = { state: "loading" } | { state: "ready"; guards: GuardView[] } | { state: "failed"; reason: string };
 
 /** 執行一個操作；成功或因衝突而重新整理時回傳 null，其餘失敗回傳要顯示的說明。 */
 type Act = (operation: () => Promise<unknown>) => Promise<string | null>;
@@ -48,8 +60,40 @@ const EVENT_LABELS: Record<string, string> = {
   knowledge_superseded: "被取代",
 };
 
+/** 各規則種類的名稱。 */
+const RULE_KIND_LABELS: Record<GuardRule["kind"], string> = {
+  preflight: "啟動前檢查",
+  tool_restriction: "工具限制",
+  retry_policy: "重試政策",
+};
+
+/** 能力名稱（與 Runtime 的 Capability::label 相同）。 */
+const CAPABILITY_LABELS: Record<Capability, string> = {
+  read_files: "讀取檔案",
+  write_files: "編輯檔案",
+  web_read: "讀取公開網頁",
+  run_build_test: "建置與測試",
+  install_project_dependencies: "安裝專案依賴",
+  admin_install: "管理員安裝",
+  global_install: "全域安裝",
+  remote_write: "遠端寫入",
+  deploy: "部署",
+  external_message: "對外發訊",
+  payment: "付費",
+  production_data: "正式資料操作",
+};
+
+const RECURRENCE_KIND_LABELS: Record<Recurrence["kind"], string> = { prevented: "已攔下", reported: "回報" };
+
 const QUERY_TERM_MIN_CHARS = 2;
+const RETRY_LIMIT_MIN = 1;
+const RETRY_LIMIT_MAX = 20;
 const CONFLICT_NOTICE = "條目已被修改，已重新整理；請確認最新內容後再操作";
+/** 版本衝突時改為提示並重新整理，不當成錯誤。 */
+const CONFLICT_NOTICES: Record<string, string> = {
+  knowledge_revision_conflict: CONFLICT_NOTICE,
+  guard_revision_conflict: "Guard 已被修改，已重新整理；請確認最新狀態後再操作",
+};
 const DEGRADED_NOTICE = "全文檢索無法使用，已改用逐筆比對（降級）：結果相同但較慢";
 
 function reasonOf(error: unknown): string {
@@ -92,9 +136,11 @@ function shortTerm(query: string): string | undefined {
 /**
  * 知識（spec D-21 主區分頁；D-26、D-28）：搜尋 Workspace 可見的知識、決策與教訓，
  * 確認或撤銷 Agent 提交的候選教訓，修正、撤銷、淘汰有效條目，並查看版本與變更歷史。
+ * 有效的已驗證教訓可轉為 Guard；Guard 區塊列出生效狀態與成效，教訓詳情列出重犯紀錄。
  */
 export function KnowledgePage({ client, workspace, timeZone }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
+  const [guards, setGuards] = useState<GuardsState>({ state: "loading" });
   const [draftQuery, setDraftQuery] = useState("");
   const [query, setQuery] = useState("");
   const [queryError, setQueryError] = useState<string | null>(null);
@@ -127,15 +173,30 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
     void load();
   }, [load]);
 
+  const loadGuards = useCallback(async () => {
+    try {
+      const { guards } = await client.listGuards(workspace.id);
+      setGuards({ state: "ready", guards });
+    } catch (e) {
+      setGuards({ state: "failed", reason: reasonOf(e) });
+    }
+  }, [client, workspace.id]);
+
+  useEffect(() => {
+    void loadGuards();
+  }, [loadGuards]);
+
+  // 知識與 Guard 互相影響（撤銷教訓會讓 Guard 不生效、回報重犯會改變成效），所以操作後兩者都重新讀取
   const act: Act = async (operation) => {
     setNotice(null);
     try {
       await operation();
     } catch (e) {
-      if (errorCode(e) !== "knowledge_revision_conflict") return reasonOf(e);
-      setNotice(CONFLICT_NOTICE);
+      const conflict = CONFLICT_NOTICES[errorCode(e) ?? ""];
+      if (conflict === undefined) return reasonOf(e);
+      setNotice(conflict);
     }
-    await load();
+    await Promise.all([load(), loadGuards()]);
     setDetailRefresh((n) => n + 1);
     return null;
   };
@@ -196,6 +257,7 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
             {list.effective.length === 0 && <p>{query === "" ? "還沒有有效的條目" : "沒有符合搜尋的有效條目"}</p>}
             {list.effective.map(card)}
           </section>
+          <GuardSection guards={guards} client={client} timeZone={timeZone} act={act} />
           <label className="knowledge-history-toggle">
             <input type="checkbox" checked={showHistory} onChange={(e) => setShowHistory(e.target.checked)} />
             顯示歷史
@@ -215,8 +277,10 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
           key={detailId}
           client={client}
           id={detailId}
+          workspace={workspace}
           refreshKey={detailRefresh}
           timeZone={timeZone}
+          act={act}
           onClose={() => setDetailId(null)}
         />
       )}
@@ -348,17 +412,17 @@ function ContentView({ content }: { content: KnowledgeContent }) {
   );
 }
 
-type CardMode = null | "correct" | "revoke" | "retire";
+type CardMode = null | "correct" | "revoke" | "retire" | "guard";
 
 interface CardProps {
-  client: KnowledgeClient;
+  client: Client;
   entry: KnowledgeEntryView;
   timeZone?: string;
   act: Act;
   onOpenDetail: (id: string) => void;
 }
 
-/** 一個條目；可用的操作依狀態：候選可確認或撤銷，已驗證可修正、撤銷或淘汰，其他只能看詳情。 */
+/** 一個條目；可用的操作依狀態：候選可確認或撤銷，已驗證可修正、撤銷或淘汰（有效的教訓還可轉為 Guard），其他只能看詳情。 */
 function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
   const [mode, setMode] = useState<CardMode>(null);
   const [error, setError] = useState<string | null>(null);
@@ -407,10 +471,21 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
             淘汰
           </button>
         )}
+        {entry.kind === "lesson" && entry.effective && (
+          <button type="button" onClick={() => setMode("guard")}>
+            轉為 Guard
+          </button>
+        )}
         <button type="button" onClick={() => onOpenDetail(entry.id)}>
           詳情
         </button>
       </div>
+      {mode === "guard" && (
+        <GuardForm
+          onCancel={() => setMode(null)}
+          onSubmit={(rule) => run(() => client.createGuard({ lesson_id: entry.id, rule }))}
+        />
+      )}
       {mode === "correct" && (
         <CorrectForm
           entry={entry}
@@ -572,15 +647,17 @@ function CreateForm({ client, workspace, act }: CreateFormProps) {
 type DetailState = { state: "loading" } | { state: "ready"; detail: KnowledgeDetail } | { state: "failed"; reason: string };
 
 interface DetailProps {
-  client: KnowledgeClient;
+  client: Client;
   id: string;
+  workspace: Workspace;
   refreshKey: number;
   timeZone?: string;
+  act: Act;
   onClose: () => void;
 }
 
-/** 條目詳情：全部內容版本（由舊到新）與變更歷史（由舊到新）。 */
-function DetailPanel({ client, id, refreshKey, timeZone, onClose }: DetailProps) {
+/** 條目詳情：全部內容版本（由舊到新）與變更歷史（由舊到新）；教訓另有重犯紀錄。 */
+function DetailPanel({ client, id, workspace, refreshKey, timeZone, act, onClose }: DetailProps) {
   const [loaded, setLoaded] = useState<DetailState>({ state: "loading" });
   const fmt = (millis: number) => formatTimestamp(millis, timeZone);
 
@@ -635,7 +712,261 @@ function DetailPanel({ client, id, refreshKey, timeZone, onClose }: DetailProps)
               );
             })}
           </ol>
+          {loaded.detail.entry.kind === "lesson" && (
+            <RecurrencePanel
+              client={client}
+              lesson={loaded.detail.entry}
+              workspace={workspace}
+              refreshKey={refreshKey}
+              timeZone={timeZone}
+              act={act}
+            />
+          )}
         </>
+      )}
+    </section>
+  );
+}
+
+interface GuardSectionProps {
+  guards: GuardsState;
+  client: GuardClient;
+  timeZone?: string;
+  act: Act;
+}
+
+/** 此 Workspace 可見的 Guard：規則說明、來源教訓、生效狀態、成效，以及停用／啟用。 */
+function GuardSection({ guards, client, timeZone, act }: GuardSectionProps) {
+  return (
+    <section className="knowledge-section knowledge-guards" aria-label="Guard">
+      <h3>Guard{guards.state === "ready" && `（${guards.guards.length}）`}</h3>
+      <p>派工前會檢查生效中的 Guard，違反就擋下並顯示來源教訓。</p>
+      {guards.state === "loading" && <p>載入中…</p>}
+      {guards.state === "failed" && <p role="alert">無法取得 Guard：{guards.reason}</p>}
+      {guards.state === "ready" && guards.guards.length === 0 && <p>還沒有 Guard；可在有效的教訓上「轉為 Guard」</p>}
+      {guards.state === "ready" && guards.guards.length > 0 && (
+        <ul className="knowledge-guard-list">
+          {guards.guards.map((guard) => (
+            <GuardItem key={guard.id} guard={guard} client={client} timeZone={timeZone} act={act} />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function GuardItem({ guard, client, timeZone, act }: { guard: GuardView; client: GuardClient; timeZone?: string; act: Act }) {
+  const [error, setError] = useState<string | null>(null);
+  const enabled = guard.status === "enabled";
+
+  const toggle = async () => {
+    setError(null);
+    const failure = await act(() =>
+      enabled ? client.disableGuard(guard.id, guard.revision) : client.enableGuard(guard.id, guard.revision),
+    );
+    if (failure !== null) setError(failure);
+  };
+
+  return (
+    <li className={`knowledge-guard ${guard.active ? "knowledge-effective" : "knowledge-inactive"}`} aria-label={guard.description}>
+      <p>
+        <span className="knowledge-badge">{guard.active ? "生效中" : `不生效：${guard.inactive_reason ?? "原因不明"}`}</span>
+        <strong>{guard.description}</strong>
+      </p>
+      <p className="knowledge-meta">
+        {RULE_KIND_LABELS[guard.rule.kind]}・來源教訓：{guard.lesson.title}
+      </p>
+      <p className="knowledge-meta">
+        成效：攔下 {guard.prevented_count} 次・最近攔下：
+        {guard.last_prevented_at === null ? "尚無" : formatTimestamp(guard.last_prevented_at, timeZone)}・未攔下的回報{" "}
+        {guard.reported_count} 次
+      </p>
+      <div className="knowledge-actions">
+        <button type="button" onClick={() => void toggle()}>
+          {enabled ? "停用" : "啟用"}
+        </button>
+      </div>
+      {error && <p role="alert">{error}</p>}
+    </li>
+  );
+}
+
+/** 轉為 Guard：選規則種類並填寫該種類的參數。 */
+function GuardForm({ onSubmit, onCancel }: { onSubmit: (rule: GuardRule) => Promise<void>; onCancel: () => void }) {
+  const [kind, setKind] = useState<GuardRule["kind"]>("preflight");
+  const [field, setField] = useState<ContractFieldName>("objective");
+  const [mention, setMention] = useState("");
+  const [capability, setCapability] = useState<Capability>("read_files");
+  const [maxFailed, setMaxFailed] = useState("3");
+  const [error, setError] = useState<string | null>(null);
+
+  /** 依種類組出規則；輸入不合法時回傳要顯示的說明。 */
+  const ruleOf = (): GuardRule | string => {
+    switch (kind) {
+      case "preflight":
+        return mention.trim() === "" ? "請輸入契約欄位必須提到的文字" : { kind, field, must_mention: mention.trim() };
+      case "tool_restriction":
+        return { kind, capability };
+      case "retry_policy": {
+        const count = Number(maxFailed);
+        return Number.isInteger(count) && count >= RETRY_LIMIT_MIN && count <= RETRY_LIMIT_MAX
+          ? { kind, max_failed_runs: count }
+          : `失敗次數須為 ${RETRY_LIMIT_MIN} 到 ${RETRY_LIMIT_MAX} 的整數`;
+      }
+    }
+  };
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const rule = ruleOf();
+    if (typeof rule === "string") {
+      setError(rule);
+      return;
+    }
+    setError(null);
+    void onSubmit(rule);
+  };
+
+  return (
+    <form className="knowledge-form" aria-label="轉為 Guard" onSubmit={submit}>
+      <label>
+        規則種類
+        <select value={kind} onChange={(e) => setKind(e.target.value as GuardRule["kind"])}>
+          {(Object.keys(RULE_KIND_LABELS) as GuardRule["kind"][]).map((k) => (
+            <option key={k} value={k}>
+              {RULE_KIND_LABELS[k]}
+            </option>
+          ))}
+        </select>
+      </label>
+      {kind === "preflight" && (
+        <>
+          <label>
+            契約欄位
+            <select value={field} onChange={(e) => setField(e.target.value as ContractFieldName)}>
+              {CONTRACT_FIELDS.map((name) => (
+                <option key={name} value={name}>
+                  {FIELD_LABELS[name]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            必須提到的文字（不分大小寫）
+            <input value={mention} onChange={(e) => setMention(e.target.value)} />
+          </label>
+        </>
+      )}
+      {kind === "tool_restriction" && (
+        <label>
+          禁止要求的能力
+          <select value={capability} onChange={(e) => setCapability(e.target.value as Capability)}>
+            {(Object.keys(CAPABILITY_LABELS) as Capability[]).map((c) => (
+              <option key={c} value={c}>
+                {CAPABILITY_LABELS[c]}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {kind === "retry_policy" && (
+        <label>
+          同一份契約失敗幾次後不再派工
+          {/* 範圍由送出時檢查並以既有的錯誤訊息呈現，不用瀏覽器內建的 min/max 驗證 */}
+          <input type="number" value={maxFailed} onChange={(e) => setMaxFailed(e.target.value)} />
+        </label>
+      )}
+      <div className="knowledge-actions">
+        <button type="submit">建立 Guard</button>
+        <button type="button" onClick={onCancel}>
+          取消
+        </button>
+      </div>
+      {error && <p role="alert">{error}</p>}
+    </form>
+  );
+}
+
+type RecurrenceState = { state: "loading" } | { state: "ready"; recurrences: Recurrence[] } | { state: "failed"; reason: string };
+
+interface RecurrenceProps {
+  client: GuardClient;
+  lesson: KnowledgeEntryView;
+  workspace: Workspace;
+  refreshKey: number;
+  timeZone?: string;
+  act: Act;
+}
+
+/** 教訓的重犯紀錄（由新到舊）；有效的教訓可回報一次沒被攔下的重犯。 */
+function RecurrencePanel({ client, lesson, workspace, refreshKey, timeZone, act }: RecurrenceProps) {
+  const [loaded, setLoaded] = useState<RecurrenceState>({ state: "loading" });
+  const [note, setNote] = useState("");
+  const [taskId, setTaskId] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    client.listRecurrences(lesson.id).then(
+      ({ recurrences }) => !cancelled && setLoaded({ state: "ready", recurrences }),
+      (e: unknown) => !cancelled && setLoaded({ state: "failed", reason: reasonOf(e) }),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, lesson.id, refreshKey]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (note.trim() === "") {
+      setError("請填寫重犯說明");
+      return;
+    }
+    setError(null);
+    // 成功後 act 會讓詳情（含重犯紀錄）與 Guard 成效重新讀取
+    const failure = await act(() =>
+      client.reportRecurrence(lesson.id, {
+        note: note.trim(),
+        workspace_id: workspace.id,
+        task_id: taskId.trim() === "" ? undefined : taskId.trim(),
+      }),
+    );
+    // 失敗時保留輸入，讓使用者修正後重送
+    if (failure === null) {
+      setNote("");
+      setTaskId("");
+    } else setError(failure);
+  };
+
+  return (
+    <section className="knowledge-recurrences" aria-label="重犯紀錄">
+      <h4>重犯紀錄</h4>
+      {loaded.state === "loading" && <p>載入中…</p>}
+      {loaded.state === "failed" && <p role="alert">無法取得重犯紀錄：{loaded.reason}</p>}
+      {loaded.state === "ready" && loaded.recurrences.length === 0 && <p>沒有重犯紀錄</p>}
+      {loaded.state === "ready" && loaded.recurrences.length > 0 && (
+        <ol>
+          {loaded.recurrences.map((recurrence) => (
+            <li key={recurrence.id}>
+              <strong>{RECURRENCE_KIND_LABELS[recurrence.kind]}</strong>・{formatTimestamp(recurrence.occurred_at, timeZone)}
+              ・Task：{recurrence.task_id ?? "未指定"}・{recurrence.message}
+            </li>
+          ))}
+        </ol>
+      )}
+      {lesson.effective && (
+        <form className="knowledge-form" aria-label="回報重犯" onSubmit={(e) => void submit(e)}>
+          <label>
+            重犯說明
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} />
+          </label>
+          <label>
+            Task 識別（選填）
+            <input value={taskId} onChange={(e) => setTaskId(e.target.value)} />
+          </label>
+          <button type="submit">回報重犯</button>
+          {error && <p role="alert">{error}</p>}
+        </form>
       )}
     </section>
   );

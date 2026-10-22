@@ -847,6 +847,69 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版以契約的路徑與 body 操作 Guard 與重犯紀錄", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const json = { "content-type": "application/json" };
+    const create = { lesson_id: "kn_1", rule: { kind: "retry_policy" as const, max_failed_runs: 3 } };
+    const report = { note: "又忘了備份", workspace_id: "ws_1", task_id: "task_2" };
+
+    await client.listGuards("ws/1");
+    await client.listGuards();
+    await client.createGuard(create);
+    await client.enableGuard("gd_1", 2);
+    await client.disableGuard("gd_1", 3);
+    await client.listRecurrences("kn_1");
+    await client.reportRecurrence("kn_1", report);
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/guards?workspace_id=ws%2F1"],
+      ["/api/v1/guards"],
+      ["/api/v1/guards", { method: "POST", headers: json, body: JSON.stringify(create) }],
+      ["/api/v1/guards/gd_1/enable", { method: "POST", headers: json, body: JSON.stringify({ expected_revision: 2 }) }],
+      ["/api/v1/guards/gd_1/disable", { method: "POST", headers: json, body: JSON.stringify({ expected_revision: 3 }) }],
+      ["/api/v1/knowledge/kn_1/recurrences"],
+      ["/api/v1/knowledge/kn_1/recurrences", { method: "POST", headers: json, body: JSON.stringify(report) }],
+    ]);
+  });
+
+  it("HTTP 版 Guard 操作失敗時保留 Runtime 的說明與錯誤代碼", async () => {
+    const body = { error: "guard_revision_conflict", message: "Guard 已被修改" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .disableGuard("gd_1", 1)
+      .catch((e: unknown) => e);
+
+    expect((error as Error).message).toBe("Guard 已被修改");
+    expect(errorCode(error)).toBe("guard_revision_conflict");
+  });
+
+  it("Tauri 版以指令與參數操作 Guard 與重犯紀錄", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+    const create = { lesson_id: "kn_1", rule: { kind: "tool_restriction" as const, capability: "deploy" as const } };
+    const report = { note: "又忘了備份", workspace_id: "ws_1" };
+
+    await client.listGuards("ws_1");
+    await client.listGuards();
+    await client.createGuard(create);
+    await client.enableGuard("gd_1", 2);
+    await client.disableGuard("gd_1", 3);
+    await client.listRecurrences("kn_1");
+    await client.reportRecurrence("kn_1", report);
+
+    expect(invoke.mock.calls).toEqual([
+      ["guard_list", { workspaceId: "ws_1" }],
+      ["guard_list", { workspaceId: undefined }],
+      ["guard_create", { request: create }],
+      ["guard_enable", { id: "gd_1", expectedRevision: 2 }],
+      ["guard_disable", { id: "gd_1", expectedRevision: 3 }],
+      ["knowledge_recurrences", { id: "kn_1" }],
+      ["knowledge_report_recurrence", { id: "kn_1", request: report }],
+    ]);
+  });
+
   const basis = { run_id: "run_1", generation: 2, contract_version: 3, artifacts: [{ artifact_id: "art_1", version: 1 }] };
 
   it("HTTP 版讀取驗證資料與手動接受：接受時以 JSON 送出 basis 與附註", async () => {

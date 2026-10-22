@@ -12,6 +12,7 @@ pub mod backup;
 pub mod config;
 pub mod decision;
 pub mod event;
+pub mod guard;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod message;

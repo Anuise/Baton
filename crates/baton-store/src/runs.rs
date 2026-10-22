@@ -58,7 +58,11 @@ impl Store {
                 {
                     return Ok(Err(RunError::LaunchHalted));
                 }
-                let loaded = load(tx, &workspace_id)?;
+                let mut loaded = load(tx, &workspace_id)?;
+                // 派工是 Run 准入：載入要檢查的 Guard（票 38）
+                if matches!(command, RunCommand::Dispatch { .. }) {
+                    loaded.guards = super::guards::load_active_guards(tx, &workspace_id, now)?;
+                }
                 // 准入（launch intent）時固定的共同設定版本，與授權的重新檢查在同一個交易中取得（票 24）
                 let (launching, settings_version) = match &command {
                     RunCommand::BeginLaunch { run_id, .. } => {
@@ -193,7 +197,8 @@ fn decide_with(
 ) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
-    let run_ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, settings_version };
+    let run_ctx =
+        RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, guards: &loaded.guards, settings_version };
     run::decide(&run_ctx, command, now)
 }
 
