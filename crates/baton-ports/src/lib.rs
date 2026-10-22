@@ -5,6 +5,7 @@
 
 mod agent;
 mod claude_env;
+mod command;
 mod clock;
 mod platform;
 mod process;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 pub use agent::{AdapterEvent, AgentAdapter, AgentHandle, Capability, RunSpec, SessionRef};
 pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, ToolProbe};
 pub use clock::Clock;
+pub use command::{CommandOutput, CommandRequest, CommandRunner};
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{observe_quota, Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
@@ -49,4 +51,6 @@ pub struct Ports {
     pub platform_info: Arc<dyn PlatformInfo>,
     pub secret_protector: Arc<dyn SecretProtector>,
     pub claude_env: Arc<dyn ClaudeEnvironment>,
+    /// 執行契約宣告的驗證命令（票 13）。
+    pub command_runner: Arc<dyn CommandRunner>,
 }

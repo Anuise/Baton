@@ -114,7 +114,7 @@ fn workspace_exists(conn: &Connection, workspace_id: &str) -> rusqlite::Result<b
 }
 
 /// 載入成果與版本（版本由舊到新）；`only` 指定 (task_id, 名稱) 時只載入那一個。
-fn load_artifacts(conn: &Connection, workspace_id: &str, only: Option<(&str, &str)>) -> rusqlite::Result<Vec<Artifact>> {
+pub(crate) fn load_artifacts(conn: &Connection, workspace_id: &str, only: Option<(&str, &str)>) -> rusqlite::Result<Vec<Artifact>> {
     let mut artifacts = conn
         .prepare(
             "SELECT id, task_id, name, created_at FROM artifact

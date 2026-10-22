@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理與首次啟動精靈端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理與首次啟動精靈端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -13,6 +13,7 @@ mod runs;
 mod scheduling;
 mod setup;
 mod tasks;
+mod verification;
 mod workspaces;
 
 use std::convert::Infallible;
@@ -55,6 +56,7 @@ pub use scheduling::{
     AccountRun, AccountScheduling, CapacityModeInfo, CapacityView, QueueEntryView, SchedulingOverview,
     SchedulingSettingsView, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
 };
+pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
 /// 健康端點路徑。
@@ -142,6 +144,8 @@ pub fn router(state: ApiState) -> Router {
         .route(tasks::ADMISSION_ROUTE, post(tasks::admission_check))
         .route(tasks::READY_ROUTE, post(tasks::mark_ready))
         .route(tasks::CANCEL_ROUTE, post(tasks::cancel))
+        .route(verification::VERIFICATION_ROUTE, get(verification::view))
+        .route(verification::ACCEPT_ROUTE, post(verification::accept))
         .route(PROFILES_PATH, get(profiles::list).post(profiles::create))
         .route(profiles::VERIFY_ROUTE, post(profiles::verify))
         .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))

@@ -45,6 +45,8 @@ pub trait WorkspaceFs: Send + Sync {
     async fn write_artifact_atomic(&self, path: &Path, bytes: &[u8]) -> PortResult<()>;
     /// 讀取成果檔案；檔案不存在回 `None`。
     async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>>;
+    /// 讀取工作目錄內的檔案（驗證的檔案檢查用，票 13）；不存在回 `None`，不是檔案（例如目錄）是錯誤。
+    async fn read_workspace_file(&self, path: &Path) -> PortResult<Option<Vec<u8>>>;
     /// 遞迴列出目錄下的全部檔案（含暫存檔）；目錄不存在回空清單。
     async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>>;
 }
