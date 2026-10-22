@@ -969,6 +969,7 @@ export function workflowView(overrides: Partial<WorkflowView> = {}): WorkflowVie
     status: "active",
     current_stage: "minimization",
     blocked_reason: null,
+    resume_stage: null,
     revision: 3,
     created_by: "ctl_1",
     created_at: CHECKED_AT,

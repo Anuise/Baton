@@ -16,7 +16,7 @@ use baton_domain::workflow::{
     self, ClaimedOutcome, EvidenceInput, MethodVersion, PlaybookDefinition, PlaybookVersion, Situation, StageAttempt,
     StageDefinition, StageState, WorkflowError, WorkflowInstance,
 };
-use baton_store::{WorkflowApplyError, WorkflowBinding, WorkflowDetail};
+use baton_store::{Builds, WorkflowApplyError, WorkflowBinding, WorkflowDetail};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::Claims;
@@ -288,6 +288,15 @@ pub(crate) async fn record_stage_result(
     let Json(request) = body.map_err(bad_json)?;
     let scope = controller_scope(&state, &record, &request.claims).await?;
     let evidence = workflow::normalize_evidence(&request.evidence)?;
+    // 在交易外觀察受驗目錄目前的 build（票 50）：通過時隨 attempt 保存，驗證證據必須是目前的 build。
+    // 觀察失敗的目錄不放進去（視為觀察不到，不比較）
+    let dirs = state.store.stage_result_build_dirs(&scope.workspace_id, &request.workflow_id, evidence.clone()).await?;
+    let mut builds = Builds::new();
+    for dir in dirs {
+        if let Ok(revision) = state.verification_driver.revision(std::path::Path::new(&dir)).await {
+            builds.insert(dir, revision);
+        }
+    }
     let (attempt, detail) = state
         .store
         .record_stage_result(
@@ -300,6 +309,7 @@ pub(crate) async fn record_stage_result(
             request.note,
             &scope.controller_run_id,
             new_id("att")?,
+            builds,
             state.clock.now(),
         )
         .await?;

@@ -360,7 +360,8 @@ export interface Goal {
 
 /** 契約內的引用；儲存時不檢查是否存在，准入檢查時才判定失效。 */
 export interface ContractReference {
-  kind: "task_contract" | "goal" | "authorization";
+  /** decision：依據某個裁定請求（version 是引用時請求的內容版本）。 */
+  kind: "task_contract" | "goal" | "authorization" | "decision";
   target: string;
   version: number;
 }
@@ -2216,7 +2217,8 @@ export type WorkflowStatus = "active" | "blocked" | "completed";
 /** decision：裁定 Gate；safety：安全 Gate。兩者都不能跳過。 */
 export type StageGate = "none" | "decision" | "safety";
 
-export type StageState = "pending" | "current" | "blocked" | "passed" | "skipped";
+/** invalidated：先前通過，但依賴（規格、build、Verification Profile、被推翻的假設）改變而失效，等待重驗。 */
+export type StageState = "pending" | "current" | "blocked" | "passed" | "skipped" | "invalidated";
 
 /** 離開條件需要的證據種類。 */
 export type EvidenceKind = "artifact" | "decision" | "task_accepted";
@@ -2230,7 +2232,8 @@ export interface ExitCheck {
 /** Stage 未通過時的去向：重試、回到某個 Stage，或阻擋 Workflow。 */
 export type FailureRoute = { kind: "retry" } | { kind: "return_to"; stage: string } | { kind: "block" };
 
-export type StageAttemptOutcome = "passed" | "incomplete" | "blocked" | "failed" | "skipped";
+/** invalidated：Runtime 記錄的失效紀錄，missing 是失效原因。 */
+export type StageAttemptOutcome = "passed" | "incomplete" | "blocked" | "failed" | "skipped" | "invalidated";
 
 /** 一項證據與 Runtime 的查驗結果。 */
 export interface StageEvidence {
@@ -2239,7 +2242,8 @@ export interface StageEvidence {
   artifact_id?: string;
   decision_request_id?: string;
   task_id?: string;
-  status: "valid" | "not_found" | "pending" | "not_accepted";
+  /** build_changed：Evidence Bundle 驗證的 build 已不是目前的 revision。 */
+  status: "valid" | "not_found" | "pending" | "not_accepted" | "build_changed";
 }
 
 export interface MissingEvidence {
@@ -2256,9 +2260,11 @@ export interface StageAttempt {
   evidence: StageEvidence[];
   missing: MissingEvidence[];
   note: string;
-  /** Controller 的 id，或使用者在桌面操作時的 "desktop"。 */
+  /** Controller 的 id、使用者在桌面操作時的 "desktop"，或 Runtime 記錄失效時的 "runtime"。 */
   recorded_by: string;
   profile_id: string | null;
+  /** 通過當下 Runtime 觀察到的受驗目錄 revision；沒有時省略。 */
+  build?: string;
   created_at: number;
 }
 
@@ -2296,6 +2302,8 @@ export interface WorkflowView {
   /** 完成後為 null。 */
   current_stage: string | null;
   blocked_reason: string | null;
+  /** Gate 失效使 Workflow 退回較早的 Stage 時，失效前的目前 Stage；否則為 null。 */
+  resume_stage: string | null;
   /** 跳過 Stage 時以 expected_revision 帶回核對。 */
   revision: number;
   created_by: string;

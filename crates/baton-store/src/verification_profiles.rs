@@ -138,10 +138,13 @@ fn active_workspace(conn: &Connection, workspace_id: &str) -> Result<String, Ver
 
 /// 在交易中查驗 Stage 的驗證證據（票 43 的 exit check）：Bundle 必須判定為 passed，依據的是這個 Workspace 目前的
 /// Profile 版本，而且綁定 Task 時，那個 Task 的契約版本仍與驗證當時相同。
+/// 證據為 passed 之外，Bundle 驗證的 build 也必須是受驗目錄目前的 revision（票 50；`builds` 是 Runtime 觀察到的目前 build，
+/// 沒有觀察到的目錄不比較）。
 pub(crate) fn verification_evidence_status(
     conn: &Connection,
     workspace_id: &str,
     bundle_id: &str,
+    builds: &super::workflows::Builds,
 ) -> rusqlite::Result<baton_domain::workflow::EvidenceStatus> {
     use baton_domain::workflow::EvidenceStatus;
     let Some(bundle) = load_bundles(conn, "id = ?1 AND workspace_id = ?2", [bundle_id, workspace_id])?.pop() else {
@@ -157,7 +160,75 @@ pub(crate) fn verification_evidence_status(
     let valid = bundle.verdict == Verdict::Passed
         && current_profile.as_deref() == Some(bundle.profile_version_id.as_str())
         && current_requirement == bundle.requirement_version;
-    Ok(if valid { EvidenceStatus::Valid } else { EvidenceStatus::NotPassed })
+    if !valid {
+        return Ok(EvidenceStatus::NotPassed);
+    }
+    let current_build = builds.get(&bundle.subject_dir).cloned().flatten();
+    Ok(match (&bundle.candidate_revision, current_build) {
+        (Some(verified), Some(current)) if *verified != current => EvidenceStatus::BuildChanged,
+        _ => EvidenceStatus::Valid,
+    })
+}
+
+/// 一份 Evidence Bundle。
+pub(crate) fn bundle(conn: &Connection, workspace_id: &str, bundle_id: &str) -> rusqlite::Result<Option<EvidenceBundle>> {
+    Ok(load_bundles(conn, "id = ?1 AND workspace_id = ?2", [bundle_id, workspace_id])?.pop())
+}
+
+/// 一個驗證要求要執行的旅程。
+pub(crate) fn request_journeys(conn: &Connection, request_id: &str) -> rusqlite::Result<Vec<String>> {
+    let raw: Option<String> =
+        conn.query_row("SELECT journeys FROM verification_request WHERE id = ?1", [request_id], |r| r.get(0)).optional()?;
+    raw.map(|raw| json_column(0, &raw)).transpose().map(Option::unwrap_or_default)
+}
+
+/// Gate 失效時由 Runtime 排入重驗（票 50）：以目前的 Profile 版本對 Workflow 的 Task 排入驗證要求，回傳要求識別。
+/// 沒有 Profile 時不排入；原本的旅程在目前版本中已不存在時改為執行全部旅程。
+pub(crate) fn queue_reverification(
+    tx: &Transaction<'_>,
+    workflow: &baton_domain::workflow::WorkflowInstance,
+    journeys: Vec<String>,
+    requested_by: String,
+    id: String,
+    now: Timestamp,
+) -> rusqlite::Result<Option<String>> {
+    let Some(profile) = latest_profile(tx, &workflow.workspace_id)? else { return Ok(None) };
+    let is_proven = proven(tx, &profile)?.is_some();
+    let journeys = verification_profile::plan_journeys(&profile.definition, &journeys, is_proven)
+        .or_else(|_| verification_profile::plan_journeys(&profile.definition, &[], is_proven))
+        .unwrap_or_default();
+    let request = VerificationRequest {
+        id,
+        workspace_id: workflow.workspace_id.clone(),
+        task_id: workflow.task_id.clone(),
+        profile_version_id: profile.id.clone(),
+        profile_version: profile.version,
+        journeys,
+        requested_by,
+        status: RequestStatus::Queued,
+        bundle_id: None,
+        created_at: now,
+    };
+    insert_request(tx, &request)?;
+    Ok(Some(request.id))
+}
+
+fn insert_request(tx: &Transaction<'_>, request: &VerificationRequest) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO verification_request
+            (id, workspace_id, task_id, profile_version_id, journeys, requested_by, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7)",
+        rusqlite::params![
+            request.id,
+            request.workspace_id,
+            request.task_id,
+            request.profile_version_id,
+            serde_json::to_string(&request.journeys).expect("旅程清單一定可以序列化"),
+            request.requested_by,
+            request.created_at.as_millis(),
+        ],
+    )?;
+    append_event(tx, &verification_profile::requested_event(request))
 }
 
 impl Store {
@@ -248,21 +319,7 @@ impl Store {
                     bundle_id: None,
                     created_at: now,
                 };
-                tx.execute(
-                    "INSERT INTO verification_request
-                        (id, workspace_id, task_id, profile_version_id, journeys, requested_by, status, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7)",
-                    rusqlite::params![
-                        request.id,
-                        request.workspace_id,
-                        request.task_id,
-                        request.profile_version_id,
-                        serde_json::to_string(&request.journeys).expect("旅程清單一定可以序列化"),
-                        request.requested_by,
-                        now.as_millis(),
-                    ],
-                )?;
-                append_event(tx, &verification_profile::requested_event(&request))?;
+                insert_request(tx, &request)?;
                 Ok(Ok(request))
             })
             .await?;

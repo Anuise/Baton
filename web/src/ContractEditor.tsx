@@ -32,7 +32,7 @@ const MODE_LABELS: Record<Mode, string> = {
 /** 這兩項是派工的底線，不能標為不適用。 */
 const NOT_APPLICABLE_FORBIDDEN = new Set<ContractFieldName>(["objective", "done_criteria"]);
 
-const REFERENCE_KINDS = ["task_contract", "goal", "authorization"] as const;
+const REFERENCE_KINDS = ["task_contract", "goal", "authorization", "decision"] as const;
 
 interface FieldDraft {
   mode: Mode;
@@ -121,7 +121,7 @@ function parseCheck(line: string): VerificationCheck | { error: string } {
 }
 
 function parseReference(line: string): ContractReference | null {
-  const match = /^(task_contract|goal|authorization):(.+)@(\d+)$/.exec(line);
+  const match = /^(task_contract|goal|authorization|decision):(.+)@(\d+)$/.exec(line);
   if (!match) return null;
   const version = Number(match[3]);
   const target = match[2].trim();

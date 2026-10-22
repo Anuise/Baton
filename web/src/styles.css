@@ -1791,7 +1791,8 @@ body {
 }
 
 .workflow-newer-version,
-.workflow-notice {
+.workflow-notice,
+.workflow-resume {
   color: #9a6700;
 }
 
@@ -1829,6 +1830,12 @@ body {
 
 .stage-blocked .workflow-stage-state {
   color: #cf222e;
+}
+
+/* 需重驗：先前通過但已失效，與已阻擋同樣醒目 */
+.stage-invalidated .workflow-stage-state {
+  color: #cf222e;
+  font-weight: 600;
 }
 
 .workflow-gate {

@@ -126,7 +126,7 @@ Goal 與 Task 的規則在 `baton_domain::task`（純邏輯：命令 + 目前狀
 | `{"status":"unknown","note"?:…}` | 明確標示未知；**不算完整**，必須補足才能 ready |
 | 省略或 `null` | 未提供（另一種缺項，和「未知」分開顯示） |
 
-引用種類：`task_contract`（同 Workspace 的 Task + 契約版本）、`goal`、`authorization`（目標是 Workspace 識別、版本是授權 revision）。儲存時不檢查引用（可先存），**准入檢查**時才判定失效：目標不存在、版本不存在、被引用的 Task 已取消。
+引用種類：`task_contract`（同 Workspace 的 Task + 契約版本）、`goal`、`authorization`（目標是 Workspace 識別、版本是授權 revision）、`decision`（同 Workspace 的裁定請求 + 引用時的內容版本：照它的建議（假設）或答案進行，票 50）。儲存時不檢查引用（可先存），**准入檢查**時才判定失效：目標不存在、版本不存在、被引用的 Task 已取消、引用的裁定請求被使用者以不同於建議的答案裁定（假設被推翻）。
 
 契約每次變更（內容與目前版本不同）追加一個版本，存在追加式的 `task_contract_version` 表（觸發器禁止更新與刪除）；內容相同回 200、不新增版本。ready 的 Task 改契約會退回 pending，必須重新通過准入。
 
@@ -1266,6 +1266,18 @@ Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journ
 桌面殼指令：`verification_artifact`（`RuntimeClient::evidence_artifact`）。UI 在「驗證」的 Evidence Bundle 檢視中顯示 persona 與登入身分、judge 的預期與理由、限流說明與證據檔案（截圖可開啟、trace 與錄影可下載，沒有保存的顯示原因）。
 
 測試：`crates/baton-harness/tests/web_verification_adapter.rs`（情境測試）、`crates/baton-runtime/tests/browser_driver.rs`（正式 Runner；本機沒有 Playwright 時略過）、`crates/baton-domain/src/verification_profile/tests.rs`、`web/src/VerificationPage.test.tsx`。
+
+### Gate 失效與重驗（票 50）
+
+已通過的 Gate 不是永久有效：規格、build、Verification Profile 改變或 Task 依據的假設被推翻時，依賴改變的 Gate 失效並建立重驗工作，其他 Gate 保持通過。規則在 `baton_domain::workflow`（`workflow/gate.rs`）與 `baton_domain::decision`（假設），持久化在 `baton-store` 的 `workflows.rs`（migration 42 `gate_reverification`），Supervisor 的 `revalidate_gates` 每一輪執行一次。細節與取捨見 ai-decisions 的票 50 條目。
+
+- **build**：受驗目錄（Task 已登記的工作目錄，否則 Workspace 目錄）的 revision，由 Runtime 經 `VerificationDriver::revision` 在交易外觀察；`record_stage_result` 前先觀察（`Store::stage_result_build_dirs`），通過時記在 attempt 的 `build`。驗證證據的 Bundle 若 `candidate_revision` 不是受驗目錄目前的 revision，查驗為 `build_changed`（票 45 驗證 R132 的觀察）。觀察不到（不是 Git repo、Port 失敗）時不比較。
+- **重新查驗**（`Store::revalidate_gates`，一個交易）：對每個未完成 Workflow 目前有效通過的 Stage，重新查驗它的證據（審查過期、Bundle 的 Profile 或需求版本改變、成果接受不是目前契約版本…），比較通過時的 build 與目前的 build（只有審查與驗證證據依賴 build），並檢查 Workflow 的 Task 依據的假設是否被推翻（使用者的裁定證據不受影響）。有 Gate 失效時：每個失效的 Stage 追加一筆 `invalidated` attempt（`recorded_by: runtime`，`missing` 是原因）、Workflow 退回最早失效的 Stage、記下原本的目前 Stage（`resume_stage`）、追加 `gate_invalidated` 事件。
+- **重驗工作**：驗證 Gate 失效時自動以原本那份 Bundle 的旅程對同一個 Task 排入驗證要求（`requested_by: runtime:gate_invalidated:<Workflow>`，已有排隊中的就不重複），同一輪就執行；並在 conversation 追加工作事件通知 Controller（原因、目前 Stage、排入的驗證要求）。Controller 以新的證據回報；重驗通過後，`resume_stage` 之前仍有效通過的 Stage 直接沿用，不重跑（`failure_route` 退回時不沿用）。流程視圖的 Stage 狀態 `invalidated` 顯示「需重驗」。
+- **假設被推翻**：Task 的契約以 `decision` 引用一個裁定請求，表示照它的建議先做。使用者的裁定不是「接受建議的那個選項」時假設被推翻，在同一個交易中：依據它的 Task 尚未結束的裁定請求標為 `superseded`（裁定中心重新整理時也會判定），通知 Controller；這些 Task 的引用失效、不能准入與派工（`reference_invalid`）；它們的 Workflow 在下一次重新查驗時 Gate 失效，而且更新契約前回報 `passed` 一律記 `blocked`。與它無關的請求、Task 與 Gate 不受影響。執行中的 Run 不會被中斷。
+- **完成條件不能被改寫讓舊成果通過**：修改已派工 Task 的完成條件仍須使用者核准（票 35），Profile 只有使用者能發布（票 45）；核准後契約改版，舊契約下的審查、Bundle 與成果接受都不再是有效證據，對應的 Gate 失效、需要重驗。
+
+測試：`crates/baton-harness/tests/gate_invalidation.rs`（情境測試）、`crates/baton-domain/src/workflow/gate_tests.rs`、`crates/baton-domain/src/decision/tests.rs`、`crates/baton-domain/src/task.rs`、`web/src/WorkflowPage.test.tsx`。
 
 ### 本機 API 的存取防護
 

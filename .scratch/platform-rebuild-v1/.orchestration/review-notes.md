@@ -82,3 +82,9 @@
 
 ## 22. 變更路徑比對（票 44）
 - 檔名含 `"`、`\` 或控制字元時，git 即使設 `core.quotepath=false` 仍會加引號，`touches` 比對會漏判而把受影響的審查軸當成可沿用；改用 `git diff -z`。
+
+## 23. 票 50 的小問題
+- `crates/baton-harness/tests/gate_invalidation.rs:54` 未使用的 `error_code`（dead_code 警告）；413-414 行取得 `/decisions` 清單後沒有斷言，「重新整理時判定過期」只有 domain 單元測試在驗。
+
+## 24. 畫面秘密偵測的已知限制（票 46，AI-423）
+- 秘密只出現在 `<input>` 的值、不在 innerText 時偵測不到；步驟之間短暫出現的中間畫面也檢查不到，截圖或 trace 仍可能拍到秘密。評估是否加讀 input 值或一律不保存含輸入欄位頁面的證據。

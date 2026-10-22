@@ -9,6 +9,9 @@
 //!   stage attempt。Runtime 依**證據**推進：exit check 都有經 Runtime 查驗的證據才算通過；缺證據記 incomplete，
 //!   等待裁定記 blocked；只說「做完了」不推進。跳過 Stage 只能由使用者在桌面進行並保存原因，裁定與安全 Gate 不能跳過。
 //! - Workflow 與 Run、帳號無關：換帳號（Controller 或 Worker 交接）後由持久化的目前 Stage 接續，不從頭跑。
+//! - **Gate 失效與重驗（票 50）**：每次通過記下當時的 build；Runtime 之後重新查驗已通過 Gate 的證據與 build，
+//!   依賴已改變（規格、build、Verification Profile、被推翻的假設）的 Gate 失效，Workflow 回到最早失效的 Stage 重驗；
+//!   沒有受影響的 Gate 保持通過，重驗後直接沿用（見 `gate` 模組）。
 
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +21,9 @@ use crate::workdir::TaskKind;
 use crate::Timestamp;
 
 mod builtin;
+mod gate;
 pub use builtin::{builtin_methods, builtin_playbooks};
+pub use gate::{passed_attempts, revalidate, GateFacts, GateInvalidation};
 
 /// Controller 依情境開始一個 Workflow 的工具名稱（Controller 專屬）。
 pub const TOOL_START_WORKFLOW: &str = "start_workflow";
@@ -34,9 +39,13 @@ pub const EVENT_WORKFLOW_STARTED: &str = "workflow_started";
 pub const EVENT_STAGE_ATTEMPT_RECORDED: &str = "stage_attempt_recorded";
 pub const EVENT_PLAYBOOK_VERSION_PUBLISHED: &str = "playbook_version_published";
 pub const EVENT_METHOD_VERSION_PUBLISHED: &str = "method_version_published";
+/// 已通過的 Gate 因依賴改變而失效（票 50）。
+pub const EVENT_GATE_INVALIDATED: &str = "gate_invalidated";
 
 /// 桌面（使用者）在 attempt 上的記錄者識別。
 pub const RECORDED_BY_DESKTOP: &str = "desktop";
+/// Runtime 自己記錄的 attempt（Gate 失效，票 50）。
+pub const RECORDED_BY_RUNTIME: &str = "runtime";
 
 pub const KEY_MAX_CHARS: usize = 64;
 pub const TITLE_MAX_CHARS: usize = 200;
@@ -640,6 +649,9 @@ pub struct WorkflowInstance {
     pub blocked_reason: Option<String>,
     /// 每次變更遞增；回報 Stage 結果與跳過都要帶上讀到的版本。
     pub revision: i64,
+    /// Gate 失效使 Workflow 退回較早的 Stage 時，失效前的目前 Stage（票 50）：重驗通過後，這之前仍有效通過的 Stage 直接沿用。
+    #[serde(default)]
+    pub resume_stage: Option<String>,
     pub created_by: String,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -709,6 +721,8 @@ pub enum EvidenceStatus {
     Stale,
     /// 審查審的不是這個 Workflow 的 Task。
     OtherSubject,
+    /// Evidence Bundle 驗證的 build（candidate revision）已不是受驗目錄目前的 revision（票 50）。
+    BuildChanged,
 }
 
 /// 一份審查兩軸各自實際審查的 reviewer（Task 識別）；沿用的軸是原本的 reviewer。
@@ -787,15 +801,18 @@ pub enum AttemptOutcome {
     Failed,
     /// 使用者附原因跳過。
     Skipped,
+    /// 先前的通過因依賴改變而失效，需要重驗（Runtime 記錄，票 50）。
+    Invalidated,
 }
 
 impl AttemptOutcome {
-    pub const ALL: [AttemptOutcome; 5] = [
+    pub const ALL: [AttemptOutcome; 6] = [
         AttemptOutcome::Passed,
         AttemptOutcome::Incomplete,
         AttemptOutcome::Blocked,
         AttemptOutcome::Failed,
         AttemptOutcome::Skipped,
+        AttemptOutcome::Invalidated,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -805,6 +822,7 @@ impl AttemptOutcome {
             AttemptOutcome::Blocked => "blocked",
             AttemptOutcome::Failed => "failed",
             AttemptOutcome::Skipped => "skipped",
+            AttemptOutcome::Invalidated => "invalidated",
         }
     }
 
@@ -836,6 +854,9 @@ pub struct StageAttempt {
     pub recorded_by: String,
     /// 記錄者所用的帳號（Controller 那一輪的帳號；桌面為 `None`）。
     pub profile_id: Option<String>,
+    /// 記錄當下 Runtime 觀察到的 build（受驗目錄的 revision；不是 Git repo 或觀察不到時為 `None`，票 50）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
     pub created_at: Timestamp,
 }
 
@@ -895,6 +916,7 @@ pub fn start(
         current_stage: Some(first.key.clone()),
         blocked_reason: None,
         revision: 1,
+        resume_stage: None,
         created_by: input.created_by,
         created_at: now,
         updated_at: now,
@@ -925,6 +947,10 @@ pub struct StageResultInput {
     pub outcome: ClaimedOutcome,
     pub evidence: Vec<CheckedEvidence>,
     pub note: String,
+    /// Runtime 在記錄前觀察到的 build（受驗目錄的 revision），隨 attempt 保存（票 50）。
+    pub build: Option<String>,
+    /// Workflow 的 Task 依據的假設已被使用者推翻的說明（票 50）：有值時不能通過，必須先更新契約。
+    pub basis_overturned: Option<String>,
 }
 
 /// 這次變更的記錄者。
@@ -981,6 +1007,8 @@ fn evaluate(stage: &StageDefinition, evidence: &[CheckedEvidence]) -> (AttemptOu
             "Task 還沒有通過成果接受".to_string()
         } else if offered.iter().any(|e| e.status == EvidenceStatus::NotPassed) {
             "驗證沒有通過（證據不足、環境或授權阻礙都不算通過），或依據的 Profile、需求版本已經改變".to_string()
+        } else if offered.iter().any(|e| e.status == EvidenceStatus::BuildChanged) {
+            "Evidence Bundle 驗證的 build 已不是受驗目錄目前的 revision，請對目前的 build 重新驗證".to_string()
         } else {
             "引用的證據在這個 Workspace 中不存在".to_string()
         };
@@ -1026,10 +1054,40 @@ fn next_attempt_no(prior: &[StageAttempt], stage: &str) -> i64 {
     prior.iter().filter(|a| a.stage_key == stage).map(|a| a.attempt).max().unwrap_or(0) + 1
 }
 
+/// 這個 Stage 最後一次通過、跳過或失效的紀錄是否是有效的通過（或跳過）。
+fn validly_passed(attempts: &[StageAttempt], stage: &str) -> bool {
+    attempts
+        .iter()
+        .filter(|a| a.stage_key == stage)
+        .filter(|a| matches!(a.outcome, AttemptOutcome::Passed | AttemptOutcome::Skipped | AttemptOutcome::Invalidated))
+        .max_by_key(|a| a.attempt)
+        .is_some_and(|a| a.outcome != AttemptOutcome::Invalidated)
+}
+
+/// 這個 Stage 的 Gate 已失效、還沒重新通過或跳過（票 50）。
+pub fn reverification_pending(attempts: &[StageAttempt], stage: &str) -> bool {
+    attempts
+        .iter()
+        .filter(|a| a.stage_key == stage)
+        .filter(|a| matches!(a.outcome, AttemptOutcome::Passed | AttemptOutcome::Skipped | AttemptOutcome::Invalidated))
+        .max_by_key(|a| a.attempt)
+        .is_some_and(|a| a.outcome == AttemptOutcome::Invalidated)
+}
+
 /// 通過或跳過之後前進到下一個 Stage；最後一個 Stage 之後 Workflow 完成。
-fn advance(workflow: &mut WorkflowInstance, playbook: &PlaybookVersion, stage: &str) {
+/// Gate 失效後的重驗途中（`resume_stage`），失效前的目前 Stage 之前仍有效通過的 Stage 直接沿用、不重跑（票 50）。
+fn advance(workflow: &mut WorkflowInstance, playbook: &PlaybookVersion, prior: &[StageAttempt], stage: &str) {
     let index = playbook.definition.stage_index(stage).expect("目前的 Stage 一定在 Playbook 中");
-    match playbook.definition.stages.get(index + 1) {
+    let mut next = index + 1;
+    if let Some(resume) = workflow.resume_stage.as_deref().and_then(|r| playbook.definition.stage_index(r)) {
+        while next < resume && validly_passed(prior, &playbook.definition.stages[next].key) {
+            next += 1;
+        }
+        if next >= resume {
+            workflow.resume_stage = None;
+        }
+    }
+    match playbook.definition.stages.get(next) {
         Some(next) => {
             workflow.current_stage = Some(next.key.clone());
             workflow.status = WorkflowStatus::Active;
@@ -1093,6 +1151,12 @@ pub fn record_result(
     }
     let mut next = workflow.clone();
     let (outcome, missing, blocked_by) = match input.outcome {
+        // 依據的假設已被推翻：舊成果不能在錯誤的前提下通過，先更新契約（票 50）
+        ClaimedOutcome::Passed if input.basis_overturned.is_some() => {
+            let why = input.basis_overturned.clone().unwrap_or_default();
+            let reason = format!("Stage「{}」：Task 依據的假設已被推翻（{why}），請先依使用者的答案更新契約", stage.title);
+            (AttemptOutcome::Blocked, Vec::new(), Some(reason))
+        }
         ClaimedOutcome::Passed => evaluate(stage, &input.evidence),
         ClaimedOutcome::Failed | ClaimedOutcome::Blocked if note.is_empty() => {
             return Err(invalid("回報失敗或阻擋時，請在 note 說明原因"));
@@ -1104,7 +1168,7 @@ pub fn record_result(
         + u32::from(outcome == AttemptOutcome::Failed);
     let exhausted = failures >= stage.budget.max_attempts;
     match outcome {
-        AttemptOutcome::Passed => advance(&mut next, playbook, &stage.key),
+        AttemptOutcome::Passed => advance(&mut next, playbook, prior, &stage.key),
         AttemptOutcome::Blocked => {
             next.status = WorkflowStatus::Blocked;
             next.blocked_reason = Some(blocked_by.unwrap_or_else(|| format!("Stage「{}」：{note}", stage.title)));
@@ -1125,6 +1189,8 @@ pub fn record_result(
                 next.current_stage = Some(target.clone());
                 next.status = WorkflowStatus::Active;
                 next.blocked_reason = None;
+                // 退回重做：之後的 Stage 照常重跑，不沿用 Gate 失效前的通過
+                next.resume_stage = None;
             }
             FailureRoute::Block => {
                 next.status = WorkflowStatus::Blocked;
@@ -1137,7 +1203,7 @@ pub fn record_result(
             next.status = WorkflowStatus::Active;
             next.blocked_reason = None;
         }
-        AttemptOutcome::Skipped => unreachable!("跳過只經由 skip_stage"),
+        AttemptOutcome::Skipped | AttemptOutcome::Invalidated => unreachable!("跳過只經由 skip_stage，失效只經由 revalidate"),
     }
     next.revision += 1;
     next.updated_at = now;
@@ -1152,6 +1218,7 @@ pub fn record_result(
         note,
         recorded_by: recorder.recorded_by,
         profile_id: recorder.profile_id,
+        build: input.build,
         created_at: now,
     };
     let event = attempt_event(&next, &attempt);
@@ -1178,7 +1245,7 @@ pub fn skip_stage(
         return Err(invalid("跳過 Stage 必須說明原因"));
     }
     let mut next = workflow.clone();
-    advance(&mut next, playbook, &definition.key);
+    advance(&mut next, playbook, prior, &definition.key);
     next.revision += 1;
     next.updated_at = now;
     let attempt = StageAttempt {
@@ -1192,6 +1259,7 @@ pub fn skip_stage(
         note: reason,
         recorded_by: RECORDED_BY_DESKTOP.to_string(),
         profile_id: None,
+        build: None,
         created_at: now,
     };
     let event = attempt_event(&next, &attempt);
@@ -1209,12 +1277,16 @@ pub enum StageState {
     Blocked,
     Passed,
     Skipped,
+    /// 先前通過，但依賴已改變而失效，等待重驗（票 50）。
+    Invalidated,
 }
 
-/// 依目前 Stage 與 attempt 推出每個 Stage 的狀態：目前 Stage 之前的以最後一次通過或跳過為準，之後的是待進行。
+/// 依目前 Stage 與 attempt 推出每個 Stage 的狀態：以最後一次通過、跳過或失效的紀錄為準。目前 Stage 之後的是待進行，
+/// 除非 Gate 失效後正在重驗（`resume_stage`）：失效前的目前 Stage 之前的通過與失效照樣顯示（仍有效的重驗後沿用）。
 pub fn stage_states(workflow: &WorkflowInstance, playbook: &PlaybookVersion, attempts: &[StageAttempt]) -> Vec<StageState> {
     let stages = &playbook.definition.stages;
     let current = workflow.current_stage.as_deref().and_then(|c| playbook.definition.stage_index(c)).unwrap_or(stages.len());
+    let resume = workflow.resume_stage.as_deref().and_then(|r| playbook.definition.stage_index(r)).unwrap_or(current);
     stages
         .iter()
         .enumerate()
@@ -1222,16 +1294,20 @@ pub fn stage_states(workflow: &WorkflowInstance, playbook: &PlaybookVersion, att
             if index == current {
                 return if workflow.status == WorkflowStatus::Blocked { StageState::Blocked } else { StageState::Current };
             }
-            if index > current {
+            if index >= resume.max(current) {
                 return StageState::Pending;
             }
             let last = attempts
                 .iter()
-                .filter(|a| a.stage_key == stage.key && matches!(a.outcome, AttemptOutcome::Passed | AttemptOutcome::Skipped))
+                .filter(|a| a.stage_key == stage.key)
+                .filter(|a| matches!(a.outcome, AttemptOutcome::Passed | AttemptOutcome::Skipped | AttemptOutcome::Invalidated))
                 .max_by_key(|a| a.attempt);
             match last.map(|a| a.outcome) {
                 Some(AttemptOutcome::Skipped) => StageState::Skipped,
-                _ => StageState::Passed,
+                Some(AttemptOutcome::Invalidated) => StageState::Invalidated,
+                Some(_) => StageState::Passed,
+                None if index < current => StageState::Passed,
+                None => StageState::Pending,
             }
         })
         .collect()
@@ -1260,6 +1336,8 @@ pub struct WorkflowNote {
     pub blocked_reason: Option<String>,
     /// 已通過或跳過的 Stage 名稱（依 Playbook 順序）。
     pub done: Vec<String>,
+    /// 已失效、等待重驗的 Stage 名稱（票 50）。
+    pub reverify: Vec<String>,
 }
 
 impl WorkflowNote {
@@ -1271,13 +1349,24 @@ impl WorkflowNote {
     ) -> Option<Self> {
         let current = workflow.current_stage.clone()?;
         let states = stage_states(workflow, playbook, attempts);
-        let done = playbook
+        let titles = |wanted: &[StageState]| {
+            playbook
+                .definition
+                .stages
+                .iter()
+                .zip(&states)
+                .filter(|(_, s)| wanted.contains(s))
+                .map(|(stage, _)| stage.title.clone())
+                .collect::<Vec<_>>()
+        };
+        let done = titles(&[StageState::Passed, StageState::Skipped]);
+        // 失效後還沒重新通過的 Gate（含退回後的目前 Stage）
+        let reverify = playbook
             .definition
             .stages
             .iter()
-            .zip(states)
-            .filter(|(_, s)| matches!(s, StageState::Passed | StageState::Skipped))
-            .map(|(stage, _)| stage.title.clone())
+            .filter(|s| reverification_pending(attempts, &s.key))
+            .map(|s| s.title.clone())
             .collect();
         Some(WorkflowNote {
             workflow_id: workflow.id.clone(),
@@ -1291,6 +1380,7 @@ impl WorkflowNote {
             current_stage: current,
             blocked_reason: workflow.blocked_reason.clone(),
             done,
+            reverify,
         })
     }
 
@@ -1299,8 +1389,13 @@ impl WorkflowNote {
         let target = self.task_title.as_deref().map(|t| format!("Task「{t}」")).unwrap_or_else(|| "Goal".to_string());
         let done = if self.done.is_empty() { "（無）".to_string() } else { self.done.join("、") };
         let blocked = self.blocked_reason.as_deref().map(|r| format!("；已阻擋：{r}")).unwrap_or_default();
+        let reverify = if self.reverify.is_empty() {
+            String::new()
+        } else {
+            format!("；Gate 已失效、需要重驗：{}", self.reverify.join("、"))
+        };
         format!(
-            "- Workflow {}（{target}，{} {} 第 {} 版，revision {}）：目前 Stage「{}」（{}）{blocked}；已完成：{done}",
+            "- Workflow {}（{target}，{} {} 第 {} 版，revision {}）：目前 Stage「{}」（{}）{blocked}{reverify}；已完成：{done}",
             self.workflow_id,
             self.playbook_title,
             self.playbook_key,

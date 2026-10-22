@@ -19,6 +19,9 @@
 //!   請求標為 `superseded`，不能再套用。權限提示另外記下判定當時的授權 revision 供查閱，但授權變更不會讓它過期：
 //!   修改授權與回答請求是兩回事，單次批准在執行時逐項核對綁定（票 23）。使用者提交時必須帶 `expected_revision`，請求在檢視後有任何變動就拒絕。
 //! - **每一項各自保存（票 35）**：一筆裁定只對應一個請求；批次處理也是逐項套用，不形成概括授權。
+//! - **答案推翻假設（票 50）**：Task 可以在契約中以 `decision` 引用一個請求，照它的建議先做。使用者的裁定與建議不同時，
+//!   假設被推翻：依據它的 Task 尚未結束的裁定請求在同一個交易中標為 `superseded`（之後重新整理時也會），並通知 Controller
+//!   重新整理受影響的 Task；與它無關的請求與 Task 不受影響。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -876,6 +879,12 @@ impl DecisionContext<'_> {
         if request.external_operation_id.is_some() {
             return None;
         }
+        // 請求提出之後，它的 Task 依據的假設被使用者推翻：請求的前提已改變（票 50）
+        for task_id in std::iter::once(&request.target.task_id).chain(&request.blocking) {
+            if let Some(why) = self.task.overturned_basis_after(task_id, request.created_at) {
+                return Some(format!("{}依據的假設已被推翻：{why}", self.task.title_of(task_id)));
+            }
+        }
         // Controller 的提問（票 17）問的是使用者的決定，不是某個契約版本：Controller 依答案補契約是預期中的事，
         // 所以契約變更不會讓它過期；只有依賴它的 Task 全部結束（或不存在）時才過期
         if request.origin == DecisionOrigin::Controller && request.kind == DecisionKind::Agent {
@@ -1730,6 +1739,18 @@ fn supersede(
 ) -> Result<Vec<String>, DecisionError> {
     let closing: Vec<&DecisionRequest> = stale.iter().map(|(r, _)| *r).collect();
     let resumed = resume_tasks(ctx, &closing, change, EVENT_DECISION_SUPERSEDED, now)?;
+    mark_superseded(ctx, stale, &resumed, change, now);
+    Ok(resumed)
+}
+
+/// 標為 `superseded` 並叫醒提出者（Task 的恢復由呼叫端處理）。
+fn mark_superseded(
+    ctx: &DecisionContext<'_>,
+    stale: Vec<(&DecisionRequest, String)>,
+    resumed: &[String],
+    change: &mut DecisionChange,
+    now: Timestamp,
+) {
     for (request, reason) in stale {
         let mut updated = request.clone();
         updated.status = DecisionStatus::Superseded;
@@ -1748,7 +1769,44 @@ fn supersede(
         wake(ctx, request, &payload, change, now);
         change.updated.push(updated);
     }
-    Ok(resumed)
+}
+
+/// 使用者的裁定是否推翻了請求的建議（假設）：只有「接受」建議的那個選項才是確認；沒有建議時任何裁定都改變了前提（票 50）。
+pub fn overturns_assumption(recommendation: Option<&str>, action: DecisionAction, option_id: Option<&str>) -> bool {
+    !(action == DecisionAction::Accept && recommendation.is_some() && option_id == recommendation)
+}
+
+/// 推翻假設的說明（給受影響的 Task 與請求看）；裁定確認了建議時為 `None`。
+pub fn overturn_reason(request: &DecisionRequest, decision: &Decision) -> Option<String> {
+    describe_overturn(
+        &request.question,
+        &request.options,
+        request.recommendation.as_deref(),
+        decision.action,
+        decision.option_id.as_deref(),
+    )
+}
+
+/// 同 [`overturn_reason`]，以請求與裁定的欄位計算（Store 載入假設狀態時用）。
+pub fn describe_overturn(
+    question: &str,
+    options: &[DecisionOption],
+    recommendation: Option<&str>,
+    action: DecisionAction,
+    option_id: Option<&str>,
+) -> Option<String> {
+    if !overturns_assumption(recommendation, action, option_id) {
+        return None;
+    }
+    let label = |id: &str| options.iter().find(|o| o.id == id).map_or(id.to_string(), |o| o.label.clone());
+    let chosen = match option_id {
+        Some(option) => format!("{}「{}」", action.label(), label(option)),
+        None => action.label().to_string(),
+    };
+    Some(match recommendation {
+        Some(recommended) => format!("使用者對「{question}」的裁定是{chosen}，不是建議的「{}」", label(recommended)),
+        None => format!("使用者對「{question}」的裁定是{chosen}"),
+    })
 }
 
 fn refresh(ctx: &DecisionContext<'_>, now: Timestamp) -> Result<DecisionChange, DecisionError> {
@@ -1865,7 +1923,43 @@ fn answer(
         decided_at: now,
         batch_id: batch_id.clone(),
     });
-    let mut resumed = resume_tasks(ctx, &[request], &mut change, EVENT_DECISION_ANSWERED, now)?;
+    // 答案推翻了建議（假設）：依據它的 Task 尚未結束的請求一起過期（票 50）
+    let decision = change.decision.as_ref().expect("剛剛建立");
+    let overturned = overturn_reason(request, decision);
+    let built_on: Vec<&str> = match &overturned {
+        Some(_) => ctx
+            .task
+            .contracts
+            .iter()
+            .filter(|c| c.content.relies_on_decision(&request.id))
+            .filter(|c| ctx.task.task(&c.task_id).is_some_and(|t| c.version == t.contract_version))
+            .map(|c| c.task_id.as_str())
+            .collect(),
+        None => Vec::new(),
+    };
+    let dependents: Vec<(&DecisionRequest, String)> = ctx
+        .requests
+        .iter()
+        .filter(|r| r.id != request.id && r.is_pending() && r.external_operation_id.is_none())
+        .filter(|r| std::iter::once(&r.target.task_id).chain(&r.blocking).any(|t| built_on.contains(&t.as_str())))
+        .map(|r| (r, format!("依據的假設已被推翻：{}（裁定請求 {}）", overturned.clone().unwrap_or_default(), request.id)))
+        .collect();
+    let mut closing = vec![request];
+    closing.extend(dependents.iter().map(|(r, _)| *r));
+    let mut resumed = resume_tasks(ctx, &closing, &mut change, EVENT_DECISION_ANSWERED, now)?;
+    mark_superseded(ctx, dependents, &resumed, &mut change, now);
+    if let (Some(why), false) = (&overturned, built_on.is_empty()) {
+        change.notices.push(ConversationNotice {
+            workspace_id: request.workspace_id.clone(),
+            source: format!("assumption_overturned:{}", request.id),
+            content: format!(
+                "使用者的答案推翻了假設：{why}（裁定請求 {}）。依據這個假設的 Task：{}；它們的契約引用已失效、不能派工，\
+                 相關的 Gate 會失效並需要重驗，等待中的裁定請求已過期。請依答案更新這些 Task 的契約（或取消），再重新提問與派工",
+                request.id,
+                built_on.join("、")
+            ),
+        });
+    }
     if action.needs_option() && option_id.as_deref() == Some(OPTION_APPROVE) {
         resumed.extend(continue_after_budget(ctx, request, &mut change, now)?);
     }

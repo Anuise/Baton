@@ -78,11 +78,13 @@ struct World {
     tasks: Vec<Task>,
     requests: Vec<DecisionRequest>,
     decisions: Vec<Decision>,
+    contracts: Vec<crate::task::TaskContract>,
+    assumptions: Vec<crate::task::Assumption>,
 }
 
 impl World {
     fn new(tasks: Vec<Task>, requests: Vec<DecisionRequest>) -> Self {
-        Self { workspace: workspace(), tasks, requests, decisions: vec![] }
+        Self { workspace: workspace(), tasks, requests, decisions: vec![], contracts: vec![], assumptions: vec![] }
     }
 
     fn run(&self, command: DecisionCommand) -> Result<DecisionChange, DecisionError> {
@@ -93,8 +95,9 @@ impl World {
             goals: &[],
             tasks: &self.tasks,
             dependencies: &[],
-            contracts: &[],
+            contracts: &self.contracts,
             decision_holds: &[],
+            assumptions: &self.assumptions,
         };
         let policy = AuthorityPolicy::default();
         let ctx = DecisionContext {
@@ -554,4 +557,80 @@ fn a_controller_gate_with_a_subject_only_shares_requests_and_approvals_for_the_s
     assert!(matches!(other.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { existing: false, .. }, .. }));
     let used = world.run(gate_on(Matter::DismissReviewFinding, "t1", "fnd_1", "dr4")).unwrap();
     assert!(matches!(used.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::Approved { .. }, .. }));
+}
+
+// --- 票 50：使用者的答案推翻既有假設 ---
+
+/// Task 目前的契約，「輸入與依據」引用裁定請求 `request_id`（照它的建議先做）。
+fn built_on(task_id: &str, request_id: &str) -> crate::task::TaskContract {
+    use crate::task::{ContractContent, ContractField, Reference, ReferenceKind};
+    crate::task::TaskContract {
+        task_id: task_id.into(),
+        version: 1,
+        content: ContractContent {
+            inputs: Some(ContractField::Filled {
+                text: "依建議先做".into(),
+                references: vec![Reference { kind: ReferenceKind::Decision, target: request_id.into(), version: 1 }],
+            }),
+            ..Default::default()
+        },
+        note: None,
+        created_at: T0,
+    }
+}
+
+/// d_api 問「要用哪個方案」並建議 a；t1 依這個建議先做，d_t1 是 t1 正在等的另一個請求；t2 與它無關。
+fn assumption_world() -> World {
+    let mut asked = pending("d_api", DecisionKind::Agent, "t0");
+    asked.recommendation = Some("a".into());
+    let mut world = World::new(
+        vec![task("t0", TaskStatus::WaitingDecision, 1), task("t1", TaskStatus::WaitingDecision, 1), task("t2", TaskStatus::WaitingDecision, 1)],
+        vec![asked, pending("d_t1", DecisionKind::Agent, "t1"), pending("d_t2", DecisionKind::Agent, "t2")],
+    );
+    world.contracts = vec![built_on("t1", "d_api")];
+    world
+}
+
+#[test]
+fn an_answer_that_overturns_the_recommendation_supersedes_pending_requests_of_tasks_built_on_it() {
+    let world = assumption_world();
+    let change = world.run(answer("d_api", 1, DecisionAction::Accept, Some("b"), None)).unwrap();
+
+    assert_eq!(change.decision.as_ref().unwrap().option_id.as_deref(), Some("b"));
+    let status = |id: &str| change.updated.iter().find(|r| r.id == id).map(|r| (r.status, r.status_reason.clone()));
+    assert_eq!(status("d_api").unwrap().0, DecisionStatus::Answered);
+    let (superseded, reason) = status("d_t1").expect("依據被推翻的 Task 的請求過期");
+    assert_eq!(superseded, DecisionStatus::Superseded);
+    assert!(reason.unwrap().contains("假設"));
+    assert_eq!(status("d_t2"), None, "獨立的請求不受影響");
+    let mut resumed = change.resumed.clone();
+    resumed.sort();
+    assert_eq!(resumed, vec!["t0".to_string(), "t1".to_string()], "等它們的 Task 不會一直卡在 waiting_decision");
+    let notice = change.notices.iter().find(|n| n.content.contains("推翻")).expect("通知 Controller 重新整理");
+    assert!(notice.content.contains("t1") && !notice.content.contains("t2"), "{}", notice.content);
+}
+
+#[test]
+fn accepting_the_recommendation_confirms_the_assumption_and_changes_nothing_else() {
+    let world = assumption_world();
+    let change = world.run(answer("d_api", 1, DecisionAction::Accept, Some("a"), None)).unwrap();
+    assert_eq!(change.updated.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["d_api"]);
+    assert!(change.notices.iter().all(|n| !n.content.contains("推翻")));
+}
+
+#[test]
+fn refresh_supersedes_requests_raised_before_the_assumption_of_their_task_was_overturned() {
+    let mut world = assumption_world();
+    world.requests.retain(|r| r.id != "d_api");
+    let mut later = pending("d_t1_later", DecisionKind::Agent, "t1");
+    later.created_at = Timestamp::from_millis(1_800);
+    world.requests.push(later);
+    world.assumptions = vec![crate::task::Assumption {
+        request_id: "d_api".into(),
+        revision: 2,
+        overturned: Some(crate::task::Overturn { decided_at: Timestamp::from_millis(1_500), reason: "選了 b".into() }),
+    }];
+    let change = world.run(DecisionCommand::Refresh).unwrap();
+    let DecisionOutcome::Refreshed { superseded } = &change.outcome else { panic!("{:?}", change.outcome) };
+    assert_eq!(superseded, &vec!["d_t1".to_string()], "推翻之後才提出的請求已經知道新的答案");
 }

@@ -90,7 +90,7 @@ pub use understanding::UnderstandingApplyError;
 pub use verification::{AcceptanceApplyError, PendingVerification};
 pub use verification_profiles::{PendingVerificationRun, VerificationApplyError, VerificationOverview};
 pub use workdirs::WorkdirCandidate;
-pub use workflows::{WorkflowApplyError, WorkflowBinding, WorkflowDetail};
+pub use workflows::{Builds, RevalidatedWorkflow, WorkflowApplyError, WorkflowBinding, WorkflowDetail};
 
 /// 控制資料庫檔名，位於資料目錄之下。
 pub const DB_FILE_NAME: &str = "control.sqlite";
@@ -1618,6 +1618,41 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'design_deviation 處理後不可更改'); END;
         CREATE TRIGGER design_deviation_no_delete BEFORE DELETE ON design_deviation
         BEGIN SELECT RAISE(ABORT, 'design_deviation 不可刪除'); END;",
+    },
+    // Gate 失效與重驗（票 50，第 42 個 migration）：stage_attempt 新增 `invalidated`（只有 Runtime 記錄）與通過當下的 build；
+    // Workflow 記下 Gate 失效前的目前 Stage（重驗通過後沿用之間仍有效的 Gate）。stage_attempt 以重建資料表放寬 outcome 的 CHECK。
+    Migration {
+        name: "gate_reverification",
+        sql: "CREATE TABLE stage_attempt_v2 (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL REFERENCES workflow_instance (id),
+            stage_key TEXT NOT NULL,
+            attempt INTEGER NOT NULL CHECK (attempt >= 1),
+            outcome TEXT NOT NULL CHECK (outcome IN ('passed', 'incomplete', 'blocked', 'failed', 'skipped', 'invalidated')),
+            evidence TEXT NOT NULL CHECK (json_valid(evidence)),
+            missing TEXT NOT NULL CHECK (json_valid(missing)),
+            note TEXT NOT NULL,
+            recorded_by TEXT NOT NULL,
+            profile_id TEXT,
+            build TEXT,
+            created_at INTEGER NOT NULL,
+            -- 跳過一定有原因
+            CHECK (outcome <> 'skipped' OR length(trim(note)) > 0),
+            -- 只有 Runtime 能讓 Gate 失效，而且一定附原因
+            CHECK (outcome <> 'invalidated' OR (recorded_by = 'runtime' AND json_array_length(missing) > 0)),
+            UNIQUE (workflow_id, stage_key, attempt)
+        );
+        INSERT INTO stage_attempt_v2
+            (id, workflow_id, stage_key, attempt, outcome, evidence, missing, note, recorded_by, profile_id, created_at)
+            SELECT id, workflow_id, stage_key, attempt, outcome, evidence, missing, note, recorded_by, profile_id, created_at
+            FROM stage_attempt ORDER BY rowid;
+        DROP TABLE stage_attempt;
+        ALTER TABLE stage_attempt_v2 RENAME TO stage_attempt;
+        CREATE TRIGGER stage_attempt_no_update BEFORE UPDATE ON stage_attempt
+        BEGIN SELECT RAISE(ABORT, 'stage_attempt 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER stage_attempt_no_delete BEFORE DELETE ON stage_attempt
+        BEGIN SELECT RAISE(ABORT, 'stage_attempt 是追加式資料表，不可刪除'); END;
+        ALTER TABLE workflow_instance ADD COLUMN resume_stage TEXT;",
     },
 ];
 
