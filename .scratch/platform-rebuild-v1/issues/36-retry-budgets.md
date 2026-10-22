@@ -1,6 +1,6 @@
 # 36: 修正與重試預算
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R086-36-impl，2026-10-22 18:41）
 Blocked by: 35, 13
 
 **What to build:** 依 spec D-16：實作失敗修正 3 次、驗證不完整 2 次、基礎設施重試 5 次（指數退避上限 10 分鐘），分開計數；額度交接與恢復嘗試不計入。超過預算時 Task 進入 blocked 並建立裁定請求。Task 詳情顯示各計數。

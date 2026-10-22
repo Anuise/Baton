@@ -35,8 +35,8 @@ use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::agent::{
-    TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
-    TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
+    TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
+    TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
@@ -48,9 +48,11 @@ use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
 
-pub use agent::{tool_path, DecisionRequested, PermissionResponse, ReportAck, TaskContractResponse};
+pub use agent::{tool_path, ControllerActionResponse, DecisionRequested, PermissionResponse, ReportAck, TaskContractResponse};
 pub use decisions::{
-    decision_answer_path, decision_path, decisions_path, AnswerRequest, PendingDecisions, PENDING_DECISIONS_PATH,
+    decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path, decision_path,
+    decisions_path, AnswerRequest, BatchItem, BatchItemResult, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
+    MergeResponse, PendingDecisions, UpdateAuthorityRequest, DECISIONS_BATCH_PATH, PENDING_DECISIONS_PATH,
 };
 pub use artifacts::{
     artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview, ArtifactRegistered,
@@ -202,7 +204,11 @@ pub fn router(state: ApiState) -> Router {
         .route(decisions::DECISIONS_ROUTE, get(decisions::list))
         .route(decisions::DECISION_ROUTE, get(decisions::detail))
         .route(decisions::ANSWER_ROUTE, post(decisions::answer))
+        .route(decisions::MERGE_ROUTE, post(decisions::merge))
+        .route(decisions::LINKS_ROUTE, post(decisions::link))
+        .route(decisions::AUTHORITY_ROUTE, get(decisions::authority).put(decisions::update_authority))
         .route(PENDING_DECISIONS_PATH, get(decisions::pending))
+        .route(DECISIONS_BATCH_PATH, post(decisions::batch))
         .route(PROFILES_PATH, get(profiles::list).post(profiles::create))
         .route(profiles::VERIFY_ROUTE, post(profiles::verify))
         .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))
@@ -248,6 +254,7 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_REPORT_BLOCKED), post(agent::report_blocked))
         .route(&tool_path(TOOL_REQUEST_DECISION), post(agent::request_decision))
         .route(&tool_path(TOOL_PERMISSION_PROMPT), post(agent::permission_prompt))
+        .route(&tool_path(TOOL_CONTROLLER_ACTION), post(agent::controller_action))
         .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
         .route(&tool_path(TOOL_SEND_MESSAGE), post(messages::send_message))
         .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))

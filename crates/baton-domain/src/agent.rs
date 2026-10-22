@@ -25,6 +25,8 @@ pub const TOOL_REPORT_BLOCKED: &str = "report_blocked";
 /// 票 22：裁定請求與權限提示轉接。
 pub const TOOL_REQUEST_DECISION: &str = "request_decision";
 pub const TOOL_PERMISSION_PROMPT: &str = "permission_prompt";
+/// 票 35：Controller 的動作先經決策權限表（spec D-15）判定；必須送裁定的動作被拒絕並轉成裁定請求。
+pub const TOOL_CONTROLLER_ACTION: &str = "controller_action";
 /// Worker 間訊息（票 18）。
 pub const TOOL_SEND_MESSAGE: &str = "send_message";
 pub const TOOL_READ_INBOX: &str = "read_inbox";
