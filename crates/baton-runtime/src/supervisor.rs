@@ -570,7 +570,8 @@ impl Supervisor {
             return self.note(&format!("Run {} 無法取得系統亂數，不啟動程序", item.run.id));
         };
         // 1. 先持久化 launch intent 與 command_id；這一步完成之前不會有任何程序被啟動。
-        //    同一個交易中決定沿用或建立 Session（票 15），所以原生識別取得前平台 Session 已經存在
+        //    這也是准入（票 24）：同一個交易以這一刻生效的授權重新檢查，被拒時 Run 直接結束、Task 重新排隊。
+        //    同一個交易中也決定沿用或建立 Session（票 15），所以原生識別取得前平台 Session 已經存在
         let resume_check = match self.resume_check(&item.run, &item.payload).await {
             Ok(check) => check,
             Err(error) => return self.note(&format!("Run {} 暫時無法決定 Session，稍後再啟動：{error}", item.run.id)),
@@ -582,14 +583,23 @@ impl Supervisor {
             resume_check,
         };
         let launched = match self.store.apply_run_command(item.run.workspace_id.clone(), begin, self.ports.clock.now()).await {
-            Ok(change) => change.run,
             Err(error) => return self.note(&format!("Run {} 無法寫入 launch intent，不啟動程序：{error}", item.run.id)),
+            Ok(change) => match change.run {
+                Some(run) if run.status != RunStatus::Starting => {
+                    let reason = run.end_reason.unwrap_or_default();
+                    return self.note(&format!("Run {} 沒有通過啟動准入，不啟動程序：{reason}", item.run.id));
+                }
+                Some(run) => run,
+                // 已經是同一個 launch intent（冪等）：不會發生，新的 command_id 每次都不同
+                None => item.run.clone(),
+            },
         };
+        let settings_version = launched.settings_version;
         // 啟動規格以寫入 launch intent 後的 Run 組出（含要接續的原生 Session）
-        let item = PendingLaunch { run: launched.unwrap_or(item.run), payload: item.payload };
-        // 2. 准入的共同設定：第一次啟動時以最新版本建立 Run 專屬唯讀快照，已綁定的依 manifest 核對（D-09）；
+        let item = PendingLaunch { run: launched, payload: item.payload };
+        // 2. 准入的共同設定：以准入時固定的版本建立 Run 專屬唯讀快照，已綁定的依 manifest 核對（D-09）；
         //    核對不過就不啟動，不以不確定的設定執行
-        if let Err(reason) = self.run_settings.for_launch(&item.run.id).await {
+        if let Err(reason) = self.run_settings.for_launch(&item.run.id, settings_version).await {
             let command = RunCommand::LaunchFailed { run_id: item.run.id.clone(), reason };
             return self.apply(&item.run, command).await;
         }

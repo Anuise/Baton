@@ -834,7 +834,14 @@ const MIGRATIONS: &[Migration] = &[
             updated_at INTEGER NOT NULL
         );",
     },
-    // 票 15：平台 Session、原生 Session 與程序身分分開保存（issue §3.1～3.2）。
+    // 啟動准入（票 24，第 23 個 migration，R1-a）：准入時間與准入時固定的共同設定版本。准入時 `authorization_revision`
+    // 改寫為准入當下生效的 revision；票 24 之前的 Run 兩欄都是 NULL（派工時記下的 revision 照舊）
+    Migration {
+        name: "run_admission",
+        sql: "ALTER TABLE run ADD COLUMN admitted_at INTEGER;
+        ALTER TABLE run ADD COLUMN settings_version INTEGER;",
+    },
+    // 票 15（第 24 個 migration）：平台 Session、原生 Session 與程序身分分開保存（issue §3.1～3.2）。
     // 原生識別的唯一性以「執行工具 + 帳號」為範圍；同一個平台 Session 任何時刻最多一個未結束的 Run 驅動它。
     // session_events 是事件表中 Session 聚合的檢視；transcript_segments 只記位置、雜湊與保存進度，內容在成果儲存
     Migration {
@@ -1194,6 +1201,7 @@ impl Store {
 
     /// Run 的准入檢查：依目前生效的授權判定 `required` 能力是否都已授權。
     /// 通過時回傳這次依據的授權 revision；被拒絕時回傳原因。
+    /// 走寫入佇列（不寫任何東西）：結果與授權更新依同一個持久化順序排列，不會讀到佇列中尚未提交的舊狀態（票 24）。
     pub async fn check_admission(
         &self,
         workspace_id: &str,
@@ -1201,7 +1209,7 @@ impl Store {
     ) -> Result<Admission, AdmissionCheckError> {
         let workspace_id = workspace_id.to_string();
         let verdict = self
-            .read(move |conn| {
+            .write(move |conn| {
                 let workspace = load_workspaces(conn)?.into_iter().find(|w| w.id == workspace_id);
                 let current = load_authorization_revisions(conn, &workspace_id)?.pop();
                 Ok(authorization::admit(&workspace_id, workspace.as_ref(), current.as_ref(), &required))
