@@ -74,4 +74,5 @@
 | R070-40-integrate | 40 | integrate | Work-9 | 2026-10-22 17:55 | 2026-10-22 18:04 | DONE，依 AI-109 直接合併 |
 | R071-24-impl | 24 | impl | Work-8 | 2026-10-22 17:57 | | |
 | R072-26-impl | 26 | impl | Work-9 | 2026-10-22 18:04 | | |
-| R073-14-integrate | 14 | integrate | Work-3 | 2026-10-22 18:04 | | |
+| R073-14-integrate | 14 | integrate | Work-3 | 2026-10-22 18:04 | 2026-10-22 18:09 | DONE（37d997a） |
+| R074-14-verify | 14 | verify | Work-3 | 2026-10-22 18:09 | | |
