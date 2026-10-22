@@ -65,3 +65,4 @@
 | R061-37-integrate | 37 | integrate | Work-3 | 2026-10-22 17:34 | 2026-10-22 17:42 | DONE，依 AI-109 直接合併 |
 | R062-20-impl | 20 | impl | Work-8 | 2026-10-22 17:34 | | |
 | R063-25-integrate | 25 | integrate | Work-9 | 2026-10-22 17:36 | | |
+| R064-35-impl | 35 | impl | Work-3 | 2026-10-22 17:42 | | |
