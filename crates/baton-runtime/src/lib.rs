@@ -3,6 +3,7 @@
 //! `Runtime::start` 以程序內方式啟動完整 Runtime（真實 Store、真實 HTTP API），
 //! 所有外部副作用都經由注入的 `Ports`。正式執行檔與測試 harness 共用這個入口。
 
+pub mod backup;
 pub mod claude_adapter;
 pub mod claude_cli;
 pub mod credentials;
@@ -28,6 +29,7 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 pub use baton_domain::config::{self, ConfigError, RuntimeConfig};
+pub use backup::BackupScheduler;
 pub use credentials::CredentialIssuer;
 pub use supervisor::{LifecycleSettings, Supervisor};
 
@@ -56,6 +58,8 @@ pub struct RuntimeOptions {
     /// 是否啟動 Supervisor 的背景迴圈。測試 harness 關閉它，改由測試在想要的時刻呼叫 `Supervisor::tick`，
     /// 才能用 fake Clock 決定性地重現任何時序。
     pub background_supervisor: bool,
+    /// 是否啟動備份排程的背景迴圈（票 40）。測試 harness 關閉它，改由測試呼叫 `BackupScheduler::tick`。
+    pub background_backup: bool,
     /// 要求 Run 的程序停止時給它的寬限期（spec D-11 的 30 秒）；逾時強制終止整個程序樹。
     pub stop_grace: Duration,
     /// 完全退出的寬限期與強制終止確認上限（spec D-11 的 30 + 10 秒）；測試可縮短。
@@ -71,6 +75,7 @@ impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
             background_supervisor: true,
+            background_backup: true,
             stop_grace: supervisor::DEFAULT_STOP_GRACE,
             exit_timing: ExitTiming::default(),
             exit_linger: Some(DEFAULT_EXIT_LINGER),
@@ -153,6 +158,12 @@ impl Runtime {
         let supervising = options
             .background_supervisor
             .then(|| supervisor.spawn_background(supervisor_wake.clone(), stop_rx.clone()));
+        let backups = BackupScheduler::new(store.clone(), config.data_dir.clone(), ports.clock.clone(), log.clone());
+        let backing_up = options.background_backup.then(|| backups.spawn_background(stop_rx.clone()));
+        let request_backup: baton_api::BackupRequestSink = {
+            let backups = backups.clone();
+            Arc::new(move |reason: &str| backups.request_milestone_backup(reason))
+        };
         let (exits_tx, exits) = watch::channel(0u64);
         let exiting = spawn_exit_runner(
             supervisor.clone(),
@@ -177,6 +188,7 @@ impl Runtime {
             run_settings,
             log,
             supervisor_wake,
+            request_backup,
             shutdown: stop_rx.clone(),
             exit_timing: options.exit_timing,
             exit_signal,
@@ -190,7 +202,19 @@ impl Runtime {
             };
             tokio::join!(serve(v4, app.clone(), stop_rx.clone()), serving_v6);
         });
-        Ok(RunningRuntime { addr, addr_v6, credentials, supervisor, supervising, exiting, exits, stop_tx, task })
+        Ok(RunningRuntime {
+            addr,
+            addr_v6,
+            credentials,
+            supervisor,
+            supervising,
+            backups,
+            backing_up,
+            exiting,
+            exits,
+            stop_tx,
+            task,
+        })
     }
 }
 
@@ -290,6 +314,8 @@ pub struct RunningRuntime {
     credentials: CredentialIssuer,
     supervisor: Arc<Supervisor>,
     supervising: Option<JoinHandle<()>>,
+    backups: Arc<BackupScheduler>,
+    backing_up: Option<JoinHandle<()>>,
     /// 完全退出的執行者（票 25）。
     exiting: JoinHandle<()>,
     /// 這個實例已完成的完全退出次數（停止流程結束就加一）。
@@ -319,6 +345,11 @@ impl RunningRuntime {
         &self.supervisor
     }
 
+    /// 備份排程；重要裁定或 Stage 完成時以它要求備份，測試 harness 以它主動驅動一次處理（`tick`）。
+    pub fn backups(&self) -> &Arc<BackupScheduler> {
+        &self.backups
+    }
+
     /// 完全退出的停止流程完成次數；測試以它等待「停止流程已結束」。
     pub fn exits_completed(&self) -> watch::Receiver<u64> {
         self.exits.clone()
@@ -330,6 +361,9 @@ impl RunningRuntime {
         let _ = (&mut self.task).await;
         if let Some(supervising) = self.supervising.take() {
             let _ = supervising.await;
+        }
+        if let Some(backing_up) = self.backing_up.take() {
+            let _ = backing_up.await;
         }
         // 停止流程進行到一半就被要求停止服務，等同當掉：下次啟動時停止意圖仍在，先核對再續跑
         self.exiting.abort();
@@ -348,6 +382,9 @@ impl Drop for RunningRuntime {
         self.task.abort();
         if let Some(supervising) = &self.supervising {
             supervising.abort();
+        }
+        if let Some(backing_up) = &self.backing_up {
+            backing_up.abort();
         }
         self.exiting.abort();
     }

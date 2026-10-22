@@ -1195,6 +1195,52 @@ export interface SharedSettingsClient {
   getSharedSettingsVersion(version: number): Promise<SettingsVersion>;
 }
 
+/** 備份的觸發原因（對應 Rust 的 BackupTrigger）。 */
+export type BackupTrigger = "daily" | "pre_migration" | "milestone";
+
+/** 備份被保留的原因（對應 Rust 的 RetentionReason）。 */
+export type RetentionReason = "daily" | "weekly" | "latest_pre_migration";
+
+/** 一份備份的摘要（對應 Rust 的 BackupSummary）。 */
+export interface BackupSummary {
+  id: string;
+  trigger: BackupTrigger;
+  created_at: number;
+  artifact_count: number;
+  retained_as: RetentionReason[];
+}
+
+export type DrillCheckKind = "restore" | "database_integrity" | "foreign_keys" | "artifact_hashes" | "artifact_relations";
+
+/** 還原演練的一項核對；`detail` 是 Runtime 產生的說明。 */
+export interface DrillCheck {
+  kind: DrillCheckKind;
+  passed: boolean;
+  detail: string;
+}
+
+/** 一次還原演練的結果（對應 Rust 的 DrillReport）。 */
+export interface DrillReport {
+  backup_id: string | null;
+  backup_created_at: number | null;
+  performed_at: number;
+  passed: boolean;
+  checks: DrillCheck[];
+  /** 還原時被標為中斷的 Run 數；還原後不會自動重做。 */
+  interrupted_runs: number;
+}
+
+/** 備份狀態（對應 Rust 的 BackupStatus）；`backups` 由新到舊。 */
+export interface BackupStatus {
+  backups: BackupSummary[];
+  latest_drill: DrillReport | null;
+}
+
+/** 備份與還原演練：唯讀查詢 Runtime 回報的狀態。 */
+export interface BackupClient {
+  backupStatus(): Promise<BackupStatus>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -1205,6 +1251,7 @@ export type AppClient = RuntimeClient &
   LifecycleClient &
   ArtifactClient &
   SharedSettingsClient &
+  BackupClient &
   KnowledgeClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
@@ -1226,6 +1273,7 @@ const LIFECYCLE_PATH = "/api/v1/lifecycle";
 /** 桌面殼在系統匣「完全退出」時發出的事件（先顯示主視窗再發出）。 */
 export const FULL_EXIT_EVENT = "baton://full-exit-requested";
 const SHARED_SETTINGS_PATH = "/api/v1/shared-settings";
+const BACKUPS_PATH = "/api/v1/backups";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
@@ -1359,6 +1407,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     setSchedulingMode: (mode) => send(`${SCHEDULING_PATH}/settings`, { method: "PUT", body: { mode } }),
     setQuotaLimits: (profileId, limits) =>
       send(`${PROFILES_PATH}/${encodeURIComponent(profileId)}/quota-limits`, { method: "PUT", body: limits }),
+    backupStatus: () => send(BACKUPS_PATH),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
     lifecycleStatus: () => send(LIFECYCLE_PATH),
@@ -1462,6 +1511,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     schedulingOverview: () => call<SchedulingOverview>("scheduling_overview"),
     setSchedulingMode: (mode) => call<SchedulingOverview>("scheduling_set_mode", { mode }),
     setQuotaLimits: (id, limits) => call<SchedulingOverview>("profile_set_quota_limits", { id, limits }),
+    backupStatus: () => call<BackupStatus>("backup_status"),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
     lifecycleStatus: () => call<LifecycleStatus>("lifecycle_status"),
     requestFullExit: () => call<LifecycleStatus>("lifecycle_exit"),
