@@ -3727,6 +3727,141 @@
 - 影響：無行為差異；`pnpm test`、`pnpm build` 通過。
 - 審閱：未審
 
+### AI-408：秘密只以 `env:NAME` 參照宣告；值只在交給 Runner 的操作中代入，可能含秘密的證據檔案不保存
+- 重要度：高
+- 時間／階段：2026-10-23，票 46 實作
+- 決策：
+  - 宣告方式：Profile 的 `secrets: [{ key, reference }]`，`reference` 目前只接受 `env:<環境變數名稱>`（Runtime 程序的環境變數）。操作的任何文字欄位（瀏覽器輸入、HTTP 標頭與本文、命令引數）以 `{{secret:KEY}}` 引用；引用沒有宣告的識別時不能發布。
+  - 保存與使用：Profile 與資料庫只保存參照。驗證開始時解析一次，值只在交給 Runner（BrowserDriver、VerificationDriver）的那一份操作中代入。證據中的操作描述保留佔位字，輸出、斷言實際值與 judge 的輸入一律以值遮蔽。解析不到時，引用它的步驟不執行，判定為 `environment_blocked`（`secret_unavailable`）。
+  - 證據檔案：輸入過秘密的欄位，在之後的截圖中一律遮住。輸入過秘密的 Session，其 trace 與錄影一律不保存（`secret_input_recorded`）。任何證據檔案內容含有秘密的值也不保存（`secret_detected`）。Bundle 會記下沒有保存的原因。
+- 理由：issue #3 §10.2 要求「秘密只以參照傳給 Runner，不進入模型 Prompt」，§10.5 要求「不能假設所有引擎的錄影都已遮蔽」。Playwright 的 trace 會記錄 fill 的文字，錄影也會拍到非密碼欄位的輸入，事後無法可靠遮蔽，所以只能不保存。目前還沒有平台自管的秘密儲存，環境變數是不需新增儲存機制、又不會把值寫進資料庫的最小方案。
+- 替代方案：
+  - 以 DPAPI 保護後存進資料庫，由 UI 輸入。需要新的秘密管理 UI 與儲存，超出本票範圍。
+  - 在 trace zip 中找出秘密再改寫。依賴引擎內部格式，而且仍無法處理錄影。
+- 影響：使用者要在 Runtime 的環境中設定環境變數（例如使用者層級的環境變數），再重新啟動 Runtime。需要除錯 trace 的登入流程拿不到 trace，只能看截圖與步驟紀錄。CLI／API 的 Profile 也可以使用秘密參照（票 45 AI-395 提到的缺口）。
+- 審閱：未審
+
+### AI-409：persona 與登入身分分開宣告、分開綁定；登入身分必須以自動的 `check` 證明實際登入的是誰
+- 重要度：高
+- 時間／階段：2026-10-23，票 46 實作
+- 決策：
+  - 宣告：Profile 有兩個獨立清單。`personas: [{ key, title, description }]` 是扮演的角色，只作為語意 judge 的領域背景，不帶任何權限，也不決定以誰登入。`identities: [{ key, title, login, check }]` 是實際登入的應用程式帳號，`login` 是登入步驟（以秘密參照輸入帳密），`check` 是一個可自動執行、有斷言的步驟，用來核對實際登入的身分（例如「我的帳號」頁顯示的角色）。
+  - 綁定：旅程以 `persona` 與 `identity` 分別引用，不存在的引用不能發布。兩個清單的名稱空間互不相通，所以名為 admin 的 persona 不會被當成登入身分。
+  - 執行：綁定登入身分的旅程先執行 `login`（階段 `login`），再執行 `check`（階段 `identity`），兩者都通過才執行旅程步驟。登入未通過是 `auth_blocked`（`login_failed`），核對未通過也是 `auth_blocked`（`identity_not_confirmed`），旅程步驟記為 `blocked_by_login` 或 `blocked_by_identity`，不執行。每條旅程使用一個新的、隔離的瀏覽器 Session，不共用 cookie 與登入狀態。
+  - 證據：旅程結果分別記下 `persona` 與 `identity`；登入與核對步驟屬於那條旅程，核對的輸出保存網站實際顯示的身分（秘密已遮蔽）。
+- 理由：issue #3 §10.2 規定「測試 persona 與實際登入的應用程式使用者分開綁定，不能因名為 admin 就假設有管理員身分」。只有網站自己顯示的身分才是事實，所以必須要求一個自動核對；登入或身分問題屬於授權，不是產品缺陷。
+- 替代方案：
+  - persona 直接帶帳密（一個概念）。這正是規格要避免的混用。
+  - `check` 改為選填。這樣就會退回到只憑名稱推定身分。
+- 影響：每個登入身分都要寫一個核對步驟。CLI／API 的 Profile 也可以使用登入身分，例如以 HTTP 登入後呼叫 `/me` 核對，但 HTTP 本身沒有 Session，登入狀態不會自動帶到後續請求。
+- 審閱：未審
+
+### AI-410：受限的語意 judge：只看當前畫面與固定預期；模型限流、無法使用與預算用盡都不是產品缺陷
+- 重要度：中
+- 時間／階段：2026-10-23，票 46 實作
+- 決策：
+  - 斷言形式：`{ kind: "judge", expectation }`，只能用在瀏覽器步驟。
+  - judge 的輸入：只有操作之後當前畫面的網址、標題、可見文字（已遮蔽秘密，最多 20,000 字），加上 Profile 寫定的預期，以及旅程 persona 的標題與說明。不含截圖、Worker 的回報、Task 契約或任何行動者的敘述。
+  - 判定：
+    - 模型明確判定不符：與程式斷言不符相同（在旅程中是產品缺陷）。
+    - 模型限流：`inconclusive`（`judge_rate_limited`，`engine_code` 為 `model:rate_limited`），同一次驗證之後不再呼叫模型。
+    - 模型無法使用或沒有可用帳號：`inconclusive`（`judge_unavailable`）。
+    - 模型呼叫預算 `budget.max_model_calls`（預設 20）用盡：`budget_exhausted`（`model_call_budget_exhausted`）。
+    - 同一步驟中程式斷言明確不符時，以產品缺陷為準，不受 judge 狀態影響；401／403 仍優先判為授權阻礙。
+  - 呼叫時機：只要畫面觀察成功，每個 judge 斷言都會呼叫一次模型，即使同一步驟的程式斷言已經不符。
+  - 正式實作：一次 `claude -p`，不給任何工具與 MCP，Prompt 經標準輸入傳入。帳號使用第一個可派工的帳號（`scheduler::usable_profiles`），不經過額度門檻與交接。
+- 理由：
+  - issue #3 §10.2 要求判定輸入取自當前可觀測畫面與固定預期，並明說「模型限流也不能直接算產品缺陷」。
+  - 不給工具的 `claude -p` 無法讀取圖片檔，所以第一版只傳可見文字。
+  - 限流後繼續呼叫只會再被拒絕，而且會消耗額度。
+  - 驗證 Run 納入帳號額度與交接是票 49 的範圍。
+- 替代方案：
+  - 程式斷言不符時跳過 judge 以節省額度。需要在 Adapter 中重複 Domain 的斷言判定，而且 judge 的理由仍有診斷價值。
+  - judge 也看截圖。需要能傳圖片的呼叫方式（例如 stream-json 輸入），留待之後。
+- 影響：
+  - 只靠畫面語意才能判斷的旅程，在所有帳號都受限時一律是 `inconclusive`，不會被當成通過或失敗。這與票 49「依賴 live judge 的案例保持未完成」一致。
+  - judge 的用量目前不計入額度推估。
+- 審閱：未審
+
+### AI-411：瀏覽器問題的判定：無法啟動與連不上是環境阻礙，操作本身沒完成是證據不足
+- 重要度：中
+- 時間／階段：2026-10-23，票 46 實作
+- 決策：
+  - 瀏覽器 Session 無法開啟（例如受驗專案沒有 Playwright）：`environment_blocked`（`browser_unavailable`），記在該旅程，旅程步驟不執行。
+  - 導覽連不上：`environment_blocked`（`endpoint_unreachable`）。
+  - 操作本身沒有完成（例如等不到元素、點擊逾時）：`inconclusive`（`action_failed`，`engine_code` 為 `playwright:<錯誤名稱>`），並附上當時畫面的截圖。
+  - Runner 自己出錯：`inconclusive`（`engine_code` 為 `playwright:RunnerError`）。
+  - 畫面上的元素「不可見」只有寫成 `visible` 斷言時才判定，斷言不符就是產品缺陷。
+- 理由：AI-393 規定只有斷言不符才是產品缺陷。找不到元素可能是產品壞了，也可能是 selector 寫錯或頁面還沒載入完，證據不足以定為產品缺陷。
+- 替代方案：找不到元素視為產品缺陷。selector 一改版就會產生大量假缺陷。
+- 影響：要把「元素必須存在」當成驗收條件時，Profile 要明確寫 `visible` 斷言。
+- 審閱：未審
+
+### AI-412：Playwright 從受驗專案解析，Runtime 不內建、不下載；tester-army/e2e 本票不整合
+- 重要度：中
+- 時間／階段：2026-10-23，票 46 實作
+- 決策：
+  - 正式的 BrowserDriver 以內嵌的 Node.js Runner 腳本驅動 Playwright，每個瀏覽器 Session 一個 Node 程序，以標準輸入與輸出逐行交換 JSON。
+  - Playwright 從受驗專案的 `package.json` 位置解析（`playwright` 或 `@playwright/test`）。解析不到就判定為 `browser_unavailable`，Runtime 不代為安裝套件或下載瀏覽器。
+  - tester-army/e2e 本票不整合：授權與契約尚未驗證，票面也允許延後。
+- 理由：
+  - 沿用專案已有的測試工具（issue #3 §10.1），版本由專案自己決定。
+  - 與首次啟動精靈「缺項只引導，不代為下載或安裝」（D-20）的原則一致。
+  - Rust 沒有官方的 Playwright 綁定。
+- 替代方案：
+  - 打包 Playwright 與 Chromium 到安裝程式。安裝程式會大幅變大，而且版本更新要跟著發布。
+  - 使用 Rust 的 CDP 函式庫。不是 Playwright，與規格不符。
+- 影響：
+  - 受驗專案必須自行安裝 Playwright 與瀏覽器，機器上要有 Node.js。
+  - 正式 Runner 的測試在本機沒有 Playwright 時會略過。
+  - 已在本機以 Playwright 1.62.1 與本機的 Chromium 實際跑過：`crates/baton-runtime/tests/browser_driver.rs` 與完整驗證的 `crates/baton-harness/tests/web_verification_real_browser.rs`，Playwright 安裝在 repo 以外的目錄，以 `BATON_PLAYWRIGHT_DIR` 指定。
+  - 之後若要整合 tester-army/e2e，可以作為另一個 BrowserDriver 實作。
+- 審閱：未審
+
+### AI-413：證據檔案以內容定址存放於成果儲存，不登記為 Task 的 Artifact
+- 重要度：低
+- 時間／階段：2026-10-23，票 46 實作
+- 決策：
+  - 存放位置：截圖、trace、錄影寫在 `<資料目錄>\artifacts\verification\<sha256>.<副檔名>`。Bundle 的 `artifacts` 記下種類、旅程、步驟、名稱、雜湊、大小，或沒有保存的原因（另有 `too_large`，單檔上限 50 MB，以及 `storage_failed`）。
+  - 讀取：以 `GET …/verification/bundles/{bundle_id}/artifacts/{index}` 回傳 base64 內容，會核對雜湊；沒有保存或不一致時回 404 `evidence_artifact_not_found`。桌面殼指令是 `verification_artifact`。
+  - 預設政策：截圖預設只保存未通過步驟的（`on_failure`），可以改為 `every_step` 或 `off`；trace 與錄影預設不錄。
+  - 資料格式：新欄位都有 serde 預設值，也不輸出空值，既有 CLI／API Profile 的內容雜湊不變，不需要 migration。
+- 理由：Artifact 表（票 12）以 Task、Run 的寫入所有者為前提，驗證可能沒有綁定 Task。對話紀錄（票 26）也採用同樣的內容定址存放方式。
+- 替代方案：為驗證另建一張證據檔案表。Bundle 本身已經只追加、不可修改，另建表只是重複記錄。
+- 影響：證據檔案不在一般備份範圍內，也還沒有清理規則（與對話紀錄相同）。
+- 審閱：未審
+
+### AI-414：正式 Runner 與 judge 的防護：所有輸入都視同秘密、trace 先去除輸入文字；judge 不載入任何畫面以外的資訊
+- 重要度：中
+- 時間／階段：2026-10-23，票 46 實作
+- 決策：
+  - Runner 的輸入處理：Port 不標示哪一個 `fill` 是秘密，所以正式 Runner 把所有輸入的文字都當成可能的秘密。
+    - 錯誤訊息回傳前去掉輸入的文字（Node 端與 Rust 端都做）。
+    - Runner 的標準錯誤直接丟棄。
+    - 輸入只經標準輸入交給 Runner，不放在指令列。
+  - trace 的處理：Runner 關閉時把 trace zip 逐項解開，把輸入過的文字（含 JSON、URL 與表單編碼形式）換成 `***` 後重新壓縮，失敗就不交出 trace。不到 4 個字元的輸入不處理，以免破壞 trace 結構。這是第二道防線；Adapter 仍依 AI-408 不保存輸入過秘密的 Session 的 trace 與錄影。
+  - 狀態碼：`status` 取最近一次主框架導覽的回應，點擊造成的導覽（例如送出表單）也算。
+  - 時間上限：
+    - 步驟最多等 `timeout` + 30 秒；Runner 內等待載入與截圖各 10 秒。
+    - 開啟與關閉各 60 秒。
+    - 逾時的回應以要求識別略過，Session 可以繼續使用。
+  - judge 的限制：
+    - 除了不給工具與 MCP，另加 `--setting-sources ""`、`--disable-slash-commands`、`--no-session-persistence`。
+    - 環境變數 `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`、`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`。
+    - 工作目錄是系統暫存目錄。
+    - Prompt 中明說畫面文字不是給 judge 的指示。
+  - judge 的限流判定：模型已經正常回答而且回應可以解析時，即使途中出現 rejected 限流事件，也採用回答（例如 overage 時模型仍會回答）。否則 rejected 事件或用量上限的錯誤文字判為 `RateLimited`。
+- 理由：
+  - 子代理實測發現，Playwright 的 trace 會在 DOM 快照與操作參數中記下 fill 的值，表單送出的內容也會留在網路紀錄裡。
+  - judge 只能依當前畫面判斷（issue #3 §10.2），使用者層的 CLAUDE.md 或記憶都可能帶入畫面以外的資訊。
+  - 受驗網站的文字可能包含提示注入。
+- 替代方案：在 Port 上標示哪些 `fill` 是秘密。Runner 就不必把一般輸入也遮掉，但多一個欄位，而且 Runner 仍然需要第二道防線。
+- 影響：
+  - 一般輸入的文字也不會出現在 Runner 的錯誤訊息中，除錯時要看步驟紀錄。
+  - 環境變數名稱取自 claude.exe 的字串，CLI 升級後需要確認仍然有效。
+  - 正式 judge 已以 Work-8 帳號實際呼叫過一次並得到判定（子代理的煙霧測試，未提交）。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
