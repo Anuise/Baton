@@ -1267,7 +1267,7 @@ Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journ
 
 桌面殼指令：`verification_artifact`（`RuntimeClient::evidence_artifact`）。UI 在「驗證」的 Evidence Bundle 檢視中顯示 persona 與登入身分、judge 的預期與理由、限流說明與證據檔案（截圖可開啟、trace 與錄影可下載，沒有保存的顯示原因）。
 
-測試：`crates/baton-harness/tests/web_verification_adapter.rs`（情境測試）、`crates/baton-runtime/tests/browser_driver.rs`（正式 Runner；本機沒有 Playwright 時略過）、`crates/baton-domain/src/verification_profile/tests.rs`、`web/src/VerificationPage.test.tsx`。
+測試：`crates/baton-harness/tests/web_verification_adapter.rs`（情境測試）、`crates/baton-harness/tests/web_verification_real_browser.rs`（以正式 Runner 與真實瀏覽器跑完整情境；沒設定 `BATON_PLAYWRIGHT_DIR` 且本機沒有 Playwright 時會略過並顯示通過，所以 CI 綠燈不代表實測過；要實測請設定該變數指向已安裝 playwright 與其瀏覽器的目錄，設定了卻無法使用 Playwright 時測試失敗）、`crates/baton-runtime/tests/browser_driver.rs`（正式 Runner；本機沒有 Playwright 時略過）、`crates/baton-domain/src/verification_profile/tests.rs`、`web/src/VerificationPage.test.tsx`。
 
 ### 探索測試到可重現缺陷（票 47）
 
