@@ -6,12 +6,12 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`） |
-| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`）、PlatformInfo、SecretProtector、ClaudeEnvironment；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`） |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run 與成果瀏覽）、`/api/v1/scheduling`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`） |
+| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`）、PlatformInfo、SecretProtector、ClaudeEnvironment、CommandRunner（驗證命令）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、成果瀏覽與成果接受）、`/api/v1/scheduling`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
-| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
+| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、確定性檢查的執行（`verifier.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-mcp-shim` | MCP 工具 shim（`baton-mcp-shim.exe`）：Claude Code 以 stdio 啟動，把工具呼叫轉送到 Runtime 的 Agent API；只依賴 `baton-domain` |
 | `crates/baton-harness` | 測試 harness 與全部 Port 的 fake（主要測試 seam，spec D-04） |
 | `crates/baton-client` | 桌面殼用的 `RuntimeClient`（自動讀取憑證）與「連回既有 Runtime 或啟動新的」邏輯 |
@@ -286,7 +286,52 @@ Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 
 
 - 登記被拒絕（過期世代）不留稽核紀錄，這點與三個回報工具不同。
 - 同一個 Run 重送相同內容會產生新版本（不去重）。
-- 真正的「接受成果」與驗證 Gate 在票 13；目前登記只代表內容完整落地並有 manifest。
+- 登記只代表內容完整落地並有 manifest；成果何時被接受見下一節「成果接受與最小完成驗證」。
+
+### 成果接受與最小完成驗證
+
+Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succeeded` 只把 Task 推進到 `verifying`。之後只有兩條路能讓 Task 進入 `completed`，規則在 `baton_domain::verification`，持久化在 `baton-store` 的 `verification.rs`，端點在 `baton-api` 的 `verification.rs`，檢查由 Supervisor 經 `baton-runtime` 的 `verifier.rs` 執行：
+
+1. **確定性檢查**：契約的 `verification_checks`（隨契約版本保存，屬「完成與驗證條件」）宣告的每一項都通過。
+2. **使用者手動接受**：只接受桌面憑證；Agent 憑證（包括 Worker 自己的）在入口就被拒絕。
+
+**確定性檢查**（JSON 以 `kind` 區分，最多 20 項，儲存契約時驗證，不合規回 400 `contract_invalid`）：
+
+| `kind` | 欄位 | 通過條件 |
+| --- | --- | --- |
+| `command` | `program`、`args`、`expected_exit_code`（預設 0） | 在受驗 Run 的工作目錄執行（不經過 shell，`CommandRunner` Port），結束碼相符；逾時 10 分鐘、被終止或無法啟動都算未通過 |
+| `file` | `path`、`sha256?` | 工作目錄內的相對路徑（不可含 `..`、磁碟代號、從根目錄開始）是存在的檔案，有 `sha256` 時雜湊相符（`WorkspaceFs::read_workspace_file`） |
+| `artifact` | `name`、`sha256?` | 這個 Task 有這個名稱的成果，最新版本的檔案與 manifest 雜湊一致，有 `sha256` 時也相符 |
+
+**流程**：Supervisor 每次處理的最後一步（第 6 步）找出 `verifying`、有受驗 Run（世代最大且 `succeeded` 的 Run）而且契約宣告了檢查的 Task，逐項取得事實（命令輸出保留結尾 4000 字元作為證據）、由 Domain 判定，再以**成果接受交易**提交。全部通過 → `completed`；任一未通過 → 回到 `ready`（可修正、可再派工；不會自動重新排隊），證據保存在驗證紀錄。沒有宣告任何檢查的 Task 停在 `verifying`，等使用者手動接受。背景迴圈把這一步放在另一個工作執行，長時間的檢查命令不會擋住啟動、取消與 lease 核對；測試 harness 的 `supervise()` 則會等它做完。Runtime 在檢查途中當掉時沒有任何紀錄，重啟後會重新執行檢查。
+
+**成果接受交易**同時校驗三件事，任一不符就拒絕、什麼都不寫：
+
+| 校驗 | 不符時 |
+| --- | --- |
+| 受驗 Run（`run_id`＋`generation`）仍是這個 Task 世代最大、已成功結束的 Run | 409 `acceptance_run_stale` |
+| 契約版本與檢視時相同，且等於 Run 派工時的契約版本 | 409 `acceptance_contract_stale` |
+| 成果 manifest（每個成果的最新版本）與檢視時相同 | 409 `acceptance_manifest_stale` |
+
+契約在 Run 派工後被改版時，Supervisor 不執行檢查，直接記錄一筆「未通過」（原因寫在 `note`），Task 回到 `ready` 重新執行；這個 Run 的成果不能在新契約下被接受，手動接受也會被拒絕。過期 Run 的回報（登記成果、結束事件）本來就因不是目前寫入所有者而被拒絕（`run_report_stale`），所以不能推進 Task。
+
+**驗證紀錄**：追加式資料表 `task_verification`（migration 12，觸發器禁止更新與刪除；`run_id` 唯一：一個 Run 最多一筆；部分唯一索引：一個 Task 最多一筆 `passed`）。每筆含方式（`checks`／`manual`）、結果（`passed`／`failed`）、受驗 Run 與世代、契約版本、每項檢查的結果與證據、驗證時的成果 manifest、手動接受者（桌面憑證雜湊的前 16 字元，**不是**憑證本身）與附註。同一個交易追加 Task 事件 `task_verification_recorded`（payload 含上述摘要與未通過的檢查）與 `task_status_changed`（`reason` 為 `verification_passed`／`verification_failed`）。
+
+**桌面端點**（都在 `/api/v1/workspaces/{id}/tasks/{task_id}/` 之下）：
+
+| 端點 | 用途 |
+| --- | --- |
+| `GET verification` | `VerificationView`：`basis`（接受基礎：`run_id`、`generation`、`contract_version`、`artifacts`；只有 `verifying` 且有受驗 Run 時才有）、宣告的 `checks`、目前的成果 manifest `artifacts`、`automatic`（Runtime 會不會自動檢查）、歷次 `records` |
+| `POST verification/accept` | 手動接受，本文 `{ basis, note? }`，`basis` 原樣送回檢視時拿到的值；成功回 200 與最新的 `VerificationView`。Task 不是 `verifying` 回 409 `task_not_verifying`，附註超過 1000 字元回 400 `acceptance_invalid` |
+
+工作面板 `GET tasks` 另回傳 `verifications`（Workspace 全部驗證紀錄）。Web UI 在 `verifying` 的卡片提供「檢視驗證」與「接受成果」，在卡片上顯示最新驗證紀錄（未通過時列出證據）；契約編輯器以每行一項的文字宣告檢查（`command: 程式 引數…`、`command[3]: …`、`file: 路徑 [sha256]`、`artifact: 名稱 [sha256]`）。桌面殼的 Tauri 指令是 `task_verification`、`task_accept`（`RuntimeClient::task_verification`、`accept_task`）。測試：`crates/baton-harness/tests/acceptance.rs`（情境）、`crates/baton-runtime/tests/command_runner.rs`（真實程序）、`crates/baton-client/tests/verification_client.rs`。
+
+**已知限制**：
+
+- 驗證命令以 Runtime 的使用者身分執行，只終止直接啟動的程序（沒有放進 Job Object），命令自己再開的子孫程序在逾時後可能殘留。
+- 檔案檢查只擋住路徑字面上的逃逸（`..`、絕對路徑），不處理工作目錄內指向外部的符號連結或 junction。
+- 命令輸出以 UTF-8 解讀，非 UTF-8 的主控台輸出（例如 `cmd` 的 Big5）在證據中會變成替代字元。
+- 沒有「手動駁回」：沒有宣告檢查而成果不理想時，目前只能取消 Task 或修改契約讓它重新執行。
 
 ### 帳號 Profile 與首次啟動精靈
 
