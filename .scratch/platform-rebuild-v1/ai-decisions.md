@@ -3727,6 +3727,78 @@
 - 影響：無行為差異；`pnpm test`、`pnpm build` 通過。
 - 審閱：未審
 
+### AI-408：Gate 的依賴就是它的證據加上通過時的 build；Runtime 每一輪重新查驗未完成 Workflow 已通過的 Gate
+- 重要度：高
+- 時間／階段：2026-10-23，票 50 實作
+- 決策：不另建依賴圖。每個通過的 Stage 已保存它的證據（成果、裁定、成果接受、審查、Evidence Bundle），票 50 再記下通過當下 Runtime 觀察到的 build。Supervisor 每一輪（驗證工作中、執行驗證要求之前）重新查驗所有未完成 Workflow 目前有效通過的 Stage：證據以與回報時相同的規則重新查驗（審查過期、Bundle 的 Profile 或需求版本改變、成果接受不是目前契約版本都會變成無效），再比較 build 與假設。哪個 Gate 受影響完全由它自己的證據決定，所以獨立的 Gate（別的 Task、使用者的裁定、不依賴 build 的成果）不受影響。完成的 Workflow 不重新查驗。
+- 理由：證據本身就記錄了它依據的版本（規格版本、Profile 版本、需求版本、candidate），重新查驗就是最直接、也最不會漏的依賴判定；與回報時共用同一套查驗，不會出現「回報時不算、失效時卻算」的落差。
+- 替代方案：在每個會改變依賴的地方（改契約、發布 Profile、改程式）主動找出受影響的 Gate。改程式碼不經過 Runtime，無法用事件觸發；而且每個寫入路徑都要知道 Gate，耦合高。
+- 影響：失效最多延遲一輪 Supervisor（背景迴圈約 1 秒）；每一輪會讀取每個未完成 Workflow 的 attempt 與證據，Workflow 很多時會增加讀取量。完成後才改的程式不會讓已完成的 Workflow 重新開啟。
+- 審閱：未審
+
+### AI-409：build 是受驗目錄的 revision；只有審查與驗證證據依賴 build，觀察不到時不比較
+- 重要度：中
+- 時間／階段：2026-10-23，票 50 實作
+- 決策：build 由 Runtime 經 `VerificationDriver::revision`（Git HEAD）觀察受驗目錄（與驗證要求相同：Task 已登記的工作目錄，否則 Workspace 目錄），回報 Stage 結果前與每次重新查驗前各觀察一次（交易外），通過時記在 attempt 的 `build`。之後 build 不同時，要求審查或驗證證據的 Gate 失效；成果、裁定與成果接受不依賴 build。驗證證據另外比對 Bundle 自己的 `candidate_revision`：不是目前的 revision 就是 `build_changed`，不能開啟 Gate（票 45 驗證 R132 的觀察）。觀察不到（不是 Git repo、Port 失敗）時不比較。為了讓 API 能觀察，`ApiState` 加入 `verification_driver`。
+- 理由：審查者自填的 candidate 不可靠（AI-404），由 Runtime 自己記下通過時的 revision 才可比較；Bundle 的 revision 本來就是 Runtime 觀察的。觀察不到就判為失效，會讓非 Git 的研究目錄或整合後被清理的 worktree 永遠無法通過。
+- 替代方案：以 Profile 的 build 命令重新計算 build。需要執行專案命令，成本高，且不一定等於受驗的產物。
+- 影響：worktree 中未提交的變更不會反映在 build 上（同 AI-396）；不是 Git repo 的 Workspace 沒有 build 失效，只靠證據本身的版本。
+- 審閱：未審
+
+### AI-410：失效時退回最早失效的 Stage，重驗後沿用之間仍有效的 Gate；失敗去向退回時照常重做
+- 重要度：中
+- 時間／階段：2026-10-23，票 50 實作
+- 決策：失效的 Stage 追加一筆 `invalidated` attempt（只有 Runtime 能記，資料表 CHECK 要求附原因），Workflow 退回最早失效的 Stage，並把原本的目前 Stage 記在新欄位 `resume_stage`。之後前進時，`resume_stage` 之前最後一筆紀錄仍是通過（或跳過）的 Stage 直接沿用、不重跑，到達 `resume_stage` 時清除。`failure_route` 的退回（`return_to`）會清除 `resume_stage`，之後的 Stage 照票 43 的行為重做。失效的 Stage 若在目前 Stage 之後（重驗途中又失效），只標為需重驗，不改目前 Stage。
+- 理由：Stage 是線性的；退回最早失效的 Gate 才能保證後面的工作不在失效的前提上繼續，而記下原本的進度才能做到「獨立 Gate 不受影響」。失敗退回代表那段工作要重做，與「只是證據過期」不同。
+- 替代方案：不移動目前 Stage，只把失效的 Gate 列為待重驗、要求完成前補齊。Workflow 會在失效的前提上繼續前進。
+- 影響：使用者在流程視圖會看到 `invalidated`（需重驗）的 Stage 與 Runtime 記錄的原因；Controller 背景中的 Workflow 一行會列出需要重驗的 Stage。
+- 審閱：未審
+
+### AI-411：「重驗工作」是失效紀錄、自動排入的驗證要求與給 Controller 的工作事件
+- 重要度：中
+- 時間／階段：2026-10-23，票 50 實作
+- 決策：Gate 失效的同一個交易中：驗證 Gate 失效時，以原本那份 Bundle 的旅程對同一個 Task 排入驗證要求（`requested_by: runtime:gate_invalidated:<Workflow>`；同一個 Task 已有排隊中的要求就不重複；原本的旅程已不在目前 Profile 中時執行全部旅程；沒有 Profile 時不排入），同一輪就執行；並在 Workspace 的 conversation 追加工作事件（原因、目前 Stage、排入的驗證要求），喚起 Controller。審查 Gate 失效時不自動派 reviewer，由 Controller 依工作事件另派。不自動以新 Bundle 回報 Stage，仍由 Controller 以 `record_stage_result` 回報。
+- 理由：驗證是確定性的、不用模型額度，自動重跑最符合「建立重驗工作」；派 reviewer 要建 Task、用帳號額度，屬於 Controller 的判斷。Stage 推進維持「Controller 附證據回報、Runtime 查驗」這條唯一路徑。
+- 替代方案：另建「重驗工作」資料表與 UI。與 stage attempt、驗證要求重複。
+- 影響：程式碼每改一次（且已通過驗證 Gate）就會自動跑一次驗證；Workspace 沒有 conversation 時不會有工作事件（同 Worker 事件的規則）。
+- 審閱：未審
+
+### AI-412：假設以契約的 `decision` 引用表達；答案不是「接受建議的選項」就算推翻
+- 重要度：高
+- 時間／階段：2026-10-23，票 50 實作
+- 決策：Task 契約的引用新增種類 `decision`（目標是同一個 Workspace 的裁定請求，版本是引用時的內容版本），表示「照這個提問的建議先做」。使用者的裁定只有「接受」而且選的是建議的選項才算確認；其他處理方式（選別的選項、修改條件、直接回答、要求調查、駁回），以及沒有建議的請求的任何裁定，都算推翻假設。推翻時：（1）同一個交易中，依據它的 Task（目前契約有這個引用）的待處理裁定請求標為 `superseded`（裁定中心重新整理時也以「請求提出後才推翻」判定），等它們的 Task 一起恢復，提出者被叫醒，另以工作事件通知 Controller 受影響的 Task；（2）這些 Task 的引用失效，准入與派工回 `reference_invalid`；（3）它們的 Workflow 除了使用者裁定之外的 Gate 在下一次重新查驗時失效，而且更新契約前回報 `passed` 一律記 `blocked`。與它無關的請求、Task 與 Gate 不受影響。執行中的 Run 不中斷。
+- 理由：ADR-0010「不依賴未決答案的工作先做、答案改變既有假設時依版本與相依阻擋或重驗受影響部分」需要一個 Runtime 看得到的依賴；契約的「輸入與依據」本來就用引用表達依據，加一種引用即可，不必改裁定請求的資料形狀。以「接受建議」作為唯一的確認，寧可多判為推翻。
+- 替代方案：在裁定請求上列出「依建議先做的 Task」。要改請求的資料表與工具，而且 Task 改契約時依賴不會跟著更新。
+- 影響：Controller 必須在照建議先做的 Task 的契約中加上引用，否則 Runtime 不知道它依賴假設（角色說明與工具說明已提示）；推翻後要由 Controller 依答案更新契約（新的契約版本又會讓舊審查與 Bundle 失效）。正在執行的 Worker 會繼續做完，但成果無法通過 Gate。
+- 審閱：未審
+
+### AI-413：票面的「政策」第一版只涵蓋 Verification Profile 與完成條件
+- 重要度：中
+- 時間／階段：2026-10-23，票 50 實作
+- 決策：會使 Gate 失效的「政策」是驗收用的 Verification Profile（新版本使依據舊版本的 Bundle 失效）與 Task 契約的完成條件（契約改版使舊契約下的審查、Bundle 與成果接受失效）。Playbook 升級不影響進行中的 Workflow（票 43 的驗收條件），Workspace 授權與決策權限表的變更也不使 Gate 失效。
+- 理由：只有這兩者是 Runtime 有版本、而且直接決定「怎麼算通過」的政策；授權與權限表管的是「能不能做」，不是「做得對不對」，用它們讓 Gate 失效會使大量無關的 Gate 重驗。
+- 替代方案：把授權 revision 也當作 Gate 的依賴。撤權本來就有 R1-a 的處理（票 24），重驗不會讓結果更正確。
+- 影響：若使用者認為某些授權或規範變更應該讓 Gate 重驗，需要另開票定義對應的證據版本。
+- 審閱：未審
+
+### AI-414：完成條件不能被改寫讓舊成果通過：成果接受證據也要求目前的契約版本
+- 重要度：中
+- 時間／階段：2026-10-23，票 50 實作
+- 決策：沿用既有的防線：Controller 修改已派工 Task 的完成條件須經使用者核准（票 35）、Worker 不能改契約、Profile 只有使用者能發布（AI-391）、Playbook 只有使用者能發布（AI-383）。票 50 補上：exit check 的 `task_accepted` 證據只認「依據目前契約版本」的成果接受；契約改版後，依據舊版本的審查、Bundle、成果接受都不再有效，已通過的 Gate 隨即失效。
+- 理由：即使使用者核准了新的完成條件，舊條件下的成果也不能直接沿用到新條件；原本成果接受證據沒有比對契約版本，是唯一可以拿舊結果過新條件的缺口。
+- 替代方案：無。
+- 影響：契約改版後，Controller 要重新取得成果接受（通常要重新驗證或由使用者手動接受）。
+- 審閱：未審
+
+### AI-415：Gate 失效的資料形狀、事件、migration 42 與 UI
+- 重要度：低
+- 時間／階段：2026-10-23，票 50 實作
+- 決策：migration 42 `gate_reverification` 重建 `stage_attempt`（`outcome` 新增 `invalidated`，限定 `recorded_by = 'runtime'` 且附原因；新增 `build` 欄位），`workflow_instance` 新增 `resume_stage`。Workflow 事件 `gate_invalidated`（每次一筆，列出失效的 Stage 與原因）。證據查驗新增狀態 `build_changed`；Stage 狀態新增 `invalidated`。工作事件的來源是 `gate_invalidated:<Workflow>:<revision>`，假設推翻的通知是 `assumption_overturned:<裁定請求>`。沒有新增端點與工具。UI 在流程視圖顯示「需重驗」、失效原因、記錄者 Runtime、通過時的 build 與重驗後沿用的說明；契約編輯器接受 `decision:<請求>@<版本>` 的引用。
+- 理由：沿用票 43 的 stage attempt 與流程視圖，不另建資料表。
+- 替代方案：另建 `gate_invalidation` 表。與 attempt 歷史重複。
+- 影響：與同時進行的票整合時，migration 與 AI 編號可能需要順延。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
