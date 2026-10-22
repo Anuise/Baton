@@ -251,6 +251,18 @@ pub fn backoff_wait(budget: &TaskBudget, now: Timestamp) -> Option<WaitReason> {
     Some(reason(WaitCategory::Backoff, "retry_backoff", message, None))
 }
 
+/// 把基礎設施重試的退避併入一次排程判定（票 36）：能派的改為等待，本來就要等的多列一個原因。
+pub fn apply_backoff(evaluation: Evaluation, budget: Option<&TaskBudget>, now: Timestamp) -> Evaluation {
+    let Some(wait) = budget.and_then(|b| backoff_wait(b, now)) else { return evaluation };
+    match evaluation {
+        Evaluation::Dispatch { .. } => Evaluation::Wait(vec![wait]),
+        Evaluation::Wait(mut reasons) => {
+            reasons.insert(0, wait);
+            Evaluation::Wait(reasons)
+        }
+    }
+}
+
 // ---------------------------------------------------------------- 容量與選帳號
 
 /// 名額的用途：一般派工佔不到交接保留槽。

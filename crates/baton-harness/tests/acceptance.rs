@@ -364,6 +364,8 @@ async fn reports_from_a_superseded_run_cannot_advance_the_task() {
     harness.process_control.script_liveness(&identity, Liveness::Dead);
     harness.supervise().await;
     assert_eq!(task_status(&harness, &ws, &tid).await, "ready");
+    // 程序意外消失是基礎設施重試：等過退避期限才再派（票 36）
+    harness.clock.advance_millis(baton_domain::budget::backoff_millis(1));
     let (current, current_token) = start_run(&harness, &ws, &tid).await;
 
     // 其實還活著的世代 1 繼續回報成果與「成功結束」：全部被拒絕，Task 不動

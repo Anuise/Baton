@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::authorization::Capability;
+use baton_domain::budget::BudgetView;
 use baton_domain::run::RunView;
 use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
@@ -109,6 +110,8 @@ pub struct TaskBoard {
     pub workdirs: Vec<WorkdirView>,
     /// 這個 Workspace 的整合項目，依排入順序（票 20）。
     pub integrations: Vec<IntegrationEntry>,
+    /// 每個 Task 的修正與重試預算，依 Task 的建立順序（票 36）。
+    pub budgets: Vec<BudgetView>,
     /// 契約「所需能力」可選的清單。
     pub capabilities: Vec<CapabilityInfo>,
 }
@@ -118,6 +121,8 @@ pub struct TaskDetail {
     pub task: TaskView,
     /// 契約的全部版本，由舊到新（含目前版本）。
     pub contract_history: Vec<TaskContract>,
+    /// 修正與重試預算：實作失敗修正、驗證不完整重驗、基礎設施重試三種計數（票 36）。
+    pub budget: BudgetView,
 }
 
 /// 准入檢查的唯讀預覽。
@@ -226,6 +231,7 @@ pub(crate) async fn board(
         verifications: data.verifications,
         workdirs: data.workdirs,
         integrations: data.integrations,
+        budgets: data.budgets,
         capabilities: Capability::ALL
             .into_iter()
             .map(|c| CapabilityInfo { capability: c, label: c.label().to_string(), high_risk: c.is_high_risk() })
@@ -267,7 +273,7 @@ pub(crate) async fn detail(
     UrlPath((id, task_id)): UrlPath<(String, String)>,
 ) -> Result<Json<TaskDetail>, TaskApiError> {
     let data = state.store.task_detail(&id, &task_id).await?;
-    Ok(Json(TaskDetail { task: data.task, contract_history: data.contract_history }))
+    Ok(Json(TaskDetail { task: data.task, contract_history: data.contract_history, budget: data.budget }))
 }
 
 /// 契約內容不同回 201 與新版本的投影；內容相同回 200（不新增版本）。
