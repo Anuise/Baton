@@ -374,7 +374,7 @@ async fn an_account_at_its_limit_queues_the_next_task_with_a_reason_until_a_run_
     assert!(!body["reasons"][0]["message"].as_str().unwrap().is_empty());
     assert_eq!(task_status(&harness, &ws, &waiting_task).await, "ready", "排隊的 Task 維持 ready");
     let queued = overview(&harness).await;
-    assert_eq!(queued_task_ids(&queued), [waiting_task.clone()]);
+    assert_eq!(queued_task_ids(&queued), std::slice::from_ref(&waiting_task));
     assert_eq!(queued["queue"][0]["title"], "等名額的 Task");
     assert_eq!(queued["queue"][0]["position"], 1);
     assert_eq!(queued["queue"][0]["priority"], 0);
@@ -431,7 +431,7 @@ async fn the_global_limit_queues_the_ninth_task_with_a_global_reason_in_higher_c
     assert!(found.iter().all(|(category, _)| category == "capacity"), "只有容量類原因：{body}");
     assert!(!found.contains(&pair("capacity", "handoff_slot_reserved")), "較高並行不保留交接槽：{body}");
     assert_eq!(task_status(&harness, &ws, &ninth).await, "ready");
-    assert_eq!(queued_task_ids(&overview(&harness).await), [ninth.clone()]);
+    assert_eq!(queued_task_ids(&overview(&harness).await), std::slice::from_ref(&ninth));
 
     // 任何一個 Run 結束，全域名額就空出來給它
     finish(&harness, &started[0].1).await;
@@ -533,7 +533,7 @@ async fn switching_to_higher_concurrency_dispatches_queued_tasks_immediately_and
     fill(&harness, &ws, &goal, 5).await;
     let sixth = ready_task(&harness, &ws, &goal, "第六個").await;
     dispatch_queued(&harness, &ws, &sixth).await;
-    assert_eq!(queued_task_ids(&overview(&harness).await), [sixth.clone()]);
+    assert_eq!(queued_task_ids(&overview(&harness).await), std::slice::from_ref(&sixth));
 
     let switched = set_mode(&harness, "higher_concurrency").await;
 
@@ -668,7 +668,7 @@ async fn quota_blocks_from_seventy_five_percent_and_not_below() {
         let body = dispatch_queued(&harness, &ws, &tid).await;
         assert_eq!(reasons(&body), [pair("quota", code)], "用量 {blocked}：{body}");
     }
-    assert_eq!(queued_task_ids(&overview(&harness).await), [tid.clone()], "重複派工仍只有一筆佇列項目");
+    assert_eq!(queued_task_ids(&overview(&harness).await), std::slice::from_ref(&tid), "重複派工仍只有一筆佇列項目");
 
     // 遲滯（spec D-13，票 28）：門檻關閉後要回到 60% 以下才恢復；74% 仍不派
     set_quota(&harness, &accounts[0], 0.74);
@@ -784,7 +784,7 @@ async fn without_any_account_a_task_waits_with_the_no_account_reason() {
     let queued = overview(&harness).await;
     assert!(queued["accounts"].as_array().unwrap().is_empty());
     assert_eq!(queued["capacity"]["usable_accounts"], 0);
-    assert_eq!(queued_task_ids(&queued), [tid.clone()]);
+    assert_eq!(queued_task_ids(&queued), std::slice::from_ref(&tid));
     harness.supervise().await;
     assert_eq!(task_status(&harness, &ws, &tid).await, "ready");
     assert_eq!(harness.process_control.spawn_count(), 0);
@@ -869,7 +869,7 @@ async fn a_later_task_with_a_higher_priority_gets_the_freed_slot_first() {
 
     assert_eq!(task_status(&harness, &ws, &late).await, "running", "釋出的名額給優先序較高者");
     assert_eq!(task_status(&harness, &ws, &early).await, "ready");
-    assert_eq!(queued_task_ids(&overview(&harness).await), [early.clone()]);
+    assert_eq!(queued_task_ids(&overview(&harness).await), std::slice::from_ref(&early));
     assert_eq!(overview(&harness).await["queue"][0]["position"], 1);
 
     finish(&harness, &started[1].1).await;
@@ -922,7 +922,7 @@ async fn a_run_that_was_asked_to_cancel_keeps_its_slot_until_the_process_is_conf
         .expect("停不掉的 Run 仍在進行中");
     assert_eq!(stuck_run["cancel_requested"], true);
     assert_eq!(stuck["capacity"]["running"], 2, "程序還沒確認停止，名額沒有釋出");
-    assert_eq!(queued_task_ids(&stuck), [waiting_task.clone()]);
+    assert_eq!(queued_task_ids(&stuck), std::slice::from_ref(&waiting_task));
     assert_eq!(task_status(&harness, &ws, &waiting_task).await, "ready");
 
     // 確認停止之後才釋出名額，排隊的 Task 取得它
@@ -1024,7 +1024,7 @@ async fn the_queue_survives_a_runtime_restart_and_queued_tasks_are_dispatched_af
     harness.restart().await;
 
     let after_restart = overview(&harness).await;
-    assert_eq!(queued_task_ids(&after_restart), [waiting_task.clone()], "排隊中的 Task 重啟後仍在佇列");
+    assert_eq!(queued_task_ids(&after_restart), std::slice::from_ref(&waiting_task), "排隊中的 Task 重啟後仍在佇列");
     assert_eq!(after_restart["queue"][0]["priority"], 3, "優先序也保留");
     assert_eq!(reasons(&after_restart["queue"][0]), [pair("capacity", "account_capacity_full")]);
     assert_eq!(task_status(&harness, &ws, &waiting_task).await, "ready");
@@ -1055,7 +1055,7 @@ async fn a_queued_task_that_is_cancelled_leaves_the_queue_and_is_never_dispatche
     let (status, body) = harness.send_json(Method::POST, &format!("{}/cancel", task_path(&ws, &cancelled_task)), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    assert_eq!(queued_task_ids(&overview(&harness).await), [kept_task.clone()], "取消的 Task 立刻離開佇列");
+    assert_eq!(queued_task_ids(&overview(&harness).await), std::slice::from_ref(&kept_task), "取消的 Task 立刻離開佇列");
     finish(&harness, &started[0].1).await;
     assert_eq!(task_status(&harness, &ws, &cancelled_task).await, "cancelled");
     assert_eq!(task_status(&harness, &ws, &kept_task).await, "running", "名額給了還在排隊的那個");
@@ -1123,5 +1123,5 @@ async fn dispatching_a_queued_task_again_is_idempotent_and_keeps_a_single_queue_
     assert_eq!(harness.process_control.spawn_count(), 3);
     let (status, body) = dispatch(&harness, &ws, &tid).await;
     assert_eq!((status, error_code(&body)), (StatusCode::CONFLICT, "task_not_ready"), "已派出的 Task 再派是 409：{body}");
-    assert_eq!(queued_task_ids(&overview(&harness).await), [other.clone()]);
+    assert_eq!(queued_task_ids(&overview(&harness).await), std::slice::from_ref(&other));
 }

@@ -275,7 +275,7 @@ impl World {
         let (status, catalog) = self.h().send_json(Method::GET, PLAYBOOKS, None).await;
         assert_eq!(status, StatusCode::OK, "{catalog}");
         let mut playbook =
-            catalog["playbooks"].as_array().unwrap().iter().filter(|p| p["key"] == "investigation").last().unwrap()["definition"].clone();
+            catalog["playbooks"].as_array().unwrap().iter().rfind(|p| p["key"] == "investigation").unwrap()["definition"].clone();
         let mut only = playbook["stages"][0].clone();
         only["key"] = json!("real_interface");
         only["title"] = json!("真實介面驗證");
@@ -535,7 +535,7 @@ async fn a_queued_reproduction_does_not_stand_in_for_the_reverification_of_an_in
     let (status, catalog) = w.h().send_json(Method::GET, PLAYBOOKS, None).await;
     assert_eq!(status, StatusCode::OK, "{catalog}");
     let mut playbook =
-        catalog["playbooks"].as_array().unwrap().iter().filter(|p| p["key"] == "investigation").last().unwrap()["definition"].clone();
+        catalog["playbooks"].as_array().unwrap().iter().rfind(|p| p["key"] == "investigation").unwrap()["definition"].clone();
     let mut verify = playbook["stages"][0].clone();
     verify["key"] = json!("real_interface");
     verify["gate"] = json!("safety");

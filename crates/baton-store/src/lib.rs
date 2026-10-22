@@ -2019,7 +2019,7 @@ impl Store {
     /// 寫入連線與唯讀連線目前生效的 PRAGMA。
     pub async fn pragma_settings(&self) -> StoreResult<ConnectionPragmas> {
         let writer = self.write(|tx| read_pragmas(tx)).await?;
-        let reader = self.read(|conn| read_pragmas(conn)).await?;
+        let reader = self.read(read_pragmas).await?;
         Ok(ConnectionPragmas { writer, reader })
     }
 

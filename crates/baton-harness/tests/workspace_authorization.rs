@@ -420,3 +420,54 @@ async fn an_agent_credential_cannot_confirm_authorization() {
     assert_eq!(confirm_response.status(), StatusCode::FORBIDDEN);
     assert_eq!(view(&harness, &id).await["status"], "unconfirmed", "Agent 不能替自己擴權");
 }
+
+/// 模擬一個視窗：以內容取得確認摘要，再帶著摘要的 `changes.base_revision` 確認（Web UI 的流程）。
+async fn summarize(harness: &Harness, id: &str, grants: &Value) -> Value {
+    let (status, summary) = harness
+        .send_json(Method::POST, &format!("{}/summary", authorization_path(id)), Some(json!({ "grants": grants })))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    summary
+}
+
+async fn confirm_from_summary(harness: &Harness, id: &str, grants: &Value, summary: &Value) -> (StatusCode, Value) {
+    let body = json!({
+        "template_id": "trusted_dev_p3",
+        "grants": grants,
+        "acknowledged_risk": true,
+        "acknowledged_expansion": true,
+        "expected_revision": summary["changes"]["base_revision"],
+    });
+    harness.send_json(Method::PUT, &authorization_path(id), Some(body)).await
+}
+
+#[tokio::test]
+async fn when_two_windows_edit_concurrently_the_later_confirmation_is_refused_without_overwriting() {
+    let harness = Harness::start().await;
+    let id = new_workspace(&harness, "two-windows").await;
+    confirm_template(&harness, &id, "trusted_dev_p3").await;
+    let base = template(&view(&harness, &id).await, "trusted_dev_p3")["grants"].clone();
+    // 兩個視窗都從 revision 1 開始編輯，各自拿掉不同的能力並檢視摘要
+    let without = |capability: &str| {
+        let mut grants = base.clone();
+        grants.as_array_mut().unwrap().retain(|g| g["capability"] != capability);
+        grants
+    };
+    let (first_grants, second_grants) = (without("install_project_dependencies"), without("run_build_test"));
+    let first_summary = summarize(&harness, &id, &first_grants).await;
+    let second_summary = summarize(&harness, &id, &second_grants).await;
+    assert_eq!(first_summary["changes"]["base_revision"], 1);
+    assert_eq!(second_summary["changes"]["base_revision"], 1);
+
+    let (first_status, first) = confirm_from_summary(&harness, &id, &first_grants, &first_summary).await;
+    let (second_status, second) = confirm_from_summary(&harness, &id, &second_grants, &second_summary).await;
+
+    assert_eq!(first_status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["revision"], 2);
+    assert_eq!((second_status, error_code(&second)), (StatusCode::CONFLICT, "authorization_revision_conflict"), "{second}");
+    assert!(second["message"].as_str().unwrap().contains("目前 revision 2，編輯時是 revision 1"), "{second}");
+    let view = view(&harness, &id).await;
+    assert_eq!(view["effective"]["revision"], 2, "後送出者不覆蓋先確認的授權");
+    assert_eq!(view["effective"]["grants"], first_grants);
+    assert_eq!(authorization_events(&harness).len(), 2, "被拒絕的確認不寫入任何東西");
+}

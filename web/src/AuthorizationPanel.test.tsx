@@ -123,7 +123,12 @@ function fakeClient(initial: AuthorizationRevision[] = [], initialLegacy: Legacy
         changes: revisions.length > 0 ? changesFrom(revisions.at(-1)!, grants) : null,
       };
     }),
-    confirmAuthorization: vi.fn(async (_id: string, { templateId, grants }: ConfirmAuthorizationRequest) => {
+    confirmAuthorization: vi.fn(async (_id: string, { templateId, grants, expectedRevision }: ConfirmAuthorizationRequest) => {
+      // 與 Runtime 相同：帶了 expected revision 卻不是目前生效的，代表另一個視窗先確認過
+      const current = revisions.at(-1)?.revision ?? null;
+      if (expectedRevision !== null && expectedRevision !== current) {
+        throw new Error(`授權已被更新（目前 revision ${current ?? "無"}，編輯時是 revision ${expectedRevision}），請重新載入後再確認`);
+      }
       const revision: AuthorizationRevision = {
         workspace_id: workspace.id,
         revision: revisions.length + 1,
@@ -209,6 +214,7 @@ describe("Workspace 授權設定", () => {
       grants: templates[1].grants,
       acknowledgedRisk: true,
       acknowledgedExpansion: false,
+      expectedRevision: null,
     });
     expect(screen.getByText(/目前授權：revision 1/)).toBeInTheDocument();
     expect(screen.queryByText(/尚未確認授權/)).not.toBeInTheDocument();
@@ -294,7 +300,41 @@ describe("Workspace 授權設定", () => {
     await user.click(confirm);
 
     expect(await screen.findByRole("status")).toHaveTextContent("已保存為 revision 2");
-    expect(vi.mocked(client.confirmAuthorization).mock.calls[0][1]).toMatchObject({ acknowledgedRisk: false, acknowledgedExpansion: true });
+    expect(vi.mocked(client.confirmAuthorization).mock.calls[0][1]).toMatchObject({
+      acknowledgedRisk: false,
+      acknowledgedExpansion: true,
+      expectedRevision: 1,
+    });
+  });
+
+  it("修改既有授權時帶上確認摘要的 base revision：另一個視窗先確認後，這次送出被拒絕，不覆蓋對方的授權", async () => {
+    const revision: AuthorizationRevision = {
+      workspace_id: "ws_1",
+      revision: 1,
+      grants: [grant("read_files"), grant("write_files")],
+      source: { kind: "custom", template_id: null, base_revision: null, confirmed_by: "desktop" },
+      confirmed_at: 1_700_000_000_000,
+    };
+    const client = fakeClient([revision]);
+    const user = await renderPanel(client);
+    await user.click(checkbox("編輯檔案"));
+    await user.click(screen.getByRole("button", { name: "檢視確認摘要" }));
+    const summary = await screen.findByRole("region", { name: "確認摘要" });
+    // 另一個視窗在這之後確認了 revision 2
+    await client.confirmAuthorization("ws_1", {
+      templateId: null,
+      grants: [grant("read_files")],
+      acknowledgedRisk: false,
+      acknowledgedExpansion: false,
+      expectedRevision: 1,
+    });
+
+    await user.click(within(summary).getByRole("button", { name: "確認並保存授權" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("授權已被更新（目前 revision 2，編輯時是 revision 1）");
+    expect(vi.mocked(client.confirmAuthorization).mock.calls[1][1]).toMatchObject({ expectedRevision: 1 });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect((await client.getAuthorization("ws_1")).revisions).toHaveLength(2);
   });
 
   it("修改既有授權而只縮小範圍時，列出移除的項目，不需要承認擴大授權", async () => {

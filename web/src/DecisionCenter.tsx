@@ -767,7 +767,7 @@ function AuthorizationChange({ client, workspace, capability }: ChangeProps) {
     }
   };
 
-  const confirm = async (templateId: string | null, grants: Grant[]) => {
+  const confirm = async (templateId: string | null, grants: Grant[], expectedRevision: number | null) => {
     setBusy(true);
     setError(null);
     try {
@@ -776,6 +776,7 @@ function AuthorizationChange({ client, workspace, capability }: ChangeProps) {
         grants,
         acknowledgedRisk,
         acknowledgedExpansion: true,
+        expectedRevision,
       });
       setState({ step: "saved", revision: revision.revision });
     } catch (e) {
@@ -839,7 +840,7 @@ function AuthorizationChange({ client, workspace, capability }: ChangeProps) {
           <button
             type="button"
             disabled={busy || !acknowledgedExpansion || (state.summary.requires_risk_acknowledgement && !acknowledgedRisk)}
-            onClick={() => void confirm(state.templateId, state.grants)}
+            onClick={() => void confirm(state.templateId, state.grants, state.summary.changes?.base_revision ?? null)}
           >
             確認修改授權
           </button>

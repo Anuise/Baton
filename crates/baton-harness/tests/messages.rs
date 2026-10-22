@@ -457,6 +457,9 @@ async fn the_desktop_credential_cannot_use_the_messaging_tools() {
 
 // ============================================================ 訊息不能改變範圍或歸屬
 
+/// 一個試圖改範圍的訊息：(kind, 額外欄位)。
+type Case<'a> = (Option<&'a str>, Vec<(&'a str, Value)>);
+
 #[tokio::test]
 async fn a_message_that_tries_to_change_scope_or_ownership_is_ignored_and_reported_to_the_controller() {
     let harness = harness().await;
@@ -470,7 +473,7 @@ async fn a_message_that_tries_to_change_scope_or_ownership_is_ignored_and_report
     let long_body = "範圍".repeat(300); // 600 個字元，事件裡最多留 500 個
 
     // (kind, 額外欄位)：五種 kind 與八種欄位各一次，另外加一個 kind 與欄位並用的
-    let mut cases: Vec<(Option<&str>, Vec<(&str, Value)>)> = ["scope_change", "reassign", "reassign_task", "change_scope", "update_contract"]
+    let mut cases: Vec<Case> = ["scope_change", "reassign", "reassign_task", "change_scope", "update_contract"]
         .into_iter()
         .map(|kind| (Some(kind), vec![]))
         .collect();

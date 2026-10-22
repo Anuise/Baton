@@ -5046,6 +5046,24 @@
 - 影響：無行為差異。
 - 審閱：未審
 
+### AI-511：Web 確認授權以確認摘要的 base revision 當 expected_revision；第一次確認不檢查
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R168-fix-d）
+- 決策：`ConfirmAuthorizationRequest`（Web）新增必填的 `expectedRevision: number | null`，HTTP 版送 `expected_revision`、Tauri 版送 `expectedRevision`。授權設定頁與裁定中心的「修改 Workspace 授權」都帶確認摘要的 `changes.base_revision`；摘要沒有 `changes`（Workspace 第一次確認）時送 null，Runtime 不檢查。補 harness 情境測試：兩個視窗從同一個 revision 編輯，後送出者收到 409 `authorization_revision_conflict`，生效的授權仍是先確認的那份。被拒絕時畫面顯示 Runtime 的說明（請重新載入後再確認），不自動重新載入，避免蓋掉使用者編輯中的內容。
+- 理由：完成 AI-471 留下的用戶端部分（review-notes #29）。base revision 取自使用者實際看過的確認摘要，代表「使用者是基於哪一版做決定」；欄位設為必填，之後新增的呼叫端不會忘記帶。
+- 替代方案：取 `getAuthorization` 讀到的 `effective.revision`（與摘要可能不同步）；第一次確認也檢查（Domain 目前無法表達「預期尚無 revision」，要改 Domain 與 API 的語意）。
+- 影響：兩個視窗同時對「尚未確認」的 Workspace 做第一次確認時，後送出者仍會建立 revision 2；之後的每次修改都受保護。
+- 審閱：未審
+
+### AI-512：clippy 納入 `pnpm test`；參數過多的三個函式以個別 allow 處理
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R168-fix-d）
+- 決策：`scripts/test.mjs` 第一步執行 `cargo clippy --workspace --all-targets -- -D warnings`（含桌面殼與測試目標），結果列為「Clippy」；CI 本來就跑 `pnpm test`，只在 `dtolnay/rust-toolchain` 加上 `components: clippy`。既有警告全部改程式碼修正（`std::slice::from_ref`、`rfind`、`enumerate`、型別別名、說明縮排等）；只有 `Supervisor::new`（9 個參數）、`workflow::skip_stage` 與 `Store::skip_stage`（8 個）在該函式加 `#[allow(clippy::too_many_arguments)]` 並附註解，比照同檔既有的 `record_stage_result`／`start_workflow`。
+- 理由：review-notes #30。三個函式都只有一個呼叫端，參數各自獨立、對應請求欄位與呼叫端產生的識別與時間，另包參數結構只是搬移欄位，不會更好讀。
+- 替代方案：只在 CI 加獨立的 clippy 步驟（本機 `pnpm test` 綠燈、CI 卻失敗）；為三個函式新增參數結構。
+- 影響：`pnpm test` 多一次 clippy 檢查的時間。CI 用 stable 工具鏈，Rust 新版本新增的 lint 可能讓原本乾淨的程式在 CI 失敗，屆時要修正或固定工具鏈版本。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

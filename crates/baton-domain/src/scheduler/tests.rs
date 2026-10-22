@@ -881,7 +881,7 @@ proptest! {
                     SlotKind::Normal => limits.normal_limit(usable_ids.len()),
                     SlotKind::Handoff => limits.global,
                 };
-                prop_assert!(world.runs.len() + 1 <= allowed, "派出後 {} 個超過 {allowed}", world.runs.len() + 1);
+                prop_assert!(world.runs.len() < allowed, "派出後 {} 個超過 {allowed}", world.runs.len() + 1);
                 let least = usable_ids
                     .iter()
                     .filter(|id| running_of(id) < limits.per_account)

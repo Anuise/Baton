@@ -203,6 +203,8 @@ export interface ConfirmAuthorizationRequest {
   acknowledgedRisk: boolean;
   /** 使用者已承認這次修改會擴大授權；修改既有授權且 `changes.expands` 為真時必須是 true。 */
   acknowledgedExpansion: boolean;
+  /** 編輯時看到的目前 revision（確認摘要的 `changes.base_revision`）；另一個視窗先確認過時 Runtime 回 409。第一次確認時為 null。 */
+  expectedRevision: number | null;
 }
 
 /** Claude Code 實際使用的認證來源（對應 Rust 的 AuthSource）；只有 `native_login` 可以派工。 */
@@ -3116,7 +3118,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       if (!response.ok) throw await failure(response);
       return (await response.json()) as ConfirmationSummary;
     },
-    async confirmAuthorization(workspaceId, { templateId, grants, acknowledgedRisk, acknowledgedExpansion }) {
+    async confirmAuthorization(workspaceId, { templateId, grants, acknowledgedRisk, acknowledgedExpansion, expectedRevision }) {
       const response = await fetchFn(authorizationPath(workspaceId), {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -3125,6 +3127,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
           grants,
           acknowledged_risk: acknowledgedRisk,
           acknowledged_expansion: acknowledgedExpansion,
+          expected_revision: expectedRevision,
         }),
       });
       if (!response.ok) throw await failure(response);
@@ -3286,13 +3289,14 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     setModelOverrides: (id, overrides) => call<Workspace>("workspace_set_model_overrides", { id, overrides }),
     getAuthorization: (id) => call<AuthorizationView>("workspace_authorization", { id }),
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
-    confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion }) =>
+    confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion, expectedRevision }) =>
       call<AuthorizationRevision>("workspace_authorization_confirm", {
         id,
         templateId,
         grants,
         acknowledgedRisk,
         acknowledgedExpansion,
+        expectedRevision,
       }),
     getTaskBoard: (workspaceId) => call<TaskBoard>("task_board", { workspaceId }),
     createGoal: (workspaceId, title) => call<Goal>("goal_create", { workspaceId, title }),

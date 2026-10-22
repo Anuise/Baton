@@ -196,7 +196,7 @@ async fn a_crash_stops_the_identified_old_worker_and_resumes_the_task_with_a_new
     harness.supervise().await;
 
     // 舊程序受控停止（身分已確認），舊 Run 結束；Task 以新 Run 恢復
-    assert_eq!(harness.process_control.stop_calls(), [old_identity.clone()]);
+    assert_eq!(harness.process_control.stop_calls(), std::slice::from_ref(&old_identity));
     let stopped = run_view(&harness, &ws, &old).await;
     assert_eq!(stopped["status"], "interrupted", "{stopped}");
     assert_eq!(stopped["end_reason"], "stopped_by_crash_recovery");

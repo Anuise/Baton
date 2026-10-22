@@ -783,9 +783,9 @@ async fn a_batch_of_permission_approvals_is_not_a_blanket_authorization() {
     assert_ne!(ra, rb, "不同 Task 的提示各自一個請求");
     // 同一個操作、不同 Task：互相連結，revision 不變
     let view_a = decision(&harness, &p.ws, &ra).await;
-    assert_eq!(link_ids(&view_a, "links"), [rb.clone()]);
+    assert_eq!(link_ids(&view_a, "links"), std::slice::from_ref(&rb));
     assert_eq!(view_a["revision"], 1);
-    assert_eq!(link_ids(&decision(&harness, &p.ws, &rb).await, "links"), [ra.clone()]);
+    assert_eq!(link_ids(&decision(&harness, &p.ws, &rb).await, "links"), std::slice::from_ref(&ra));
 
     worker_exits(&harness, &p.run_a).await;
     worker_exits(&harness, &p.run_b).await;
@@ -835,18 +835,18 @@ async fn similar_questions_from_different_tasks_are_linked_automatically_and_man
     let view_a = decision(&harness, &p.ws, &ra).await;
     assert_eq!(view_a["links"], json!([{ "id": rb, "question": "要用哪個資料來源", "status": "pending" }]));
     assert_eq!(view_a["revision"], 1, "新增連結不改 revision");
-    assert_eq!(link_ids(&decision(&harness, &p.ws, &rb).await, "links"), [ra.clone()]);
+    assert_eq!(link_ids(&decision(&harness, &p.ws, &rb).await, "links"), std::slice::from_ref(&ra));
     assert_eq!(decision(&harness, &p.ws, &rc).await["links"], json!([]));
 
     // 手動連結：雙向可見、冪等、revision 不變
     let link = |other: &str| json!({ "other_id": other });
     let (status, linked) = harness.send_json(Method::POST, &links_path(&p.ws, &rc), Some(link(&rb))).await;
     assert_eq!(status, StatusCode::OK, "{linked}");
-    assert_eq!(link_ids(&linked, "links"), [rb.clone()]);
+    assert_eq!(link_ids(&linked, "links"), std::slice::from_ref(&rb));
     assert_eq!(linked["revision"], 1);
     let (status, again) = harness.send_json(Method::POST, &links_path(&p.ws, &rc), Some(link(&rb))).await;
     assert_eq!(status, StatusCode::OK, "{again}");
-    assert_eq!(link_ids(&again, "links"), [rb.clone()]);
+    assert_eq!(link_ids(&again, "links"), std::slice::from_ref(&rb));
     let mut from_b = link_ids(&decision(&harness, &p.ws, &rb).await, "links");
     from_b.sort();
     assert_eq!(from_b, sorted(&[&ra, &rc]));
@@ -882,7 +882,7 @@ async fn merging_a_request_widens_the_target_and_one_answer_resumes_both_tasks()
     assert_eq!(target["status"], "pending");
     assert_eq!(target["revision"], 2);
     assert_eq!(blocking_task_ids(target), sorted(&[&p.a, &p.b]));
-    assert_eq!(link_ids(target, "merged_from"), [rb.clone()]);
+    assert_eq!(link_ids(target, "merged_from"), std::slice::from_ref(&rb));
     let source = decision(&harness, &p.ws, &rb).await;
     assert_eq!(source["status"], "merged");
     assert_eq!(source["merged_into"], ra);
@@ -966,7 +966,7 @@ async fn a_controller_trying_to_modify_done_criteria_is_refused_and_turned_into_
     assert!(!view["authority"]["matter_label"].as_str().unwrap_or_default().is_empty(), "{view}");
     assert_eq!(view["authority"]["summary"], "把完成條件從五個產品改成三個產品");
     assert_eq!(option_ids(&view), ["approve", "reject"]);
-    assert_eq!(blocking_task_ids(&view), [p.a.clone()]);
+    assert_eq!(blocking_task_ids(&view), std::slice::from_ref(&p.a));
     assert_eq!(view["target"]["task_id"], p.a);
     assert_eq!(view["target"]["contract_version"], 1);
     assert_eq!(view["evidence"], json!(["只找到三個產品的價格表"]));
@@ -1006,7 +1006,7 @@ async fn approving_with_modified_conditions_passes_the_conditions_back_to_the_co
     assert_eq!(status, StatusCode::OK, "{first}");
     assert_eq!(first["status"], "requires_decision");
     let rid = first["decision_request_id"].as_str().unwrap().to_string();
-    assert_eq!(blocking_task_ids(&decision(&harness, &p.ws, &rid).await), [p.b.clone()]);
+    assert_eq!(blocking_task_ids(&decision(&harness, &p.ws, &rid).await), std::slice::from_ref(&p.b));
 
     worker_exits(&harness, &p.run_b).await;
     let conditions = "可以改成四個產品，但第五個要列為後續工作";

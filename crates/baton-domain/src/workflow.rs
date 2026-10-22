@@ -1303,6 +1303,8 @@ fn budget_blocked_reason(stage: &StageDefinition, decision: &BudgetDecision) -> 
 }
 
 /// 使用者跳過目前的 Stage：必須附原因；裁定與安全 Gate 不能跳過。
+// 參數依序是 Workflow 的現況與使用者要求的欄位（同 `record_result`，識別與時間由呼叫端產生）；只有 Store 一個呼叫端
+#[allow(clippy::too_many_arguments)]
 pub fn skip_stage(
     workflow: &WorkflowInstance,
     playbook: &PlaybookVersion,

@@ -24,7 +24,7 @@ async fn a_command_reports_its_exit_code_and_output_and_runs_in_the_working_dire
     std::fs::write(dir.path().join(marker), "x").unwrap();
 
     let output = LocalCommandRunner
-        .run(request(dir.path(), "cmd", &["/C", &format!("dir /B & echo 驗證輸出 & exit 3")], Duration::from_secs(30)))
+        .run(request(dir.path(), "cmd", &["/C", "dir /B & echo 驗證輸出 & exit 3"], Duration::from_secs(30)))
         .await
         .unwrap();
 

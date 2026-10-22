@@ -233,11 +233,11 @@ fn the_same_task_waits_ten_minutes_between_account_switches() {
     let successor = running("r2", "p2", "t1", 2);
     let (stopping, _) = begin_stop(&requested(&first, at(0)), None, at(1)).unwrap().unwrap();
     let (moved, _) = transfer(&stopping, &successor, None, "stopped_gracefully", at(2)).unwrap();
-    assert_eq!(cooldown_until(&[moved.clone()], "t1"), Some(at(12)));
+    assert_eq!(cooldown_until(std::slice::from_ref(&moved), "t1"), Some(at(12)));
 
     let runs = vec![successor];
     let draining = gates(&[("p2", GateState::Draining)]);
-    assert!(candidates(&runs, &draining, &[moved.clone()], at(11)).is_empty(), "冷卻中");
+    assert!(candidates(&runs, &draining, std::slice::from_ref(&moved), at(11)).is_empty(), "冷卻中");
     assert_eq!(candidates(&runs, &draining, &[moved], at(12)).len(), 1, "滿 10 分鐘");
 }
 
@@ -269,7 +269,7 @@ fn the_latest_checkpoint_spans_generations_and_ignores_rejected_reports() {
 fn phases_advance_in_order_and_each_step_is_versioned() {
     let run = running("r1", "p1", "t1", 1);
     let successor = running("r2", "p3", "t1", 2);
-    let saved = latest_checkpoint(&[checkpoint("r1", 1, "做到一半", at(1))], &[run.clone()], "t1");
+    let saved = latest_checkpoint(&[checkpoint("r1", 1, "做到一半", at(1))], std::slice::from_ref(&run), "t1");
 
     let handoff = requested(&run, at(0));
     assert_eq!((handoff.phase, handoff.from_generation, handoff.to_profile_id.as_str()), (HandoffPhase::Requested, 1, "p2"));
@@ -366,7 +366,7 @@ fn a_sudden_limit_skips_the_switch_cooldown() {
     let (moved, _) = transfer(&stopping, &successor, None, "stopped_gracefully", at(2)).unwrap();
     let runs = vec![successor];
 
-    assert!(candidates(&runs, &draining_for("p2", "drain_threshold"), &[moved.clone()], at(3)).is_empty(), "冷卻中");
+    assert!(candidates(&runs, &draining_for("p2", "drain_threshold"), std::slice::from_ref(&moved), at(3)).is_empty(), "冷卻中");
     let picked = candidates(&runs, &draining_for("p2", GATE_REASON_LIMIT_REACHED), &[moved], at(3));
     assert_eq!(picked.len(), 1, "突然限流不受冷卻限制（spec D-13）");
     assert_eq!(picked[0].1, GATE_REASON_LIMIT_REACHED);
@@ -404,7 +404,7 @@ fn without_a_reset_time_the_check_backs_off_from_five_to_sixty_minutes() {
 #[test]
 fn a_stopped_sudden_limit_waits_for_resources_then_transfers_from_the_wait() {
     let run = running("r1", "p1", "t1", 1);
-    let saved = latest_checkpoint(&[checkpoint("r1", 1, "做到一半", at(1))], &[run.clone()], "t1");
+    let saved = latest_checkpoint(&[checkpoint("r1", 1, "做到一半", at(1))], std::slice::from_ref(&run), "t1");
     let (handoff, _) = request("hof_1".into(), &run, "", GATE_REASON_LIMIT_REACHED, at(2));
     let (stopping, _) = begin_stop(&handoff, saved.clone(), at(2)).unwrap().unwrap();
 

@@ -1003,7 +1003,7 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         build = None;
         run.prerequisite(Phase::Build, &step).await;
         if let Some(record) = run.steps.last().filter(|r| r.phase == Phase::Build && r.verdict == Verdict::Passed) {
-            build = record.output.lines().map(str::trim).filter(|l| !l.is_empty()).last().map(str::to_string);
+            build = record.output.lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_string);
         }
     }
     let build = build.map(|b| vp::sanitize(&b, &run.policy));

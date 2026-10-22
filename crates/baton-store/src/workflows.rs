@@ -931,6 +931,8 @@ impl Store {
     }
 
     /// 使用者跳過目前的 Stage（附原因；裁定與安全 Gate 不能跳過）。
+    // 與 `record_stage_result` 相同：參數一一對應 API 請求的欄位與呼叫端產生的識別、時間
+    #[allow(clippy::too_many_arguments)]
     pub async fn skip_stage(
         &self,
         workspace_id: &str,
