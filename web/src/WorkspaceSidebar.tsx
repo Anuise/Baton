@@ -15,6 +15,8 @@ interface Props {
   onOpenTasks?: (workspace: Workspace) => void;
   /** 使用者要開啟某個 Workspace 的成果與驗證。 */
   onOpenArtifacts?: (workspace: Workspace) => void;
+  /** 使用者要開啟某個 Workspace 的知識。 */
+  onOpenKnowledge?: (workspace: Workspace) => void;
 }
 
 function reasonOf(error: unknown): string {
@@ -22,7 +24,7 @@ function reasonOf(error: unknown): string {
 }
 
 /** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace。 */
-export function WorkspaceSidebar({ client, timeZone, onSelect, onOpenTasks, onOpenArtifacts }: Props) {
+export function WorkspaceSidebar({ client, timeZone, onSelect, onOpenTasks, onOpenArtifacts, onOpenKnowledge }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
@@ -98,6 +100,9 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, onOpenTasks, onOp
                 </button>
                 <button type="button" aria-label={`成果與驗證 ${workspace.name}`} onClick={() => onOpenArtifacts?.(workspace)}>
                   成果與驗證
+                </button>
+                <button type="button" aria-label={`知識 ${workspace.name}`} onClick={() => onOpenKnowledge?.(workspace)}>
+                  知識
                 </button>
                 <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
                   封存

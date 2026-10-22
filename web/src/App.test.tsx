@@ -28,6 +28,7 @@ const client = {
   }),
   getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [] })),
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
+  listKnowledge: vi.fn(async () => ({ search_mode: "full_text", entries: [] })),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({
@@ -61,5 +62,18 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "工作面板 筆記" }));
     expect(await screen.findByRole("heading", { name: "工作面板：筆記" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "成果與驗證：筆記" })).not.toBeInTheDocument();
+  });
+
+  it("可從 Workspace 清單開啟知識，並切回其他檢視", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "知識 筆記" }));
+    expect(await screen.findByRole("heading", { name: "知識：筆記" })).toBeInTheDocument();
+    expect(client.listKnowledge).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws_1" }));
+
+    await user.click(screen.getByRole("button", { name: "成果與驗證 筆記" }));
+    expect(await screen.findByRole("heading", { name: "成果與驗證：筆記" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "知識：筆記" })).not.toBeInTheDocument();
   });
 });
