@@ -24,8 +24,8 @@ use std::sync::Arc;
 
 pub use agent::{AdapterEvent, AgentAdapter, AgentHandle, Capability, RunSpec, SessionRef};
 pub use browser::{
-    BrowserCommand, BrowserDriver, BrowserFile, BrowserOutcome, BrowserSession, BrowserSessionRequest, BrowserStep, JudgeAccount,
-    JudgeOutcome, JudgeRequest, PageSnapshot, SecretResolver, SemanticJudge,
+    ActionPlan, ActionRequest, BrowserCommand, BrowserDriver, BrowserFile, BrowserOutcome, BrowserSession, BrowserSessionRequest,
+    BrowserStep, JudgeAccount, JudgeOutcome, JudgeRequest, PageSnapshot, SecretResolver, SemanticJudge,
 };
 pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, ToolProbe};
 pub use clock::Clock;
@@ -86,7 +86,7 @@ pub struct Ports {
     pub verification_driver: Arc<dyn VerificationDriver>,
     /// web 驗證 Adapter 的瀏覽器 Runner（票 46）。
     pub browser_driver: Arc<dyn BrowserDriver>,
-    /// web 驗證的受限語意 judge（票 46）。
+    /// web 驗證的受限模型呼叫：語意 judge（票 46）與目標導向動作的規劃（票 48）。
     pub semantic_judge: Arc<dyn SemanticJudge>,
     /// 驗證用秘密參照的解析（票 46）。
     pub secret_resolver: Arc<dyn SecretResolver>,

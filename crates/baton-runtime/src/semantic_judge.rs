@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use baton_domain::quota::LimitStatus;
-use baton_ports::{AdapterEvent, JudgeOutcome, JudgeRequest, PortResult, SemanticJudge};
+use baton_ports::{ActionPlan, ActionRequest, AdapterEvent, JudgeOutcome, JudgeRequest, PortResult, SemanticJudge};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
@@ -205,6 +205,11 @@ impl SemanticJudge for ClaudeSemanticJudge {
             }
             other => other,
         })
+    }
+
+    async fn plan(&self, _request: ActionRequest) -> PortResult<ActionPlan> {
+        // 暫時：正式的動作規劃由後續 commit 實作
+        Ok(ActionPlan::Unavailable { reason: "尚未實作動作規劃".into() })
     }
 }
 

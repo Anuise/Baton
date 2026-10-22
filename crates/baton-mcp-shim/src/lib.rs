@@ -781,6 +781,10 @@ fn tool_definitions() -> Value {
                         "items": { "type": "string" },
                         "description": "要執行的旅程 key（選填；空的或沒給時執行全部旅程）",
                     },
+                    "no_live_model": {
+                        "type": "boolean",
+                        "description": "為 true 時這次驗證不呼叫任何即時模型（選填，預設 false）：語意判斷與目標導向動作的規劃都被 Adapter 阻擋，只執行不需模型的斷言與已驗證動作的重播；需要模型的步驟記為 inconclusive（live_model_disabled）。重播的動作仍實際執行並重新檢查後置條件，快取命中不是通過",
+                    },
                 },
             },
         },

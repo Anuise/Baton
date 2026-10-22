@@ -4,7 +4,10 @@
 //! - 驗證要求在建立時固定 Profile 版本與要執行的旅程（版本還沒被證明可用時一定包含代表旅程）。
 //! - Runtime 執行完一個要求時，在同一個交易中寫入 Evidence Bundle、把要求標為完成並追加事件；
 //!   要求已經完成（例如重複提交）時什麼都不寫。
+//! - 目標導向動作的錄製（票 48）：每個 Workspace、每個案例一筆。保存 Bundle 的同一個交易依 Bundle 的動作紀錄
+//!   取代錄製或標為 stale；執行驗證時連同要求一起讀出。
 
+use baton_domain::verification_profile::replay::{self, ReplayEntry, ReplayStatus, ReplayUpdate};
 use baton_domain::verification_profile::{
     self, EvidenceBundle, ProfileDefinition, ProfileError, ProfileVersion, RequestStatus, Verdict, VerificationRequest,
 };
@@ -57,14 +60,16 @@ pub struct PendingVerificationRun {
     pub requirement_version: Option<i64>,
     /// 受驗 Task 最新的 Run 與世代。
     pub run: Option<(String, i64)>,
+    /// 這個 Workspace 目標導向動作的錄製（票 48）。
+    pub replay: Vec<ReplayEntry>,
 }
 
 /// 概況中保留的最近要求與 Bundle 數量。
 const RECENT_LIMIT: i64 = 20;
 
 const PROFILE_COLUMNS: &str = "id, workspace_id, version, definition, content_hash, published_by, created_at";
-const REQUEST_COLUMNS: &str =
-    "r.id, r.workspace_id, r.task_id, r.profile_version_id, p.version, r.journeys, r.requested_by, r.status, r.bundle_id, r.created_at";
+const REQUEST_COLUMNS: &str = "r.id, r.workspace_id, r.task_id, r.profile_version_id, p.version, r.journeys, r.requested_by, \
+     r.status, r.bundle_id, r.created_at, r.no_live_model";
 
 fn profile_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProfileVersion> {
     Ok(ProfileVersion {
@@ -93,7 +98,71 @@ fn request_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VerificationRequest> {
         })?,
         bundle_id: r.get(8)?,
         created_at: Timestamp::from_millis(r.get(9)?),
+        no_live_model: r.get(10)?,
     })
+}
+
+/// 一個 Workspace 目標導向動作的錄製（票 48）。
+fn load_replay(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<ReplayEntry>> {
+    conn.prepare(
+        "SELECT case_key, identity, action, status, stale_reasons, bundle_id, recorded_at FROM replay_action
+         WHERE workspace_id = ?1 ORDER BY case_key",
+    )?
+    .query_map([workspace_id], |r| {
+        let status: String = r.get(3)?;
+        Ok(ReplayEntry {
+            case_key: r.get(0)?,
+            identity: json_column(1, &r.get::<_, String>(1)?)?,
+            action: json_column(2, &r.get::<_, String>(2)?)?,
+            status: ReplayStatus::parse(&status).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, "未知的錄製狀態".into())
+            })?,
+            stale_reasons: json_column(4, &r.get::<_, String>(4)?)?,
+            bundle_id: r.get(5)?,
+            recorded_at: Timestamp::from_millis(r.get(6)?),
+        })
+    })?
+    .collect()
+}
+
+/// 依 Bundle 的動作紀錄取代錄製或標為 stale（與保存 Bundle 同一個交易）。
+fn apply_replay_updates(tx: &Transaction<'_>, bundle: &EvidenceBundle) -> rusqlite::Result<()> {
+    let now = bundle.finished_at.as_millis();
+    for update in replay::updates(bundle) {
+        match update {
+            ReplayUpdate::Record { case_key, recorded } => {
+                tx.execute(
+                    "INSERT INTO replay_action
+                        (workspace_id, case_key, identity, action, status, stale_reasons, bundle_id, recorded_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 'valid', '[]', ?5, ?6, ?6)
+                     ON CONFLICT (workspace_id, case_key) DO UPDATE SET identity = excluded.identity, action = excluded.action,
+                        status = 'valid', stale_reasons = '[]', bundle_id = excluded.bundle_id,
+                        recorded_at = excluded.recorded_at, updated_at = excluded.updated_at",
+                    rusqlite::params![
+                        bundle.workspace_id,
+                        case_key,
+                        serde_json::to_string(&recorded.identity).expect("錄製身分一定可以序列化"),
+                        serde_json::to_string(&recorded.action).expect("動作一定可以序列化"),
+                        bundle.id,
+                        now,
+                    ],
+                )?;
+            }
+            ReplayUpdate::MarkStale { case_key, reasons } => {
+                tx.execute(
+                    "UPDATE replay_action SET status = 'stale', stale_reasons = ?3, updated_at = ?4
+                     WHERE workspace_id = ?1 AND case_key = ?2",
+                    rusqlite::params![
+                        bundle.workspace_id,
+                        case_key,
+                        serde_json::to_string(&reasons).expect("原因一定可以序列化"),
+                        now,
+                    ],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn latest_profile(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Option<ProfileVersion>> {
@@ -208,6 +277,7 @@ pub(crate) fn queue_reverification(
         status: RequestStatus::Queued,
         bundle_id: None,
         created_at: now,
+        no_live_model: false,
     };
     insert_request(tx, &request)?;
     Ok(Some(request.id))
@@ -216,8 +286,8 @@ pub(crate) fn queue_reverification(
 fn insert_request(tx: &Transaction<'_>, request: &VerificationRequest) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO verification_request
-            (id, workspace_id, task_id, profile_version_id, journeys, requested_by, status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7)",
+            (id, workspace_id, task_id, profile_version_id, journeys, requested_by, status, created_at, no_live_model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?8)",
         rusqlite::params![
             request.id,
             request.workspace_id,
@@ -226,6 +296,7 @@ fn insert_request(tx: &Transaction<'_>, request: &VerificationRequest) -> rusqli
             serde_json::to_string(&request.journeys).expect("旅程清單一定可以序列化"),
             request.requested_by,
             request.created_at.as_millis(),
+            request.no_live_model,
         ],
     )?;
     append_event(tx, &verification_profile::requested_event(request))
@@ -275,12 +346,14 @@ impl Store {
         outcome
     }
 
-    /// 建立驗證要求：固定目前的 Profile 版本與要執行的旅程。
+    /// 建立驗證要求：固定目前的 Profile 版本與要執行的旅程；`no_live_model` 時這次驗證不呼叫任何即時模型（票 48）。
+    #[allow(clippy::too_many_arguments)]
     pub async fn request_verification(
         &self,
         workspace_id: &str,
         task_id: Option<String>,
         journeys: Vec<String>,
+        no_live_model: bool,
         requested_by: String,
         id: String,
         now: Timestamp,
@@ -318,6 +391,7 @@ impl Store {
                     status: RequestStatus::Queued,
                     bundle_id: None,
                     created_at: now,
+                    no_live_model,
                 };
                 insert_request(tx, &request)?;
                 Ok(Ok(request))
@@ -361,7 +435,8 @@ impl Store {
                         )
                         .optional()?;
                 }
-                pending.push(PendingVerificationRun { request, profile, subject_dir, requirement_version, run });
+                let replay = load_replay(conn, &request.workspace_id)?;
+                pending.push(PendingVerificationRun { request, profile, subject_dir, requirement_version, run, replay });
             }
             Ok(pending)
         })
@@ -394,6 +469,7 @@ impl Store {
                 ],
             )?;
             append_event(tx, &verification_profile::completed_event(&bundle))?;
+            apply_replay_updates(tx, &bundle)?;
             Ok(true)
         })
         .await

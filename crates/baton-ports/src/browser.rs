@@ -101,6 +101,10 @@ pub trait BrowserDriver: Send + Sync {
     async fn step(&self, session: &BrowserSession, step: BrowserStep) -> PortResult<BrowserOutcome>;
     /// 關閉 Session，回傳 trace、錄影等檔案。
     async fn close(&self, session: &BrowserSession) -> PortResult<Vec<BrowserFile>>;
+    /// 這個 Session 實際使用的引擎（例如 Playwright 與瀏覽器的版本；票 48 錄製身分的一部分）；取不到時為 `None`。
+    fn engine(&self, _session: &BrowserSession) -> Option<String> {
+        None
+    }
 }
 
 /// 語意 judge 使用的帳號（Profile 的設定目錄）。
@@ -134,10 +138,41 @@ pub enum JudgeOutcome {
     Unavailable { reason: String },
 }
 
-/// 受限的語意 judge（票 46）：一次模型呼叫，不給任何工具。
+/// 目標導向動作的規劃輸入（票 48）：只有目標、參數、persona 與當前畫面，不含秘密與任何行動者的敘述。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionRequest {
+    pub account: JudgeAccount,
+    /// Profile 寫定的目標。
+    pub goal: String,
+    /// Profile 寫定的參數（例如要輸入的商品名稱），依識別排序。
+    pub params: Vec<(String, String)>,
+    pub persona: Option<String>,
+    pub page_url: String,
+    pub page_title: String,
+    /// 畫面上可見的文字（已遮蔽秘密）。
+    pub page_text: String,
+}
+
+/// 目標導向動作的規劃結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionPlan {
+    /// 模型選定的一個具體動作；Adapter 只接受點擊、輸入與按鍵。
+    Planned { command: BrowserCommand, rationale: String },
+    /// 模型判斷在當前畫面無法達成目標。
+    Unachievable { rationale: String },
+    /// 模型限流：不是產品的問題。
+    RateLimited { reset_at_millis: Option<i64> },
+    /// 模型無法使用或回應無法解讀。
+    Unavailable { reason: String },
+}
+
+/// 受限的模型呼叫（票 46、48）：每次一個模型呼叫，不給任何工具。web 驗證的即時模型呼叫只經過這個 Port，
+/// 所以 `no_live_model` 由 Adapter 在這裡一律阻擋。
 #[async_trait]
 pub trait SemanticJudge: Send + Sync {
     async fn judge(&self, request: JudgeRequest) -> PortResult<JudgeOutcome>;
+    /// 依當前畫面為目標選一個具體動作（票 48）。
+    async fn plan(&self, request: ActionRequest) -> PortResult<ActionPlan>;
 }
 
 /// 秘密參照的解析（票 46）：Profile 與資料庫只保存參照，值只在 Runner 執行操作的當下解析。

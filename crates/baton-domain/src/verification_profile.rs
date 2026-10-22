@@ -13,6 +13,10 @@
 //!   模型限流或無法使用是證據不足（`inconclusive`），不是產品缺陷。秘密只以參照（`{{secret:KEY}}`）出現在 Profile 中，
 //!   值只在 Runner 執行操作時代入，證據與 judge 的輸入都以值遮蔽。測試 persona（扮演的角色）與登入身分（實際的帳號）
 //!   分開宣告、分開綁定到旅程；登入身分要以 `check` 步驟證明實際登入的是誰，不能因 persona 的名稱推定權限。
+//! - 已驗證動作重播（票 48，見 `replay`）：目標導向動作（`act`）由模型依當前畫面決定一個具體動作；只有後續有效斷言
+//!   證明結果的動作才錄製，重播時仍執行真實動作並重新檢查後置條件。`no_live_model` 的驗證要求不呼叫任何模型。
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -118,6 +122,16 @@ pub enum BrowserAction {
     Fill { selector: String, text: String },
     Press { selector: String, key: String },
     WaitFor { selector: String },
+    /// 目標導向動作（票 48）：模型依當前畫面、目標與參數決定一個具體動作（點擊、輸入或按鍵）。只能用在旅程步驟，
+    /// 至少要有一個不靠模型的斷言（後置條件）；通過的動作會錄製，之後可以不呼叫模型重播。
+    Act {
+        goal: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        params: BTreeMap<String, String>,
+        /// Profile 宣告為正式環境時，仍允許重播這個步驟的錄製（預設不允許：正式環境的副作用不重播）。
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replay_in_production: bool,
+    },
 }
 
 impl BrowserAction {
@@ -128,12 +142,13 @@ impl BrowserAction {
             BrowserAction::Fill { selector, text } => format!("瀏覽器在「{selector}」輸入「{text}」"),
             BrowserAction::Press { selector, key } => format!("瀏覽器在「{selector}」按下 {key}"),
             BrowserAction::WaitFor { selector } => format!("瀏覽器等待「{selector}」出現"),
+            BrowserAction::Act { goal, .. } => format!("瀏覽器依目標動作：{goal}"),
         }
     }
 
     fn selector(&self) -> Option<&str> {
         match self {
-            BrowserAction::Goto { .. } => None,
+            BrowserAction::Goto { .. } | BrowserAction::Act { .. } => None,
             BrowserAction::Click { selector }
             | BrowserAction::Fill { selector, .. }
             | BrowserAction::Press { selector, .. }
@@ -184,6 +199,9 @@ impl Operation {
                 BrowserAction::Fill { selector, text } => vec![selector, text],
                 BrowserAction::Press { selector, key } => vec![selector, key],
                 BrowserAction::Click { selector } | BrowserAction::WaitFor { selector } => vec![selector],
+                BrowserAction::Act { goal, params, .. } => {
+                    std::iter::once(goal.as_str()).chain(params.values().map(String::as_str)).collect()
+                }
             },
             Operation::Manual { instruction } => vec![instruction],
         }
@@ -208,6 +226,11 @@ impl Operation {
             Operation::Browser { action: BrowserAction::Fill { selector, .. }, .. } => Some(selector),
             _ => None,
         }
+    }
+
+    /// 目標導向動作（票 48）。
+    pub fn is_act(&self) -> bool {
+        matches!(self, Operation::Browser { action: BrowserAction::Act { .. }, .. })
     }
 
     /// 實際使用的逾時（毫秒）。
@@ -443,6 +466,23 @@ pub struct BuildIdentity {
     pub args: Vec<String>,
 }
 
+/// 錄製與重播的政策（票 48）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplayPolicy {
+    /// 受驗環境是正式環境：錄製的動作預設不重播（目標導向動作可以個別以 `replay_in_production` 允許）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub production: bool,
+    /// 資料集版本：資料相容性的一部分，改變時之前的錄製都是 stale。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+}
+
+impl ReplayPolicy {
+    fn is_default(&self) -> bool {
+        *self == ReplayPolicy::default()
+    }
+}
+
 /// Verification Profile 的內容（一個版本）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileDefinition {
@@ -479,6 +519,9 @@ pub struct ProfileDefinition {
     /// 登入身分（票 46）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identities: Vec<Identity>,
+    /// 錄製與重播的政策（票 48）。
+    #[serde(default, skip_serializing_if = "ReplayPolicy::is_default")]
+    pub replay: ReplayPolicy,
 }
 
 impl ProfileDefinition {
@@ -600,6 +643,24 @@ fn check_operation(operation: &Operation, label: &str) -> Result<(), ProfileErro
             match action {
                 BrowserAction::Fill { text, .. } => check_text(text, &format!("{label}的輸入文字"), false),
                 BrowserAction::Press { key, .. } => check_text(key, &format!("{label}的按鍵"), true),
+                BrowserAction::Act { goal, params, .. } => {
+                    check_text(goal, &format!("{label}的目標"), true)?;
+                    if params.len() > LIST_MAX {
+                        return Err(invalid(format!("{label}的參數最多 {LIST_MAX} 項")));
+                    }
+                    for (key, value) in params {
+                        if !valid_key(key) {
+                            return Err(invalid(format!(
+                                "{label}的參數識別「{key}」只能用小寫英數、_ 與 -（最多 {KEY_MAX_CHARS} 字）"
+                            )));
+                        }
+                        check_text(value, &format!("{label}的參數「{key}」"), false)?;
+                    }
+                    if !operation.secret_keys().is_empty() {
+                        return Err(invalid(format!("{label}的目標與參數會交給模型，不能引用秘密")));
+                    }
+                    Ok(())
+                }
                 _ => Ok(()),
             }
         }
@@ -656,6 +717,11 @@ fn check_step(step: &Step, label: &str) -> Result<(), ProfileError> {
                     }
                     _ => {}
                 }
+            }
+            if operation.is_act() && step.assertions.iter().all(|a| matches!(a, Assertion::Judge { .. })) {
+                return Err(invalid(format!(
+                    "{label}是目標導向動作，至少要有一個不靠模型的斷言（後置條件）；重播時要能不呼叫模型重新檢查"
+                )));
             }
         }
     }
@@ -807,6 +873,14 @@ fn check_secrets_personas_identities(definition: &ProfileDefinition) -> Result<(
         .chain(&definition.teardown);
     if outside_journeys.any(|o| matches!(o, Operation::Browser { .. })) {
         return Err(invalid("瀏覽器操作只能用在旅程與登入身分中；doctor、就緒、資料準備與 teardown 請改用命令或 HTTP"));
+    }
+    // 目標導向動作（票 48）只用在旅程步驟：登入與身分核對要輸入秘密、證明身分，必須是固定的操作
+    let mut identity_steps = definition.identities.iter().flat_map(|i| i.login.iter().chain(std::iter::once(&i.check)));
+    if identity_steps.any(|s| s.operation.is_act()) {
+        return Err(invalid("目標導向動作只能用在旅程步驟；登入與身分核對必須是固定的操作"));
+    }
+    if let Some(dataset) = &definition.replay.dataset {
+        check_text(dataset, "資料集版本", true)?;
     }
     check_count(&definition.secrets, "秘密參照")?;
     for secret in &definition.secrets {
@@ -1022,6 +1096,9 @@ pub struct VerificationRequest {
     pub status: RequestStatus,
     pub bundle_id: Option<String>,
     pub created_at: Timestamp,
+    /// 不呼叫任何即時模型（票 48）：語意判斷與目標導向動作的規劃都被 Adapter 阻擋，只執行不需模型的斷言與重播。
+    #[serde(default)]
+    pub no_live_model: bool,
 }
 
 pub fn requested_event(request: &VerificationRequest) -> DomainEvent {
@@ -1037,6 +1114,7 @@ pub fn requested_event(request: &VerificationRequest) -> DomainEvent {
             "profile_version": request.profile_version,
             "journeys": request.journeys,
             "requested_by": request.requested_by,
+            "no_live_model": request.no_live_model,
         }),
     }
 }
@@ -1137,6 +1215,8 @@ pub enum Judgement {
     Unavailable { reason: String },
     /// 模型呼叫預算已用盡，沒有呼叫。
     BudgetExhausted,
+    /// `no_live_model`：Adapter 禁止即時模型呼叫，沒有呼叫（票 48）。
+    LiveModelDisabled,
 }
 
 /// Adapter 執行操作後觀察到的事實（Domain 不依賴 Port，由 Runtime 轉成這個型別）。
@@ -1238,6 +1318,11 @@ fn map_operation(operation: &Operation, f: impl Fn(&str) -> String) -> Operation
                 BrowserAction::Fill { selector, text } => BrowserAction::Fill { selector: s(selector), text: s(text) },
                 BrowserAction::Press { selector, key } => BrowserAction::Press { selector: s(selector), key: s(key) },
                 BrowserAction::WaitFor { selector } => BrowserAction::WaitFor { selector: s(selector) },
+                BrowserAction::Act { goal, params, replay_in_production } => BrowserAction::Act {
+                    goal: s(goal),
+                    params: params.iter().map(|(k, v)| (k.clone(), s(v))).collect(),
+                    replay_in_production: *replay_in_production,
+                },
             },
             timeout_ms: *timeout_ms,
         },
@@ -1335,6 +1420,11 @@ fn judgement_result(
             false,
             "模型呼叫預算已用盡，沒有判定".to_string(),
             Some((Verdict::BudgetExhausted, "model_call_budget_exhausted", "model:budget_exhausted")),
+        ),
+        Some(Judgement::LiveModelDisabled) => (
+            false,
+            "no_live_model：不呼叫模型，沒有判定".to_string(),
+            Some((Verdict::Inconclusive, "live_model_disabled", "model:disabled")),
         ),
         None => (
             false,
@@ -1591,6 +1681,15 @@ pub struct EvidenceBundle {
     /// 截圖、trace、錄影（票 46）；依政策遮蔽，無法確認不含秘密的不保存。
     #[serde(default)]
     pub artifacts: Vec<EvidenceArtifact>,
+    /// 這次驗證禁止即時模型呼叫（票 48）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_live_model: bool,
+    /// 目標導向動作的來源（live／replay）與錄製的處理（票 48）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<replay::ActionRecord>,
+    /// 即時模型與重播分開計算的用量（票 48）。
+    #[serde(default)]
+    pub usage: replay::VerificationUsage,
     pub started_at: Timestamp,
     pub finished_at: Timestamp,
 }
@@ -1667,6 +1766,8 @@ pub fn proven_by<'a>(profile: &ProfileVersion, bundles: &'a [EvidenceBundle]) ->
         .filter(|b| b.profile_version_id == profile.id)
         .find(|b| b.journeys.iter().any(|j| j.representative && j.verdict == Verdict::Passed))
 }
+
+pub mod replay;
 
 #[cfg(test)]
 mod tests;
