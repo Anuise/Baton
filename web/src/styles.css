@@ -621,6 +621,29 @@ body {
   background: #bf8700;
 }
 
+/* 控制資料庫寫不進去、新派工已停止：獨占狀態列一整行 */
+.status-bar:has(.status-storage-fault) {
+  flex-wrap: wrap;
+  padding-bottom: 6px;
+}
+
+.status-storage-fault {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 6px 12px;
+  color: #82071e;
+  background: #ffebe9;
+  border: 1px solid #cf222e;
+  border-radius: 6px;
+}
+
+.status-storage-detail {
+  color: #656d76;
+  font-size: 12px;
+}
+
 .decision-badge {
   align-self: center;
   padding: 0 8px;

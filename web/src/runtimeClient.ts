@@ -6,6 +6,26 @@ export interface HealthResponse {
   boot_count: number;
   started_at: number;
   pid: number;
+  /** 控制資料庫儲存狀態；舊版 Runtime 沒有這個欄位，視為正常。 */
+  storage?: StorageHealth;
+}
+
+/** 控制資料庫的儲存健康狀態（對應 Rust 的 StorageHealth）。 */
+export interface StorageHealth {
+  /** 為真時 Runtime 已停止新派工。 */
+  dispatch_halted: boolean;
+  fault: StorageFault | null;
+}
+
+/** 控制資料庫無法寫入的原因與處理方式。 */
+export interface StorageFault {
+  kind: "disk_full" | "busy" | "unwritable";
+  code: string;
+  summary: string;
+  /** 使用者可以怎麼處理。 */
+  action: string;
+  /** SQLite 原始訊息，僅供診斷。 */
+  detail: string;
 }
 
 export interface PlatformIssue {

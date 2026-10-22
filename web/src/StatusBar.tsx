@@ -77,6 +77,18 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
           待裁定：{pending.pending_count}
         </span>
       )}
+      {status.state === "running" && status.health.storage?.dispatch_halted && (
+        <div className="status-storage-fault" role="alert">
+          <strong>新派工已停止</strong>
+          {status.health.storage.fault && (
+            <>
+              <span>{status.health.storage.fault.summary}</span>
+              <span>{status.health.storage.fault.action}</span>
+              <small className="status-storage-detail">{status.health.storage.fault.detail}</small>
+            </>
+          )}
+        </div>
+      )}
     </header>
   );
 }
