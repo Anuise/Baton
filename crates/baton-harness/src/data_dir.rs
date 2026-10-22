@@ -2,8 +2,9 @@
 //!
 //! Runtime 的背景工作在測試的 tokio runtime 結束前仍開著控制資料庫與日誌；Windows 上開著的檔案不能刪除，
 //! 所以 `TempDir` 在 harness 被丟棄的當下刪除會失敗並靜默留下目錄。這裡改為：
-//! - harness 丟棄時交給背景執行緒重試刪除，等 runtime 結束、檔案關閉後就刪得掉；
-//! - 程序在刪除完成前就結束時（例如最後一個測試），由之後任何一個 harness 啟動時清掉。
+//! - harness 丟棄時記到待刪清單，由背景執行緒重試刪除，等 runtime 結束、檔案關閉後就刪得掉；
+//! - 程序結束時（`atexit`，各測試的 runtime 都已結束）同步重試刪除清單中剩下的目錄（例如最後一個測試的）；
+//! - 程序沒有正常結束（被終止）而留下的，由之後任何一個 harness 啟動時清掉。
 //!
 //! 目錄都放在暫存區的 `baton-harness` 之下，每個目錄旁有一個鎖檔（`<目錄名>.lock`）。持有鎖檔的程序
 //! 還在使用或正在刪除那個目錄，其他程序不碰；Windows 上以不共用的方式開啟，程序結束時自動釋放。
@@ -11,10 +12,17 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, Once, PoisonError};
 use std::time::{Duration, Instant};
 
-/// 背景重試刪除的上限；超過就留給之後的 harness 清理。
+/// 背景重試刪除的上限；超過就等程序結束時再試。
 const REMOVE_RETRY_LIMIT: Duration = Duration::from_secs(600);
+/// 程序結束時同步重試刪除的上限；超過就留給之後的 harness 清理。
+const EXIT_RETRY_LIMIT: Duration = Duration::from_secs(10);
+
+/// 已丟棄、還沒刪掉的資料目錄與它們的鎖檔。
+static PENDING: Mutex<Vec<(PathBuf, Option<File>)>> = Mutex::new(Vec::new());
+static REGISTER_AT_EXIT: Once = Once::new();
 
 pub(crate) struct DataDir {
     path: PathBuf,
@@ -45,19 +53,46 @@ impl Drop for DataDir {
             release(&path, lock);
             return;
         }
-        // 還有開著的檔案（Runtime 的背景工作要等測試的 tokio runtime 結束才會關閉）：背景重試
-        std::thread::spawn(move || {
+        // 還有開著的檔案（Runtime 的背景工作要等測試的 tokio runtime 結束才會關閉）：記到待刪清單，背景重試
+        REGISTER_AT_EXIT.call_once(|| unsafe {
+            libc::atexit(remove_pending_at_exit);
+        });
+        PENDING.lock().unwrap_or_else(PoisonError::into_inner).push((path, lock));
+        std::thread::spawn(|| {
             let deadline = Instant::now() + REMOVE_RETRY_LIMIT;
             let mut wait = Duration::from_millis(10);
             while Instant::now() < deadline {
                 std::thread::sleep(wait);
-                if fs::remove_dir_all(&path).is_ok() || !path.exists() {
-                    release(&path, lock);
+                if remove_pending() {
                     return;
                 }
                 wait = (wait * 2).min(Duration::from_secs(1));
             }
         });
+    }
+}
+
+/// 試著刪除待刪清單中的目錄，刪掉的移出清單；回傳清單是否已清空。
+fn remove_pending() -> bool {
+    let mut pending = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut i = 0;
+    while i < pending.len() {
+        let path = &pending[i].0;
+        if fs::remove_dir_all(path).is_ok() || !path.exists() {
+            let (path, lock) = pending.swap_remove(i);
+            release(&path, lock);
+        } else {
+            i += 1;
+        }
+    }
+    pending.is_empty()
+}
+
+/// 程序結束時執行：這時各測試的 tokio runtime 都已結束，剩下的檔案很快就會關閉。
+extern "C" fn remove_pending_at_exit() {
+    let deadline = Instant::now() + EXIT_RETRY_LIMIT;
+    while !remove_pending() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 

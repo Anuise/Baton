@@ -97,3 +97,34 @@ async fn a_later_harness_removes_dirs_abandoned_by_exited_processes_but_not_ones
     let _ = std::fs::remove_dir_all(&in_use);
     let _ = std::fs::remove_file(root.join(format!("hinuse{unique}.lock")));
 }
+
+/// 由 `nothing_is_left_after_the_test_process_exits` 以子程序執行：程序中最後一個 harness 在測試結束時才被丟棄。
+#[tokio::test]
+#[ignore = "由 nothing_is_left_after_the_test_process_exits 以子程序執行"]
+async fn child_process_holds_a_harness_until_the_test_ends() {
+    let harness = Harness::start().await;
+    println!("BATON_HARNESS_DATA_DIR={}", harness.data_dir().display());
+}
+
+/// 程序結束時，最後一個 harness 的資料目錄與鎖檔也要刪掉，不能留給下一次執行。
+#[test]
+fn nothing_is_left_after_the_test_process_exits() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_process_holds_a_harness_until_the_test_ends", "--ignored", "--nocapture"])
+        .env("TMP", temp.path())
+        .env("TEMP", temp.path())
+        .env("TMPDIR", temp.path())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "子程序失敗：{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    let dir = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("BATON_HARNESS_DATA_DIR="))
+        .unwrap_or_else(|| panic!("子程序沒有啟動 harness：{stdout}"));
+    let root = temp.path().join("baton-harness");
+    assert!(Path::new(dir).starts_with(&root), "子程序的資料目錄在指定的暫存區：{dir}");
+    let left: Vec<_> = std::fs::read_dir(&root).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+    assert!(left.is_empty(), "子程序結束後仍留下：{left:?}");
+}
