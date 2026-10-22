@@ -486,6 +486,96 @@
 - 影響：開發指南已補上這個例外與使用範圍。
 - 審閱：未審
 
+### AI-52：Profile 的「預期身分」怎麼決定，以及不符時怎麼處理
+- 重要度：高
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：票面要求「實際認證身分與 Profile 預期不符時標示並阻擋」，但沒有說預期身分從哪來。採兩條路：(1) 建立 Profile 時可選填 `expected_account`（電子郵件），第一次核對起就比對；(2) 沒填時，第一次在該 Profile 自己的原生登入（`authMethod=claude.ai`）且設定目錄相符時核對到的帳號，固定為預期身分（追加 `account_profile_identity_pinned` 事件）。之後核對到不同帳號（不分大小寫）就標 `identity_mismatch` 並阻擋，不會悄悄改寫預期身分。認證來源被覆蓋時回報的帳號一律不採用、也不固定。另外，同一個帳號被兩個使用中的 Profile 認到時，較晚建立的標 `duplicate_identity` 並阻擋。登入了但取不到帳號（`email` 缺漏）標 `identity_unconfirmed` 並阻擋。
+- 理由：沒有預期身分就沒有「不符」可言；讓使用者必填會增加首次啟動負擔，所以預設用「第一次原生登入的帳號」固定。同帳號綁兩個 Profile 會讓額度與並行判斷失真，且正是「以為在用 A、實際在用 B」的常見成因（兩個目錄都登入同一人）。
+- 替代方案：預期帳號必填（較嚴但多一個欄位）；不固定、只比對覆蓋來源（抓不到「在終端機改登入別的帳號」）；允許同帳號多個 Profile（額度重複計算）。
+- 影響：使用者在 Profile 的終端機改登入另一個帳號後，該 Profile 會被阻擋且目前沒有「接受新身分」的操作，需封存後重建（會是新的設定目錄與新的登入）。若需要「接受新身分」，在帳號頁加一個明確動作與命令即可。
+- 審閱：未審
+
+### AI-53：「阻擋派工」以 `dispatchable=false` 加 `blockers` 表示
+- 重要度：高
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：Scheduler 與派工尚未存在，所以無法測「實際不被派工」。Domain 的 `profile::blockers`／`views` 判定每個 Profile 是否可派工，`GET /api/v1/profiles` 與精靈都回傳 `dispatchable` 與逐項 `blockers`（穩定代碼：`profile_unverified`、`profile_not_logged_in`、`auth_source_overridden`、`config_dir_mismatch`、`identity_unconfirmed`、`identity_mismatch`、`duplicate_identity`、`profile_archived`）。尚未核對過的 Profile 也不可派工。
+- 理由：與 AI-35 相同的處理方式：現在能被外部觀察的只有 API 回應；判定集中在 Domain，後續票不必自行比對。
+- 替代方案：先做一個假的派工端點來測（超出本票範圍）。
+- 影響：Scheduler／Run 准入的票必須只選 `dispatchable` 的 Profile，並補上「被阻擋的 Profile 沒有被派工」的情境測試。核對結果沒有時效：目前不會因為太久沒核對而失效，是否需要定期重新核對由額度觀測或准入的票決定。
+- 審閱：未審
+
+### AI-54：認證來源的判定依據（實測 Claude Code 2.1.307）與環境變數處理
+- 重要度：高
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：以 `claude auth status --json`（`CLAUDE_CONFIG_DIR` 設為該 Profile 目錄）判定。本機實測輸出：原生登入 `authMethod: "claude.ai"`（含 `email`、`configDirectory`）；環境變數 `ANTHROPIC_API_KEY` → `"api_key"` 加 `apiKeySource: "ANTHROPIC_API_KEY"`（沒有 `email`）；`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN` → `"oauth_token"`；未登入 → `loggedIn: false`、結束碼 1 但仍輸出 JSON。判定規則：只有 `claude.ai` 且 `apiProvider` 是 `firstParty` 才算 `NativeLogin`；`api_key`、`oauth_token`、非 firstParty 供應商與不認識的方式全部視為覆蓋並阻擋。另外比對 CLI 回報的 `configDirectory` 與 Profile 目錄（不分大小寫、斜線、`\\?\` 前綴）。核對**沿用 Runtime 的環境變數**，只覆寫 `CLAUDE_CONFIG_DIR`，不像 AI-02 那樣清除。
+- 理由：核對的目的就是看出覆蓋；清除環境變數會讓覆蓋看不見。這樣得到的是「以 Runtime 目前環境啟動 Claude Code 時實際會用什麼」，之後 Adapter 若啟動前清除環境，只會更嚴格、不會更寬鬆。`apiKeySource` 的 `apiKeyHelper` 值只是依字面推測，沒有實測（本機沒有設定 helper）。
+- 替代方案：只看電子郵件有沒有變（抓不到沒有 email 的 API key 覆蓋）；讀取 `.credentials.json` 判定（要碰登入資料，違反驗收條件）。
+- 影響：使用 `claude auth login --console`（Console／API 計費）登入的 Profile，若 CLI 回報的 `authMethod` 不是 `claude.ai` 會被視為覆蓋而阻擋，需要實測確認；CLI 改版改了 `auth status` 的輸出格式時，核對會回報 `profile_check_failed`。正式實作已用本機真實的 `claude`（空目錄、已登入的 `.claude-Work-3`）以 `--ignored` 的 live 測試與桌面冒煙測試驗證。
+- 審閱：未審
+
+### AI-55：新增 ClaudeEnvironment Port，並為 WorkspaceFs 加 `ensure_directory`
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：新增 `ClaudeEnvironment` Port（`probe_claude`、`probe_git`、`auth_status`、`open_login_terminal`）。`Ports` 結構多一個 `claude_env` 欄位；harness 提供 `FakeClaudeEnvironment`（可腳本化工具存在與版本、各設定目錄的原生登入、環境變數覆蓋、登入終端機，並像真實 Claude Code 一樣把登入資料寫進該 Profile 目錄）。Port 沒有任何下載或安裝動作。`WorkspaceFs` 新增 `ensure_directory`，用於建立 Profile 的設定目錄。
+- 理由：spec 的 Port 草圖沒有涵蓋「執行 claude／git 探測」與「開終端機」，這些都是外部副作用，依 D-04 必須是 Port。「不執行任何下載腳本」因此可以用「Port 上沒有這個能力」加上測試斷言「沒有 spawn」來證明。
+- 替代方案：用既有的 `ProcessControl.spawn`（它沒有環境變數與輸出擷取，語意也是 Run 的程序）。
+- 影響：後續建立 `Ports` 的程式要補上 `claude_env`。真實 Claude Code Adapter（票之後）可以共用 `ClaudeCli` 的探測。
+- 審閱：未審
+
+### AI-56：Profile 設定目錄的位置、封存與資料表
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：設定目錄固定在 `<資料目錄>\profiles\<profile id>`（id 為 `prof_` 加 96 位元隨機值），由 Runtime 建立，不讓使用者自選；Domain 另外保證任兩個 Profile（含已封存者）的目錄不相同也不互相包含。新增 `POST /api/v1/profiles/{id}/archive`（票面沒有明列）：D-32 的 8 個上限若沒有釋出名額的方式，使用者只能永久佔滿；封存不刪除目錄（登入資料仍在那裡，刪除是不可逆動作）。Profile 名稱必填、使用中不可重複（不分大小寫）、50 字元以內。新增 migration 4：`account_profile`（核對結果存成 JSON 欄位）與 `setup_state`；所有變更與事件在同一個交易追加。
+- 理由：D-17 規定 Profile 原生設定目錄放在資料目錄之下；封存與刪除目錄分開處理比較安全。
+- 替代方案：讓使用者選任意目錄（可能共用或指到自己平常的 `~/.claude`，違反「互不共用」）；不做封存（8 個上限變成陷阱）。
+- 影響：被封存 Profile 的資料夾會留在磁碟上，清理（含登出）需要另一個明確的功能。使用者原本想沿用的現有 `.claude-Work-n` 目錄不能直接匯入，要在新的 Profile 目錄重新登入。
+- 審閱：未審
+
+### AI-57：登入終端機的開啟方式
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：App 呼叫 Runtime 的 `POST /api/v1/profiles/{id}/login-terminal`，由 Runtime 執行 `cmd /d /c start "Baton - Claude login" cmd.exe /k claude auth login`，環境變數 `CLAUDE_CONFIG_DIR` 設為該 Profile 目錄，視窗以 `/k` 保持開啟。Runtime 的標準輸入輸出是空的，直接用 `CREATE_NEW_CONSOLE` 會讓新視窗的 `cmd` 讀到 EOF 立刻結束，所以透過 `start` 讓新視窗取得自己的主控台。登入完成後由使用者按「重新核對」，Runtime 不輪詢登入結果。
+- 理由：票面要求「可在 App 開啟的終端機中以該 Profile 執行原生登入」。只執行 `claude auth login`，不碰登入資料，也不下載任何東西。
+- 替代方案：Tauri 殼自己開終端機（登入動作會從 Runtime 搬到殼，harness 無法測）；內嵌終端機元件（超出範圍）。
+- 影響：自動化測試只驗證「為選定 Profile 呼叫 Port、使用它自己的設定目錄」與命令列內容（`login_terminal_command` 的單元測試）；真實視窗是否出現、`claude auth login` 是否在其中正常完成沒有自動化覆蓋，屬 **Validation Required**，已寫入 `docs/development.md`，列入票 51 的平台驗收較妥。`start` 的視窗標題刻意用 ASCII，避免主控台字碼頁亂碼。
+- 審閱：未審
+
+### AI-58：Claude Code 最低版本與 Git 的檢查標準
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：最低 Claude Code 版本暫定 2.1.0（`MIN_CLAUDE_CODE_VERSION`）；低於它標為 `too_old`，並提示 `claude update`。版本取不到或探測失敗標為 `unknown`（不當作可用）。Git for Windows 只檢查在 PATH 上（`where git`），不設版本下限，也不判斷是不是 Git for Windows 發行版。
+- 理由：spec D-20 說最低版本在 Adapter 驗證時固定；目前實測過的是 2.1.x 系列，且 `claude auth status` 存在於這個系列。官方文件把 Git for Windows 列為建議而非必要（沒有它 Claude Code 改用 PowerShell 工具），但 D-20 與 worktree 管理需要 git，所以仍檢查並提示。
+- 替代方案：不設最低版本（無法呈現「版本過舊」）；把缺少 Git 視為阻擋（官方並不要求）。
+- 影響：Adapter 驗證票確認實際需要的最低版本後，改 `baton-domain/src/setup.rs` 的常數與測試。Git 缺少目前只是提示，不阻擋建立 Profile 或派工。
+- 審閱：未審
+
+### AI-59：精靈顯示的官方指令與其核對狀況
+- 重要度：低
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：Claude Code 缺項顯示 `irm https://claude.ai/install.ps1 | iex` 與 `winget install Anthropic.ClaudeCode`；過舊顯示 `claude update`；Git 缺項顯示 `winget install --id Git.Git -e --source winget`，並附說明頁網址（Claude Code：code.claude.com/docs/en/setup；Git：git-scm.com/download/win）。Claude Code 的三條指令已對照官方安裝文件（2026-10-22 查閱）；Git 的 winget 指令沿用 Git for Windows 官方下載頁慣用的 `Git.Git` 套件識別，沒有逐字核對官網。指令只是文字，UI 沒有執行按鈕，說明頁網址以純文字顯示（不做成連結，避免 WebView 被導走）。
+- 理由：D-20 規定缺項只引導、不代為安裝。
+- 替代方案：顯示可點的連結（需要 Tauri 的 opener 外掛與權限）。
+- 影響：官方指令改版時需更新 `setup.rs`。
+- 審閱：未審
+
+### AI-60：核對失敗與「重新檢查」的語意
+- 重要度：低
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：單一 Profile 核對本身失敗（claude 沒回應、輸出不是預期的 JSON）時回 502 `profile_check_failed`，不改寫該 Profile 已記錄的結果。精靈的 `GET /api/v1/setup` 每次都重新探測 Claude Code 與 Git、讀取已記錄的 Profile 結果；`POST /api/v1/setup/recheck`（「重新檢查」）另外並行重新核對每個使用中的 Profile，個別失敗者略過、保留先前結果。工具探測失敗回報 `unknown` 與原因，不讓精靈整體失敗。RuntimeClient 對這幾個會執行 `claude`／`git` 的請求等待上限放寬為 60 秒（一般請求維持 2 秒）。
+- 理由：核對失敗不該被誤記成「未登入」而覆蓋掉先前可信的結果；也不該因一個 Profile 卡住而讓整個精靈沒有回應。
+- 替代方案：失敗時把結果記為「未知」並阻擋（較保守，但暫時性的 CLI 逾時會讓所有帳號被阻擋）。
+- 影響：Claude Code 長時間不可用時，舊的「可派工」結果會一直保留；派工前的准入應自行重新核對（見 AI-53）。
+- 審閱：未審
+
+### AI-61：精靈狀態、背景行為告知的保存與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：`ready` 的定義是 Claude Code 與 Git 都 `ok`，且至少有一個可派工的 Profile；背景行為告知是否確認另外以 `setup_state` 表保存（首次確認追加 `background_notice_acknowledged` 事件，之後重複確認不改變時間也不追加事件）。UI 在 App 主區依序放首次設定精靈、帳號頁、平台狀態頁（導覽尚未存在，與 AI-37 相同）；全部完成且已確認告知時精靈縮成一行「首次設定已完成」加「重新檢查」。已有 8 個 Profile 時，新增按鈕停用並說明上限（Runtime 端仍會拒絕第 9 個）。精靈步驟中的「匯入共同設定」與「建立第一個 Workspace（授權範本確認）」不在本票範圍，由後續的票加入。
+- 理由：票面只要求精靈檢查三項環境與告知背景行為。
+- 替代方案：把告知確認存在 WebView 的 localStorage（重建 Runtime 或換視窗資料夾後會重複顯示，也不在事件紀錄中）。
+- 影響：加入導覽的票只需移動這兩個元件的掛載位置。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

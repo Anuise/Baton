@@ -5,6 +5,8 @@
 //   2. 關閉 App 視窗後 Runtime 仍在執行
 //   3. 再次開啟 App 時連回同一個 Runtime（boot_count 不增加、pid 不變）
 //   4. 不帶憑證的請求被 Runtime 拒絕（桌面憑證由 App 自動讀取 DPAPI 保護檔，不需人工複製）
+//   5. 首次設定精靈以本機真實的 claude 與 git 檢查；帳號頁新增 Profile 並以真實的 claude auth status 核對，
+//      第 9 個 Profile 被拒絕（不會開啟登入終端機，避免在測試中彈出視窗）
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -74,6 +76,36 @@ function readDesktopCredential(dir) {
 
 const runtimeUrl = (port) => `http://127.0.0.1:${port}/api/v1/health`;
 
+/** 帶桌面憑證呼叫 Runtime API，回傳狀態碼與 JSON。 */
+async function callApi(port, path, method = "GET", body) {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${readDesktopCredential(dataDir)}`,
+      "X-Baton-Client": "baton-desktop",
+      ...(body ? { "content-type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+/** 在頁面中填入指定標籤的輸入欄位（React 受控元件需要原生 setter 與 input 事件）。 */
+const fillExpression = (label, value) => `(() => {
+  const input = [...document.querySelectorAll('label')].find((l) => l.innerText.trim() === ${JSON.stringify(label)})?.querySelector('input');
+  if (!input) return false;
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(value)});
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+})()`;
+
+const clickExpression = (ariaLabelOrText) => `(() => {
+  const button = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') ?? b.innerText.trim()) === ${JSON.stringify(ariaLabelOrText)});
+  if (!button || button.disabled) return false;
+  button.click();
+  return true;
+})()`;
+
 const health = async (port) =>
   (
     await fetch(runtimeUrl(port), {
@@ -129,6 +161,43 @@ try {
   console.log(`✔ ${platformBar.match(/平台：\S+/)[0]}；${platformPage.replace(/\s+/g, " ").trim()}`);
   const first = await health(runtimePort);
   runtimePid = first.pid;
+
+  // 5. 首次設定精靈與帳號頁（真實的 claude、git；不開登入終端機）
+  const wizardText = await waitFor("精靈顯示 Claude Code 與 Git 的檢查結果", async () => {
+    const text = await evaluate(debug1, "document.querySelector('.setup-wizard')?.innerText ?? ''");
+    return text.includes("Claude Code") && text.includes("Git for Windows") ? text : null;
+  });
+  console.log(`✔ 首次設定：${wizardText.replace(/\s+/g, " ").trim().slice(0, 160)}`);
+  if (!wizardText.includes("背景")) throw new Error("精靈沒有顯示背景執行行為的告知");
+  await waitFor("填入 Profile 名稱", () => evaluate(debug1, fillExpression("名稱", "冒煙測試帳號")));
+  await waitFor("按下新增 Profile", () => evaluate(debug1, clickExpression("新增 Profile")));
+  await waitFor("帳號頁列出新的 Profile", async () => {
+    const text = await evaluate(debug1, "document.querySelector('.accounts-page')?.innerText ?? ''");
+    return text.includes("冒煙測試帳號") && text.includes("尚未核對") ? text : null;
+  }).catch(async (error) => {
+    const page = await evaluate(debug1, "document.querySelector('.accounts-page')?.innerText ?? ''");
+    throw new Error(`${error.message}；帳號頁目前內容：${String(page).replace(/\s+/g, " ")}`);
+  });
+  await waitFor("按下重新核對", () => evaluate(debug1, clickExpression("重新核對 冒煙測試帳號")));
+  const verifiedText = await waitFor("核對後顯示登入狀態", async () => {
+    const text = await evaluate(debug1, "document.querySelector('.accounts-page')?.innerText ?? ''");
+    return /未登入|已阻擋派工|可派工/.test(text) && !text.includes("尚未核對") ? text : null;
+  });
+  console.log(`✔ 帳號頁核對（真實 claude auth status）：${verifiedText.replace(/\s+/g, " ").trim().slice(0, 160)}`);
+  const listed = await callApi(runtimePort, "/api/v1/profiles");
+  const created = listed.body.profiles.find((p) => p.name === "冒煙測試帳號");
+  if (!created || !existsSync(created.config_dir) || !created.config_dir.startsWith(dataDir)) {
+    throw new Error(`Profile 的設定目錄不在資料目錄之下或不存在：${JSON.stringify(created)}`);
+  }
+  for (let n = 2; n <= 8; n++) {
+    const added = await callApi(runtimePort, "/api/v1/profiles", "POST", { name: `帳號 ${n}` });
+    if (added.status !== 201) throw new Error(`第 ${n} 個 Profile 應該成功：${JSON.stringify(added)}`);
+  }
+  const ninth = await callApi(runtimePort, "/api/v1/profiles", "POST", { name: "帳號 9" });
+  if (ninth.status !== 409 || ninth.body.error !== "profile_limit_reached" || !ninth.body.message.includes("8")) {
+    throw new Error(`第 9 個 Profile 應該被拒絕並說明上限：${JSON.stringify(ninth)}`);
+  }
+  console.log(`✔ 第 9 個 Profile 被拒絕：${ninth.body.message}`);
   console.log(`✔ Runtime 已由 App 啟動（pid ${first.pid}，boot_count ${first.boot_count}）`);
 
   // 2. 關閉 App：Runtime 繼續執行

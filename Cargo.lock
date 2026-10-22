@@ -271,6 +271,8 @@ dependencies = [
  "baton-store",
  "futures",
  "getrandom 0.3.4",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -283,6 +285,7 @@ version = "0.1.0"
 dependencies = [
  "baton-domain",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

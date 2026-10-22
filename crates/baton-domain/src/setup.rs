@@ -1,7 +1,7 @@
 //! 首次啟動精靈的判定（spec D-20）：Claude Code 與 Git for Windows 的檢查結果、官方指引，
 //! 以及「背景執行行為」告知的確認。
 //!
-//! 純邏輯、無 I/O。缺項只提供官方指令讓使用者自行執行，Baton 不下載也不執行任何安裝腳本。
+//! 純邏輯、無 I/O。缺項只提供官方指令讓使用者自行執行，Runtime 不下載也不執行任何安裝腳本。
 
 use serde::{Deserialize, Serialize};
 
@@ -119,7 +119,10 @@ pub fn check_claude(probe: Result<ToolProbe, String>) -> ToolCheck {
         Ok(ToolProbe::NotFound) => base(
             ToolStatus::Missing,
             None,
-            "在 PATH 上找不到 Claude Code。請自行執行下列官方指令安裝，再按「重新檢查」。Baton 不會代為下載或安裝".into(),
+            format!(
+                "在 PATH 上找不到 Claude Code。請自行執行下列官方指令安裝，再按「重新檢查」。{} 不會代為下載或安裝",
+                product::PRODUCT_NAME
+            ),
             claude_install_guidance(),
         ),
         Ok(ToolProbe::Found { version_output }) => {
@@ -166,9 +169,11 @@ pub fn check_git(probe: Result<ToolProbe, String>) -> ToolCheck {
         Ok(ToolProbe::NotFound) => base(
             ToolStatus::Missing,
             None,
-            "在 PATH 上找不到 Git for Windows（Claude Code 在 Windows 上需要它）。\
-             請自行執行下列官方指令或到下載頁安裝，再按「重新檢查」。Baton 不會代為下載或安裝"
-                .into(),
+            format!(
+                "在 PATH 上找不到 Git for Windows（Claude Code 的 Bash 工具與 {name} 的 worktree 管理需要它）。\
+                 請自行執行下列官方指令或到下載頁安裝，再按「重新檢查」。{name} 不會代為下載或安裝",
+                name = product::PRODUCT_NAME
+            ),
             git_install_guidance(),
         ),
         Ok(ToolProbe::Found { version_output }) => {
