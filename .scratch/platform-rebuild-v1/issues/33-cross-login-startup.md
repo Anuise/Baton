@@ -1,6 +1,6 @@
 # 33: 跨 Windows 登入的啟動、續跑與停止抑制
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R110-33-impl，2026-10-22 20:44）
 Blocked by: 32, 25
 
 **What to build:** 依 DR-20261021-07 與 spec D-25：「登入時自動啟動」（預設關閉）以 HKCU Run 機碼啟動 launcher；launcher 先讀生命週期檔，有完全退出或維護抑制時直接結束。每個 Workspace 另有「跨登入自動續跑」設定（預設關閉），與完全退出後續跑設定分開。完全退出後只有手動開 App 才依 DR-01 處理。重新登入不重設恢復額度與阻擋。
