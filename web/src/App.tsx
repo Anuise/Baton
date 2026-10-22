@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { AccountsPage } from "./AccountsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
+import { ExitProgress } from "./ExitProgress";
 import { PlatformPage } from "./PlatformPage";
 import { SchedulingSettings } from "./SchedulingSettings";
 import { SetupWizard } from "./SetupWizard";
@@ -47,6 +48,8 @@ export function App() {
           {client && <PlatformPage client={client} />}
         </main>
       </div>
+      {/* 系統匣「完全退出」的停止進度，以覆蓋層顯示 */}
+      {client && <ExitProgress client={client} />}
     </div>
   );
 }

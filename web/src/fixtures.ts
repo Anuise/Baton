@@ -2,11 +2,14 @@ import type {
   AccountProfile,
   AccountRun,
   AccountScheduling,
+  ExitRunResult,
+  LifecycleStatus,
   PlatformResponse,
   RunView,
   SchedulingOverview,
   SetupStatus,
   ToolCheck,
+  WorkspaceLifecycleView,
 } from "./runtimeClient";
 
 /** 測試用的平台狀態：Windows 11 26H2 Pro x64，正式支援。 */
@@ -199,6 +202,36 @@ export function schedulingOverview(overrides: Partial<SchedulingOverview> = {}):
     },
     accounts: [accountScheduling()],
     queue: [],
+    ...overrides,
+  };
+}
+
+/** 生命週期裡的 Workspace：預設不自動續跑、沒有暫停。 */
+export function workspaceLifecycle(overrides: Partial<WorkspaceLifecycleView> = {}): WorkspaceLifecycleView {
+  return {
+    workspace_id: "ws_1",
+    name: "筆記",
+    auto_resume_after_exit: false,
+    paused_since: null,
+    awaiting_resume: false,
+    ...overrides,
+  };
+}
+
+/** 完全退出時 run_1 的停止結果；預設還在等待停止。 */
+export function exitRun(overrides: Partial<ExitRunResult> = {}): ExitRunResult {
+  return { run_id: "run_1", workspace_id: "ws_1", task_id: "task_1", outcome: "pending", ...overrides };
+}
+
+/** 測試用的生命週期：預設 Runtime 運作中、沒有停止意圖、一個 Workspace。 */
+export function lifecycleStatus(overrides: Partial<LifecycleStatus> = {}): LifecycleStatus {
+  return {
+    phase: "running",
+    stop_intent_active: false,
+    timing: { stop_grace_ms: 30_000, kill_confirm_ms: 10_000 },
+    exit: null,
+    active_runs: 0,
+    workspaces: [workspaceLifecycle()],
     ...overrides,
   };
 }

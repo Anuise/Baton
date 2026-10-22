@@ -69,6 +69,7 @@ const WAIT_CATEGORY_LABELS: [WaitCategory, string][] = [
   ["dependency", "相依"],
   ["state_unknown", "狀態不明"],
   ["account", "帳號"],
+  ["lifecycle", "完全退出"],
 ];
 
 /** Run 仍在進行（尚未結束）。 */
@@ -404,7 +405,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   );
 }
 
-/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號）。 */
+/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、完全退出）。 */
 function QueuedStatus({ position, reasons }: { position: number | null; reasons: WaitReason[] }) {
   return (
     <div className="task-queued" role="group" aria-label="排隊原因">

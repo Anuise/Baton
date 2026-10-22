@@ -362,8 +362,15 @@ export type RunView = Run & {
   blocked: BlockedNote | null;
 };
 
-/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。 */
-export type WaitCategory = "capacity" | "quota" | "authorization" | "dependency" | "state_unknown" | "account";
+/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。`lifecycle` 是完全退出中或等待「繼續工作」。 */
+export type WaitCategory =
+  | "capacity"
+  | "quota"
+  | "authorization"
+  | "dependency"
+  | "state_unknown"
+  | "account"
+  | "lifecycle";
 
 /** 等待原因（對應 Rust 的 WaitReason）；`code` 是穩定的機器可讀代碼。 */
 export interface WaitReason {
@@ -524,7 +531,74 @@ export interface AccountClient {
   acknowledgeBackgroundNotice(): Promise<SetupStatus>;
 }
 
-export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient & TaskClient & AccountClient & SchedulingClient;
+export type LifecyclePhase = "running" | "stopping" | "stopped";
+
+/** 完全退出時單一 Run 的停止結果；`anomaly` 是無法確認已停止的程序（停止異常）。 */
+export type ExitRunOutcome = "pending" | "not_started" | "stopped_gracefully" | "force_killed" | "anomaly";
+
+export type StopAnomaly = "still_alive" | "stop_failed" | "stop_unconfirmed";
+
+export interface ExitRunResult {
+  run_id: string;
+  workspace_id: string;
+  task_id: string;
+  outcome: ExitRunOutcome;
+  /** 只有 outcome 為 anomaly 時才有。 */
+  anomaly?: StopAnomaly;
+  message?: string;
+}
+
+/** 最近一次完全退出的經過；時間是 UTC 毫秒。 */
+export interface ExitReport {
+  requested_at: number;
+  deadline_at: number;
+  completed_at: number | null;
+  runs: ExitRunResult[];
+  notes: string[];
+}
+
+/** 單一 Workspace 的生命週期設定與狀態（對應 Rust 的 WorkspaceLifecycleView）。 */
+export interface WorkspaceLifecycleView {
+  workspace_id: string;
+  name: string;
+  /** 完全退出後重新開啟時是否自動續跑；預設關閉。 */
+  auto_resume_after_exit: boolean;
+  paused_since: number | null;
+  /** 完全退出後暫停中，等使用者按「繼續工作」。 */
+  awaiting_resume: boolean;
+}
+
+/** Runtime 生命週期（對應 Rust 的 LifecycleStatus）。 */
+export interface LifecycleStatus {
+  phase: LifecyclePhase;
+  stop_intent_active: boolean;
+  timing: { stop_grace_ms: number; kill_confirm_ms: number };
+  exit: ExitReport | null;
+  active_runs: number;
+  workspaces: WorkspaceLifecycleView[];
+}
+
+/** 完全退出、各 Workspace 的自動續跑設定與「繼續工作」，以及桌面 App 的結束。 */
+export interface LifecycleClient {
+  lifecycleStatus(): Promise<LifecycleStatus>;
+  /** 完全退出：Runtime 持久化停止意圖並開始停止。 */
+  requestFullExit(): Promise<LifecycleStatus>;
+  /** 只影響下次重新開啟，不立即啟停目前的工作。 */
+  updateWorkspaceLifecycle(workspaceId: string, autoResumeAfterExit: boolean): Promise<WorkspaceLifecycleView>;
+  resumeWorkspace(workspaceId: string): Promise<WorkspaceLifecycleView>;
+  /** 結束桌面 App 程序。 */
+  quitApp(): Promise<void>;
+  /** 使用者在系統匣按「完全退出」時呼叫 handler；回傳取消訂閱的函式。 */
+  onFullExitRequested(handler: () => void): () => void;
+}
+
+export type AppClient = RuntimeClient &
+  WorkspaceClient &
+  AuthorizationClient &
+  TaskClient &
+  AccountClient &
+  SchedulingClient &
+  LifecycleClient;
 
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
@@ -532,6 +606,9 @@ const WORKSPACES_PATH = "/api/v1/workspaces";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
 const SCHEDULING_PATH = "/api/v1/scheduling";
+const LIFECYCLE_PATH = "/api/v1/lifecycle";
+/** 桌面殼在系統匣「完全退出」時發出的事件（先顯示主視窗再發出）。 */
+export const FULL_EXIT_EVENT = "baton://full-exit-requested";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
@@ -637,13 +714,28 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     setSchedulingMode: (mode) => send(`${SCHEDULING_PATH}/settings`, { method: "PUT", body: { mode } }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
+    lifecycleStatus: () => send(LIFECYCLE_PATH),
+    requestFullExit: () => send(`${LIFECYCLE_PATH}/exit`, { method: "POST" }),
+    updateWorkspaceLifecycle: (workspaceId, autoResumeAfterExit) =>
+      send(`${workspacePath(workspaceId)}/lifecycle`, {
+        method: "PUT",
+        body: { auto_resume_after_exit: autoResumeAfterExit },
+      }),
+    resumeWorkspace: (workspaceId) => send(`${workspacePath(workspaceId)}/resume`, { method: "POST" }),
+    // 瀏覽器開發模式沒有桌面程序可結束；window.close() 對使用者自己開的分頁無效，所以不做事
+    quitApp: async () => {},
+    // 系統匣只存在於桌面殼，瀏覽器裡不會收到完全退出事件
+    onFullExitRequested: () => () => {},
   };
 }
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
-/** 在 Tauri 內透過桌面殼的指令查詢；殼負責連回或啟動 Runtime。 */
-export function createTauriClient(invoke: Invoke): AppClient {
+/** `@tauri-apps/api/event` 的 listen（只用到不帶 payload 的事件）。 */
+type Listen = (event: string, handler: () => void) => Promise<() => void>;
+
+/** 在 Tauri 內透過桌面殼的指令查詢；殼負責連回或啟動 Runtime。`listen` 省略時不接收殼的事件（只有測試會省略）。 */
+export function createTauriClient(invoke: Invoke, listen: Listen = async () => () => {}): AppClient {
   const call = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
     try {
       return await (args === undefined ? invoke<T>(command) : invoke<T>(command, args));
@@ -688,14 +780,25 @@ export function createTauriClient(invoke: Invoke): AppClient {
     schedulingOverview: () => call<SchedulingOverview>("scheduling_overview"),
     setSchedulingMode: (mode) => call<SchedulingOverview>("scheduling_set_mode", { mode }),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
+    lifecycleStatus: () => call<LifecycleStatus>("lifecycle_status"),
+    requestFullExit: () => call<LifecycleStatus>("lifecycle_exit"),
+    updateWorkspaceLifecycle: (workspaceId, autoResumeAfterExit) =>
+      call<WorkspaceLifecycleView>("workspace_lifecycle_update", { workspaceId, autoResumeAfterExit }),
+    resumeWorkspace: (workspaceId) => call<WorkspaceLifecycleView>("workspace_resume", { workspaceId }),
+    quitApp: () => call<void>("app_quit"),
+    onFullExitRequested: (handler) => {
+      const registered = listen(FULL_EXIT_EVENT, () => handler());
+      // 註冊是非同步的；取消訂閱時等註冊完成再解除
+      return () => void registered.then((unlisten) => unlisten());
+    },
   };
 }
 
 /** 依執行環境挑選用戶端。 */
 export async function createRuntimeClient(): Promise<AppClient> {
   if ("__TAURI_INTERNALS__" in window) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return createTauriClient(invoke);
+    const [{ invoke }, { listen }] = await Promise.all([import("@tauri-apps/api/core"), import("@tauri-apps/api/event")]);
+    return createTauriClient(invoke, listen);
   }
   return createHttpClient();
 }
