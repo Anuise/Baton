@@ -60,12 +60,23 @@ pub(crate) fn contains_secret_value(text: &str) -> bool {
     }
     let words: Vec<&str> = text.split(is_separator).filter(|w| !w.is_empty()).collect();
     words.iter().enumerate().any(|(index, word)| {
-        word_looks_secret(word) || {
-            let next = words.get(index + 1).copied();
-            (word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic"))
-                && next.is_some_and(|n| n.chars().count() >= 16 && !is_reference(n))
-        }
+        let next = words.get(index + 1).copied();
+        word_looks_secret(word)
+            || header_has_secret(word, next)
+            || ((word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic"))
+                && next.is_some_and(|n| n.chars().count() >= 16 && !is_reference(n)))
     })
+}
+
+/// `名稱: 值` 或 `名稱:值` 的標頭形式（例如 `x-api-key: …`）：名稱像秘密，值是夠長、英數混合的 token。
+fn header_has_secret(word: &str, next: Option<&str>) -> bool {
+    let Some((name, value)) = word.split_once(':') else { return false };
+    let value = if value.is_empty() { next.unwrap_or("") } else { value };
+    is_secret_key(name)
+        && value.chars().count() >= 16
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '+' | '='))
+        && value.chars().any(|c| c.is_ascii_digit())
+        && value.chars().any(|c| c.is_ascii_alphabetic())
 }
 
 fn word_looks_secret(word: &str) -> bool {

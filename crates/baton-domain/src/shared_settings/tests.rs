@@ -348,3 +348,58 @@ fn secrets_glued_to_cjk_text_or_flags_are_still_detected() {
     }
     assert!(!secrets::contains_secret_value("備忘：下一步 token=1"), "短值不算");
 }
+
+#[test]
+fn secrets_used_as_item_names_are_masked_in_exclusion_records() {
+    let secret = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+    let candidate = import_ok(
+        Some(&format!(
+            r#"{{"{secret}":true,"model":"opus",
+                "hooks":{{"{secret}":[{{"hooks":[{{"type":"command","command":"echo hi"}}]}}]}},
+                "enabledPlugins":{{"{secret}":true}}}}"#
+        )),
+        None,
+        Some(&format!(r#"{{"mcpServers":{{"{secret}":{{"command":"npx"}}}}}}"#)),
+    );
+
+    assert!(!serde_json::to_string(&candidate).unwrap().contains(secret));
+    let items: Vec<_> = candidate.exclusions.iter().map(|e| (e.source, e.item.as_str(), e.reason)).collect();
+    for expected in [
+        (SourceKind::Settings, MASKED, ExclusionReason::SecretValue),
+        (SourceKind::Settings, "hooks.<已遮蔽>", ExclusionReason::SecretValue),
+        (SourceKind::Settings, "enabledPlugins.<已遮蔽>", ExclusionReason::SecretValue),
+        (SourceKind::UserState, "mcpServers.<已遮蔽>", ExclusionReason::SecretValue),
+    ] {
+        assert!(items.contains(&expected), "{expected:?} 應在排除清單：{items:?}");
+    }
+    assert_eq!(candidate.bundle.preferences["model"], json!("opus"));
+}
+
+#[test]
+fn secret_shaped_login_env_names_are_masked_in_exclusion_records() {
+    let secret = "sk-ant-api03-abcdefghijklmnop";
+    let candidate = import_ok(Some(&format!(r#"{{"env":{{"ANTHROPIC_API_KEY={secret}":"x","EDITOR":"vim"}}}}"#)), None, None);
+
+    assert!(!serde_json::to_string(&candidate).unwrap().contains(secret));
+    assert!(candidate.exclusions.iter().any(|e| e.item == "env.<已遮蔽>"));
+}
+
+#[test]
+fn secret_named_headers_with_long_token_values_are_detected() {
+    for secret in [
+        "curl -H 'x-api-key: abcdefghijklmnop1234567890'",
+        "curl -H 'X-Api-Key:abcdefghijklmnop1234567890'",
+        "Authorization: abcdefghijklmnop1234567890",
+    ] {
+        assert!(secrets::contains_secret_value(secret), "{secret} 應被偵測");
+    }
+    for plain in [
+        "x-api-key: ${API_KEY}",
+        "Authorization: Bearer ${TOKEN}",
+        "password: 請向管理員索取",
+        "token: short123",
+        "https://example.com:8443/abcdefghijklmnop1234567890",
+    ] {
+        assert!(!secrets::contains_secret_value(plain), "{plain} 不應被偵測");
+    }
+}

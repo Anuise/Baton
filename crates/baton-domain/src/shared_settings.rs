@@ -37,6 +37,9 @@ const MARKETPLACES_KEY: &str = "extraKnownMarketplaces";
 const MCP_KEY: &str = "mcpServers";
 const ENV_KEY: &str = "env";
 
+/// 排除紀錄中代替「本身像秘密的名稱」的文字。
+const MASKED: &str = "<已遮蔽>";
+
 /// 與登入、認證來源有關的 `settings.json` 欄位：不是共同基準的一部分，一律排除。
 const LOGIN_RELATED_KEYS: [&str; 9] = [
     "apiKeyHelper",
@@ -260,7 +263,7 @@ fn import_settings(
             }
             _ => {
                 let value = if key == ENV_KEY { without_login_env(value, exclusions) } else { value };
-                import_item(source, key.clone(), &key, &value, &mut bundle.preferences, exclusions);
+                import_item(source, None, key, &value, &mut bundle.preferences, exclusions);
             }
         }
     }
@@ -275,7 +278,7 @@ fn without_login_env(env: Value, exclusions: &mut Vec<Exclusion>) -> Value {
         if secrets::is_login_env_key(&name) {
             exclusions.push(Exclusion {
                 source: SourceKind::Settings,
-                item: format!("{ENV_KEY}.{name}"),
+                item: item_path(Some(ENV_KEY), &name),
                 reason: ExclusionReason::LoginRelated,
             });
         } else {
@@ -297,7 +300,7 @@ fn import_items(
         return Err(ImportError::UnexpectedShape { file: source, key: root.to_string() });
     };
     for (name, item) in items {
-        import_item(source, name.clone(), &format!("{root}.{name}"), item, target, exclusions);
+        import_item(source, Some(root), name.clone(), item, target, exclusions);
     }
     Ok(())
 }
@@ -305,12 +308,13 @@ fn import_items(
 /// 匯入單一項目：欄位名稱像秘密者只丟掉該欄位；內容像秘密則整個項目不匯入。
 fn import_item(
     source: SourceKind,
+    root: Option<&str>,
     name: String,
-    path: &str,
     value: &Value,
     target: &mut BTreeMap<String, Value>,
     exclusions: &mut Vec<Exclusion>,
 ) {
+    let path = &item_path(root, &name);
     let mut dropped = Vec::new();
     let top_level_secret = matches!(value, Value::String(text) if is_secret_entry(&name, text));
     if secrets::contains_secret_value(&name) || top_level_secret {
@@ -326,6 +330,15 @@ fn import_item(
         Err(Tainted) => {
             exclusions.push(Exclusion { source, item: path.to_string(), reason: ExclusionReason::SecretValue });
         }
+    }
+}
+
+/// 排除紀錄用的項目路徑；名稱本身像秘密時以 `MASKED` 代替，紀錄才不會帶出秘密。
+fn item_path(root: Option<&str>, name: &str) -> String {
+    let name = if secrets::contains_secret_value(name) { MASKED } else { name };
+    match root {
+        Some(root) => format!("{root}.{name}"),
+        None => name.to_string(),
     }
 }
 

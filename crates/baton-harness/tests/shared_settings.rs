@@ -263,8 +263,9 @@ const HOOK_SECRET: &str = "sk-ant-api03-HOOKSECRET0123456789abcdef";
 const ACCOUNT_EMAIL: &str = "victim@example.com";
 const ACCOUNT_UUID: &str = "uuid-VICTIM-1234-abcd";
 const INSTRUCTION_SECRET: &str = "ghp_INSTRUCTIONSECRET0123456789abcdef";
+const SERVER_NAME_SECRET: &str = "ghp_SERVERNAMESECRET0123456789abcdef";
 
-const PLANTED_SECRETS: [&str; 10] = [
+const PLANTED_SECRETS: [&str; 11] = [
     CREDENTIAL_ACCESS,
     CREDENTIAL_REFRESH,
     ENV_API_KEY,
@@ -275,6 +276,7 @@ const PLANTED_SECRETS: [&str; 10] = [
     ACCOUNT_EMAIL,
     ACCOUNT_UUID,
     INSTRUCTION_SECRET,
+    SERVER_NAME_SECRET,
 ];
 
 /// 使用者的設定裡混著登入資料與秘密，同時有一般內容（用來證明掃描不是空轉）。
@@ -294,7 +296,8 @@ fn plant_settings_with_secrets(harness: &Harness) {
         r#"{{"oauthAccount":{{"emailAddress":"{ACCOUNT_EMAIL}","accountUuid":"{ACCOUNT_UUID}"}},
             "mcpServers":{{"docs":{{"command":"npx","args":["-y","docs-mcp"]}},
                            "gh":{{"command":"gh-mcp","env":{{"GITHUB_TOKEN":"{GITHUB_TOKEN}","REGION":"eu"}},
-                                  "headers":{{"Authorization":"Bearer {BEARER_VALUE}"}}}}}}}}"#
+                                  "headers":{{"Authorization":"Bearer {BEARER_VALUE}"}}}},
+                           "{SERVER_NAME_SECRET}":{{"command":"npx"}}}}}}"#
     ));
 }
 
@@ -340,7 +343,7 @@ async fn imported_content_never_contains_login_secrets_anywhere() {
     assert!(bundle["mcp_servers"]["docs"].is_object());
     assert_eq!(bundle["instructions"], Value::Null);
     let excluded: Vec<_> = version["exclusions"].as_array().unwrap().iter().map(|e| e["item"].as_str().unwrap()).collect();
-    for item in ["apiKeyHelper", "env.ANTHROPIC_API_KEY", "hooks.PreToolUse", "CLAUDE.md", "mcpServers.gh.env.GITHUB_TOKEN", "mcpServers.gh.headers.Authorization"] {
+    for item in ["apiKeyHelper", "env.ANTHROPIC_API_KEY", "hooks.PreToolUse", "CLAUDE.md", "mcpServers.gh.env.GITHUB_TOKEN", "mcpServers.gh.headers.Authorization", "mcpServers.<已遮蔽>"] {
         assert!(excluded.contains(&item), "{item} 應在排除清單：{excluded:?}");
     }
 
