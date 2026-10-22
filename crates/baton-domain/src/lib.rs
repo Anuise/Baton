@@ -46,6 +46,7 @@ pub mod timeline;
 pub mod understanding;
 pub mod verification;
 pub mod workdir;
+pub mod workflow;
 pub mod workspace;
 
 pub use time::Timestamp;
