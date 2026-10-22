@@ -7,14 +7,15 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Router;
 use baton_domain::agent::{
-    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED,
-    TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT,
+    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_GET_TASK_CONTRACT, TOOL_READ_INBOX,
+    TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::artifact::{ARTIFACT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS, TOOL_REGISTER_ARTIFACT};
 use baton_domain::knowledge::{
     EVIDENCE_MAX, LESSON_FIELD_MAX_CHARS, QUERY_MAX_CHARS, TAGS_MAX, TITLE_MAX_CHARS, TOOL_RECORD_LESSON_CANDIDATE,
     TOOL_SEARCH_KNOWLEDGE,
 };
+use baton_domain::message::{INBOX_MAX_LIMIT, MAX_RECIPIENTS};
 use baton_mcp_shim::{serve, ShimConfig};
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -120,7 +121,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_seven_tools_with_their_required_fields() {
+async fn tools_list_has_the_nine_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -132,6 +133,8 @@ async fn tools_list_has_the_seven_tools_with_their_required_fields() {
             TOOL_REPORT_PROGRESS,
             TOOL_SAVE_CHECKPOINT,
             TOOL_REPORT_BLOCKED,
+            TOOL_SEND_MESSAGE,
+            TOOL_READ_INBOX,
             TOOL_REGISTER_ARTIFACT,
             TOOL_RECORD_LESSON_CANDIDATE,
             TOOL_SEARCH_KNOWLEDGE,
@@ -148,6 +151,20 @@ async fn tools_list_has_the_seven_tools_with_their_required_fields() {
     assert_eq!(schema(TOOL_SAVE_CHECKPOINT)["properties"]["details"]["type"], "string");
     assert_eq!(schema(TOOL_REPORT_BLOCKED)["required"], json!(["reason"]));
 
+    let send = schema(TOOL_SEND_MESSAGE);
+    assert_eq!(send["required"], json!(["to", "subject"]));
+    assert_eq!(send["properties"]["to"]["type"], "array");
+    assert_eq!(send["properties"]["to"]["minItems"], 1);
+    assert_eq!(send["properties"]["to"]["maxItems"], MAX_RECIPIENTS);
+    assert_eq!(send["properties"]["kind"]["enum"], json!(["note", "question", "answer", "result"]));
+    for field in ["subject", "body", "message_id", "in_reply_to", "correlation_id"] {
+        assert_eq!(send["properties"][field]["type"], "string", "{field}");
+    }
+    let inbox = schema(TOOL_READ_INBOX);
+    assert!(inbox.get("required").is_none());
+    assert_eq!(inbox["properties"]["include_read"]["type"], "boolean");
+    assert_eq!(inbox["properties"]["limit"]["minimum"], 1);
+    assert_eq!(inbox["properties"]["limit"]["maximum"], INBOX_MAX_LIMIT);
     let artifact = schema(TOOL_REGISTER_ARTIFACT);
     assert_eq!(artifact["required"], json!(["name"]));
     let properties = &artifact["properties"];
@@ -260,6 +277,56 @@ async fn register_artifact_accepts_a_request_line_of_about_14_mib() {
     let log = log.lock().unwrap();
     let body: Value = serde_json::from_slice(&log[0].body).unwrap();
     assert_eq!(body["content_base64"].as_str().unwrap().len(), ARTIFACT_MAX_BYTES / 3 * 4 + 4);
+}
+
+#[tokio::test]
+async fn message_tools_forward_to_their_paths_with_credentials_and_unchanged_arguments() {
+    let cases = [
+        (
+            TOOL_SEND_MESSAGE,
+            json!({"to":["task-b","task-c"],"kind":"question","subject":"介面要不要改？","body":"本文\n含換行與 \"引號\"","message_id":"m-1","unknown":{"x":[1]}}),
+            r#"{"delivered":["task-b","task-c"]}"#,
+        ),
+        (TOOL_READ_INBOX, json!({"include_read":true,"limit":5}), r#"{"messages":[]}"#),
+    ];
+    for (tool, arguments, response) in cases {
+        let (url, log) = spawn_stub(200, response).await;
+
+        let reply = call(&url, tool_call(11, tool, arguments.clone())).await;
+
+        assert_eq!(reply["id"], 11);
+        assert_eq!(reply["result"]["isError"], false, "{tool}");
+        assert_eq!(reply["result"]["content"][0]["text"], response);
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 1, "{tool}");
+        let request = &log[0];
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, format!("{AGENT_TOOLS_PREFIX}/{tool}"));
+        assert_eq!(request.headers["authorization"], format!("Bearer {TOKEN}"));
+        assert_eq!(request.headers["x-baton-client"], "baton-desktop");
+        assert!(request.headers["content-type"].to_str().unwrap().starts_with("application/json"));
+        assert_eq!(serde_json::from_slice::<Value>(&request.body).unwrap(), arguments, "{tool}");
+    }
+}
+
+#[tokio::test]
+async fn message_tools_turn_runtime_4xx_into_tool_errors_with_the_error_code() {
+    for (tool, status, body) in [
+        (TOOL_SEND_MESSAGE, 400, r#"{"error":"message_invalid","message":"主旨不能是空的"}"#),
+        (TOOL_READ_INBOX, 403, r#"{"error":"forbidden","message":"憑證無效"}"#),
+    ] {
+        let (url, _) = spawn_stub(status, body).await;
+
+        let reply = call(&url, tool_call(12, tool, json!({"subject":""}))).await;
+
+        assert_eq!(reply["id"], 12);
+        assert_eq!(reply["result"]["isError"], true, "{tool}");
+        assert!(reply.get("error").is_none());
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        let code = if tool == TOOL_SEND_MESSAGE { "message_invalid" } else { "forbidden" };
+        assert!(text.contains(code), "{text}");
+        assert!(text.contains(&status.to_string()), "{text}");
+    }
 }
 
 #[tokio::test]

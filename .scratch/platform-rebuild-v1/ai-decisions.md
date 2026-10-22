@@ -1171,16 +1171,88 @@
 - 影響：Controller 或其他畫面要讀額度時用同一個總覽。
 - 審閱：未審
 
-### AI-128：知識條目與教訓共用一張 `knowledge_entry` 表；內容版本追加式、條目不可刪除
+### AI-128：訊息的收件人是同一個 Workspace 的 Task；收件匣跟著 Task，不跟著 Run
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：`send_message` 的 `to` 是同一個 Workspace 內其他 Task 的 id（1 到 10 個，去除重複，不能含自己的 Task）；收件 Task 不必有進行中的 Run。每個收件 Task 一筆交付（主鍵 workspace＋message_id＋收件 Task）。`read_inbox` 只回傳寄給「憑證所屬 Run 的 Task」的訊息：交接或重試後的新 Run（新世代）會接到前一個 Run 沒讀完的訊息；自己寄出的訊息不在自己的收件匣。收件 Task 不存在或屬於別的 Workspace 一律回 404 `recipient_not_found`，不洩漏別的 Workspace 是否有那個 Task。`in_reply_to` 只能指向寄件者自己寄過或收到的訊息，否則回 404 `reply_target_not_found`。Controller 與使用者目前不是收件人（Controller 的訊息通道由後續票處理）。
+- 理由：Task 才是跨 Run 穩定的歸屬單位（glossary：交接會結束舊 Run 並建立 successor Run，兩者屬同一個 Task）；若收件匣綁 Run，交接時未讀訊息會遺失。Worker 不知道別人的 run id，用 Task id 也和 `get_task_contract` 回傳的 `task_id` 一致。
+- 替代方案：收件人用 run id（交接就遺失訊息、也要求收件人已經在跑）；廣播給整個 Workspace（Worker 會被無關訊息淹沒，也更難界定「自己範圍」）。
+- 影響：Worker 要知道對方的 task id（來源：Prompt 或 Controller 提供）；本票沒有「列出同 Workspace 的 Task」工具，由 Controller 在 Prompt 中提供。收件 Task 已完成或取消時訊息仍會存入但不會被讀到。
+- 審閱：未審
+
+### AI-129：`message_id` 是寄件者提供的冪等鍵，範圍是 Workspace
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：`message_id` 為選填（字元 `A-Za-z0-9_-.:`、1 到 128）。有提供時它就是去重鍵，唯一範圍是（Workspace、message_id）：同一個寄件 Task 以同一個 `message_id` 重送完全相同的內容（類型、主旨、本文、`in_reply_to`、收件人集合）→ 200 `duplicate: true`，回傳原本的訊息，不新增訊息或交付，寄件 Run 換世代重送也算；同一個 `message_id` 但內容不同、或是別的 Task 使用 → 409 `message_id_conflict`。沒有提供時 Runtime 產生 `msg_…`（這種請求每次都是新訊息，沒有重送保護）。不同 Workspace 可以使用相同的 `message_id`，彼此看不到對方。`thread_id` 由 Runtime 決定（新訊息＝自己的 `message_id`，回覆＝沿用被回覆訊息的 `thread_id`），`correlation_id` 可由寄件者指定，預設沿用被回覆訊息的、否則等於 `message_id`。
+- 理由：驗收條件「重複送出的訊息只交付一次」與「每個收件人以 message_id 去重」；Worker 重試工具呼叫（逾時、shim 重送）時需要穩定的冪等鍵，Runtime 無法替沒有鍵的請求猜測是不是重送。資料庫層以（workspace、message_id、收件 Task）主鍵保證同一則訊息對同一個收件人不可能有兩份。Workspace 為範圍與整個平台「所有範圍查詢都以 Workspace 為界」一致，也不會因 id 衝突洩漏別的 Workspace 的資訊。
+- 替代方案：全域唯一的 `message_id`（跨 Workspace 的衝突會洩漏存在性）；以內容雜湊自動去重（合法的連續相同訊息會被吞掉）；不允許 Worker 指定 `thread_id`（採用，避免加入別人的對話串）。
+- 影響：工具說明建議 Worker 重送時帶同一個 `message_id`。寄件 Task 相同但內容不同的重送會得到 409，而不是悄悄覆蓋。
+- 審閱：未審
+
+### AI-130：「以訊息變更範圍」的判定方式與處理：看類型與欄位名稱，200 忽略並轉成事件
+- 重要度：高
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：訊息本文是自由文字，Runtime 不解讀語意。被視為「想改變範圍或歸屬」的只有兩種明確訊號：`kind` 為 `scope_change`、`reassign`、`reassign_task`、`change_scope`、`update_contract`，或請求中出現 `task_id`、`contract`、`scope`、`assignee`、`assign_to`、`reassign_to`、`new_scope`、`owner` 任一欄位。這類請求：不儲存、不交付，HTTP 200 回 `{accepted:false, ignored:true, reason:"scope_change_not_allowed"}`，並追加一筆事件 `message_scope_change_ignored`（aggregate_type `message`，payload 含 workspace、run、寄件 Task、世代、嘗試的類型與欄位、收件人、主旨、本文前 500 字元）給 Controller。寄件 Run 已不是目前的寫入所有者時同樣回 409 `run_report_stale`，不記事件。正常訊息的合法類型只有 `note`、`question`、`answer`、`result`，其他值 400 `message_invalid`。訊息工具沒有任何路徑能修改 Task、契約、Run 或授權：訊息只寫 `message`、`message_delivery` 兩張表。
+- 理由：驗收條件要求「嘗試以訊息變更範圍時被忽略並轉為給 Controller 的事件」。從本文判斷語意不可靠（誤判合法協作、漏判改寫措辭），所以只處理結構上明確的嘗試；其餘訊息即使文字上在要求改範圍，也只是收件 Worker 讀到的文字，不會改變任何契約（範圍的唯一來源仍是 Task 契約，ADR-0011）。用 200 而不是錯誤，是讓 Worker 知道「沒有被執行」但不會把它當作故障重試。
+- 替代方案：用 4xx 拒絕（Worker 可能當成暫時性錯誤重試，而且不會產生 Controller 事件）；對本文做關鍵字偵測（誤判率高）；把嘗試存成一般訊息但標記（收件人仍會讀到，違反「被忽略」）。
+- 影響：Controller 消費 `message_scope_change_ignored` 事件的邏輯由 Controller 相關的票實作；本票只保證事件存在且內容足夠。訊息本文本身若含有誘導收件 Worker 超出範圍的文字，防護是 Worker 的契約與授權檢查，不在本票。
+- 審閱：未審
+
+### AI-131：交付狀態、Run 啟動時的未讀摘要與「不中途插話」
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：每筆交付有三種狀態：`pending`（已存入，收件人還沒看到）、`delivered`（出現在某個 Run 啟動時的未讀摘要裡）、`read`（收件人用 `read_inbox` 取走全文；`read_inbox` 直接讀取尚未 delivered 的訊息時一併補上 delivered 時間）。狀態由 `delivered_at`、`read_at` 兩個時間推導，不另存狀態欄。派工當下（`apply_run_command` 處理 Dispatch 的同一個交易）把收件 Task 的未讀訊息摘要附在 Prompt 末端：第一行 `未讀訊息：N 則（…）`，之後每則 `- [類型] 主旨（來自 Task「標題」，message_id）`，最多 10 則，超過加一行 `…另有 M 則`，**不含本文**；摘要列出的訊息標為 delivered；沒有未讀時 Prompt 不變。Prompt 在派工時固定並存入 Outbox（Runtime 重啟後重組出相同指令），所以派工之後才送來的訊息只能靠 `read_inbox` 取得；Runtime 不在 Worker 執行中途注入。`read_inbox` 預設只回未讀（依送出順序、最多 `limit`，預設 50、上限 100）並標為已讀；`include_read: true` 連已讀的一起回傳（每則有 `already_read`）；`unread_remaining` 是讀完之後仍未讀的數量。
+- 理由：D-27 規定拉取式交付與「Context Builder 在每次 Run 啟動時附上未讀摘要」。Context Builder 尚未存在（`render_prompt` 仍是最小版本，AI-73），所以摘要在 Store 派工交易內附加，與派工的其他寫入同一個交易、也和 Prompt 同時固定；Context Builder 加入後把這段納入它即可。摘要不含本文以免大量訊息撐大 Prompt，也避免把不受信任的訊息文字直接放進 Prompt 的指令區。
+- 替代方案：啟動時（Supervisor 啟動程序那一刻）才重新計算摘要（Prompt 不再固定，與「重啟後重組相同指令」衝突）；讀取時只記單一 `read` 狀態（無法區分「已提示」與「已取走」）。
+- 影響：派工到實際啟動之間送達的訊息不在摘要裡，Worker 開始工作前仍應呼叫 `read_inbox`（工具說明這麼寫）。派工交易需要查詢訊息表，多一次小查詢。
+- 審閱：未審
+
+### AI-132：訊息的其他限制與資料表命名
+- 重要度：低
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：資料表命名沿用單數慣例：`message`（追加式，禁止更新與刪除）、`message_delivery`（禁止刪除，只會填入 `delivered_at`、`read_at`），不照票文的複數 `messages`／`message_deliveries`。限制：主旨 1 到 200 字元、本文最多 16 KiB、收件人最多 10 個。`send_message` 只接受目前仍是寫入所有者的 Run（已結束或被接替 → 409 `run_report_stale`，什麼都不儲存，也不留稽核）；`read_inbox` 在 Run 結束或被接替後 401 `credential_revoked` 且不改變已讀狀態；兩者都沿用「請求聲稱的 Workspace／Run 與憑證不一致 → 403 `agent_scope_mismatch`」。`send_message` 不續約 lease（只有回報進度、checkpoint、受阻才是存活訊號）。`read_inbox` 的 `include_read` 搭配 `limit` 時回傳最舊的幾則。
+- 理由：與既有資料表命名一致（`agent_report`、`event`、`run`）；上限與 Worker 回報的上限同量級，避免訊息成為塞大量資料的通道。寄出的訊息不是 Worker 在「做事」的證明，不該延長 lease；被接替的 Run 遲到的訊息沒有決策價值，所以不像回報那樣留稽核。
+- 替代方案：照票文用複數表名；過期世代的訊息也存稽核（會讓舊 Worker 的內容留在別人的收件匣旁邊，沒有明確用途）。
+- 影響：若之後需要稽核被拒絕的訊息，需另開票加入。
+- 審閱：未審
+
+### AI-133：票 18 整合：migration 與 AI 編號順延到票 19 之後；排程派工也附上未讀摘要
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 整合（R037-18-integrate）
+- 決策：整合 rebuild/v1（票 19 已合併）時，票 19 的 `scheduling` 維持第 10 個 migration，本票的 `message_and_delivery` 順延為第 11 個（排在 `scheduling` 之後；R048 再順延為第 14 個，見 AI-134）；本票的決策由 AI-95～AI-99 順延為 AI-103～AI-107（R048 再順延為 AI-128～AI-132，見 AI-134），移到 AI-102 之後並補上審閱行，內容不變。兩個 migration 互不相依（訊息表只參照 `workspace`、`run`、`task`，不涉及 `run.profile_id`），先後順序不影響 schema。票 19 之後派工 API 與 Supervisor 都改走 `Store::schedule`，不再經過 `apply_run_command`，所以在 `schedule` 派出 Run 的同一個交易裡也呼叫 `attach_unread_summary`，維持 AI-131 的「Run 啟動時附上未讀摘要」；`apply_run_command` 的呼叫保留（仍可直接派工）。本票的 harness 情境測試比照票 19 先建立可派工帳號；因單一帳號並行上限是 2，而部分情境同時有 3 個 Run，所以建立兩個帳號；Store 測試的 `RunCommand::Dispatch` 補上 `profile_id`。測試的斷言都沒有改。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。
+- 替代方案：讓本票保留第 10 個、把票 19 順延（會改動整合分支已存在的 migration 版本，已套用的開發資料庫版本號會錯位）。
+- 影響：本票程式碼與文件沒有引用 AI-95～AI-99 或 migration 編號，不需其他同步修改。只套用到第 10 版的資料庫開啟時會補套後續版本。之後若再新增派工路徑，要記得同樣附上未讀摘要（Context Builder 加入後應收斂到一處）。
+- 審閱：未審
+
+### AI-134：票 18 第二次整合 rebuild/v1：migration 第 14 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 整合（R048-18-integrate）
+- 決策：rebuild/v1 已合併票 12（`artifact`，第 11 版）、票 08（`shared_settings_version`，第 12 版）、票 27（`quota`，第 13 版），本票的 `message_and_delivery` 順延為第 14 個 migration，排在 `quota` 之後；本票的決策由 AI-103～AI-108 順延為 AI-128～AI-133，移到 AI-127 之後，內容不變，只在 AI-133 的歷史說明加註再次順延，並把其中對 AI-106 的引用改為 AI-131。衝突合併方式：Agent 工具變成 7 個（原有 4 個＋票 12 的 `register_artifact`＋本票的 `send_message`、`read_inbox`），shim 的工具定義、已知工具清單與 API 路由三者都保留；shim 情境測試把兩邊的 schema 斷言放在同一個測試（改名為 `tools_list_has_the_seven_tools_with_their_required_fields`），stdio 測試的工具數改為 7；GLOSSARY 兩邊新增的詞條都保留。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。訊息表只參照 `workspace`、`run`、`task`，與成果、共同設定、額度的資料表互不相依，順序不影響 schema。
+- 替代方案：把本票的 migration 插在中間（會改動整合分支已存在的版本號，已套用的開發資料庫會錯位）。
+- 影響：本票程式碼與文件沒有引用 AI 編號或 migration 編號，不需其他同步修改。工具數量相關的斷言之後若再新增工具，要同時更新兩個 shim 測試。
+- 審閱：未審
+
+### AI-137：子代理建置關閉增量編譯與除錯資訊，閒置 worktree 的 target 隨時可刪
+- 重要度：中
+- 時間／階段：2026-10-22，票 13、14、22、25、37 進行中
+- 決策：`dispatch.sh` 為每個 run 設定 `CARGO_INCREMENTAL=0`、`CARGO_PROFILE_DEV_DEBUG=0`（只影響子代理的環境，不改 repo 的 Cargo.toml）。沒有 run 在執行的 worktree，主控可直接刪除其 `target/`；票結案時 close.sh 已會移除整個 worktree。
+- 理由：每個 worktree 各自編一份含完整除錯資訊與增量快取的 debug 版，單一 worktree 的 `target/debug` 達 32.8 GB，6 個 worktree 合計約 143 GB，C 槽一度歸零，R050、R051、R052 的建置都因 `os error 112` 失敗過。增量快取與除錯資訊是體積的大宗，對一次性的 run 沒有用處。
+- 替代方案：所有 worktree 共用一個 `CARGO_TARGET_DIR`（體積最小，但 cargo 會以檔案鎖讓並行建置排隊）；或每個 run 結束就 `cargo clean`（下一個 run 要整套重編）。
+- 影響：測試失敗時的 backtrace 只有函式名稱、沒有行號；每次建置都是非增量，第一次編譯時間不變、反覆修改時較慢。
+- 審閱：未審
+
+### AI-138：知識條目與教訓共用一張 `knowledge_entry` 表；內容版本追加式、條目不可刪除
 - 重要度：中
 - 時間／階段：2026-10-22，票 37 實作
 - 決策：票面的「knowledge_entries 與 lessons」實作為 migration 14 `knowledge` 的兩張表：`knowledge_entry`（決策 `decision`、教訓 `lesson`、一般知識 `fact` 以 `kind` 區分；保存範圍、可信狀態、來源、有效期間、內容版本號、聚合版本 `revision`、取代關係、撤銷／淘汰原因與目前內容的檢索文字 `search_text`）與追加式的 `knowledge_entry_version`（每個內容版本一列，觸發器禁止更新與刪除）。教訓特有的「觸發條件、根因或待驗假說、解法」放在內容 JSON 的 `lesson` 欄（只有教訓有）。`knowledge_entry` 有觸發器禁止刪除。變更歷史取自既有的追加式 `event` 表（`aggregate_type = 'knowledge_entry'`）。
 - 理由：GLOSSARY 已定義「Decision 與 Lesson 都是 Knowledge Entry 的特定形態」；狀態、範圍、有效期間、版本、取代關係與搜尋對三種形態完全相同，拆兩張表只會複製一整套程式與索引。仿照 Task 契約（`task` + 追加式 `task_contract_version`）的做法，歷史不需要另一張稽核表。
 - 替代方案：`knowledge_entry` 與 `lesson` 兩張表（教訓欄位成為獨立欄位，Guard 查詢較直接，但版本、狀態、搜尋要做兩份）；每個版本一列、以 lineage 串起（查目前狀態要取最大版本，狀態變更也要複製內容）。
-- 影響：票 38（Guard）以條目 id 參照教訓；若 Guard 需要結構化的教訓欄位，可在 `lesson` JSON 內擴充或另加欄位。整合 rebuild/v1 時 migration 由第 12 個順延為第 14 個（見 AI-134）。
+- 影響：票 38（Guard）以條目 id 參照教訓；若 Guard 需要結構化的教訓欄位，可在 `lesson` JSON 內擴充或另加欄位。整合 rebuild/v1 時 migration 由第 12 個順延為第 14 個（見 AI-144），第二次整合再順延為第 15 個（見 AI-145）。
 - 審閱：未審
 
-### AI-129：驗收條件中的「決策」以知識分頁的決策條目滿足；裁定中心的正式 Decision 尚未納入搜尋
+### AI-139：驗收條件中的「決策」以知識分頁的決策條目滿足；裁定中心的正式 Decision 尚未納入搜尋
 - 重要度：中
 - 時間／階段：2026-10-22，票 37 實作
 - 決策：「繁體中文兩字以上關鍵字可搜到決策與教訓」的「決策」，指 `kind = decision` 的知識條目（使用者在知識分頁記錄的已定案判斷與理由，可指定取代舊決策）。票 22／35 的裁定（Decision Request 經人工裁定產生的正式 Decision）目前不在本分支，所以沒有被寫入知識索引。
@@ -1189,7 +1261,7 @@
 - 影響：票 35（完整裁定中心）或之後的整合，應在保存正式 Decision 的同一個交易中建立對應的 `kind = decision` 知識條目（來源指向該 Decision），才能用同一個搜尋找到裁定；在那之前，裁定中心的 Decision 搜不到。
 - 審閱：未審
 
-### AI-130：`record_lesson_candidate` 暫時開放給所有 Agent 憑證；不論誰提交都只能是候選教訓
+### AI-140：`record_lesson_candidate` 暫時開放給所有 Agent 憑證；不論誰提交都只能是候選教訓
 - 重要度：高
 - 時間／階段：2026-10-22，票 37 實作
 - 決策：spec D-05 把 `record_lesson_candidate` 列為 Controller 專屬工具，但目前 Agent 憑證只有一種角色（Worker Run，見 AI-88；Controller 憑證屬票 16、17），所以本票讓任何 Agent 憑證都能呼叫。限制一律由 Runtime 決定、請求無法改變：(1) 只會建立 `kind = lesson`、`status = candidate` 的條目（請求帶 `status`、`kind` 會被忽略；Domain 的 `knowledge::create` 依來源決定狀態，Agent 來源只能是候選教訓）；(2) 範圍只能是憑證所屬 Run 的 Task（預設）、它的 Goal 或它的 Workspace，以 `scope` 字串指定、不接受任何識別，全域被拒絕；(3) Run 必須仍是寫入所有者，否則 409 `run_report_stale`、不寫入；(4) Agent 憑證不能呼叫知識分頁的管理 API（確認、修正、撤銷、建立都需要桌面憑證）。`search_knowledge` 同樣需要 Run 仍是寫入所有者（否則 401 `credential_revoked`），只回傳這個 Run 適用範圍內有效的條目。
@@ -1198,7 +1270,7 @@
 - 影響：票 16／17 建立 Controller 憑證角色時，應把 `record_lesson_candidate` 限制為 Controller 角色（Worker 呼叫改回 403），或決定保留 Worker 提交候選的能力並更新本條目。在那之前 Worker 可以提交候選教訓，知識分頁的候選區會看到來源 Run。
 - 審閱：未審
 
-### AI-131：可信狀態與轉換規則、有效的定義、取代關係與並行修改校驗
+### AI-141：可信狀態與轉換規則、有效的定義、取代關係與並行修改校驗
 - 重要度：中
 - 時間／階段：2026-10-22，票 37 實作
 - 決策：可信狀態五種：候選 `candidate`、已驗證 `verified`、已撤銷 `revoked`、已淘汰 `retired`、已被取代 `superseded`。狀態由來源決定：使用者在知識分頁建立的直接是已驗證，Agent 提交的是候選。轉換：確認（候選→已驗證）；修正（候選或已驗證，追加新內容版本、狀態不變，只改有效期限時不追加版本）；撤銷（候選或已驗證→已撤銷，表示內容是錯的，需原因；拒絕候選也用撤銷）；淘汰（只限已驗證→已淘汰，表示曾經正確但已不適用，需原因）；取代（使用者建立新條目時指定 `supersedes`，被取代者必須是同種類且已驗證，同一交易轉為已被取代並互相連結）。撤銷、淘汰、被取代都是終態。**有效 = 已驗證且現在在有效期間內**（`valid_from ≤ now < valid_until`），只有有效條目會被 Agent 取得或出現在預設搜尋結果。每個操作都必須帶 `expected_revision`，不符回 409 `knowledge_revision_conflict`。
@@ -1207,7 +1279,7 @@
 - 影響：過期的已驗證條目仍是「已驗證」，只是不有效；延長期限需透過修正。Agent 提交的候選若被使用者修正，仍保留 Agent 來源。
 - 審閱：未審
 
-### AI-132：全文檢索的實作：每次啟動重建 FTS5 索引；2 字元關鍵字走 LIKE；降級的偵測與顯示
+### AI-142：全文檢索的實作：每次啟動重建 FTS5 索引；2 字元關鍵字走 LIKE；降級的偵測與顯示
 - 重要度：中
 - 時間／階段：2026-10-22，票 37 實作
 - 決策：(1) FTS5 虛擬表 `knowledge_fts(entry_id UNINDEXED, content, tokenize = 'trigram')` 不放在 migration，而是 Store 每次開啟時建立（不存在時）並從 `knowledge_entry.search_text` 整個重建；建立或重建失敗（FTS5 或 trigram 不可用、schema 較新）就以 LIKE 模式運作。之後的寫入在同一個交易中更新索引。(2) 查詢以空白分詞、全部都要出現（AND）；每個詞至少 2 個字元（單字元回 400 `knowledge_query_invalid`），最多 8 個詞、200 字元。FTS5 可用時，3 個字元以上的詞以片語 MATCH 查 trigram 索引；**2 個字元的詞一律以 LIKE 比對 `search_text`**（trigram 索引無法涵蓋少於 3 字元的詞）；FTS5 不可用時全部以 LIKE（`%`、`_`、`\` 已跳脫）。(3) 結果依最後更新時間由新到舊，最多 100 筆，不做相關度排序。(4) 降級顯示：列表與 `search_knowledge` 的回應帶 `search_mode`（`full_text`／`like_fallback`），Runtime 啟動時在日誌記一行降級訊息，知識分頁顯示降級提示。(5) 測試以 `RuntimeOptions.full_text_search = false`（Store 的 `StoreOptions`、harness 的 `without_full_text_search`／`set_full_text_search`）重現「FTS5 不可用」，因為 bundled SQLite 一定有 FTS5。
@@ -1216,7 +1288,7 @@
 - 影響：條目數量很大時，啟動重建與 2 字元的 LIKE 掃描會變慢，需要時再改為增量或加上 bigram 索引。搜尋沒有相關度排序。
 - 審閱：未審
 
-### AI-133：知識 API 與 Agent 工具的形狀與限制
+### AI-143：知識 API 與 Agent 工具的形狀與限制
 - 重要度：低
 - 時間／階段：2026-10-22，票 37 實作
 - 決策：管理 API（桌面憑證）：`GET /api/v1/knowledge?workspace_id=&q=&include_inactive=`（省略 `workspace_id` 時只列全域；`include_inactive=true` 時連同無效條目一起回傳，供「顯示歷史」與候選區使用）、`POST /api/v1/knowledge`、`GET /api/v1/knowledge/{id}`（目前狀態、全部內容版本、變更歷史）、`POST …/{id}/confirm|correct|revoke|retire`。範圍由 Runtime 核對存在與一致性，Task 範圍的 Goal 一律取自 Task。Agent 工具 `record_lesson_candidate`、`search_knowledge` 放在 `/agent/v1/tools/` 之下（AI-88）。Agent 看得到的範圍：全域、它的 Workspace、它的 Goal、它的 Task；知識分頁看得到：全域與該 Workspace 內所有範圍。限制：標題 200、內文 10,000、教訓各欄 2,000、標籤 20 個各 50、證據 20 項各 1,000、原因與修正說明 1,000 字元。
@@ -1225,13 +1297,22 @@
 - 影響：知識分頁目前沒有 Goal／Task 範圍的建立入口（API 支援），也不能在 UI 修改有效期間（修正時沿用原值）；需要時由後續票補上。Context Builder（票 39）載入教訓時應沿用 `search_knowledge` 的「適用範圍 + 有效」判定。
 - 審閱：未審
 
-### AI-134：票 37 整合 rebuild/v1（票 08、27）：migration 與 AI 編號順延、錯誤代碼輔助函式合併
+### AI-144：票 37 整合 rebuild/v1（票 08、27）：migration 與 AI 編號順延、錯誤代碼輔助函式合併
 - 重要度：低
 - 時間／階段：2026-10-22，票 37 實作（結束前合併 rebuild/v1）
-- 決策：票 08（`shared_settings_version`，第 12 個）與票 27（`quota`，第 13 個）已先合併，本票的 migration `knowledge` 由第 12 個順延為第 14 個；兩者互不參照（`knowledge_entry` 只參照 `workspace`、`goal`、`task` 與自己），先後不影響 schema。本票的 AI 條目由 AI-110～AI-115 順延為 AI-128～AI-133，內容不變（程式碼與文件沒有引用這些編號）。Web UI 原本新增的 `hasErrorCode` 與票 08 的 `errorCode` 功能重疊，改用整合分支的 `errorCode`，刪除 `hasErrorCode`。其餘衝突（API 路由與匯出、Tauri 指令清單、`AppClient`、開發指南的目錄表與情境測試清單）一律兩邊都保留。
+- 決策：票 08（`shared_settings_version`，第 12 個）與票 27（`quota`，第 13 個）已先合併，本票的 migration `knowledge` 由第 12 個順延為第 14 個；兩者互不參照（`knowledge_entry` 只參照 `workspace`、`goal`、`task` 與自己），先後不影響 schema。本票的 AI 條目由 AI-110～AI-115 順延為 AI-128～AI-133（第二次整合再順延為 AI-138～AI-143，見 AI-145），內容不變（程式碼與文件沒有引用這些編號）。Web UI 原本新增的 `hasErrorCode` 與票 08 的 `errorCode` 功能重疊，改用整合分支的 `errorCode`，刪除 `hasErrorCode`。其餘衝突（API 路由與匯出、Tauri 指令清單、`AppClient`、開發指南的目錄表與情境測試清單）一律兩邊都保留。
 - 理由：整合分支已有的 migration 與 AI 編號不可變動（AI-108 同樣做法）；兩個做同一件事的輔助函式只留一個。
 - 替代方案：保留兩個輔助函式（重複且判斷規則不同：`hasErrorCode` 以子字串比對，`errorCode` 只認訊息開頭的代碼格式）。
 - 影響：以本票分支（合併前）建立過的開發資料庫，其 `schema_migrations` 第 12 筆是 `knowledge`，與整合後不一致，需刪除重建；尚無發布版本，不提供轉換。
+- 審閱：未審
+
+### AI-145：票 37 整合：第二次整合 rebuild/v1（票 18）：migration 第 15 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 37 整合（R056-37-integrate）
+- 決策：rebuild/v1 已合併票 18（`message_and_delivery`，第 14 個 migration），本票的 `knowledge` 順延為第 15 個 migration，排在 `message_and_delivery` 之後；開發指南的「migration 14 `knowledge`」同步改為 15。整合分支的 AI 編號已用到 AI-137（AI-128～AI-134 為票 18，AI-137 為主控），本票的決策由 AI-128～AI-134 順延為 AI-138～AI-144，移到 AI-137 之後，內容不變，只把條目間的互相引用改成新編號，並在 AI-138、AI-144 的歷史說明加註再次順延；票 16 票面引用的「票 37 的 AI-130」改為 AI-140。衝突合併方式：Agent 工具變成 9 個（原有 4 個＋`register_artifact`＋票 18 的 `send_message`、`read_inbox`＋本票的 `record_lesson_candidate`、`search_knowledge`），順序依 shim 工具定義（自動合併後為票 18 的兩個在 `register_artifact` 之前、本票的兩個在之後），shim 的已知工具清單、情境測試的名稱斷言與 API 路由都照此順序兩邊保留；shim 情境測試改名為 `tools_list_has_the_nine_tools_with_their_required_fields`，兩邊的 schema 斷言都保留；Domain、Store、API 的模組宣告與匯出兩邊都保留。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。知識表只參照 `workspace`、`goal`、`task` 與自己，訊息表只參照 `workspace`、`run`、`task`，兩者互不相依，先後不影響 schema。
+- 替代方案：本票的 AI 編號接在 AI-134 之後用 AI-135、AI-136（其他平行票的分支已占用這兩個編號，之後整合還會再撞號）。
+- 影響：以本票分支（第一次整合後）建立過的開發資料庫，其 `schema_migrations` 第 14 筆是 `knowledge`，與整合後不一致，需刪除重建。之後再新增 Agent 工具，要同時更新 shim 的兩個工具數量測試。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

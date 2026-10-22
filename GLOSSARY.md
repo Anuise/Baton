@@ -67,6 +67,11 @@
 - **關係**：由 Runtime 中途中斷（或登記被拒）造成；不被當成成果、不自動刪除，在成果列表中顯示，讓恢復時可辨識；與 Task 狀態無關。
 - **避免使用**：orphan file、垃圾檔、temp file（暫存檔只指 `.partial`）。
 
+### Message（訊息）
+- **定義**：Worker 之間交換研究結果或協商介面的一則通知，含 `message_id`、`thread_id`、`correlation_id`、類型（`note`、`question`、`answer`、`result`）、寄件 Run 與收件 Task。每個收件 Task 各有一筆交付，狀態由 `pending`（已存入）→ `delivered`（出現在 Run 啟動的未讀摘要）→ `read`（用 `read_inbox` 取走全文）。
+- **關係**：屬於 Workspace；收件匣跟著 Task，交接後的新 Run 接得到前一個 Run 沒讀完的訊息；同一個 `message_id` 對同一個收件人只交付一次；Worker 自己拉取，Runtime 不在執行中途插話。訊息不能改變 Task 的歸屬或範圍，想這麼做的嘗試會被忽略並轉成給 Controller 的事件。
+- **避免使用**：notification、chat、broadcast、command（訊息不是指令，也不是 Controller 與使用者的對話；那是 conversation）。
+
 ### Account Profile
 - **定義**：一個 Claude Code 帳號及其獨立的原生登入與 Session 狀態，是額度管理的單位。
 - **關係**：每個 Run 綁定一個 Account Profile；額度觀測、並行上限與 draining 都以 Account Profile 為單位；各 Profile 之間不共用登入資料；共同設定以版本化快照提供，不直接共用。

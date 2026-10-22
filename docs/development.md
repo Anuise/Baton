@@ -323,7 +323,7 @@ Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 
 
 決策、教訓與一般知識都是 Knowledge Entry（spec D-26、D-28）。規則在 `baton_domain::knowledge`（純邏輯：內容驗證、狀態轉換、版本、取代關係、可見範圍、搜尋關鍵字解析），持久化與搜尋在 `baton-store` 的 `knowledge.rs`，端點在 `baton-api` 的 `knowledge.rs`（管理 API 與 Agent 工具 `record_lesson_candidate`、`search_knowledge`）。
 
-**資料模型**（migration 14 `knowledge`）：
+**資料模型**（migration 15 `knowledge`）：
 
 - `knowledge_entry`：一張表放全部條目，以 `kind` 區分 `decision`（決策）、`lesson`（教訓）、`fact`（一般知識）。保存範圍、可信狀態、來源、有效期間（`valid_from`、`valid_until`）、目前內容的版本號 `version`、聚合版本 `revision`（每次變更都遞增，操作時用來做 expected_revision 校驗）、取代關係（`supersedes`、`superseded_by`）、撤銷或淘汰的原因，以及目前內容的檢索文字 `search_text`。觸發器禁止刪除：**條目不可刪除**，撤銷與淘汰都只改變狀態。
 - `knowledge_entry_version`：內容（標題、內文、標籤、證據；教訓另有觸發條件 `trigger`、根因 `root_cause`、解法 `resolution`）的每個版本，追加式（觸發器禁止更新與刪除）。修正只追加新版本，舊版本內容保留。

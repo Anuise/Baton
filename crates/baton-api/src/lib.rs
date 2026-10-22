@@ -9,6 +9,7 @@ mod artifacts;
 mod authorization;
 mod guard;
 mod knowledge;
+mod messages;
 mod profiles;
 pub mod quota;
 mod runs;
@@ -26,7 +27,10 @@ use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
-use baton_domain::agent::{TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT};
+use baton_domain::agent::{
+    TOOL_GET_TASK_CONTRACT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT,
+    TOOL_SEND_MESSAGE,
+};
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
@@ -42,6 +46,7 @@ pub use artifacts::{
     artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview, ArtifactRegistered,
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
+pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
     AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
@@ -192,6 +197,8 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_SAVE_CHECKPOINT), post(agent::save_checkpoint))
         .route(&tool_path(TOOL_REPORT_BLOCKED), post(agent::report_blocked))
         .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
+        .route(&tool_path(TOOL_SEND_MESSAGE), post(messages::send_message))
+        .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))
         .route(&tool_path(TOOL_RECORD_LESSON_CANDIDATE), post(knowledge::record_lesson_candidate))
         .route(&tool_path(TOOL_SEARCH_KNOWLEDGE), post(knowledge::search_knowledge))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
