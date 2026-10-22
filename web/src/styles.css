@@ -1859,3 +1859,186 @@ body {
   gap: 8px;
   align-items: center;
 }
+
+.verification-page {
+  display: grid;
+  gap: 12px;
+}
+
+.verification-reload {
+  justify-self: start;
+}
+
+.verification-section,
+.verification-bundle {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.verification-section h3,
+.verification-section h4,
+.verification-section p,
+.verification-summary {
+  margin: 0;
+}
+
+.verification-summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+}
+
+.verification-summary dt {
+  color: #656d76;
+}
+
+.verification-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.verification-proven {
+  color: #1a7f37;
+}
+
+.verification-unproven {
+  color: #9a6700;
+  font-weight: 600;
+}
+
+.verification-features,
+.verification-journeys,
+.verification-uncovered ul,
+.verification-cleanup ul,
+.verification-steps ol {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.verification-features li {
+  display: grid;
+  gap: 2px;
+}
+
+.verification-feature-title {
+  font-weight: 600;
+}
+
+.verification-feature-uncovered {
+  color: #9a6700;
+}
+
+/* 未覆蓋範圍要醒目：不在自動驗證內的部分不能被當成已驗證 */
+.verification-uncovered {
+  padding: 6px 10px;
+  border: 1px solid #d4a72c;
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: #fff8c5;
+}
+
+.verification-section [role="alert"] {
+  color: #cf222e;
+}
+
+.verification-publish,
+.verification-run {
+  display: grid;
+  gap: 8px;
+}
+
+.verification-publish textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+}
+
+.verification-run fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.verification-run button,
+.verification-publish button {
+  justify-self: start;
+}
+
+/* 判定標籤：只有 passed 是綠色，其餘六種都不能看起來像通過 */
+.verdict {
+  padding: 0 6px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verdict-passed {
+  background: #dafbe1;
+  color: #1a7f37;
+}
+
+.verdict-product_failure {
+  background: #ffebe9;
+  color: #cf222e;
+}
+
+.verdict-inconclusive {
+  background: #eaeef2;
+  color: #57606a;
+}
+
+.verdict-environment_blocked {
+  background: #fff1e5;
+  color: #bc4c00;
+}
+
+.verdict-auth_blocked {
+  background: #fbefff;
+  color: #8250df;
+}
+
+.verdict-budget_exhausted {
+  background: #fff8c5;
+  color: #9a6700;
+}
+
+.verdict-automation_unsupported {
+  background: #ddf4ff;
+  color: #0969da;
+}
+
+.verification-steps ol {
+  display: grid;
+  gap: 6px;
+}
+
+.verification-step {
+  display: grid;
+  gap: 2px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.verification-step-operation {
+  color: #656d76;
+}
+
+.assertion-failed {
+  color: #cf222e;
+}
+
+.verification-step-output {
+  margin: 0;
+  padding: 4px 8px;
+  max-height: 200px;
+  overflow: auto;
+  background: #f6f8fa;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}

@@ -1211,6 +1211,62 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版讀取驗證概況與 Evidence Bundle，並以 JSON 發布 Profile 與要求執行", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const definition = { interface: "cli_api", journeys: [], feature_map: [] };
+    const request = { task_id: "task_1", journeys: ["smoke"] };
+
+    await client.verificationOverview("ws/1");
+    await client.publishVerificationProfile("ws_1", definition);
+    await client.runVerification("ws_1", request);
+    await client.evidenceBundle("ws_1", "vbun/1");
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/workspaces/ws%2F1/verification"],
+      [
+        "/api/v1/workspaces/ws_1/verification/profile",
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(definition) },
+      ],
+      [
+        "/api/v1/workspaces/ws_1/verification/runs",
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) },
+      ],
+      ["/api/v1/workspaces/ws_1/verification/bundles/vbun%2F1"],
+    ]);
+  });
+
+  it("HTTP 版發布 Profile 被拒時保留 Runtime 的說明與錯誤代碼", async () => {
+    const body = { error: "verification_profile_invalid", message: "Verification Profile 不正確：至少要有一條旅程" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 422 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .publishVerificationProfile("ws_1", { interface: "cli_api" })
+      .catch((e: unknown) => e);
+
+    expect((error as Error).message).toBe("Verification Profile 不正確：至少要有一條旅程");
+    expect(errorCode(error)).toBe("verification_profile_invalid");
+  });
+
+  it("Tauri 版以指令與 camelCase 參數讀取驗證概況、發布 Profile、要求執行與讀取 Evidence Bundle", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+    const definition = { interface: "cli_api" };
+    const request = { journeys: [] };
+
+    await client.verificationOverview("ws_1");
+    await client.publishVerificationProfile("ws_1", definition);
+    await client.runVerification("ws_1", request);
+    await client.evidenceBundle("ws_1", "vbun_1");
+
+    expect(invoke.mock.calls).toEqual([
+      ["workspace_verification", { workspaceId: "ws_1" }],
+      ["verification_publish_profile", { workspaceId: "ws_1", definition }],
+      ["verification_run", { workspaceId: "ws_1", request }],
+      ["verification_bundle", { workspaceId: "ws_1", bundleId: "vbun_1" }],
+    ]);
+  });
+
   const basis = { run_id: "run_1", generation: 2, contract_version: 3, artifacts: [{ artifact_id: "art_1", version: 1 }] };
 
   it("HTTP 版讀取驗證資料與手動接受：接受時以 JSON 送出 basis 與附註", async () => {

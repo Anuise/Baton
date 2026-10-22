@@ -26,6 +26,8 @@ use baton_api::{
     metrics_path, timeline_path, MetricsResponse, TimelineResponse,
     projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, UnderstandingView,
     workflow_skip_path, workflows_path, PlaybookCatalog, SkipStageRequest, WorkflowList, WorkflowView, PLAYBOOKS_PATH,
+    evidence_bundle_path, verification_profile_path, verification_runs_path, workspace_verification_path,
+    PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
@@ -50,6 +52,7 @@ use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::verification::VerificationView;
+use baton_domain::verification_profile::{EvidenceBundle, ProfileDefinition, VerificationRequest};
 use baton_domain::workspace::{ModelOverrides, Workspace};
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
@@ -688,6 +691,34 @@ impl RuntimeClient {
         request: &SkipStageRequest,
     ) -> Result<WorkflowView, ClientError> {
         self.send_json(reqwest::Method::POST, &workflow_skip_path(workspace_id, workflow_id), Some(request)).await
+    }
+
+    /// 驗證概況（票 45）：最新的 Verification Profile、是否已被證明可用、未覆蓋範圍、最近的要求與 Evidence Bundle。
+    pub async fn verification_overview(&self, workspace_id: &str) -> Result<VerificationOverviewView, ClientError> {
+        self.get_json(&workspace_verification_path(workspace_id)).await
+    }
+
+    /// 使用者發布 Verification Profile 的新版本（內容與最新版本相同時不新增）。
+    pub async fn publish_verification_profile(
+        &self,
+        workspace_id: &str,
+        definition: &ProfileDefinition,
+    ) -> Result<PublishProfileResponse, ClientError> {
+        self.send_json(reqwest::Method::POST, &verification_profile_path(workspace_id), Some(definition)).await
+    }
+
+    /// 使用者要求執行驗證（由 Runtime 排入，之後執行）。
+    pub async fn run_verification(
+        &self,
+        workspace_id: &str,
+        request: &RunVerificationRequest,
+    ) -> Result<VerificationRequest, ClientError> {
+        self.send_json(reqwest::Method::POST, &verification_runs_path(workspace_id), Some(request)).await
+    }
+
+    /// 讀取一份 Evidence Bundle。
+    pub async fn evidence_bundle(&self, workspace_id: &str, bundle_id: &str) -> Result<EvidenceBundle, ClientError> {
+        self.get_json(&evidence_bundle_path(workspace_id, bundle_id)).await
     }
 
     /// Playbook 與方法的全部版本。
