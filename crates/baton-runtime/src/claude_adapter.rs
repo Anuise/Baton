@@ -438,6 +438,7 @@ mod tests {
             config_dir: Some("C:\\Baton\\profiles\\prof_1".into()),
             settings_dir: settings_dir.map(|d| d.to_string_lossy().into_owned()),
             model: model.map(Into::into),
+            resume_native_session_id: None,
         }
     }
 

@@ -55,6 +55,7 @@ fn contract_spec(run_id: &str, scenario: Scenario, model: Option<String>, config
             Scenario::Completes => model,
             Scenario::InvalidModel => Some(INVALID_MODEL.to_string()),
         },
+        resume_native_session_id: None,
     }
 }
 

@@ -510,6 +510,7 @@ impl Supervisor {
             config_dir: Some(config_dir),
             settings_dir: pin.map(|p| p.directory),
             model: payload.model.clone(),
+            resume_native_session_id: None,
         })
     }
 
@@ -655,7 +656,9 @@ impl Supervisor {
                         self.record_quota_event(&item.view.run, event).await;
                     }
                     // 訊息由後續的票處理（對話紀錄）
-                    AdapterEvent::Started { native_session_id: None } | AdapterEvent::Message { .. } => {}
+                    AdapterEvent::Started { native_session_id: None }
+                    | AdapterEvent::Message { .. }
+                    | AdapterEvent::Transcript { .. } => {}
                 }
             }
             if !finished {

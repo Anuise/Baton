@@ -246,6 +246,10 @@ struct AdapterState {
     next_scripts: VecDeque<Vec<AdapterEvent>>,
     launched: Vec<RunSpec>,
     capability: Capability,
+    /// 個別原生 Session 的接續能力（優先於 `capability`）。
+    session_capabilities: HashMap<String, Capability>,
+    /// 每次 `resume_capability` 收到的參照。
+    capability_queries: Vec<SessionRef>,
 }
 
 impl Default for FakeAgentAdapter {
@@ -256,6 +260,8 @@ impl Default for FakeAgentAdapter {
                 next_scripts: VecDeque::new(),
                 launched: Vec::new(),
                 capability: Capability::Resumable,
+                session_capabilities: HashMap::new(),
+                capability_queries: Vec::new(),
             }),
         }
     }
@@ -292,6 +298,16 @@ impl FakeAgentAdapter {
         lock(&self.state).capability = capability;
     }
 
+    /// 只改變某個原生 Session 的接續能力（例如模擬原生 Session 遺失）。
+    pub fn set_session_capability(&self, native_session_id: &str, capability: Capability) {
+        lock(&self.state).session_capabilities.insert(native_session_id.to_string(), capability);
+    }
+
+    /// 每次查驗接續能力時收到的參照，依查驗順序。
+    pub fn capability_queries(&self) -> Vec<SessionRef> {
+        lock(&self.state).capability_queries.clone()
+    }
+
     /// 每次 `launch`（含 Runtime 重建後的重新接上）收到的 RunSpec。
     pub fn launched(&self) -> Vec<RunSpec> {
         lock(&self.state).launched.clone()
@@ -301,9 +317,13 @@ impl FakeAgentAdapter {
 #[async_trait]
 impl AgentAdapter for FakeAgentAdapter {
     fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        let mut args = vec![spec.run_id.clone()];
+        if let Some(native_session_id) = &spec.resume_native_session_id {
+            args.extend(["--resume".to_string(), native_session_id.clone()]);
+        }
         SpawnSpec {
             program: "fake-agent".into(),
-            args: vec![spec.run_id.clone()],
+            args,
             working_dir: spec.working_dir.clone(),
             command_id: spec.command_id.clone(),
             env: Vec::new(),
@@ -342,8 +362,10 @@ impl AgentAdapter for FakeAgentAdapter {
         }))
     }
 
-    async fn resume_capability(&self, _session: &SessionRef) -> PortResult<Capability> {
-        Ok(lock(&self.state).capability)
+    async fn resume_capability(&self, session: &SessionRef) -> PortResult<Capability> {
+        let mut state = lock(&self.state);
+        state.capability_queries.push(session.clone());
+        Ok(state.session_capabilities.get(&session.native_session_id).copied().unwrap_or(state.capability))
     }
 }
 
