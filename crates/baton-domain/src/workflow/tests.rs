@@ -37,6 +37,7 @@ fn evidence(check: &str, status: EvidenceStatus) -> CheckedEvidence {
     CheckedEvidence {
         evidence: Evidence { check: check.into(), reference: EvidenceRef::Artifact { artifact_id: format!("art_{check}") } },
         status,
+        reviewers: None,
     }
 }
 
@@ -75,8 +76,11 @@ fn pass(workflow: &WorkflowInstance, playbook: &PlaybookVersion, prior: &mut Vec
                 EvidenceKind::Artifact => EvidenceRef::Artifact { artifact_id: "art".into() },
                 EvidenceKind::Decision => EvidenceRef::Decision { decision_request_id: "dr".into() },
                 EvidenceKind::TaskAccepted => EvidenceRef::TaskAccepted { task_id: "task".into() },
+                EvidenceKind::Review => EvidenceRef::Review { review_id: "rev".into() },
             };
-            CheckedEvidence { evidence: Evidence { check: c.key.clone(), reference }, status: EvidenceStatus::Valid }
+            let reviewers = (c.requires == EvidenceKind::Review)
+                .then(|| AxisReviewers { standards: "t_reviewer".into(), spec: "t_reviewer".into() });
+            CheckedEvidence { evidence: Evidence { check: c.key.clone(), reference }, status: EvidenceStatus::Valid, reviewers }
         })
         .collect();
     report(workflow, playbook, prior, ClaimedOutcome::Passed, evidence, "").unwrap()
@@ -209,6 +213,7 @@ fn a_pending_decision_blocks_the_stage_until_it_is_answered() {
     let pending = CheckedEvidence {
         evidence: Evidence { check: "decision".into(), reference: EvidenceRef::Decision { decision_request_id: "dr".into() } },
         status: EvidenceStatus::Pending,
+        reviewers: None,
     };
     let blocked = report(&workflow, &playbook, &mut prior, ClaimedOutcome::Passed, vec![pending.clone()], "").unwrap();
     assert_eq!(blocked.status, WorkflowStatus::Blocked);
@@ -226,6 +231,7 @@ fn evidence_must_match_an_exit_check_of_the_current_stage_and_its_kind() {
     let wrong_kind = CheckedEvidence {
         evidence: Evidence { check: "reproduction".into(), reference: EvidenceRef::TaskAccepted { task_id: "task".into() } },
         status: EvidenceStatus::Valid,
+        reviewers: None,
     };
     let wrong_kind = report(&workflow, &playbook, &mut Vec::new(), ClaimedOutcome::Passed, vec![wrong_kind], "");
     assert_eq!(wrong_kind.unwrap_err().code(), "workflow_invalid");
@@ -349,4 +355,96 @@ fn notes_for_the_controller_and_the_worker_name_the_current_stage() {
     assert!(note.contains("目前 Stage「最小化」") && note.contains("已完成：建立重現") && note.contains("修正匯出錯誤"), "{note}");
     let worker = worker_stage_note(&workflow, &playbook).unwrap();
     assert!(worker.contains("Stage「最小化」（minimization）") && worker.contains("不要重做"), "{worker}");
+}
+
+// --- 票 44：雙軸審查作為 Gate 的證據 ---
+
+fn review(id: &str, status: EvidenceStatus, standards: &str, spec: &str) -> CheckedEvidence {
+    CheckedEvidence {
+        evidence: Evidence { check: "review".into(), reference: EvidenceRef::Review { review_id: id.into() } },
+        status,
+        reviewers: Some(AxisReviewers { standards: standards.into(), spec: spec.into() }),
+    }
+}
+
+/// 前進到功能開發的「獨立審查」。
+fn at_review(playbook: &PlaybookVersion) -> (WorkflowInstance, Vec<StageAttempt>) {
+    let route = route(&catalog(), Situation::Feature, Some(TaskKind::Development), "測試").unwrap();
+    let input = StartInput { workspace_id: "ws".into(), goal_id: "goal".into(), task_id: Some("task".into()), route, created_by: "c".into() };
+    let mut workflow = start("wf".into(), input, playbook, None, T0).unwrap().workflow;
+    let mut prior = Vec::new();
+    while workflow.current_stage.as_deref() != Some("independent_review") {
+        workflow = pass(&workflow, playbook, &mut prior);
+    }
+    (workflow, prior)
+}
+
+#[test]
+fn the_independent_review_gate_needs_a_passed_two_axis_review_not_an_artifact() {
+    let playbook = playbook("feature");
+    let stage = playbook.definition.stage("independent_review").unwrap();
+    assert_eq!((stage.gate, stage.exit_checks[0].requires), (GateKind::Safety, EvidenceKind::Review));
+    let (workflow, mut prior) = at_review(&playbook);
+    let artifact = CheckedEvidence {
+        evidence: Evidence { check: "review".into(), reference: EvidenceRef::Artifact { artifact_id: "art".into() } },
+        status: EvidenceStatus::Valid,
+        reviewers: None,
+    };
+    let error = report(&workflow, &playbook, &mut prior, ClaimedOutcome::Passed, vec![artifact], "作者說已審過").unwrap_err();
+    assert_eq!(error.code(), "workflow_invalid", "作者的工作摘要不是審查證據");
+
+    // 沒有任何非作者的審查：Gate 保持關閉並記為 blocked
+    let blocked = report(&workflow, &playbook, &mut prior, ClaimedOutcome::Passed, vec![], "").unwrap();
+    assert_eq!((blocked.status, prior.last().unwrap().outcome), (WorkflowStatus::Blocked, AttemptOutcome::Blocked));
+    assert!(blocked.blocked_reason.as_deref().unwrap().contains("非作者"), "{:?}", blocked.blocked_reason);
+
+    // 審查有未解決的 finding 或已過期：incomplete，不前進
+    for status in [EvidenceStatus::NotPassed, EvidenceStatus::Stale, EvidenceStatus::OtherSubject] {
+        let after = report(&blocked, &playbook, &mut prior, ClaimedOutcome::Passed, vec![review("rev", status, "r1", "r1")], "").unwrap();
+        assert_eq!((after.current_stage.as_deref(), prior.last().unwrap().outcome), (Some("independent_review"), AttemptOutcome::Incomplete), "{status:?}");
+    }
+    let passed = report(&blocked, &playbook, &mut prior, ClaimedOutcome::Passed, vec![review("rev", EvidenceStatus::Valid, "r1", "r1")], "").unwrap();
+    assert_eq!(passed.current_stage.as_deref(), Some("integration"));
+}
+
+#[test]
+fn the_gate_stays_closed_until_each_axis_has_the_required_number_of_distinct_reviewers() {
+    let keys = method_keys();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let v1 = playbook("feature");
+    let mut definition = v1.definition.clone();
+    let stage = definition.stages.iter_mut().find(|s| s.key == "independent_review").unwrap();
+    stage.exit_checks[0].reviewers = Some(2);
+    let (v2, _) = publish_playbook(Some(&v1), definition, &keys, Origin::User, "pbv2".into(), T0).unwrap().unwrap();
+    let (workflow, mut prior) = at_review(&v2);
+
+    let one = report(&workflow, &v2, &mut prior, ClaimedOutcome::Passed, vec![review("a", EvidenceStatus::Valid, "r1", "r1")], "").unwrap();
+    assert_eq!(one.status, WorkflowStatus::Blocked);
+    assert!(prior.last().unwrap().missing[0].reason.contains("2 位"), "{:?}", prior.last().unwrap().missing);
+    // 同一位 reviewer 交兩份不算兩位
+    let same = vec![review("a", EvidenceStatus::Valid, "r1", "r1"), review("b", EvidenceStatus::Valid, "r1", "r1")];
+    assert_eq!(report(&one, &v2, &mut prior, ClaimedOutcome::Passed, same, "").unwrap().status, WorkflowStatus::Blocked);
+    // 第二位只沿用了第一位的需求軸：需求軸仍只有一位
+    let reused = vec![review("a", EvidenceStatus::Valid, "r1", "r1"), review("b", EvidenceStatus::Valid, "r2", "r1")];
+    assert_eq!(report(&one, &v2, &mut prior, ClaimedOutcome::Passed, reused, "").unwrap().status, WorkflowStatus::Blocked);
+    let two = vec![review("a", EvidenceStatus::Valid, "r1", "r1"), review("b", EvidenceStatus::Valid, "r2", "r2")];
+    assert_eq!(report(&one, &v2, &mut prior, ClaimedOutcome::Passed, two, "").unwrap().current_stage.as_deref(), Some("integration"));
+}
+
+#[test]
+fn reviewer_counts_are_only_for_review_checks_and_within_range() {
+    let keys = method_keys();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let base = playbook("feature").definition;
+    let mut on_artifact = base.clone();
+    on_artifact.stages[0].exit_checks[0].reviewers = Some(1);
+    let mut zero = base.clone();
+    zero.stages.iter_mut().find(|s| s.key == "independent_review").unwrap().exit_checks[0].reviewers = Some(0);
+    for definition in [on_artifact, zero] {
+        assert_eq!(validate_playbook(&definition, &keys).unwrap_err().code(), "playbook_invalid");
+    }
+    let evidence = normalize_evidence(&[EvidenceInput { check: "review".into(), review_id: Some("rev_1".into()), ..Default::default() }]).unwrap();
+    assert_eq!(evidence[0].reference, EvidenceRef::Review { review_id: "rev_1".into() });
+    let both = EvidenceInput { check: "review".into(), review_id: Some("rev_1".into()), artifact_id: Some("art".into()), ..Default::default() };
+    assert_eq!(normalize_evidence(&[both]).unwrap_err().code(), "workflow_invalid");
 }
