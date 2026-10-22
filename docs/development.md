@@ -563,7 +563,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 規則在 `baton_domain::lifecycle`（純邏輯），持久化在 `baton-store` 的 `lifecycle.rs`（migration 18：`runtime_lifecycle`、`workspace_lifecycle`），端點在 `baton-api` 的 `lifecycle.rs`，停止流程與重新開啟在 `Supervisor`（`full_exit`、第一次 `tick` 的重新開啟）。對應 ADR-0001（DR-20261021-01）與 spec D-11、D-25。
 
-**關窗不等於停止**：Runtime 是獨立程序。桌面殼關閉主視窗只會隱藏到系統匣；系統匣有狀態（每 3 秒更新）、「開啟 Baton」與「完全退出」。重開視窗以 `ensure_runtime` 連回同一個 Runtime，不會啟動第二個控制平面，也不會重複啟動 Worker。
+**關窗不等於停止**：Runtime 是獨立程序。桌面殼關閉主視窗只會隱藏到系統匣；系統匣有狀態（每 3 秒更新）、「開啟 Baton」與「完全退出」。重開視窗以 `ensure_runtime` 連回同一個 Runtime，不會啟動第二個控制平面，也不會重複啟動 Worker。桌面殼只保留成功的連線結果：啟動失敗（逾時、資料目錄被拒絕）不會被記住，下一次查詢會重試，Runtime 之後正常監聽就能接上，不必重開 App。
 
 **完全退出**（系統匣 → Web UI 的 `ExitProgress` → `POST /api/v1/lifecycle/exit`）：
 
@@ -572,6 +572,8 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 3. 停止流程（Runtime 背景）：再鏡像一次生命週期檔（API 寫入失敗時補上），等 Supervisor 的 tick 鎖（正在停止已取消 Run 的處理看到完全退出就讓出），再對每個尚未結束的 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`（ProcessControl 在寬限期後以 Job Object 終止程序樹，並在 10 秒內確認），全部並行。總上限 40 秒從持久化的期限算起，等鎖的時間也算在內；到期限仍拿不到鎖時不要求任何程序停止，全部記為 `stop_unconfirmed`。拿到鎖後握到結束，不會啟動任何程序。Worker 透過 Agent 回報的回應 `stop_requested: true` 得知要保存並停止。
 4. 程序確認停止（或根本沒有程序）的 Run 以 `interrupted`（`stopped_by_full_exit`）結束、釋放寫入所有權，Task 退回 `ready` 並重新排入派工佇列；使用者先前已要求取消的 Run 則完成取消。`StillAlive`、停止呼叫失敗、到總上限仍沒有結果的記為**停止異常**（`still_alive`／`stop_failed`／`stop_unconfirmed`），Run 保留寫入所有權。完全退出不會把任何 Task 標為取消或完成。
 5. 進度（每個 Run 的結果）寫在 `runtime_lifecycle.last_exit`，結束時進入 `stopped` 並追加 `full_exit_completed`（含異常清單）。Runtime 再提供 API 5 秒（讓 App 讀最終結果）後結束。App 沒有停止異常就自動結束；有異常則列出並等使用者按「關閉 Baton」。
+
+**後備計時器**：按下系統匣的「完全退出」後，桌面殼另起一個 60 秒的後備計時器：Web UI 沒反應時，逾時由殼自行送出完全退出並結束 App。同時最多一個計時器（連按不會疊加）；Web UI 送出完全退出成功、或使用者在失敗畫面按「返回」放棄退出時，呼叫 Tauri 指令 `full_exit_cancel_fallback` 取消它。
 
 **重新開啟**：Runtime 啟動時讀資料庫與生命週期檔，不一致時採較保守者（只有檔案有停止意圖或檔案毀損都視為停止，並補記進資料庫）。停止意圖仍生效時，Supervisor 第一次 `tick` 先核對（以 command_id 找回啟動中的程序、查證上次沒能確認停止的程序：確定已不在才以 `process_gone_after_full_exit` 中斷，不自動重派），再解除停止意圖：開啟「完全退出後自動續跑」的 Workspace 解除暫停，排隊中的工作照常派出；其餘 Workspace 等使用者按「繼續工作」。啟動後若又有新的退出要求（生命週期版本改變），不會重新開啟。
 
@@ -1362,7 +1364,7 @@ powershell -NoProfile -File scripts/with-msvc.ps1 cargo test --workspace --exclu
 pnpm --filter web test
 ```
 
-桌面殼 `baton-desktop` 編譯時需要已建置的 `web/dist`，所以不在預設的 `cargo test` 範圍內；`pnpm build` 會編譯它。
+桌面殼 `baton-desktop` 編譯時需要已建置的 `web/dist`，所以不在預設的 `cargo test` 範圍內；`pnpm build` 會編譯它。殼本身的單元測試（只快取成功的啟動、可取消的完全退出後備計時器）在 `pnpm --filter web build` 之後以 `cargo test -p baton-desktop`（經 `with-msvc.ps1`）執行。
 
 ### 桌面 App 冒煙測試
 
