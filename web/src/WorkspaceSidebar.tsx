@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { formatTimestamp } from "./time";
-import type { LifecycleClient, Workspace, WorkspaceClient, WorkspaceLifecycleView } from "./runtimeClient";
+import type { LifecycleClient, PauseCause, Workspace, WorkspaceClient, WorkspaceLifecycleView } from "./runtimeClient";
 
 type ListState = { state: "loading" } | { state: "ready"; workspaces: Workspace[] } | { state: "failed"; reason: string };
 
 interface Props {
-  client: WorkspaceClient & Pick<LifecycleClient, "lifecycleStatus" | "updateWorkspaceLifecycle" | "resumeWorkspace">;
+  client: WorkspaceClient &
+    Pick<LifecycleClient, "lifecycleStatus" | "updateWorkspaceLifecycle" | "updateWorkspaceLoginResume" | "resumeWorkspace">;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
   /** 使用者要設定某個 Workspace 的授權：點「授權設定」，或剛建立完成（建立後直接進入授權設定）。 */
@@ -31,7 +32,14 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace，並提供各自的完全退出後自動續跑設定。 */
+/** 等待「繼續工作」時顯示的暫停原因；舊資料沒有原因時視為完全退出。 */
+const PAUSE_LABELS: Record<PauseCause, string> = {
+  full_exit: "完全退出後暫停中",
+  new_login: "重新登入 Windows 後暫停中（未開啟跨登入自動續跑）",
+  login_unverified: "無法核對是否跨登入，暫停中",
+};
+
+/** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace，並提供各自的完全退出後與跨登入自動續跑設定。 */
 export function WorkspaceSidebar({
   client,
   timeZone,
@@ -112,6 +120,16 @@ export function WorkspaceSidebar({
     }
   };
 
+  const setLoginResume = async (workspace: Workspace, autoResume: boolean) => {
+    setFormError(null);
+    try {
+      const updated = await client.updateWorkspaceLoginResume(workspace.id, autoResume);
+      setLifecycles((current) => current.map((view) => (view.workspace_id === updated.workspace_id ? updated : view)));
+    } catch (error) {
+      setFormError(reasonOf(error));
+    }
+  };
+
   const resume = async (workspace: Workspace) => {
     setFormError(null);
     try {
@@ -122,7 +140,7 @@ export function WorkspaceSidebar({
     }
   };
 
-  /** 完全退出後的暫停狀態與「繼續工作」，以及自動續跑設定；沒有生命週期資料時不顯示。 */
+  /** 暫停狀態（依原因說明）與「繼續工作」，以及兩項各自獨立的自動續跑設定；沒有生命週期資料時不顯示。 */
   const lifecycleControls = (workspace: Workspace) => {
     const lifecycle = lifecycles.find((view) => view.workspace_id === workspace.id);
     if (!lifecycle) return null;
@@ -130,7 +148,7 @@ export function WorkspaceSidebar({
       <>
         {lifecycle.awaiting_resume && (
           <div className="workspace-paused">
-            <span>完全退出後暫停中</span>
+            <span>{PAUSE_LABELS[lifecycle.paused_by ?? "full_exit"]}</span>
             <button type="button" aria-label={`繼續工作 ${workspace.name}`} onClick={() => void resume(workspace)}>
               繼續工作
             </button>
@@ -146,6 +164,16 @@ export function WorkspaceSidebar({
           完全退出後自動續跑
         </label>
         <span className="workspace-auto-resume-hint">只影響下次重新開啟，不會立即啟停目前工作</span>
+        <label className="workspace-auto-resume">
+          <input
+            type="checkbox"
+            aria-label={`跨登入自動續跑 ${workspace.name}`}
+            checked={lifecycle.auto_resume_across_login}
+            onChange={(e) => void setLoginResume(workspace, e.target.checked)}
+          />
+          跨登入自動續跑
+        </label>
+        <span className="workspace-auto-resume-hint">重新登入 Windows 後是否自動續跑；只影響之後的登入</span>
       </>
     );
   };

@@ -1176,6 +1176,85 @@ impl GuardianProbe for FakeGuardianProbe {
     }
 }
 
+/// 目前 Windows 登入工作階段的識別（票 33）。預設是固定的第一次登入；`sign_in_again` 換成新的一次登入，
+/// `set` 可設成取不到（`None`）。
+#[derive(Debug)]
+pub struct FakeLoginSession {
+    state: std::sync::Mutex<(u32, Option<String>)>,
+}
+
+impl Default for FakeLoginSession {
+    fn default() -> Self {
+        Self { state: std::sync::Mutex::new((1, Some("login-1".to_string()))) }
+    }
+}
+
+impl FakeLoginSession {
+    /// 換成新的一次登入（重新登入或重新開機後），回傳新的識別。
+    pub fn sign_in_again(&self) -> String {
+        let mut state = self.state.lock().unwrap();
+        state.0 += 1;
+        let id = format!("login-{}", state.0);
+        state.1 = Some(id.clone());
+        id
+    }
+
+    /// 直接設定目前的識別；`None` 表示取不到。
+    pub fn set(&self, id: Option<&str>) {
+        self.state.lock().unwrap().1 = id.map(str::to_string);
+    }
+}
+
+impl LoginSession for FakeLoginSession {
+    fn current_login(&self) -> Option<String> {
+        self.state.lock().unwrap().1.clone()
+    }
+}
+
+/// 「登入時自動啟動」的 Windows 登記（票 33）：記下是否已登記與每次變更；可讓下一次變更失敗。
+#[derive(Debug, Default)]
+pub struct FakeStartupRegistration {
+    registered: std::sync::atomic::AtomicBool,
+    fail_next: std::sync::Mutex<Option<String>>,
+    changes: std::sync::Mutex<Vec<bool>>,
+}
+
+impl FakeStartupRegistration {
+    pub fn registered(&self) -> bool {
+        self.registered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 不經 Runtime 直接改變登記（例如使用者手動刪掉登錄值）。
+    pub fn force(&self, registered: bool) {
+        self.registered.store(registered, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 下一次 `set_registered` 以這個原因失敗。
+    pub fn fail_next(&self, reason: &str) {
+        *self.fail_next.lock().unwrap() = Some(reason.to_string());
+    }
+
+    /// 成功的 `set_registered` 呼叫，依時間順序。
+    pub fn changes(&self) -> Vec<bool> {
+        self.changes.lock().unwrap().clone()
+    }
+}
+
+impl StartupRegistration for FakeStartupRegistration {
+    fn is_registered(&self) -> PortResult<bool> {
+        Ok(self.registered())
+    }
+
+    fn set_registered(&self, enabled: bool) -> PortResult<()> {
+        if let Some(reason) = self.fail_next.lock().unwrap().take() {
+            return Err(PortError::Failed(reason));
+        }
+        self.force(enabled);
+        self.changes.lock().unwrap().push(enabled);
+        Ok(())
+    }
+}
+
 pub struct FakePorts {
     pub clock: Arc<FakeClock>,
     pub process_control: Arc<FakeProcessControl>,
@@ -1188,6 +1267,8 @@ pub struct FakePorts {
     pub command_runner: Arc<FakeCommandRunner>,
     pub user_settings: Arc<FakeUserSettings>,
     pub guardian_probe: Arc<FakeGuardianProbe>,
+    pub login_session: Arc<FakeLoginSession>,
+    pub startup_registration: Arc<FakeStartupRegistration>,
 }
 
 impl FakePorts {
@@ -1204,6 +1285,8 @@ impl FakePorts {
             command_runner: Arc::default(),
             user_settings: Arc::default(),
             guardian_probe: Arc::default(),
+            login_session: Arc::default(),
+            startup_registration: Arc::default(),
         }
     }
 
@@ -1221,6 +1304,8 @@ impl FakePorts {
             command_runner: self.command_runner.clone(),
             user_settings: self.user_settings.clone(),
             guardian_probe: self.guardian_probe.clone(),
+            login_session: self.login_session.clone(),
+            startup_registration: self.startup_registration.clone(),
         }
     }
 }

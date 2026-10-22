@@ -222,14 +222,48 @@ impl LifecycleState {
     }
 }
 
-/// 每個 Workspace 的生命週期設定與暫停狀態。從未設定過的 Workspace 等同預設值（自動續跑關閉、未暫停）。
+/// Workspace 被暫停的原因：決定等待「繼續工作」時的說明，以及重新開啟時哪些暫停可由「完全退出後自動續跑」解除。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PauseCause {
+    /// 完全退出（DR-01）：重新開啟時依「完全退出後自動續跑」解除。
+    FullExit,
+    /// 跨 Windows 登入啟動，而這個 Workspace 沒有開啟「跨登入自動續跑」（DR-07，票 33）。
+    NewLogin,
+    /// 無法核對這次啟動是否跨了登入（取不到登入識別）：不自動續跑（DR-07，票 33）。
+    LoginUnverified,
+}
+
+impl PauseCause {
+    pub const ALL: [PauseCause; 3] = [PauseCause::FullExit, PauseCause::NewLogin, PauseCause::LoginUnverified];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PauseCause::FullExit => "full_exit",
+            PauseCause::NewLogin => "new_login",
+            PauseCause::LoginUnverified => "login_unverified",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == raw)
+    }
+}
+
+/// 每個 Workspace 的生命週期設定與暫停狀態。從未設定過的 Workspace 等同預設值（兩種自動續跑都關閉、未暫停）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceLifecycle {
     pub workspace_id: String,
-    /// 「完全退出後自動續跑」；預設關閉。
+    /// 「完全退出後自動續跑」（DR-01）；預設關閉。
     pub auto_resume_after_exit: bool,
-    /// 被完全退出暫停的時間；有值代表重新開啟後還在等「繼續工作」（或 Runtime 仍在停止中）。
+    /// 「跨登入自動續跑」（DR-07，票 33）；預設關閉。與 `auto_resume_after_exit` 分開保存，互不影響。
+    #[serde(default)]
+    pub auto_resume_across_login: bool,
+    /// 被暫停的時間；有值代表還在等「繼續工作」（或 Runtime 仍在停止中）。
     pub paused_since: Option<Timestamp>,
+    /// 暫停的原因；沒有暫停時為 `None`。
+    #[serde(default)]
+    pub paused_by: Option<PauseCause>,
     pub version: i64,
     pub updated_at: Option<Timestamp>,
 }
@@ -239,13 +273,15 @@ impl WorkspaceLifecycle {
         Self {
             workspace_id: workspace_id.to_string(),
             auto_resume_after_exit: false,
+            auto_resume_across_login: false,
             paused_since: None,
+            paused_by: None,
             version: 0,
             updated_at: None,
         }
     }
 
-    fn push(&mut self, event_type: &'static str, now: Timestamp, payload: serde_json::Value) -> DomainEvent {
+    pub(crate) fn push(&mut self, event_type: &'static str, now: Timestamp, payload: serde_json::Value) -> DomainEvent {
         self.version += 1;
         self.updated_at = Some(now);
         DomainEvent {
@@ -321,6 +357,7 @@ pub fn request_exit(
             continue;
         }
         lifecycle.paused_since = Some(now);
+        lifecycle.paused_by = Some(PauseCause::FullExit);
         events.push(lifecycle.push(EVENT_WORKSPACE_PAUSED_BY_EXIT, now, serde_json::json!({})));
         paused.push(lifecycle);
     }
@@ -361,6 +398,7 @@ pub fn complete_exit(state: &LifecycleState, mut report: ExitReport, now: Timest
 }
 
 /// 重新開啟（核對完程序之後）：解除停止意圖，只有開啟「完全退出後自動續跑」的 Workspace 解除暫停。
+/// 只解除因完全退出而起的暫停；跨登入造成的暫停（票 33）不由這個設定解除，照樣等「繼續工作」。
 /// `expected_version` 是 Runtime 啟動時看到的版本；核對期間若又有新的退出要求（版本變了），不重新開啟。
 pub fn reopen(
     state: &LifecycleState,
@@ -379,9 +417,11 @@ pub fn reopen(
     let mut changed = Vec::new();
     let mut workspace_events = Vec::new();
     for lifecycle in workspaces.iter().filter(|w| w.paused_since.is_some()) {
-        if lifecycle.auto_resume_after_exit {
+        let paused_by_exit = lifecycle.paused_by.unwrap_or(PauseCause::FullExit) == PauseCause::FullExit;
+        if lifecycle.auto_resume_after_exit && paused_by_exit {
             let mut released = lifecycle.clone();
             released.paused_since = None;
+            released.paused_by = None;
             workspace_events.push(released.push(EVENT_WORKSPACE_RESUMED, now, serde_json::json!({ "by": "auto_resume" })));
             resumed.push(released.workspace_id.clone());
             changed.push(released);
@@ -412,6 +452,7 @@ pub fn resume_workspace(
     }
     let mut next = lifecycle.clone();
     next.paused_since = None;
+    next.paused_by = None;
     let event = next.push(EVENT_WORKSPACE_RESUMED, now, serde_json::json!({ "by": "user" }));
     Ok(Some((next, event)))
 }
@@ -446,7 +487,15 @@ pub fn dispatch_halt(state: &LifecycleState, workspace: &WorkspaceLifecycle, wor
     workspace.paused_since.map(|_| WaitReason {
         category: WaitCategory::Lifecycle,
         code: "awaiting_resume".to_string(),
-        message: format!("Workspace「{workspace_name}」在完全退出後等待「繼續工作」"),
+        message: match workspace.paused_by.unwrap_or(PauseCause::FullExit) {
+            PauseCause::FullExit => format!("Workspace「{workspace_name}」在完全退出後等待「繼續工作」"),
+            PauseCause::NewLogin => {
+                format!("Workspace「{workspace_name}」未開啟跨登入自動續跑，重新登入 Windows 後等待「繼續工作」")
+            }
+            PauseCause::LoginUnverified => {
+                format!("無法核對這次啟動是否跨了 Windows 登入，Workspace「{workspace_name}」等待「繼續工作」")
+            }
+        },
         profile_id: None,
         guard: None,
     })

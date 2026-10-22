@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 
 use async_trait::async_trait;
 use baton_domain::guardian::GUARDIAN_ATTEMPT_ENV;
+use baton_domain::login::{START_SOURCE_ENV, START_SOURCE_LOGIN};
 
 use crate::files;
 use crate::RuntimeHost;
@@ -39,10 +40,21 @@ impl RuntimeHost for ProcessHost {
     }
 
     async fn start_runtime(&mut self, attempt_id: &str) -> Result<(), String> {
+        self.spawn((GUARDIAN_ATTEMPT_ENV, attempt_id))
+    }
+
+    async fn start_runtime_at_login(&mut self) -> Result<(), String> {
+        self.spawn((START_SOURCE_ENV, START_SOURCE_LOGIN))
+    }
+}
+
+impl ProcessHost {
+    /// 以脫離監護的方式啟動 Runtime，並交付一個標明啟動方式的環境變數。
+    fn spawn(&mut self, (name, value): (&str, &str)) -> Result<(), String> {
         let mut command = Command::new(&self.runtime_exe);
         command
             .envs(self.envs.iter().map(|(k, v)| (k, v)))
-            .env(GUARDIAN_ATTEMPT_ENV, attempt_id)
+            .env(name, value)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

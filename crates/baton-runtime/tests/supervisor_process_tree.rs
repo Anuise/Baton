@@ -25,6 +25,27 @@ impl GuardianProbe for NoGuardian {
         false
     }
 }
+
+/// 一直是同一次登入（票 33）。
+struct SameLogin;
+
+impl baton_ports::LoginSession for SameLogin {
+    fn current_login(&self) -> Option<String> {
+        Some("login".into())
+    }
+}
+
+/// 不登記登入自動啟動（票 33）。
+struct NoStartup;
+
+impl baton_ports::StartupRegistration for NoStartup {
+    fn is_registered(&self) -> baton_ports::PortResult<bool> {
+        Ok(false)
+    }
+    fn set_registered(&self, _enabled: bool) -> baton_ports::PortResult<()> {
+        Ok(())
+    }
+}
 use baton_runtime::production_ports::{LocalCommandRunner, LocalWorkspaceFs, SystemClock};
 use baton_runtime::windows_platform::WindowsPlatformInfo;
 use baton_runtime::windows_process::WindowsProcessControl;
@@ -195,6 +216,8 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         command_runner: Arc::new(LocalCommandRunner),
         user_settings: Arc::new(baton_ports::DirUserSettingsSource::new("unused", "unused")),
         guardian_probe: Arc::new(NoGuardian),
+        login_session: Arc::new(SameLogin),
+        startup_registration: Arc::new(NoStartup),
     };
     let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
     let runtime = Runtime::start_with(

@@ -55,8 +55,11 @@ function fakeClient(initial: Workspace[] = [], lifecycles: Partial<WorkspaceLife
     updateWorkspaceLifecycle: vi.fn(async (id: string, autoResume: boolean) =>
       replace({ ...viewOf(items.find((w) => w.id === id)!), auto_resume_after_exit: autoResume }),
     ),
+    updateWorkspaceLoginResume: vi.fn(async (id: string, autoResume: boolean) =>
+      replace({ ...viewOf(items.find((w) => w.id === id)!), auto_resume_across_login: autoResume }),
+    ),
     resumeWorkspace: vi.fn(async (id: string) =>
-      replace({ ...viewOf(items.find((w) => w.id === id)!), awaiting_resume: false, paused_since: null }),
+      replace({ ...viewOf(items.find((w) => w.id === id)!), awaiting_resume: false, paused_since: null, paused_by: null }),
     ),
   };
   return client;
@@ -287,6 +290,68 @@ describe("左側 Workspace 清單", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Runtime 正在完全退出，無法繼續工作");
     expect(screen.getByText("完全退出後暫停中")).toBeInTheDocument();
+  });
+
+  it("每個 Workspace 另有「跨登入自動續跑」勾選，預設關閉並說明只影響之後的登入", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+
+    const item = (await screen.findByText("筆記")).closest("li")!;
+    const checkbox = await within(item).findByRole("checkbox", { name: "跨登入自動續跑 筆記" });
+    expect(checkbox).not.toBeChecked();
+    expect(within(item).getByText("重新登入 Windows 後是否自動續跑；只影響之後的登入")).toBeInTheDocument();
+  });
+
+  it("兩項自動續跑設定各自呼叫自己的 API，勾選一項不影響另一項", async () => {
+    const client = fakeClient([workspace()]);
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    const acrossLogin = await screen.findByRole("checkbox", { name: "跨登入自動續跑 筆記" });
+    const afterExit = screen.getByRole("checkbox", { name: "完全退出後自動續跑 筆記" });
+
+    await user.click(acrossLogin);
+
+    expect(client.updateWorkspaceLoginResume).toHaveBeenCalledWith("ws_1", true);
+    expect(client.updateWorkspaceLifecycle).not.toHaveBeenCalled();
+    await waitFor(() => expect(acrossLogin).toBeChecked());
+    expect(afterExit).not.toBeChecked();
+
+    await user.click(afterExit);
+
+    expect(client.updateWorkspaceLifecycle).toHaveBeenCalledWith("ws_1", true);
+    expect(client.updateWorkspaceLoginResume).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(afterExit).toBeChecked());
+    expect(acrossLogin).toBeChecked();
+
+    await user.click(acrossLogin);
+
+    expect(client.updateWorkspaceLoginResume).toHaveBeenLastCalledWith("ws_1", false);
+    await waitFor(() => expect(acrossLogin).not.toBeChecked());
+    expect(afterExit).toBeChecked();
+  });
+
+  it("跨登入自動續跑設定失敗時顯示原因，勾選維持原狀", async () => {
+    const client = fakeClient([workspace()]);
+    vi.mocked(client.updateWorkspaceLoginResume).mockRejectedValueOnce(new Error("Runtime 拒絕連線"));
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+
+    await user.click(await screen.findByRole("checkbox", { name: "跨登入自動續跑 筆記" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Runtime 拒絕連線");
+    expect(screen.getByRole("checkbox", { name: "跨登入自動續跑 筆記" })).not.toBeChecked();
+  });
+
+  it.each([
+    ["full_exit", "完全退出後暫停中"],
+    ["new_login", "重新登入 Windows 後暫停中（未開啟跨登入自動續跑）"],
+    ["login_unverified", "無法核對是否跨登入，暫停中"],
+  ] as const)("等待「繼續工作」時依暫停原因 %s 顯示說明", async (pausedBy, label) => {
+    const client = fakeClient([workspace()], [{ awaiting_resume: true, paused_since: CREATED_AT, paused_by: pausedBy }]);
+    render(<WorkspaceSidebar client={client} />);
+
+    const item = (await screen.findByText("筆記")).closest("li")!;
+    expect(await within(item).findByText(label)).toBeInTheDocument();
+    expect(within(item).getByRole("button", { name: "繼續工作 筆記" })).toBeInTheDocument();
   });
 
   it("讀不到生命週期時清單照常顯示，不顯示自動續跑設定", async () => {

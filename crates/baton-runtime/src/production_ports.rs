@@ -1,7 +1,7 @@
 //! 正式執行環境使用的 Port。
 //!
 //! 目前只有系統時鐘、平台辨識、DPAPI 憑證保護、目錄檢查與建立、成果與工作目錄檔案讀寫、Claude Code／Git 環境探測、驗證命令執行、
-//! Claude Code Adapter、worktree 建立與整合合併（git CLI，票 20）是真實實作；其餘 Port 的正式版由後續的票提供，
+//! Claude Code Adapter、worktree 建立與整合合併（git CLI，票 20）、Windows 登入識別與登入啟動登記（票 33）是真實實作；其餘 Port 的正式版由後續的票提供，
 //! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
 
 use std::path::Path;
@@ -47,6 +47,21 @@ impl ProcessControl for Unavailable {
 impl QuotaObserver for Unavailable {
     async fn observe(&self, _profile: &ProfileRef) -> PortResult<QuotaSample> {
         Err(PortError::NotImplemented("QuotaObserver"))
+    }
+}
+
+impl LoginSession for Unavailable {
+    fn current_login(&self) -> Option<String> {
+        None
+    }
+}
+
+impl StartupRegistration for Unavailable {
+    fn is_registered(&self) -> PortResult<bool> {
+        Err(PortError::NotImplemented("StartupRegistration"))
+    }
+    fn set_registered(&self, _enabled: bool) -> PortResult<()> {
+        Err(PortError::NotImplemented("StartupRegistration"))
     }
 }
 
@@ -164,14 +179,37 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> PortResult<T> + Send
     tokio::task::spawn_blocking(work).await.map_err(|e| PortError::Failed(format!("檔案工作被中斷：{e}")))?
 }
 
-/// 組出正式執行用的 Port 組合；`data_dir` 是 Runtime 的資料目錄（Run 的啟動檔案與輸出放在其下）。
-pub fn production_ports(data_dir: &Path) -> Ports {
+/// 登入啟動入口的執行檔（與 Runtime 放在同一個資料夾，票 33）。
+#[cfg(windows)]
+const LAUNCHER_EXE: &str = "baton-guardian.exe";
+
+/// 組出正式執行用的 Port 組合；`data_dir` 是 Runtime 的資料目錄（Run 的啟動檔案與輸出放在其下），
+/// `port` 是 Runtime 的埠（寫進登入啟動登記的命令列）。
+pub fn production_ports(data_dir: &Path, port: u16) -> Ports {
     let unavailable = Arc::new(Unavailable);
     // Windows 上使用真實的 Job Object 實作；其他平台維持尚未實作
     #[cfg(windows)]
     let process_control: Arc<dyn ProcessControl> = Arc::new(crate::windows_process::WindowsProcessControl::new());
     #[cfg(not(windows))]
     let process_control: Arc<dyn ProcessControl> = unavailable.clone();
+    // 登入識別與登入啟動登記（票 33）：Windows 上是真實實作；找不到本程序的執行檔就無法登記
+    #[cfg(windows)]
+    let (login_session, startup_registration): (Arc<dyn LoginSession>, Arc<dyn StartupRegistration>) = (
+        Arc::new(crate::windows_login::WindowsLoginSession),
+        match std::env::current_exe() {
+            Ok(exe) => Arc::new(crate::windows_login::HkcuRunRegistration::for_launcher(
+                &exe.with_file_name(LAUNCHER_EXE),
+                data_dir,
+                port,
+            )),
+            Err(_) => unavailable.clone(),
+        },
+    );
+    #[cfg(not(windows))]
+    let (login_session, startup_registration): (Arc<dyn LoginSession>, Arc<dyn StartupRegistration>) = {
+        let _ = port;
+        (unavailable.clone(), unavailable.clone())
+    };
     Ports {
         clock: Arc::new(SystemClock),
         process_control,
@@ -185,6 +223,8 @@ pub fn production_ports(data_dir: &Path) -> Ports {
         command_runner: Arc::new(LocalCommandRunner),
         user_settings: Arc::new(user_settings_source()),
         guardian_probe: Arc::new(GuardianInstanceProbe { data_dir: data_dir.to_path_buf() }),
+        login_session,
+        startup_registration,
     }
 }
 

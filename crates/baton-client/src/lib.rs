@@ -17,6 +17,7 @@ use baton_api::{
     ArtifactList, ArtifactPreview, SHA256_HEADER,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_accept_path, task_path, task_ready_path, task_verification_path, tasks_path, workspace_lifecycle_path, workspace_resume_path, AcceptTaskRequest, LifecycleStatus,
+    workspace_login_resume_path, LoginStartupView, UpdateLoginResumeRequest, UpdateLoginStartupRequest, LOGIN_STARTUP_PATH,
     QueuedDispatch, UpdateWorkspaceLifecycleRequest, WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     BackupStatus, BACKUPS_PATH,
@@ -366,6 +367,23 @@ impl RuntimeClient {
     ) -> Result<WorkspaceLifecycleView, ClientError> {
         let request = UpdateWorkspaceLifecycleRequest { auto_resume_after_exit };
         self.send_json(reqwest::Method::PUT, &workspace_lifecycle_path(workspace_id), Some(&request)).await
+    }
+
+    /// 變更 Workspace 的「跨登入自動續跑」（票 33；只影響之後的跨登入啟動）。
+    pub async fn set_workspace_login_resume(
+        &self,
+        workspace_id: &str,
+        auto_resume_across_login: bool,
+    ) -> Result<WorkspaceLifecycleView, ClientError> {
+        let request = UpdateLoginResumeRequest { auto_resume_across_login };
+        self.send_json(reqwest::Method::PUT, &workspace_login_resume_path(workspace_id), Some(&request)).await
+    }
+
+    /// 變更「登入時自動啟動」（票 33）；Windows 的登記失敗時回傳 `ClientError::Rejected`
+    /// （`login_startup_registration_failed`），偏好不變。
+    pub async fn set_login_startup(&self, enabled: bool) -> Result<LoginStartupView, ClientError> {
+        let request = UpdateLoginStartupRequest { enabled };
+        self.send_json(reqwest::Method::PUT, LOGIN_STARTUP_PATH, Some(&request)).await
     }
 
     /// 「繼續工作」：解除 Workspace 在完全退出後的暫停。

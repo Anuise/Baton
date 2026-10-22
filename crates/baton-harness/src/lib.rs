@@ -25,6 +25,7 @@ use baton_domain::guardian::JournalRecord;
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::Timestamp;
 use baton_ports::{AgentAdapter, Ports};
+use baton_guardian::launcher::{self, LoginLaunch};
 use baton_guardian::{Guardian, GuardianStep, RuntimeHost};
 use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeOptions};
 use serde::de::DeserializeOwned;
@@ -105,8 +106,14 @@ impl HarnessBuilder {
             guardian_script: GuardianScript::default(),
         };
         harness.runtime = Some(
-            try_start_runtime(harness.data_dir.path(), &harness.ports(), harness.exit_timing, harness.full_text_search, None)
-                .await?,
+            try_start_runtime(
+                harness.data_dir.path(),
+                &harness.ports(),
+                harness.exit_timing,
+                harness.full_text_search,
+                StartedBy::App,
+            )
+            .await?,
         );
         Ok(harness)
     }
@@ -136,6 +143,17 @@ pub struct GuardianStart {
     pub outcome: Result<(), String>,
 }
 
+/// 登入啟動入口在 Windows 登入時做了什麼（票 33）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginStartupRun {
+    pub launch: LoginLaunch,
+    /// 登入啟動的 Runtime 程序啟動後的結果：`Ok` 是開始服務；`Err` 是很快就結束（遇到停止意圖不提供服務、
+    /// 或已有 Runtime 而因單實例結束），附原因。沒有啟動程序時為 `None`。
+    pub runtime_outcome: Option<Result<(), String>>,
+    /// 之後這個程序是否接著當監護（有 Runtime 可監看、而且還沒有監護時才會）。
+    pub guards: bool,
+}
+
 /// 監護與程序內 Runtime 之間的腳本與紀錄。
 #[derive(Default)]
 struct GuardianScript {
@@ -144,6 +162,10 @@ struct GuardianScript {
     /// 下一次監護查詢 Runtime 是否在執行時，先執行這個動作（重現「寫下日誌之後、最後核對之前」的競態）。
     on_next_probe: Option<Box<dyn FnOnce(&Path) + Send>>,
     starts: Vec<GuardianStart>,
+    /// 下一次登入啟動入口啟動 Runtime 的同一刻，使用者也手動開了 App（票 33 的競態）。
+    app_opens_during_next_login_start: bool,
+    /// 最近一次登入啟動的 Runtime 程序的結果。
+    login_start_outcome: Option<Result<(), String>>,
 }
 
 /// 讓測試可用 `harness.clock`、`harness.process_control` 等直接取得 fake。
@@ -404,9 +426,65 @@ impl Harness {
 
     async fn start_again(&mut self) {
         let runtime =
-            try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search, None).await;
+            try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search, StartedBy::App)
+                .await;
         self.runtime = Some(runtime.unwrap_or_else(|e| panic!("Runtime 重啟失敗：{e}")));
         self.exits_seen.store(0, Ordering::SeqCst);
+    }
+
+    /// 以單實例的規則啟動一個 Runtime 程序：已有 Runtime 時新的程序取不到單實例鎖、立即結束（不開資料庫）。
+    async fn start_single_instance(&mut self, by: StartedBy) -> Result<(), String> {
+        if self.runtime.is_some() {
+            return Err("已有 Runtime 在執行（單實例），本程序結束".to_string());
+        }
+        let started =
+            try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search, by).await;
+        started
+            .map(|runtime| {
+                self.runtime = Some(runtime);
+                self.exits_seen.store(0, Ordering::SeqCst);
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    // ------------------------------------------------------------ 跨 Windows 登入（票 33）
+
+    /// 模擬登出（或關機）後再次登入 Windows：同一次登入期間的程序全部結束（Runtime 沒有記下正常結束、監護也不在），
+    /// 新的一次登入有新的登入識別。之後由 `windows_login_startup`（登入啟動）或 `open_app`（手動開 App）決定是否再啟動。
+    pub async fn sign_in_again(&mut self) -> String {
+        self.kill_runtime().await;
+        self.kill_guardian();
+        self.fakes.login_session.sign_in_again()
+    }
+
+    /// 模擬 Windows 登入後執行登入啟動登記（HKCU Run）的項目：沒有登記時什麼都不執行（回傳 `None`）；
+    /// 有登記時執行登入啟動入口（`baton-guardian.exe --login`），之後有 Runtime 可監看就接著當監護。
+    pub async fn windows_login_startup(&mut self) -> Option<LoginStartupRun> {
+        if !self.fakes.startup_registration.registered() {
+            return None;
+        }
+        self.guardian_script.login_start_outcome = None;
+        let clock = self.fakes.clock.clone();
+        let data_dir = self.data_dir.path().to_path_buf();
+        let launch = launcher::launch_at_login(&data_dir, &*clock, &mut HarnessHost { harness: self }).await;
+        let runtime_outcome = self.guardian_script.login_start_outcome.take();
+        let watchable = matches!(launch, LoginLaunch::AlreadyRunning | LoginLaunch::Started) && self.runtime.is_some();
+        // 監護的單實例：已有監護時這個程序直接結束
+        let guards = watchable && !self.guardian_running();
+        if guards {
+            self.start_guardian();
+        }
+        Some(LoginStartupRun { launch, runtime_outcome, guards })
+    }
+
+    /// 下一次登入啟動入口啟動 Runtime 的同一刻，使用者也手動開了 App：App 的 Runtime 先取得單實例鎖。
+    pub fn open_app_during_next_login_start(&mut self) {
+        self.guardian_script.app_opens_during_next_login_start = true;
+    }
+
+    /// 監護是否在執行（程序內的監護存在而且還沒結束）。
+    pub fn guardian_running(&self) -> bool {
+        self.guardian.as_ref().is_some_and(|g| g.finished().is_none())
     }
 
     // ------------------------------------------------------------ 監護（票 32）
@@ -503,24 +581,33 @@ impl RuntimeHost for HarnessHost<'_> {
         let outcome = if std::mem::take(&mut harness.guardian_script.fail_next_start_early) {
             Err("模擬：Runtime 在匯入監護日誌之前就結束".to_string())
         } else {
-            let started = try_start_runtime(
-                harness.data_dir.path(),
-                &harness.ports(),
-                harness.exit_timing,
-                harness.full_text_search,
-                Some(attempt_id.to_string()),
-            )
-            .await;
-            started.map(|runtime| {
-                harness.runtime = Some(runtime);
-                harness.exits_seen.store(0, Ordering::SeqCst);
-            })
-            .map_err(|e| e.to_string())
+            harness.start_single_instance(StartedBy::Guardian(attempt_id.to_string())).await
         };
         harness.guardian_script.starts.push(GuardianStart { attempt_id: attempt_id.to_string(), outcome });
         // 程序本身有啟動起來；之後很快結束的情形由下一次 runtime_running 發現
         Ok(())
     }
+
+    async fn start_runtime_at_login(&mut self) -> Result<(), String> {
+        let harness = &mut *self.harness;
+        if std::mem::take(&mut harness.guardian_script.app_opens_during_next_login_start) {
+            // 使用者手動開 App 的那個 Runtime 先取得單實例鎖
+            harness.start_single_instance(StartedBy::App).await.expect("手動開 App 的 Runtime 應該啟動");
+        }
+        let outcome = harness.start_single_instance(StartedBy::Login).await;
+        harness.guardian_script.login_start_outcome = Some(outcome);
+        Ok(())
+    }
+}
+
+/// 啟動 Runtime 的是誰。
+enum StartedBy {
+    /// 使用者（手動開 App）。
+    App,
+    /// 監護，帶這一次的嘗試識別（票 32）。
+    Guardian(String),
+    /// Windows 登入時的啟動入口（票 33）。
+    Login,
 }
 
 async fn try_start_runtime(
@@ -528,8 +615,13 @@ async fn try_start_runtime(
     ports: &Ports,
     exit_timing: ExitTiming,
     full_text_search: bool,
-    guardian_attempt: Option<String>,
+    by: StartedBy,
 ) -> Result<RunningRuntime, RuntimeError> {
+    let (guardian_attempt, login_start) = match by {
+        StartedBy::App => (None, false),
+        StartedBy::Guardian(attempt_id) => (Some(attempt_id), false),
+        StartedBy::Login => (None, true),
+    };
     let config = RuntimeConfig {
         data_dir: data_dir.to_path_buf(),
         // 埠 0 讓作業系統配置；每個 Harness 與每次重建都不會互相衝突
@@ -544,6 +636,7 @@ async fn try_start_runtime(
         exit_linger: None,
         full_text_search,
         guardian_attempt,
+        login_start,
         ..RuntimeOptions::default()
     };
     Runtime::start_with(config, ports.clone(), options).await

@@ -51,6 +51,8 @@ function fakeClient(onExit: LifecycleStatus, ...polls: Array<LifecycleStatus | E
     }),
     updateWorkspaceLifecycle: vi.fn(),
     resumeWorkspace: vi.fn(),
+    updateWorkspaceLoginResume: vi.fn(),
+    updateLoginStartup: vi.fn(),
   } satisfies LifecycleClient;
   return { client, emitFullExit: () => act(() => handler?.()) };
 }

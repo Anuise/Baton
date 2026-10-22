@@ -11,7 +11,7 @@ use std::time::Duration;
 use baton_api::{
     PostedMessage, AcceptTaskRequest, AdmissionReport, AnswerRequest, ArtifactList, ArtifactPreview, AuthorizationView, BackupStatus,
     BatchRequest, BatchResponse, ConfirmAuthorizationRequest, CreateProfileRequest, CreateTaskRequest,
-    CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus, LoginTerminalResponse, MergeRequest,
+    CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus, LoginStartupView, LoginTerminalResponse, MergeRequest,
     MergeResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus,
     SummaryRequest, TaskBoard, TaskDetail, UpdateAuthorityRequest, WorkspaceLifecycleView, WorkspaceList,
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
@@ -794,6 +794,28 @@ async fn workspace_lifecycle_update(
     link.client.set_workspace_auto_resume(&workspace_id, auto_resume_after_exit).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 變更 Workspace 的「跨登入自動續跑」（票 33；只影響之後的跨登入啟動）。
+#[tauri::command]
+async fn workspace_login_resume_update(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    auto_resume_across_login: bool,
+) -> Result<WorkspaceLifecycleView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.set_workspace_login_resume(&workspace_id, auto_resume_across_login).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 變更「登入時自動啟動」（票 33）。
+#[tauri::command]
+async fn lifecycle_login_startup_update(link: State<'_, RuntimeLink>, enabled: bool) -> Result<LoginStartupView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.set_login_startup(enabled).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 的「繼續工作」：解除 Workspace 在完全退出後的暫停。
 #[tauri::command]
 async fn workspace_resume(
@@ -1119,6 +1141,8 @@ fn main() {
             lifecycle_status,
             lifecycle_exit,
             workspace_lifecycle_update,
+            workspace_login_resume_update,
+            lifecycle_login_startup_update,
             workspace_resume,
             recovery_status,
             recovery_retry,

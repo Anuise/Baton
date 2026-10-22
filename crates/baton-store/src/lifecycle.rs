@@ -1,4 +1,4 @@
-//! 桌面生命週期與完全退出的持久化（票 25）。
+//! 桌面生命週期與完全退出的持久化（票 25），以及跨 Windows 登入的啟動與續跑（票 33）。
 //!
 //! 規則都在 Domain（`baton_domain::lifecycle`）；這裡只做「在同一個交易中載入目前狀態 → 交給 Domain 判定 →
 //! 寫入新狀態與事件」，以及生命週期檔（停止意圖的鏡像，spec D-25）的原子讀寫。
@@ -8,8 +8,9 @@ use std::io::Write as _;
 
 use baton_domain::lifecycle::{
     self, ExitReport, ExitTiming, FileStopView, LifecycleChange, LifecycleError, LifecycleFile, LifecyclePhase,
-    LifecycleState, WorkspaceLifecycle, RUN_STOPPED_BY_EXIT_REASON,
+    LifecycleState, PauseCause, WorkspaceLifecycle, RUN_STOPPED_BY_EXIT_REASON,
 };
+use baton_domain::login::{self, LoginBoundary, LoginStartup};
 use baton_domain::run::{RunChange, RunCommand, RunError, RunStatus};
 use baton_domain::scheduler::WaitReason;
 use baton_domain::task::TaskStatus;
@@ -25,6 +26,8 @@ pub const LIFECYCLE_FILE_NAME: &str = baton_domain::lifecycle::LIFECYCLE_FILE_NA
 #[derive(Debug, Clone, PartialEq)]
 pub struct LifecycleSnapshot {
     pub state: LifecycleState,
+    /// 「登入時自動啟動」的偏好（票 33）。
+    pub login_startup: LoginStartup,
     pub workspaces: Vec<(Workspace, WorkspaceLifecycle)>,
     pub active_runs: usize,
 }
@@ -72,7 +75,12 @@ impl Store {
                 [],
                 |r| r.get(0),
             )?;
-            Ok(LifecycleSnapshot { state, workspaces, active_runs: active_runs as usize })
+            Ok(LifecycleSnapshot {
+                state,
+                login_startup: load_login_startup(conn)?,
+                workspaces,
+                active_runs: active_runs as usize,
+            })
         })
         .await
     }
@@ -184,6 +192,103 @@ impl Store {
             })
             .await?;
         outcome
+    }
+
+    /// 變更「跨登入自動續跑」（票 33）；只影響之後的跨登入啟動，不會啟動或停止任何工作，也不解除暫停。
+    pub async fn set_login_resume(
+        &self,
+        workspace_id: &str,
+        enabled: bool,
+        now: Timestamp,
+    ) -> Result<WorkspaceLifecycleOutcome, LifecycleApplyError> {
+        let workspace_id = workspace_id.to_string();
+        let outcome = self
+            .write(move |tx| {
+                let Some(workspace) = active_workspace(tx, &workspace_id)? else {
+                    return Ok(Err(LifecycleApplyError::WorkspaceNotFound(workspace_id)));
+                };
+                let current = lifecycle::workspace_lifecycle_of(&load_workspace_lifecycles(tx)?, &workspace_id);
+                let next = match login::set_login_resume(&current, enabled, now) {
+                    Some((next, event)) => {
+                        save_workspace_lifecycle(tx, &next)?;
+                        append_event(tx, &event)?;
+                        next
+                    }
+                    None => current,
+                };
+                Ok(Ok((workspace.name, next, load_lifecycle(tx)?.stop_intent_active())))
+            })
+            .await?;
+        outcome
+    }
+
+    /// 「登入時自動啟動」的偏好（票 33）。
+    pub async fn login_startup(&self) -> StoreResult<LoginStartup> {
+        self.read(|conn| Ok(load_login_startup(conn)?)).await
+    }
+
+    /// 變更「登入時自動啟動」的偏好（票 33）；相同值不寫入。Windows 的登記由呼叫端先完成。
+    pub async fn set_login_startup(&self, enabled: bool, now: Timestamp) -> StoreResult<LoginStartup> {
+        self.write(move |tx| {
+            let current = load_login_startup(tx)?;
+            match login::set_login_startup(&current, enabled, now) {
+                Some((next, event)) => {
+                    tx.execute(
+                        "INSERT INTO login_startup (id, enabled, version, updated_at) VALUES (1, ?1, ?2, ?3)
+                         ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, version = excluded.version,
+                           updated_at = excluded.updated_at",
+                        rusqlite::params![next.enabled, next.version, now.as_millis()],
+                    )?;
+                    append_event(tx, &event)?;
+                    Ok(next)
+                }
+                None => Ok(current),
+            }
+        })
+        .await
+    }
+
+    /// 記下這一次啟動（`record_boot` 剛寫入的那一列）的登入識別，並與上一次啟動比較（票 33）。
+    pub async fn note_login_session(&self, current: Option<String>) -> StoreResult<LoginBoundary> {
+        self.write(move |tx| {
+            let previous = tx.query_row(
+                "SELECT login_session FROM runtime_boot ORDER BY id DESC LIMIT 1 OFFSET 1",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            );
+            let previous = match previous {
+                Ok(id) => Some(id),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(other) => return Err(other.into()),
+            };
+            tx.execute(
+                "UPDATE runtime_boot SET login_session = ?1 WHERE id = (SELECT MAX(id) FROM runtime_boot)",
+                [current.as_deref()],
+            )?;
+            Ok(login::login_boundary(previous.as_ref().map(Option::as_deref), current.as_deref()))
+        })
+        .await
+    }
+
+    /// 依登入邊界處置各 Workspace（票 33）：跨了登入時暫停沒有開啟「跨登入自動續跑」的 Workspace，
+    /// 無法核對時全部暫停；停止意圖生效時不做任何事。回傳這次被暫停的 Workspace 與原因。
+    pub async fn apply_login_boundary(
+        &self,
+        boundary: LoginBoundary,
+        now: Timestamp,
+    ) -> StoreResult<Vec<(String, PauseCause)>> {
+        self.write(move |tx| {
+            let change = login::cross_login(
+                &load_lifecycle(tx)?,
+                boundary,
+                &load_workspaces(tx)?,
+                &load_workspace_lifecycles(tx)?,
+                now,
+            );
+            apply_change(tx, &change)?;
+            Ok(change.workspaces.iter().filter_map(|w| Some((w.workspace_id.clone(), w.paused_by?))).collect())
+        })
+        .await
     }
 
     /// 「繼續工作」：解除這個 Workspace 在完全退出後的暫停。停止意圖仍生效時拒絕。
@@ -358,14 +463,24 @@ fn save_lifecycle(tx: &Transaction<'_>, state: &LifecycleState) -> rusqlite::Res
 
 pub(crate) fn load_workspace_lifecycles(conn: &Connection) -> rusqlite::Result<Vec<WorkspaceLifecycle>> {
     conn.prepare(
-        "SELECT workspace_id, auto_resume_after_exit, paused_since, version, updated_at FROM workspace_lifecycle
-         ORDER BY rowid",
+        "SELECT workspace_id, auto_resume_after_exit, paused_since, version, updated_at, auto_resume_across_login,
+           paused_by
+         FROM workspace_lifecycle ORDER BY rowid",
     )?
     .query_map([], |r| {
+        let paused_by: Option<String> = r.get(6)?;
         Ok(WorkspaceLifecycle {
             workspace_id: r.get(0)?,
             auto_resume_after_exit: r.get(1)?,
+            auto_resume_across_login: r.get(5)?,
             paused_since: r.get::<_, Option<i64>>(2)?.map(Timestamp::from_millis),
+            paused_by: paused_by
+                .map(|raw| {
+                    PauseCause::parse(&raw).ok_or_else(|| {
+                        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, "未知的暫停原因".into())
+                    })
+                })
+                .transpose()?,
             version: r.get(3)?,
             updated_at: Some(Timestamp::from_millis(r.get(4)?)),
         })
@@ -375,19 +490,34 @@ pub(crate) fn load_workspace_lifecycles(conn: &Connection) -> rusqlite::Result<V
 
 fn save_workspace_lifecycle(tx: &Transaction<'_>, lifecycle: &WorkspaceLifecycle) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT INTO workspace_lifecycle (workspace_id, auto_resume_after_exit, paused_since, version, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO workspace_lifecycle (workspace_id, auto_resume_after_exit, paused_since, version, updated_at,
+           auto_resume_across_login, paused_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(workspace_id) DO UPDATE SET auto_resume_after_exit = excluded.auto_resume_after_exit,
-           paused_since = excluded.paused_since, version = excluded.version, updated_at = excluded.updated_at",
+           paused_since = excluded.paused_since, version = excluded.version, updated_at = excluded.updated_at,
+           auto_resume_across_login = excluded.auto_resume_across_login, paused_by = excluded.paused_by",
         rusqlite::params![
             lifecycle.workspace_id,
             lifecycle.auto_resume_after_exit,
             lifecycle.paused_since.map(|t| t.as_millis()),
             lifecycle.version,
-            lifecycle.updated_at.map(|t| t.as_millis()).unwrap_or_default()
+            lifecycle.updated_at.map(|t| t.as_millis()).unwrap_or_default(),
+            lifecycle.auto_resume_across_login,
+            lifecycle.paused_by.map(PauseCause::as_str)
         ],
     )?;
     Ok(())
+}
+
+fn load_login_startup(conn: &Connection) -> rusqlite::Result<LoginStartup> {
+    let row = conn.query_row("SELECT enabled, version, updated_at FROM login_startup WHERE id = 1", [], |r| {
+        Ok(LoginStartup { enabled: r.get(0)?, version: r.get(1)?, updated_at: Some(Timestamp::from_millis(r.get(2)?)) })
+    });
+    match row {
+        Ok(startup) => Ok(startup),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(LoginStartup::default()),
+        Err(other) => Err(other),
+    }
 }
 
 // ---------------------------------------------------------------- 生命週期檔
