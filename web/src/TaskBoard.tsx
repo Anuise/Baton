@@ -6,6 +6,7 @@ import type {
   AcceptanceBasis,
   BudgetView,
   CheckResult,
+  CleanupStatus,
   Goal,
   IntegrationEntry,
   IntegrationStatus,
@@ -27,6 +28,7 @@ import type {
   WaitReason,
   WorkdirView,
   Workspace,
+  WorktreeCleanup,
 } from "./runtimeClient";
 
 /** 排程總覽讀不到時是 null：看板照常顯示，只是沒有排隊順位與帳號名稱。 */
@@ -101,6 +103,13 @@ const INTEGRATION_STATUS_LABELS: Record<IntegrationStatus, string> = {
   advancing: "更新目標分支中",
   integrated: "已整合",
   failed: "未通過整合",
+};
+
+const CLEANUP_STATUS_LABELS: Record<CleanupStatus, string> = {
+  pending: "待清理",
+  removing: "清理中",
+  cleaned: "已清理",
+  failed: "清理失敗",
 };
 
 /** 整合項目尚未結束（排隊中或處理中）。 */
@@ -299,6 +308,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   integration={latestIntegration(board.integrations, task.id)}
                   budget={board.budgets.find((b) => b.task_id === task.id) ?? null}
                   accountName={accountNameOf(overview, board.runs, task.id)}
+                  authorizationRevision={board.authorization_revision}
                   queued={queuedInfo(overview, queuedNotice, task)}
                   timeZone={timeZone}
                   error={cardError?.taskId === task.id ? cardError.message : null}
@@ -346,6 +356,8 @@ interface CardProps {
   budget: BudgetView | null;
   /** 最新 Run 使用的帳號名稱。 */
   accountName: string | null;
+  /** Workspace 目前生效的授權 revision；尚未確認為 null。 */
+  authorizationRevision: number | null;
   /** 在佇列中等待名額時的順位（未知為 null）與原因；不在佇列為 null。 */
   queued: { position: number | null; reasons: WaitReason[] } | null;
   timeZone?: string;
@@ -362,7 +374,7 @@ interface CardProps {
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, accountName, authorizationRevision, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -420,9 +432,11 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
 
       {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
 
-      {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} />}
+      {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} timeZone={timeZone} />}
 
-      {run && <RunStatusLine run={run} accountName={accountName} timeZone={timeZone} />}
+      {run && (
+        <RunStatusLine run={run} accountName={accountName} authorizationRevision={authorizationRevision} timeZone={timeZone} />
+      )}
 
       {verification && <VerificationSummary record={verification} timeZone={timeZone} />}
 
@@ -537,13 +551,24 @@ function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; t
   );
 }
 
-/** Task 的工作目錄：種類、路徑、worktree 的分支與整合目標、狀態；準備失敗時醒目顯示原因。 */
-function WorkdirStatus({ workdir, runLabelOf }: { workdir: WorkdirView; runLabelOf: (runId: string) => string }) {
+/** Task 的工作目錄：種類、路徑、worktree 的分支與整合目標、狀態；準備失敗時醒目顯示原因；有清理登記時顯示清理狀態。 */
+function WorkdirStatus({
+  workdir,
+  runLabelOf,
+  timeZone,
+}: {
+  workdir: WorkdirView;
+  runLabelOf: (runId: string) => string;
+  timeZone?: string;
+}) {
   const failed = workdir.status === "failed";
+  const removed = workdir.cleanup?.status === "cleaned";
   return (
     <div className={failed ? "task-workdir task-workdir-failed" : "task-workdir"} role="group" aria-label="工作目錄">
       <p>
-        {workdir.kind === "worktree" ? "Worktree" : "輸出目錄"}：<code>{workdir.path}</code>
+        {workdir.kind === "worktree" ? "Worktree" : "輸出目錄"}：
+        <code className={removed ? "task-workdir-removed" : undefined}>{workdir.path}</code>
+        {removed && "（已移除）"}
       </p>
       {workdir.branch && (
         <p>
@@ -551,13 +576,40 @@ function WorkdirStatus({ workdir, runLabelOf }: { workdir: WorkdirView; runLabel
           {workdir.base_branch && ` → 整合到 ${workdir.base_branch}`}
         </p>
       )}
-      <p>狀態：{failed ? "準備失敗" : "已就緒"}</p>
+      {!removed && <p>狀態：{failed ? "準備失敗" : "已就緒"}</p>}
       {failed && <p role="alert">工作目錄無法使用，不會派工：{workdir.failure}</p>}
       <p>
         {workdir.run_ids.length === 0
           ? "尚未有 Run 在此目錄執行"
           : `在此目錄執行過的 Run：${workdir.run_ids.map(runLabelOf).join("、")}`}
       </p>
+      {workdir.cleanup && <CleanupStatusLine cleanup={workdir.cleanup} timeZone={timeZone} />}
+    </div>
+  );
+}
+
+/**
+ * worktree 的清理狀態；與 Task 是否完成分開顯示，清理失敗不代表 Task 失敗。
+ * 待清理且上次失敗時顯示原因與自動重試時間；清理失敗（不再自動重試）時醒目顯示原因。
+ */
+function CleanupStatusLine({ cleanup, timeZone }: { cleanup: WorktreeCleanup; timeZone?: string }) {
+  return (
+    <div
+      className={cleanup.status === "failed" ? "task-workdir-cleanup task-workdir-cleanup-failed" : "task-workdir-cleanup"}
+      role="status"
+      aria-label="清理狀態"
+    >
+      <p>
+        清理：<strong>{CLEANUP_STATUS_LABELS[cleanup.status]}</strong>
+      </p>
+      {cleanup.status === "pending" && cleanup.failure && <p>上次清理失敗：{cleanup.failure}</p>}
+      {cleanup.status === "pending" && cleanup.failure && cleanup.next_attempt_at !== null && (
+        <p>將於 {formatTimestamp(cleanup.next_attempt_at, timeZone)} 自動重試</p>
+      )}
+      {cleanup.status === "failed" && <p role="alert">清理失敗，worktree 已保留：{cleanup.failure}</p>}
+      {cleanup.status === "cleaned" && cleanup.finished_at !== null && (
+        <p>已清理（{formatTimestamp(cleanup.finished_at, timeZone)}）</p>
+      )}
     </div>
   );
 }
@@ -618,8 +670,27 @@ function QueuedStatus({ position, reasons }: { position: number | null; reasons:
   );
 }
 
-/** 最新 Run 的狀態列：狀態、使用的帳號、程序 pid、結束原因、lease 最後心跳；已要求取消時說明正在等程序停止。 */
-function RunStatusLine({ run, accountName, timeZone }: { run: RunView; accountName: string | null; timeZone?: string }) {
+/**
+ * 最新 Run 的狀態列：狀態、使用的帳號、程序 pid、結束原因、lease 最後心跳；已要求取消時說明正在等程序停止。
+ * 撤銷授權前已准入的 Run 沿用准入時的 revision（ADR-0003 R1-a），比目前舊時另外標示。
+ */
+function RunStatusLine({
+  run,
+  accountName,
+  authorizationRevision,
+  timeZone,
+}: {
+  run: RunView;
+  accountName: string | null;
+  authorizationRevision: number | null;
+  timeZone?: string;
+}) {
+  const usesOlderAuthorization =
+    isRunActive(run.status) &&
+    run.admitted_at !== null &&
+    run.authorization_revision !== null &&
+    authorizationRevision !== null &&
+    run.authorization_revision < authorizationRevision;
   return (
     <div className="task-run" role="group" aria-label="Run 狀態">
       <p>
@@ -627,6 +698,11 @@ function RunStatusLine({ run, accountName, timeZone }: { run: RunView; accountNa
         {accountName && `，帳號 ${accountName}`}
         {run.process && `，程序 pid ${run.process.pid}`}
       </p>
+      {usesOlderAuthorization && (
+        <p>
+          沿用舊授權（revision {run.authorization_revision}，目前 {authorizationRevision}）
+        </p>
+      )}
       {run.end_reason && <p>結束原因：{run.end_reason}</p>}
       {run.lease && <p>最後心跳：{formatTimestamp(run.lease.last_heartbeat_at, timeZone)}</p>}
       {isRunActive(run.status) && run.cancel_requested_at !== null && <p>取消中，等待程序停止…</p>}

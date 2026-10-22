@@ -329,6 +329,22 @@ body {
   border-color: #ff8182;
 }
 
+.task-workdir-removed {
+  color: #656d76;
+  text-decoration: line-through;
+}
+
+.task-workdir-cleanup {
+  display: grid;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed #d0d7de;
+}
+
+.task-workdir-cleanup-failed [role="alert"] {
+  color: #cf222e;
+}
+
 .task-integration ul,
 .task-budget ul,
 .integration-queue ol {

@@ -41,6 +41,8 @@ pub struct TaskBoardData {
     pub runs: Vec<RunView>,
     /// 這個 Workspace 的全部驗證紀錄，由舊到新（票 13）。
     pub verifications: Vec<VerificationRecord>,
+    /// 目前生效的授權 revision；尚未確認為 `None`（面板據此標示沿用舊授權的 Run，票 24）。
+    pub authorization_revision: Option<i64>,
     /// 平台登記的工作目錄與曾在其中執行的 Run（票 20）。
     pub workdirs: Vec<WorkdirView>,
     /// 這個 Workspace 的整合項目，依排入順序（票 20）。
@@ -137,6 +139,7 @@ impl Store {
                 let tasks = task::board(&loaded.ctx(&workspace_id));
                 let runs = super::runs::views(&loaded);
                 let verifications = super::verification::load_verifications(conn, &workspace_id)?;
+                let authorization_revision = loaded.authorization.as_ref().map(|a| a.revision);
                 let workdirs = super::workdirs::views(conn, &loaded.workdirs)?;
                 let budgets = loaded.tasks.iter().map(|t| budget::view(&loaded.budgets, t)).collect();
                 Ok(Ok(TaskBoardData {
@@ -144,6 +147,7 @@ impl Store {
                     tasks,
                     runs,
                     verifications,
+                    authorization_revision,
                     workdirs,
                     integrations: loaded.integrations,
                     budgets,

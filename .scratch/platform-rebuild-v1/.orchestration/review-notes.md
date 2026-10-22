@@ -37,3 +37,10 @@
 ## 9. 票 24 的小問題
 - `crates/baton-api/src/shared_settings.rs:20` 未使用的 `StoreError` import（編譯警告）。
 - `crates/baton-domain/src/authorization.rs:405` 說明文字與 `crates/baton-store/src/runs.rs` 的 `RUN_COLUMNS_QUALIFIED` 有多餘空白（同第 8 項的折行問題）。
+
+## 10. 外部操作查證的兩個設計取捨（票 26）
+- 已成功、在 `verifying` 的 Task 若留下未回報的外部操作，查證後回到 `ready` 重新派工，整件工作會重做一次；評估是否改為只重新驗證。
+- 已因其他原因等待裁定的 Task 不會被加入「結果未知」請求的阻擋範圍，另一個裁定回答後會先恢復派出，要到新 Run 登記同一個鍵才被擋下（安全但多跑一次）。
+
+## 11. 原生 Session 綁定的邊界（票 15）
+- `bind_native` 遇到 `InUse{driven:false}`（另一個暫停中的 Session 綁著同一原生 ID）時不要求取消，但 `run.native_session_id` 仍會被設定；之後該暫停 Session 被另一 Run 以 `--resume` 接續時，可能兩個程序同時驅動同一原生 Session。改為 `driven:false` 時也拒絕綁定（或取消）。

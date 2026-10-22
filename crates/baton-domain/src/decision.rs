@@ -758,6 +758,8 @@ pub struct DecisionContext<'a> {
     pub authority: &'a AuthorityPolicy,
     /// 各 Task 成果的最新版本（單次批准綁定的成果版本，票 23）。
     pub artifacts: &'a [ArtifactMark],
+    /// Workspace 的全部授權 revision（由舊到新）：權限提示依「Run 准入時固定的 revision」判定（R1-a，票 24）。
+    pub authorizations: &'a [AuthorizationRevision],
     /// 各 Task 的修正與重試預算（票 36）：核准用盡時建立的請求要重設它。
     pub budgets: &'a [TaskBudget],
 }
@@ -775,6 +777,12 @@ impl DecisionContext<'_> {
         self.uses.iter().find(|u| u.request_id == request_id)
     }
 
+    /// Run 沿用的授權：准入時固定的 revision，不是 Workspace 目前生效的 revision（R1-a）。
+    /// 准入時還沒有任何授權的 Run 是 `None`：之後才確認的授權不會回頭套用到它身上。
+    fn authorization_of(&self, run: &Run) -> Option<&AuthorizationRevision> {
+        run.authorization_revision.and_then(|number| self.authorizations.iter().find(|r| r.revision == number))
+    }
+
     fn request(&self, id: &str) -> Result<&DecisionRequest, DecisionError> {
         self.requests.iter().find(|r| r.id == id).ok_or_else(|| DecisionError::NotFound(id.to_string()))
     }
@@ -788,10 +796,6 @@ impl DecisionContext<'_> {
         }
         let task = self.task.task(&run.task_id).ok_or_else(|| DecisionError::TaskNotFound(run.task_id.clone()))?;
         Ok((run, task))
-    }
-
-    fn authorization_revision(&self) -> Option<i64> {
-        self.task.authorization.map(|a| a.revision)
     }
 
     /// 目標版本已變更的原因；仍有效回傳 `None`。
@@ -852,7 +856,6 @@ pub fn decide(ctx: &DecisionContext<'_>, command: DecisionCommand, now: Timestam
 /// 新請求的共同欄位；`blocking` 只有目標 Task。
 #[allow(clippy::too_many_arguments)]
 fn new_request(
-    ctx: &DecisionContext<'_>,
     id: String,
     run: &Run,
     caller: &Task,
@@ -882,7 +885,8 @@ fn new_request(
         target: DecisionTarget {
             task_id: target.id.clone(),
             contract_version: target.contract_version,
-            authorization_revision: (kind == DecisionKind::Permission).then(|| ctx.authorization_revision()).flatten(),
+            // 權限提示依 Run 准入時固定的 revision 判定（R1-a，票 24），記下的就是那一版
+            authorization_revision: (kind == DecisionKind::Permission).then_some(run.authorization_revision).flatten(),
         },
         revision: 1,
         event_version: 0,
@@ -968,7 +972,7 @@ fn request(
         return Ok(DecisionChange::new(DecisionOutcome::Requested { request_id: existing.id.clone(), existing: true }));
     }
     let mut record =
-        new_request(ctx, request_id.clone(), run, task, task, DecisionKind::Agent, content.question, content.reason, now);
+        new_request(request_id.clone(), run, task, task, DecisionKind::Agent, content.question, content.reason, now);
     record.options = content.options;
     record.recommendation = content.recommendation;
     record.evidence = content.evidence;
@@ -1033,7 +1037,7 @@ fn permission_prompt(
     }
     let (run, task) = ctx.current_run(run_id, generation)?;
     let workspace = ctx.task.workspace.ok_or_else(|| DecisionError::WorkspaceNotFound(ctx.task.workspace_id.to_string()))?;
-    let authorization: Option<&AuthorizationRevision> = ctx.task.authorization;
+    let authorization = ctx.authorization_of(run);
     let summary = permission::summarize(tool_name, &input);
 
     let (capability, reason) = match permission::evaluate(tool_name, &input, &workspace.path, authorization) {
@@ -1171,7 +1175,7 @@ fn permission_prompt(
         }
         _ => None,
     };
-    let mut record = new_request(ctx, request_id.clone(), run, task, task, DecisionKind::Permission, question, reason_text, now);
+    let mut record = new_request(request_id.clone(), run, task, task, DecisionKind::Permission, question, reason_text, now);
     record.options = vec![
         DecisionOption {
             id: OPTION_ALLOW_ONCE.to_string(),
@@ -1289,7 +1293,7 @@ fn controller_action(
 
     let question = format!("Controller 要「{}」：{}，核准嗎？", matter.label(), content.summary);
     let reason = format!("依決策權限表，「{}」必須由你裁定，Controller 不能自行處理。Controller 的理由：{}", matter.label(), content.reason);
-    let mut record = new_request(ctx, request_id.clone(), run, caller, target, DecisionKind::Authority, question, reason, now);
+    let mut record = new_request(request_id.clone(), run, caller, target, DecisionKind::Authority, question, reason, now);
     record.options = vec![
         DecisionOption {
             id: OPTION_APPROVE.to_string(),

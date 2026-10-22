@@ -63,13 +63,28 @@ impl Store {
                 if matches!(command, RunCommand::Dispatch { .. }) {
                     loaded.guards = super::guards::load_active_guards(tx, &workspace_id, now)?;
                 }
-                match decide_in(&loaded, &workspace_id, &loaded.tasks, command, now) {
+                // 准入（launch intent）時固定的共同設定版本，與授權的重新檢查在同一個交易中取得（票 24）
+                let (launching, settings_version) = match &command {
+                    RunCommand::BeginLaunch { run_id, .. } => {
+                        (true, super::shared_settings::admission_settings_version(tx, run_id)?)
+                    }
+                    _ => (false, None),
+                };
+                match decide_with(&loaded, &workspace_id, &loaded.tasks, command, now, settings_version) {
                     Err(rejected) => Ok(Err(rejected)),
                     Ok(mut change) => {
                         // 派工（唯一會產生 Outbox 項目的命令）時，Prompt 附上收件 Task 的未讀訊息摘要
                         super::messages::attach_unread_summary(tx, &mut change, now)?;
                         if change.changed() {
                             save(tx, &change, now)?;
+                        }
+                        // 准入被拒：Task 已回到 ready，在同一個交易中重新排隊，由排程依新授權判定並顯示等待原因
+                        if let Some(task) = change.task.as_ref().filter(|t| launching && t.status == TaskStatus::Ready) {
+                            tx.execute(
+                                "INSERT INTO dispatch_request (task_id, workspace_id, priority, requested_at)
+                                 VALUES (?1, ?2, 0, ?3) ON CONFLICT(task_id) DO NOTHING",
+                                rusqlite::params![task.id, workspace_id, now.as_millis()],
+                            )?;
                         }
                         Ok(Ok(change))
                     }
@@ -106,6 +121,17 @@ impl Store {
             })
             .await?;
         Ok(result?)
+    }
+
+    /// 已准入、尚未結束、沿用舊授權而且保有已撤銷範圍的 Run（票 24）；Workspace 不存在時是空的。
+    pub async fn legacy_runs(&self, workspace_id: &str) -> StoreResult<Vec<run::LegacyRun>> {
+        let workspace_id = workspace_id.to_string();
+        self.read(move |conn| {
+            let loaded = load(conn, &workspace_id)?;
+            let revisions = load_authorization_revisions(conn, &workspace_id)?;
+            Ok(run::legacy_runs(&loaded.runs, &loaded.tasks, &revisions))
+        })
+        .await
     }
 
     /// 派工 Outbox 中尚未處理的啟動要求（跨 Workspace，依派工順序）。
@@ -157,17 +183,30 @@ pub(crate) fn decide_in(
     command: RunCommand,
     now: Timestamp,
 ) -> Result<RunChange, RunError> {
+    decide_with(loaded, workspace_id, tasks, command, now, None)
+}
+
+/// 同 `decide_in`，另帶准入時要固定的共同設定版本（只有 `BeginLaunch` 使用）。
+fn decide_with(
+    loaded: &Loaded,
+    workspace_id: &str,
+    tasks: &[Task],
+    command: RunCommand,
+    now: Timestamp,
+    settings_version: Option<i64>,
+) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
-    let ctx = RunContext {
+    let run_ctx = RunContext {
         task: &task_ctx,
         runs: &loaded.runs,
         leases: &loaded.leases,
         workdirs: &loaded.workdirs,
         guards: &loaded.guards,
+        settings_version,
         budgets: &loaded.budgets,
     };
-    run::decide(&ctx, command, now)
+    run::decide(&run_ctx, command, now)
 }
 
 /// 取消 Task 之後，同一個交易中要求取消它還在進行的 Run。
@@ -206,11 +245,9 @@ pub(crate) fn views(loaded: &Loaded) -> Vec<RunView> {
 
 const RUN_COLUMNS: &str = "id, workspace_id, task_id, status, version, generation, contract_version, \
      authorization_revision, command_id, pid, process_created_at, command_hash, cancel_requested_at, end_reason, \
-     created_at, updated_at, started_at, ended_at, profile_id, native_session_id";
-const RUN_COLUMNS_QUALIFIED: &str = "r.id, r.workspace_id, r.task_id, r.status, r.version, r.generation, \
-     r.contract_version, r.authorization_revision, r.command_id, r.pid, r.process_created_at, r.command_hash, \
-     r.cancel_requested_at, r.end_reason, r.created_at, r.updated_at, r.started_at, r.ended_at, r.profile_id, r.native_session_id";
-const RUN_COLUMN_COUNT: usize = 20;
+     created_at, updated_at, started_at, ended_at, profile_id, native_session_id, admitted_at, settings_version";
+const RUN_COLUMNS_QUALIFIED: &str = "r.id, r.workspace_id, r.task_id, r.status, r.version, r.generation,      r.contract_version, r.authorization_revision, r.command_id, r.pid, r.process_created_at, r.command_hash,      r.cancel_requested_at, r.end_reason, r.created_at, r.updated_at, r.started_at, r.ended_at, r.profile_id,      r.native_session_id, r.admitted_at, r.settings_version";
+const RUN_COLUMN_COUNT: usize = 22;
 
 const LEASE_COLUMNS: &str =
     "run_id, task_id, generation, acquired_at, last_heartbeat_at, expires_at, released_at, release_reason";
@@ -248,6 +285,8 @@ fn run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
         // 票 19 之前建立的 Run 沒有帳號
         profile_id: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
         native_session_id: r.get(19)?,
+        admitted_at: timestamp(20)?,
+        settings_version: r.get(21)?,
     })
 }
 
@@ -323,9 +362,11 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
         let millis = |t: Option<Timestamp>| t.map(|t| t.as_millis());
         tx.execute(
             &format!(
-                "INSERT INTO run ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                "INSERT INTO run ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                  ON CONFLICT(id) DO UPDATE SET
                    status = excluded.status, version = excluded.version, command_id = excluded.command_id,
+                   authorization_revision = excluded.authorization_revision, admitted_at = excluded.admitted_at,
+                   settings_version = excluded.settings_version,
                    pid = excluded.pid, process_created_at = excluded.process_created_at,
                    command_hash = excluded.command_hash, cancel_requested_at = excluded.cancel_requested_at,
                    end_reason = excluded.end_reason, updated_at = excluded.updated_at,
@@ -353,6 +394,8 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
                 millis(run.ended_at),
                 run.profile_id,
                 run.native_session_id,
+                millis(run.admitted_at),
+                run.settings_version,
             ],
         )?;
     }

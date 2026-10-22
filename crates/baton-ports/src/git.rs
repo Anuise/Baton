@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::{AdvanceOutcome, GitState, MergeOutcome, PortError, PortResult};
+use crate::{AdvanceOutcome, GitState, MergeOutcome, PortError, PortResult, WorktreeState};
 
 /// 錯誤訊息中 git 輸出摘要的長度上限（字元）。
 const SUMMARY_LIMIT: usize = 800;
@@ -137,6 +137,108 @@ pub fn git_advance_branch(
         }),
         None => Err(failure(&command, &result)),
     }
+}
+
+/// 核對 `target` 是不是 `repo` 登記的 worktree（不含主 checkout），以及其中未保存的檔案（票 21）。
+pub fn git_inspect_worktree(repo: &Path, target: &Path) -> PortResult<WorktreeState> {
+    if !target.exists() {
+        return Ok(WorktreeState::Missing);
+    }
+    // 先清掉目錄已不存在的登記，避免舊登記剛好對到後來出現在同一路徑的其他目錄
+    prune_worktrees(repo)?;
+    let Some(worktree) = registered_worktree(repo, target)? else {
+        return Ok(WorktreeState::Foreign);
+    };
+    let branch = worktree.branch.map(|r| r.strip_prefix("refs/heads/").map(str::to_string).unwrap_or(r));
+    Ok(WorktreeState::Registered { branch, unsaved: unsaved_files(target)? })
+}
+
+/// 移除 `repo` 登記的 worktree `target`：改名為 `trash`、清掉 Git 的登記、再刪除 `trash`（票 21）。
+/// 冪等；`target` 不是登記的 worktree（或是主 checkout）時拒絕且不刪任何東西。絕不刪除分支。
+pub fn git_remove_worktree(repo: &Path, target: &Path, trash: &Path) -> PortResult<()> {
+    prune_worktrees(repo)?;
+    if target.exists() {
+        if registered_worktree(repo, target)?.is_none() {
+            return Err(PortError::Failed(format!(
+                "{} 不是平台登記的 worktree（或是 {} 的主 checkout），拒絕移除",
+                target.display(),
+                repo.display()
+            )));
+        }
+        // trash 若已存在，是平台上一次移除到一半的殘留
+        remove_tree(trash)?;
+        create_parent(trash)?;
+        // 改名是這次移除唯一可能因檔案被占用而失敗的一步；失敗時什麼都沒變
+        std::fs::rename(target, trash).map_err(|e| {
+            PortError::Failed(format!(
+                "無法把 worktree {} 移到 {}：{e}。檔案可能被其他程式占用，請關閉使用這個目錄的程式後重試",
+                target.display(),
+                trash.display()
+            ))
+        })?;
+    }
+    // 目錄已不在原處，prune 會清掉 Git 的 worktree 登記（分支保留）
+    prune_worktrees(repo)?;
+    remove_tree(trash)
+}
+
+/// `target` 對應的 `repo` worktree 登記；主 checkout（第一筆）不算。
+fn registered_worktree(repo: &Path, target: &Path) -> PortResult<Option<Worktree>> {
+    Ok(worktrees(repo)?.into_iter().skip(1).find(|w| same_path(&w.path, target)))
+}
+
+/// worktree 內未提交的變更與未追蹤的檔案（不含被忽略的），路徑相對於 worktree，依 git 輸出順序。
+fn unsaved_files(dir: &Path) -> PortResult<Vec<String>> {
+    let mut command = git(dir);
+    command.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    let result = output(&mut command)?;
+    if !result.success {
+        return Err(failure(&command, &result));
+    }
+    // 每筆是 `XY 路徑`，以 NUL 分隔；改名／複製的下一個欄位是原路徑，略過
+    let mut fields = result.stdout.split('\0').filter(|f| !f.is_empty());
+    let mut found = Vec::new();
+    while let Some(entry) = fields.next() {
+        let (status, path) = (entry.get(..2).unwrap_or(""), entry.get(3..).unwrap_or(""));
+        if status.contains(['R', 'C']) {
+            fields.next();
+        }
+        found.push(path.to_string());
+    }
+    Ok(found)
+}
+
+/// 刪除目錄樹；先解除唯讀（Windows 不能刪唯讀檔，例如 .git 物件），不存在時不是錯誤。
+fn remove_tree(path: &Path) -> PortResult<()> {
+    /// 遞迴解除唯讀；不跟隨符號連結（避免改到目錄外的檔案）。
+    fn make_writable(path: &Path) -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                make_writable(&entry?.path())?;
+            }
+        }
+        let mut permissions = meta.permissions();
+        if permissions.readonly() {
+            // 只是為了接著刪除，Unix 上暫時變成任何人可寫無妨
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            std::fs::set_permissions(path, permissions)?;
+        }
+        Ok(())
+    }
+    if matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        return Ok(());
+    }
+    make_writable(path).and_then(|()| std::fs::remove_dir_all(path)).map_err(|e| {
+        PortError::Failed(format!(
+            "無法刪除 {}：{e}。檔案可能被其他程式占用，請關閉使用這個目錄的程式後重試",
+            path.display()
+        ))
+    })
 }
 
 /// 準備整合目錄：不存在就建立 detached worktree；已是本 repo 的 detached worktree 就整個重設。
@@ -592,5 +694,160 @@ mod tests {
         assert_eq!(tip(&repo, "main"), commit_b);
         assert!(repo.join("a.txt").exists() && repo.join("b.txt").exists());
         assert_eq!(sh(&repo, &["status", "--porcelain"]), "");
+    }
+
+    fn trash_dir(repo: &Path, id: &str) -> PathBuf {
+        repo.join(".baton").join("trash").join(id)
+    }
+
+    fn registered(branch: &str, unsaved: &[&str]) -> WorktreeState {
+        WorktreeState::Registered {
+            branch: Some(branch.to_string()),
+            unsaved: unsaved.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn worktree_list(repo: &Path) -> String {
+        sh(repo, &["worktree", "list", "--porcelain"])
+    }
+
+    #[test]
+    fn removing_a_clean_worktree_keeps_its_branch_and_everything_else() {
+        let (_temp, repo) = init_repo();
+        let (branch_a, dir_a) = task_with_commit(&repo, "task-a", "a.txt", "a\n");
+        let (branch_b, dir_b) = task_with_commit(&repo, "task-b", "b.txt", "b\n");
+        let (tip_a, tip_b, main_before) = (tip(&repo, &branch_a), tip(&repo, &branch_b), tip(&repo, "main"));
+        let status_before = sh(&repo, &["status", "--porcelain"]);
+        let trash = trash_dir(&repo, "task-a");
+
+        assert_eq!(git_inspect_worktree(&repo, &dir_a).unwrap(), registered("baton/task-a", &[]));
+        git_remove_worktree(&repo, &dir_a, &trash).unwrap();
+
+        assert!(!dir_a.exists() && !trash.exists());
+        assert!(!worktree_list(&repo).contains("task-a"), "{}", worktree_list(&repo));
+        assert_eq!(tip(&repo, &branch_a), tip_a);
+        assert_eq!(tip(&repo, "main"), main_before);
+        assert_eq!(std::fs::read_to_string(repo.join("README.md")).unwrap(), "hello\n");
+        assert_eq!(sh(&repo, &["status", "--porcelain"]), status_before);
+        // 另一個 Task 的 worktree 不受影響
+        assert_eq!(git_inspect_worktree(&repo, &dir_b).unwrap(), registered("baton/task-b", &[]));
+        assert!(dir_b.join("b.txt").exists());
+        assert_eq!(tip(&repo, &branch_b), tip_b);
+
+        // 分支保留，之後可以重建同一個 worktree
+        git_create_worktree(&repo, &branch_a, &dir_a).unwrap();
+        assert!(dir_a.join("a.txt").exists());
+    }
+
+    #[test]
+    fn inspect_lists_changed_renamed_and_untracked_files_but_not_ignored_ones() {
+        let (_temp, repo) = init_repo();
+        let (_branch, dir) = task_with_commit(&repo, "task-a", "a.txt", "a\n");
+        commit_file(&dir, "old.txt", "old\n", "加入 old.txt");
+        commit_file(&dir, ".gitignore", "build/\n", "忽略建置輸出");
+
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        sh(&dir, &["mv", "old.txt", "new.txt"]);
+        std::fs::write(dir.join("untracked.txt"), "u\n").unwrap();
+        std::fs::create_dir_all(dir.join("notes")).unwrap();
+        std::fs::write(dir.join("notes").join("x.txt"), "x\n").unwrap();
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build").join("out.bin"), "bin").unwrap();
+
+        assert_eq!(
+            git_inspect_worktree(&repo, &dir).unwrap(),
+            registered("baton/task-a", &["a.txt", "new.txt", "notes/x.txt", "untracked.txt"])
+        );
+    }
+
+    #[test]
+    fn main_checkout_and_plain_directory_are_foreign_and_never_removed() {
+        let (temp, repo) = init_repo();
+        let plain = temp.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("keep.txt"), "keep").unwrap();
+        let trash = trash_dir(&repo, "x");
+
+        for dir in [&repo, &plain] {
+            assert_eq!(git_inspect_worktree(&repo, dir).unwrap(), WorktreeState::Foreign);
+            let error = git_remove_worktree(&repo, dir, &trash).unwrap_err();
+            assert!(format!("{error:?}").contains("拒絕移除"), "{error:?}");
+        }
+        assert!(repo.join("README.md").exists() && plain.join("keep.txt").exists());
+        assert!(!trash.exists());
+        assert_eq!(sh(&repo, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn missing_target_is_reported_and_removal_is_idempotent() {
+        let (_temp, repo) = init_repo();
+        let dir = worktree_dir(&repo, "nope");
+        let trash = trash_dir(&repo, "nope");
+
+        assert_eq!(git_inspect_worktree(&repo, &dir).unwrap(), WorktreeState::Missing);
+        git_remove_worktree(&repo, &dir, &trash).unwrap();
+        git_remove_worktree(&repo, &dir, &trash).unwrap();
+
+        // 移除完成後再做一次也成功
+        let (_branch, dir_a) = task_with_commit(&repo, "task-a", "a.txt", "a\n");
+        let trash_a = trash_dir(&repo, "task-a");
+        git_remove_worktree(&repo, &dir_a, &trash_a).unwrap();
+        git_remove_worktree(&repo, &dir_a, &trash_a).unwrap();
+        assert_eq!(git_inspect_worktree(&repo, &dir_a).unwrap(), WorktreeState::Missing);
+    }
+
+    #[test]
+    fn removal_finishes_after_a_crash_between_rename_and_cleanup() {
+        let (_temp, repo) = init_repo();
+        let (branch, dir) = task_with_commit(&repo, "task-a", "a.txt", "a\n");
+        let tip_before = tip(&repo, &branch);
+        let trash = trash_dir(&repo, "task-a");
+        // 模擬改名後、清理前崩潰
+        std::fs::create_dir_all(trash.parent().unwrap()).unwrap();
+        std::fs::rename(&dir, &trash).unwrap();
+
+        assert_eq!(git_inspect_worktree(&repo, &dir).unwrap(), WorktreeState::Missing);
+        git_remove_worktree(&repo, &dir, &trash).unwrap();
+
+        assert!(!trash.exists() && !dir.exists());
+        assert!(!worktree_list(&repo).contains("task-a"), "{}", worktree_list(&repo));
+        assert_eq!(tip(&repo, &branch), tip_before);
+    }
+
+    #[test]
+    fn stale_trash_from_an_earlier_attempt_is_replaced() {
+        let (_temp, repo) = init_repo();
+        let (_branch, dir) = task_with_commit(&repo, "task-a", "a.txt", "a\n");
+        let trash = trash_dir(&repo, "task-a");
+        std::fs::create_dir_all(trash.join("leftover")).unwrap();
+        std::fs::write(trash.join("leftover").join("old.txt"), "old").unwrap();
+
+        git_remove_worktree(&repo, &dir, &trash).unwrap();
+        assert!(!trash.exists() && !dir.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn removal_fails_without_changes_while_a_file_is_held_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (_temp, repo) = init_repo();
+        let (branch, dir) = task_with_commit(&repo, "task-a", "a.txt", "a\n");
+        let tip_before = tip(&repo, &branch);
+        let trash = trash_dir(&repo, "task-a");
+        let locked = dir.join("locked.txt");
+        std::fs::write(&locked, "busy").unwrap();
+        let handle = std::fs::OpenOptions::new().read(true).share_mode(0).open(&locked).unwrap();
+
+        let error = git_remove_worktree(&repo, &dir, &trash).unwrap_err();
+        assert!(format!("{error:?}").contains("占用"), "{error:?}");
+        assert_eq!(git_inspect_worktree(&repo, &dir).unwrap(), registered("baton/task-a", &["locked.txt"]));
+        assert!(dir.join("a.txt").exists() && locked.exists());
+        assert_eq!(tip(&repo, &branch), tip_before);
+
+        drop(handle);
+        git_remove_worktree(&repo, &dir, &trash).unwrap();
+        assert!(!dir.exists() && !trash.exists());
+        assert_eq!(tip(&repo, &branch), tip_before);
     }
 }

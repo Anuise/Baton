@@ -24,6 +24,7 @@ import type {
   VerificationRecord,
   VerificationView,
   WorkdirView,
+  WorktreeCleanup,
 } from "./runtimeClient";
 
 /** 測試用的平台狀態：Windows 11 26H2 Pro x64，正式支援。 */
@@ -202,6 +203,8 @@ export function runView(overrides: Partial<RunView> = {}): RunView {
     generation: 1,
     contract_version: 1,
     authorization_revision: null,
+    admitted_at: null,
+    settings_version: null,
     command_id: null,
     process: null,
     cancel_requested_at: null,
@@ -490,6 +493,25 @@ export function workdirView(overrides: Partial<WorkdirView> = {}): WorkdirView {
     attempted_at: CHECKED_AT,
     ready_at: CHECKED_AT,
     run_ids: ["run_1"],
+    cleanup: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的清理登記：task_1 已整合的 worktree 等待清理，尚未嘗試過。 */
+export function worktreeCleanup(overrides: Partial<WorktreeCleanup> = {}): WorktreeCleanup {
+  return {
+    task_id: "task_1",
+    workspace_id: "ws_1",
+    path: "C:\\work\\app\\.baton\\worktrees\\task_1",
+    branch: "baton/task_1",
+    status: "pending",
+    version: 1,
+    attempts: 0,
+    failure: null,
+    requested_at: CHECKED_AT,
+    next_attempt_at: null,
+    finished_at: null,
     ...overrides,
   };
 }

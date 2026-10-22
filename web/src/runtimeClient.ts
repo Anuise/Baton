@@ -112,6 +112,25 @@ export interface AuthorizationView {
   templates: AuthorizationTemplate[];
   capabilities: { capability: Capability; label: string; high_risk: boolean }[];
   risk_disclosure: string;
+  /** 已准入、尚未結束、仍沿用較舊 revision（且舊 revision 有目前已撤銷或縮小的能力）的 Run。 */
+  legacy_runs: LegacyRun[];
+}
+
+/** 撤銷授權前已准入、仍沿用舊授權 revision 的 Run（對應 Rust 的 LegacyRun）。 */
+export interface LegacyRun {
+  run_id: string;
+  task_id: string;
+  task_title: string;
+  /** 只會是 starting 或 running。 */
+  status: RunStatus;
+  /** 這個 Run 沿用的舊 revision。 */
+  authorization_revision: number;
+  /** 准入時間（UTC 毫秒）。 */
+  admitted_at: number | null;
+  /** 已要求停止、正在等程序確認停止。 */
+  cancel_requested: boolean;
+  /** 舊 revision 有、但目前 revision 已移除或縮小的能力。 */
+  revoked_capabilities: Capability[];
 }
 
 export interface ConfirmationSummary {
@@ -486,7 +505,12 @@ export interface Run {
   /** 同一個 Task 的 Run 依序遞增，最新的是最大者。 */
   generation: number;
   contract_version: number;
+  /** 准入後代表准入時依據的授權 revision。 */
   authorization_revision: number | null;
+  /** 准入時間（UTC 毫秒）；尚未准入（queued）或票 24 之前的舊資料為 null。 */
+  admitted_at: number | null;
+  /** 准入時固定的共同設定版本；沒有採用任何版本為 null。 */
+  settings_version: number | null;
   command_id: string | null;
   /** 啟動回執；回執寫入前為 null。 */
   process: ProcessRecord | null;
@@ -591,6 +615,8 @@ export interface TaskBoard {
   capabilities: { capability: Capability; label: string; high_risk: boolean }[];
   /** Workspace 全部驗證紀錄，由舊到新。 */
   verifications: VerificationRecord[];
+  /** Workspace 目前生效的授權 revision；尚未確認為 null。 */
+  authorization_revision: number | null;
   /** 各 Task 在平台登記的工作目錄。 */
   workdirs: WorkdirView[];
   /** 這個 Workspace 的整合佇列項目，依排入順序。 */
@@ -644,6 +670,34 @@ export interface WorkdirView {
   ready_at: number | null;
   /** 在這個目錄中執行過的 Run，依建立順序。 */
   run_ids: string[];
+  /** worktree 的清理登記；Task 尚未完成並整合、或是輸出目錄時為 null。 */
+  cleanup: WorktreeCleanup | null;
+}
+
+/**
+ * worktree 清理狀態：pending 待清理（failure 不為 null 時表示上一次失敗、會在 next_attempt_at 自動重試）、
+ * removing 清理中、cleaned 已清理、failed 清理失敗（重試用完，不再自動重試，worktree 保留）。
+ */
+export type CleanupStatus = "pending" | "removing" | "cleaned" | "failed";
+
+/** 開發 Task 完成並整合後的 worktree 清理登記（對應 Rust 的 WorktreeCleanup）；時間是 UTC 毫秒。 */
+export interface WorktreeCleanup {
+  task_id: string;
+  workspace_id: string;
+  /** 要移除的 worktree。 */
+  path: string;
+  /** 平台分支。 */
+  branch: string;
+  status: CleanupStatus;
+  version: number;
+  /** 已開始過的嘗試次數。 */
+  attempts: number;
+  /** 最近一次失敗的原因（給使用者看）。 */
+  failure: string | null;
+  requested_at: number;
+  /** pending 時下一次自動重試的時間。 */
+  next_attempt_at: number | null;
+  finished_at: number | null;
 }
 
 export type IntegrationStatus = "queued" | "merging" | "verifying" | "advancing" | "integrated" | "failed";

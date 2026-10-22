@@ -103,6 +103,7 @@ impl World {
             uses: &[],
             authority: &policy,
             artifacts: &[],
+            authorizations: &[],
             budgets: &[],
         };
         decide(&ctx, command, T1)

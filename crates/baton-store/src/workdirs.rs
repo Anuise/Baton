@@ -121,7 +121,7 @@ pub(crate) fn load_workdirs(conn: &Connection, workspace_id: &str) -> rusqlite::
     .collect()
 }
 
-/// 每個工作目錄加上曾在其中執行的 Run：派工 Outbox 的啟動資訊中工作目錄相同的 Run（依建立順序）。
+/// 每個工作目錄加上曾在其中執行的 Run（派工 Outbox 的啟動資訊中工作目錄相同的 Run，依建立順序）與清理登記（票 21）。
 pub(crate) fn views(conn: &Connection, workdirs: &[Workdir]) -> rusqlite::Result<Vec<WorkdirView>> {
     let mut found = Vec::with_capacity(workdirs.len());
     for workdir in workdirs {
@@ -134,7 +134,8 @@ pub(crate) fn views(conn: &Connection, workdirs: &[Workdir]) -> rusqlite::Result
                 r.get::<_, String>(0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        found.push(WorkdirView { workdir: workdir.clone(), run_ids });
+        let cleanup = super::cleanup::load_cleanup(conn, &workdir.task_id)?;
+        found.push(WorkdirView { workdir: workdir.clone(), run_ids, cleanup });
     }
     Ok(found)
 }

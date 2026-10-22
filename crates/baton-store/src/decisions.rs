@@ -82,6 +82,7 @@ struct DecisionData {
     uses: Vec<ApprovalUse>,
     policy: AuthorityPolicy,
     artifacts: Vec<ArtifactMark>,
+    authorizations: Vec<baton_domain::authorization::AuthorizationRevision>,
 }
 
 impl DecisionData {
@@ -95,6 +96,7 @@ impl DecisionData {
             uses: &self.uses,
             authority: &self.policy,
             artifacts: &self.artifacts,
+            authorizations: &self.authorizations,
             budgets: &loaded.budgets,
         }
     }
@@ -561,7 +563,9 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
         )?
         .query_map([workspace_id], |r| Ok(ArtifactMark { task_id: r.get(0)?, name: r.get(1)?, version: r.get(2)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)?, artifacts })
+    // 權限提示依 Run 准入時固定的 revision 判定（票 24），所以載入全部 revision
+    let authorizations = load_authorization_revisions(conn, workspace_id)?;
+    Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)?, artifacts, authorizations })
 }
 
 /// 寫入一個新的裁定請求與它的阻擋範圍（Runtime 因預算用盡而建立的請求也走這裡，票 36）。
