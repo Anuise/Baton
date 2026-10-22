@@ -390,10 +390,12 @@ pub enum ArtifactWritePoint {
 /// 在暫存目錄中運作的 WorkspaceFs：成果寫入是真實的原子寫入（步驟與正式版相同），
 /// worktree 只在記憶體中追蹤（不依賴 git）：目錄是真的建立在暫存目錄中，Git 的狀態（哪些目錄是 repo、
 /// 簽出哪個分支、分支在哪個 commit、整合合併的結果）則由測試腳本化，並記錄每一次合併（票 20）。
+/// 移除 worktree 與正式版步驟相同：真的把目錄改名到暫放目錄再刪除，可以腳本化失敗或在中途當掉（票 21）。
 #[derive(Default)]
 pub struct FakeWorkspaceFs {
     worktrees: Mutex<HashSet<PathBuf>>,
-    dirty: Mutex<HashSet<PathBuf>>,
+    /// worktree 目錄 → 未保存的變更與未追蹤的檔案。
+    unsaved: Mutex<HashMap<PathBuf, Vec<String>>>,
     artifact_hang: Mutex<Option<ArtifactWritePoint>>,
     git: Mutex<FakeGit>,
 }
@@ -415,6 +417,12 @@ struct FakeGit {
     merge_hold: Option<Arc<tokio::sync::Notify>>,
     merges: Vec<FakeMerge>,
     commits: u32,
+    /// 下一次（依序）移除 worktree 的失敗原因（例如檔案被占用）；失敗時什麼都不變。
+    removal_failures: VecDeque<String>,
+    /// 下一次移除在目錄改名之後、刪除之前停住，直到閘門放行（只生效一次）；永不放行就等同 Runtime 在清理中崩潰。
+    removal_hold: Option<Arc<tokio::sync::Notify>>,
+    /// 至今被要求移除的 worktree 目錄，依順序。
+    removals: Vec<PathBuf>,
 }
 
 /// 一次整合合併的紀錄。
@@ -481,8 +489,38 @@ impl FakeWorkspaceFs {
         lock(&self.git).merges.clone()
     }
 
-    pub fn mark_dirty(&self, target: &Path) {
-        lock(&self.dirty).insert(target.to_path_buf());
+    /// worktree 中有未保存的變更或未追蹤的檔案（清理前的核對會看到它們）。
+    pub fn mark_unsaved(&self, target: &Path, files: &[&str]) {
+        lock(&self.unsaved).insert(target.to_path_buf(), files.iter().map(|f| f.to_string()).collect());
+    }
+
+    /// 未保存的變更已被使用者處理掉。
+    pub fn clear_unsaved(&self, target: &Path) {
+        lock(&self.unsaved).remove(target);
+    }
+
+    /// 目錄不再是 Git 登記的 worktree（例如使用者手動刪除後 Git 的登記被清掉）。
+    pub fn forget_worktree(&self, target: &Path) {
+        lock(&self.worktrees).remove(target);
+        lock(&self.git).worktree_branches.remove(target);
+    }
+
+    /// 下一次移除 worktree 以這個原因失敗（只生效一次），例如模擬 Windows 的檔案占用。
+    pub fn fail_next_removal(&self, reason: &str) {
+        lock(&self.git).removal_failures.push_back(reason.to_string());
+    }
+
+    /// 下一次移除在目錄改名之後、刪除之前停住，直到回傳的 `Notify` 被 `notify_one`（只生效一次）。
+    /// 不放行並丟棄呼叫端的 future，就等同 Runtime 在清理中崩潰。
+    pub fn hold_next_removal(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        lock(&self.git).removal_hold = Some(gate.clone());
+        gate
+    }
+
+    /// 至今被要求移除的 worktree 目錄（含失敗的嘗試），依順序。
+    pub fn removals(&self) -> Vec<PathBuf> {
+        lock(&self.git).removals.clone()
     }
 
     pub fn has_worktree(&self, target: &Path) -> bool {
@@ -606,18 +644,52 @@ impl WorkspaceFs for FakeWorkspaceFs {
         })
     }
 
-    async fn remove_worktree(&self, target: &Path) -> PortResult<()> {
-        lock(&self.worktrees).remove(target);
-        lock(&self.dirty).remove(target);
-        match tokio::fs::remove_dir_all(target).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(PortError::Failed(e.to_string())),
+    async fn inspect_worktree(&self, repo: &Path, target: &Path) -> PortResult<WorktreeState> {
+        if !target.exists() {
+            return Ok(WorktreeState::Missing);
         }
+        let registered = target != repo && lock(&self.worktrees).contains(target);
+        let Some(branch) = registered.then(|| lock(&self.git).worktree_branches.get(target).cloned()).flatten() else {
+            return Ok(WorktreeState::Foreign);
+        };
+        let unsaved = lock(&self.unsaved).get(target).cloned().unwrap_or_default();
+        Ok(WorktreeState::Registered { branch: Some(branch), unsaved })
     }
 
-    async fn inspect_dirty(&self, target: &Path) -> PortResult<DirtyState> {
-        Ok(if lock(&self.dirty).contains(target) { DirtyState::Dirty } else { DirtyState::Clean })
+    async fn remove_worktree(&self, repo: &Path, target: &Path, trash: &Path) -> PortResult<()> {
+        let io = |e: std::io::Error| PortError::Failed(e.to_string());
+        let hold = {
+            let mut git = lock(&self.git);
+            git.removals.push(target.to_path_buf());
+            if let Some(reason) = git.removal_failures.pop_front() {
+                return Err(PortError::Failed(reason));
+            }
+            git.removal_hold.take()
+        };
+        // 與正式版相同：只移除 repo 登記的 worktree，先改名到暫放目錄（Git 登記一併清掉），再刪除；不動分支
+        if target.exists() {
+            if target == repo || !lock(&self.worktrees).contains(target) {
+                return Err(PortError::Failed(format!("{} 不是平台登記的 worktree，拒絕移除", target.display())));
+            }
+            if trash.exists() {
+                tokio::fs::remove_dir_all(trash).await.map_err(io)?;
+            }
+            if let Some(parent) = trash.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(io)?;
+            }
+            tokio::fs::rename(target, trash).await.map_err(io)?;
+        }
+        lock(&self.worktrees).remove(target);
+        lock(&self.unsaved).remove(target);
+        lock(&self.git).worktree_branches.remove(target);
+        if let Some(gate) = hold {
+            gate.notified().await;
+        }
+        match tokio::fs::remove_dir_all(trash).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io(e)),
+        }
     }
 
     async fn write_artifact_atomic(&self, path: &Path, bytes: &[u8]) -> PortResult<()> {

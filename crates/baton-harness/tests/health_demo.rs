@@ -139,9 +139,13 @@ async fn every_port_can_be_driven_through_its_fake() {
     let target = harness.data_dir().join("wt");
     harness.workspace_fs.init_repo(harness.data_dir(), "main");
     ports.workspace_fs.create_worktree(harness.data_dir(), "branch", &target).await.unwrap();
-    harness.workspace_fs.mark_dirty(&target);
-    assert_eq!(ports.workspace_fs.inspect_dirty(&target).await.unwrap(), DirtyState::Dirty);
-    ports.workspace_fs.remove_worktree(&target).await.unwrap();
+    harness.workspace_fs.mark_unsaved(&target, &["notes.txt"]);
+    assert_eq!(
+        ports.workspace_fs.inspect_worktree(harness.data_dir(), &target).await.unwrap(),
+        WorktreeState::Registered { branch: Some("branch".into()), unsaved: vec!["notes.txt".into()] }
+    );
+    ports.workspace_fs.remove_worktree(harness.data_dir(), &target, &harness.data_dir().join("trash")).await.unwrap();
+    assert!(!target.exists());
     let artifact = harness.data_dir().join("artifacts").join("a.txt");
     ports.workspace_fs.write_artifact_atomic(&artifact, b"data").await.unwrap();
     assert_eq!(std::fs::read(&artifact).unwrap(), b"data");

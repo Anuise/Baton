@@ -7,11 +7,16 @@ use baton_domain::artifact::STAGING_SUFFIX;
 
 use crate::{PortError, PortResult};
 
-/// 工作目錄是否有未保存的變更。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DirtyState {
-    Clean,
-    Dirty,
+/// 移除前核對到的 worktree 實際狀態（票 21）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeState {
+    /// 目錄不存在。
+    Missing,
+    /// `repo` 登記的 worktree（不是主 checkout）：簽出 `branch`（detached HEAD 為 `None`）；
+    /// `unsaved` 是未提交的變更與未追蹤（且未被忽略）的檔案，路徑相對於 worktree。
+    Registered { branch: Option<String>, unsaved: Vec<String> },
+    /// 目錄存在，但不是 `repo` 登記的 worktree，或是主 checkout。
+    Foreign,
 }
 
 /// 使用者指定的目錄實際上是什麼。
@@ -89,8 +94,12 @@ pub trait WorkspaceFs: Send + Sync {
         expected_tip: &str,
         commit: &str,
     ) -> PortResult<AdvanceOutcome>;
-    async fn remove_worktree(&self, target: &Path) -> PortResult<()>;
-    async fn inspect_dirty(&self, target: &Path) -> PortResult<DirtyState>;
+    /// 核對 `target` 是不是 `repo` 登記的 worktree，以及其中未保存的變更與歸屬不明的檔案（票 21）。
+    async fn inspect_worktree(&self, repo: &Path, target: &Path) -> PortResult<WorktreeState>;
+    /// 移除 `repo` 登記的 worktree `target`（票 21）：先把目錄改名為 `trash`（檔案被占用時在這一步失敗，什麼都不變），
+    /// 清掉 Git 的 worktree 登記，再刪除 `trash`。冪等：`target` 已不存在時只收拾 Git 登記與 `trash` 的殘留。
+    /// `target` 存在但不是 `repo` 登記的 worktree（或是主 checkout）時拒絕、不刪除任何檔案。不刪除分支。
+    async fn remove_worktree(&self, repo: &Path, target: &Path, trash: &Path) -> PortResult<()>;
     /// 先寫暫存、fsync、再原子改名（spec D-17）。
     ///
     /// 暫存檔就在目標旁邊，檔名是 [`partial_path`]；寫到一半中斷只會留下暫存檔，目標路徑要嘛不存在、要嘛內容完整。
