@@ -186,13 +186,14 @@ describe("專案理解", () => {
     expect(screen.queryByText(/個投影檔被外部修改/)).not.toBeInTheDocument();
   });
 
-  it("「保留外部版本」送出 keep_external；之後投影顯示 Baton 停止寫入，只能再以 Baton 版本覆寫（送 baseline_hash）", async () => {
+  it("「保留外部版本」送出 keep_external；之後投影顯示 Baton 停止寫入，只能再以 Baton 版本覆寫（送最後一次比對的外部版本）", async () => {
+    // 保留之後使用者又改了檔：重新比對把目前的雜湊記在 external_hash，baseline_hash 仍是保留當時的版本
     const detached = projection({
       path: "GLOSSARY.md",
       version: 3,
       status: "detached",
       baseline_hash: "hash_external",
-      external_hash: null,
+      external_hash: "hash_edited_after_keep",
     });
     const client = fakeClient(understandingView({ projections: [conflict] }));
     client.reconcileProjection.mockResolvedValueOnce(understandingView({ projections: [detached] }));
@@ -215,7 +216,7 @@ describe("專案理解", () => {
     expect(client.reconcileProjection).toHaveBeenLastCalledWith("ws_1", {
       path: "GLOSSARY.md",
       action: "overwrite",
-      expected_external_hash: "hash_external",
+      expected_external_hash: "hash_edited_after_keep",
     });
   });
 

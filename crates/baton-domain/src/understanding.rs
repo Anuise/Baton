@@ -387,7 +387,7 @@ pub struct Projection {
     /// Baton 最後寫入（或採用）的整個檔案雜湊；`None` 表示還沒有基準（例如接入前就存在的檔案）。
     pub baseline_hash: Option<String>,
     pub status: ProjectionStatus,
-    /// 協調中時檔案目前的雜湊；`None` 表示檔案被刪除。
+    /// 協調中或已保留外部版本時，最後一次比對讀到的檔案雜湊（`None` 表示檔案被刪除）；覆寫時以此核對使用者看到的版本。
     pub external_hash: Option<String>,
     pub detected_at: Option<Timestamp>,
     pub revision: i64,
@@ -453,7 +453,7 @@ fn next_version(record: Option<&Projection>, body_hash: &str) -> i64 {
 /// - 從未投影過：檔案不存在就寫入；內容剛好相同就採用為基準；其他內容（接入前就存在）開啟協調。
 /// - 同步中：檔案仍是基準（沒被動過）才寫入新內容；檔案已是要產生的內容就只更新基準；其他情況（修改、刪除）開啟協調。
 /// - 協調中：不寫入；檔案又被改成別的內容時更新協調資訊並再產生一次事件；被改成與要產生的內容相同時視為已同步。
-/// - 保留外部版本：什麼都不做。
+/// - 保留外部版本：不寫入、不通知；檔案又被改動時只更新 `external_hash`，讓使用者之後仍能核對後覆寫。
 pub fn plan_projection(
     workspace_id: &str,
     record: Option<&Projection>,
@@ -461,8 +461,13 @@ pub fn plan_projection(
     current: Option<&[u8]>,
     now: Timestamp,
 ) -> ProjectionPlan {
-    if record.is_some_and(|r| r.status == ProjectionStatus::Detached) {
-        return ProjectionPlan::unchanged();
+    if let Some(r) = record.filter(|r| r.status == ProjectionStatus::Detached) {
+        let current_hash = current.map(sha256_hex);
+        if r.external_hash == current_hash {
+            return ProjectionPlan::unchanged();
+        }
+        let projection = Projection { external_hash: current_hash, revision: r.revision + 1, updated_at: now, ..r.clone() };
+        return ProjectionPlan { write: None, projection: Some(projection), events: Vec::new(), conflict_opened: false };
     }
     let body_hash = sha256_hex(target.body.as_bytes());
     let version = next_version(record, &body_hash);
@@ -600,7 +605,7 @@ pub fn reconcile(
             let projection = Projection {
                 baseline_hash: current_hash.clone(),
                 status: ProjectionStatus::Detached,
-                external_hash: None,
+                external_hash: current_hash.clone(),
                 detected_at: None,
                 revision: record.revision + 1,
                 updated_at: now,

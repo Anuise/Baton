@@ -2103,7 +2103,7 @@ export interface Projection {
   body_hash: string;
   baseline_hash: string | null;
   status: ProjectionStatus;
-  /** 偵測到的外部版本雜湊；協調中檔案被刪除時是 null。 */
+  /** 協調中或已保留外部版本時，最後一次比對讀到的檔案雜湊（覆寫時送回核對）；檔案被刪除時是 null。 */
   external_hash: string | null;
   detected_at: number | null;
   revision: number;

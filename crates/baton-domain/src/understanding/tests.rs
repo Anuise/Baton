@@ -182,12 +182,46 @@ fn reconciling_checks_what_the_user_saw_then_overwrites_or_detaches() {
     assert_eq!(kept.write, None);
     let detached = kept.projection.unwrap();
     assert_eq!(detached.status, ProjectionStatus::Detached);
-    // 保留外部版本之後不再寫入，也不再偵測
-    assert_eq!(plan_projection("ws_1", Some(&detached), &target("v3"), Some(b"other"), T1), ProjectionPlan::unchanged());
+    assert_eq!(detached.external_hash.as_deref(), Some(seen.as_str()), "視圖要提供覆寫時核對用的雜湊");
+    assert_eq!(plan_projection("ws_1", Some(&detached), &target("v3"), Some(b"edit"), T1), ProjectionPlan::unchanged());
     assert!(reconcile(&detached, ReconcileAction::KeepExternal, Some(&seen), &target("v3"), Some(b"edit"), T1).is_err());
 
     let overwritten = reconcile(&detached, ReconcileAction::Overwrite, Some(&seen), &target("v3"), Some(b"edit"), T1).unwrap();
     let content = overwritten.write.unwrap();
     assert!(content.contains("第 2 版") && content.ends_with("v3"), "{content}");
     assert_eq!(overwritten.projection.unwrap().status, ProjectionStatus::InSync);
+}
+
+#[test]
+fn a_detached_file_edited_again_is_not_written_or_reported_but_its_current_hash_is_tracked_for_overwrite() {
+    let (first, _) = written(None, "v1", None);
+    let conflict = plan_projection("ws_1", Some(&first), &target("v2"), Some(b"edit"), T1).projection.unwrap();
+    let seen = sha256_hex(b"edit");
+    let detached = reconcile(&conflict, ReconcileAction::KeepExternal, Some(&seen), &target("v2"), Some(b"edit"), T1)
+        .unwrap()
+        .projection
+        .unwrap();
+
+    // 保留外部版本之後使用者又改了檔：不寫入、不通知，只記下目前的雜湊
+    let plan = plan_projection("ws_1", Some(&detached), &target("v3"), Some(b"edit 2"), T1);
+    assert_eq!(plan.write, None);
+    assert!(!plan.conflict_opened);
+    assert!(plan.events.is_empty());
+    let tracked = plan.projection.unwrap();
+    assert_eq!(tracked.status, ProjectionStatus::Detached);
+    assert_eq!(tracked.external_hash, Some(sha256_hex(b"edit 2")));
+    assert_eq!(tracked.revision, detached.revision + 1);
+
+    // 舊的雜湊仍被拒絕；用記下的雜湊可以覆寫
+    let stale = reconcile(&tracked, ReconcileAction::Overwrite, Some(&seen), &target("v3"), Some(b"edit 2"), T1);
+    assert_eq!(stale, Err(UnderstandingError::ProjectionChanged(GLOSSARY_PATH.into())));
+    let overwritten =
+        reconcile(&tracked, ReconcileAction::Overwrite, tracked.external_hash.as_deref(), &target("v3"), Some(b"edit 2"), T1)
+            .unwrap();
+    assert_eq!(overwritten.projection.unwrap().status, ProjectionStatus::InSync);
+
+    // 檔案被刪除也一樣只記下（`None`）
+    let deleted = plan_projection("ws_1", Some(&tracked), &target("v3"), None, T1).projection.unwrap();
+    assert_eq!(deleted.status, ProjectionStatus::Detached);
+    assert_eq!(deleted.external_hash, None);
 }

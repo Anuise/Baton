@@ -1129,7 +1129,7 @@ Workspace 首次接入專案時，Controller 以工具建立並維護「專案�
 | 檔案已是要產生的內容 | 只更新基準 |
 | 檔案被修改、刪除，或接入前就已存在 | **不寫入**，開啟協調（`conflict`，事件 `understanding_projection_conflict_detected`），並在同一個交易中讓 Controller 對話收到工作事件（請它把外部修改吸收進專案理解） |
 | 協調中 | 不寫入；檔案又被改成別的內容時更新 `external_hash` 並再記一次事件（不重複通知 Controller） |
-| 保留外部版本（`detached`） | 不比對、不寫入 |
+| 保留外部版本（`detached`） | 不寫入、不通知；檔案又被改動（或刪除）時只把目前的雜湊記在 `external_hash`，供之後覆寫時核對 |
 
 比對發生在 `record_understanding` 有變更之後、Workspace 範圍的決策被建立／確認／修正／撤銷／淘汰之後，以及 `POST …/understanding/sync`（「專案理解」分頁開啟與「重新檢查」）；比對與寫入以 `ApiState::projection_lock` 一次只做一個。變更之後的比對失敗只記日誌，下一次再試。
 
@@ -1137,7 +1137,7 @@ Workspace 首次接入專案時，Controller 以工具建立並維護「專案�
 | --- | --- |
 | `GET /api/v1/workspaces/{id}/understanding` | `{ workspace_id, projection_enabled, items, projections }`；`items` 依文件別、名稱排序（含已移除），每項的 `sources[]` 帶 `changed`，另有 `stale` |
 | `POST /api/v1/workspaces/{id}/understanding/sync` | 重新比對投影檔後回傳同一個視圖 |
-| `POST /api/v1/workspaces/{id}/understanding/projections/reconcile` | `{ path, action: "overwrite" \| "keep_external", expected_external_hash }`。`expected_external_hash` 是使用者檢視時檔案的雜湊（當時不存在為 `null`），與目前檔案不同回 409 `projection_changed`；`keep_external` 只限協調中，`overwrite` 協調中或已保留外部版本時都可以，否則 409 `projection_transition_invalid`；沒有這個投影 404 `projection_not_found` |
+| `POST /api/v1/workspaces/{id}/understanding/projections/reconcile` | `{ path, action: "overwrite" \| "keep_external", expected_external_hash }`。`expected_external_hash` 是使用者檢視時檔案的雜湊（當時不存在為 `null`），即視圖中該投影的 `external_hash`（協調中與已保留外部版本都是最後一次比對讀到的雜湊），與目前檔案不同回 409 `projection_changed`（重新比對後再試）；`keep_external` 只限協調中，`overwrite` 協調中或已保留外部版本時都可以，否則 409 `projection_transition_invalid`；沒有這個投影 404 `projection_not_found` |
 
 Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`）：`record_understanding` `{ section, key, text?, status?, sources? }` 回 `{ item, changed, projections }`；`get_project_understanding` `{}` 回與桌面相同的視圖。桌面殼指令：`workspace_understanding`、`workspace_understanding_sync`、`workspace_projection_reconcile`。UI 在側欄的「專案理解」（`web/src/ProjectUnderstandingPage.tsx`）。
 

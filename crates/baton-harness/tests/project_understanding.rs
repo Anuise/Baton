@@ -9,6 +9,7 @@
 //!   `a_confirmed_item_whose_source_file_changes_is_flagged_for_recheck`
 //! - 投影檔被外部修改時產生協調事件而非靜默覆寫：
 //!   `an_externally_edited_glossary_raises_a_reconciliation_event_instead_of_being_overwritten`、
+//!   `a_kept_external_glossary_edited_again_can_still_be_overwritten_with_the_hash_from_the_view`、
 //!   `a_glossary_that_already_exists_in_the_repo_is_not_overwritten_on_first_projection`、
 //!   `workspace_decisions_are_projected_as_adrs_and_an_external_deletion_is_reconciled`
 //! - Controller 透過工具建立並維護附來源的 Brief／Glossary／Map：
@@ -381,6 +382,51 @@ async fn an_externally_edited_glossary_raises_a_reconciliation_event_instead_of_
     let glossary = read(&dir, "GLOSSARY.md").unwrap();
     assert!(glossary.contains("Glossary 第 2 版"), "{glossary}");
     assert!(glossary.contains("## 帳本") && glossary.contains("## 結算") && glossary.contains("## 帳目"), "{glossary}");
+}
+
+#[tokio::test]
+async fn a_kept_external_glossary_edited_again_can_still_be_overwritten_with_the_hash_from_the_view() {
+    let Project { harness, ws, dir } = project(true).await;
+    let (_, token) = controller_turn(&harness, &ws, "建立專案理解").await;
+    recorded(&harness, &token, term("帳目", "一筆收入或支出", "confirmed", json!([{ "path": "README.md" }]))).await;
+    let edited = "# Glossary
+
+使用者自己的版本
+";
+    std::fs::write(dir.join("GLOSSARY.md"), edited).unwrap();
+    let view = sync(&harness, &ws).await;
+    let seen = projection(&view, "GLOSSARY.md")["external_hash"].as_str().unwrap().to_string();
+    let (status, kept) = reconcile(&harness, &ws, "GLOSSARY.md", "keep_external", Some(&seen)).await;
+    assert_eq!(status, StatusCode::OK, "{kept}");
+    assert_eq!(projection(&kept, "GLOSSARY.md")["status"], "detached");
+    assert_eq!(projection(&kept, "GLOSSARY.md")["external_hash"], seen.as_str());
+
+    // 保留外部版本之後使用者繼續編輯：重新比對不寫入、不通知，但視圖帶著檔案目前的雜湊
+    let edited_again = format!("{edited}
+又補了一段
+");
+    std::fs::write(dir.join("GLOSSARY.md"), &edited_again).unwrap();
+    let view = sync(&harness, &ws).await;
+    let detached = projection(&view, "GLOSSARY.md");
+    assert_eq!(detached["status"], "detached");
+    assert_eq!(detached["external_hash"], sha256_hex(edited_again.as_bytes()));
+    assert_eq!(read(&dir, "GLOSSARY.md").as_deref(), Some(edited_again.as_str()));
+    let notices = pending_work_events(&harness, &ws).await;
+    assert_eq!(notices.iter().filter(|e| e.contains("GLOSSARY.md")).count(), 1, "只有最初的協調通知過 Controller：{notices:?}");
+
+    // 用過時的雜湊（保留時看到的版本）覆寫：拒絕
+    let (status, body) = reconcile(&harness, &ws, "GLOSSARY.md", "overwrite", Some(&seen)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body), "projection_changed");
+    assert_eq!(read(&dir, "GLOSSARY.md").as_deref(), Some(edited_again.as_str()));
+
+    // 用視圖提供的雜湊覆寫：寫入 Baton 版本
+    let current = detached["external_hash"].as_str().unwrap();
+    let (status, overwritten) = reconcile(&harness, &ws, "GLOSSARY.md", "overwrite", Some(current)).await;
+    assert_eq!(status, StatusCode::OK, "{overwritten}");
+    assert_eq!(projection(&overwritten, "GLOSSARY.md")["status"], "in_sync");
+    let glossary = read(&dir, "GLOSSARY.md").unwrap();
+    assert!(glossary.contains("Baton 投影：Glossary") && glossary.contains("## 帳目"), "{glossary}");
 }
 
 #[tokio::test]

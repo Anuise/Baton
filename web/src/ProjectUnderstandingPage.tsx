@@ -239,9 +239,8 @@ function ProjectionSection({
                       onReconcile({
                         path: projection.path,
                         action: "overwrite",
-                        // 協調中送使用者看到的外部版本；已保留外部版本（detached）時依契約送 baseline_hash
-                        expected_external_hash:
-                          projection.status === "detached" ? projection.baseline_hash : projection.external_hash,
+                        // 送使用者看到的外部版本（協調中與已保留外部版本都由最後一次比對記在 external_hash）
+                        expected_external_hash: projection.external_hash,
                       })
                     }
                   >
