@@ -16,6 +16,7 @@ use baton_domain::agent::{
 use baton_domain::message::{
     MessageKind, BODY_MAX_BYTES, ID_MAX_CHARS, INBOX_DEFAULT_LIMIT, INBOX_MAX_LIMIT, MAX_RECIPIENTS, SUBJECT_MAX_CHARS,
 };
+use baton_domain::artifact::{ARTIFACT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS, TOOL_REGISTER_ARTIFACT};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -228,6 +229,33 @@ fn tool_definitions() -> Value {
                 },
             },
         },
+        {
+            "name": TOOL_REGISTER_ARTIFACT,
+            "description": "登記一個成果（報告、檔案等交付物）；同名再次登記會追加新版本。content 與 content_base64 擇一提供。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "maxLength": NAME_MAX_CHARS,
+                        "description": "成果檔名，不可含路徑分隔字元",
+                    },
+                    "description": { "type": "string", "maxLength": DESCRIPTION_MAX_CHARS, "description": "成果的簡短描述（選填）" },
+                    "content": {
+                        "type": "string",
+                        "description": format!("UTF-8 文字內容；與 content_base64 擇一（上限 {} MiB）", ARTIFACT_MAX_BYTES / (1024 * 1024)),
+                    },
+                    "content_base64": {
+                        "type": "string",
+                        "description": format!(
+                            "Base64 編碼的二進位內容；與 content 擇一（解碼後上限 {} MiB）",
+                            ARTIFACT_MAX_BYTES / (1024 * 1024)
+                        ),
+                    },
+                },
+                "required": ["name"],
+            },
+        },
     ])
 }
 
@@ -241,6 +269,7 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_REPORT_BLOCKED,
         TOOL_SEND_MESSAGE,
         TOOL_READ_INBOX,
+        TOOL_REGISTER_ARTIFACT,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));

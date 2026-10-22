@@ -1,10 +1,18 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AccountsPage } from "./AccountsPage";
-import { accountRun, accountScheduling, profile, schedulingOverview } from "./fixtures";
-import type { AccountClient, AccountProfile, AccountScheduling } from "./runtimeClient";
+import { AccountsPage, QUOTA_REFRESH_INTERVAL_MS } from "./AccountsPage";
+import {
+  accountRun,
+  accountScheduling,
+  CHECKED_AT,
+  profile,
+  quotaAssessment,
+  quotaObservation,
+  schedulingOverview,
+} from "./fixtures";
+import type { AccountClient, AccountProfile, AccountScheduling, PlanLimits } from "./runtimeClient";
 
 type PageClient = Pick<
   AccountClient,
@@ -296,18 +304,23 @@ describe("帳號頁", () => {
       const client = withOverview(
         [
           accountScheduling({ quota_used: null }),
-          accountScheduling({ profile_id: "prof_2", name: "備用帳號", quota_used: 0.42 }),
+          accountScheduling({
+            profile_id: "prof_2",
+            name: "備用帳號",
+            quota_used: 0.42,
+            quota: quotaAssessment({ used: 0.42, source: "observed", confidence: "observed" }),
+          }),
         ],
         [profile(), profile({ id: "prof_2", name: "備用帳號" })],
       );
 
       render(<AccountsPage client={client} />);
 
-      const unknown = await screen.findByRole("group", { name: "主要帳號 的進行中 Run" });
-      expect(within(unknown).getByText("已知用量：未知")).toBeInTheDocument();
-      expect(within(unknown).queryByText(/0%/)).not.toBeInTheDocument();
-      const known = screen.getByRole("group", { name: "備用帳號 的進行中 Run" });
-      expect(within(known).getByText("已知用量：42%")).toBeInTheDocument();
+      const unknown = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      expect(within(unknown).getByText("判斷用量：未知")).toBeInTheDocument();
+      expect(within(unknown).queryByText(/\d+%/)).not.toBeInTheDocument();
+      const known = screen.getByRole("group", { name: "備用帳號 的額度" });
+      expect(within(known).getByText("判斷用量：42%")).toBeInTheDocument();
     });
 
     it("總覽沒有這個帳號時不顯示並行資訊", async () => {
@@ -340,6 +353,265 @@ describe("帳號頁", () => {
       rerender(<AccountsPage client={client} refreshKey={1} />);
 
       expect(await screen.findByText("進行中 1/2")).toBeInTheDocument();
+    });
+  });
+
+  describe("額度與方案上限", () => {
+    /** 帶排程總覽與方案上限設定的 client；`setQuotaLimits` 回傳上限已更新的總覽。 */
+    function withQuota(account: AccountScheduling = accountScheduling()) {
+      return {
+        ...fakeClient([profile()]),
+        schedulingOverview: vi.fn(async () => schedulingOverview({ accounts: [account] })),
+        setQuotaLimits: vi.fn(async (_id: string, limits: PlanLimits) =>
+          schedulingOverview({ accounts: [{ ...account, plan_limits: limits }] }),
+        ),
+      };
+    }
+
+    /** 2023-11-15 01:13:20 UTC（台北 09:13），比觀測時間晚三小時。 */
+    const RESET_AT = CHECKED_AT + 3 * 60 * 60 * 1000;
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("完全未知時判斷用量顯示「未知」而非 0%，並說明重置時間未知、尚未觀測", async () => {
+      render(<AccountsPage client={withQuota()} />);
+
+      const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      expect(within(quota).getByText("判斷用量：未知")).toBeInTheDocument();
+      expect(within(quota).getByText("來源：未知")).toBeInTheDocument();
+      expect(within(quota).getByText("可信度：未知")).toBeInTheDocument();
+      expect(within(quota).getByText("重置時間未知")).toBeInTheDocument();
+      expect(within(quota).getByText("尚未觀測")).toBeInTheDocument();
+      expect(within(quota).queryByText(/\d+%/)).not.toBeInTheDocument();
+      const [fiveHour, sevenDay] = within(quota).getAllByRole("listitem");
+      expect(fiveHour).toHaveTextContent("五小時已觀測：未知推估：未知（未設定方案上限）");
+      expect(sevenDay).toHaveTextContent("七日已觀測：未知推估：未知（未設定方案上限）");
+    });
+
+    it("已觀測與推估並存時顯示判斷用量、兩個來源各自的數值與當地的重置、觀測時間", async () => {
+      const observed = quotaObservation({ used: 0.3, reset_at: RESET_AT });
+      const estimated = quotaObservation({
+        origin: "estimate",
+        source: "estimated",
+        status: null,
+        used: 0.45,
+        tokens: 90_000,
+        limit_tokens: 200_000,
+        reset_at: RESET_AT,
+        confidence: "estimated",
+        raw_ref: "quota_usage:seq=1..4",
+      });
+      const weekly = quotaObservation({
+        origin: "estimate",
+        source: "estimated",
+        window: "seven_day",
+        status: null,
+        used: null,
+        tokens: 120_000,
+        confidence: "unknown",
+        raw_ref: "quota_usage:seq=1..4",
+      });
+      const account = accountScheduling({
+        quota_used: 0.45,
+        plan_limits: { five_hour_tokens: 200_000, seven_day_tokens: null },
+        quota: quotaAssessment({
+          used: 0.45,
+          source: "estimated",
+          confidence: "estimated",
+          reset_at: RESET_AT,
+          observed_at: CHECKED_AT,
+          windows: [
+            { window: "five_hour", label: "五小時", effective: estimated, observed, estimated },
+            { window: "seven_day", label: "七日", effective: null, observed: null, estimated: weekly },
+          ],
+        }),
+      });
+
+      render(<AccountsPage client={withQuota(account)} timeZone="Asia/Taipei" />);
+
+      const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      expect(within(quota).getByText("判斷用量：45%")).toBeInTheDocument();
+      expect(within(quota).getByText("來源：推估")).toBeInTheDocument();
+      expect(within(quota).getByText("可信度：推估")).toBeInTheDocument();
+      expect(within(quota).getByText("重置時間：2023/11/15 09:13")).toBeInTheDocument();
+      expect(within(quota).getByText("觀測時間：2023/11/15 06:13")).toBeInTheDocument();
+      const [fiveHour, sevenDay] = within(quota).getAllByRole("listitem");
+      expect(within(fiveHour).getByText("已觀測：30%")).toBeInTheDocument();
+      expect(fiveHour).toHaveTextContent("推估：45%（本機累計 90,000 token；方案上限 200,000 token）");
+      expect(within(sevenDay).getByText("已觀測：未知")).toBeInTheDocument();
+      expect(sevenDay).toHaveTextContent("推估：未知（本機累計 120,000 token；未設定方案上限）");
+    });
+
+    it("CLI 只回報已達上限或警告而沒有數字時，照實說明而不是顯示百分比", async () => {
+      const exhausted = quotaObservation({ status: "exhausted", used: null, confidence: "observed" });
+      const warning = quotaObservation({ window: "seven_day", status: "warning", used: null, confidence: "unknown" });
+      const account = accountScheduling({
+        quota_used: 1,
+        quota: quotaAssessment({
+          used: 1,
+          source: "observed",
+          confidence: "observed",
+          observed_at: CHECKED_AT,
+          windows: [
+            { window: "five_hour", label: "五小時", effective: exhausted, observed: exhausted, estimated: null },
+            { window: "seven_day", label: "七日", effective: warning, observed: warning, estimated: null },
+          ],
+        }),
+      });
+
+      render(<AccountsPage client={withQuota(account)} />);
+
+      const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      const [fiveHour, sevenDay] = within(quota).getAllByRole("listitem");
+      expect(within(fiveHour).getByText("已觀測：已達上限")).toBeInTheDocument();
+      expect(within(sevenDay).getByText("已觀測：接近上限（CLI 警告）")).toBeInTheDocument();
+    });
+
+    it("判斷用量只來自沒有數字的 CLI 警告時，標明那是保守的下限", async () => {
+      const warning = quotaObservation({ status: "warning", used: null, confidence: "unknown" });
+      const account = accountScheduling({
+        quota_used: 0.75,
+        quota: quotaAssessment({
+          used: 0.75,
+          source: "observed",
+          confidence: "unknown",
+          observed_at: CHECKED_AT,
+          windows: [
+            { window: "five_hour", label: "五小時", effective: warning, observed: warning, estimated: null },
+            { window: "seven_day", label: "七日", effective: null, observed: null, estimated: null },
+          ],
+        }),
+      });
+
+      render(<AccountsPage client={withQuota(account)} />);
+
+      const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      expect(within(quota).getByText(/判斷用量/)).toHaveTextContent("判斷用量：75%（CLI 警告，至少此值）");
+    });
+
+    it("觀測不完整時以提示說明原因；完整時不顯示提示", async () => {
+      const client = {
+        ...withQuota(),
+        schedulingOverview: vi.fn(async () =>
+          schedulingOverview({
+            accounts: [
+              accountScheduling(),
+              accountScheduling({
+                profile_id: "prof_2",
+                name: "備用帳號",
+                quota: quotaAssessment({ complete: true, incomplete_reason: null }),
+              }),
+            ],
+          }),
+        ),
+        listProfiles: vi.fn(async () => ({ profiles: [profile(), profile({ id: "prof_2", name: "備用帳號" })], limit: 8 })),
+      };
+
+      render(<AccountsPage client={client} />);
+
+      const incomplete = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      const note = within(incomplete).getByRole("note");
+      expect(note).toHaveClass("quota-incomplete");
+      expect(note).toHaveTextContent(/^觀測不完整：五小時、七日視窗沒有來自 Claude Code 的已觀測用量/);
+      const complete = screen.getByRole("group", { name: "備用帳號 的額度" });
+      expect(within(complete).queryByRole("note")).not.toBeInTheDocument();
+    });
+
+    it("方案上限表單預先填入目前設定；送出時空白送 null，並以回傳的總覽更新畫面", async () => {
+      const client = withQuota(accountScheduling({ plan_limits: { five_hour_tokens: null, seven_day_tokens: 3_000_000 } }));
+      const user = userEvent.setup();
+      render(<AccountsPage client={client} />);
+      const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      expect(within(quota).getByLabelText("七日方案上限")).toHaveValue(3_000_000);
+
+      await user.type(within(quota).getByLabelText("五小時方案上限"), "200000");
+      await user.clear(within(quota).getByLabelText("七日方案上限"));
+      await user.click(within(quota).getByRole("button", { name: "儲存 主要帳號 的方案上限" }));
+
+      expect(client.setQuotaLimits).toHaveBeenCalledWith("prof_1", { five_hour_tokens: 200_000, seven_day_tokens: null });
+      const [fiveHour, sevenDay] = within(quota).getAllByRole("listitem");
+      await waitFor(() => expect(fiveHour).toHaveTextContent("方案上限 200,000 token"));
+      expect(sevenDay).toHaveTextContent("未設定方案上限");
+      expect(within(quota).queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("方案上限被拒絕時顯示 Runtime 的說明並保留輸入", async () => {
+      const client = withQuota();
+      client.setQuotaLimits.mockRejectedValueOnce(new Error("Profile 已封存，不能設定方案上限"));
+      const user = userEvent.setup();
+      render(<AccountsPage client={client} />);
+      const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+
+      await user.type(within(quota).getByLabelText("五小時方案上限"), "500000");
+      await user.click(within(quota).getByRole("button", { name: "儲存 主要帳號 的方案上限" }));
+
+      expect(await within(quota).findByRole("alert")).toHaveTextContent("無法儲存方案上限：Profile 已封存，不能設定方案上限");
+      expect(within(quota).getByLabelText("五小時方案上限")).toHaveValue(500_000);
+    });
+
+    it("方案上限不是正整數時輸入框標示無效，不送出", async () => {
+      const client = withQuota();
+      const user = userEvent.setup();
+      render(<AccountsPage client={client} />);
+      const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+
+      await user.type(within(quota).getByLabelText("五小時方案上限"), "1.5");
+      await user.type(within(quota).getByLabelText("七日方案上限"), "0");
+      await user.click(within(quota).getByRole("button", { name: "儲存 主要帳號 的方案上限" }));
+
+      expect(within(quota).getByLabelText("五小時方案上限")).toBeInvalid();
+      expect(within(quota).getByLabelText("七日方案上限")).toBeInvalid();
+      expect(client.setQuotaLimits).not.toHaveBeenCalled();
+    });
+
+    it("沒有提供 setQuotaLimits 時不顯示方案上限表單", async () => {
+      const { setQuotaLimits: _omitted, ...client } = withQuota();
+      render(<AccountsPage client={client} />);
+
+      const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      expect(within(quota).queryByLabelText("五小時方案上限")).not.toBeInTheDocument();
+      expect(within(quota).queryByRole("button")).not.toBeInTheDocument();
+    });
+
+    it("每 5 分鐘重新讀取排程總覽，不到 5 分鐘不讀取", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const client = withQuota();
+      render(<AccountsPage client={client} />);
+      await screen.findByText("判斷用量：未知");
+      expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
+
+      client.schedulingOverview.mockResolvedValue(
+        schedulingOverview({
+          accounts: [
+            accountScheduling({
+              quota_used: 0.6,
+              quota: quotaAssessment({ used: 0.6, source: "observed", confidence: "observed" }),
+            }),
+          ],
+        }),
+      );
+      // 留一秒餘裕，抵銷 shouldAdvanceTime 隨真實時間前進的部分
+      act(() => vi.advanceTimersByTime(QUOTA_REFRESH_INTERVAL_MS - 1000));
+      expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
+
+      act(() => vi.advanceTimersByTime(1000));
+      expect(client.schedulingOverview).toHaveBeenCalledTimes(2);
+      expect(await screen.findByText("判斷用量：60%")).toBeInTheDocument();
+      expect(client.listProfiles).toHaveBeenCalledTimes(1);
+    });
+
+    it("離開帳號頁後不再輪詢", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const client = withQuota();
+      const { unmount } = render(<AccountsPage client={client} />);
+      await screen.findByText("判斷用量：未知");
+
+      unmount();
+      act(() => vi.advanceTimersByTime(QUOTA_REFRESH_INTERVAL_MS * 2));
+
+      expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
     });
   });
 });

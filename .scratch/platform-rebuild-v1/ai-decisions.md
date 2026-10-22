@@ -946,7 +946,232 @@
 - 影響：本票原本是第 8 個 migration，整合 rebuild/v1（票 11 已有第 8、9 個）時順延為第 10 個；AI 編號同樣由 AI-87～AI-94 順延為 AI-95～AI-102。
 - 審閱：未審
 
-### AI-103：訊息的收件人是同一個 Workspace 的 Task；收件匣跟著 Task，不跟著 Run
+### AI-103：`register_artifact` 的內容以參數內嵌傳入，不接受 Worker 指定的路徑
+- 重要度：高
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：Worker 呼叫 `register_artifact` 時，內容直接放在參數裡：`content`（UTF-8 文字）或 `content_base64`（二進位），二選一；單一成果最多 10 MiB（`ARTIFACT_MAX_BYTES`）。Runtime 不讀取請求中的任何檔案路徑。
+- 理由：Worker 是不完全可信的程序，若登記時可指定路徑，Runtime 會替它讀取該路徑的檔案並存進成果儲存，再經由成果下載交出去，等於讓 Worker 藉 Runtime 的身分讀走工作目錄以外的檔案（例如其他帳號的登入資料目錄）。內嵌內容讓「Worker 能提供的資料」只限於它自己放進參數的位元組。
+- 替代方案：接受 Workspace／worktree 內的相對路徑，由 Runtime 讀取。可以支援大型檔案，但必須先有 worktree 的位置規則與路徑逃逸（符號連結、junction、`..`）防護，屬於票 20 之後再評估。
+- 影響：大型成果（超過 10 MiB，例如影片、資料集）目前無法登記；JSON 內嵌會使 MCP 本文約為內容的 1.4 倍（Base64），Runtime 的登記路由因此把本文上限設為 32 MiB。若日後要支援大檔，需新增「由 Runtime 讀取受限路徑」的第二條路徑並另行審閱。**Validation Required（票 14）**：Claude Code 對單一 MCP 工具呼叫的參數大小是否有自己的上限，需要以真實 Worker 驗證。
+- 審閱：未審
+
+### AI-104：成果檔案的儲存位置、寫入順序與「未登記檔案」不自動刪除
+- 重要度：中
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：成果存放在 `<資料目錄>\artifacts\<workspace_id>\blob_<隨機>`，每個版本一個獨立檔案、檔名與成果名稱無關。寫入順序是：暫存檔 `<檔名>.partial` → fsync → 原子改名 → 在單一交易提交 manifest 與事件。中途中斷只會留下「未登記檔案」：`.partial` 暫存檔（`staging`，內容不完整）或已改名但 manifest 未提交的檔案（`unregistered`，內容完整但不算成果）。`GET …/artifacts` 的 `unregistered_files` 列出它們，恢復時可辨識；Runtime **不自動刪除**，也不在啟動時搬移。`WorkspaceFs` Port 新增 `read_artifact`、`list_artifact_files`，`write_artifact_atomic` 補上正式實作；fake 在三個點（`MidWrite`、`BeforeRename`、`AfterRename`）可模擬崩潰。
+- 理由：「已登記」只由 manifest 決定，而 manifest 一定在檔案完整落地之後才提交，所以不需要「恢復時修復」就能保證已登記的成果完整。spec 非目標明列「自動刪除正式 Artifact」，未登記檔案雖不是成果，但是否刪除涉及使用者資料，先保守地只顯示。
+- 替代方案：啟動時自動刪除 `.partial`（暫存檔一定無用，刪除安全）；先只顯示是因為清理屬於票 21／40 的範圍，且不刪除不影響正確性。
+- 影響：崩潰多次後儲存區會累積殘留檔案，直到後續票加入清理或備份流程；列表每次都會掃描 Workspace 的成果目錄（成果數量大時需要改成索引）。
+- 審閱：未審
+
+### AI-105：成果與版本的識別：同 Workspace、同 Task、同名是同一個成果
+- 重要度：中
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：成果以（Workspace、Task、名稱）唯一識別；再次登記同名成果只追加新版本（版本號從 1 起連續遞增），不同名稱是另一個成果。Task 與產生者（Run、世代）一律取自憑證所屬的 Run，請求不能指定。`artifact`、`artifact_version` 是追加式資料表（觸發器禁止更新與刪除，`storage_path` 唯一），每個版本追加事件 `artifact_registered`（`aggregate_type = 'artifact'`，聚合版本 = 成果版本號）。同一個 Run 重送相同內容不去重，會產生新版本。
+- 理由：票面要求「同一成果新版本不覆寫舊版本」，需要一個穩定的「同一成果」定義；Worker 重新產生報告時自然會沿用同一個檔名。以 Task 為界避免不同 Task 同名互相混成同一個成果。
+- 替代方案：由 Worker 在登記時提供成果識別（容易被亂用或撞名）；以內容雜湊去重（Worker 重送會被悄悄合併，但無法表達「再次確認同一內容」，且增加判斷）。
+- 影響：不同 Task 之間沒有版本關係；Task 重派後的新 Run 仍歸入同一個成果（同 Task 同名）。票 13 的驗證 Gate 若需要「某個版本被接受」的狀態，要另建紀錄，不可改寫版本表。
+- 審閱：未審
+
+### AI-106：預覽與下載重新核對雜湊；列表只比對大小；桌面殼以 base64 傳遞下載內容
+- 重要度：中
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：預覽與下載每次都重新讀檔、計算 SHA-256 並比對大小，與 manifest 不符回 409 `artifact_integrity_failed`，檔案不存在回 409 `artifact_file_missing`，不交出內容。列表的 `file_status`（`ok`／`missing`／`size_mismatch`）只比對存在與大小，避免列表為每個版本讀整個檔案。管理 API 只接受桌面憑證（既有 `guard` 規則），Agent 憑證不能下載；成果一律以 Workspace 為界，跨 Workspace 或不存在一律回 404 `artifact_not_found`。Tauri 殼的 `artifact_download` 指令把內容以 base64 放在 JSON 回傳值裡交給 Web UI（Web UI 再核對 `X-Baton-Sha256` 與 manifest 雜湊）。
+- 理由：票面要求「manifest 雜湊與檔案一致」且「下載同樣驗證身分」；成果檔案放在使用者可編輯的資料目錄，事後被改動或截斷是可能的，交出不可信的內容比拒絕更糟。base64 是 Tauri JSON 指令最簡單的作法，上限 10 MiB 時約 14 MiB，可接受。
+- 替代方案：列表也計算雜湊（成本高）；以 `tauri::ipc::Response` 回傳原始位元組（省 33% 傳輸，但前端與殼都要另一套處理）；預覽時不核對（較快，但預覽可能顯示被竄改的內容）。
+- 影響：大成果的預覽與下載每次都要讀整個檔案。使用者要「忽略完整性失敗仍想取回檔案」沒有入口，需要時直接從資料目錄取得。
+- 審閱：未審
+
+### AI-107：成果登記的限制值與未涵蓋的行為
+- 重要度：低
+- 時間／階段：2026-10-22，票 12 實作
+- 決策：名稱必須是檔名（不含路徑分隔字元、控制字元與 Windows 不允許的 `:*?"<>|`，不可是 `.`／`..`，最多 200 字元）；描述最多 1000 字元；預覽最多 64 KiB 並在字元邊界截斷，含 NUL 或不是有效 UTF-8 者視為 `binary`。登記**不改變 Task 狀態**（接受成果屬票 13 的驗證 Gate）、**不續約 lease**（只有三個回報工具與 Heartbeat 續約）；過期世代的登記回 409 `run_report_stale`，不寫入任何檔案、也不像三個回報工具那樣留稽核紀錄。
+- 理由：數值是預設值，改起來便宜；不續約 lease 與不留稽核都是為了讓本票只做票面要求的事，避免提早決定後續票的語意。
+- 替代方案：登記同時視為存活訊號並續約 lease；過期世代的登記也留稽核（需要保存被拒絕的內容，成果可達 10 MiB，不適合放進追加式資料表）。
+- 影響：Worker 若長時間只登記成果而不回報進度，lease 仍會照原本的規則過期並被核對。
+- 審閱：未審
+
+### AI-108：票 12 整合 rebuild/v1（票 19）：migration 與 AI 編號順延、衝突合併方式
+- 重要度：低
+- 時間／階段：2026-10-22，票 12 整合（R036-12-integrate）
+- 決策：票 12 的 migration `artifact` 原本是第 10 個，與票 19 的 `scheduling`（migration 10）重號，順延為第 11 個，排在 `scheduling` 之後；兩者互不參照（`artifact_version.run_id` 只參照 `run.id`），所以先後順序不影響 schema。票 12 的 AI 編號由 AI-95～AI-99 順延為 AI-103～AI-107，內容不變；程式碼與文件沒有引用這些編號，不需同步。其餘衝突（API 路由、Tauri 指令清單、`AppClient` 型別、開發指南的 crate 表與章節）一律兩邊都保留：路由與指令並列，`AppClient` 同時包含 `SchedulingClient` 與 `ArtifactClient`，開發指南「多帳號並行排程與容量」在前、「成果儲存與成果瀏覽」在後。票 19 起派工必須有可派工帳號、`dispatch_task` 改回傳 `DispatchOutcome`，所以本票的 `crates/baton-harness/tests/artifacts.rs` 與 `crates/baton-client/tests/artifacts_client.rs` 在共用設定中加上 `harness.add_account`（與票 19 調整 `agent_api.rs` 的方式相同），並把派工結果拆成 `Started`；測試的斷言不變。
+- 理由：整合分支已有的 migration 與 AI 編號不可變動；已套用的資料庫以 migration 序號判斷，只能把後合併的一方往後排。
+- 替代方案：把兩個 migration 合併成一個（會改動整合分支已有的 migration 10，已套用的開發資料庫會漏掉其中一半）。
+- 影響：以票 12 分支（合併前）建立過的開發資料庫，其 `schema_migrations` 第 10 筆是 `artifact`，與整合後的 `scheduling` 不一致，需刪除重建；尚無發布版本，不提供轉換。
+- 審閱：未審
+
+### AI-109：已驗證通過的票，整合後不再重驗
+- 重要度：中
+- 時間／階段：2026-10-22，票 08、12、18、22 合併
+- 決策：票的驗證 run 判定 PASS 之後，若因其他票先合併而需要整合 run，整合 run 跑完全部測試且通過，就直接合併，不再派重新驗證。驗證 FAIL 後的修正 run 仍要重新驗證。
+- 理由：08、12、18、22 都把 migration 排在第 11 個、AI 編號都從 AI-103 起，每合併一張，其餘都要再整合；若每次整合後都重驗，驗證 run 的數量會隨平行票數成倍增加。整合 run 不改票的行為，且被要求不可刪除或弱化任何測試。
+- 替代方案：照 AI-75 每次整合後重驗（較保險、額度消耗大）；或把會動到 Store／API 的票改成循序派工（降低並行度）。
+- 影響：整合過程若引入行為缺陷（例如 R037 發現的「排程流程不再附上未讀摘要」），只能靠整合 run 自己的測試與判斷抓出；最終的 code-review 會再檢查一次整合分支。
+- 審閱：未審
+
+### AI-110：匯入的來源白名單與位置
+- 重要度：高
+- 時間／階段：2026-10-22，票 08 實作
+- 決策：「使用者平常的 Claude Code 設定」只讀三個檔案：`settings.json`（偏好、hooks、`enabledPlugins`、`extraKnownMarketplaces`）、`CLAUDE.md`（全域指示）、`.claude.json` 中**只有** `mcpServers`（使用者層級 MCP）。位置：設定了 `CLAUDE_CONFIG_DIR` 時為該目錄（`.claude.json` 在其中），否則是 `%USERPROFILE%\.claude` 與 `%USERPROFILE%\.claude.json`。`.credentials.json` 與 `.claude.json` 的其他欄位（登入帳號、使用者識別、各專案資料）永遠不讀。讀檔經新的 `UserSettingsSource` Port，它沒有任何寫入能力。`settings.local.json`、專案層設定、skills／agents／commands 目錄不在本票範圍。
+- 理由：票面五類（偏好、指示、hooks、MCP、plugins）正好對應這三個檔案；白名單讓「不複製登入資料」由結構保證（根本不讀），而不是靠事後清洗。
+- 替代方案：整個 `~/.claude` 目錄複製再清洗（會碰到登入檔與 Session 資料）；讓使用者自選來源目錄（多一個輸入欄位、容易指到 Profile 目錄）。
+- 影響：使用者若把 MCP 設定放在專案層 `.mcp.json` 或把 Skills 當作「共同基準」，不會被匯入；要支援需新增來源。`CLAUDE_CONFIG_DIR` 若被 Runtime 的啟動環境設成某個 Profile 目錄，來源就會是那個 Profile 的目錄（正式使用時使用者不會這樣啟動）。
+- 審閱：未審
+
+### AI-111：秘密處理的規則與限制
+- 重要度：高
+- 時間／階段：2026-10-22，票 08 實作
+- 決策：三層。(1) 登入相關一律排除：`apiKeyHelper`、`awsAuthRefresh`、`awsCredentialExport`、`forceLoginMethod`、`forceLoginOrgUUID`、`otelHeadersHelper`、`oauthAccount`、`primaryApiKey`、`customApiKeyResponses`，以及 `settings.json` 的 `env` 中 `ANTHROPIC_*`、`CLAUDE_CODE_OAUTH*`、`CLAUDE_CODE_USE_*`、`AWS_*`、`GOOGLE_APPLICATION_CREDENTIALS*`（這些會覆蓋 Profile 的原生登入，與 AI-78 的認證來源檢查衝突）。(2) 欄位名稱像秘密（含 token、secret、password、apikey、authorization、credential、cookie 等；`tokens` 複數視為用量上限不算）且值是非空字串時，只丟該欄位、保留其餘項目。(3) 字串內容像秘密（`sk-ant-`／`sk-`／`ghp_`／`github_pat_`／`xox*-`／AKIA／JWT／`Bearer …`／`名稱=值`／含密碼的網址／PEM 私鑰），整個項目（一個 hook 事件、一個 MCP 伺服器、一個偏好、整份 `CLAUDE.md`）都不匯入。`${NAME}` 形式的環境變數參照不是秘密，保留。排除紀錄只有「來源、項目路徑、原因」，絕不含值。這是啟發式規則，抓不到沒有可辨識形狀的秘密（例如 MCP `args` 裡隨意命名的密碼）。
+- 理由：驗收要求「匯入結果不含任何登入秘密」；欄位層級的丟棄讓常見的 `env: { GITHUB_TOKEN }` 不致整個 MCP 伺服器都被拒；內容層級的整項排除避免「改寫使用者的指示或命令」。`CLAUDE.md` 整份排除而不是逐行塗黑，是因為塗黑會悄悄改變指示的意思。
+- 替代方案：把秘密換成佔位符後保留（Run 啟動時伺服器會壞，且佔位符本身會被當成設定）；只依名稱判斷（漏掉 `--key=sk-…` 這類）；只依內容判斷（漏掉長得不像金鑰的密碼）。
+- 影響：被排除的 MCP 伺服器在 Run 裡不存在，使用者要在預覽的排除清單看到原因，自行改用 `${VAR}` 參照或在其他地方提供。偵測規則改版（新增金鑰格式）只需改 `shared_settings/secrets.rs`；既有版本不會被重新掃描。測試以「在 API 回應、快照目錄、資料庫檔（含 WAL）與日誌中掃描已知秘密」驗證，但掃描只涵蓋測試放進去的那些樣式。
+- 審閱：未審
+
+### AI-112：預覽、採用與版本的語意
+- 重要度：中
+- 時間／階段：2026-10-22，票 08 實作
+- 決策：預覽不保存任何東西（沒有「待採用」暫存狀態）。採用必須帶預覽回傳的 `candidate_hash`，Runtime 重新讀取來源後若雜湊不同回 409 `settings_source_changed`，所以使用者採用的一定是看過的內容。**每次採用都建立新版本**，即使內容與目前版本相同（版本號連續遞增、雜湊相同）；預覽以 `changed` 與空差異告知，UI 在差異為空時停用「採用」。版本以追加式資料表保存（觸發器禁止更新與刪除），建立時同交易追加 `shared_settings_adopted` 事件（聚合版本 = 版本號）。內容雜湊 = 排序後標準 JSON 的 SHA-256，與來源檔的排版、鍵順序無關；排除清單與來源指紋不參與雜湊。
+- 理由：票面寫「每次採用建立新版本」，照字面做最不會與驗證者的測試落差；以雜湊做樂觀比對比存暫存候選簡單，也不會有過期的暫存。
+- 替代方案：內容相同時冪等回傳原版本（較整潔，但與票面字面不同）；預覽時存候選並以識別採用（需要清理過期候選）。
+- 影響：連按兩次「採用」會產生兩個內容相同的版本（無害）。沒有任何版本且來源全空時 `changed` 為 true 但差異為空，UI 因此無法採用空內容。
+- 審閱：未審
+
+### AI-113：Run 設定快照的形狀與 Run 綁定
+- 重要度：高
+- 時間／階段：2026-10-22，票 08 實作
+- 決策：快照目錄是 `<資料目錄>\run-settings\<run_id>\`，內容只含有資料的類別：`settings.json`（偏好＋hooks＋`enabledPlugins`＋`extraKnownMarketplaces`，Claude Code 設定格式）、`mcp.json`（`{"mcpServers": …}`）、`CLAUDE.md`，外加 `manifest.json`（版本、內容雜湊、各檔 SHA-256）。渲染完全由版本內容決定（鍵排序、固定縮排）；`bundle_from_snapshot_files` 可從目錄還原內容並重算雜湊，與版本雜湊一致。Run 與版本的綁定存在追加式表 `run_settings_snapshot`：第一次要求時綁定（預設最新版本，也可指定），之後再要求回傳同一份（200），要求別的版本回 409 `settings_snapshot_pinned`，所以後來採用的新版本不會影響已准入的 Run。端點 `POST /api/v1/workspaces/{id}/runs/{run_id}/settings-snapshot`（桌面憑證），內部能力是 `materialize_run_settings`。本票**沒有**讓 Supervisor 在派工啟動時自動呼叫它，也沒有把快照檔以設定參數傳給 Claude Code：正式的 AgentAdapter 還是「尚未實作」，且「Claude Code 能否完全擋下使用者層設定合併與熱重載」是 spec 的 Validation Required。
+- 理由：票面要求「提供」取得版本快照並寫成 Run 專屬唯讀目錄的能力；接到派工流程與 CLI 參數屬於 Adapter／Supervisor 的票。綁定放資料庫（而不是只靠目錄存在）才能在重啟後仍回答「這個 Run 用哪一版」。
+- 替代方案：在派工交易裡就綁定版本（改動票 10 的 Dispatch 命令與測試，範圍超出本票）；目錄名帶版本號（同一 Run 若競爭綁定會留下孤兒目錄）。
+- 影響：後續的 Adapter 票要在啟動 Run 前呼叫它（或把它匯出給 Supervisor：目前是 `baton-api` 內的 `pub(crate)`），並把 `settings.json`、`mcp.json` 與 `CLAUDE.md` 以 `--settings`、`--mcp-config` 與附加指示的方式傳入；是否需要同時設定 `--setting-sources` 排除使用者層需實測。Run 未綁定版本就派工目前不會被阻擋。
+- 審閱：未審
+
+### AI-114：快照目錄的「唯讀」只靠檔案唯讀屬性，不防刪除
+- 重要度：中
+- 時間／階段：2026-10-22，票 08 實作
+- 決策：快照檔寫入後設為唯讀屬性（目錄也設），先寫同層暫存目錄再改名，目錄已存在時整個取代（取代前先解除唯讀）。實測（本機 Windows 11）：唯讀屬性能阻止開啟寫入與覆寫，但**不阻止刪除**——Rust 標準函式庫與 Node 的 `unlink` 都會忽略唯讀屬性；目錄的唯讀屬性也不阻止新增檔案。不另外加 ACL。情境測試只斷言「不能寫入、不能改寫」。`manifest.json` 記錄各檔雜湊，可偵測竄改，但目前沒有流程自動核對或修復。
+- 理由：同一 Windows 使用者本來就能取消任何唯讀屬性，ACL 也擋不了同一使用者；票面的目的是「避免熱重載改變已准入 Run」，也就是防止 Claude Code 或使用者無意間改檔，而不是抵禦惡意。
+- 替代方案：以 ACL 拒絕刪除與寫入（Windows 專屬、清理時要先還原、測試複雜）；每次回傳快照時核對並修復目錄（需要新增 WorkspaceFs 讀取能力）。
+- 影響：快照被刪除或竄改時 Run 不會被通知；後續若要保證，Adapter 啟動前應核對 `manifest.json` 並在不符時重新產生。已寫入 `docs/development.md` 的 Validation Required。
+- 審閱：未審
+
+### AI-115：新增 UserSettingsSource Port 與 WorkspaceFs 的寫入唯讀目錄
+- 重要度：中
+- 時間／階段：2026-10-22，票 08 實作
+- 決策：`Ports` 多一個欄位 `user_settings: Arc<dyn UserSettingsSource>`（`read() -> SourceFiles`，不存在的檔案以 `bytes: None` 回報）；`WorkspaceFs` 多一個方法 `write_readonly_files(dir, files)`。唯讀讀檔與寫唯讀目錄的實作（`DirUserSettingsSource`、`write_readonly_tree`）放在 `baton-ports`，正式版與 harness 的 fake 共用，因為這是對真實檔案系統的操作。harness 的 `FakeUserSettings` 是一個暫存「家目錄」（`.claude\`、`.claude.json`），讀取走真實讀檔，所以測試能直接比對使用者原始檔案的位元組，也能放入 `.credentials.json` 證明它不被讀。正式 `LocalWorkspaceFs` 順便實作了 `write_readonly_files`；`write_artifact_atomic` 仍是「尚未實作」（不在本票範圍）。
+- 理由：「讀使用者設定」與「寫快照目錄」都是外部副作用，依 D-04 必須經 Port；與 AI-79 相同的作法。
+- 替代方案：API 直接讀寫檔案（harness 無法替換位置，測試會碰到真實的家目錄）。
+- 影響：之後建立 `Ports` 的地方要補上 `user_settings`（已更新 production、harness 與 Runtime 整合測試）。
+- 審閱：未審
+
+### AI-116：共同設定頁面的位置與錯誤代碼辨識
+- 重要度：低
+- 時間／階段：2026-10-22，票 08 實作
+- 決策：新增 `SharedSettingsPage`，掛在 App 主區帳號頁之後（導覽尚未存在，與 AI-85 相同）；沒有新增 CSS。Tauri 指令 `shared_settings_status`、`shared_settings_preview`、`shared_settings_adopt`、`shared_settings_version`；HTTP 版用戶端對應同一組端點。既有前端沒有辨識穩定錯誤代碼的機制，新增 `errorCode(error)`：HTTP 版把代碼掛在 `Error.code`，Tauri 版從 `ClientError` 訊息格式中取出；採用被 `settings_source_changed` 拒絕時清掉過期的預覽並要求重新預覽。
+- 理由：需要在 UI 區分「來源已改變」與其他錯誤。
+- 替代方案：把 `error` 代碼併進訊息文字再比對字串。
+- 影響：`ClientError` 的訊息格式若改變，前端的辨識正規表示式要同步改；沒有視覺樣式，之後做導覽時一併處理。
+- 審閱：未審
+
+### AI-117：票 08 整合 rebuild/v1：migration 順序與文件
+- 重要度：低
+- 時間／階段：2026-10-22，票 08 實作
+- 決策：整合分支此時已有票 11 的兩個 migration（第 8、9 版：`agent_credential_scope`、`agent_report`），本票的 `shared_settings_version`（含 `run_settings_snapshot`）接在其後成為第 10 版；兩邊的 migration、API 路由、`Ports`／`ApiState` 欄位、`docs/development.md` 的表格列都完整保留。本票條目編號接在整合分支最大的 AI-93 之後（原為 AI-95～AI-102；第二次整合時順延為 AI-103～AI-110，見 AI-119；第三次整合時再順延為 AI-110～AI-117，見 AI-120）。
+- 理由：已進入整合分支的 migration 不可改動，順延尚未合併的本票。
+- 替代方案：無。
+- 影響：若其他平行票先合併並也新增 migration 或 AI 編號，需由整合 run 再順延一次（與 AI-86 同）。
+- 審閱：未審
+
+### AI-118：名稱本身像秘密時，排除紀錄以「<已遮蔽>」代替；偵測補上 `名稱: 值` 標頭形式
+- 重要度：高
+- 時間／階段：2026-10-22，票 08 實作（R031 修正 R030 驗證）
+- 決策：(1) 偏好鍵、hook 事件、MCP 伺服器、plugin／市集名稱，以及 `env` 的登入變數名稱，若名稱本身含有像秘密的內容，排除紀錄的項目路徑改寫成 `<已遮蔽>`（例如 `mcpServers.<已遮蔽>`；頂層偏好鍵只寫 `<已遮蔽>`），原名稱不進入排除清單、資料庫、預覽 API 與 UI。項目內部的子欄位名稱若像秘密，整個項目以上層路徑排除（原本就是如此）。(2) 字串內容偵測新增標頭形式：`名稱: 值` 或 `名稱:值`，名稱符合秘密欄位規則（如 `x-api-key`、`Authorization`），且值至少 16 字元、只含 token 字元、英數混合時，視為秘密（例如 hook 指令 `curl -H 'x-api-key: abcdefghijklmnop1234567890'`）。`${VAR}` 參照與一般文字不受影響。
+- 理由：R030 驗證實測到 `{"ghp_…":true}` 與以金鑰為名的 MCP 伺服器，金鑰會原樣寫進 `Exclusion.item`，違反「匯入結果不含任何登入秘密」與 AI-111「排除紀錄絕不含值」。標頭形式是驗證者提出的實測漏網案例，是 hook 與 MCP 設定中最常見的金鑰寫法之一。
+- 替代方案：以雜湊或部分字元代替名稱（仍可能洩漏片段或被比對）；名稱像秘密時完全不留紀錄（使用者看不到有東西被排除）；標頭只看名稱不看值（`password: 請向管理員索取` 這類文字指示會被誤判，連帶整份 `CLAUDE.md` 被排除）。
+- 影響：多個被遮蔽的同類項目在排除清單裡無法區分，使用者要回原始檔自行找出。標頭規則要求值英數混合、至少 16 字元，純字母或較短的密碼仍抓不到（AI-111 的限制不變）；名稱像 `tokenizer` 這類被當成秘密欄位的誤判，可能讓含 `tokenizer: model_v2_0123456789` 的指示被排除。
+- 審閱：未審
+
+### AI-119：票 08 第二次整合 rebuild/v1：migration 第 11 版、AI 編號順延、情境測試補帳號
+- 重要度：低
+- 時間／階段：2026-10-22，票 08 實作（R031 修正時整合）
+- 決策：整合分支已先合併票 19（多帳號排程），其 migration `scheduling` 是第 10 版、決策條目用了 AI-95～AI-102。本票的 `shared_settings_version` 順延為第 11 版；本票條目由 AI-95～AI-103 順延為 AI-103～AI-111，並移到票 19 條目之後依編號排列，程式碼與文件中的引用（AI-99 → AI-107）同步更新。票 19 讓派工必須有可用帳號、並把 `RuntimeClient::dispatch_task` 改回傳 `DispatchOutcome`，所以本票的情境測試在派工前為每個 Run 建立一個帳號（避免同一測試的第 3 個 Run 碰到每帳號上限而排隊），client 測試改為比對 `DispatchOutcome::Started`。`ApiState`／`Ports` 欄位、API 路由、前端 `AppClient`、Tauri 命令與 `docs/development.md` 兩邊的內容都完整保留。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-86、AI-117 同）。
+- 替代方案：讓情境測試共用一個帳號並改用較高並行預設（會把排程設定混進共同設定的測試）。
+- 影響：已用本票分支建過的開發資料庫，`shared_settings_version` 記在第 10 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-120：票 08 第三次整合 rebuild/v1：migration 第 12 版、AI 編號再順延
+- 重要度：低
+- 時間／階段：2026-10-22，票 08 整合（R044-08-integrate）
+- 決策：整合分支已先合併票 12（成果儲存），其 migration `artifact` 是第 11 版、決策條目用了 AI-103～AI-109。本票的 `shared_settings_version`（含 `run_settings_snapshot`）順延為第 12 版，排在 `artifact` 之後；兩者互不參照（都只參照 `run.id`），所以兩邊的 schema 都會依序套用。本票條目由 AI-103～AI-112 順延為 AI-110～AI-119，移到票 12 條目之後依編號排列；條目內的交互引用（AI-104 → AI-111、AI-110 → AI-117、AI-112 → AI-119）與程式碼、文件中的引用（AI-107 → AI-114：`docs/development.md`、`crates/baton-harness/tests/shared_settings.rs`）同步更新，記錄歷史編號的敘述保留原文。原 AI-112 缺少審閱行，順延時補上 `- 審閱：未審`。其餘衝突一律兩邊都保留：`WorkspaceFs` 同時有成果的 `read_artifact`／`list_artifact_files` 與本票的 `write_readonly_files`（正式版各自實作），`baton-ports` 同時匯出 `write_file_atomic` 等成果工具與 `write_readonly_tree`、`UserSettingsSource`；API 路由、`RuntimeClient` 方法、Tauri 指令與匯入、前端 `AppClient`（`ArtifactClient & SharedSettingsClient`）與 `errorCode`、前端測試、開發指南的 crate 表四列合併為同時描述兩張票的內容。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-86、AI-108、AI-117、AI-119 同）。
+- 替代方案：把兩個 migration 合併成一個（會改動整合分支已有的第 11 版，已套用的開發資料庫會漏掉其中一半）。
+- 影響：已用本票分支建過的開發資料庫，`shared_settings_version` 記在第 11 版，與整合後的編號不一致，需要刪除重建（與 AI-119 同）。
+- 審閱：未審
+
+### AI-121：QuotaObserver Port 改為「外部觀測器」；D-12 的兩個來源由 Runtime 從 Adapter 事件累積
+- 重要度：高
+- 時間／階段：2026-10-22，票 27 實作
+- 決策：spec 把「已觀測」與「推估」都寫成 QuotaObserver 的實作，但 harness 以 fake QuotaObserver 取代整個 Port 時就測不到它們。因此兩個來源改由 Runtime 自己累積：Adapter 送出 `AdapterEvent::RateLimited { window, status(allowed／warning／exhausted), used, reset_at_millis, raw }`（取代原本只有 `reset_at_millis` 的形狀）與新增的 `AdapterEvent::UsageReported { tokens, raw }`，Supervisor 收到後記為該 Run 帳號（`run.profile_id`）的觀測；沒有帳號的舊 Run 略過。QuotaObserver Port 保留為 spec 所說的「第三個觀測器」擴充點（例如 CLI 直接的額度查詢），每個帳號每 5 分鐘輪詢一次；正式版仍回 `NotImplemented`（不留紀錄）。`QuotaSource`、`Confidence` 移到 `baton_domain::quota`（ports 重新匯出，序列化改為 snake_case），`AdapterEvent` 因帶 `f64` 不再 `Eq`，`baton_ports::observe_quota` 移除（改用 `baton_api::quota`）。
+- 理由：主要 seam 只替換 Port（D-04）；Adapter 事件才是真正的外部邊界，用 scripted fake AgentAdapter 驅動兩個來源，情境測試才會經過真實的判斷與持久化。保留 Port 讓既有的 fake 樣本（票 19 的測試）與未來的直接查詢都能沿用。
+- 替代方案：照 spec 把兩個來源寫成 QuotaObserver 實作、由 Runtime 組合（harness 換掉 Port 後測不到它們，或 harness 必須改用真實實作而失去 fake 的意義）；移除 Port（違反 D-04 的 Port 清單）。
+- 影響：**票 14** 的真實 Adapter 必須從 stream-json 解析並送出這兩種事件（格式為 Validation Required），契約測試要涵蓋；`tokens` 計入哪些 token 類別（建議 input + output + cache 建立）由票 14 決定。
+- 審閱：未審
+
+### AI-122：「較保守者」與已觀測訊號的判斷規則
+- 重要度：中
+- 時間／階段：2026-10-22，票 27 實作
+- 決策：每個視窗取已觀測與推估中用量較高者（同值偏好已觀測），帳號再取兩個視窗與外部觀測器中最高者，這個值就是排程用的用量（`quota_used`，≥75% 停止派工沿用票 19）。`exhausted` 視為 100%；`warning` 沒有數字時視為 75%（停止派工門檻，UI 標示「CLI 警告，至少此值」）；`allowed` 沒有數字是未知。沒有說明視窗的訊號歸到五小時視窗。訊號在 `reset_at` 之後失效、沒有重置時間時維持一個視窗長度（5 小時或 7 日），失效後回到未知（不是 0）；同一視窗以最新一筆訊號為準。
+- 理由：票面要求並存時取較保守者；CLI 的警告代表接近上限，沒有數字時至少不該再派新工作。沒有視窗資訊的訊號歸到較短的視窗，避免一則訊號就把帳號鎖住七天。
+- 替代方案：警告沒有數字時視為未知（可能繼續派工到撞牆）；無視窗訊號同時套用兩個視窗並維持七日（過度保守）。
+- 影響：遲滯（<60% 才恢復）、≥85% 的 draining 與「收到警告就交接」屬票 28，本票只提供判斷值與訊號狀態。若真實 CLI 的訊號帶有其他狀態，票 14 需對應到這三種。
+- 審閱：未審
+
+### AI-123：推估模型：token 為單位、使用者設定方案上限；沒有依據時是未知
+- 重要度：中
+- 時間／階段：2026-10-22，票 27 實作
+- 決策：推估 = 滾動視窗內本機 Run 回報的 token 累計 ÷ 該視窗的方案上限（token）。方案上限每個 Profile 兩個（五小時、七日），可留空；沒有上限，或視窗內沒有任何本機用量時，用量是未知（記下 `tokens` 與 `limit_tokens`，但 `used` 為 null、可信度 unknown）。推估的重置時間是視窗內最早一筆用量滑出視窗的時間。比例可以超過 100%。
+- 理由：Claude 的方案上限沒有公開的 token 數，只能讓使用者填；「本機沒有用量」不代表帳號沒有被使用（其他裝置看不到），顯示 0% 會違反「觀測不到時顯示未知而非 0」。
+- 替代方案：以費用（USD）為單位（結果訊息有 `total_cost_usd`，但訂閱方案的上限也不是以費用公告）；本機沒有用量時推估為 0%（較直觀，但與驗收條件衝突）。
+- 影響：使用者需要自行估計方案上限才能得到推估比例；沒有填時只有已觀測來源能擋派工。
+- 審閱：未審
+
+### AI-124：「觀測完整」的定義
+- 重要度：中
+- 時間／階段：2026-10-22，票 27 實作
+- 決策：只有兩個視窗都有來自 CLI、仍有效、帶數字（或 `exhausted`）的已觀測訊號，或外部觀測器有「已觀測」且帶數字的樣本時，才算 `complete`；否則 `incomplete_reason` 說明缺哪個視窗，並明講推估只計入這台電腦上 Baton 派出的 Run、其他裝置與互動式使用的用量看不到。帳號頁以醒目的提示顯示。
+- 理由：CLI 的限流訊號是帳號層級（含其他裝置）的事實，本機推估不是；只要任一視窗只有推估，就可能低估。
+- 替代方案：有任何已觀測訊號就算完整（另一個視窗仍可能低估）；永遠標示不完整（失去資訊）。
+- 影響：目前真實 Adapter 尚未實作，正式執行時所有帳號都會顯示「觀測不完整」，直到票 14 送出帶數字的訊號。
+- 審閱：未審
+
+### AI-125：額度觀測的資料表與保留期限（migration 13）
+- 重要度：低
+- 時間／階段：2026-10-22，票 27 實作
+- 決策：migration 13 `quota`：`quota_observation`（每筆觀測：`origin`＝adapter／estimate／observer、`source`、`quota_window`、`status`、`used`、`tokens`、`limit_tokens`、`reset_at`、`observed_at`、`confidence`、`raw_ref`、`raw`；未知存 NULL）、`quota_usage`（每次用量回報與原文）、`quota_plan_limit`（單一 Profile 一列，含版本）、`quota_poll`（每個 Profile 上次輪詢時間）。每次記下用量、變更方案上限與輪詢時都寫入新的推估觀測。原始資料參照：`run:<run_id>`、`quota_usage:seq=a..b`、`quota_observer`；原文截斷到 2000 字元、不經 API 回傳。Port 失敗記為一筆未知的觀測（原文是錯誤訊息），`NotImplemented` 不留紀錄。輪詢時刪除超過 8 天的觀測與用量，但每個（帳號、來源、視窗）最新的一筆保留。方案上限變更追加事件 `quota_plan_limits_changed`（`aggregate_type = 'quota_plan_limit'`），相同時不寫入。
+- 理由：票面要求每筆觀測保存來源、時間、可信度與原始資料參照；每 5 分鐘一筆推估若不刪除會無限成長，8 天涵蓋最長的七日視窗。
+- 替代方案：推估即時計算、不落地（沒有「觀測時間」可顯示，也不符合「每筆觀測保存」）；不刪除（資料表無限成長）。
+- 影響：本票原本是第 11 個 migration，整合 rebuild/v1（票 12、08 已有第 11、12 個）時順延為第 13 個。時間線（票 41）若需要更久的額度歷史，要調整保留期限。
+- 審閱：未審
+
+### AI-126：輪詢的觸發點；票 19 的額度測試改為等下一次輪詢
+- 重要度：低
+- 時間／階段：2026-10-22，票 27 實作
+- 決策：`baton_api::quota::current` 先輪詢到期（距上次 ≥ 5 分鐘或從未輪詢）的使用中帳號再回傳判斷，Supervisor 的每次 tick（新增第 5 步「額度」）、排程佇列、派工 API、排程總覽與容量切換都經過它，所以 Port 每個帳號每 5 分鐘最多被呼叫一次。票 19 的兩個情境測試（`quota_near_the_limit_…`、`quota_blocks_from_seventy_five_percent_…`）原本改了 fake 樣本就立刻生效，現在要先把 fake Clock 前進 5 分鐘。
+- 理由：spec D-31 的額度輪詢是 5 分鐘；不再每次排程都呼叫 Port。輪詢時間存在資料庫，API 與 Supervisor 共用、重啟後也延續。
+- 替代方案：只在 Supervisor 背景輪詢（harness 不跑背景迴圈，派工 API 會看不到第一次樣本）；每次排程都呼叫 Port（違反 5 分鐘輪詢）。
+- 影響：外部觀測器的新樣本最多晚 5 分鐘生效；Adapter 的訊號與用量則立即生效。
+- 審閱：未審
+
+### AI-127：額度的 API 與帳號頁形狀
+- 重要度：低
+- 時間／階段：2026-10-22，票 27 實作
+- 決策：`GET /api/v1/scheduling` 的每個帳號新增 `quota`（`used`、`source`、`confidence`、`reset_at`、`observed_at`、`complete`、`incomplete_reason`、兩個視窗各自的 `effective`／`observed`／`estimated`、`external`）與 `plan_limits`，`quota_used` 保留且等於 `quota.used`。新增 `PUT /api/v1/profiles/{id}/quota-limits`（回傳排程總覽；400 `plan_limit_invalid`、404 `profile_not_found`、409 `profile_archived`），Tauri 指令 `profile_set_quota_limits`、`RuntimeClient::set_quota_limits`。帳號頁顯示判斷用量、來源、可信度、重置與觀測時間、兩個視窗的已觀測與推估（推估附本機 token 與方案上限）、觀測不完整提示與方案上限表單，並每 5 分鐘重新讀取排程總覽。外部觀測器的樣本目前不單獨顯示（正式版沒有外部觀測器）。
+- 理由：帳號頁已經從排程總覽讀進行中 Run（AI-101），額度放在同一份總覽避免多一個端點；方案上限屬於帳號設定，放在 Profile 路徑下。
+- 替代方案：獨立的 `GET /api/v1/quota`（UI 需要合併兩份資料）。
+- 影響：Controller 或其他畫面要讀額度時用同一個總覽。
+- 審閱：未審
+
+### AI-128：訊息的收件人是同一個 Workspace 的 Task；收件匣跟著 Task，不跟著 Run
 - 重要度：中
 - 時間／階段：2026-10-22，票 18 實作
 - 決策：`send_message` 的 `to` 是同一個 Workspace 內其他 Task 的 id（1 到 10 個，去除重複，不能含自己的 Task）；收件 Task 不必有進行中的 Run。每個收件 Task 一筆交付（主鍵 workspace＋message_id＋收件 Task）。`read_inbox` 只回傳寄給「憑證所屬 Run 的 Task」的訊息：交接或重試後的新 Run（新世代）會接到前一個 Run 沒讀完的訊息；自己寄出的訊息不在自己的收件匣。收件 Task 不存在或屬於別的 Workspace 一律回 404 `recipient_not_found`，不洩漏別的 Workspace 是否有那個 Task。`in_reply_to` 只能指向寄件者自己寄過或收到的訊息，否則回 404 `reply_target_not_found`。Controller 與使用者目前不是收件人（Controller 的訊息通道由後續票處理）。
@@ -955,7 +1180,7 @@
 - 影響：Worker 要知道對方的 task id（來源：Prompt 或 Controller 提供）；本票沒有「列出同 Workspace 的 Task」工具，由 Controller 在 Prompt 中提供。收件 Task 已完成或取消時訊息仍會存入但不會被讀到。
 - 審閱：未審
 
-### AI-104：`message_id` 是寄件者提供的冪等鍵，範圍是 Workspace
+### AI-129：`message_id` 是寄件者提供的冪等鍵，範圍是 Workspace
 - 重要度：中
 - 時間／階段：2026-10-22，票 18 實作
 - 決策：`message_id` 為選填（字元 `A-Za-z0-9_-.:`、1 到 128）。有提供時它就是去重鍵，唯一範圍是（Workspace、message_id）：同一個寄件 Task 以同一個 `message_id` 重送完全相同的內容（類型、主旨、本文、`in_reply_to`、收件人集合）→ 200 `duplicate: true`，回傳原本的訊息，不新增訊息或交付，寄件 Run 換世代重送也算；同一個 `message_id` 但內容不同、或是別的 Task 使用 → 409 `message_id_conflict`。沒有提供時 Runtime 產生 `msg_…`（這種請求每次都是新訊息，沒有重送保護）。不同 Workspace 可以使用相同的 `message_id`，彼此看不到對方。`thread_id` 由 Runtime 決定（新訊息＝自己的 `message_id`，回覆＝沿用被回覆訊息的 `thread_id`），`correlation_id` 可由寄件者指定，預設沿用被回覆訊息的、否則等於 `message_id`。
@@ -964,7 +1189,7 @@
 - 影響：工具說明建議 Worker 重送時帶同一個 `message_id`。寄件 Task 相同但內容不同的重送會得到 409，而不是悄悄覆蓋。
 - 審閱：未審
 
-### AI-105：「以訊息變更範圍」的判定方式與處理：看類型與欄位名稱，200 忽略並轉成事件
+### AI-130：「以訊息變更範圍」的判定方式與處理：看類型與欄位名稱，200 忽略並轉成事件
 - 重要度：高
 - 時間／階段：2026-10-22，票 18 實作
 - 決策：訊息本文是自由文字，Runtime 不解讀語意。被視為「想改變範圍或歸屬」的只有兩種明確訊號：`kind` 為 `scope_change`、`reassign`、`reassign_task`、`change_scope`、`update_contract`，或請求中出現 `task_id`、`contract`、`scope`、`assignee`、`assign_to`、`reassign_to`、`new_scope`、`owner` 任一欄位。這類請求：不儲存、不交付，HTTP 200 回 `{accepted:false, ignored:true, reason:"scope_change_not_allowed"}`，並追加一筆事件 `message_scope_change_ignored`（aggregate_type `message`，payload 含 workspace、run、寄件 Task、世代、嘗試的類型與欄位、收件人、主旨、本文前 500 字元）給 Controller。寄件 Run 已不是目前的寫入所有者時同樣回 409 `run_report_stale`，不記事件。正常訊息的合法類型只有 `note`、`question`、`answer`、`result`，其他值 400 `message_invalid`。訊息工具沒有任何路徑能修改 Task、契約、Run 或授權：訊息只寫 `message`、`message_delivery` 兩張表。
@@ -973,7 +1198,7 @@
 - 影響：Controller 消費 `message_scope_change_ignored` 事件的邏輯由 Controller 相關的票實作；本票只保證事件存在且內容足夠。訊息本文本身若含有誘導收件 Worker 超出範圍的文字，防護是 Worker 的契約與授權檢查，不在本票。
 - 審閱：未審
 
-### AI-106：交付狀態、Run 啟動時的未讀摘要與「不中途插話」
+### AI-131：交付狀態、Run 啟動時的未讀摘要與「不中途插話」
 - 重要度：中
 - 時間／階段：2026-10-22，票 18 實作
 - 決策：每筆交付有三種狀態：`pending`（已存入，收件人還沒看到）、`delivered`（出現在某個 Run 啟動時的未讀摘要裡）、`read`（收件人用 `read_inbox` 取走全文；`read_inbox` 直接讀取尚未 delivered 的訊息時一併補上 delivered 時間）。狀態由 `delivered_at`、`read_at` 兩個時間推導，不另存狀態欄。派工當下（`apply_run_command` 處理 Dispatch 的同一個交易）把收件 Task 的未讀訊息摘要附在 Prompt 末端：第一行 `未讀訊息：N 則（…）`，之後每則 `- [類型] 主旨（來自 Task「標題」，message_id）`，最多 10 則，超過加一行 `…另有 M 則`，**不含本文**；摘要列出的訊息標為 delivered；沒有未讀時 Prompt 不變。Prompt 在派工時固定並存入 Outbox（Runtime 重啟後重組出相同指令），所以派工之後才送來的訊息只能靠 `read_inbox` 取得；Runtime 不在 Worker 執行中途注入。`read_inbox` 預設只回未讀（依送出順序、最多 `limit`，預設 50、上限 100）並標為已讀；`include_read: true` 連已讀的一起回傳（每則有 `already_read`）；`unread_remaining` 是讀完之後仍未讀的數量。
@@ -982,7 +1207,7 @@
 - 影響：派工到實際啟動之間送達的訊息不在摘要裡，Worker 開始工作前仍應呼叫 `read_inbox`（工具說明這麼寫）。派工交易需要查詢訊息表，多一次小查詢。
 - 審閱：未審
 
-### AI-107：訊息的其他限制與資料表命名
+### AI-132：訊息的其他限制與資料表命名
 - 重要度：低
 - 時間／階段：2026-10-22，票 18 實作
 - 決策：資料表命名沿用單數慣例：`message`（追加式，禁止更新與刪除）、`message_delivery`（禁止刪除，只會填入 `delivered_at`、`read_at`），不照票文的複數 `messages`／`message_deliveries`。限制：主旨 1 到 200 字元、本文最多 16 KiB、收件人最多 10 個。`send_message` 只接受目前仍是寫入所有者的 Run（已結束或被接替 → 409 `run_report_stale`，什麼都不儲存，也不留稽核）；`read_inbox` 在 Run 結束或被接替後 401 `credential_revoked` 且不改變已讀狀態；兩者都沿用「請求聲稱的 Workspace／Run 與憑證不一致 → 403 `agent_scope_mismatch`」。`send_message` 不續約 lease（只有回報進度、checkpoint、受阻才是存活訊號）。`read_inbox` 的 `include_read` 搭配 `limit` 時回傳最舊的幾則。
@@ -991,13 +1216,22 @@
 - 影響：若之後需要稽核被拒絕的訊息，需另開票加入。
 - 審閱：未審
 
-### AI-108：票 18 整合：migration 與 AI 編號順延到票 19 之後；排程派工也附上未讀摘要
+### AI-133：票 18 整合：migration 與 AI 編號順延到票 19 之後；排程派工也附上未讀摘要
 - 重要度：中
 - 時間／階段：2026-10-22，票 18 整合（R037-18-integrate）
-- 決策：整合 rebuild/v1（票 19 已合併）時，票 19 的 `scheduling` 維持第 10 個 migration，本票的 `message_and_delivery` 順延為第 11 個（排在 `scheduling` 之後）；本票的決策由 AI-95～AI-99 順延為 AI-103～AI-107，移到 AI-102 之後並補上審閱行，內容不變。兩個 migration 互不相依（訊息表只參照 `workspace`、`run`、`task`，不涉及 `run.profile_id`），先後順序不影響 schema。票 19 之後派工 API 與 Supervisor 都改走 `Store::schedule`，不再經過 `apply_run_command`，所以在 `schedule` 派出 Run 的同一個交易裡也呼叫 `attach_unread_summary`，維持 AI-106 的「Run 啟動時附上未讀摘要」；`apply_run_command` 的呼叫保留（仍可直接派工）。本票的 harness 情境測試比照票 19 先建立可派工帳號；因單一帳號並行上限是 2，而部分情境同時有 3 個 Run，所以建立兩個帳號；Store 測試的 `RunCommand::Dispatch` 補上 `profile_id`。測試的斷言都沒有改。
+- 決策：整合 rebuild/v1（票 19 已合併）時，票 19 的 `scheduling` 維持第 10 個 migration，本票的 `message_and_delivery` 順延為第 11 個（排在 `scheduling` 之後；R048 再順延為第 14 個，見 AI-134）；本票的決策由 AI-95～AI-99 順延為 AI-103～AI-107（R048 再順延為 AI-128～AI-132，見 AI-134），移到 AI-102 之後並補上審閱行，內容不變。兩個 migration 互不相依（訊息表只參照 `workspace`、`run`、`task`，不涉及 `run.profile_id`），先後順序不影響 schema。票 19 之後派工 API 與 Supervisor 都改走 `Store::schedule`，不再經過 `apply_run_command`，所以在 `schedule` 派出 Run 的同一個交易裡也呼叫 `attach_unread_summary`，維持 AI-131 的「Run 啟動時附上未讀摘要」；`apply_run_command` 的呼叫保留（仍可直接派工）。本票的 harness 情境測試比照票 19 先建立可派工帳號；因單一帳號並行上限是 2，而部分情境同時有 3 個 Run，所以建立兩個帳號；Store 測試的 `RunCommand::Dispatch` 補上 `profile_id`。測試的斷言都沒有改。
 - 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。
 - 替代方案：讓本票保留第 10 個、把票 19 順延（會改動整合分支已存在的 migration 版本，已套用的開發資料庫版本號會錯位）。
-- 影響：本票程式碼與文件沒有引用 AI-95～AI-99 或 migration 編號，不需其他同步修改。只套用到第 10 版的資料庫開啟時會補套第 11 版。之後若再新增派工路徑，要記得同樣附上未讀摘要（Context Builder 加入後應收斂到一處）。
+- 影響：本票程式碼與文件沒有引用 AI-95～AI-99 或 migration 編號，不需其他同步修改。只套用到第 10 版的資料庫開啟時會補套後續版本。之後若再新增派工路徑，要記得同樣附上未讀摘要（Context Builder 加入後應收斂到一處）。
+- 審閱：未審
+
+### AI-134：票 18 第二次整合 rebuild/v1：migration 第 14 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 整合（R048-18-integrate）
+- 決策：rebuild/v1 已合併票 12（`artifact`，第 11 版）、票 08（`shared_settings_version`，第 12 版）、票 27（`quota`，第 13 版），本票的 `message_and_delivery` 順延為第 14 個 migration，排在 `quota` 之後；本票的決策由 AI-103～AI-108 順延為 AI-128～AI-133，移到 AI-127 之後，內容不變，只在 AI-133 的歷史說明加註再次順延，並把其中對 AI-106 的引用改為 AI-131。衝突合併方式：Agent 工具變成 7 個（原有 4 個＋票 12 的 `register_artifact`＋本票的 `send_message`、`read_inbox`），shim 的工具定義、已知工具清單與 API 路由三者都保留；shim 情境測試把兩邊的 schema 斷言放在同一個測試（改名為 `tools_list_has_the_seven_tools_with_their_required_fields`），stdio 測試的工具數改為 7；GLOSSARY 兩邊新增的詞條都保留。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。訊息表只參照 `workspace`、`run`、`task`，與成果、共同設定、額度的資料表互不相依，順序不影響 schema。
+- 替代方案：把本票的 migration 插在中間（會改動整合分支已存在的版本號，已套用的開發資料庫會錯位）。
+- 影響：本票程式碼與文件沒有引用 AI 編號或 migration 編號，不需其他同步修改。工具數量相關的斷言之後若再新增工具，要同時更新兩個 shim 測試。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

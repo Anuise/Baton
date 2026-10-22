@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createHttpClient, createTauriClient } from "./runtimeClient";
+import { createHttpClient, createTauriClient, errorCode } from "./runtimeClient";
 
 const health = { status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 };
 
@@ -279,6 +279,40 @@ describe("Runtime 用戶端", () => {
     expect(invoke.mock.calls).toEqual([["scheduling_overview"], ["scheduling_set_mode", { mode: "reserve_handoff" }]]);
   });
 
+  it("HTTP 版設定方案上限：PUT 到 Profile 的 quota-limits，未設定的視窗送 null", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.setQuotaLimits("prof_1", { five_hour_tokens: 500_000, seven_day_tokens: null });
+
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/profiles/prof_1/quota-limits", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ five_hour_tokens: 500_000, seven_day_tokens: null }),
+    });
+  });
+
+  it("HTTP 版設定方案上限被拒絕時，錯誤訊息是 Runtime 的說明", async () => {
+    const body = { error: "plan_limit_invalid", message: "方案上限必須是正整數（token）；不知道就留空" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 400 }));
+
+    await expect(
+      createHttpClient(fetchFn as unknown as typeof fetch).setQuotaLimits("prof_1", {
+        five_hour_tokens: 0,
+        seven_day_tokens: null,
+      }),
+    ).rejects.toThrow("方案上限必須是正整數（token）；不知道就留空");
+  });
+
+  it("Tauri 版以 profile_set_quota_limits 指令設定方案上限", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const limits = { five_hour_tokens: null, seven_day_tokens: 3_000_000 };
+
+    await createTauriClient(invoke as never).setQuotaLimits("prof_1", limits);
+
+    expect(invoke.mock.calls).toEqual([["profile_set_quota_limits", { id: "prof_1", limits }]]);
+  });
+
   it("HTTP 版把 Task 操作失敗時 Runtime 的說明當成錯誤訊息", async () => {
     const body = { error: "dependency_cycle", message: "相依會形成循環：A → B → A" };
     const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
@@ -407,5 +441,115 @@ describe("Runtime 用戶端", () => {
       ["setup_recheck"],
       ["setup_acknowledge_notice"],
     ]);
+  });
+  it("Tauri 版以指令與 camelCase 參數操作共同設定", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.getSharedSettingsStatus();
+    await client.previewSharedSettings();
+    await client.adoptSharedSettings("hash_1");
+    await client.getSharedSettingsVersion(3);
+
+    expect(invoke.mock.calls).toEqual([
+      ["shared_settings_status"],
+      ["shared_settings_preview"],
+      ["shared_settings_adopt", { expectedHash: "hash_1" }],
+      ["shared_settings_version", { version: 3 }],
+    ]);
+  });
+
+  it("HTTP 版以契約的路徑操作共同設定，採用送出 expected_hash", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.getSharedSettingsStatus();
+    await client.previewSharedSettings();
+    await client.adoptSharedSettings("hash_1");
+    await client.getSharedSettingsVersion(3);
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/shared-settings");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/shared-settings/import-preview", { method: "POST" });
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/shared-settings/adopt", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_hash: "hash_1" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(4, "/api/v1/shared-settings/versions/3");
+  });
+
+  it("兩種用戶端都能辨識採用被拒絕的穩定代碼 settings_source_changed", async () => {
+    const body = { error: "settings_source_changed", message: "來源設定在預覽之後已經改變" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+    const invoke = vi.fn(async () => {
+      throw "Runtime 拒絕連線（settings_source_changed）：來源設定在預覽之後已經改變";
+    });
+
+    const http = await createHttpClient(fetchFn as unknown as typeof fetch).adoptSharedSettings("h").catch((e) => e);
+    const tauri = await createTauriClient(invoke as never).adoptSharedSettings("h").catch((e) => e);
+
+    expect(errorCode(http)).toBe("settings_source_changed");
+    expect(errorCode(tauri)).toBe("settings_source_changed");
+    expect(errorCode(new Error("無法連線到 Runtime"))).toBeNull();
+  });
+
+  it("HTTP 版列出成果、預覽版本：路徑含 Workspace、成果與版本", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ artifacts: [], unregistered_files: [] }), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.listArtifacts("ws_1");
+    await client.previewArtifact("ws_1", "art_1", 2);
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/artifacts");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/artifacts/art_1/versions/2/preview");
+  });
+
+  it("HTTP 版下載成果：以同一個 fetch 取得位元組與 X-Baton-Sha256，不把憑證放進網址", async () => {
+    const fetchFn = vi.fn(
+      async () => new Response("內容", { status: 200, headers: { "X-Baton-Sha256": "ab".repeat(32) } }),
+    );
+
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).downloadArtifact("ws_1", "art_1", 2);
+
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/workspaces/ws_1/artifacts/art_1/versions/2/content");
+    expect(result.sha256).toBe("ab".repeat(32));
+    expect(await result.blob.text()).toBe("內容");
+  });
+
+  it("HTTP 版下載成果缺少 X-Baton-Sha256 標頭時，雜湊是空字串", async () => {
+    const fetchFn = vi.fn(async () => new Response("x", { status: 200 }));
+
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).downloadArtifact("ws_1", "art_1", 1);
+
+    expect(result.sha256).toBe("");
+  });
+
+  it("HTTP 版成果操作失敗時，以 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "artifact_integrity_failed", message: "成果檔案與登記的雜湊不符，拒絕提供" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await expect(client.listArtifacts("ws_1")).rejects.toThrow("成果檔案與登記的雜湊不符，拒絕提供");
+    await expect(client.previewArtifact("ws_1", "art_1", 1)).rejects.toThrow("成果檔案與登記的雜湊不符，拒絕提供");
+    await expect(client.downloadArtifact("ws_1", "art_1", 1)).rejects.toThrow("成果檔案與登記的雜湊不符，拒絕提供");
+  });
+
+  it("Tauri 版以指令與參數瀏覽成果；下載由殼回傳 base64 內容與雜湊", async () => {
+    const invoke = vi.fn(async (command: string) =>
+      command === "artifact_download" ? { sha256: "cd".repeat(32), content_base64: btoa("hello") } : {},
+    );
+    const client = createTauriClient(invoke as never);
+
+    await client.listArtifacts("ws_1");
+    await client.previewArtifact("ws_1", "art_1", 2);
+    const result = await client.downloadArtifact("ws_1", "art_1", 2);
+
+    expect(invoke.mock.calls).toEqual([
+      ["artifact_list", { workspaceId: "ws_1" }],
+      ["artifact_preview", { workspaceId: "ws_1", artifactId: "art_1", version: 2 }],
+      ["artifact_download", { workspaceId: "ws_1", artifactId: "art_1", version: 2 }],
+    ]);
+    expect(result.sha256).toBe("cd".repeat(32));
+    expect(await result.blob.text()).toBe("hello");
   });
 });
