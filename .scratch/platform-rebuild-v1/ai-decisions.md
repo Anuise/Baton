@@ -3535,6 +3535,8 @@
 - 理由：沿用票 42 的模式（Controller 專屬工具 + 桌面檢視 API + 側欄入口）。
 - 替代方案：把流程放進「工作」分頁的 Task 詳細面板。Goal 層級的 Workflow 沒有對應的 Task，放不進去。
 - 影響：與同時進行的票整合時，migration 編號可能需要順延（見 AI-390）。
+- 審閱：未審
+
 ### AI-390：票 43 整合 rebuild/v1（票 34）：`methods_and_workflows` 順延為第 39 個 migration、AI 編號改為 AI-381～AI-389
 - 重要度：低
 - 時間／階段：2026-10-23，票 43 實作
