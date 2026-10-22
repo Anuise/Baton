@@ -102,6 +102,7 @@ impl World {
             tasks: &self.tasks,
             dependencies: &[],
             contracts: &[],
+            decision_holds: &[],
         };
         let ctx = ExternalContext {
             task: &task_ctx,
@@ -412,4 +413,37 @@ fn requests_are_validated() {
     assert!(OperationRequest::new("k", "deploy", "prod", huge).is_err());
     assert!(OperationResult::succeeded(" ").is_err());
     assert_eq!(OperationRequest::new(" k ", "deploy", "prod", Value::Null).unwrap().idempotency_key, "k");
+}
+
+#[test]
+fn every_blocked_repeat_from_another_run_is_recorded_as_a_duplicate_operation_event() {
+    let mut world = World::new();
+    world.begin("r1", "deploy-1", params()).unwrap();
+    let duplicates = |change: &ExternalChange| -> Vec<(String, Value)> {
+        change
+            .events
+            .iter()
+            .filter(|e| e.event_type == EVENT_EXTERNAL_OPERATION_DUPLICATE_BLOCKED)
+            .map(|e| (e.aggregate_id.clone(), e.payload.clone()))
+            .collect()
+    };
+    let request = || OperationRequest::new("deploy-1", "deploy", "production", params()).unwrap();
+    let begin = |world: &mut World, run_id: &str, op: &str| {
+        let generation = world.runs.iter().find(|r| r.id == run_id).unwrap().generation;
+        world.step(ExternalCommand::Begin { operation_id: op.into(), run_id: run_id.into(), generation, request: request() }, T0).unwrap()
+    };
+
+    // 同一個 Run 重送登記（回應遺失）不是重複操作
+    assert!(duplicates(&begin(&mut world, "r1", "op-again")).is_empty());
+
+    let elsewhere = begin(&mut world, "r2", "op-dup1");
+    let [(aggregate_id, payload)] = &duplicates(&elsewhere)[..] else { panic!("{:?}", elsewhere.events) };
+    assert_eq!(aggregate_id, "op-dup1", "每次擋下各是一個聚合，不改動原操作的版本");
+    assert_eq!(payload["status"], "in_progress_elsewhere");
+    assert_eq!((payload["operation_id"].as_str(), payload["task_id"].as_str()), (Some("op1"), Some("t2")));
+    assert!(elsewhere.operations.is_empty());
+
+    world.record("r1", "deploy-1", OperationResult::succeeded("release #42").unwrap()).unwrap();
+    let again = begin(&mut world, "r2", "op-dup2");
+    assert_eq!(duplicates(&again)[0].1["status"], "already_succeeded");
 }

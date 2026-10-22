@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::decision::{self, DecisionKind, DecisionOption, DecisionRequest, DecisionStatus, DecisionTarget, Urgency};
+use crate::decision::{self, DecisionKind, DecisionOption, DecisionOrigin, DecisionRequest, DecisionStatus, DecisionTarget, Urgency};
 use crate::event::DomainEvent;
 use crate::run::{self, ExecutionLease, Run};
 use crate::task::{Task, TaskContext, TaskStatus, Versioned};
@@ -26,6 +26,10 @@ pub const EVENT_EXTERNAL_OPERATION_SUCCEEDED: &str = "external_operation_succeed
 pub const EVENT_EXTERNAL_OPERATION_FAILED: &str = "external_operation_failed";
 pub const EVENT_EXTERNAL_OPERATION_RESULT_UNKNOWN: &str = "external_operation_result_unknown";
 pub const EVENT_EXTERNAL_OPERATION_VERIFIED: &str = "external_operation_verified";
+/// 重複登記被擋下（票 41 的「重複操作事件」）：另一個 Run 以同一個冪等鍵要求執行已成功、結果未知或他處進行中的操作。
+/// 每次擋下各是一個聚合（識別是這次登記新配的操作識別），不改動原操作的版本。
+pub const EXTERNAL_OPERATION_DUPLICATE_AGGREGATE: &str = "external_operation_duplicate";
+pub const EVENT_EXTERNAL_OPERATION_DUPLICATE_BLOCKED: &str = "external_operation_duplicate_blocked";
 
 /// Agent 工具名稱。
 pub const TOOL_BEGIN_EXTERNAL_OPERATION: &str = "begin_external_operation";
@@ -392,6 +396,7 @@ fn begin(
         return Err(ExternalOperationError::KeyConflict(existing.idempotency_key.clone()));
     }
     let id = existing.id.clone();
+    let blocked = |status: &str| duplicate_blocked(&operation_id, existing, run, status, now);
     let outcome = match existing.status {
         OperationStatus::Succeeded => {
             BeginOutcome::AlreadySucceeded { operation_id: id, receipt: existing.receipt.clone() }
@@ -415,6 +420,7 @@ fn begin(
                 operation_id: id,
                 decision_request_id: existing.decision_request_id.clone(),
             }));
+            change.events.push(blocked("result_unknown"));
             if let Some(request_id) = existing.decision_request_id.as_ref().filter(|r| ctx.pending_requests.contains(r)) {
                 let task = ctx.task.task(&run.task_id).ok_or_else(|| ExternalOperationError::TaskNotFound(run.task_id.clone()))?;
                 if task.id != existing.task_id {
@@ -427,7 +433,35 @@ fn begin(
             return Ok(change);
         }
     };
-    Ok(ExternalChange::new(ExternalOutcome::Begin(outcome)))
+    let mut change = ExternalChange::new(ExternalOutcome::Begin(outcome.clone()));
+    // 同一個 Run 重送登記是回應遺失後的重試，不是重複操作
+    let status = match outcome {
+        BeginOutcome::Proceed { .. } => None,
+        BeginOutcome::AlreadySucceeded { .. } => Some("already_succeeded"),
+        BeginOutcome::ResultUnknown { .. } => Some("result_unknown"),
+        BeginOutcome::InProgressElsewhere { .. } => Some("in_progress_elsewhere"),
+    };
+    change.events.extend(status.map(blocked));
+    Ok(change)
+}
+
+/// 重複登記被擋下的事件；`status` 是回給 Worker 的登記結果。
+fn duplicate_blocked(event_id: &str, existing: &ExternalOperation, run: &Run, status: &str, now: Timestamp) -> DomainEvent {
+    DomainEvent {
+        aggregate_type: EXTERNAL_OPERATION_DUPLICATE_AGGREGATE,
+        aggregate_id: event_id.to_string(),
+        aggregate_version: 1,
+        event_type: EVENT_EXTERNAL_OPERATION_DUPLICATE_BLOCKED,
+        occurred_at: now,
+        payload: serde_json::json!({
+            "operation_id": existing.id,
+            "idempotency_key": existing.idempotency_key,
+            "operation": existing.operation,
+            "status": status,
+            "run_id": run.id,
+            "task_id": run.task_id,
+        }),
+    }
 }
 
 /// 開始一次新的嘗試（第一次登記，或確定沒有生效之後再執行）。
@@ -595,6 +629,7 @@ fn unknown_request(operation: &ExternalOperation, task_contract_version: i64, re
         workspace_id: operation.workspace_id.clone(),
         run_id: operation.run_id.clone(),
         task_id: operation.task_id.clone(),
+        origin: DecisionOrigin::Worker,
         // 資料庫的種類沒有外部操作；這個請求由 Runtime 代 Worker 提出，與外部操作的關聯記在操作上（`external_operation_id`）
         kind: DecisionKind::Agent,
         status: DecisionStatus::Pending,

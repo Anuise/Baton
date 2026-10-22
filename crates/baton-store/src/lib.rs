@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use baton_domain::auth::{AgentScope, CredentialRecord, Role};
+use baton_domain::auth::{AgentScope, ControllerScope, CredentialRecord, Role};
 use baton_domain::authorization::{
     self, Admission, AdmissionDenied, AuthorizationError, AuthorizationRevision, Capability, ConfirmOutcome,
     ConfirmRequest,
@@ -48,6 +48,7 @@ mod scheduling;
 mod sessions;
 mod shared_settings;
 mod tasks;
+mod timeline;
 mod verification;
 mod workdirs;
 pub use agent::AgentContext;
@@ -75,6 +76,7 @@ pub use scheduling::{
     QueuedRequest, ScheduleOutcome, ScheduleRequest, SchedulingSnapshot, StartedRun, WaitingTask,
 };
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
+pub use timeline::TimelineError;
 pub use verification::{AcceptanceApplyError, PendingVerification};
 pub use workdirs::WorkdirCandidate;
 
@@ -1210,7 +1212,93 @@ const MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX handoff_one_in_flight_per_task ON handoff (task_id)
             WHERE phase IN ('requested', 'stopping', 'waiting_resource');",
     },
-    // 票 30（第 33 個 migration）：Controller 跨帳號交接。conversation 記下沒有可用帳號時的等待原因（下一輪開始時清除）；
+    // 票 17（第 33 個 migration）：Controller 的工具。(1) Controller 憑證綁定 Controller 的一輪（`controller_run_id`）；
+    // (2) 裁定請求可以由 Controller 提出（`origin`）：`run_id` 依來源指向 Worker 的 `run` 或 Controller 的 `controller_run`，
+    // 所以重建 `decision_request` 與 `decision_approval_use`，把對 `run` 的外鍵改成依來源檢查的觸發器。
+    // 這個 migration 在 `foreign_keys=OFF` 下套用（見 `FOREIGN_KEYS_OFF_MIGRATIONS`）：參照 `decision_request` 的子表不必跟著重建，
+    // 提交前以 `foreign_key_check` 核對
+    Migration {
+        name: "controller_tools",
+        sql: "ALTER TABLE credential ADD COLUMN controller_run_id TEXT REFERENCES controller_run (id);
+        CREATE UNIQUE INDEX credential_one_per_controller_run ON credential (controller_run_id)
+            WHERE controller_run_id IS NOT NULL;
+        CREATE TABLE decision_request_next (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            run_id TEXT NOT NULL,
+            task_id TEXT NOT NULL REFERENCES task (id),
+            kind TEXT NOT NULL CHECK (kind IN ('agent', 'permission', 'authority')),
+            status TEXT NOT NULL CHECK (status IN ('pending', 'answered', 'superseded', 'merged')),
+            question TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            options TEXT NOT NULL CHECK (json_valid(options)),
+            recommendation TEXT,
+            evidence TEXT NOT NULL CHECK (json_valid(evidence)),
+            urgency TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
+            deadline_at INTEGER,
+            permission TEXT CHECK (permission IS NULL OR json_valid(permission)),
+            authority TEXT CHECK (authority IS NULL OR json_valid(authority)),
+            target_task_id TEXT NOT NULL REFERENCES task (id),
+            target_contract_version INTEGER NOT NULL,
+            target_authorization_revision INTEGER,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            deferred_until INTEGER,
+            merged_into TEXT REFERENCES decision_request (id),
+            status_reason TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            origin TEXT NOT NULL DEFAULT 'worker' CHECK (origin IN ('worker', 'controller')),
+            CHECK ((status = 'merged') = (merged_into IS NOT NULL)),
+            CHECK (origin = 'worker' OR kind <> 'permission')
+        );
+        INSERT INTO decision_request_next
+            (id, workspace_id, run_id, task_id, kind, status, question, reason, options, recommendation, evidence, urgency,
+             deadline_at, permission, authority, target_task_id, target_contract_version, target_authorization_revision,
+             revision, deferred_until, merged_into, status_reason, created_at, updated_at, origin)
+        SELECT id, workspace_id, run_id, task_id, kind, status, question, reason, options, recommendation, evidence, urgency,
+               deadline_at, permission, authority, target_task_id, target_contract_version, target_authorization_revision,
+               revision, deferred_until, merged_into, status_reason, created_at, updated_at, 'worker'
+        FROM decision_request ORDER BY rowid;
+        DROP TABLE decision_request;
+        ALTER TABLE decision_request_next RENAME TO decision_request;
+        CREATE INDEX decision_request_workspace ON decision_request (workspace_id, status);
+        -- 提出者必須存在：Worker 的請求指向 run，Controller 的請求指向 controller_run
+        CREATE TRIGGER decision_request_origin BEFORE INSERT ON decision_request
+        WHEN NOT ((NEW.origin = 'worker' AND EXISTS (SELECT 1 FROM run WHERE id = NEW.run_id))
+               OR (NEW.origin = 'controller' AND EXISTS (SELECT 1 FROM controller_run WHERE id = NEW.run_id)))
+        BEGIN SELECT RAISE(ABORT, 'decision_request 的提出者不存在'); END;
+        -- 只有待處理的請求能變動，而且只能改可變欄位、內容版本只增不減；結束的狀態不能再改
+        CREATE TRIGGER decision_request_guard BEFORE UPDATE ON decision_request
+        WHEN NOT (OLD.status = 'pending' AND NEW.revision > OLD.revision AND NEW.id = OLD.id
+                  AND NEW.workspace_id = OLD.workspace_id AND NEW.run_id = OLD.run_id AND NEW.task_id = OLD.task_id
+                  AND NEW.kind = OLD.kind AND NEW.question = OLD.question AND NEW.reason = OLD.reason
+                  AND NEW.options = OLD.options AND NEW.target_task_id = OLD.target_task_id
+                  AND NEW.target_contract_version = OLD.target_contract_version
+                  AND NEW.target_authorization_revision IS OLD.target_authorization_revision
+                  AND NEW.origin = OLD.origin AND NEW.created_at = OLD.created_at)
+        BEGIN SELECT RAISE(ABORT, 'decision_request 只有待處理時能變動，且只能改狀態、延後、合併與原因'); END;
+        CREATE TRIGGER decision_request_no_delete BEFORE DELETE ON decision_request
+        BEGIN SELECT RAISE(ABORT, 'decision_request 不可刪除'); END;
+        CREATE TABLE decision_approval_use_next (
+            request_id TEXT PRIMARY KEY REFERENCES decision (request_id),
+            run_id TEXT NOT NULL,
+            used_at INTEGER NOT NULL
+        );
+        INSERT INTO decision_approval_use_next (request_id, run_id, used_at)
+        SELECT request_id, run_id, used_at FROM decision_approval_use ORDER BY rowid;
+        DROP TABLE decision_approval_use;
+        ALTER TABLE decision_approval_use_next RENAME TO decision_approval_use;
+        -- 消耗單次批准的 Run 必須存在（Worker 的 run 或 Controller 的 controller_run）
+        CREATE TRIGGER decision_approval_use_run BEFORE INSERT ON decision_approval_use
+        WHEN NOT (EXISTS (SELECT 1 FROM run WHERE id = NEW.run_id)
+               OR EXISTS (SELECT 1 FROM controller_run WHERE id = NEW.run_id))
+        BEGIN SELECT RAISE(ABORT, 'decision_approval_use 的 Run 不存在'); END;
+        CREATE TRIGGER decision_approval_use_no_update BEFORE UPDATE ON decision_approval_use
+        BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER decision_approval_use_no_delete BEFORE DELETE ON decision_approval_use
+        BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可刪除'); END;",
+    },
+    // 票 30（第 34 個 migration）：Controller 跨帳號交接。conversation 記下沒有可用帳號時的等待原因（下一輪開始時清除）；
     // controller_run 記下承接換帳號的那一輪的來源帳號、上一輪與原因
     Migration {
         name: "controller_handoff",
@@ -1222,6 +1310,10 @@ const MIGRATIONS: &[Migration] = &[
         ALTER TABLE controller_run ADD COLUMN handoff_reason TEXT;",
     },
 ];
+
+/// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
+/// 外鍵開著會讓 `DROP TABLE` 的隱含刪除失敗。套用後、提交前以 `foreign_key_check` 確認沒有任何違反。
+const FOREIGN_KEYS_OFF_MIGRATIONS: &[&str] = &["controller_tools"];
 
 /// 開啟 Store 的選項；預設值就是正式執行的行為。
 #[derive(Debug, Clone, Copy)]
@@ -1415,17 +1507,21 @@ impl Store {
                 tx.execute("DELETE FROM credential WHERE role = ?1", [record.role.as_str()])?;
             }
             let scope = record.scope.as_ref();
+            let controller = record.controller.as_ref();
+            let workspace_id = scope.map(|s| s.workspace_id.as_str()).or(controller.map(|c| c.workspace_id.as_str()));
             tx.execute(
-                "INSERT INTO credential (token_hash, role, issued_at, expires_at, workspace_id, run_id, generation)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO credential
+                 (token_hash, role, issued_at, expires_at, workspace_id, run_id, generation, controller_run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     record.token_hash,
                     record.role.as_str(),
                     record.issued_at.as_millis(),
                     record.expires_at.map(|t| t.as_millis()),
-                    scope.map(|s| s.workspace_id.as_str()),
+                    workspace_id,
                     scope.map(|s| s.run_id.as_str()),
                     scope.map(|s| s.generation),
+                    controller.map(|c| c.controller_run_id.as_str()),
                 ],
             )?;
             Ok(())
@@ -1439,7 +1535,7 @@ impl Store {
         self.read(move |conn| {
             let row = conn
                 .query_row(
-                    "SELECT role, issued_at, expires_at, workspace_id, run_id, generation
+                    "SELECT role, issued_at, expires_at, workspace_id, run_id, generation, controller_run_id
                      FROM credential WHERE token_hash = ?1",
                     [&token_hash],
                     |r| {
@@ -1450,6 +1546,7 @@ impl Store {
                             r.get::<_, Option<String>>(3)?,
                             r.get::<_, Option<String>>(4)?,
                             r.get::<_, Option<i64>>(5)?,
+                            r.get::<_, Option<String>>(6)?,
                         ))
                     },
                 )
@@ -1458,12 +1555,15 @@ impl Store {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     other => Err(other),
                 })?;
-            Ok(row.and_then(|(role, issued_at, expires_at, workspace_id, run_id, generation)| {
-                let scope = match (workspace_id, run_id, generation) {
-                    (Some(workspace_id), Some(run_id), Some(generation)) => {
-                        Some(AgentScope { workspace_id, run_id, generation })
+            Ok(row.and_then(|(role, issued_at, expires_at, workspace_id, run_id, generation, controller_run_id)| {
+                let (scope, controller) = match (workspace_id, run_id, generation, controller_run_id) {
+                    (Some(workspace_id), Some(run_id), Some(generation), None) => {
+                        (Some(AgentScope { workspace_id, run_id, generation }), None)
                     }
-                    _ => None,
+                    (Some(workspace_id), None, None, Some(controller_run_id)) => {
+                        (None, Some(ControllerScope { workspace_id, controller_run_id }))
+                    }
+                    _ => (None, None),
                 };
                 Some(CredentialRecord {
                     token_hash,
@@ -1471,6 +1571,7 @@ impl Store {
                     issued_at: Timestamp::from_millis(issued_at),
                     expires_at: expires_at.map(Timestamp::from_millis),
                     scope,
+                    controller,
                 })
             }))
         })
@@ -1744,14 +1845,46 @@ fn migrate(conn: &mut Connection, now: Timestamp, backup_data_dir: Option<&Path>
             .map_err(|e| StoreError::PreMigrationBackup(e.to_string()))?;
     }
     for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch(migration.sql)?;
-        tx.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![index + 1, migration.name, now.as_millis()],
-        )?;
-        tx.commit()?;
+        let foreign_keys_off = FOREIGN_KEYS_OFF_MIGRATIONS.contains(&migration.name);
+        // PRAGMA foreign_keys 在交易中不能改變，所以在交易外關閉、套用完立刻開回
+        if foreign_keys_off {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+        }
+        let result = apply_migration(conn, index, migration, now, foreign_keys_off);
+        if foreign_keys_off {
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+        }
+        result?;
     }
+    Ok(())
+}
+
+fn apply_migration(
+    conn: &mut Connection,
+    index: usize,
+    migration: &Migration,
+    now: Timestamp,
+    check_foreign_keys: bool,
+) -> StoreResult<()> {
+    use rusqlite::OptionalExtension;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute_batch(migration.sql)?;
+    if check_foreign_keys {
+        let violation: Option<String> =
+            tx.query_row("SELECT \"table\" FROM pragma_foreign_key_check LIMIT 1", [], |r| r.get(0)).optional()?;
+        if let Some(table) = violation {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+                Some(format!("migration {} 之後 {table} 有外鍵違反", migration.name)),
+            )
+            .into());
+        }
+    }
+    tx.execute(
+        "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![index + 1, migration.name, now.as_millis()],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1841,6 +1974,7 @@ mod tests {
             issued_at: Timestamp::from_millis(10),
             expires_at: expires_at.map(Timestamp::from_millis),
             scope: None,
+            controller: None,
         }
     }
 
@@ -1995,6 +2129,71 @@ mod tests {
         insert("ver_4", "r2", "passed").unwrap();
         assert!(insert("ver_5", "r2", "failed").is_err());
         assert!(insert("ver_6", "r1", "unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn the_controller_tools_migration_keeps_existing_decisions_and_checks_the_requester_by_origin() {
+        // 套用到票 17 之前的版本，放一筆已回答、用過單次批准的 Worker 請求（含阻擋範圍）
+        let dir = tempfile::tempdir().unwrap();
+        let before = MIGRATIONS.iter().position(|m| m.name == "controller_tools").unwrap();
+        {
+            let old = raw(dir.path());
+            old.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (index, migration) in MIGRATIONS[..before].iter().enumerate() {
+                old.execute_batch(migration.sql).unwrap();
+                old.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![index + 1, migration.name],
+                )
+                .unwrap();
+            }
+            old.execute_batch(
+                "INSERT INTO workspace (id, name, path, status, version, created_at) VALUES ('w1', 'w', 'C:/w', 'active', 1, 1);
+                 INSERT INTO goal (id, workspace_id, title, version, created_at) VALUES ('g1', 'w1', 'g', 1, 1);
+                 INSERT INTO task (id, workspace_id, goal_id, title, status, version, contract_version, created_at, updated_at)
+                   VALUES ('t1', 'w1', 'g1', 't', 'running', 1, 1, 1, 1);
+                 INSERT INTO run (id, workspace_id, task_id, status, version, generation, contract_version, created_at, updated_at)
+                   VALUES ('r1', 'w1', 't1', 'running', 1, 1, 1, 1, 1);
+                 INSERT INTO decision_request (id, workspace_id, run_id, task_id, kind, status, question, reason, options,
+                   evidence, urgency, target_task_id, target_contract_version, revision, created_at, updated_at)
+                   VALUES ('d1', 'w1', 'r1', 't1', 'permission', 'answered', '要允許嗎？', '範圍外', '[]', '[]', 'normal',
+                           't1', 1, 2, 1, 2);
+                 INSERT INTO decision_request_block (request_id, task_id) VALUES ('d1', 't1');
+                 INSERT INTO decision (request_id, action, option_id, decided_by, decided_at)
+                   VALUES ('d1', 'accept', 'allow_once', 'desktop', 2);
+                 INSERT INTO decision_approval_use (request_id, run_id, used_at) VALUES ('d1', 'r1', 3);",
+            )
+            .unwrap();
+        }
+
+        drop(open(dir.path()).await);
+
+        let conn = raw(dir.path());
+        let kept: (String, String, String) = conn
+            .query_row("SELECT id, status, origin FROM decision_request", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(kept, ("d1".to_string(), "answered".to_string(), "worker".to_string()));
+        let used: String = conn.query_row("SELECT run_id FROM decision_approval_use", [], |r| r.get(0)).unwrap();
+        assert_eq!(used, "r1");
+        // 子表對重建後的 decision_request 仍有效
+        let violations: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(violations, 0);
+        // 提出者依來源檢查：Worker 的請求要指向 run，Controller 的請求要指向 controller_run
+        let insert = |id: &str, run: &str, origin: &str| {
+            conn.execute(
+                "INSERT INTO decision_request (id, workspace_id, run_id, task_id, kind, status, question, reason, options,
+                   evidence, urgency, target_task_id, target_contract_version, revision, created_at, updated_at, origin)
+                 VALUES (?1, 'w1', ?2, 't1', 'agent', 'pending', 'q', 'r', '[]', '[]', 'normal', 't1', 1, 1, 5, 5, ?3)",
+                rusqlite::params![id, run, origin],
+            )
+        };
+        assert!(insert("d2", "r1", "controller").is_err(), "r1 不是 Controller 的一輪");
+        assert!(insert("d3", "ctl_nope", "controller").is_err());
+        insert("d4", "r1", "worker").unwrap();
+        assert!(conn.execute("UPDATE decision_request SET origin = 'controller', revision = 2 WHERE id = 'd4'", []).is_err());
     }
 
     #[tokio::test]

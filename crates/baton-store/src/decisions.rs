@@ -6,11 +6,12 @@
 //! 批次處理由呼叫端逐項呼叫 `answer_decision`：每一項各自一個交易，一項失敗不影響其他項。
 
 use baton_domain::approval::ArtifactMark;
-use baton_domain::auth::AgentScope;
+use baton_domain::auth::{AgentScope, ControllerScope};
 use baton_domain::authority::{self, AuthorityEntryRequest, AuthorityError, AuthorityPolicy, AuthorityTable, Matter};
 use baton_domain::decision::{
     self, ActionContent, ApprovalUse, AuthorityDetail, Decision, DecisionAction, DecisionChange, DecisionCommand,
-    DecisionContext, DecisionError, DecisionKind, DecisionOutcome, DecisionRequest, DecisionStatus, DecisionTarget,
+    DecisionContext, DecisionError, DecisionKind, DecisionOrigin, DecisionOutcome, DecisionRequest, DecisionStatus,
+    DecisionTarget,
     DecisionView, Resolution, Urgency,
 };
 use baton_domain::task::Task;
@@ -155,6 +156,43 @@ impl Store {
             audit_id,
             run_id: scope.run_id.clone(),
             generation: scope.generation,
+            content,
+        };
+        self.apply_decision_command(scope.workspace_id.clone(), command, now).await
+    }
+
+    /// Controller 的一輪向使用者提問（`propose_decision_request`，票 17）；`blocking` 是依賴答案的 Task。
+    /// 呼叫端已確認那一輪還沒結束。
+    pub async fn controller_question(
+        &self,
+        scope: &ControllerScope,
+        request_id: String,
+        content: decision::RequestContent,
+        blocking: Vec<String>,
+        now: Timestamp,
+    ) -> Result<DecisionOutcome, DecisionApplyError> {
+        let command = DecisionCommand::ControllerQuestion {
+            request_id,
+            controller_run_id: scope.controller_run_id.clone(),
+            content,
+            blocking,
+        };
+        self.apply_decision_command(scope.workspace_id.clone(), command, now).await
+    }
+
+    /// Controller 的工具在變更前，以 Runtime 推導出的事項依決策權限表判定（票 17）。呼叫端已確認那一輪還沒結束。
+    pub async fn controller_gate(
+        &self,
+        scope: &ControllerScope,
+        request_id: String,
+        audit_id: String,
+        content: ActionContent,
+        now: Timestamp,
+    ) -> Result<DecisionOutcome, DecisionApplyError> {
+        let command = DecisionCommand::ControllerGate {
+            request_id,
+            audit_id,
+            controller_run_id: scope.controller_run_id.clone(),
             content,
         };
         self.apply_decision_command(scope.workspace_id.clone(), command, now).await
@@ -437,7 +475,7 @@ fn load_policy(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Author
 
 const REQUEST_COLUMNS: &str = "id, workspace_id, run_id, task_id, kind, status, question, reason, options, \
      recommendation, evidence, urgency, deadline_at, permission, authority, target_task_id, target_contract_version, \
-     target_authorization_revision, revision, deferred_until, merged_into, status_reason, created_at, updated_at";
+     target_authorization_revision, revision, deferred_until, merged_into, status_reason, created_at, updated_at, origin";
 
 fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result<DecisionData> {
     let bad = |index: usize, what: &str| {
@@ -482,6 +520,7 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
                 links: Vec::new(),
                 created_at: Timestamp::from_millis(r.get(22)?),
                 updated_at: Timestamp::from_millis(r.get(23)?),
+                origin: DecisionOrigin::parse(&r.get::<_, String>(24)?).ok_or_else(|| bad(24, "裁定請求的提出者"))?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -597,7 +636,7 @@ pub(crate) fn insert_request(tx: &Transaction<'_>, request: &DecisionRequest) ->
     tx.execute(
         &format!(
             "INSERT INTO decision_request ({REQUEST_COLUMNS})
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"
         ),
         rusqlite::params![
             request.id,
@@ -624,6 +663,7 @@ pub(crate) fn insert_request(tx: &Transaction<'_>, request: &DecisionRequest) ->
             request.status_reason,
             request.created_at.as_millis(),
             request.updated_at.as_millis(),
+            request.origin.as_str(),
         ],
     )?;
     for task_id in &request.blocking {
@@ -711,6 +751,10 @@ fn save(tx: &Transaction<'_>, change: &DecisionChange, now: Timestamp) -> rusqli
             "INSERT INTO outbox (kind, run_id, payload, created_at, delivered_at) VALUES (?1, ?2, ?3, ?4, NULL)",
             rusqlite::params![item.kind, item.run_id, item.payload.to_string(), item.created_at.as_millis()],
         )?;
+    }
+    // Controller 提出的請求結束：成為 conversation 的工作事件，喚醒 Controller（票 17）
+    for notice in &change.notices {
+        super::conversations::enqueue_notice(tx, &notice.workspace_id, &notice.source, &notice.content, now)?;
     }
     for event in &change.events {
         append_event(tx, event)?;

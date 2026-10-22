@@ -9,7 +9,7 @@ async fn open(dir: &Path) -> Store {
 }
 
 fn credential(hash: &str) -> CredentialRecord {
-    CredentialRecord { token_hash: hash.into(), role: Role::Desktop, issued_at: T0, expires_at: None, scope: None }
+    CredentialRecord { token_hash: hash.into(), role: Role::Desktop, issued_at: T0, expires_at: None, scope: None, controller: None }
 }
 
 /// 備份目錄下全部檔案的位元組（掃描用）。

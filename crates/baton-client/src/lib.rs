@@ -21,6 +21,7 @@ use baton_api::{
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     BackupStatus, BACKUPS_PATH,
     RecoveryStatusView, RECOVERY_PATH, RECOVERY_RETRY_PATH,
+    metrics_path, timeline_path, MetricsResponse, TimelineResponse,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
@@ -584,6 +585,26 @@ impl RuntimeClient {
     /// 教訓的重犯事件（新到舊）。
     pub async fn lesson_recurrences(&self, lesson_id: &str) -> Result<RecurrenceList, ClientError> {
         self.get_json(&recurrences_path(lesson_id)).await
+    }
+
+    /// 時間線（票 41）：依提交順序；指定 Task 時只有與它有關的事件。
+    pub async fn timeline(&self, workspace_id: &str, task_id: Option<&str>) -> Result<TimelineResponse, ClientError> {
+        // 以 URL 的表單編碼組查詢字串，Task 識別中的特殊字元才會正確編碼
+        let mut url = reqwest::Url::parse("http://localhost").expect("固定的 URL 一定合法");
+        url.set_path(&timeline_path(workspace_id));
+        if let Some(task_id) = task_id {
+            url.query_pairs_mut().append_pair("task_id", task_id);
+        }
+        let path = match url.query() {
+            Some(query) => format!("{}?{query}", url.path()),
+            None => url.path().to_string(),
+        };
+        self.get_json(&path).await
+    }
+
+    /// 觀測指標（票 41）：由時間線事件計算，附各帳號的服務端額度（看不到為 `None`）。
+    pub async fn metrics(&self, workspace_id: &str) -> Result<MetricsResponse, ClientError> {
+        self.get_json(&metrics_path(workspace_id)).await
     }
 
     /// 回報一次沒被 Guard 攔下的重犯。

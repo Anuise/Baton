@@ -46,6 +46,7 @@ fn pending(id: &str, kind: DecisionKind, task_id: &str) -> DecisionRequest {
         workspace_id: "ws".into(),
         run_id: format!("run_{task_id}"),
         task_id: task_id.into(),
+        origin: DecisionOrigin::Worker,
         kind,
         status: DecisionStatus::Pending,
         question: format!("問題 {id}"),
@@ -93,6 +94,7 @@ impl World {
             tasks: &self.tasks,
             dependencies: &[],
             contracts: &[],
+            decision_holds: &[],
         };
         let policy = AuthorityPolicy::default();
         let ctx = DecisionContext {
@@ -375,4 +377,148 @@ fn only_the_desktop_can_answer() {
         .run(DecisionCommand::Answer { request_id, expected_revision, resolution, decided_by: "agent".into(), batch_id })
         .unwrap_err();
     assert_eq!(refused, DecisionError::NotDesktop);
+}
+
+// ---------------------------------------------------------------- Controller 的提問與事項判定（票 17）
+
+fn question(blocking: &[&str]) -> DecisionCommand {
+    DecisionCommand::ControllerQuestion {
+        request_id: "dq".into(),
+        controller_run_id: "ctl_1".into(),
+        content: content(vec![option("a"), option("b")], Some("a")).unwrap(),
+        blocking: blocking.iter().map(|t| t.to_string()).collect(),
+    }
+}
+
+fn controller_pending(id: &str, blocking: &[&str]) -> DecisionRequest {
+    let mut request = pending(id, DecisionKind::Agent, blocking[0]);
+    request.origin = DecisionOrigin::Controller;
+    request.run_id = "ctl_1".into();
+    request.question = "要用哪個方案？".into();
+    request.blocking = blocking.iter().map(|t| t.to_string()).collect();
+    request
+}
+
+#[test]
+fn a_controller_question_blocks_the_listed_tasks_without_changing_their_status() {
+    let world = World::new(vec![task("t1", TaskStatus::Pending, 1), task("t2", TaskStatus::Ready, 1), task("t3", TaskStatus::Pending, 1)], vec![]);
+
+    let change = world.run(question(&["t1", "t2", "t1"])).unwrap();
+
+    assert_eq!(change.outcome, DecisionOutcome::Requested { request_id: "dq".into(), existing: false });
+    let created = change.created.unwrap();
+    assert_eq!((created.origin, created.run_id.as_str(), created.kind), (DecisionOrigin::Controller, "ctl_1", DecisionKind::Agent));
+    assert_eq!(created.blocking, vec!["t1".to_string(), "t2".to_string()]);
+    assert_eq!(created.target.task_id, "t1");
+    assert!(change.tasks.is_empty(), "依賴答案的 Task 狀態不變，只是不能准入");
+}
+
+#[test]
+fn a_controller_question_only_blocks_tasks_that_have_not_been_dispatched() {
+    let world = World::new(vec![task("t1", TaskStatus::Running, 1), task("t2", TaskStatus::Pending, 1)], vec![]);
+    assert_eq!(world.run(question(&["t2", "t1"])).unwrap_err().code(), "decision_invalid");
+    assert_eq!(world.run(question(&[])).unwrap_err().code(), "decision_invalid");
+    assert_eq!(world.run(question(&["t9"])).unwrap_err().code(), "task_not_found");
+}
+
+#[test]
+fn asking_the_same_question_again_returns_the_pending_request_and_adds_new_tasks() {
+    let world = World::new(
+        vec![task("t1", TaskStatus::Pending, 1), task("t2", TaskStatus::Pending, 1)],
+        vec![controller_pending("d1", &["t1"])],
+    );
+    let change = world.run(question(&["t1", "t2"])).unwrap();
+    assert_eq!(change.outcome, DecisionOutcome::Requested { request_id: "d1".into(), existing: true });
+    assert!(change.created.is_none());
+    assert_eq!(change.new_blocks, vec![("d1".to_string(), "t2".to_string())]);
+}
+
+#[test]
+fn answering_a_controller_question_notifies_the_conversation_instead_of_the_outbox() {
+    let world = World::new(vec![task("t1", TaskStatus::Pending, 3)], vec![controller_pending("d1", &["t1"])]);
+
+    let change = world.run(answer("d1", 1, DecisionAction::Accept, Some("b"), Some("先做 B"))).unwrap();
+
+    assert_eq!(change.outcome, DecisionOutcome::Answered { resumed_task_ids: vec![] });
+    assert!(change.outbox.is_empty(), "Controller 沒有 Worker 的 Run，不寫喚醒 Outbox");
+    assert_eq!(change.notices.len(), 1);
+    let notice = &change.notices[0];
+    assert_eq!((notice.workspace_id.as_str(), notice.source.as_str()), ("ws", "decision_wake:d1:2"));
+    assert!(notice.content.contains("要用哪個方案？") && notice.content.contains("選項 b") && notice.content.contains("先做 B"), "{}", notice.content);
+    assert!(change.tasks.is_empty(), "pending 的 Task 不會被改成 ready，由 Controller 補契約後再派工");
+}
+
+#[test]
+fn a_controller_question_is_not_superseded_by_contract_changes_only_when_its_tasks_end() {
+    let world = World::new(
+        vec![task("t1", TaskStatus::Pending, 5), task("t2", TaskStatus::Cancelled, 1), task("t3", TaskStatus::Cancelled, 1)],
+        vec![controller_pending("d1", &["t1", "t2"]), controller_pending("d2", &["t3"])],
+    );
+    let change = world.run(DecisionCommand::Refresh).unwrap();
+    assert_eq!(change.outcome, DecisionOutcome::Refreshed { superseded: vec!["d2".into()] });
+    assert!(change.notices[0].content.contains("已過期"), "{}", change.notices[0].content);
+}
+
+#[test]
+fn controller_and_worker_requests_cannot_be_merged() {
+    let mut worker = pending("w", DecisionKind::Agent, "t2");
+    worker.question = "要用哪個方案？".into();
+    let world = World::new(
+        vec![task("t1", TaskStatus::Pending, 1), task("t2", TaskStatus::WaitingDecision, 1)],
+        vec![controller_pending("c", &["t1"]), worker],
+    );
+    let merge = DecisionCommand::Merge { request_id: "c".into(), expected_revision: 1, into: "w".into(), into_expected_revision: 1 };
+    assert_eq!(world.run(merge).unwrap_err().code(), "decision_merge_invalid");
+}
+
+fn gate(matter: Matter, task_id: &str) -> DecisionCommand {
+    DecisionCommand::ControllerGate {
+        request_id: "dg".into(),
+        audit_id: "audit".into(),
+        controller_run_id: "ctl_1".into(),
+        content: ActionContent::new(matter, Some(task_id), "派出部署 Task", "需要部署能力", vec![], None).unwrap(),
+    }
+}
+
+#[test]
+fn a_controller_gate_creates_an_authority_request_from_the_controller_and_consumes_an_approval_once() {
+    let mut world = World::new(vec![task("t1", TaskStatus::Pending, 1)], vec![]);
+
+    let change = world.run(gate(Matter::ExceedAuthorization, "t1")).unwrap();
+    let DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { request_id, existing: false }, .. } = &change.outcome else {
+        panic!("{:?}", change.outcome)
+    };
+    let created = change.created.clone().unwrap();
+    assert_eq!((created.origin, created.run_id.as_str(), created.task_id.as_str()), (DecisionOrigin::Controller, "ctl_1", "t1"));
+    assert!(created.options[0].tradeoff.as_deref().unwrap().contains("不會擴大 Workspace 授權"));
+    assert_eq!(request_id, "dg");
+
+    // 還在等待：回到同一個請求
+    world.requests.push(created.clone());
+    let again = world.run(gate(Matter::ExceedAuthorization, "t1")).unwrap();
+    assert!(matches!(again.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { existing: true, .. }, .. }));
+
+    // 使用者核准之後，下一次同一個事項消耗它（記在 Controller 的一輪上）
+    let answered = world.run(answer("dg", 1, DecisionAction::Accept, Some(OPTION_APPROVE), None)).unwrap();
+    world.requests = answered.updated.clone();
+    world.decisions.push(answered.decision.clone().unwrap());
+    let used = world.run(gate(Matter::ExceedAuthorization, "t1")).unwrap();
+    assert!(matches!(used.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::Approved { .. }, .. }));
+    assert_eq!(used.approval_use.unwrap().run_id, "ctl_1");
+}
+
+#[test]
+fn a_controller_gate_needs_a_target_task() {
+    let world = World::new(vec![task("t1", TaskStatus::Pending, 1)], vec![]);
+    let command = DecisionCommand::ControllerGate {
+        request_id: "dg".into(),
+        audit_id: "audit".into(),
+        controller_run_id: "ctl_1".into(),
+        content: ActionContent::new(Matter::ModifyDoneCriteria, None, "改完成條件", "原因", vec![], None).unwrap(),
+    };
+    assert_eq!(world.run(command).unwrap_err().code(), "decision_invalid");
+    assert!(matches!(
+        world.run(gate(Matter::ArrangeTasks, "t1")).unwrap().outcome,
+        DecisionOutcome::Controller { outcome: ControllerOutcome::Allowed, .. }
+    ));
 }

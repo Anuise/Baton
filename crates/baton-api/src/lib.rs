@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、Guard 與重犯事件端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、Guard 與重犯事件端點、時間線與觀測指標端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -8,6 +8,7 @@ mod agent;
 mod artifacts;
 mod authorization;
 mod backups;
+mod controller;
 mod conversations;
 mod decisions;
 mod external_operations;
@@ -25,6 +26,7 @@ mod sessions;
 mod setup;
 mod shared_settings;
 mod tasks;
+mod timeline;
 mod verification;
 pub mod workdirs;
 mod workspaces;
@@ -40,7 +42,8 @@ use axum::{middleware, Json, Router};
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::agent::{
     TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
-    TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
+    TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE, TOOL_ADD_DEPENDENCY,
+    TOOL_CANCEL_TASK, TOOL_DISPATCH_TASK, TOOL_PROPOSE_DECISION_REQUEST, TOOL_PROPOSE_TASK, TOOL_UPDATE_TASK,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT};
@@ -103,6 +106,7 @@ pub use scheduling::{
     AccountRun, AccountScheduling, CapacityModeInfo, CapacityView, QueueEntryView, SchedulingOverview,
     SchedulingSettingsView, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
 };
+pub use timeline::{metrics_path, timeline_path, MetricsResponse, ServerQuota, TimelineQuery, TimelineResponse};
 pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
 pub use shared_settings::{
     run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
@@ -247,6 +251,8 @@ pub fn router(state: ApiState) -> Router {
         .route(sessions::SESSIONS_ROUTE, get(sessions::list))
         .route(sessions::SESSION_ROUTE, get(sessions::detail))
         .route(external_operations::EXTERNAL_OPERATIONS_ROUTE, get(external_operations::list))
+        .route(timeline::TIMELINE_ROUTE, get(timeline::timeline))
+        .route(timeline::METRICS_ROUTE, get(timeline::metrics))
         .route(LIFECYCLE_PATH, get(lifecycle::status))
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
@@ -291,6 +297,13 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_SEARCH_KNOWLEDGE), post(knowledge::search_knowledge))
         .route(&tool_path(TOOL_BEGIN_EXTERNAL_OPERATION), post(external_operations::begin))
         .route(&tool_path(TOOL_RECORD_EXTERNAL_OPERATION_RESULT), post(external_operations::record_result))
+        // Controller 專屬的拆工與派工工具（票 17）：只接受 Controller 憑證
+        .route(&tool_path(TOOL_PROPOSE_TASK), post(controller::propose_task))
+        .route(&tool_path(TOOL_UPDATE_TASK), post(controller::update_task))
+        .route(&tool_path(TOOL_ADD_DEPENDENCY), post(controller::add_dependency))
+        .route(&tool_path(TOOL_DISPATCH_TASK), post(controller::dispatch_task))
+        .route(&tool_path(TOOL_CANCEL_TASK), post(controller::cancel_task))
+        .route(&tool_path(TOOL_PROPOSE_DECISION_REQUEST), post(controller::propose_decision_request))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

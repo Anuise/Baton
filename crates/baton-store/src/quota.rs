@@ -12,6 +12,8 @@ use baton_domain::quota::{
     QuotaSource, QuotaWindow, UsageRecord, QUOTA_POLL_INTERVAL_MILLIS, QUOTA_RETENTION_MILLIS,
 };
 
+use rusqlite::OptionalExtension;
+
 use super::profiles::load_profiles;
 use super::*;
 
@@ -101,6 +103,7 @@ impl Store {
         profile_id: String,
         run_id: String,
         tokens: u64,
+        context_tokens: Option<u64>,
         raw: String,
         now: Timestamp,
     ) -> StoreResult<()> {
@@ -109,6 +112,17 @@ impl Store {
                 "INSERT INTO quota_usage (profile_id, run_id, tokens, reported_at, raw) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![profile_id, run_id, tokens as i64, now.as_millis(), quota::truncate_raw(&raw)],
             )?;
+            // 觀測指標用的用量事件（票 41）：quota_usage 會在保留期滿後刪除，事件不會
+            let task_id: Option<String> =
+                tx.query_row("SELECT task_id FROM run WHERE id = ?1", [&run_id], |r| r.get(0)).optional()?;
+            let version: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(aggregate_version), 0) + 1 FROM event WHERE aggregate_type = ?1 AND aggregate_id = ?2",
+                rusqlite::params![quota::USAGE_AGGREGATE, run_id],
+                |r| r.get(0),
+            )?;
+            let event =
+                quota::usage_reported_event(&run_id, task_id.as_deref(), &profile_id, version, tokens, context_tokens, now);
+            append_event(tx, &event)?;
             record_estimates(tx, &profile_id, now)?;
             Ok(())
         })

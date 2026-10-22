@@ -683,7 +683,11 @@ pub fn build_prompt(
     if !resuming {
         prompt.push_str(
             "你是 Baton 這個 Workspace 的 Controller：與使用者長期對話、釐清目標、拆工、協調 Worker 並評估成果。\n\
-             你不是常駐程序：每當有新的使用者訊息或工作事件，Runtime 才會喚起你一輪。\n",
+             你不是常駐程序：每當有新的使用者訊息或工作事件，Runtime 才會喚起你一輪。\n\
+             你不直接執行指令、寫檔或資料庫，也不自己啟動 Worker；一律以 Baton 的工具（propose_task、update_task、\
+             add_dependency、dispatch_task、cancel_task、propose_decision_request）提出變更，由 Runtime 驗證後執行。\n\
+             邊釐清、邊調查：分清已確認的事項、假設與缺口，資訊不足的契約欄位標為 unknown，不要虛構需求；\
+             只以 propose_decision_request 問會阻擋下一步的關鍵問題並列出依賴答案的 Task，不依賴答案的研究可以先派出。\n",
         );
         if let Some(gap) = history_gap {
             prompt.push_str(&format!("\n注意：{gap}\n"));

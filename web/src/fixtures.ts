@@ -15,6 +15,8 @@ import type {
   Handoff,
   LifecycleStatus,
   ImportPreview,
+  Metrics,
+  MetricsResponse,
   IntegrationEntry,
   PlatformResponse,
   QuotaAssessment,
@@ -26,6 +28,7 @@ import type {
   SchedulingOverview,
   SettingsVersionSummary,
   SetupStatus,
+  TimelineEvent,
   ToolCheck,
   WorkspaceLifecycleView,
   VerificationRecord,
@@ -694,6 +697,48 @@ export function handoff(overrides: Partial<Handoff> = {}): Handoff {
     wait_reasons: [],
     updated_at: CHECKED_AT,
     version: 1,
+    ...overrides,
+  };
+}
+
+/** 測試用的時間線事件：task_1 第 1 次 Run 建立（派工）。 */
+export function timelineEvent(overrides: Partial<TimelineEvent> = {}): TimelineEvent {
+  return {
+    seq: 1,
+    occurred_at: CHECKED_AT,
+    category: "dispatch",
+    aggregate_type: "run",
+    aggregate_id: "run_1",
+    event_type: "run_created",
+    task_ids: ["task_1"],
+    run_id: "run_1",
+    payload: {},
+    ...overrides,
+  };
+}
+
+/** 測試用的觀測指標：每項都有資料（沒有 null）。 */
+export function metrics(overrides: Partial<Metrics> = {}): Metrics {
+  return {
+    events: 42,
+    task_completion: { completion: { numerator: 1, denominator: 3, rate: 1 / 3 }, cancelled: 1 },
+    handoff: { success: { numerator: 1, denominator: 2, rate: 0.5 }, abandoned: 1, confirmed: 1, in_flight: 0 },
+    recovery: { count: 1, pending: 0, average_ms: 40_000, max_ms: 40_000 },
+    duplicate_operations: { blocked: 3, already_succeeded: 2, result_unknown: 1, in_progress_elsewhere: 0, unknown_outcomes: 1 },
+    decision_wait: { count: 2, pending: 1, average_ms: 40_000, max_ms: 150_000 },
+    lesson_recurrence: { rate: { numerator: 1, denominator: 4, rate: 0.25 }, recurrences: 2, prevented: 1, reported: 1 },
+    usage: { total_tokens: 2000, runs: 3, by_stage: [{ stage: "implement", tokens: 2000, runs: 3 }] },
+    context: { runs_known: 2, runs_unknown: 1, average_tokens: 45_000, max_tokens: 60_000 },
+    ...overrides,
+  };
+}
+
+/** 測試用的觀測指標回應：一個帳號的服務端額度兩個視窗都看得到。 */
+export function metricsResponse(overrides: Partial<MetricsResponse> = {}): MetricsResponse {
+  return {
+    workspace_id: "ws_1",
+    metrics: metrics(),
+    server_quota: [{ profile_id: "prof_1", name: "Work-1", five_hour_used: 0.42, seven_day_used: 0.1 }],
     ...overrides,
   };
 }
