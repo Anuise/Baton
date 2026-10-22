@@ -1,6 +1,6 @@
 # 16: Controller 長期對話與事件驅動
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R093-16-impl，2026-10-22 19:17）
 Blocked by: 15, 11
 
 **What to build:** 在 Workspace 的「對話」分頁與 Controller 對話：conversation 與 conversation_turns 持久化；需要 Controller 判斷時（使用者訊息、Worker 成果或阻礙），合併 5 秒視窗後啟動一輪 `claude -p` 並 resume 原生 Session（spec D-06）。同一對話同時最多一輪（B1）；忙碌時新訊息顯示「已收到／待處理」，本輪結束後先處理使用者訊息再處理工作事件；沒有事件時不喚醒。暫停／取消不排隊（DR-20261022-01）。
