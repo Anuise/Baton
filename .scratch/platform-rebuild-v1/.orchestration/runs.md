@@ -90,5 +90,6 @@
 | R086-36-impl | 36 | impl | Work-8 | 2026-10-22 18:41 | | |
 | R087-26-verify | 26 | verify | Work-9 | 2026-10-22 18:41 | 2026-10-22 18:47 | PASS（等 24 合併後整合） |
 | R088-26-integrate | 26 | integrate | Work-3 | 2026-10-22 18:53 | | |
-| R089-21-verify | 21 | verify | Work-8 | 2026-10-22 18:57 | | |
-| R090-15-verify | 15 | verify | Work-9 | 2026-10-22 18:58 | | |
+| R089-21-verify | 21 | verify | Work-8 | 2026-10-22 18:57 | 2026-10-22 19:02 | PASS |
+| R090-15-verify | 15 | verify | Work-9 | 2026-10-22 18:58 | 2026-10-22 19:06 | PASS（基底早於票 21，依 AI-109 整合後合併） |
+| R091-15-integrate | 15 | integrate | Work-8 | 2026-10-22 19:06 | | |

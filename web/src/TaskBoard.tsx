@@ -4,6 +4,7 @@ import { buildContract, ContractEditor, draftFromContract, emptyDraft, type Cont
 import { formatTimestamp } from "./time";
 import type {
   AcceptanceBasis,
+  CleanupStatus,
   Goal,
   IntegrationEntry,
   IntegrationStatus,
@@ -25,6 +26,7 @@ import type {
   WaitReason,
   WorkdirView,
   Workspace,
+  WorktreeCleanup,
 } from "./runtimeClient";
 
 /** 排程總覽讀不到時是 null：看板照常顯示，只是沒有排隊順位與帳號名稱。 */
@@ -98,6 +100,13 @@ const INTEGRATION_STATUS_LABELS: Record<IntegrationStatus, string> = {
   advancing: "更新目標分支中",
   integrated: "已整合",
   failed: "未通過整合",
+};
+
+const CLEANUP_STATUS_LABELS: Record<CleanupStatus, string> = {
+  pending: "待清理",
+  removing: "清理中",
+  cleaned: "已清理",
+  failed: "清理失敗",
 };
 
 /** 整合項目尚未結束（排隊中或處理中）。 */
@@ -417,7 +426,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
 
       {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
 
-      {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} />}
+      {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} timeZone={timeZone} />}
 
       {run && (
         <RunStatusLine run={run} accountName={accountName} authorizationRevision={authorizationRevision} timeZone={timeZone} />
@@ -534,13 +543,24 @@ function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; t
   );
 }
 
-/** Task 的工作目錄：種類、路徑、worktree 的分支與整合目標、狀態；準備失敗時醒目顯示原因。 */
-function WorkdirStatus({ workdir, runLabelOf }: { workdir: WorkdirView; runLabelOf: (runId: string) => string }) {
+/** Task 的工作目錄：種類、路徑、worktree 的分支與整合目標、狀態；準備失敗時醒目顯示原因；有清理登記時顯示清理狀態。 */
+function WorkdirStatus({
+  workdir,
+  runLabelOf,
+  timeZone,
+}: {
+  workdir: WorkdirView;
+  runLabelOf: (runId: string) => string;
+  timeZone?: string;
+}) {
   const failed = workdir.status === "failed";
+  const removed = workdir.cleanup?.status === "cleaned";
   return (
     <div className={failed ? "task-workdir task-workdir-failed" : "task-workdir"} role="group" aria-label="工作目錄">
       <p>
-        {workdir.kind === "worktree" ? "Worktree" : "輸出目錄"}：<code>{workdir.path}</code>
+        {workdir.kind === "worktree" ? "Worktree" : "輸出目錄"}：
+        <code className={removed ? "task-workdir-removed" : undefined}>{workdir.path}</code>
+        {removed && "（已移除）"}
       </p>
       {workdir.branch && (
         <p>
@@ -548,13 +568,40 @@ function WorkdirStatus({ workdir, runLabelOf }: { workdir: WorkdirView; runLabel
           {workdir.base_branch && ` → 整合到 ${workdir.base_branch}`}
         </p>
       )}
-      <p>狀態：{failed ? "準備失敗" : "已就緒"}</p>
+      {!removed && <p>狀態：{failed ? "準備失敗" : "已就緒"}</p>}
       {failed && <p role="alert">工作目錄無法使用，不會派工：{workdir.failure}</p>}
       <p>
         {workdir.run_ids.length === 0
           ? "尚未有 Run 在此目錄執行"
           : `在此目錄執行過的 Run：${workdir.run_ids.map(runLabelOf).join("、")}`}
       </p>
+      {workdir.cleanup && <CleanupStatusLine cleanup={workdir.cleanup} timeZone={timeZone} />}
+    </div>
+  );
+}
+
+/**
+ * worktree 的清理狀態；與 Task 是否完成分開顯示，清理失敗不代表 Task 失敗。
+ * 待清理且上次失敗時顯示原因與自動重試時間；清理失敗（不再自動重試）時醒目顯示原因。
+ */
+function CleanupStatusLine({ cleanup, timeZone }: { cleanup: WorktreeCleanup; timeZone?: string }) {
+  return (
+    <div
+      className={cleanup.status === "failed" ? "task-workdir-cleanup task-workdir-cleanup-failed" : "task-workdir-cleanup"}
+      role="status"
+      aria-label="清理狀態"
+    >
+      <p>
+        清理：<strong>{CLEANUP_STATUS_LABELS[cleanup.status]}</strong>
+      </p>
+      {cleanup.status === "pending" && cleanup.failure && <p>上次清理失敗：{cleanup.failure}</p>}
+      {cleanup.status === "pending" && cleanup.failure && cleanup.next_attempt_at !== null && (
+        <p>將於 {formatTimestamp(cleanup.next_attempt_at, timeZone)} 自動重試</p>
+      )}
+      {cleanup.status === "failed" && <p role="alert">清理失敗，worktree 已保留：{cleanup.failure}</p>}
+      {cleanup.status === "cleaned" && cleanup.finished_at !== null && (
+        <p>已清理（{formatTimestamp(cleanup.finished_at, timeZone)}）</p>
+      )}
     </div>
   );
 }
