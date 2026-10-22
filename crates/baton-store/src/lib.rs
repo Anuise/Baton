@@ -26,6 +26,7 @@ use tokio::sync::oneshot;
 
 mod agent;
 mod artifacts;
+mod cleanup;
 pub mod backup;
 mod decisions;
 mod guards;
@@ -43,6 +44,7 @@ mod verification;
 mod workdirs;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
+pub use cleanup::{CleanupApplyError, CleanupWork};
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
 pub use guards::{GuardApplyError, GuardOverview};
 pub use integration::{IntegrationApplyError, IntegrationWork};
@@ -838,6 +840,24 @@ const MIGRATIONS: &[Migration] = &[
         name: "run_admission",
         sql: "ALTER TABLE run ADD COLUMN admitted_at INTEGER;
         ALTER TABLE run ADD COLUMN settings_version INTEGER;",
+    },
+    // 票 21（第 24 個 migration）：worktree 自動清理的登記（與工作目錄一對一），清理意圖與每次嘗試都先持久化
+    Migration {
+        name: "worktree_cleanup",
+        sql: "CREATE TABLE worktree_cleanup (
+            task_id TEXT PRIMARY KEY REFERENCES task_workdir (task_id),
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            path TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'removing', 'cleaned', 'failed')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            attempts INTEGER NOT NULL CHECK (attempts >= 0),
+            failure TEXT,
+            requested_at INTEGER NOT NULL,
+            next_attempt_at INTEGER,
+            finished_at INTEGER
+        );
+        CREATE INDEX worktree_cleanup_workspace ON worktree_cleanup (workspace_id);",
     },
 ];
 

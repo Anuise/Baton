@@ -91,11 +91,13 @@ impl WorkspaceFs for LocalWorkspaceFs {
             (repo.to_path_buf(), target_branch.to_string(), expected_tip.to_string(), commit.to_string());
         blocking(move || git_advance_branch(&repo, &target_branch, &expected_tip, &commit)).await
     }
-    async fn remove_worktree(&self, _target: &Path) -> PortResult<()> {
-        Err(PortError::NotImplemented("WorkspaceFs::remove_worktree"))
+    async fn inspect_worktree(&self, repo: &Path, target: &Path) -> PortResult<WorktreeState> {
+        let (repo, target) = (repo.to_path_buf(), target.to_path_buf());
+        blocking(move || git_inspect_worktree(&repo, &target)).await
     }
-    async fn inspect_dirty(&self, _target: &Path) -> PortResult<DirtyState> {
-        Err(PortError::NotImplemented("WorkspaceFs::inspect_dirty"))
+    async fn remove_worktree(&self, repo: &Path, target: &Path, trash: &Path) -> PortResult<()> {
+        let (repo, target, trash) = (repo.to_path_buf(), target.to_path_buf(), trash.to_path_buf());
+        blocking(move || git_remove_worktree(&repo, &target, &trash)).await
     }
     async fn write_artifact_atomic(&self, path: &Path, bytes: &[u8]) -> PortResult<()> {
         let (path, bytes) = (path.to_path_buf(), bytes.to_vec());

@@ -2215,6 +2215,69 @@
 - 影響：沒有撤權或擴權時兩者相同，只有沿用舊授權的 Run 提出的權限請求顯示的授權版本不同。
 - 審閱：未審
 
+### AI-246：worktree 自動清理的觸發條件：Task 已完成、最新整合項目已整合、這個 Task 的 Run 全部結束
+- 重要度：高
+- 時間／階段：2026-10-22，票 21 實作
+- 決策：DR-20261021-02 的條件依序對應為：「通過驗證、成果已整合」＝ Task 是 `completed` 且它最新的整合項目是 `integrated`（開發 Task 只有整合後才會完成，見 AI-219）；「相關程序停止、無其他使用者」＝這個 Task 的 Run 全部是結束狀態（一個 Task 一個 worktree，見 AI-218，沒有其他 Task 使用同一目錄）；「必要成果與證據已保存於 worktree 外」由現有設計保證：Artifact 登記時已複製到成果儲存、驗證與整合證據在控制資料庫、整合結果在目標分支上，worktree 中唯一可能遺失的是未提交的檔案，由每次嘗試前的安全核對（AI-247）擋下。只清理平台登記且可用的 worktree；研究與文件 Task 的輸出目錄不清理。條件成立時由 Supervisor 在整合之後的同一個背景工作中登記 `pending`（事件 `worktree_cleanup_requested`）。
+- 理由：都是已持久化的事實，Domain 可以純函式判定，崩潰後重算結果相同；暫停、交接、失敗、取消與完全退出都不會讓 Task 完成，自然不觸發清理。
+- 替代方案：在整合完成的同一個交易中登記待清理（耦合整合佇列；Run 未全部結束時還要另外等待）；另外檢查完全退出的停止異常紀錄（完成的 Task 不會有進行中的 Run，停止異常只發生在退出當時未結束的 Run）。
+- 影響：Task 若有任何 Run 停在非結束狀態（例如未確認停止），worktree 不會被清理，也不會顯示待清理。
+- 審閱：未審
+
+### AI-247：每次嘗試前的安全核對：必須仍是 repo 登記、簽出平台分支的 worktree，且沒有未提交的變更或未追蹤的檔案；被忽略的檔案不算
+- 重要度：高
+- 時間／階段：2026-10-22，票 21 實作
+- 決策：每次嘗試先持久化 `removing`，再經 `WorkspaceFs::inspect_worktree` 核對：目錄不存在 → 安全（只剩平台自己的殘留要收拾）；是 repo 的 `git worktree list` 中非主 checkout 的項目、簽出 `baton/<Task>`，而且 `git status --porcelain --untracked-files=all` 是空的 → 安全；其他（主 checkout、普通目錄、簽出別的分支或 detached HEAD、有未提交的變更或未追蹤的檔案）→ 不移除，原因（最多列 5 個檔案）記在 `failure`。被 `.gitignore` 忽略的檔案（建置輸出、`node_modules` 等）視為可重建，一併刪除。核對前先 `git worktree prune`，避免舊登記剛好對到後來出現在同一路徑的其他目錄。
+- 理由：「未保存變更或歸屬不明檔案阻擋刪除」；忽略的檔案若也阻擋，幾乎每個建置過的 worktree 都永遠不會被清理。
+- 替代方案：被忽略的檔案也阻擋（磁碟空間無法回收）；只檢查追蹤檔的修改（未追蹤的新檔案會被刪掉）。
+- 影響：使用者若把重要檔案放在被忽略的路徑中，清理時會一起刪除。
+- 審閱：未審
+
+### AI-248：移除方式：改名到 `.baton\trash\<Task>`、`git worktree prune`、再刪除暫放目錄；不用 `git worktree remove --force`，不刪除分支
+- 重要度：高
+- 時間／階段：2026-10-22，票 21 實作
+- 決策：`WorkspaceFs::remove_worktree(repo, target, trash)` 先確認 `target` 是 repo 登記的非主 checkout worktree（否則拒絕、不刪任何檔案），把整個目錄改名到 `<Workspace>\.baton\trash\<Task>`，執行 `git worktree prune` 清掉 Git 的 worktree 登記，最後解除唯讀並刪除暫放目錄。冪等：`target` 已不存在時只做 prune 與刪除暫放目錄。平台分支、Git 歷史與成果都不動。Port 的 `inspect_dirty`／`DirtyState` 改為 `inspect_worktree`／`WorktreeState`，`remove_worktree` 多了 `repo` 與 `trash` 參數（兩者的正式版原本都是尚未實作）。
+- 理由：Windows 上目錄內有檔案被占用時改名會整個失敗、什麼都不變，留下的狀態最容易說明；改名之後才刪除，崩潰或刪到一半失敗時，剩下的只會是平台自己的暫放目錄，重建後重新核對時原路徑已是「不存在」，不會把刪到一半的 worktree 誤判成「有未保存的變更」而卡住，也不需要 `--force`。
+- 替代方案：`git worktree remove`（刪到一半失敗時工作目錄殘缺，之後的核對會看到大量「已刪除」的變更）；`git worktree remove --force`（會連未保存的檔案一起刪）。
+- 影響：暫放目錄與 worktree 在同一個磁碟區（都在 `.baton` 內），改名不會跨磁碟複製。
+- 審閱：未審
+
+### AI-249：清理失敗的重試：沿用 D-16 的基礎設施重試預算（5 次，1、2、4、8、10 分鐘），用完即「清理失敗」，沒有手動重試
+- 重要度：中
+- 時間／階段：2026-10-22，票 21 實作
+- 決策：安全核對不通過或移除失敗都回到 `pending`，記下原因與 `next_attempt_at`（`worktree_cleanup_retry_scheduled`）；第一次嘗試加上 5 次重試都失敗時進入 `failed`（`worktree_cleanup_failed`），不再自動重試，worktree 保留。崩潰後接續停在 `removing` 的那一次嘗試不另外計算（D-16：恢復嘗試不計入預算）。清理狀態與 Task 分開保存，任何結果都不改變 Task 的 `completed`。第一版不提供「重試清理」的操作。
+- 理由：票面要求有限重試並顯示原因；D-16 已有基礎設施重試的數字。手動重試需要新增 API、桌面殼指令與 UI，屬於後續的空間管理面板（spec 已列為延後）。
+- 替代方案：未保存變更的阻擋不計入次數、無限期等待使用者處理；提供手動重試按鈕。
+- 影響：關掉占用檔案的程式超過約 25 分鐘後，worktree 會停在「清理失敗」，需要使用者自行刪除（之後有空間管理面板時再補手動重試）。
+- 審閱：未審
+
+### AI-250：完全退出中或等待「繼續工作」的 Workspace 不登記也不執行清理
+- 重要度：中
+- 時間／階段：2026-10-22，票 21 實作
+- 決策：登記待清理與處理到期清理都跳過 `lifecycle::halt_for` 有阻擋原因的 Workspace（與 AI-217 準備工作目錄相同）；使用者「繼續工作」之後接著處理。被完全退出停下的 Task 回到 `ready`，本來就不會觸發清理。只登記使用中 Workspace 的 worktree；已登記的清理在 Workspace 封存後仍會處理。
+- 理由：票面要求完全退出不觸發清理；停止期間不應執行 git 或刪除檔案。
+- 替代方案：已登記的清理在停止期間照常執行（停止意圖期間仍有外部副作用）。
+- 影響：Workspace 一直等待「繼續工作」時，已完成 Task 的 worktree 會一直保留。
+- 審閱：未審
+
+### AI-251：清理登記的資料形狀與顯示：獨立資料表 `worktree_cleanup`、工作面板 `workdirs[].cleanup`、四種狀態
+- 重要度：低
+- 時間／階段：2026-10-22，票 21 實作
+- 決策：新增 migration `worktree_cleanup`（與 `task_workdir` 一對一，自己的聚合版本與事件 `worktree_cleanup_requested`／`_started`／`_retry_scheduled`／`worktree_cleaned`／`worktree_cleanup_failed`），不在 `task_workdir` 加欄位。狀態是 `pending`（待清理）、`removing`（清理中）、`cleaned`（已清理）、`failed`（清理失敗）；User Story 37 的三種顯示之外多了「清理中」，是為了崩潰後能辨識「這一次嘗試已開始」。工作面板 `GET tasks` 的 `workdirs[]` 多一個 `cleanup`（沒有登記時為 `null`），Web UI 在工作目錄區塊顯示清理狀態、上次失敗原因與下次自動重試時間；已清理時路徑標為已移除。`task_workdir.status` 不變（已完成的 Task 不會再派工）。
+- 理由：工作目錄登記由準備流程整列覆寫（upsert），把清理狀態放在另一張表，兩邊的版本與事件互不干擾。
+- 替代方案：在 `task_workdir` 加清理欄位並新增 `removed` 狀態（要重建 CHECK 約束）。
+- 影響：備份整份複製控制資料庫，新表自然包含在內；還原後停在 `removing` 的清理會重新核對後接續。
+- 審閱：未審
+
+### AI-252：票 21 整合 rebuild/v1（票 35、24）：migration 順延為第 24 個、AI 編號順延為 AI-246～AI-252
+- 重要度：中
+- 時間／階段：2026-10-22，票 21 實作
+- 決策：實作期間整合分支先後併入票 35（第 22 個 migration `decision_center_full`，AI-227～AI-237）與票 24（第 23 個 migration `run_admission`，AI-238～AI-245）。本票的 `worktree_cleanup` 順延為第 24 個，排在最後；三者沒有共用的資料表。本票條目原本編為 AI-238～AI-244，順延為 AI-246～AI-252，移到 AI-245 之後，條目內引用本票編號之處一併更新；整合分支的條目逐字未動。衝突合併方式：Store 的匯出同時保留本票的 `CleanupApplyError`、`CleanupWork` 與票 35 的 `DecisionOverview`；開發指南測試清單的情境測試兩邊都保留。
+- 理由：已進入整合分支的 migration 與條目編號不可改動。
+- 替代方案：無（編號規則已定）。
+- 影響：本票較早的 commit 中 migration 註解寫「第 22 個」「第 23 個」、AI 編號寫 AI-238～AI-244，是改號前的編號；以本票分支（合併前）建立過的開發資料庫需刪除重建。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
