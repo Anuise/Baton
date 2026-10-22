@@ -393,10 +393,10 @@ export type TaskContract = { [K in ContractFieldName]: ContractField | null } & 
   created_at: number;
 };
 
-/** 單項檢查的結果與證據。 */
+/** 單項檢查的結果與證據；`inconclusive` 是證據不足或環境問題，不算通過也不算產品缺陷。 */
 export interface CheckResult {
   check: VerificationCheck;
-  status: "passed" | "failed";
+  status: "passed" | "failed" | "inconclusive";
   detail: string;
 }
 
@@ -430,7 +430,8 @@ export interface VerificationRecord {
   generation: number;
   contract_version: number;
   method: "checks" | "manual";
-  outcome: "passed" | "failed";
+  /** `inconclusive`：驗證不完整（證據不足或環境問題），計入驗證不完整重驗的預算。 */
+  outcome: "passed" | "failed" | "inconclusive";
   checks: CheckResult[];
   artifacts: ManifestEntry[];
   accepted_by: string | null;
@@ -581,7 +582,7 @@ export type RunView = Run & {
   blocked: BlockedNote | null;
 };
 
-/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。`lifecycle` 是完全退出中或等待「繼續工作」，`workdir` 是工作目錄不可用。 */
+/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。`lifecycle` 是完全退出中或等待「繼續工作」，`workdir` 是工作目錄不可用，`backoff` 是基礎設施重試的退避期間。 */
 export type WaitCategory =
   | "capacity"
   | "quota"
@@ -591,7 +592,8 @@ export type WaitCategory =
   | "account"
   | "lifecycle"
   | "workdir"
-  | "guard";
+  | "guard"
+  | "backoff";
 
 /** 等待原因（對應 Rust 的 WaitReason）；`code` 是穩定的機器可讀代碼。 */
 export interface WaitReason {
@@ -639,6 +641,33 @@ export interface TaskBoard {
   workdirs: WorkdirView[];
   /** 這個 Workspace 的整合佇列項目，依排入順序。 */
   integrations: IntegrationEntry[];
+  /** 各 Task 的修正與重試預算，每個 Task 一筆。 */
+  budgets: BudgetView[];
+}
+
+/** 修正與重試預算的種類（spec D-16）：三種計數互不影響。 */
+export type BudgetKind = "implementation" | "verification" | "infrastructure";
+
+/** 一種預算的計數；`used` 在 0..=limit 之間。 */
+export interface BudgetCounter {
+  kind: BudgetKind;
+  /** 顯示用名稱，例如「實作失敗修正」。 */
+  label: string;
+  used: number;
+  limit: number;
+}
+
+/** Task 的修正與重試預算（對應 Rust 的 BudgetView）；時間是 UTC 毫秒。 */
+export interface BudgetView {
+  task_id: string;
+  /** 一律三項，依 implementation、verification、infrastructure 順序。 */
+  counters: BudgetCounter[];
+  /** 基礎設施重試的退避期限，之前不會派工；沒有退避為 null。 */
+  retry_not_before: number | null;
+  /** 已用盡而等待裁定的種類；沒有為 null。 */
+  exhausted: BudgetKind | null;
+  /** 用盡時建立的裁定請求。 */
+  decision_request_id: string | null;
 }
 
 /** Task 在平台登記的工作目錄（對應 Rust 的 WorkdirView）；時間是 UTC 毫秒。 */
@@ -720,6 +749,7 @@ export interface TaskDetail {
   task: TaskView;
   /** 由舊到新，含目前版本。 */
   contract_history: TaskContract[];
+  budget: BudgetView;
 }
 
 export interface AdmissionReport {

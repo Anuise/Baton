@@ -38,6 +38,7 @@ struct World {
     artifacts: Vec<Artifact>,
     workdirs: Vec<Workdir>,
     integrations: Vec<IntegrationEntry>,
+    budgets: Vec<crate::budget::TaskBudget>,
 }
 
 impl World {
@@ -71,6 +72,7 @@ impl World {
             artifacts: vec![],
             workdirs: vec![],
             integrations: vec![],
+            budgets: vec![],
         };
         world.add_run("r1", 1, RunStatus::Succeeded);
         world
@@ -151,6 +153,7 @@ impl World {
             artifacts: &self.artifacts,
             workdirs: &self.workdirs,
             integrations: &self.integrations,
+            budgets: &self.budgets,
         };
         super::decide(&ctx, command, "ver_1".into(), T1)
     }
@@ -225,7 +228,8 @@ fn command_check_passes_only_on_the_expected_exit_code() {
     assert_eq!(ok.status, CheckStatus::Passed);
     assert_eq!(bad.status, CheckStatus::Failed);
     assert!(bad.detail.contains("結束碼 101") && bad.detail.contains("1 failed"), "{}", bad.detail);
-    assert_eq!((timeout.status, missing.status), (CheckStatus::Failed, CheckStatus::Failed));
+    // 逾時與無法執行取不到證據：不完整，不算產品缺陷（票 36）
+    assert_eq!((timeout.status, missing.status), (CheckStatus::Inconclusive, CheckStatus::Inconclusive));
     assert!(missing.detail.contains("找不到程式"));
     assert_eq!(judge(&command("x", 3), Observation::Command(CommandObservation::Exited { code: 3, output: String::new() })).status, CheckStatus::Passed);
 }
@@ -237,7 +241,7 @@ fn file_check_needs_the_file_and_the_hash_when_declared() {
 
     assert_eq!(judge(&any, Observation::File(Ok(Some(b"xyz".to_vec())))).status, CheckStatus::Passed);
     assert_eq!(judge(&any, Observation::File(Ok(None))).status, CheckStatus::Failed);
-    assert_eq!(judge(&any, Observation::File(Err("拒絕存取".into()))).status, CheckStatus::Failed);
+    assert_eq!(judge(&any, Observation::File(Err("拒絕存取".into()))).status, CheckStatus::Inconclusive);
     assert_eq!(judge(&pinned, Observation::File(Ok(Some(b"abc".to_vec())))).status, CheckStatus::Passed);
     let wrong = judge(&pinned, Observation::File(Ok(Some(b"abd".to_vec()))));
     assert_eq!(wrong.status, CheckStatus::Failed);
@@ -543,4 +547,43 @@ fn a_development_task_without_a_registered_worktree_cannot_be_accepted() {
     let mut world = World::verifying(vec![]);
     world.tasks[0].kind = TaskKind::Development;
     assert_eq!(world.accept(world.basis()), Err(AcceptanceError::WorktreeMissing));
+}
+
+// ---------------------------------------------------------------- 修正與重試預算（票 36）
+
+fn inconclusive(check: VerificationCheck) -> CheckResult {
+    CheckResult { check, status: CheckStatus::Inconclusive, detail: "無法執行：找不到程式".into() }
+}
+
+#[test]
+fn an_inconclusive_check_keeps_the_task_verifying_and_charges_the_verification_budget() {
+    let checks = vec![command("cargo", 0), command("lint", 0)];
+    let mut world = World::verifying(checks.clone());
+
+    let change = world.record(vec![passed(checks[0].clone()), inconclusive(checks[1].clone())]).unwrap();
+
+    assert_eq!(change.record.outcome, VerificationOutcome::Inconclusive);
+    assert_eq!(change.task.status, TaskStatus::Verifying, "不完整不算通過也不算產品缺陷，留在驗證中重驗");
+    let budget = change.budget.clone().unwrap();
+    assert_eq!((budget.implementation, budget.verification, budget.infrastructure), (0, 1, 0));
+    assert!(change.decision.is_none());
+
+    // 第三次不完整：重驗預算（2 次）用盡，Task 阻擋並建立裁定請求
+    world.budgets = vec![crate::budget::TaskBudget { verification: 2, ..budget }];
+    let change = world.record(vec![passed(checks[0].clone()), inconclusive(checks[1].clone())]).unwrap();
+    assert_eq!(change.task.status, TaskStatus::Blocked);
+    assert_eq!(change.decision.map(|d| d.id), Some("dr_budget_ver_1".to_string()));
+    assert_eq!(change.budget.unwrap().exhausted, Some(crate::budget::BudgetKind::Verification));
+}
+
+#[test]
+fn a_failed_check_wins_over_an_inconclusive_one_and_charges_the_implementation_budget() {
+    let checks = vec![command("cargo", 0), command("lint", 0)];
+    let world = World::verifying(checks.clone());
+
+    let change = world.record(vec![failed(checks[0].clone()), inconclusive(checks[1].clone())]).unwrap();
+
+    assert_eq!((change.record.outcome, change.task.status), (VerificationOutcome::Failed, TaskStatus::Ready));
+    let budget = change.budget.unwrap();
+    assert_eq!((budget.implementation, budget.verification), (1, 0));
 }

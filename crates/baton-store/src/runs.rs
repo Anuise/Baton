@@ -210,6 +210,7 @@ fn decide_with(
         guards: &loaded.guards,
         settings_version,
         sessions: &loaded.sessions,
+        budgets: &loaded.budgets,
     };
     run::decide(&run_ctx, command, now)
 }
@@ -446,6 +447,13 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
     }
     if let Some(task) = &change.task {
         save_task(tx, task)?;
+        // 基礎設施重試在預算內：排回派工佇列，排程等到退避期限才派（票 36）
+        if change.requeue && task.status == TaskStatus::Ready {
+            super::budgets::requeue(tx, task, now)?;
+        }
+    }
+    if let Some(budget) = &change.budget {
+        super::budgets::save_budget(tx, budget, change.decision.as_ref(), now)?;
     }
     for event in &change.events {
         append_event(tx, event)?;

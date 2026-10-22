@@ -30,6 +30,7 @@ mod artifacts;
 mod cleanup;
 mod conversations;
 pub mod backup;
+mod budgets;
 mod decisions;
 mod external_operations;
 mod guards;
@@ -959,7 +960,52 @@ const MIGRATIONS: &[Migration] = &[
         );
         CREATE INDEX transcript_segment_session ON transcript_segment (agent_session_id);",
     },
-    // 票 16（第 27 個 migration）：Controller 長期對話。每個 Workspace 一個 conversation；conversation_turn 是使用者訊息、
+    // 修正與重試預算（票 36，第 27 個 migration）：每個 Task 一列三種計數、退避期限與用盡狀態（從未計入的 Task 沒有列）。
+    // 驗證紀錄加上「不完整」：同一個 Run 可以重驗多次，所以重建 task_verification，把「一個 Run 一筆」放寬為
+    // 「一個 Run 最多一筆有結論（通過或未通過）的紀錄」。沒有其他表參照它，建新表、搬資料、刪舊表、改名即可
+    Migration {
+        name: "retry_budgets",
+        sql: "CREATE TABLE task_verification_next (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            run_id TEXT NOT NULL REFERENCES run (id),
+            generation INTEGER NOT NULL,
+            contract_version INTEGER NOT NULL,
+            method TEXT NOT NULL CHECK (method IN ('checks', 'manual')),
+            outcome TEXT NOT NULL CHECK (outcome IN ('passed', 'failed', 'inconclusive')),
+            evidence TEXT NOT NULL,
+            decided_at INTEGER NOT NULL
+        );
+        INSERT INTO task_verification_next
+            (id, workspace_id, task_id, run_id, generation, contract_version, method, outcome, evidence, decided_at)
+        SELECT id, workspace_id, task_id, run_id, generation, contract_version, method, outcome, evidence, decided_at
+        FROM task_verification ORDER BY rowid;
+        DROP TABLE task_verification;
+        ALTER TABLE task_verification_next RENAME TO task_verification;
+        CREATE INDEX task_verification_workspace ON task_verification (workspace_id);
+        CREATE UNIQUE INDEX task_verification_one_pass ON task_verification (task_id) WHERE outcome = 'passed';
+        CREATE UNIQUE INDEX task_verification_one_conclusion ON task_verification (run_id) WHERE outcome <> 'inconclusive';
+        CREATE TRIGGER task_verification_no_update BEFORE UPDATE ON task_verification
+        BEGIN SELECT RAISE(ABORT, 'task_verification 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER task_verification_no_delete BEFORE DELETE ON task_verification
+        BEGIN SELECT RAISE(ABORT, 'task_verification 是追加式資料表，不可刪除'); END;
+        CREATE TABLE task_budget (
+            task_id TEXT PRIMARY KEY REFERENCES task (id),
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            implementation INTEGER NOT NULL CHECK (implementation >= 0),
+            verification INTEGER NOT NULL CHECK (verification >= 0),
+            infrastructure INTEGER NOT NULL CHECK (infrastructure >= 0),
+            retry_not_before INTEGER,
+            exhausted TEXT CHECK (exhausted IN ('implementation', 'verification', 'infrastructure')),
+            request_id TEXT REFERENCES decision_request (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL,
+            CHECK ((exhausted IS NULL) = (request_id IS NULL))
+        );
+        CREATE INDEX task_budget_workspace ON task_budget (workspace_id);",
+    },
+    // 票 16（第 28 個 migration）：Controller 長期對話。每個 Workspace 一個 conversation；conversation_turn 是使用者訊息、
     // 工作事件與 Controller 回覆，輸入帶處理狀態；controller_run 是 Controller 的一輪（只綁 conversation，不綁 Task）。
     // 同一個 conversation 任何時刻最多一輪未結束（B1）由唯一索引保證；同一個工作事件來源只會成為一個輸入
     Migration {
@@ -1738,6 +1784,57 @@ mod tests {
         assert_eq!(rows.len(), MIGRATIONS.len());
         assert_eq!(rows[0], (1, "runtime_boot".to_string(), 1_000));
         assert!(rows.iter().all(|(_, _, applied_at)| *applied_at == 1_000), "第二次開啟不可重新套用");
+    }
+
+    #[tokio::test]
+    async fn the_retry_budget_migration_keeps_verification_records_and_allows_reverifying_a_run() {
+        // 套用到預算 migration 之前的版本，放一筆票 13 的驗證紀錄
+        let dir = tempfile::tempdir().unwrap();
+        let before = MIGRATIONS.iter().position(|m| m.name == "retry_budgets").unwrap();
+        {
+            let old = raw(dir.path());
+            old.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (index, migration) in MIGRATIONS[..before].iter().enumerate() {
+                old.execute_batch(migration.sql).unwrap();
+                old.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![index + 1, migration.name],
+                )
+                .unwrap();
+            }
+            old.execute_batch(
+                "INSERT INTO workspace (id, name, path, status, version, created_at) VALUES ('w1', 'w', 'C:/w', 'active', 1, 1);
+                 INSERT INTO goal (id, workspace_id, title, version, created_at) VALUES ('g1', 'w1', 'g', 1, 1);
+                 INSERT INTO task (id, workspace_id, goal_id, title, status, version, contract_version, created_at, updated_at)
+                   VALUES ('t1', 'w1', 'g1', 't', 'ready', 1, 1, 1, 1);
+                 INSERT INTO run (id, workspace_id, task_id, status, version, generation, contract_version, created_at, updated_at)
+                   VALUES ('r1', 'w1', 't1', 'succeeded', 1, 1, 1, 1, 1), ('r2', 'w1', 't1', 'succeeded', 1, 2, 1, 1, 1);
+                 INSERT INTO task_verification VALUES ('ver_1', 'w1', 't1', 'r1', 1, 1, 'checks', 'failed', '{}', 5);",
+            )
+            .unwrap();
+        }
+
+        drop(open(dir.path()).await);
+
+        let conn = raw(dir.path());
+        let kept: (String, String) =
+            conn.query_row("SELECT id, outcome FROM task_verification", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(kept, ("ver_1".to_string(), "failed".to_string()));
+        // 同一個 Run 可以有多筆「不完整」，但最多一筆有結論的紀錄
+        let insert = |id: &str, run: &str, outcome: &str| {
+            conn.execute(
+                "INSERT INTO task_verification VALUES (?1, 'w1', 't1', ?2, 1, 1, 'checks', ?3, '{}', 6)",
+                rusqlite::params![id, run, outcome],
+            )
+        };
+        insert("ver_2", "r2", "inconclusive").unwrap();
+        insert("ver_3", "r2", "inconclusive").unwrap();
+        insert("ver_4", "r2", "passed").unwrap();
+        assert!(insert("ver_5", "r2", "failed").is_err());
+        assert!(insert("ver_6", "r1", "unknown").is_err());
     }
 
     #[tokio::test]

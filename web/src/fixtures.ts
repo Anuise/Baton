@@ -5,6 +5,7 @@ import type {
   AuthorityTable,
   BackupStatus,
   BackupSummary,
+  BudgetView,
   ControllerRun,
   ConversationTurn,
   ConversationView,
@@ -571,7 +572,7 @@ export function controllerRun(overrides: Partial<ControllerRun> = {}): Controlle
     version: 1,
     command_id: "cmd_1",
     prompt: "先整理文件目錄",
-    working_dir: "C:\work\notes",
+    working_dir: "C:\\work\\notes",
     model: null,
     input_turn_ids: ["turn_1"],
     agent_session_id: "ses_1",
@@ -596,6 +597,22 @@ export function conversationView(overrides: Partial<ConversationView> = {}): Con
     next_wake_at: null,
     turns: [],
     runs: [],
+    ...overrides,
+  };
+}
+
+/** 測試用的修正與重試預算：task_1 三種計數都還沒用。 */
+export function budgetView(overrides: Partial<BudgetView> = {}): BudgetView {
+  return {
+    task_id: "task_1",
+    counters: [
+      { kind: "implementation", label: "實作失敗修正", used: 0, limit: 3 },
+      { kind: "verification", label: "驗證不完整重驗", used: 0, limit: 2 },
+      { kind: "infrastructure", label: "基礎設施重試", used: 0, limit: 5 },
+    ],
+    retry_not_before: null,
+    exhausted: null,
+    decision_request_id: null,
     ...overrides,
   };
 }

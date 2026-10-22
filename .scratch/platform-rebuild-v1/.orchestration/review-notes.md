@@ -44,3 +44,7 @@
 
 ## 11. 原生 Session 綁定的邊界（票 15）
 - `bind_native` 遇到 `InUse{driven:false}`（另一個暫停中的 Session 綁著同一原生 ID）時不要求取消，但 `run.native_session_id` 仍會被設定；之後該暫停 Session 被另一 Run 以 `--resume` 接續時，可能兩個程序同時驅動同一原生 Session。改為 `driven:false` 時也拒絕綁定（或取消）。
+
+## 12. 票 36 的小問題
+- `crates/baton-store/src/scheduling.rs:286-289` 的 `backoff_budget` 插在 `failed_check` 的 doc 註解與函式之間，註解錯掛。
+- 驗證不完整時立即重驗，兩次重驗可能數秒內用完（AI-274 的取捨）；評估是否加入短暫延遲。

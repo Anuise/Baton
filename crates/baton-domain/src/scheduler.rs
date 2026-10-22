@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::authorization::AdmissionDenied;
+use crate::budget::{BudgetKind, TaskBudget};
 use crate::event::DomainEvent;
 use crate::guard::GuardSource;
 use crate::profile::{self, AccountProfile, ProfileStatus};
@@ -164,6 +165,8 @@ pub enum WaitCategory {
     Lifecycle,
     /// 已啟用的 Guard 擋下（票 38）：依來源教訓修改契約，或在知識分頁停用該 Guard 後自動再試。
     Guard,
+    /// 基礎設施重試的退避期間（票 36）：期限一到自動再試。
+    Backoff,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,6 +236,30 @@ pub fn task_wait_reasons(error: &RunError) -> Option<Vec<WaitReason>> {
             )
         }
         _ => None,
+    }
+}
+
+/// 基礎設施重試的退避期限還沒到（票 36）：留在佇列，期限一到自動派工。
+pub fn backoff_wait(budget: &TaskBudget, now: Timestamp) -> Option<WaitReason> {
+    let until = budget.retry_not_before.filter(|_| budget.in_backoff(now))?;
+    let retry = budget.used(BudgetKind::Infrastructure);
+    let message = format!(
+        "基礎設施重試第 {retry} 次（上限 {} 次）的退避期間，{} 秒後自動再試",
+        BudgetKind::Infrastructure.limit(),
+        (until.as_millis() - now.as_millis() + 999) / 1000
+    );
+    Some(reason(WaitCategory::Backoff, "retry_backoff", message, None))
+}
+
+/// 把基礎設施重試的退避併入一次排程判定（票 36）：能派的改為等待，本來就要等的多列一個原因。
+pub fn apply_backoff(evaluation: Evaluation, budget: Option<&TaskBudget>, now: Timestamp) -> Evaluation {
+    let Some(wait) = budget.and_then(|b| backoff_wait(b, now)) else { return evaluation };
+    match evaluation {
+        Evaluation::Dispatch { .. } => Evaluation::Wait(vec![wait]),
+        Evaluation::Wait(mut reasons) => {
+            reasons.insert(0, wait);
+            Evaluation::Wait(reasons)
+        }
     }
 }
 

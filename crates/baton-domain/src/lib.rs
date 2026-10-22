@@ -11,6 +11,7 @@ pub mod claude_code;
 pub mod cleanup;
 pub mod authorization;
 pub mod backup;
+pub mod budget;
 pub mod config;
 pub mod conversation;
 pub mod decision;
