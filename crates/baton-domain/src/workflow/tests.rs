@@ -75,6 +75,7 @@ fn pass(workflow: &WorkflowInstance, playbook: &PlaybookVersion, prior: &mut Vec
                 EvidenceKind::Artifact => EvidenceRef::Artifact { artifact_id: "art".into() },
                 EvidenceKind::Decision => EvidenceRef::Decision { decision_request_id: "dr".into() },
                 EvidenceKind::TaskAccepted => EvidenceRef::TaskAccepted { task_id: "task".into() },
+                EvidenceKind::Verification => EvidenceRef::Verification { evidence_bundle_id: "evb".into() },
             };
             CheckedEvidence { evidence: Evidence { check: c.key.clone(), reference }, status: EvidenceStatus::Valid }
         })

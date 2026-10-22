@@ -281,6 +281,9 @@ fn check_evidence(conn: &Connection, workspace_id: &str, evidence: Evidence) -> 
                 (Some(_), Some(_)) => EvidenceStatus::Valid,
             }
         }
+        EvidenceRef::Verification { evidence_bundle_id } => {
+            super::verification_profiles::verification_evidence_status(conn, workspace_id, evidence_bundle_id)?
+        }
     };
     Ok(CheckedEvidence { evidence, status })
 }

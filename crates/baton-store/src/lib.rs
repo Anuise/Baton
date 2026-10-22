@@ -53,6 +53,7 @@ mod tasks;
 mod timeline;
 mod understanding;
 mod verification;
+mod verification_profiles;
 mod workdirs;
 mod workflows;
 pub use agent::AgentContext;
@@ -85,6 +86,7 @@ pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 pub use timeline::TimelineError;
 pub use understanding::UnderstandingApplyError;
 pub use verification::{AcceptanceApplyError, PendingVerification};
+pub use verification_profiles::{PendingVerificationRun, VerificationApplyError, VerificationOverview};
 pub use workdirs::WorkdirCandidate;
 pub use workflows::{WorkflowApplyError, WorkflowBinding, WorkflowDetail};
 
@@ -1482,6 +1484,56 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'stage_attempt 是追加式資料表，不可更新'); END;
         CREATE TRIGGER stage_attempt_no_delete BEFORE DELETE ON stage_attempt
         BEGIN SELECT RAISE(ABORT, 'stage_attempt 是追加式資料表，不可刪除'); END;",
+    },
+    // Verification Profile 與 CLI／API 驗證（票 45，第 40 個 migration）：Profile 的版本只追加；驗證要求固定要求當時的
+    // Profile 版本與旅程，執行完成時同一個交易寫入 Evidence Bundle（只追加、不可修改）並把要求標為完成。
+    Migration {
+        name: "verification_profiles",
+        sql: "CREATE TABLE verification_profile_version (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            definition TEXT NOT NULL CHECK (json_valid(definition)),
+            content_hash TEXT NOT NULL CHECK (length(content_hash) = 64),
+            published_by TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE (workspace_id, version)
+        );
+        CREATE TRIGGER verification_profile_version_no_update BEFORE UPDATE ON verification_profile_version
+        BEGIN SELECT RAISE(ABORT, 'verification_profile_version 不可原地覆寫'); END;
+        CREATE TRIGGER verification_profile_version_no_delete BEFORE DELETE ON verification_profile_version
+        BEGIN SELECT RAISE(ABORT, 'verification_profile_version 不可刪除'); END;
+        CREATE TABLE verification_request (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT REFERENCES task (id),
+            profile_version_id TEXT NOT NULL REFERENCES verification_profile_version (id),
+            journeys TEXT NOT NULL CHECK (json_valid(journeys)),
+            requested_by TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('queued', 'completed')),
+            bundle_id TEXT,
+            created_at INTEGER NOT NULL,
+            completed_at INTEGER,
+            CHECK ((status = 'completed') = (bundle_id IS NOT NULL))
+        );
+        CREATE INDEX verification_request_status ON verification_request (status, created_at);
+        CREATE INDEX verification_request_workspace ON verification_request (workspace_id, created_at);
+        CREATE TABLE evidence_bundle (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            request_id TEXT NOT NULL UNIQUE REFERENCES verification_request (id),
+            task_id TEXT REFERENCES task (id),
+            profile_version_id TEXT NOT NULL REFERENCES verification_profile_version (id),
+            verdict TEXT NOT NULL CHECK (verdict IN ('passed', 'product_failure', 'inconclusive', 'environment_blocked',
+                'auth_blocked', 'budget_exhausted', 'automation_unsupported')),
+            content TEXT NOT NULL CHECK (json_valid(content)),
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX evidence_bundle_workspace ON evidence_bundle (workspace_id, created_at);
+        CREATE TRIGGER evidence_bundle_no_update BEFORE UPDATE ON evidence_bundle
+        BEGIN SELECT RAISE(ABORT, 'evidence_bundle 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER evidence_bundle_no_delete BEFORE DELETE ON evidence_bundle
+        BEGIN SELECT RAISE(ABORT, 'evidence_bundle 是追加式資料表，不可刪除'); END;",
     },
 ];
 

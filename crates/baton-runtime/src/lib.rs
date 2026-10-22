@@ -15,6 +15,8 @@ pub mod single_instance;
 pub mod supervisor;
 pub mod update_source;
 pub mod updates;
+pub mod verification_adapter;
+pub mod verification_driver;
 pub mod verifier;
 pub mod windows_platform;
 #[cfg(windows)]
