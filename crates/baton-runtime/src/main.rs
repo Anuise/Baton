@@ -11,20 +11,23 @@ use baton_runtime::{Runtime, RuntimeConfig, RuntimeOptions};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
-    match run().await {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // 還原不是啟動 Runtime：失敗時說是還原失敗
+    let (result, failure) = if args.first().map(String::as_str) == Some("restore") {
+        (restore(&args[1..]), "還原失敗")
+    } else {
+        (run(&args).await, "Runtime 啟動失敗")
+    };
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("Runtime 啟動失敗：{message}");
+            eprintln!("{failure}：{message}");
             std::process::ExitCode::FAILURE
         }
     }
 }
 
-async fn run() -> Result<(), String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("restore") {
-        return restore(&args[1..]);
-    }
+async fn run(args: &[String]) -> Result<(), String> {
     if args.first().map(String::as_str) == Some(installer::MAINTENANCE_COMMAND) {
         return prepare_for_installer(&args[1..]).await;
     }
@@ -51,10 +54,15 @@ async fn run() -> Result<(), String> {
     let runtime = Runtime::start_with(config.clone(), ports, options).await.map_err(|e| e.to_string())?;
     println!("Runtime 已啟動：http://{}", runtime.local_addr());
 
-    tokio::select! {
-        _ = runtime.wait() => {}
-        _ = tokio::signal::ctrl_c() => {}
-    }
+    // 主控台 Ctrl-C 是使用者有意的停止：有秩序地停止並記下正常結束，下次啟動不判為崩潰（程序被終止、重開機仍是）
+    runtime
+        .serve_until(async {
+            if tokio::signal::ctrl_c().await.is_err() {
+                // 無法接收 Ctrl-C 時只等服務自行結束，不當成收到中斷
+                std::future::pending::<()>().await;
+            }
+        })
+        .await;
     Ok(())
 }
 
@@ -73,7 +81,7 @@ fn restore(args: &[String]) -> Result<(), String> {
     if report.passed() {
         Ok(())
     } else {
-        Err("還原完成，但有核對沒有通過；請不要使用這個目錄".into())
+        Err("檔案已還原，但有核對沒有通過；請不要使用這個目錄".into())
     }
 }
 

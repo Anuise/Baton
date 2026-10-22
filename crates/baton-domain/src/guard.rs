@@ -400,10 +400,12 @@ pub fn prevented(source: &GuardSource, message: &str, task: &Task, now: Timestam
     (recurrence, event)
 }
 
-/// 使用者回報一次沒被攔下的重犯；教訓必須是已驗證的教訓（過期的也可以），可指定相關 Task（必須在教訓的適用範圍內）。
+/// 使用者回報一次沒被攔下的重犯；教訓必須是已驗證的教訓（過期的也可以），可指定相關的 Workspace 或 Task（必須在教訓的適用範圍內）。
+/// 指定 Task 時以 Task 所在的 Workspace 為準；只指定 Workspace 時記下它（App 的重犯表單沒填 Task 時就是這樣）。
 pub fn report(
     id: String,
     lesson: &KnowledgeEntry,
+    workspace_id: Option<&str>,
     task: Option<&Task>,
     note: &str,
     now: Timestamp,
@@ -430,7 +432,7 @@ pub fn report(
         id,
         lesson_id: lesson.id.clone(),
         guard_id: None,
-        workspace_id: task.map(|t| t.workspace_id.clone()),
+        workspace_id: task.map(|t| t.workspace_id.clone()).or_else(|| workspace_id.map(str::to_string)),
         task_id: task.map(|t| t.id.clone()),
         contract_version: task.map(|t| t.contract_version),
         kind: RecurrenceKind::Reported,

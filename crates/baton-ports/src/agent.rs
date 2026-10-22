@@ -20,6 +20,9 @@ pub struct RunSpec {
     pub config_dir: Option<String>,
     /// 這個 Run 准入、已核對過的共同設定快照目錄；沒有採用任何共同設定版本時為 `None`。
     pub settings_dir: Option<String>,
+    /// 快照中實際有的設定檔名稱（`settings.json`、`mcp.json`、`CLAUDE.md` 中有內容的類別）。
+    /// 由綁定的版本渲染決定、不讀檔案系統，所以快照目錄在 Run 啟動後被刪，Runtime 重建後組出的啟動指令仍相同。
+    pub settings_files: Vec<String>,
     /// 指定的模型（Workspace 依角色覆寫，spec D-30）；`None` 時沿用帳號的預設模型。
     pub model: Option<String>,
     /// 要以原生方式接續的原生 Session（票 15）；`None` 時建立新的原生 Session。

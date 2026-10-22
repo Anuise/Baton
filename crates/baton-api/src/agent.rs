@@ -184,9 +184,11 @@ async fn report(
     let content = content?;
     let kind = content.kind();
     state.store.apply_agent_report(&scope, content, state.clock.now()).await?;
-    // 回報的回應是 Runtime 通知 Worker「保存進度並停止」的管道：停止意圖生效或正在交接時告訴它
+    // 回報的回應是 Runtime 通知 Worker「保存進度並停止」的管道：使用者取消了這個 Run、停止意圖生效或正在交接時告訴它
     let handoff_requested = state.store.in_flight_handoff_of_run(&scope.run_id).await?.is_some();
-    let stop_requested = handoff_requested || state.store.lifecycle_state().await?.stop_intent_active();
+    let cancel_requested = state.store.agent_context(&scope).await?.run.cancel_requested_at.is_some();
+    let stop_requested =
+        handoff_requested || cancel_requested || state.store.lifecycle_state().await?.stop_intent_active();
     Ok(Json(ReportAck { accepted: true, kind, stop_requested, handoff_requested }))
 }
 
@@ -331,7 +333,8 @@ pub(crate) async fn permission_prompt(
             behavior: "deny".to_string(),
             updated_input: None,
             message: Some(
-                "Controller 不能直接執行這個操作（不能直接寫資料、執行指令或自行啟動 Worker）；                 請以 propose_task、dispatch_task 等工具把工作交給 Runtime 管理的 Worker。"
+                "Controller 不能直接執行這個操作（不能直接寫資料、執行指令或自行啟動 Worker）；\
+                 請以 propose_task、dispatch_task 等工具把工作交給 Runtime 管理的 Worker。"
                     .to_string(),
             ),
             status: "controller_denied".to_string(),
@@ -462,7 +465,8 @@ pub(crate) async fn controller_action(
             existing: Some(existing),
             ..response(
                 "requires_decision",
-                "依決策權限表，這個事項必須由使用者裁定：動作沒有執行，已建立裁定請求。                 請等待裁定結果，不要自行執行或改用其他方式繞過；可以先做不需要這項裁定的其他工作。",
+                "依決策權限表，這個事項必須由使用者裁定：動作沒有執行，已建立裁定請求。\
+                 請等待裁定結果，不要自行執行或改用其他方式繞過；可以先做不需要這項裁定的其他工作。",
             )
         },
         ControllerOutcome::Approved { request_id, conditions } => ControllerActionResponse {

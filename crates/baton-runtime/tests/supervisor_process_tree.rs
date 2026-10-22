@@ -104,6 +104,38 @@ impl AgentAdapter for TreeAdapter {
     }
 }
 
+/// Worker 啟動背景的 ping 後立刻結束，約一秒後回報成功結束；ping 留在 Run 的 Job 內。
+struct OrphanAdapter;
+
+#[async_trait]
+impl AgentAdapter for OrphanAdapter {
+    fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        SpawnSpec {
+            program: "cmd.exe".into(),
+            args: ["/c", "start", "/b", "ping", "-n", "60", "127.0.0.1"].map(String::from).to_vec(),
+            working_dir: spec.working_dir.clone(),
+            command_id: spec.command_id.clone(),
+            env: Vec::new(),
+            ..Default::default()
+        }
+    }
+
+    async fn launch(&self, spec: RunSpec) -> PortResult<AgentHandle> {
+        Ok(AgentHandle(spec.run_id))
+    }
+
+    fn events(&self, _handle: &AgentHandle) -> BoxStream<'static, AdapterEvent> {
+        Box::pin(futures::stream::once(async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            AdapterEvent::Exited { success: true }
+        }))
+    }
+
+    async fn resume_capability(&self, _session: &SessionRef) -> PortResult<Capability> {
+        Ok(Capability::Unknown)
+    }
+}
+
 /// 測試用的 Claude 環境：任何設定目錄都回報原生登入，帳號以目錄名稱區分（不會呼叫真的 `claude`）。
 struct NativeLoginEnv;
 
@@ -213,16 +245,11 @@ fn complete() -> ContractContent {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree() {
-    let data_dir = tempfile::tempdir().unwrap();
-    let workspace_dir = data_dir.path().join("work");
-    std::fs::create_dir_all(&workspace_dir).unwrap();
-    let protector: Arc<dyn SecretProtector> = Arc::new(baton_credential::DpapiProtector);
-    let ports = Ports {
+fn ports(agent_adapter: Arc<dyn AgentAdapter>, protector: Arc<dyn SecretProtector>) -> Ports {
+    Ports {
         clock: Arc::new(SystemClock),
         process_control: Arc::new(WindowsProcessControl::new()),
-        agent_adapter: Arc::new(TreeAdapter),
+        agent_adapter,
         quota_observer: Arc::new(NoQuota),
         workspace_fs: Arc::new(LocalWorkspaceFs),
         platform_info: Arc::new(WindowsPlatformInfo),
@@ -238,8 +265,19 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         browser_driver: Arc::new(baton_runtime::browser_driver::LocalBrowserDriver::default()),
         semantic_judge: Arc::new(baton_runtime::semantic_judge::ClaudeSemanticJudge::default()),
         secret_resolver: Arc::new(baton_runtime::secret_resolver::EnvSecretResolver),
-    };
-    let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
+    }
+}
+
+/// 以真實 Runtime 派出一個 Run 並讓 Supervisor 啟動它；回傳 Runtime、用戶端、Workspace 與 Run 的識別。
+async fn running_run(
+    data_dir: &Path,
+    agent_adapter: Arc<dyn AgentAdapter>,
+) -> (baton_runtime::RunningRuntime, RuntimeClient, String, baton_domain::run::RunView) {
+    let workspace_dir = data_dir.join("work");
+    std::fs::create_dir_all(&workspace_dir).unwrap();
+    let protector: Arc<dyn SecretProtector> = Arc::new(baton_credential::DpapiProtector);
+    let ports = ports(agent_adapter, protector.clone());
+    let config = RuntimeConfig { data_dir: data_dir.to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
     let runtime = Runtime::start_with(
         config,
         ports,
@@ -247,7 +285,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
     )
     .await
     .unwrap();
-    let client = RuntimeClient::new(runtime.local_addr(), data_dir.path().to_path_buf(), protector);
+    let client = RuntimeClient::new(runtime.local_addr(), data_dir.to_path_buf(), protector);
 
     // 派工需要可派工的帳號：經由 HTTP 建立 Profile 並核對（測試用的 Claude 環境回報原生登入）
     let profile = client.create_profile(&CreateProfileRequest { name: "測試帳號".into(), expected_account: None }).await.unwrap();
@@ -273,10 +311,17 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
     };
     runtime.supervisor().tick().await;
     let running = client.task_board(&workspace.id).await.unwrap().runs.remove(0);
+    assert_eq!((queued.run.status, running.run.status), (RunStatus::Queued, RunStatus::Running), "{running:?}");
+    (runtime, client, workspace.id, running)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (runtime, client, workspace_id, running) = running_run(data_dir.path(), Arc::new(TreeAdapter)).await;
     let command_id = running.run.command_id.clone().expect("launch intent 已持久化");
     let _cleanup = JobGuard(command_id.clone());
 
-    assert_eq!((queued.run.status, running.run.status), (RunStatus::Queued, RunStatus::Running), "{running:?}");
     let process = running.run.process.as_ref().expect("回執已寫回");
     assert!(process.pid > 0 && !process.command_hash.is_empty());
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -285,12 +330,35 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    client.cancel_run(&workspace.id, &running.run.id).await.unwrap();
+    client.cancel_run(&workspace_id, &running.run.id).await.unwrap();
     runtime.supervisor().tick().await;
 
-    let board = client.task_board(&workspace.id).await.unwrap();
+    let board = client.task_board(&workspace_id).await.unwrap();
     assert_eq!(board.runs[0].run.status, RunStatus::Cancelled, "{:?}", board.runs[0]);
     assert_eq!(board.tasks[0].task.status, TaskStatus::Ready);
     assert_eq!(job_process_count(&command_id), 0, "整個程序樹（含孫程序）都已被終止");
+    runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_worker_leaves_nothing_running_in_its_job() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let (runtime, client, workspace_id, running) = running_run(data_dir.path(), Arc::new(OrphanAdapter)).await;
+    let command_id = running.run.command_id.clone().expect("launch intent 已持久化");
+    let _cleanup = JobGuard(command_id.clone());
+
+    // Worker 回報結束：Supervisor 結束 Run 之前終止它留在背景的 ping
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        runtime.supervisor().tick().await;
+        let board = client.task_board(&workspace_id).await.unwrap();
+        if board.runs[0].run.status != RunStatus::Running {
+            assert_eq!(board.runs[0].run.status, RunStatus::Succeeded, "{:?}", board.runs[0]);
+            break;
+        }
+        assert!(Instant::now() < deadline, "Run 沒有在 20 秒內結束");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(job_process_count(&command_id), 0, "Run 結束時 Job 內不能留下任何程序");
     runtime.shutdown().await;
 }

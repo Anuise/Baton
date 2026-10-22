@@ -250,6 +250,17 @@ fn file_check_needs_the_file_and_the_hash_when_declared() {
     assert!(wrong.detail.contains("SHA-256 不符"), "{}", wrong.detail);
 }
 
+/// 工作目錄內的符號連結或 junction 指向外部：不讀取內容，檢查不通過（審查 R152、票 13）。
+#[test]
+fn a_file_check_whose_path_resolves_outside_the_working_directory_fails() {
+    let any = file_check("dist/app.js", None);
+
+    let result = judge(&any, Observation::FileOutsideWorkdir { resolved: r"C:\secret\app.js".into() });
+
+    assert_eq!(result.status, CheckStatus::Failed);
+    assert!(result.detail.contains("工作目錄外") && result.detail.contains(r"C:\secret\app.js"), "{}", result.detail);
+}
+
 #[test]
 fn artifact_check_verifies_presence_manifest_integrity_and_declared_hash() {
     let entry = ManifestEntry { artifact_id: "a1".into(), name: "r.md".into(), version: 2, sha256: SHA_ABC.into() };

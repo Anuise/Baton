@@ -8,7 +8,7 @@ use baton_domain::artifact::Artifact;
 use baton_domain::verification::{
     judge, CheckResult, CommandObservation, ManifestEntry, Observation, VerificationCheck, COMMAND_TIMEOUT_MS,
 };
-use baton_ports::{CommandOutput, CommandRequest, Ports};
+use baton_ports::{CommandOutput, CommandRequest, ContainedFile, Ports};
 use baton_store::PendingVerification;
 
 /// 依序執行一個 Task 的全部檢查，結果的順序與契約宣告的順序相同。
@@ -59,14 +59,17 @@ async fn observe(ports: &Ports, artifacts_root: &Path, item: &Subject<'_>, check
                 Err(error) => CommandObservation::NotStarted { reason: error.to_string() },
             })
         }
-        // 路徑在契約儲存時已驗證為工作目錄內的相對路徑
-        VerificationCheck::File { path, .. } => Observation::File(
-            ports
-                .workspace_fs
-                .read_workspace_file(&Path::new(item.working_dir).join(path))
-                .await
-                .map_err(|e| e.to_string()),
-        ),
+        // 路徑在契約儲存時已驗證為工作目錄內的相對路徑；經由連結指向工作目錄外的由 Port 正規化後擋下
+        VerificationCheck::File { path, .. } => {
+            match ports.workspace_fs.read_file_within(Path::new(item.working_dir), Path::new(path)).await {
+                Ok(ContainedFile::Found(bytes)) => Observation::File(Ok(Some(bytes))),
+                Ok(ContainedFile::Missing) => Observation::File(Ok(None)),
+                Ok(ContainedFile::OutsideRoot(resolved)) => {
+                    Observation::FileOutsideWorkdir { resolved: resolved.display().to_string() }
+                }
+                Err(e) => Observation::File(Err(e.to_string())),
+            }
+        }
         VerificationCheck::Artifact { name, .. } => {
             let latest = item.manifest.iter().find(|entry| &entry.name == name).cloned();
             let storage_path = latest.as_ref().and_then(|entry| {

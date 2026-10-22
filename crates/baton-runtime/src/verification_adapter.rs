@@ -29,7 +29,8 @@
 //! - 語意 judge 限流而另有帳號可用（額度門檻 open、這個要求中沒有限流過）時，在那個步驟之後停止旅程，照常 teardown、
 //!   停止服務、移除狀態目錄，回傳 `AttemptOutcome::HandedOff`，由 Supervisor 以另一個帳號開始新的嘗試。
 //!   沒有其他帳號時留在原地繼續，之後的語意判斷不呼叫模型（只執行不需模型的斷言）。
-//! - 承接的嘗試先以日誌中的參照停止前一次留下的服務與瀏覽器 Session，無法確認停止時不執行任何操作；
+//! - 承接的嘗試先以日誌中的參照停止前一次留下的服務與瀏覽器 Session，無法確認停止時不執行任何操作
+//!   （也不準備或移除狀態目錄、不執行 teardown：舊程序可能仍在使用它們）；
 //!   旅程依 `plan_journey` 沿用、從新的 fixture 整條重跑，或不重送已開始的外部操作。
 
 use std::path::{Path, PathBuf};
@@ -192,9 +193,9 @@ struct Screenshot {
     shows_secret: bool,
 }
 
-/// 畫面（網址、標題、文字）是否顯示了任何要遮蔽的值。
+/// 畫面（網址、標題、文字、輸入欄位的值）是否顯示了任何要遮蔽的值。
 fn shows_secret(page: &PageSnapshot, policy: &EvidencePolicy) -> bool {
-    [&page.url, &page.title, &page.text].iter().any(|t| redact(t, policy) != **t)
+    [&page.url, &page.title, &page.text].into_iter().chain(&page.fields).any(|t| redact(t, policy) != *t)
 }
 
 /// 只遮蔽、不截斷（judge 的輸入需要完整的畫面文字）。
@@ -963,18 +964,22 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
     };
 
     // 承接：先以日誌中的安全參照停止前一次留下的測試程序；無法確認停止時不執行任何操作（舊程序可能仍在回應）
+    // 舊程序可能仍在使用同一個狀態目錄：受阻時也不準備或移除狀態目錄、不執行 teardown（AI-429）
+    let mut takeover_blocked = false;
     let mut takeover = context.previous.last().map(|last| Takeover { from_attempt: last.attempt, ..Takeover::default() });
     if let Some(takeover) = takeover.as_mut() {
         run.take_over(takeover, context.previous).await;
         if !takeover.problems.is_empty() {
             run.blocked = true;
+            takeover_blocked = true;
             let output = takeover.problems.join("；");
             let reason = va::REASON_PREVIOUS_SESSION_UNCONFIRMED;
             run.push(system_record(Phase::Start, "takeover", "停止前一次嘗試的測試程序", reason, output, &run.policy)).await;
         }
     }
 
-    if let Err(error) = driver.prepare_state_dir(&state).await {
+    let prepared = if takeover_blocked { Ok(()) } else { driver.prepare_state_dir(&state).await };
+    if let Err(error) = prepared {
         run.blocked = true;
         let record = system_record(Phase::Start, "state-dir", "準備狀態目錄", "state_dir_unavailable", error.to_string(), &run.policy);
         run.push(record).await;
@@ -1084,9 +1089,12 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         }
     }
 
-    // 清理：一定執行（交接前也是，先停止舊的測試程序），只碰本次驗證的狀態
-    for (index, operation) in definition.teardown.iter().enumerate() {
-        run.teardown(index, operation).await;
+    // 清理：一定執行（交接前也是，先停止舊的測試程序），只碰本次驗證的狀態；
+    // 承接受阻時除外：狀態目錄可能仍屬於無法確認停止的舊程序
+    if !takeover_blocked {
+        for (index, operation) in definition.teardown.iter().enumerate() {
+            run.teardown(index, operation).await;
+        }
     }
     let service_stopped = match &service {
         None => None,
@@ -1101,11 +1109,16 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
             }
         },
     };
-    let state_dir_removed = match driver.remove_state_dir(&state).await {
-        Ok(()) => true,
-        Err(error) => {
-            run.problems.push(format!("無法移除狀態目錄：{error}"));
-            false
+    let state_dir_removed = if takeover_blocked {
+        run.problems.push("無法確認前一次嘗試的測試程序已停止：沒有執行 teardown，狀態目錄保留不動".into());
+        false
+    } else {
+        match driver.remove_state_dir(&state).await {
+            Ok(()) => true,
+            Err(error) => {
+                run.problems.push(format!("無法移除狀態目錄：{error}"));
+                false
+            }
         }
     };
     if let Some(reason) = run.handoff {
@@ -1158,4 +1171,27 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         started_at,
         finished_at,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_only_in_an_input_value_counts_as_shown_on_the_page() {
+        // 最終 review #24：秘密只出現在輸入欄位的值、不在畫面文字中，畫面仍然顯示了它
+        let policy = EvidencePolicy { redact: vec!["tok-1234".into()], ..EvidencePolicy::default() };
+        let page = PageSnapshot {
+            url: "http://127.0.0.1/settings".into(),
+            title: "設定".into(),
+            status: Some(200),
+            text: "API 設定".into(),
+            fields: vec!["alice".into(), "tok-1234".into()],
+            visible: Vec::new(),
+            screenshot: None,
+        };
+        assert!(shows_secret(&page, &policy));
+        let clean = PageSnapshot { fields: vec!["alice".into()], ..page };
+        assert!(!shows_secret(&clean, &policy));
+    }
 }

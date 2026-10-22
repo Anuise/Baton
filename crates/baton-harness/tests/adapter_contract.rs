@@ -51,6 +51,7 @@ fn contract_spec(run_id: &str, scenario: Scenario, model: Option<String>, config
         working_dir: Some(working_dir.to_string_lossy().into_owned()),
         config_dir,
         settings_dir: None,
+        settings_files: Vec::new(),
         model: match scenario {
             Scenario::Completes => model,
             Scenario::InvalidModel => Some(INVALID_MODEL.to_string()),

@@ -66,3 +66,42 @@ async fn app_turns_a_lesson_into_a_guard_toggles_it_and_reports_a_recurrence() {
     assert_eq!(recurrences.len(), 1);
     assert_eq!(recurrences[0].lesson_id, lesson.entry.id);
 }
+
+#[tokio::test]
+async fn a_recurrence_reported_with_only_a_workspace_keeps_the_workspace() {
+    let harness = Harness::start().await;
+    let client = app_client(&harness);
+    let dir = harness.data_dir().join("app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let workspace_id = client
+        .create_workspace(&CreateWorkspaceRequest { path: dir.to_string_lossy().into_owned(), name: None })
+        .await
+        .unwrap()
+        .id;
+    let lesson = client
+        .create_knowledge(&CreateKnowledgeRequest {
+            kind: KnowledgeKind::Lesson,
+            scope: ScopeInput { kind: ScopeKind::Workspace, workspace_id: Some(workspace_id.clone()), goal_id: None, task_id: None },
+            title: "部署前要寫回滾計畫".into(),
+            body: String::new(),
+            tags: vec![],
+            evidence: vec![],
+            lesson: Some(LessonDetail::default()),
+            valid_from: None,
+            valid_until: None,
+            supersedes: None,
+        })
+        .await
+        .unwrap();
+
+    // App 的重犯表單沒填 Task 時只帶目前的 Workspace
+    let request = ReportRecurrenceRequest { note: "又忘了回滾".into(), workspace_id: Some(workspace_id.clone()), task_id: None };
+    let reported = client.report_recurrence(&lesson.entry.id, &request).await.unwrap();
+    assert_eq!((reported.workspace_id.as_deref(), reported.task_id.as_deref()), (Some(workspace_id.as_str()), None));
+    let recurrences = client.lesson_recurrences(&lesson.entry.id).await.unwrap().recurrences;
+    assert_eq!(recurrences[0].workspace_id.as_deref(), Some(workspace_id.as_str()), "保存後讀回來仍帶 Workspace");
+
+    let unknown = ReportRecurrenceRequest { note: "又忘了".into(), workspace_id: Some("ws_missing".into()), task_id: None };
+    let rejected = client.report_recurrence(&lesson.entry.id, &unknown).await;
+    assert!(matches!(rejected, Err(ClientError::Rejected { ref code, .. }) if code == "guard_invalid"), "{rejected:?}");
+}

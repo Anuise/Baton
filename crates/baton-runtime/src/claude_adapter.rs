@@ -25,6 +25,8 @@ use baton_ports::{
 use futures::stream::BoxStream;
 use serde_json::Value;
 
+use crate::claude_cli::is_batch_file;
+
 /// Run 專屬目錄放在資料目錄下的子目錄（spec D-17）。
 pub const RUNS_DIR: &str = "runs";
 pub const PROMPT_FILE: &str = "prompt.md";
@@ -46,7 +48,8 @@ pub fn affects_auth(name: &str) -> bool {
 }
 
 pub struct ClaudeCodeAdapter {
-    /// `claude` 的執行檔（CreateProcessW 依 PATH 尋找，並自動補上 `.exe`）。
+    /// `claude` 的執行檔（CreateProcessW 依 PATH 尋找，並自動補上 `.exe`），
+    /// 或 npm 安裝的批次檔完整路徑（經 cmd.exe 啟動，見 `claude_cli::claude_program`）。
     program: String,
     /// MCP shim 執行檔的完整路徑。
     shim_program: String,
@@ -62,7 +65,8 @@ impl ClaudeCodeAdapter {
         Self { program, shim_program, runs_dir: data_dir.join(RUNS_DIR), inherited_env, poll: DEFAULT_POLL }
     }
 
-    /// 正式執行：`claude`、與 Runtime 同目錄的 `baton-mcp-shim.exe`、目前程序的環境變數。
+    /// 正式執行：PATH 上的 `claude`（只有 npm 的 `claude.cmd` 時是它的完整路徑）、與 Runtime 同目錄的
+    /// `baton-mcp-shim.exe`、目前程序的環境變數。
     pub fn for_current_process(data_dir: &Path) -> Self {
         let shim = std::env::current_exe()
             .ok()
@@ -70,7 +74,7 @@ impl ClaudeCodeAdapter {
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| "baton-mcp-shim.exe".to_string());
         let inherited = std::env::vars_os().map(|(name, _)| name.to_string_lossy().into_owned()).collect();
-        Self::new("claude".to_string(), shim, data_dir, inherited)
+        Self::new(crate::claude_cli::claude_program(), shim, data_dir, inherited)
     }
 
     /// 讀取 stream 檔案的間隔（測試用較短的間隔）。
@@ -97,10 +101,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // 只使用這個 Run 的 MCP 設定：Baton 的 shim，加上快照中的共同 MCP 伺服器
         args.extend(["--strict-mcp-config", "--mcp-config"].map(String::from));
         args.push(self.file(&spec.run_id, RUN_MCP_FILE));
+        // 只依綁定的版本決定要傳哪些快照檔，不讀檔案系統（啟動指令與它的雜湊在重建後必須相同）
         let snapshot = |name: &str| {
             let dir = spec.settings_dir.as_deref()?;
-            let path = Path::new(dir).join(name);
-            path.is_file().then(|| path.to_string_lossy().into_owned())
+            spec.settings_files.iter().any(|file| file == name).then(|| Path::new(dir).join(name).to_string_lossy().into_owned())
         };
         if let Some(shared_mcp) = snapshot(MCP_FILE) {
             args.push(shared_mcp);
@@ -126,8 +130,19 @@ impl AgentAdapter for ClaudeCodeAdapter {
         env_remove.sort();
         env_remove.dedup();
         let env = spec.config_dir.iter().map(|dir| ("CLAUDE_CONFIG_DIR".to_string(), dir.clone())).collect();
+        let (program, args) = if is_batch_file(&self.program) {
+            // CreateProcessW 不能直接執行批次檔：經 cmd.exe 執行。`/d` 不跑 AutoRun（不會有額外輸出混進 stream），
+            // `/v:off` 關閉延遲展開；以 `call` 開頭，路徑含空白而加的引號不會被 `/c` 的引號規則剝掉。
+            // 引數只有旗標、路徑與模型名稱（Prompt 經標準輸入），`prepare` 會拒絕 cmd 會另作解讀的字元。
+            let mut wrapped: Vec<String> = ["/d", "/v:off", "/c", "call"].map(String::from).to_vec();
+            wrapped.push(self.program.clone());
+            wrapped.extend(args);
+            (cmd_exe(), wrapped)
+        } else {
+            (self.program.clone(), args)
+        };
         SpawnSpec {
-            program: self.program.clone(),
+            program,
             args,
             working_dir: spec.working_dir.clone(),
             command_id: spec.command_id.clone(),
@@ -140,6 +155,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     async fn prepare(&self, spec: &RunSpec) -> PortResult<()> {
+        if is_batch_file(&self.program) {
+            // 經 cmd.exe 啟動時，引數（含批次檔路徑）不能有 cmd 會另作解讀的字元，否則可能被拆成別的命令
+            for arg in self.spawn_spec(spec).args.iter().skip(4) {
+                if let Some(ch) = arg.chars().find(|c| CMD_UNSAFE.contains(*c) || c.is_control()) {
+                    return Err(PortError::Failed(format!(
+                        "Claude Code 是批次檔（{}），要經 cmd.exe 啟動，但引數 {arg:?} 含有 cmd.exe 會另作解讀的字元 {ch:?}；\
+                         請安裝原生的 claude.exe，或調整資料目錄、模型名稱",
+                        self.program
+                    )));
+                }
+            }
+        }
         let dir = self.run_dir(&spec.run_id);
         let files = [(PROMPT_FILE, spec.prompt.clone()), (RUN_MCP_FILE, mcp_config_json(&self.shim_program))];
         tokio::task::spawn_blocking(move || {
@@ -230,6 +257,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
         })
         .await
         .map_err(|e| PortError::Failed(format!("查驗原生 Session 的工作被中斷：{e}")))
+    }
+}
+
+/// 經 cmd.exe 啟動批次檔時，引數中不允許的字元：引號會改變 cmd 的引號狀態，`%`、`!` 會被展開，
+/// 其餘是 cmd 的運算子或跳脫字元（`call` 與批次檔內的 `%*` 會再解讀一次，所以引號內也不允許）。
+const CMD_UNSAFE: &str = "\"%!^&|<>()";
+
+/// 系統目錄下的 cmd.exe（不依 PATH 或目前目錄尋找）。
+fn cmd_exe() -> String {
+    match std::env::var_os("SystemRoot") {
+        Some(root) => Path::new(&root).join("System32").join("cmd.exe").to_string_lossy().into_owned(),
+        None => "cmd.exe".to_string(),
     }
 }
 
@@ -501,6 +540,11 @@ mod tests {
             working_dir: Some("C:\\work\\app".into()),
             config_dir: Some("C:\\Baton\\profiles\\prof_1".into()),
             settings_dir: settings_dir.map(|d| d.to_string_lossy().into_owned()),
+            // 有快照時預設三類設定都有內容
+            settings_files: match settings_dir {
+                Some(_) => [SETTINGS_FILE, MCP_FILE, INSTRUCTIONS_FILE].map(String::from).to_vec(),
+                None => Vec::new(),
+            },
             model: model.map(Into::into),
             resume_native_session_id: None,
         }
@@ -550,6 +594,33 @@ mod tests {
         let mcp_at = spec.args.iter().position(|a| a == "--mcp-config").unwrap();
         assert_eq!(spec.args[mcp_at + 2], path(MCP_FILE), "共同 MCP 伺服器接在 Baton 的設定之後：{:?}", spec.args);
         assert_eq!(value_after(&spec.args, "--model"), Some("claude-opus-5-5"));
+    }
+
+    /// 要傳哪些快照檔只看 Run 綁定的版本（`settings_files`），不看檔案系統：快照目錄在 Run 啟動後被刪，
+    /// Runtime 重建時組出的啟動指令（與它的雜湊）仍與啟動時相同（review-notes #6）。
+    #[test]
+    fn the_snapshot_files_passed_come_from_the_run_spec_and_not_from_the_file_system() {
+        let data = tempfile::tempdir().unwrap();
+        let snapshot = data.path().join("run-settings").join("run_1");
+        let adapter = adapter(data.path(), &[]);
+        let spec = RunSpec {
+            settings_files: [SETTINGS_FILE, INSTRUCTIONS_FILE].map(String::from).to_vec(),
+            ..run_spec(Some(&snapshot), None)
+        };
+
+        let before = adapter.spawn_spec(&spec);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        for name in [SETTINGS_FILE, MCP_FILE, INSTRUCTIONS_FILE] {
+            std::fs::write(snapshot.join(name), "{}").unwrap();
+        }
+        let after = adapter.spawn_spec(&spec);
+
+        let path = |name: &str| snapshot.join(name).to_string_lossy().into_owned();
+        assert_eq!(value_after(&before.args, "--settings"), Some(path(SETTINGS_FILE).as_str()), "快照目錄不存在也照綁定的版本傳");
+        assert_eq!(value_after(&before.args, "--append-system-prompt-file"), Some(path(INSTRUCTIONS_FILE).as_str()));
+        assert!(!before.args.contains(&path(MCP_FILE)), "版本沒有共同 MCP 伺服器就不傳：{:?}", before.args);
+        assert_eq!(after, before, "檔案系統的狀態不影響啟動指令");
+        assert_eq!(baton_ports::command_hash(&after), baton_ports::command_hash(&before));
     }
 
     #[test]
@@ -787,6 +858,88 @@ mod tests {
             parse_stream_line(line),
             [AdapterEvent::Error { message: "error_during_execution".into() }, AdapterEvent::Exited { success: false }]
         );
+    }
+
+    const NPM_SHIM: &str = r"C:\Users\Jo Smith\AppData\Roaming\npm\claude.cmd";
+
+    fn batch_adapter(dir: &Path, program: &str) -> ClaudeCodeAdapter {
+        ClaudeCodeAdapter::new(program.into(), "C:\\Baton\\bin\\baton-mcp-shim.exe".into(), dir, Vec::new())
+    }
+
+    /// npm 安裝的 `claude.cmd` 不能直接以 CreateProcessW 啟動（審查 R152）：經 cmd.exe 的 `call` 執行，
+    /// claude 收到的引數與直接啟動 `claude.exe` 時相同。
+    #[test]
+    fn an_npm_installed_claude_cmd_is_launched_through_cmd_exe_with_the_same_claude_arguments() {
+        let data = tempfile::tempdir().unwrap();
+        let spec = run_spec(None, Some("sonnet"));
+
+        let launched = batch_adapter(data.path(), NPM_SHIM).spawn_spec(&spec);
+        let direct = adapter(data.path(), &[]).spawn_spec(&spec);
+
+        assert!(launched.program.to_ascii_lowercase().ends_with(r"\system32\cmd.exe"), "{}", launched.program);
+        assert_eq!(&launched.args[..5], ["/d", "/v:off", "/c", "call", NPM_SHIM]);
+        assert_eq!(&launched.args[5..], &direct.args[..], "claude 的引數不變");
+        assert_eq!(SpawnSpec { program: direct.program.clone(), args: direct.args.clone(), ..launched.clone() }, direct);
+        assert_eq!(batch_adapter(data.path(), NPM_SHIM).spawn_spec(&spec), launched, "同一個 RunSpec 永遠得到同一個啟動指令");
+    }
+
+    #[tokio::test]
+    async fn a_batch_launch_refuses_arguments_that_cmd_would_reinterpret() {
+        let data = tempfile::tempdir().unwrap();
+        let batch = batch_adapter(data.path(), NPM_SHIM);
+
+        for model in ["sonnet&calc", "a%PATH%b", "x^y", "a|b", "a>b", "a<b", "a\"b", "a!b", "(x)", "a\nb"] {
+            let error = batch.prepare(&run_spec(None, Some(model))).await.unwrap_err();
+            assert!(error.to_string().contains("cmd.exe"), "{model:?}：{error}");
+        }
+        let odd_path = batch_adapter(data.path(), r"C:\Users\Tom&Jerry\npm\claude.cmd");
+        assert!(odd_path.prepare(&run_spec(None, None)).await.is_err(), "批次檔路徑本身也要檢查");
+        batch.prepare(&run_spec(None, Some("claude-opus-5-5"))).await.unwrap();
+        adapter(data.path(), &[]).prepare(&run_spec(None, Some("sonnet&calc"))).await.unwrap();
+    }
+
+    /// 真的經 cmd.exe 啟動一個模擬 npm 的 `claude.cmd`（路徑含空白）：它收到的引數與標準輸入都和預期相同。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_claude_cmd_receives_the_arguments_and_the_prompt_when_launched_through_the_job_object() {
+        use baton_ports::{Liveness, ProcessControl};
+        let temp = tempfile::tempdir().unwrap();
+        let npm = temp.path().join("npm dir");
+        std::fs::create_dir_all(&npm).unwrap();
+        let shim = npm.join("claude.cmd");
+        std::fs::write(&shim, "@echo off\r\n> \"%~dp0args.txt\" echo(%*\r\nmore > \"%~dp0stdin.txt\"\r\n").unwrap();
+        let data = temp.path().join("baton data");
+        let snapshot = data.join("run-settings").join("run_1");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        for name in [SETTINGS_FILE, MCP_FILE, INSTRUCTIONS_FILE] {
+            std::fs::write(snapshot.join(name), "{}").unwrap();
+        }
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let spec = RunSpec {
+            prompt: "do the work".into(),
+            command_id: format!("test-claude-cmd-{}-{nanos}", std::process::id()),
+            working_dir: Some(temp.path().to_string_lossy().into_owned()),
+            ..run_spec(Some(&snapshot), Some("sonnet"))
+        };
+        let adapter = batch_adapter(&data, &shim.to_string_lossy());
+        adapter.prepare(&spec).await.unwrap();
+        let spawn = adapter.spawn_spec(&spec);
+        let control = crate::windows_process::WindowsProcessControl::new();
+
+        let receipt = control.spawn(spawn.clone()).await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while control.inspect(&receipt.identity).await.unwrap() != Liveness::Dead {
+            assert!(std::time::Instant::now() < deadline, "模擬的 claude.cmd 沒有結束");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // cmd 原樣交給批次檔的引數列：含空白或空字串的引數加引號，其餘不變
+        let quoted: Vec<String> =
+            spawn.args[5..].iter().map(|a| if a.is_empty() || a.contains(' ') { format!("\"{a}\"") } else { a.clone() }).collect();
+        let received = std::fs::read_to_string(npm.join("args.txt")).unwrap();
+        assert_eq!(received.trim_end(), quoted.join(" "));
+        assert!(received.contains("baton data"), "路徑含空白的引數完整送達：{received}");
+        assert_eq!(std::fs::read_to_string(npm.join("stdin.txt")).unwrap().trim_end(), "do the work");
     }
 
     #[test]

@@ -210,14 +210,15 @@ pub(crate) async fn report(
     body: Result<Json<ReportRecurrenceRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Recurrence>), ApiError> {
     let Json(request) = body.map_err(bad_json)?;
-    let task = match (request.workspace_id, request.task_id) {
-        (Some(workspace_id), Some(task_id)) => Some((workspace_id, task_id)),
-        (_, None) => None,
+    // 只帶 Workspace（App 的重犯表單沒填 Task）時也記下 Workspace，不靜默丟棄
+    let scope = match (request.workspace_id, request.task_id) {
+        (Some(workspace_id), task_id) => Some((workspace_id, task_id)),
+        (None, None) => None,
         (None, Some(_)) => {
             return Err(GuardError::Invalid("指定 Task 時必須同時指定它的 Workspace".into()).into());
         }
     };
     let recurrence =
-        state.store.report_recurrence(new_id("rec")?, &id, task, request.note, state.clock.now()).await?;
+        state.store.report_recurrence(new_id("rec")?, &id, scope, request.note, state.clock.now()).await?;
     Ok((StatusCode::CREATED, Json(recurrence)))
 }
