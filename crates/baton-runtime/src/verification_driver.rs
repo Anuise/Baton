@@ -20,10 +20,23 @@ use crate::production_ports::LocalCommandRunner;
 /// 保留的回應本文長度（位元組，取開頭）；斷言需要的 JSON 通常在開頭就完整。
 const BODY_MAX_BYTES: usize = 256 * 1024;
 
-#[derive(Default)]
 pub struct LocalVerificationDriver {
     services: Mutex<HashMap<String, tokio::process::Child>>,
     next_service: AtomicU64,
+    /// 服務識別的前綴：每個 Runtime 實例不同，承接者才能分辨一個識別是不是目前的 Runtime 啟動的（票 49）。
+    prefix: String,
+}
+
+impl Default for LocalVerificationDriver {
+    fn default() -> Self {
+        Self { services: Mutex::default(), next_service: AtomicU64::new(1), prefix: format!("svc-{}-", instance_tag()) }
+    }
+}
+
+/// 這個 Runtime 實例的標記：程序識別加上建立時間（程序識別可能被重用）。
+pub(crate) fn instance_tag() -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    format!("{}-{nanos}", std::process::id())
 }
 
 fn failed(message: String) -> PortError {
@@ -82,14 +95,21 @@ impl VerificationDriver for LocalVerificationDriver {
         #[cfg(windows)]
         command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         let child = command.spawn().map_err(|e| failed(format!("無法啟動「{}」：{e}", request.program)))?;
-        let id = format!("svc-{}", self.next_service.fetch_add(1, Ordering::Relaxed));
+        let id = format!("{}{}", self.prefix, self.next_service.fetch_add(1, Ordering::Relaxed));
         self.services.lock().expect("服務表不會中毒").insert(id.clone(), child);
         Ok(ServiceHandle(id))
     }
 
     async fn stop_service(&self, handle: &ServiceHandle) -> PortResult<()> {
         let child = self.services.lock().expect("服務表不會中毒").remove(&handle.0);
-        let Some(mut child) = child else { return Ok(()) };
+        let Some(mut child) = child else {
+            // 這個 Runtime 啟動、已經停止的服務：重複停止無害。其他 Runtime（例如崩潰前的那一個）啟動的服務無法確認
+            return if handle.0.starts_with(&self.prefix) {
+                Ok(())
+            } else {
+                Err(failed(format!("服務「{}」不是目前的 Runtime 啟動的，無法確認已停止", handle.0)))
+            };
+        };
         // 已經自行結束的服務不必再終止
         if child.try_wait().map_err(|e| failed(format!("無法查詢服務狀態：{e}")))?.is_some() {
             return Ok(());
