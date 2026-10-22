@@ -1,6 +1,6 @@
 # 30: Controller 跨帳號交接
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R108-30-impl，2026-10-22 20:35）
 Blocked by: 28, 16
 
 **What to build:** Controller 帳號接近上限或限流時，以同一交接協議切換到其他帳號：建立新 Controller Session、從持久化對話、決策與檢查點重建，conversation_id 不變，未處理指示依序去重交付。

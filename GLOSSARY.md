@@ -211,8 +211,13 @@
 
 ### waiting_resource
 - **定義**：Task 因所有合適帳號都受限而等待的狀態，進度已保存，依重置時間或退避輪詢重新評估。
-- **關係**：與 waiting_decision（等人工裁定）、blocked（授權不足、相依未完成、狀態不明）分開呈現；不消耗修正預算。
+- **關係**：與 waiting_decision（等人工裁定）、blocked（授權不足、相依未完成、狀態不明）分開呈現；不消耗修正預算。由突然限流的 handoff 進入，handoff 停在同名的 phase 並記下預計重新評估時間（重置後 1 分鐘，或 5 分鐘起、上限 60 分鐘的退避）；Stop Intent 生效時資源恢復也不派工。
 - **避免使用**：queued（Run 的 queued 是另一回事）、rate-limited、stalled。
+
+### 突然限流（sudden limit）
+- **定義**：Run 執行中，Claude Code 回報帳號已達上限（exhausted）；Worker 已無法再呼叫模型，也來不及保存最後一輪的進度。
+- **關係**：帳號進入 draining（原因 `limit_reached`）；觸發的 handoff 不受冷卻限制、不等 checkpoint，successor 以最近的有效 checkpoint 與實際成果接手；所有合適帳號都受限時 Task 進入 waiting_resource。
+- **避免使用**：rate limit（泛稱，也指限流警告）、額度用完（不區分視窗與是否可恢復）、failure（突然限流不是失敗，不計入修正預算）。
 
 ### Recovery Event（恢復事件）
 - **定義**：Runtime 意外終止後的一次完整恢復流程，最多三次自動嘗試（含第一次），第二與第三次前分別退避，連續穩定一段時間並持久化成功才結束。三次用盡後只能由使用者明確要求建立新輪次。

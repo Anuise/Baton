@@ -1,6 +1,7 @@
 //! 崩潰恢復持久化的單元測試（票 31）：正常結束標記、啟動判定、嘗試序號的唯一性。
 
-use baton_domain::recovery::{RecoveryCommand, RecoveryStatus};
+use baton_domain::guardian::{GuardianAttempt, JournalRecord};
+use baton_domain::recovery::{ImportDisposition, RecoveryCommand, RecoveryStatus};
 
 use super::*;
 
@@ -85,4 +86,61 @@ async fn pending_recovery_halts_launches() {
     store.apply_recovery(RecoveryCommand::Begin { attempt_id: "a1".into() }, T0).await.unwrap();
     store.apply_recovery(RecoveryCommand::Complete { affected: vec![] }, T0).await.unwrap();
     assert!(!halted(&store).await, "穩定觀察期間可以啟動");
+}
+
+// ------------------------------------------------------------ 監護日誌匯入（票 32）
+
+fn guardian(seq: u32, id: &str) -> JournalRecord {
+    JournalRecord::Attempt(GuardianAttempt {
+        event_id: "rec_g".into(),
+        round: 1,
+        seq,
+        attempt_id: id.into(),
+        detected_at: T0,
+        at: T0,
+        reason: "監護確認 Runtime 意外終止".into(),
+    })
+}
+
+#[tokio::test]
+async fn guardian_records_are_imported_once_and_deduplicated_by_attempt_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path()).await;
+    let journal = vec![guardian(1, "rcv_g1")];
+    let imported = store.import_guardian_journal(journal.clone(), T0).await.unwrap();
+    assert_eq!(imported, vec![("rcv_g1".to_string(), ImportDisposition::Counted)]);
+    let event = store.recovery_event().await.unwrap().unwrap();
+    assert_eq!((event.id.as_str(), event.attempts_used, event.status), ("rec_g", 1, RecoveryStatus::Attempting));
+
+    // 再次啟動、再次讀到同一份日誌：不重複計次
+    assert!(store.import_guardian_journal(journal.clone(), T0).await.unwrap().is_empty());
+    assert_eq!(store.recovery_event().await.unwrap().unwrap(), event);
+
+    // 這個 Runtime 就是為了 rcv_g1 啟動的：不記為失敗
+    let kept = store.note_runtime_start_owning(true, Some("rcv_g1".into()), "rec_x".into(), T0).await.unwrap().unwrap();
+    assert_eq!(kept, event);
+
+    let mirror = store.recovery_mirror(T0).await.unwrap();
+    assert_eq!(mirror.journal_cursor.as_deref(), Some("rcv_g1"));
+    assert_eq!(mirror.event.unwrap().attempts_used, 1);
+}
+
+#[tokio::test]
+async fn withdrawn_and_stop_intent_records_are_remembered_but_not_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path()).await;
+    let withdrawn = vec![
+        guardian(1, "rcv_g1"),
+        JournalRecord::Withdrawn { attempt_id: "rcv_g1".into(), at: T0, reason: "更新中".into() },
+    ];
+    let imported = store.import_guardian_journal(withdrawn, T0).await.unwrap();
+    assert_eq!(imported, vec![("rcv_g1".to_string(), ImportDisposition::Withdrawn)]);
+    assert!(store.recovery_event().await.unwrap().is_none());
+
+    store.request_exit(Default::default(), T0).await.unwrap();
+    let journal = vec![guardian(1, "rcv_g1"), guardian(1, "rcv_g2")];
+    let imported = store.import_guardian_journal(journal.clone(), T0).await.unwrap();
+    assert_eq!(imported, vec![("rcv_g2".to_string(), ImportDisposition::IgnoredStopIntent)], "完全退出優先");
+    assert!(store.recovery_event().await.unwrap().is_none());
+    assert_eq!(store.recovery_mirror(T0).await.unwrap().journal_cursor.as_deref(), Some("rcv_g2"));
 }

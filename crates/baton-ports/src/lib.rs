@@ -8,6 +8,7 @@ mod claude_env;
 mod command;
 mod clock;
 mod git;
+mod guardian;
 mod platform;
 mod process;
 mod quota;
@@ -25,6 +26,7 @@ pub use git::{
     git_advance_branch, git_create_worktree, git_inspect, git_inspect_worktree, git_merge_for_integration,
     git_remove_worktree,
 };
+pub use guardian::GuardianProbe;
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
@@ -61,4 +63,6 @@ pub struct Ports {
     /// 執行契約宣告的驗證命令（票 13）。
     pub command_runner: Arc<dyn CommandRunner>,
     pub user_settings: Arc<dyn UserSettingsSource>,
+    /// 監護程序是否還在（票 32；顯示降級用）。
+    pub guardian_probe: Arc<dyn GuardianProbe>,
 }

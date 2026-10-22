@@ -2809,25 +2809,160 @@
 - 影響：程序死掉到這一輪被找回最多約 60 秒加一次 tick。Controller 若超過 60 秒沒有任何輸出，每 60 秒會被查證一次（存活就繼續）。票 30 若要讓崩潰恢復也處置 Controller 的輪次，需要另外決定。
 - 審閱：未審
 
-### AI-312：Controller 憑證是綁定 Controller 那一輪的 Agent 憑證；入口防護依工具路徑分流 Worker 與 Controller
+### AI-312：監護與 Runtime 的銜接檔案：監護日誌、獨立的恢復狀態鏡像與日誌游標
+- 重要度：高
+- 時間／階段：2026-10-22，票 32 實作
+- 決策：監護相關檔案都在 `<資料目錄>\guardian\`。監護日誌 `journal.jsonl` 每筆一行 JSON、append 後 fsync，有兩種紀錄：`attempt`（事件識別、輪次、序號、嘗試識別、確認終止時間、寫下時間、原因）與 `withdrawn`（寫下嘗試後、啟動前撤回）。Runtime 另外原子寫入恢復狀態鏡像 `recovery.json`（最新事件的狀態、輪次、本輪已用次數、退避期限，以及已匯入的最後一筆監護日誌 `journal_cursor`），監護以「鏡像 + 游標之後的日誌」算出已用次數與退避期限，不讀 SQLite。鏡像沒有放進 `lifecycle.json`，是另一個檔案。計次一律以控制資料庫為準：監護的鏡像過期時頂多多啟動一次，那次在匯入時會因用盡而不計（`ignored_exhausted`），不會出現第四次嘗試。
+- 理由：spec D-24 要求監護不讀 SQLite 就能算出次數與退避，但事件結束、使用者重新嘗試（新輪次）、Runtime 自己做的嘗試與退避只存在控制資料庫，必須由 Runtime 鏡像出來。`lifecycle.json` 目前有三個寫入點都以 `LifecycleFile::mirror` 整份覆寫，把恢復狀態放進去就得讓每個寫入點都讀恢復事件，容易互相覆蓋。游標讓監護分得出哪些日誌 Runtime 已經算進鏡像、哪些還沒有（例如啟動早期就失敗的嘗試）。
+- 替代方案：(a) 鏡像寫進 `lifecycle.json`：要改寫三個寫入點，且停止意圖與恢復狀態互相覆蓋。(b) 監護只看自己的日誌：無法得知事件已成功、使用者已重新嘗試或 Runtime 自己的退避。(c) 以行數當游標：日誌行在中斷時可能寫到一半，嘗試識別比較穩定。
+- 影響：spec D-24 的「生命週期檔」在本實作是 `lifecycle.json` 加上 `guardian\recovery.json` 兩個檔案。鏡像寫入失敗只記日誌（監護看到較舊的狀態，偏向多啟動一次，由控制資料庫擋下）。
+- 審閱：未審
+
+### AI-313：匯入規則：去重、四種處置、接續監護的嘗試；監護拉起的 Runtime 遇停止意圖不提供服務
+- 重要度：高
+- 時間／階段：2026-10-22，票 32 實作
+- 決策：Runtime 啟動時在停止意圖核對之後、崩潰判定與任何恢復副作用之前匯入監護日誌，全部在一個交易中寫入 migration 第 31 個 `guardian_journal`（`guardian_journal_import`，以嘗試識別為主鍵去重）。每筆嘗試的處置：被撤回 → `withdrawn`；停止意圖生效 → `ignored_stop_intent`（完全退出優先，與 AI-280 一致）；這一輪已用盡 → `ignored_exhausted`；其餘 `counted`：當時進行中或觀察中的嘗試記為失敗（原因「Runtime 意外終止（監護確認）」，時間取監護確認終止的時間），以監護的嘗試識別開始下一次，序號以控制資料庫的計數為準，**不檢查退避**（監護已依同一規則等過）。監護以環境變數 `BATON_GUARDIAN_ATTEMPT` 把嘗試識別交給它拉起的 Runtime；該 Runtime 的啟動判定不把這次嘗試記為失敗，Supervisor 第一次 tick 看到「嘗試中」就接續執行盤點、受控停止與以新 Run 恢復。手動開 App 啟動的 Runtime 不接手監護的嘗試，照票 31 記為失敗。監護拉起的 Runtime 若停止意圖仍生效（例如停止意圖只寫進資料庫、生命週期檔還沒寫成就被殺掉），記下正常結束後直接結束、不提供服務（`SuppressedByStopIntent`），並把停止意圖補進生命週期檔，讓監護下一次看到抑制。
+- 理由：ADR-0006「監護在啟動前先持久化…Runtime 接續同一次，不另扣也不另取」；只有交付嘗試識別，Runtime 才分得出「這次啟動就是那次嘗試」與「手動開 App 時日誌裡剛好有一筆」。完全退出後被監護拉起的 Runtime 若照票 25 的「重新開啟」續跑，等於繞過完全退出，所以在監護模式下直接拒絕。
+- 替代方案：(a) 匯入時也檢查退避：監護與 Runtime 的時間起點差一點就會讓接續的嘗試被拒。(b) 日誌最後一筆一律視為目前 Runtime 的嘗試：手動開 App 時會把早期失敗的那次當成自己的，多給一次。(c) 監護模式遇停止意圖仍啟動但不續跑：仍會建立第二個控制平面的空殼，App 再開時行為難以預期。
+- 影響：本票較早的 commit 中 migration 是第 29 個（整合前的編號）。匯入讀不到日誌時只記日誌、照常啟動，那些嘗試留到下次啟動再匯入。
+- 審閱：未審
+
+### AI-314：「確認意外終止」與重啟前的檢查順序；最後核對發現抑制或已有 Runtime 就撤回
+- 重要度：高
+- 時間／階段：2026-10-22，票 32 實作
+- 決策：監護只重啟它親眼看到結束的 Runtime：啟動時沒有執行中的 Runtime 就直接結束。確認終止只看程序（自己啟動的看子程序控制代碼；App 啟動的看 Runtime 寫下的 `guardian\runtime.json`：程序識別碼與記錄時間，程序建立時間晚於記錄時間視為識別碼被重複使用），不以 heartbeat 或 API 逾時推定。確認終止後依序：(1) 讀生命週期檔，停止意圖、維護抑制或檔案讀不懂（停止意圖不明）→ 不啟動並結束監護；(2) 由鏡像與日誌決定第幾次與退避，用盡 → 結束監護；退避中發現已有 Runtime → 改為監看它；(3) append 嘗試並 fsync，寫不進去 → 不啟動並結束監護；(4) 最後核對：已有 Runtime → 寫撤回紀錄、改為監看它；出現抑制 → 寫撤回紀錄、結束監護；(5) 啟動 Runtime。程序啟動失敗或很快就結束，這次嘗試照樣計次，下一次依退避再決定。
+- 理由：ADR-0006 要求「只對已確認意外終止的 Runtime 做有限次自動重啟…停止意圖不明時不推定允許啟動…無法保存或核對時不自動啟動」。先寫日誌再做最後核對，讓「寫下」到「啟動」之間出現的完全退出、更新或使用者開 App 都不會拉起第二個 Runtime；撤回紀錄讓這種情形不消耗額度。
+- 替代方案：(a) 先核對再寫日誌：核對與啟動之間的空窗沒有被保護。(b) 撤回的嘗試也計次：更新期間碰巧遇上就白白用掉一次。
+- 影響：監護結束（抑制、用盡、日誌不可用）之後，Runtime 若還在就顯示降級；兩者都不在時等使用者開 App。
+- 審閱：未審
+
+### AI-315：生命週期檔新增選用的 `maintenance` 欄位，由票 34 寫入；本票只讀
+- 重要度：中
+- 時間／階段：2026-10-22，票 32 實作
+- 決策：`LifecycleFile` 新增 `maintenance: Option<{ kind, requested_at }>`（序列化時沒有值就省略，舊檔案照常讀取）。監護看到它就不重啟（`kind` 例如 `update`、`uninstall`）。本票不寫這個欄位；Runtime 鏡像停止意圖時沿用 `LifecycleFile::mirror`，寫出的檔案沒有 `maintenance`。
+- 理由：驗收條件要求更新與解除安裝抑制重啟，spec D-25 把維護抑制放在生命週期檔；但更新與解除安裝流程屬於票 34，本票只需要監護會遵守它。
+- 替代方案：另開 `maintenance.json`：與 spec D-25「生命週期檔中的停止抑制與維護抑制」不符。
+- 影響：票 34 寫入維護抑制後，Runtime 之後的停止意圖鏡像會把它覆蓋掉；票 34 需要讓 Runtime 的鏡像保留既有的 `maintenance`（或在維護流程中由 Runtime 一併寫入），否則維護期間只剩停止意圖在擋（完全退出流程中仍會擋住）。
+- 審閱：未審
+
+### AI-316：監護由 App 補啟動，Runtime 以程序身分判斷監護是否還在，健康查詢回報降級
+- 重要度：中
+- 時間／階段：2026-10-22，票 32 實作
+- 決策：新增 crate `baton-guardian`（`baton-guardian.exe`，不依賴 `baton-store`），與 `baton-runtime.exe` 一起建置、打包並放在同一個資料夾。桌面 App 在 `ensure_runtime` 之後看健康查詢的 `guardian`，不是 `active`（含舊版 Runtime 的 `unknown`）就啟動監護（`ensure_guardian`）；補監護失敗不讓 App 啟動失敗。監護以另一個具名 mutex（`Local\Baton.Guardian.<雜湊>`）保證單實例，並寫下 `guardian\guardian.json`；Runtime 以新的 Port `GuardianProbe`（正式版讀這個檔案、查程序）判斷監護是否還在，`GET /api/v1/health` 新增 `guardian: { state: active | unavailable, message }`，不在時 `message` 固定為「工作繼續，自動重啟保護不可用」，頂部狀態列顯示。Runtime 不啟動監護。
+- 理由：ADR-0006 拒絕「Runtime 反向監護」（雙向重啟與退出競態），所以補監護的是 App，正好對應「下次開 App 只補缺少的元件」。Runtime 不能用開啟具名 mutex 的方式探測監護：短暫持有控制代碼會讓剛啟動的監護誤以為已有一個在執行；以程序身分查詢沒有這個副作用。
+- 替代方案：(a) 監護定期打 Runtime 的 API 報到、Runtime 以逾時判斷：要讓監護讀 DPAPI 憑證，且逾時只是推定。(b) Runtime 啟動監護：ADR-0006 已拒絕。
+- 影響：系統匣「完全退出」後 Runtime 結束，監護看到停止意圖也跟著結束。`scripts/smoke-desktop.mjs` 收尾時也要結束監護。
+- 審閱：未審
+
+### AI-317：監護的時間參數與診斷
+- 重要度：低
+- 時間／階段：2026-10-22，票 32 實作
+- 決策：監護每秒查詢一次 Runtime 程序是否還在；退避期間最多每秒醒來一次；退避期限從監護確認終止的時刻起算（與 AI-282「失敗被記下的時刻」一致）。監護把診斷文字寫在 `guardian\guardian.log`，不參與任何判斷。
+- 理由：只查詢程序狀態，每秒一次負擔很輕；1 秒的偵測延遲相對 30 秒退避可以忽略。
+- 替代方案：以 `WaitForSingleObject` 阻塞等待程序結束：要另外處理 App 啟動的 Runtime 與自己啟動的子程序兩種控制代碼，輪詢較簡單。
+- 影響：每秒輪詢的負擔與登出時監護、Runtime 一起結束的行為是 Validation Required，需在 Windows 上確認。
+- 審閱：未審
+
+### AI-318：票 32 整合 rebuild/v1（票 28、16）：migration 順延為第 31 個
+- 重要度：低
+- 時間／階段：2026-10-22，票 32 實作（run R100-32-impl 結束前合併整合分支）
+- 決策：實作期間整合分支併入票 28（第 29 個 migration `quota_gate_and_handoff`）與票 16（第 30 個 `conversation_and_controller_run`）。本票的 `guardian_journal` 順延為第 31 個，排在兩者之後；沒有共用的資料表。衝突合併：Domain 模組清單同時保留 `guardian` 與 `handoff`；Supervisor 的匯入同時保留整合分支的 `scheduler` 與本票的 `RecoveryEvent`；開發指南以整合分支的敘述為底，再補上本票的目錄表、監護章節與測試清單。本票的 AI 條目在合併後才寫入，編號直接接在 AI-311 之後。
+- 理由：已進入整合分支的 migration 編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：本票較早的 commit 中 migration 是第 29 個（改號前的編號）；用本票分支（本次合併前）建過的開發資料庫，`guardian_journal` 記在第 29 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-319：突然限流沿用交接的 phase：門檻原因 `limit_reached`，不受冷卻、不等 checkpoint、不需先有承接帳號；以持久化的門檻判定
+- 重要度：高
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：(1) CLI 回報已達上限（`RateLimited { status: Exhausted }`）時，帳號門檻進入 draining，原因是新的 `limit_reached`（突然限流）；原本的 `limit_warning` 只剩警告。已在 draining（例如 86%）的帳號撞到上限時，狀態不變也把原因改成 `limit_reached`。(2) 突然限流是帳號層級：該帳號上所有執行中的 Run 都以票 28 的交接流程交出去，但交接不受 10 分鐘冷卻限制（spec D-13 的例外）、安全邊界立即成立（不等 Worker 保存新的 checkpoint，以 Task 最近一筆被接受的 checkpoint 為準）、也不需要先有承接帳號（沒有時 `to_profile_id` 是空字串，轉移時再選）。之前以其他原因（例如 85%）建立、還在等 checkpoint 的交接，帳號撞到上限後也立即進入 stopping。(3) CLI 仍活著（例如在等額度恢復）時，Supervisor 查證並停止它（確認停止才轉移，沿用票 28）；CLI 自行以失敗結束、還沒有交接時，Supervisor 在收事件的那一步先推進門檻，再以 `Store::request_sudden_handoff` 建立交接並直接轉移（`stop_outcome` = `exited`）。只有失敗結束才這樣處理；成功結束照一般流程進驗證。(4) 判定依據是持久化的門檻（Runtime 在訊號與結束之間重建也一樣），取代 AI-277 的記憶體旗標；旗標保留為建立交接失敗時的退路（退回 `RunOutcome::QuotaLimited`）。(5) successor 的 Prompt 改用突然限流版本：說明舊 Worker 沒有機會保存最後一輪的進度或摘要，以最近的有效 checkpoint、工作目錄實際狀態與已登記的成果為準，並照舊要求 `confirm_handoff`。
+- 理由：使用者故事 45「從最近有效檢查點與實際成果重建，不依賴最後一輪摘要成功」；撞到上限的 Worker 已無法呼叫模型，等它保存 checkpoint 或等冷卻都只是浪費時間。沿用交接的 phase，就直接得到「舊 writer 確認停止前不建立 successor」、單一交易轉移、Runtime 重建後依 phase 繼續、交接不計入預算等票 28 已驗收的性質，不另寫一套。
+- 替代方案：另設一條「突然限流恢復」流程（Run 以 `QuotaLimited` 結束、Task 回 ready 再由排程派工，Prompt 另外附 checkpoint）：要重做交接已有的停止確認與單一交易；以 `limit_warning` 加上記憶體旗標判定：Runtime 重建後會誤判。
+- 影響：`retry_budgets.rs` 的 `quota_handoff_recovery_and_cancellation_never_increase_any_counter` 原本預期突然限流後 Task 停在 ready、由測試手動派工，改為斷言另一個帳號的 successor 已自動接手（斷言預算仍是 0）。帳號頁與交接卡片多一個原因文字「Claude Code 回報已達上限（突然限流）」。**Validation Required**：真實 CLI 撞到上限時是自行結束還是依 watchdog 等待，兩種都已處理，但 stream-json 中的訊號格式仍待 Adapter 契約測試確認（spec Further Notes）。
+- 審閱：未審
+
+### AI-320：只有突然限流的交接找不到承接帳號時才進入 waiting_resource；不論找不到的原因是額度還是名額
+- 重要度：高
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：交接在轉移時（舊程序已確認停止）以 `SlotKind::Handoff` 選承接帳號，名額以舊 Run 結束後計；突然限流的交接找不到任何可接手的帳號時，在同一個交易中以新的 `RunCommand::ParkForResource` 結束舊 Run（`interrupted`、`handed_off_waiting_resource`、事件 `run_handed_off`，不計入預算）、Task 進入 `waiting_resource`、交接停在新的 phase `waiting_resource`（保存要延續的 checkpoint、預計重新評估時間與當時的等待原因）。找不到的原因不分額度、名額已滿或帳號狀態，一律等待。一般（非突然限流）交接找不到承接帳號時維持票 28 的行為（不建立交接，Run 留在原帳號繼續執行）；從未開始的 Task 在派工佇列等額度時也不進入 `waiting_resource`（GLOSSARY：派工佇列與 waiting_resource 是不同階段）。
+- 理由：spec 的 waiting_resource 指「所有合適帳號都受限、進度已保存」的工作；只有突然限流會讓進行中的工作非停不可。名額已滿也進入等待，是為了讓之後接手的 successor 一定帶著檢查點與交接說明（排回派工佇列的話，新的 Run 只是一般重派，不保證延續）。
+- 替代方案：名額已滿時改排回派工佇列（名額一空就派，但失去檢查點延續）；派工佇列中所有帳號都受限的 Task 也改成 waiting_resource（要改動票 19、27、28 的排程與等待原因）。
+- 影響：只有名額已滿時，等待的重新評估依退避（5 分鐘起），可能比佇列晚幾分鐘才接手。使用者目前沒有手動把 `waiting_resource` 的 Task 拉回 ready 的端點（取消仍可用）。
+- 審閱：未審
+
+### AI-321：重新評估時間：合適帳號最早的重置時間之後 1 分鐘；任何帳號的重置時間未知時另算退避，取較早者
+- 重要度：中
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：`handoff::next_resource_check` 對每個合適（可派工、核對無誤）帳號取一個重置時間：門檻關閉（paused／draining）的帳號取門檻記下的 `reset_at`，其他原因不能接手的（例如名額已滿）以及 `reset_at` 未知的都算未知。有尚未過去的重置時間：最早者之後 1 分鐘；有任何未知（或已過重置時間仍受限、或根本沒有可用帳號）：退避 `5 分鐘 × 2^n`、上限 60 分鐘（5、10、20、40、60…），n 是這筆等待已重新評估而仍受限的次數（`wait_attempts`）；兩者都有時取較早者。依據的重置時間存在 `wait_reset_at`（API 與 UI 顯示「依帳號重置時間後 1 分鐘」或「重置時間未知，退避第幾次」）。重新評估在 Supervisor 的交接步驟中、到了 `next_check_at` 才做；Runtime 重建不改排定的時間。
+- 理由：spec「有 reset_at 時於重置後 1 分鐘重新評估，未知時以 5 分鐘起、上限 60 分鐘的退避輪詢」沒有說明多個帳號、部分已知部分未知時怎麼算；取較早者才不會因為一個未知的帳號而錯過另一個帳號的重置。
+- 替代方案：只看已知的重置時間（未知的帳號可能更早恢復卻要等到別的帳號重置）；退避次數在每次已知重置後歸零。
+- 影響：門檻記下的 `reset_at` 是帳號進入 paused／draining 時的判斷結果；之後才得知的重置時間（例如外部觀測器更新）要等下一次重新評估才會採用。
+- 審閱：未審
+
+### AI-322：停止意圖與等待「繼續工作」優先於資源喚醒：不派工、也不重新排定，解除後立即重新評估
+- 重要度：高
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：到了重新評估時間時，若承接帳號的選擇被生命週期擋住（完全退出的停止意圖，或 Workspace 在完全退出後等待「繼續工作」，等待原因類別 `lifecycle`），既不派工也不重新排定（不增加退避次數），之後每次處理都再檢查；停止意圖解除且 Workspace 已續跑（自動續跑或使用者按「繼續工作」）後的下一次處理，若資源已恢復就立即由 successor 接手。完全退出的停止流程不動 `waiting_resource` 的 Task（它沒有 Run）。Supervisor 的交接步驟在停止意圖下不為仍在執行的 Run 建立突然限流交接；但程序已自行結束時仍建立（只保存檢查點並等待，不會啟動任何 Worker）。
+- 理由：驗收「資源恢復不會解除完全退出」與 GLOSSARY 的 Stop Intent「優先於額度恢復、資源喚醒」；派工的唯一入口（`Capacity.halt`）已經擋住，這裡只決定擋住期間要不要推遲排程。不推遲，使用者按「繼續工作」時才不必再等最多 60 分鐘。
+- 替代方案：擋住期間照常退避（解除後可能還要等一個退避期間）；完全退出時把等待中的 Task 改回 ready（會失去檢查點延續）。
+- 影響：停止意圖期間每次處理都會讀一次到期的等待（不寫入）。
+- 審閱：未審
+
+### AI-323：資源恢復時同一筆交接從等待中轉移；派工檢查不過就以那個原因繼續等待；Task 被取消則放棄
+- 重要度：中
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：`Store::resume_resource_waits` 對到期的等待以單一交易：Task `waiting_resource` → `ready`（`handoff::resume_task`）→ 以 `SlotKind::Handoff` 選的帳號 `RunCommand::Dispatch` 派出 successor（不偏好原帳號，重置後原帳號也可以接手）→ Prompt 附上突然限流版本的交接段落與 Task 最近的有效 checkpoint → 同一筆交接轉移（`transferred`，`to_run_id`），之後照常 `confirm_handoff`。派工檢查不過（Guard、工作目錄不可用等）時什麼都不寫，以那個原因重新排定（照退避）。Task 已不在 `waiting_resource`（例如使用者取消）時交接改為 `abandoned`（`task_left_waiting_resource：<狀態>`），不論是否到期。
+- 理由：一筆交接記錄從限流到接手的完整經過，工作卡片與確認流程都沿用票 28；先在記憶體中把 Task 轉成 ready 再派工，檢查不過時整個交易沒有寫入，Task 不會停在「ready 但沒有人派」的狀態。
+- 替代方案：資源恢復時新建一筆交接（歷史分散在兩筆）；派工檢查不過就放棄等待並排回佇列（失去檢查點延續）。
+- 影響：交接的冷卻以這次的 `transferred_at` 起算，之後的一般交接照常受冷卻限制。
+- 審閱：未審
+
+### AI-324：等待資源的資料形狀、API 與 migration 32
+- 重要度：低
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：第 32 個 migration `handoff_waiting_resource` 重建 `handoff`（phase 的 CHECK 多 `waiting_resource`，SQLite 無法直接改 CHECK）：新增 `waiting_at`、`next_check_at`、`wait_attempts`、`wait_reset_at`、`wait_reasons`（JSON 的 `WaitReason` 陣列），CHECK `waiting_resource` 一定有 `next_check_at`；Task 層級的唯一索引把 `waiting_resource` 也算進「同一個 Task 最多一筆」。事件：`handoff_waiting_resource`、`handoff_wait_rescheduled`。Domain：`HandoffPhase::WaitingResource`、`awaits_successor()`（可轉移或放棄）、`wait_for_resource`、`reschedule_wait`、`next_resource_check`、`resume_task`、`RunCommand::ParkForResource`。API：工作面板 `handoffs[]` 多出上述欄位（舊資料預設 null／0／空陣列）。Web UI：交接卡片在 `waiting_resource` 時顯示「預計 … 重新評估」、依據與等待原因，尚未選定承接帳號時不顯示空帳號名，`handed_off_waiting_resource` 的 Run 顯示「已停止（等待資源）」。
+- 理由：等待資源是交接的一個階段，放在同一筆紀錄最容易呈現與恢復。
+- 替代方案：另建 `resource_wait` 表（不必重建 `handoff`，但同一件事分在兩張表）。
+- 影響：與平行進行的票合併時 migration 與 AI 編號可能需要順延（見 AI-325、AI-326）。
+- 審閱：未審
+
+### AI-325：票 29 整合 rebuild/v1（票 16）：migration 順延為第 31 個、AI 編號從 AI-319 起
+- 重要度：低
+- 時間／階段：2026-10-22，票 29 實作（run R103-29-impl 結束前合併整合分支）
+- 決策：整合分支併入票 16（第 30 個 migration `conversation_and_controller_run`，AI-299～AI-311）。本票的 `handoff_waiting_resource` 順延為第 31 個、排在其後（兩者沒有共用的資料表）；本票條目從 AI-319 起編號。衝突合併：開發指南目錄表以整合分支為底，再補上本票對 `handoff.rs` 的說明；Supervisor 同時保留票 16 的 Controller 步驟與本票的交接變更（自動合併）。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：本票較早的 commit（合併前）中 migration 是第 30 個；用那時的分支建過的開發資料庫需要刪除重建。（AI-326 整合時再順延為第 32 個 migration、條目改為 AI-319～AI-325。）
+- 審閱：未審
+
+### AI-326：票 29 整合 rebuild/v1（票 32）：migration 順延為第 32 個、AI 編號改為 AI-319～AI-325
+- 重要度：低
+- 時間／階段：2026-10-22，票 29 整合（run R111-29-integrate）
+- 決策：整合分支併入票 32（第 31 個 migration `guardian_journal`，AI-312～AI-318）。本票的 `handoff_waiting_resource` 順延為第 32 個、排在 `guardian_journal` 之後（兩者沒有共用的資料表，`guardian_journal_import` 是新表，`handoff` 的重建不受影響）；本票條目由 AI-312～AI-318 改為 AI-319～AI-325（條目內的互相引用一併更新），並補上原 AI-318（現 AI-325）缺少的審閱行。衝突合併：`MIGRATIONS` 依序保留兩個 migration；開發指南目錄表以整合分支為底，再補上本票對 `handoff.rs` 的說明，情境測試清單同時列出 `sudden_limit.rs` 與 `guardian.rs`，〈檢查點與主動交接〉的 migration 編號改為 32。Supervisor、Store、`runtimeClient.ts` 由 git 自動合併，兩邊行為都保留。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票較早的分支（migration 31 是 `handoff_waiting_resource`）建過的開發資料庫需要刪除重建。
+- 審閱：未審
+
+### AI-327：Controller 憑證是綁定 Controller 那一輪的 Agent 憑證；入口防護依工具路徑分流 Worker 與 Controller
 - 重要度：高
 - 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
 - 決策：(1) 不新增憑證角色，Controller 憑證仍是 Agent 角色，另以 `credential.controller_run_id`（第 31 個 migration）綁定 Workspace 與 Controller 的一輪（`ControllerScope`）；Supervisor 在 `launch_controller` 的 `spawn` 之前簽發，只經 `BATON_AGENT_TOKEN` 交給程序，取代票 16 的佔位值（AI-306）。沒有時間上限，有效與否取決於那一輪是否仍是 `starting`／`running`（Runtime 重啟後進行中的一輪仍可用，結束後 401 `credential_revoked`）。(2) `guard` 在解析請求前依路徑分流：Controller 憑證只能呼叫 6 個 Controller 工具與 `permission_prompt`，其他工具 403 `worker_only`；Worker 憑證呼叫 Controller 工具 403 `controller_only`；處理函式內另有同樣的檢查。(3) 回應票 16 的 Comment 與 AI-161、AI-227：`record_lesson_candidate`、`controller_action` **維持開放給 Worker 憑證、不收窄**，Controller 憑證也不能呼叫它們。
-- 理由：新增角色要重建 `credential` 表的 CHECK，並讓每個 Agent 端點同時接受兩種角色；以範圍區分改動最小。收窄 `record_lesson_candidate`／`controller_action` 會改變票 37、35 已驗收的行為與測試，而本票的 Controller 工具已由 Runtime 推導事項（AI-316），Controller 不需要自報事項的 `controller_action`。
+- 理由：新增角色要重建 `credential` 表的 CHECK，並讓每個 Agent 端點同時接受兩種角色；以範圍區分改動最小。收窄 `record_lesson_candidate`／`controller_action` 會改變票 37、35 已驗收的行為與測試，而本票的 Controller 工具已由 Runtime 推導事項（AI-331），Controller 不需要自報事項的 `controller_action`。
 - 替代方案：新增 `controller` 角色；把兩個工具收窄為 Controller 專屬並改寫票 35、37 的測試。
 - 影響：Worker 仍可提交候選教訓、仍可呼叫 `controller_action`（只是判定，不執行動作）。Controller 要提交候選教訓需要日後另開 Controller 版本的工具。MCP shim 對兩種角色列出同一份工具清單（描述註明 Controller 專屬），由 Runtime 拒絕。
 - 審閱：未審
 
-### AI-313：「依賴未回答問題」以 Controller 的提問（`propose_decision_request`）表達，依賴的 Task 多一個准入缺項 `decision_pending`
+### AI-328：「依賴未回答問題」以 Controller 的提問（`propose_decision_request`）表達，依賴的 Task 多一個准入缺項 `decision_pending`
 - 重要度：高
 - 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
-- 決策：票面只列 5 個工具，但驗收條件「依賴未回答問題的 Task 不會被派出」需要 Runtime 知道「問題」與「依賴它的 Task」，所以一併實作 spec D-05 列出、沒有任何票負責的 `propose_decision_request`：Controller 提出問題、選項與 `blocking`（1–20 個依賴答案的 Task，只能是 `pending`／`ready`）。(1) 這些 Task 狀態不變（不進入 `waiting_decision`），而是在 `task::admission_report` 多一個缺項 `decision_pending`，所以使用者手動標記 ready、Controller 的 `dispatch_task`、Scheduler 派工都被同一個准入檢查擋下；不依賴答案的 Task 照常派出。(2) 回答後缺項消失，但 Task **不會自動排隊或轉為 ready**，回答成為對話的工作事件喚醒 Controller，由它依答案更新契約後再派工。(3) Controller 的提問不會因契約變更而過期（Controller 依答案補契約是預期中的事），只有依賴的 Task 全部結束才過期。(4) 同一個問題（正規化後相同）仍待處理時回既有請求，新列出的 Task 併入阻擋範圍。只有 Controller 的提問（`kind: agent`）會阻擋准入，Controller 的權限表請求不會（見 AI-315、AI-316）。
+- 決策：票面只列 5 個工具，但驗收條件「依賴未回答問題的 Task 不會被派出」需要 Runtime 知道「問題」與「依賴它的 Task」，所以一併實作 spec D-05 列出、沒有任何票負責的 `propose_decision_request`：Controller 提出問題、選項與 `blocking`（1–20 個依賴答案的 Task，只能是 `pending`／`ready`）。(1) 這些 Task 狀態不變（不進入 `waiting_decision`），而是在 `task::admission_report` 多一個缺項 `decision_pending`，所以使用者手動標記 ready、Controller 的 `dispatch_task`、Scheduler 派工都被同一個准入檢查擋下；不依賴答案的 Task 照常派出。(2) 回答後缺項消失，但 Task **不會自動排隊或轉為 ready**，回答成為對話的工作事件喚醒 Controller，由它依答案更新契約後再派工。(3) Controller 的提問不會因契約變更而過期（Controller 依答案補契約是預期中的事），只有依賴的 Task 全部結束才過期。(4) 同一個問題（正規化後相同）仍待處理時回既有請求，新列出的 Task 併入阻擋範圍。只有 Controller 的提問（`kind: agent`）會阻擋准入，Controller 的權限表請求不會（見 AI-330、AI-331）。
 - 理由：契約欄位標 `unknown` 也能擋派工，但 Runtime 無法分辨「等使用者回答」與「Controller 還沒寫」，問題也不會出現在裁定中心；沿用裁定請求讓使用者在同一個地方回答，且准入檢查對使用者與 Controller 一致。Worker 請求的「回答後自動恢復」不適用：依賴答案的 Task 通常要先依答案改契約。
 - 替代方案：只用契約的 `unknown` 欄位表達缺口、問題寫在對話回覆中；讓依賴的 Task 轉為 `waiting_decision`（回答後會自動 ready 並派工，可能繞過准入）。
 - 影響：票面工具清單多了一個；裁定中心會出現 `origin: controller` 的請求。已派工的 Task 不能標為依賴答案（要先取消或等它結束）。
 - 審閱：未審
 
-### AI-314：Controller 提出的裁定請求記在同一張表（`origin`），回答或過期時成為對話的工作事件而不是喚醒 Outbox
+### AI-329：Controller 提出的裁定請求記在同一張表（`origin`），回答或過期時成為對話的工作事件而不是喚醒 Outbox
 - 重要度：高
 - 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
 - 決策：(1) `decision_request` 新增 `origin`（`worker`／`controller`）；Controller 的請求 `run_id` 是 Controller 的一輪、`task_id` 是目標 Task。`run_id` 原本是對 `run` 的外鍵，所以第 31 個 migration `controller_tools` 重建 `decision_request` 與 `decision_approval_use`，改由觸發器依來源檢查提出者存在（Worker → `run`、Controller → `controller_run`）；權限提示只能由 Worker 提出（CHECK）。(2) 重建被其他資料表參照的表時外鍵必須關閉，所以 `migrate` 新增 `FOREIGN_KEYS_OFF_MIGRATIONS` 清單：在交易外關閉 `foreign_keys`、套用後提交前以 `foreign_key_check` 核對、再開回（SQLite 官方的重建程序），子表不必跟著重建。(3) 回答或過期時，Worker 的請求照舊寫喚醒 Outbox；Controller 的請求改為在同一個交易中寫入該 Workspace conversation 的工作事件（`source = decision_wake:<請求>:<revision>`），喚醒 Controller。這是 AI-301「哪些事件喚醒 Controller」之外新增的一種。(4) Controller 與 Worker 的請求不能合併（阻擋方式不同），仍可連結。
@@ -2836,7 +2971,7 @@
 - 影響：既有資料庫升級時重建兩張表（既有請求一律 `origin = worker`）；之後其他票若要重建被參照的表，可以把 migration 名稱加入同一個清單。
 - 審閱：未審
 
-### AI-315：超出授權在 `dispatch_task` 時判定並送裁定；核准不會擴大授權
+### AI-330：超出授權在 `dispatch_task` 時判定並送裁定；核准不會擴大授權
 - 重要度：中
 - 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
 - 決策：(1) `propose_task`／`update_task` 與使用者建立 Task 一樣允許暫存不完整或需要未授權能力的契約（回應附准入檢查的缺項）；真正「要讓 Task 執行」的 `dispatch_task` 才判定：准入缺項含 `capability_not_granted` 時，由 Runtime 推導事項 `exceed_authorization`，經決策權限表（內建必須送裁定、不能放寬）建立 `kind: authority`、`origin: controller` 的裁定請求，回 409 `requires_decision`（附 `decision_request_id`、`existing`），不建立 Run。同一個 Task 仍待處理時回既有請求。(2) 使用者核准只記錄決定、消耗一次，**不擴大 Workspace 授權**：授權仍未涵蓋時回 409 `authorization_not_expanded`，要使用者到授權頁修改授權（選項的取捨文字寫明這點）；使用者拒絕回 409 `decision_denied`。(3) 使用者在工作面板手動派工同一個 Task 時沿用既有回應（`task_admission_denied`），不建立請求。
@@ -2845,7 +2980,7 @@
 - 影響：使用者核准後還要另外修改授權才能派出；Controller 會在對話中收到回答事件後重試派工。
 - 審閱：未審
 
-### AI-316：修改完成條件的推導規則：只有已派工過的 Task、而且改掉已填寫的完成條件或驗證檢查
+### AI-331：修改完成條件的推導規則：只有已派工過的 Task、而且改掉已填寫的完成條件或驗證檢查
 - 重要度：中
 - 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
 - 決策：依 AI-227 的要求由 Runtime 依實際變更推導 `modify_done_criteria`：`update_task` 對**已有任何 Run** 的 Task，原本已填寫的 `done_criteria` 被改掉（文字或引用不同），或 `verification_checks` 有任何不同時，先以決策權限表判定（沿用票 35 的單次核准：使用者核准後，下一次對同一個 Task 的這類變更消耗它）；沒有可用的核准時不寫入、回 409 `requires_decision`。還沒派工的 Task、補上原本缺少或未知的完成條件不算修改。這類請求待處理時不另外擋 Task 的准入（避免擋住預算內的重派）。
@@ -2854,7 +2989,7 @@
 - 影響：Controller 可以在派工前任意調整自己草擬的完成條件；使用者手動修改契約不受影響（桌面端點不經決策權限表）。
 - 審閱：未審
 
-### AI-317：Controller 的權限提示一律拒絕，不建立裁定請求
+### AI-332：Controller 的權限提示一律拒絕，不建立裁定請求
 - 重要度：中
 - 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
 - 決策：`permission_prompt` 收到 Controller 憑證時一律回 `{behavior: "deny", status: "controller_denied"}` 與說明（改用 Controller 工具把工作交給 Worker），不依授權判定、也不建立裁定請求。Controller 因此不能執行指令、寫檔、寫資料庫或自己啟動 `claude`；不需要權限提示的唯讀工具（例如 Read、Grep）仍由 Claude Code 自己決定。
@@ -2863,13 +2998,20 @@
 - 影響：Controller 無法自己執行任何指令或寫入（包括寫 Project Brief 之類的文件）；票 42 等需要 Controller 產出文件時，要以 Worker 或新的工具完成。
 - 審閱：未審
 
-### AI-318：Controller 工具的回應形狀與幾個細節
+### AI-333：Controller 工具的回應形狀與幾個細節
 - 重要度：低
 - 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
 - 決策：(1) `propose_task` 以 `goal_id`（既有 Goal）或 `goal_title`（建立新 Goal）二擇一，兩者在同一個交易中判定與寫入（`Store::propose_task`），任一個被拒絕就都不寫，不會留下空的 Goal；其他不是剛好一個時 400 `goal_choice_invalid`。(2) 建立、修改、加相依、取消都回 `{task, goal_id, changed, admission}`，`admission` 與工作面板的准入預覽相同。(3) `dispatch_task` 對 pending 的 Task 先轉為 ready 再派工（使用者要分兩步），之後與桌面派工端點共用 `runs::dispatch_now`；回 201 `{status: "started", run}` 或 202 `{status: "queued", task_id, priority, reasons}`。(4) Controller 建立的 Task 不另外記錄來源（Task 事件不帶操作者）。(5) Controller 的 Prompt 角色說明補上「只以工具提出變更」與「邊釐清、邊調查」的原則。
 - 理由：MCP shim 只把錯誤的 `error` 與 `message` 交給模型，所以錯誤訊息本身要含缺項與裁定請求識別；一次派工減少 Controller 的工具呼叫次數。
 - 替代方案：要求 Controller 先建立 Goal 再建立 Task；Task 事件記錄操作者。
 - 影響：時間線（票 41）若要區分 Controller 與使用者建立的 Task，需要另外補上操作者。
+### AI-334：票 17 整合 rebuild/v1（票 32、29）：migration 順延為第 33 個、AI 編號改為 AI-327～AI-333
+- 重要度：低
+- 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
+- 決策：(1) 整合分支已併入票 32（第 31 個 migration `guardian_journal`）與票 29（第 32 個 `handoff_waiting_resource`），本票的 `controller_tools` 順延為第 33 個、排在最後；三者沒有共用的資料表。migration 註解與開發指南的「migration 31 `controller_tools`」改為 33。(2) 本票條目原寫成 AI-312～AI-318，與整合分支的票 32、29 條目同號，現改為 AI-327～AI-333，移到 AI-326 之後，條目內引用本票編號之處一併更新；整合分支的條目逐字未動。(3) 衝突合併：Store 的 migration 先放票 32、29 再放本票；開發指南目錄表以整合分支的列為底，補回本票在 `baton-domain`（依賴未決答案的准入缺項、Controller 提出的請求）與 `baton-api`（`controller.rs`）的描述，情境測試清單兩邊都保留。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票分支（本次合併前）建過的開發資料庫，`controller_tools` 記在第 31 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-312～AI-318 與 migration 31 是改號前的編號。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

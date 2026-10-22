@@ -12,6 +12,7 @@ fn lifecycle_file_round_trips_and_replaces_the_previous_content() {
     let stop = LifecycleFile {
         version: LIFECYCLE_FILE_VERSION,
         stop: Some(StopSuppression { requested_at: Timestamp::from_millis(7), reason: "full_exit".into() }),
+        maintenance: None,
         updated_at: Timestamp::from_millis(7),
     };
     write_lifecycle_file(dir.path(), &stop).unwrap();
