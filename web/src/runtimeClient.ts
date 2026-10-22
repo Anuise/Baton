@@ -534,13 +534,81 @@ export interface AccountRun {
   cancel_requested: boolean;
 }
 
+/** 用量視窗：滾動五小時與七日。 */
+export type QuotaWindow = "five_hour" | "seven_day";
+
+/** 額度資料來源（spec D-12）：CLI 回報的「已觀測」，或依本機 Run 用量的「推估」。 */
+export type QuotaSource = "observed" | "estimated";
+
+/** 可信度；觀測不到時為 unknown，不填零。 */
+export type QuotaConfidence = "observed" | "estimated" | "unknown";
+
+/** CLI 回報的限流狀態。 */
+export type LimitStatus = "allowed" | "warning" | "exhausted";
+
+/** 一筆觀測的原始資料從哪裡來：Adapter 解析 CLI、Runtime 推估、外部觀測器輪詢。 */
+export type ObservationOrigin = "adapter" | "estimate" | "observer";
+
+/** 一筆額度觀測（對應 Rust 的 QuotaObservation）；觀測不到的欄位為 null，時間是 UTC 毫秒。 */
+export interface QuotaObservation {
+  profile_id: string;
+  origin: ObservationOrigin;
+  source: QuotaSource;
+  window: QuotaWindow | null;
+  status: LimitStatus | null;
+  /** 已用比例（1 = 達到上限，推估可能超過 1）；null 是未知。 */
+  used: number | null;
+  /** 推估：視窗內本機 Run 累計的 token 數。 */
+  tokens: number | null;
+  /** 推估：計算時使用的方案上限（token）；沒有設定為 null。 */
+  limit_tokens: number | null;
+  reset_at: number | null;
+  observed_at: number;
+  confidence: QuotaConfidence;
+  /** 原始資料參照，例如 `run:<run_id>`。 */
+  raw_ref: string;
+}
+
+/** 一個視窗的判斷：兩個來源各自的最新觀測，與取較保守者後的結果。 */
+export interface WindowQuota {
+  window: QuotaWindow;
+  label: string;
+  effective: QuotaObservation | null;
+  observed: QuotaObservation | null;
+  estimated: QuotaObservation | null;
+}
+
+/** 一個帳號的額度判斷（對應 Rust 的 QuotaAssessment）。 */
+export interface QuotaAssessment {
+  /** 以較保守者判斷的用量比例；null 是未知（顯示「未知」，不是 0）。 */
+  used: number | null;
+  source: QuotaSource | null;
+  confidence: QuotaConfidence;
+  reset_at: number | null;
+  observed_at: number | null;
+  /** 是否看得到帳號的完整用量（含其他裝置）。 */
+  complete: boolean;
+  incomplete_reason: string | null;
+  /** 固定兩個：five_hour、seven_day。 */
+  windows: WindowQuota[];
+  external: QuotaObservation | null;
+}
+
+/** 使用者為 Profile 設定的方案上限（推估的分母），單位為 token；未設定為 null。 */
+export interface PlanLimits {
+  five_hour_tokens: number | null;
+  seven_day_tokens: number | null;
+}
+
 export interface AccountScheduling {
   profile_id: string;
   name: string;
   dispatchable: boolean;
   blockers: ProfileBlocker[];
-  /** 已知的用量比例（0 到 1）；`null` 是尚未觀測，不是 0。 */
+  /** 已知的用量比例（0 到 1）；`null` 是尚未觀測，不是 0。與 `quota.used` 相同。 */
   quota_used: number | null;
+  quota: QuotaAssessment;
+  plan_limits: PlanLimits;
   running: number;
   limit: number;
   runs: AccountRun[];
@@ -565,10 +633,12 @@ export interface SchedulingOverview {
   queue: QueueEntry[];
 }
 
-/** 排程：總覽（容量、各帳號進行中的 Run、佇列）與容量預設切換。 */
+/** 排程：總覽（容量、各帳號進行中的 Run 與額度、佇列）、容量預設切換與方案上限設定。 */
 export interface SchedulingClient {
   schedulingOverview(): Promise<SchedulingOverview>;
   setSchedulingMode(mode: SchedulingMode): Promise<SchedulingOverview>;
+  /** 設定 Profile 的方案上限（推估的分母）；回傳更新後的排程總覽。 */
+  setQuotaLimits(profileId: string, limits: PlanLimits): Promise<SchedulingOverview>;
 }
 
 /** 帳號 Profile 與首次啟動精靈；與其他用戶端分開，讓只關心帳號的畫面不必知道它們。 */
@@ -809,6 +879,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       toDispatchResult(await send<RunView | QueuedDispatch>(`${taskPath(workspaceId, taskId)}/dispatch`, { method: "POST" })),
     schedulingOverview: () => send(SCHEDULING_PATH),
     setSchedulingMode: (mode) => send(`${SCHEDULING_PATH}/settings`, { method: "PUT", body: { mode } }),
+    setQuotaLimits: (profileId, limits) =>
+      send(`${PROFILES_PATH}/${encodeURIComponent(profileId)}/quota-limits`, { method: "PUT", body: limits }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
     listArtifacts: (workspaceId) => send(`${workspacePath(workspaceId)}/artifacts`),
@@ -873,6 +945,7 @@ export function createTauriClient(invoke: Invoke): AppClient {
       toDispatchResult(await call<RunView | QueuedDispatch>("task_dispatch", { workspaceId, taskId })),
     schedulingOverview: () => call<SchedulingOverview>("scheduling_overview"),
     setSchedulingMode: (mode) => call<SchedulingOverview>("scheduling_set_mode", { mode }),
+    setQuotaLimits: (id, limits) => call<SchedulingOverview>("profile_set_quota_limits", { id, limits }),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
     listArtifacts: (workspaceId) => call<ArtifactList>("artifact_list", { workspaceId }),
     previewArtifact: (workspaceId, artifactId, version) =>

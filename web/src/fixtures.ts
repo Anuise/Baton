@@ -4,6 +4,8 @@ import type {
   AccountScheduling,
   ImportPreview,
   PlatformResponse,
+  QuotaAssessment,
+  QuotaObservation,
   RunView,
   SchedulingOverview,
   SettingsVersionSummary,
@@ -195,7 +197,46 @@ export function accountRun(overrides: Partial<AccountRun> = {}): AccountRun {
   };
 }
 
-/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、每帳號上限 2。 */
+/** 測試用的額度觀測：預設是 prof_1 五小時視窗、CLI 回報的已觀測用量 30%。 */
+export function quotaObservation(overrides: Partial<QuotaObservation> = {}): QuotaObservation {
+  return {
+    profile_id: "prof_1",
+    origin: "adapter",
+    source: "observed",
+    window: "five_hour",
+    status: "allowed",
+    used: 0.3,
+    tokens: null,
+    limit_tokens: null,
+    reset_at: null,
+    observed_at: CHECKED_AT,
+    confidence: "observed",
+    raw_ref: "run:run_1",
+    ...overrides,
+  };
+}
+
+/** 測試用的額度判斷：預設完全未知（兩個視窗都沒有觀測、觀測不完整）。 */
+export function quotaAssessment(overrides: Partial<QuotaAssessment> = {}): QuotaAssessment {
+  return {
+    used: null,
+    source: null,
+    confidence: "unknown",
+    reset_at: null,
+    observed_at: null,
+    complete: false,
+    incomplete_reason:
+      "觀測不完整：五小時、七日視窗沒有來自 Claude Code 的已觀測用量；推估只計入這台電腦上 Baton 派出的 Run，其他裝置與互動式使用的用量看不到",
+    windows: [
+      { window: "five_hour", label: "五小時", effective: null, observed: null, estimated: null },
+      { window: "seven_day", label: "七日", effective: null, observed: null, estimated: null },
+    ],
+    external: null,
+    ...overrides,
+  };
+}
+
+/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、沒有設定方案上限、每帳號上限 2。 */
 export function accountScheduling(overrides: Partial<AccountScheduling> = {}): AccountScheduling {
   return {
     profile_id: "prof_1",
@@ -203,6 +244,8 @@ export function accountScheduling(overrides: Partial<AccountScheduling> = {}): A
     dispatchable: true,
     blockers: [],
     quota_used: null,
+    quota: quotaAssessment(),
+    plan_limits: { five_hour_tokens: null, seven_day_tokens: null },
     running: 0,
     limit: 2,
     runs: [],

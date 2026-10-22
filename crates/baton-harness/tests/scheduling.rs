@@ -235,6 +235,9 @@ fn settings_events(harness: &Harness) -> Vec<(i64, String)> {
     statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
 }
 
+/// 額度觀測器的輪詢間隔（spec D-31）：改了樣本之後要等到下一次輪詢，Runtime 才會看到新的值（票 27）。
+const QUOTA_POLL_MILLIS: i64 = 5 * 60 * 1000;
+
 /// 腳本化某個帳號的額度樣本（用量比例）。
 fn set_quota(harness: &Harness, profile_id: &str, used: f64) {
     harness.quota_observer.set_sample(
@@ -642,8 +645,9 @@ async fn quota_near_the_limit_blocks_the_account_and_dispatch_resumes_when_the_s
     assert_eq!(task_status(&harness, &ws, &tid).await, "ready", "額度沒降下來之前不派");
     assert_eq!(harness.process_control.spawn_count(), 0);
 
-    // 樣本降到門檻以下：下一次處理就派出
+    // 樣本降到門檻以下：下一次輪詢之後的處理就派出
     set_quota(&harness, &accounts[0], 0.5);
+    harness.clock.advance_millis(QUOTA_POLL_MILLIS);
     harness.supervise().await;
 
     assert_eq!(task_status(&harness, &ws, &tid).await, "running");
@@ -659,12 +663,14 @@ async fn quota_blocks_from_seventy_five_percent_and_not_below() {
 
     for blocked in [0.75, 0.9, 1.0] {
         set_quota(&harness, &accounts[0], blocked);
+        harness.clock.advance_millis(QUOTA_POLL_MILLIS);
         let body = dispatch_queued(&harness, &ws, &tid).await;
         assert_eq!(reasons(&body), [pair("quota", "quota_near_limit")], "用量 {blocked}：{body}");
     }
     assert_eq!(queued_task_ids(&overview(&harness).await), [tid.clone()], "重複派工仍只有一筆佇列項目");
 
     set_quota(&harness, &accounts[0], 0.74);
+    harness.clock.advance_millis(QUOTA_POLL_MILLIS);
     let (status, run) = dispatch(&harness, &ws, &tid).await;
 
     assert_eq!(status, StatusCode::CREATED, "{run}");

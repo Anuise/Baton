@@ -1,29 +1,12 @@
-use std::collections::HashMap;
-
 use async_trait::async_trait;
+pub use baton_domain::quota::{Confidence, QuotaSource};
 use baton_domain::Timestamp;
-use serde::{Deserialize, Serialize};
 
 use crate::PortResult;
 
 /// account_profile 的參照。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProfileRef(pub String);
-
-/// 額度資料來源（spec D-12）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum QuotaSource {
-    Observed,
-    Estimated,
-}
-
-/// 可信度；觀測不到時為 Unknown，不填零。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Confidence {
-    Observed,
-    Estimated,
-    Unknown,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuotaSample {
@@ -35,19 +18,10 @@ pub struct QuotaSample {
     pub confidence: Confidence,
 }
 
+/// 外部額度觀測器（spec D-12 的擴充點，例如 CLI 直接的額度查詢）：Runtime 每 5 分鐘輪詢一次（spec D-31）。
+/// 「已觀測」（CLI 限流訊號）與「推估」（本機 Run 用量）兩個來源由 Runtime 自己從 Adapter 事件累積，不經過這個 Port。
+/// 回傳 `PortError::NotImplemented` 代表沒有外部觀測器，不留下任何觀測；其他錯誤記為一筆未知的觀測。
 #[async_trait]
 pub trait QuotaObserver: Send + Sync {
     async fn observe(&self, profile: &ProfileRef) -> PortResult<QuotaSample>;
-}
-
-/// 觀測一批帳號目前已知的用量比例（排程用）。觀測不到（Port 失敗、未知）的帳號不放進結果：
-/// 未知不當作 0，也不因此阻擋派工（額度觀測屬票 27）。
-pub async fn observe_quota(observer: &dyn QuotaObserver, profile_ids: &[String]) -> HashMap<String, f64> {
-    let mut known = HashMap::new();
-    for id in profile_ids {
-        if let Ok(QuotaSample { used: Some(used), .. }) = observer.observe(&ProfileRef(id.clone())).await {
-            known.insert(id.clone(), used);
-        }
-    }
-    known
 }

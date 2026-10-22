@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -9,6 +9,7 @@ mod artifacts;
 mod authorization;
 mod guard;
 mod profiles;
+pub mod quota;
 mod runs;
 mod scheduling;
 mod setup;
@@ -120,7 +121,7 @@ pub struct ApiState {
     pub platform_info: Arc<dyn PlatformInfo>,
     pub workspace_fs: Arc<dyn WorkspaceFs>,
     pub claude_env: Arc<dyn ClaudeEnvironment>,
-    /// 排程判斷額度門檻用；觀測不到的帳號不阻擋派工。
+    /// 外部額度觀測器，每個帳號每 5 分鐘輪詢一次（票 27）；觀測不到的帳號不阻擋派工。
     pub quota_observer: Arc<dyn QuotaObserver>,
     /// 使用者平常使用的 Claude Code 設定（唯讀；共同設定匯入的來源）。
     pub user_settings: Arc<dyn UserSettingsSource>,
@@ -154,6 +155,7 @@ pub fn router(state: ApiState) -> Router {
         .route(profiles::VERIFY_ROUTE, post(profiles::verify))
         .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))
         .route(profiles::ARCHIVE_ROUTE, post(profiles::archive))
+        .route(quota::PLAN_LIMITS_ROUTE, axum::routing::put(quota::set_plan_limits))
         .route(SETUP_PATH, get(setup::status))
         .route(SETUP_RECHECK_PATH, post(setup::recheck))
         .route(SETUP_ACK_PATH, post(setup::acknowledge_background_notice))
