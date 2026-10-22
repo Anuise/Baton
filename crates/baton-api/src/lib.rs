@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -10,6 +10,7 @@ mod authorization;
 mod decisions;
 mod guard;
 mod knowledge;
+mod lifecycle;
 mod messages;
 mod profiles;
 pub mod quota;
@@ -29,6 +30,7 @@ use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
+use baton_domain::lifecycle::ExitTiming;
 use baton_domain::agent::{
     TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
     TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
@@ -66,6 +68,10 @@ pub use knowledge::{
     knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest,
     KnowledgeDetail, KnowledgeEntryView, KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     LessonCandidateRecorded, ScopeInput, KNOWLEDGE_PATH,
+};
+pub use lifecycle::{
+    workspace_lifecycle_path, workspace_resume_path, LifecycleStatus, UpdateWorkspaceLifecycleRequest,
+    WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
 };
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
@@ -148,6 +154,10 @@ pub struct ApiState {
     pub supervisor_wake: Arc<Notify>,
     /// Runtime 開始停止時變成 `true`；長連線（串流）據此結束，優雅停止才不會被它們卡住。
     pub shutdown: watch::Receiver<bool>,
+    /// 完全退出的時間參數（spec D-11）：停止意圖記錄的期限由它計算。
+    pub exit_timing: ExitTiming,
+    /// 停止意圖持久化之後通知 Runtime 開始停止 Run（票 25）。
+    pub exit_signal: Arc<Notify>,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -187,6 +197,10 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
+        .route(LIFECYCLE_PATH, get(lifecycle::status))
+        .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
+        .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
+        .route(lifecycle::WORKSPACE_RESUME_ROUTE, post(lifecycle::resume_workspace))
         .route(SCHEDULING_PATH, get(scheduling::view))
         .route(SCHEDULING_SETTINGS_PATH, axum::routing::put(scheduling::update_settings))
         .route(SHARED_SETTINGS_PATH, get(shared_settings::status))
