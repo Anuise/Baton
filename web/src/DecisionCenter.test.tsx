@@ -136,6 +136,7 @@ function fakeClient(initial: DecisionRequestView[], options: FakeOptions = {}) {
     templates: [],
     capabilities: [],
     risk_disclosure: "",
+    legacy_runs: [],
   });
   const find = (id: string) => items.find((d) => d.id === id)!;
   const replace = (next: DecisionRequestView) => {

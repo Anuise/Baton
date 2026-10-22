@@ -111,6 +111,10 @@ pub struct TaskBoard {
     pub integrations: Vec<IntegrationEntry>,
     /// 契約「所需能力」可選的清單。
     pub capabilities: Vec<CapabilityInfo>,
+    /// Workspace 目前生效的授權 revision；尚未確認為 `null`。Run 的 `authorization_revision` 比它舊時，
+    /// 卡片標示「沿用舊授權」（票 24）。
+    #[serde(default)]
+    pub authorization_revision: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,6 +228,7 @@ pub(crate) async fn board(
         tasks: data.tasks,
         runs: data.runs,
         verifications: data.verifications,
+        authorization_revision: data.authorization_revision,
         workdirs: data.workdirs,
         integrations: data.integrations,
         capabilities: Capability::ALL

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 
 import { formatTimestamp } from "./time";
 import type {
@@ -9,8 +9,13 @@ import type {
   Capability,
   ConfirmationSummary,
   Grant,
+  LegacyRun,
+  TaskClient,
   Workspace,
 } from "./runtimeClient";
+
+/** 授權設定畫面另外需要暫停／取消沿用舊授權的 Run。 */
+export type AuthorizationPanelClient = AuthorizationClient & Pick<TaskClient, "cancelRun" | "cancelTask">;
 
 type ViewState = { state: "loading" } | { state: "ready"; view: AuthorizationView } | { state: "failed"; reason: string };
 
@@ -18,7 +23,7 @@ type ViewState = { state: "loading" } | { state: "ready"; view: AuthorizationVie
 type Draft = Partial<Record<Capability, { targets: string; restrictions: string }>>;
 
 interface Props {
-  client: AuthorizationClient;
+  client: AuthorizationPanelClient;
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
@@ -164,6 +169,20 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
     }
   };
 
+  /** 暫停或取消沿用舊授權的 Run 後只重新載入畫面資料，不覆蓋編輯中的內容。 */
+  const actOnLegacyRun = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+      setLoaded({ state: "ready", view: await client.getAuthorization(workspace.id) });
+    } catch (e) {
+      setError(reasonOf(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const effective = view.effective;
   // 修改既有授權而擴大範圍時，另外要承認擴大授權；第一次確認沒有 changes，不需要
   const expands = summary?.changes?.expands ?? false;
@@ -179,6 +198,17 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
         <p className="authorization-unconfirmed">
           尚未確認授權：選取目錄不等於授權，確認之前任何需要能力的 Agent 都不會被准入。
         </p>
+      )}
+
+      {view.legacy_runs.length > 0 && (
+        <LegacyRunsNotice
+          runs={view.legacy_runs}
+          capabilities={view.capabilities}
+          busy={busy}
+          timeZone={timeZone}
+          onPause={(run) => void actOnLegacyRun(() => client.cancelRun(workspace.id, run.run_id))}
+          onCancel={(run) => void actOnLegacyRun(() => client.cancelTask(workspace.id, run.task_id))}
+        />
       )}
 
       <div className="authorization-templates">
@@ -293,6 +323,56 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
           </ol>
         </section>
       )}
+    </section>
+  );
+}
+
+/**
+ * 撤銷授權前已准入的 Run 沿用原 revision（ADR-0003 R1-a），撤權沒有固定完成時間；
+ * 列出這些 Run，讓使用者自行暫停（停止 Run，之後重新派工依新授權准入）或取消整個 Task。
+ */
+function LegacyRunsNotice({
+  runs,
+  capabilities,
+  busy,
+  timeZone,
+  onPause,
+  onCancel,
+}: {
+  runs: LegacyRun[];
+  capabilities: AuthorizationView["capabilities"];
+  busy: boolean;
+  timeZone?: string;
+  onPause: (run: LegacyRun) => void;
+  onCancel: (run: LegacyRun) => void;
+}) {
+  const headingId = useId();
+  const labelOf = (capability: Capability) => capabilities.find((c) => c.capability === capability)?.label ?? capability;
+  return (
+    <section className="authorization-legacy-runs" role="status" aria-labelledby={headingId}>
+      <h3 id={headingId}>後續執行已停用，仍有 {runs.length} 個 Run 沿用舊授權</h3>
+      <p>已准入的 Run 撤權沒有固定完成時間，可以自行暫停或取消。</p>
+      <ul>
+        {runs.map((run) => (
+          <li key={run.run_id}>
+            <strong>{run.task_title}</strong>：沿用 revision {run.authorization_revision}
+            {run.revoked_capabilities.length > 0 && <>；已撤銷：{run.revoked_capabilities.map(labelOf).join("、")}</>}
+            {run.admitted_at !== null && <>；准入於 {formatTimestamp(run.admitted_at, timeZone)}</>}
+            {run.cancel_requested && <p>已要求停止，等待程序確認</p>}
+            <button
+              type="button"
+              disabled={busy || run.cancel_requested}
+              title="停止這個 Run，Task 回到可派工；之後重新派工時依目前授權准入"
+              onClick={() => onPause(run)}
+            >
+              暫停
+            </button>
+            <button type="button" disabled={busy || run.cancel_requested} title="取消整個 Task" onClick={() => onCancel(run)}>
+              取消
+            </button>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

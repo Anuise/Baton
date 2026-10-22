@@ -90,6 +90,8 @@ fn failed_run(id: &str, contract_version: i64) -> Run {
         generation: 1,
         contract_version,
         authorization_revision: None,
+        admitted_at: None,
+        settings_version: None,
         command_id: None,
         process: None,
         cancel_requested_at: None,

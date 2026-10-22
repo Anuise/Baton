@@ -82,6 +82,7 @@ struct DecisionData {
     uses: Vec<ApprovalUse>,
     policy: AuthorityPolicy,
     artifacts: Vec<ArtifactMark>,
+    authorizations: Vec<baton_domain::authorization::AuthorizationRevision>,
 }
 
 impl DecisionData {
@@ -95,6 +96,7 @@ impl DecisionData {
             uses: &self.uses,
             authority: &self.policy,
             artifacts: &self.artifacts,
+            authorizations: &self.authorizations,
         }
     }
 }
@@ -560,7 +562,9 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
         )?
         .query_map([workspace_id], |r| Ok(ArtifactMark { task_id: r.get(0)?, name: r.get(1)?, version: r.get(2)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)?, artifacts })
+    // 權限提示依 Run 准入時固定的 revision 判定（票 24），所以載入全部 revision
+    let authorizations = load_authorization_revisions(conn, workspace_id)?;
+    Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)?, artifacts, authorizations })
 }
 
 /// 把 Domain 的結果寫進同一個交易：請求、阻擋範圍、連結、裁定、單次批准的消耗、受影響的 Task、派工佇列、喚醒 Outbox 與事件。

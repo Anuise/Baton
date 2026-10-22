@@ -12,6 +12,7 @@ use baton_domain::authorization::{
     self, Admission, AdmissionDenied, AuthorizationError, AuthorizationRevision, Capability, ConfirmOutcome,
     ConfirmRequest, ConfirmationSummary, Grant, Template,
 };
+use baton_domain::run::LegacyRun;
 use baton_store::{AdmissionCheckError, AuthorizationApplyError};
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +69,10 @@ pub struct AuthorizationView {
     pub capabilities: Vec<CapabilityInfo>,
     /// 可信程式以目前 Windows 使用者身分執行的風險說明。
     pub risk_disclosure: String,
+    /// 已准入、尚未結束、仍沿用舊授權而且保有已撤銷範圍的 Run（R1-a，票 24）：
+    /// 畫面顯示「後續執行已停用，仍有 N 個 Run 沿用舊授權」與它們的暫停／取消入口。
+    #[serde(default)]
+    pub legacy_runs: Vec<LegacyRun>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +168,7 @@ pub(crate) async fn view(
     let workspace = find_workspace(&state, &id).await?;
     let revisions = state.store.authorization_revisions(&id).await?;
     let effective = revisions.last().cloned();
+    let legacy_runs = state.store.legacy_runs(&id).await?;
     Ok(Json(AuthorizationView {
         workspace_id: id,
         status: if effective.is_some() { AuthorizationStatus::Confirmed } else { AuthorizationStatus::Unconfirmed },
@@ -174,6 +180,7 @@ pub(crate) async fn view(
             .map(|c| CapabilityInfo { capability: c, label: c.label().to_string(), high_risk: c.is_high_risk() })
             .collect(),
         risk_disclosure: authorization::TRUSTED_EXECUTION_RISK.to_string(),
+        legacy_runs,
     }))
 }
 
