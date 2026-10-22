@@ -4796,6 +4796,15 @@
 - 理由：已合併的條目編號不能改，只能移動本 run 的內容。
 - 替代方案：無。
 - 影響：無行為差異。
+### AI-491：新增票 54 補齊 Controller 共同工具
+- 重要度：中
+- 時間／階段：2026-10-23，最終 code-review
+- 決策：新增票 54「Controller 的共同工具」，補上 spec D-05 列為共同工具、但 Controller 目前不能用的 `search_knowledge`、`send_message`、`read_inbox`、成果接受與 Controller 版 `record_lesson_candidate`；票 51 的相依加入 54。等最終 review 的修正分支全部合併後再派工。
+- 理由：最終 review 修正 run R155 判斷需要新的 Domain／Store 模型，不適合在修正 run 中做（AI-488）；驗證 R160 建議由主控開票或在 spec 註記。這是 spec 明文要求，選擇補做而不是降級 spec。
+- 替代方案：在 spec D-05 註記 v1 不提供 Controller 共同工具。
+- 影響：多一張自動化票；Controller 的能力範圍擴大，需要維持 Workspace 範圍的隔離保證。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
