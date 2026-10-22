@@ -443,6 +443,10 @@ impl WorkspaceFs for FakeWorkspaceFs {
         baton_ports::read_file_if_exists(path)
     }
 
+    async fn read_workspace_file(&self, path: &Path) -> PortResult<Option<Vec<u8>>> {
+        baton_ports::read_file_if_exists(path)
+    }
+
     async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
         baton_ports::list_files_recursive(dir)
     }
@@ -516,6 +520,64 @@ impl FakeUserSettings {
 impl UserSettingsSource for FakeUserSettings {
     async fn read(&self) -> PortResult<SourceFiles> {
         self.source.read().await
+    }
+}
+
+/// 腳本化的驗證命令執行器：依程式名稱回傳設定好的結果（設定一次後每次都相同，可再覆寫）；
+/// 沒有設定的程式視為「找不到程式」而無法啟動。記錄每一次執行要求，並可讓下一次執行停住直到測試放行。
+#[derive(Default)]
+pub struct FakeCommandRunner {
+    results: Mutex<HashMap<String, PortResultOf<CommandOutput>>>,
+    calls: Mutex<Vec<CommandRequest>>,
+    hold: Mutex<Option<Arc<tokio::sync::Notify>>>,
+}
+
+/// `PortError` 不能複製，所以腳本以字串保存錯誤原因。
+type PortResultOf<T> = Result<T, String>;
+
+impl FakeCommandRunner {
+    /// 這個程式之後每次執行都以 `code` 結束，輸出 `output`。
+    pub fn script_exit(&self, program: &str, code: i32, output: &str) {
+        lock(&self.results).insert(program.to_string(), Ok(CommandOutput::Exited { code, output: output.to_string() }));
+    }
+
+    /// 這個程式之後每次執行都逾時。
+    pub fn script_timeout(&self, program: &str) {
+        lock(&self.results).insert(program.to_string(), Ok(CommandOutput::TimedOut { output: String::new() }));
+    }
+
+    /// 這個程式之後每次都無法啟動。
+    pub fn script_start_failure(&self, program: &str, reason: &str) {
+        lock(&self.results).insert(program.to_string(), Err(reason.to_string()));
+    }
+
+    /// 下一次執行在開始後停住，直到回傳的 `Notify` 被 `notify_one`（只生效一次）。
+    pub fn hold_next(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *lock(&self.hold) = Some(gate.clone());
+        gate
+    }
+
+    /// 至今的全部執行要求，依順序。
+    pub fn calls(&self) -> Vec<CommandRequest> {
+        lock(&self.calls).clone()
+    }
+}
+
+#[async_trait]
+impl CommandRunner for FakeCommandRunner {
+    async fn run(&self, request: CommandRequest) -> PortResult<CommandOutput> {
+        let program = request.program.clone();
+        lock(&self.calls).push(request);
+        let gate = lock(&self.hold).take();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        match lock(&self.results).get(&program).cloned() {
+            Some(Ok(output)) => Ok(output),
+            Some(Err(reason)) => Err(PortError::Failed(reason)),
+            None => Err(PortError::Failed(format!("找不到程式「{program}」"))),
+        }
     }
 }
 
@@ -753,6 +815,7 @@ pub struct FakePorts {
     pub platform_info: Arc<FakePlatformInfo>,
     pub secret_protector: Arc<FakeSecretProtector>,
     pub claude_env: Arc<FakeClaudeEnvironment>,
+    pub command_runner: Arc<FakeCommandRunner>,
     pub user_settings: Arc<FakeUserSettings>,
 }
 
@@ -767,6 +830,7 @@ impl FakePorts {
             platform_info: Arc::default(),
             secret_protector: Arc::default(),
             claude_env: Arc::default(),
+            command_runner: Arc::default(),
             user_settings: Arc::default(),
         }
     }
@@ -782,6 +846,7 @@ impl FakePorts {
             platform_info: self.platform_info.clone(),
             secret_protector: self.secret_protector.clone(),
             claude_env: self.claude_env.clone(),
+            command_runner: self.command_runner.clone(),
             user_settings: self.user_settings.clone(),
         }
     }
