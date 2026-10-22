@@ -12,6 +12,7 @@ use baton_domain::agent::{
     AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, DETAILS_MAX_BYTES, REASON_MAX_CHARS, RUNTIME_URL_ENV, SUMMARY_MAX_CHARS,
     TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT,
 };
+use baton_domain::artifact::{ARTIFACT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS, TOOL_REGISTER_ARTIFACT};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -172,13 +173,40 @@ fn tool_definitions() -> Value {
                 "required": ["reason"],
             },
         },
+        {
+            "name": TOOL_REGISTER_ARTIFACT,
+            "description": "登記一個成果（報告、檔案等交付物）；同名再次登記會追加新版本。content 與 content_base64 擇一提供。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "maxLength": NAME_MAX_CHARS,
+                        "description": "成果檔名，不可含路徑分隔字元",
+                    },
+                    "description": { "type": "string", "maxLength": DESCRIPTION_MAX_CHARS, "description": "成果的簡短描述（選填）" },
+                    "content": {
+                        "type": "string",
+                        "description": format!("UTF-8 文字內容；與 content_base64 擇一（上限 {} MiB）", ARTIFACT_MAX_BYTES / (1024 * 1024)),
+                    },
+                    "content_base64": {
+                        "type": "string",
+                        "description": format!(
+                            "Base64 編碼的二進位內容；與 content 擇一（解碼後上限 {} MiB）",
+                            ARTIFACT_MAX_BYTES / (1024 * 1024)
+                        ),
+                    },
+                },
+                "required": ["name"],
+            },
+        },
     ])
 }
 
 /// 處理 `tools/call`：協定層的錯誤回 `Err`，Runtime 的結果（含失敗）一律包成 MCP 工具結果。
 async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value) -> Result<Value, (i64, String)> {
     let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "缺少工具名稱 name".to_string()))?;
-    let known = [TOOL_GET_TASK_CONTRACT, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT, TOOL_REPORT_BLOCKED];
+    let known = [TOOL_GET_TASK_CONTRACT, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT, TOOL_REPORT_BLOCKED, TOOL_REGISTER_ARTIFACT];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));
     }

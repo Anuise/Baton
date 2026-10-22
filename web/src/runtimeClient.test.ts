@@ -408,4 +408,64 @@ describe("Runtime 用戶端", () => {
       ["setup_acknowledge_notice"],
     ]);
   });
+
+  it("HTTP 版列出成果、預覽版本：路徑含 Workspace、成果與版本", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ artifacts: [], unregistered_files: [] }), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.listArtifacts("ws_1");
+    await client.previewArtifact("ws_1", "art_1", 2);
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/artifacts");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/artifacts/art_1/versions/2/preview");
+  });
+
+  it("HTTP 版下載成果：以同一個 fetch 取得位元組與 X-Baton-Sha256，不把憑證放進網址", async () => {
+    const fetchFn = vi.fn(
+      async () => new Response("內容", { status: 200, headers: { "X-Baton-Sha256": "ab".repeat(32) } }),
+    );
+
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).downloadArtifact("ws_1", "art_1", 2);
+
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/workspaces/ws_1/artifacts/art_1/versions/2/content");
+    expect(result.sha256).toBe("ab".repeat(32));
+    expect(await result.blob.text()).toBe("內容");
+  });
+
+  it("HTTP 版下載成果缺少 X-Baton-Sha256 標頭時，雜湊是空字串", async () => {
+    const fetchFn = vi.fn(async () => new Response("x", { status: 200 }));
+
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).downloadArtifact("ws_1", "art_1", 1);
+
+    expect(result.sha256).toBe("");
+  });
+
+  it("HTTP 版成果操作失敗時，以 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "artifact_integrity_failed", message: "成果檔案與登記的雜湊不符，拒絕提供" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await expect(client.listArtifacts("ws_1")).rejects.toThrow("成果檔案與登記的雜湊不符，拒絕提供");
+    await expect(client.previewArtifact("ws_1", "art_1", 1)).rejects.toThrow("成果檔案與登記的雜湊不符，拒絕提供");
+    await expect(client.downloadArtifact("ws_1", "art_1", 1)).rejects.toThrow("成果檔案與登記的雜湊不符，拒絕提供");
+  });
+
+  it("Tauri 版以指令與參數瀏覽成果；下載由殼回傳 base64 內容與雜湊", async () => {
+    const invoke = vi.fn(async (command: string) =>
+      command === "artifact_download" ? { sha256: "cd".repeat(32), content_base64: btoa("hello") } : {},
+    );
+    const client = createTauriClient(invoke as never);
+
+    await client.listArtifacts("ws_1");
+    await client.previewArtifact("ws_1", "art_1", 2);
+    const result = await client.downloadArtifact("ws_1", "art_1", 2);
+
+    expect(invoke.mock.calls).toEqual([
+      ["artifact_list", { workspaceId: "ws_1" }],
+      ["artifact_preview", { workspaceId: "ws_1", artifactId: "art_1", version: 2 }],
+      ["artifact_download", { workspaceId: "ws_1", artifactId: "art_1", version: 2 }],
+    ]);
+    expect(result.sha256).toBe("cd".repeat(32));
+    expect(await result.blob.text()).toBe("hello");
+  });
 });
