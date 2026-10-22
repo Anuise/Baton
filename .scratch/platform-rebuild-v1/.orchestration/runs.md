@@ -63,3 +63,4 @@
 | R059-13-verify | 13 | verify | Work-8 | 2026-10-22 17:30 | 2026-10-22 17:34 | PASS |
 | R060-25-verify | 25 | verify | Work-9 | 2026-10-22 17:30 | | |
 | R061-37-integrate | 37 | integrate | Work-3 | 2026-10-22 17:34 | | |
+| R062-20-impl | 20 | impl | Work-8 | 2026-10-22 17:34 | | |
