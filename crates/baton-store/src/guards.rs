@@ -137,12 +137,12 @@ impl Store {
         outcome
     }
 
-    /// 使用者回報一次沒被攔下的重犯；指定 Task 時必須同時指定它所在的 Workspace。
+    /// 使用者回報一次沒被攔下的重犯：`scope` 是相關的 Workspace 與（選填的）其中一個 Task。
     pub async fn report_recurrence(
         &self,
         id: String,
         lesson_id: &str,
-        task: Option<(String, String)>,
+        scope: Option<(String, Option<String>)>,
         note: String,
         now: Timestamp,
     ) -> Result<Recurrence, GuardApplyError> {
@@ -152,19 +152,27 @@ impl Store {
                 let Some(lesson) = load_entry(tx, &lesson_id)? else {
                     return Ok(Err(KnowledgeError::NotFound(lesson_id).into()));
                 };
-                let task = match task {
-                    None => None,
+                let (workspace_id, task) = match scope {
+                    None => (None, None),
                     Some((workspace_id, task_id)) => {
-                        match super::tasks::load(tx, &workspace_id)?.tasks.into_iter().find(|t| t.id == task_id) {
-                            Some(task) => Some(task),
-                            None => {
-                                let message = format!("Workspace {workspace_id} 沒有 Task {task_id}");
-                                return Ok(Err(GuardError::Invalid(message).into()));
-                            }
+                        let loaded = super::tasks::load(tx, &workspace_id)?;
+                        if loaded.workspace.is_none() {
+                            return Ok(Err(GuardError::Invalid(format!("找不到 Workspace {workspace_id}")).into()));
                         }
+                        let task = match task_id {
+                            None => None,
+                            Some(task_id) => match loaded.tasks.into_iter().find(|t| t.id == task_id) {
+                                Some(task) => Some(task),
+                                None => {
+                                    let message = format!("Workspace {workspace_id} 沒有 Task {task_id}");
+                                    return Ok(Err(GuardError::Invalid(message).into()));
+                                }
+                            },
+                        };
+                        (Some(workspace_id), task)
                     }
                 };
-                match guard::report(id, &lesson, task.as_ref(), &note, now) {
+                match guard::report(id, &lesson, workspace_id.as_deref(), task.as_ref(), &note, now) {
                     Err(rejected) => Ok(Err(rejected.into())),
                     Ok((recurrence, event)) => {
                         insert_recurrence(tx, &recurrence)?;
