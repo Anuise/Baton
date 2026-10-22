@@ -221,10 +221,59 @@ export interface TaskView {
   missing: MissingItem[];
 }
 
+export type RunStatus = "queued" | "starting" | "running" | "succeeded" | "failed" | "interrupted" | "cancelled";
+
+/** 程序身分：PID + 程序建立時間 + 啟動指令雜湊。 */
+export interface ProcessRecord {
+  pid: number;
+  created_at_millis: number;
+  command_hash: string;
+}
+
+/** Run（對應 Rust 的 Run）；時間一律是 UTC 毫秒。 */
+export interface Run {
+  id: string;
+  workspace_id: string;
+  task_id: string;
+  status: RunStatus;
+  version: number;
+  /** 同一個 Task 的 Run 依序遞增，最新的是最大者。 */
+  generation: number;
+  contract_version: number;
+  authorization_revision: number | null;
+  command_id: string | null;
+  /** 啟動回執；回執寫入前為 null。 */
+  process: ProcessRecord | null;
+  /** 使用者要求取消的時間；程序確認停止之前 Run 仍是 starting／running。 */
+  cancel_requested_at: number | null;
+  end_reason: string | null;
+  created_at: number;
+  updated_at: number;
+  started_at: number | null;
+  ended_at: number | null;
+}
+
+/** execution lease：Task 的寫入所有權。 */
+export interface ExecutionLease {
+  run_id: string;
+  task_id: string;
+  generation: number;
+  acquired_at: number;
+  last_heartbeat_at: number;
+  expires_at: number;
+  released_at: number | null;
+  release_reason: string | null;
+}
+
+/** Run 加上它的 lease（Run 的欄位展平在同一層）。 */
+export type RunView = Run & { lease: ExecutionLease | null };
+
 export interface TaskBoard {
   workspace_id: string;
   goals: Goal[];
   tasks: TaskView[];
+  /** Workspace 全部 Run，依建立順序。 */
+  runs: RunView[];
   capabilities: { capability: Capability; label: string; high_risk: boolean }[];
 }
 
@@ -256,6 +305,10 @@ export interface TaskClient {
   checkTaskAdmission(workspaceId: string, taskId: string): Promise<AdmissionReport>;
   markTaskReady(workspaceId: string, taskId: string): Promise<TaskView>;
   cancelTask(workspaceId: string, taskId: string): Promise<TaskView>;
+  /** 對 ready 的 Task 派工：回傳 queued 的 Run（程序由 Supervisor 之後才啟動）。 */
+  dispatchTask(workspaceId: string, taskId: string): Promise<RunView>;
+  /** 要求取消 Run；已啟動的 Run 要等程序確認停止才會變 cancelled。 */
+  cancelRun(workspaceId: string, runId: string): Promise<RunView>;
 }
 
 export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient & TaskClient;
@@ -353,6 +406,9 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     checkTaskAdmission: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/admission-check`, { method: "POST" }),
     markTaskReady: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/ready`, { method: "POST" }),
     cancelTask: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/cancel`, { method: "POST" }),
+    dispatchTask: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/dispatch`, { method: "POST" }),
+    cancelRun: (workspaceId, runId) =>
+      send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   };
 }
 
@@ -390,6 +446,8 @@ export function createTauriClient(invoke: Invoke): AppClient {
     checkTaskAdmission: (workspaceId, taskId) => call<AdmissionReport>("task_admission_check", { workspaceId, taskId }),
     markTaskReady: (workspaceId, taskId) => call<TaskView>("task_ready", { workspaceId, taskId }),
     cancelTask: (workspaceId, taskId) => call<TaskView>("task_cancel", { workspaceId, taskId }),
+    dispatchTask: (workspaceId, taskId) => call<RunView>("task_dispatch", { workspaceId, taskId }),
+    cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
   };
 }
 

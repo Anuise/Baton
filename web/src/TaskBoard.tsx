@@ -2,7 +2,18 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { buildContract, ContractEditor, draftFromContract, emptyDraft, type ContractDraft } from "./ContractEditor";
 import { formatTimestamp } from "./time";
-import type { Goal, MissingItem, TaskBoard as TaskBoardData, TaskClient, TaskContract, TaskStatus, TaskView, Workspace } from "./runtimeClient";
+import type {
+  Goal,
+  MissingItem,
+  RunStatus,
+  RunView,
+  TaskBoard as TaskBoardData,
+  TaskClient,
+  TaskContract,
+  TaskStatus,
+  TaskView,
+  Workspace,
+} from "./runtimeClient";
 
 type ViewState = { state: "loading" } | { state: "ready"; board: TaskBoardData } | { state: "failed"; reason: string };
 
@@ -24,6 +35,26 @@ const COLUMNS: [TaskStatus, string][] = [
   ["completed", "已完成"],
   ["cancelled", "已取消"],
 ];
+
+const RUN_STATUS_LABELS: Record<RunStatus, string> = {
+  queued: "排隊中",
+  starting: "啟動中",
+  running: "執行中",
+  succeeded: "成功",
+  failed: "失敗",
+  interrupted: "中斷",
+  cancelled: "已取消",
+};
+
+/** Run 仍在進行（尚未結束）。 */
+const isRunActive = (status: RunStatus) => status === "queued" || status === "starting" || status === "running";
+
+/** 同一個 Task 最新的 Run：generation 最大者。 */
+function latestRun(runs: RunView[], taskId: string): RunView | null {
+  return runs
+    .filter((r) => r.task_id === taskId)
+    .reduce<RunView | null>((latest, r) => (latest === null || r.generation > latest.generation ? r : latest), null);
+}
 
 const isClosed = (status: TaskStatus) => status === "completed" || status === "cancelled";
 
@@ -131,10 +162,13 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   goalTitle={board.goals.find((g) => g.id === task.goal_id)?.title ?? task.goal_id}
                   titleOf={titleOf}
                   others={board.tasks.filter((t) => t.id !== task.id)}
+                  run={latestRun(board.runs, task.id)}
                   timeZone={timeZone}
                   error={cardError?.taskId === task.id ? cardError.message : null}
                   onReady={() => void act(task, () => client.markTaskReady(workspace.id, task.id))}
                   onCancel={() => void act(task, () => client.cancelTask(workspace.id, task.id))}
+                  onDispatch={() => void act(task, () => client.dispatchTask(workspace.id, task.id))}
+                  onCancelRun={(runId) => void act(task, () => client.cancelRun(workspace.id, runId))}
                   onEdit={() => setPanel({ kind: "edit", task })}
                   onAddDependency={(dependsOn) => act(task, () => client.addTaskDependency(workspace.id, task.id, dependsOn))}
                 />
@@ -155,17 +189,21 @@ interface CardProps {
   titleOf: (taskId: string) => string;
   /** 同一個 Workspace 內的其他 Task，供選擇相依對象。 */
   others: TaskView[];
+  /** 這個 Task 最新的 Run；從未派工過為 null。 */
+  run: RunView | null;
   timeZone?: string;
   error: string | null;
   onReady: () => void;
   onCancel: () => void;
+  onDispatch: () => void;
+  onCancelRun: (runId: string) => void;
   onEdit: () => void;
   onAddDependency: (dependsOn: string) => Promise<boolean>;
 }
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, timeZone, error, onReady, onCancel, onEdit, onAddDependency }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -218,7 +256,19 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, timeZ
         </div>
       )}
 
+      {run && <RunStatusLine run={run} timeZone={timeZone} />}
+
       <div className="task-actions">
+        {task.status === "ready" && (
+          <button type="button" onClick={onDispatch}>
+            派工
+          </button>
+        )}
+        {run && isRunActive(run.status) && run.cancel_requested_at === null && (
+          <button type="button" onClick={() => onCancelRun(run.id)}>
+            取消 Run
+          </button>
+        )}
         {task.status === "pending" && (
           <button type="button" onClick={onReady}>
             標記為可派工
@@ -283,6 +333,21 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, timeZ
         </div>
       )}
     </article>
+  );
+}
+
+/** 最新 Run 的狀態列：狀態、程序 pid、結束原因、lease 最後心跳；已要求取消時說明正在等程序停止。 */
+function RunStatusLine({ run, timeZone }: { run: RunView; timeZone?: string }) {
+  return (
+    <div className="task-run" role="group" aria-label="Run 狀態">
+      <p>
+        Run（第 {run.generation} 次）：<strong>{RUN_STATUS_LABELS[run.status]}</strong>
+        {run.process && `，程序 pid ${run.process.pid}`}
+      </p>
+      {run.end_reason && <p>結束原因：{run.end_reason}</p>}
+      {run.lease && <p>最後心跳：{formatTimestamp(run.lease.last_heartbeat_at, timeZone)}</p>}
+      {isRunActive(run.status) && run.cancel_requested_at !== null && <p>取消中，等待程序停止…</p>}
+    </div>
   );
 }
 

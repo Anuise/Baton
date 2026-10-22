@@ -4,6 +4,7 @@
 //! 寫入新狀態、契約版本、相依與事件」，以及唯讀的看板投影。範圍一律以 Workspace 為界。
 
 use baton_domain::authorization::AuthorizationRevision;
+use baton_domain::run::{ExecutionLease, Run, RunView};
 use baton_domain::task::{
     self, ContractContent, Dependency, Goal, MissingItem, Task, TaskChange, TaskCommand, TaskContext, TaskContract,
     TaskError, TaskStatus, TaskView,
@@ -26,11 +27,12 @@ impl From<rusqlite::Error> for TaskApplyError {
     }
 }
 
-/// 工作面板的資料：全部 Goal 與每個 Task 的投影，依建立順序。
+/// 工作面板的資料：全部 Goal 與每個 Task 的投影，依建立順序，外加這個 Workspace 的全部 Run。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskBoardData {
     pub goals: Vec<Goal>,
     pub tasks: Vec<TaskView>,
+    pub runs: Vec<RunView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,17 +43,19 @@ pub struct TaskDetailData {
 }
 
 /// 一個 Workspace 範圍內、Domain 判定需要的全部狀態。
-struct Loaded {
-    workspace: Option<Workspace>,
-    authorization: Option<AuthorizationRevision>,
-    goals: Vec<Goal>,
-    tasks: Vec<Task>,
-    dependencies: Vec<Dependency>,
-    contracts: Vec<TaskContract>,
+pub(crate) struct Loaded {
+    pub(crate) workspace: Option<Workspace>,
+    pub(crate) authorization: Option<AuthorizationRevision>,
+    pub(crate) goals: Vec<Goal>,
+    pub(crate) tasks: Vec<Task>,
+    pub(crate) dependencies: Vec<Dependency>,
+    pub(crate) contracts: Vec<TaskContract>,
+    pub(crate) runs: Vec<Run>,
+    pub(crate) leases: Vec<ExecutionLease>,
 }
 
 impl Loaded {
-    fn ctx<'a>(&'a self, workspace_id: &'a str) -> TaskContext<'a> {
+    pub(crate) fn ctx<'a>(&'a self, workspace_id: &'a str) -> TaskContext<'a> {
         TaskContext {
             workspace_id,
             workspace: self.workspace.as_ref(),
@@ -75,10 +79,18 @@ impl Store {
         let outcome = self
             .write(move |tx| {
                 let loaded = load(tx, &workspace_id)?;
+                let cancelled = match &command {
+                    TaskCommand::Cancel { task_id } => Some(task_id.clone()),
+                    _ => None,
+                };
                 match task::decide(&loaded.ctx(&workspace_id), command, now) {
                     Err(rejected) => Ok(Err(rejected)),
                     Ok(change) => {
                         save(tx, &change)?;
+                        // 取消 Task 時，它還在進行的 Run 在同一個交易中一起被要求取消（不留下沒有主人的寫入者）
+                        if let (Some(task_id), Some(task)) = (cancelled, &change.task) {
+                            super::runs::cascade_cancel(tx, &loaded, task, &task_id, now)?;
+                        }
                         Ok(Ok(change))
                     }
                 }
@@ -97,7 +109,8 @@ impl Store {
                     return Ok(Err(TaskError::WorkspaceNotFound(workspace_id)));
                 }
                 let tasks = task::board(&loaded.ctx(&workspace_id));
-                Ok(Ok(TaskBoardData { goals: loaded.goals, tasks }))
+                let runs = super::runs::views(&loaded);
+                Ok(Ok(TaskBoardData { goals: loaded.goals, tasks, runs }))
             })
             .await?;
         Ok(result?)
@@ -152,7 +165,7 @@ impl Store {
     }
 }
 
-fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Loaded> {
+pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Loaded> {
     let workspace = load_workspaces(conn)?.into_iter().find(|w| w.id == workspace_id);
     let authorization = load_authorization_revisions(conn, workspace_id)?.pop();
 
@@ -210,7 +223,9 @@ fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Loaded> {
         .query_map([workspace_id], contract_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    Ok(Loaded { workspace, authorization, goals, tasks, dependencies, contracts })
+    let runs = super::runs::load_runs(conn, workspace_id)?;
+    let leases = super::runs::load_leases(conn, workspace_id)?;
+    Ok(Loaded { workspace, authorization, goals, tasks, dependencies, contracts, runs, leases })
 }
 
 fn contract_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskContract> {
@@ -232,6 +247,30 @@ fn load_contract_history(conn: &Connection, task_id: &str) -> rusqlite::Result<V
     .collect()
 }
 
+/// 寫入（或更新）一個 Task；Run 的結果改變 Task 狀態時也走這裡。
+pub(crate) fn save_task(tx: &Transaction<'_>, task: &Task) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO task
+         (id, workspace_id, goal_id, title, status, version, contract_version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(id) DO UPDATE SET
+           status = excluded.status, version = excluded.version,
+           contract_version = excluded.contract_version, updated_at = excluded.updated_at",
+        rusqlite::params![
+            task.id,
+            task.workspace_id,
+            task.goal_id,
+            task.title,
+            task.status.as_str(),
+            task.version,
+            task.contract_version,
+            task.created_at.as_millis(),
+            task.updated_at.as_millis(),
+        ],
+    )?;
+    Ok(())
+}
+
 /// 把 Domain 的結果寫進同一個交易：新狀態、契約版本、相依與事件。
 fn save(tx: &Transaction<'_>, change: &TaskChange) -> rusqlite::Result<()> {
     if let Some(goal) = &change.goal {
@@ -241,25 +280,7 @@ fn save(tx: &Transaction<'_>, change: &TaskChange) -> rusqlite::Result<()> {
         )?;
     }
     if let Some(task) = &change.task {
-        tx.execute(
-            "INSERT INTO task
-             (id, workspace_id, goal_id, title, status, version, contract_version, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(id) DO UPDATE SET
-               status = excluded.status, version = excluded.version,
-               contract_version = excluded.contract_version, updated_at = excluded.updated_at",
-            rusqlite::params![
-                task.id,
-                task.workspace_id,
-                task.goal_id,
-                task.title,
-                task.status.as_str(),
-                task.version,
-                task.contract_version,
-                task.created_at.as_millis(),
-                task.updated_at.as_millis(),
-            ],
-        )?;
+        save_task(tx, task)?;
     }
     if let Some(contract) = &change.contract {
         // Domain 型別只含字串與數字，序列化不會失敗

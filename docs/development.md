@@ -6,12 +6,12 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、資料目錄位置判定（`storage_location.rs`） |
-| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl、AgentAdapter、QuotaObserver、WorkspaceFs、PlatformInfo |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、資料目錄位置判定（`storage_location.rs`） |
+| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs、PlatformInfo |
 | `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、授權 revision、Goal／Task／契約版本／相依與事件表 |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal 與 Task）、`/api/v1/events`）與入口防護 `guard`（憑證、Host、Origin、CORS） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task 與 Run）、`/api/v1/events`）與入口防護 `guard`（憑證、Host、Origin、CORS） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
-| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、單實例鎖、`baton-runtime.exe` |
+| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-harness` | 測試 harness 與全部 Port 的 fake（主要測試 seam，spec D-04） |
 | `crates/baton-client` | 桌面殼用的 `RuntimeClient`（自動讀取憑證）與「連回既有 Runtime 或啟動新的」邏輯 |
 | `src-tauri` | Tauri 桌面殼與安裝設定（`tauri.conf.json`） |
@@ -98,7 +98,7 @@ Workspace API（桌面憑證才能使用）：`GET /api/v1/workspaces`（含已�
 | `PUT /api/v1/workspaces/{id}/authorization` | 確認並保存：新內容回 201 與新的 revision（含來源與時間）；內容與目前相同回 200；需要承認風險時必須帶 `acknowledged_risk: true` |
 | `POST /api/v1/workspaces/{id}/admission-check` | Run 的准入檢查：`{ "required_capabilities": [...] }`；未確認回 409 `authorization_unconfirmed`，缺少能力回 409 `capability_not_granted` |
 
-revision 存在 append-only 的 `authorization_revision` 表（觸發器禁止更新與刪除），並在同一交易追加 `authorization_confirmed` 事件（聚合版本 = revision 編號）。Run 還不存在時（票 10 之前），准入判定 `authorization::admit` 只由 `admission-check` 端點使用；派工交易要呼叫同一個函式。
+revision 存在 append-only 的 `authorization_revision` 表（觸發器禁止更新與刪除），並在同一交易追加 `authorization_confirmed` 事件（聚合版本 = revision 編號）。准入判定 `authorization::admit` 由 `admission-check` 端點與派工交易（`RunCommand::Dispatch`）共用，不另寫准入邏輯。
 
 ### Task、六項最小派工契約與工作面板
 
@@ -138,6 +138,37 @@ Goal 與 Task 的規則在 `baton_domain::task`（純邏輯：命令 + 目前狀
 | `POST tasks/{task_id}/cancel` | 取消 |
 
 事件（追加式 `event` 表，`aggregate_type = 'task'`，版本連續遞增）：`task_created`、`task_contract_changed`、`task_dependency_added`、`task_status_changed`（含 `from`／`to`／`reason`）；Goal 是 `goal_created`。Web UI 的工作面板（`web/src/TaskBoard.tsx`）依狀態分欄顯示，pending 卡片列出缺項，並提供契約編輯器（`ContractEditor.tsx`）、版本歷史、新增相依與標記 ready／取消；從左側 Workspace 清單的「工作面板」進入。
+
+### Supervisor、Run 與程序身分
+
+Run 的規則在 `baton_domain::run`（純邏輯：命令 + 目前狀態 → 新狀態 + 事件 + Outbox），持久化在 `baton-store` 的 `runs.rs`，端點在 `baton-api` 的 `runs.rs`，啟動程序與核對在 `baton-runtime` 的 `supervisor.rs`。
+
+**Run 狀態**：`queued → starting → running → succeeded／failed／interrupted／cancelled`（`RunStatus::allowed_next`）。只有 `running` 之後才有程序身分；`starting` 代表 launch intent 已持久化但回執還沒寫回。
+
+**派工交易**（`POST …/tasks/{task_id}/dispatch`，Domain `RunCommand::Dispatch`）：在同一個交易中重新做完整准入檢查（`task::admission_report`，內部呼叫 `authorization::admit`）、確認相依都已完成、確認沒有任何尚未釋放的 lease，然後建立 Run（`queued`）、execution lease（世代 = 該 Task 的 Run 數 + 1）、派工 Outbox 項目，Task 進入 `running`。派工**不啟動程序**。
+
+**寫入所有權**：同一個 Task 任何時刻最多一個尚未釋放的 `execution_lease`（Domain 判定 + 資料庫唯一索引 `execution_lease_one_held_per_task`；性質測試 `at_most_one_effective_writer_per_task_under_any_command_sequence`）。Run 結束或取消**確認程序停止之後**才釋放；停不掉（`StopResult::StillAlive`）就一直持有，新的 Run 派不出去。
+
+**Supervisor**（`Supervisor::tick`，每次依序做四件事，全部冪等、只信任資料庫）：
+
+1. 啟動派工 Outbox 的 Run：先在交易中持久化 launch intent 與 `command_id`（`starting`），才在交易外 `spawn`，再把回執（PID + 建立時間 + 指令雜湊）寫回（`running`）。Runtime 在任何一點當掉，重建後以 `command_id` 呼叫 `ProcessControl::find` 找回原程序並補寫回執，**不重複啟動**；找不到就把 Run 標為 `interrupted`（`launch_outcome_unknown`），不自動重送，由使用者重新派工。
+2. 收 Adapter 事件：`Heartbeat` 續約 lease（間隔 15 秒、有效 60 秒，spec D-31）；`Exited` 只結束 Run（成功 → Task `verifying`，失敗 → Task 回到 `ready`），**不會**把 Task 標為 `completed`。
+3. 取消：要求取消的 Run 先記下意圖（`cancel_requested_at`），Supervisor 停止整個程序樹，確認之後才完成取消、釋放 lease、Task 回到 `ready`；還沒啟動的 Run 立即取消。取消 Task 會在同一個交易中要求取消它進行中的 Run。
+4. 核對 lease：過期只觸發核對（`inspect`）：確認 `Dead` 才中斷 Run，`Alive` 續約，`Unknown` 維持原狀。
+
+正式執行時由背景迴圈每秒（或派工／取消時被喚醒）呼叫 `tick`；`RuntimeOptions { background_supervisor: false }`（harness 使用）不啟動背景迴圈，由測試呼叫 `harness.supervise()`。`RuntimeOptions::stop_grace` 預設 30 秒（spec D-11）。
+
+**真實 ProcessControl**（`WindowsProcessControl`，只在 Windows 編譯）：每個 Run 一個具名 Job Object `Local\Baton-Run-{command_id}`（不設 KILL_ON_JOB_CLOSE，Runtime 崩潰不會殺掉程序）；`stop` 先在寬限期內等程序自行結束，逾時 `TerminateJobObject` 終止整棵樹。整合測試：`crates/baton-runtime/tests/process_tree.rs`（直接測 Port）、`crates/baton-runtime/tests/supervisor_process_tree.rs`（真實 Runtime + HTTP 取消）。正式執行檔的 AgentAdapter 仍是「尚未實作」（票 14），所以目前派工後 Run 會以 `launch_failed` 結束。
+
+桌面憑證專用的端點（Agent 憑證得到 403），在 `/api/v1/workspaces/{id}/` 之下：
+
+| 端點 | 用途 |
+| --- | --- |
+| `POST tasks/{task_id}/dispatch` | 派工（Task 必須是 ready）；201 回 `queued` 的 Run。409 代碼：`task_not_ready`、`task_admission_denied`（帶 `missing`）、`dependencies_unfinished`、`execution_conflict` |
+| `GET runs`、`GET runs/{run_id}` | Run（含 lease、程序身分、`cancel_requested_at`、`end_reason`）；工作面板 `GET tasks` 也帶 `runs` |
+| `POST runs/{run_id}/cancel` | 要求取消；已結束或重複取消是冪等的（200） |
+
+事件（`aggregate_type = 'run'`）：`run_created`、`run_launch_started`、`run_started`、`run_lease_verified`、`run_succeeded`、`run_failed`、`run_interrupted`、`run_cancel_requested`、`run_cancelled`（heartbeat 只更新 lease，不追加事件）。
 
 ### 本機 API 的存取防護
 
@@ -200,9 +231,10 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - `harness.desktop_credential()`：與 App 相同，從 DPAPI 保護檔（測試中是 fake 保護器）讀出目前的桌面憑證；`harness.issue_credential(role, ttl)` 簽發額外憑證（Agent 角色或會過期的憑證）；`harness.log_text()` 讀日誌。
 - `harness.send_json(method, path, body)`：帶桌面憑證發出請求並回傳 `(狀態碼, JSON)`，用來斷言拒絕情境的錯誤代碼；`harness.db()`：以唯讀方式開啟控制資料庫，只用來確認「事件有追加、時間以 UTC 存放」這類必須看落地內容的事實。
 - `Harness::builder().prepare_data_dir(..).try_start()`：Runtime 第一次啟動前先整理資料目錄（例如放入較新版本的資料庫），並回傳啟動錯誤而不是 panic。
+- `harness.supervise()`：讓 Supervisor 處理一次（Harness 不啟動背景迴圈，何時發生由測試決定）；`process_control.hang_next_spawn_at(HangPoint::…)` 讓下一次 spawn 在「啟動前／啟動後回執前」永遠不回來，測試以 `timeout` 丟棄該次處理即等同 Runtime 在那一點崩潰；`agent_adapter.emit(run_id, event)`、`script_next_run(events)` 推送 Adapter 事件。
 - `harness.restart()`：模擬重啟。舊的 Runtime 被丟棄（原位址不再回應），資料目錄與全部 fake 都保留。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`：具體的 fake，可腳本化回應並讀取呼叫紀錄。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 

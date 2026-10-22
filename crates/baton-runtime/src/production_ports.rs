@@ -30,6 +30,9 @@ impl ProcessControl for Unavailable {
     async fn spawn(&self, _spec: SpawnSpec) -> PortResult<Receipt> {
         Err(PortError::NotImplemented("ProcessControl"))
     }
+    async fn find(&self, _spec: &SpawnSpec) -> PortResult<Option<Receipt>> {
+        Err(PortError::NotImplemented("ProcessControl"))
+    }
     async fn inspect(&self, _identity: &ProcessIdentity) -> PortResult<Liveness> {
         Err(PortError::NotImplemented("ProcessControl"))
     }
@@ -40,6 +43,14 @@ impl ProcessControl for Unavailable {
 
 #[async_trait]
 impl AgentAdapter for Unavailable {
+    fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        SpawnSpec {
+            program: String::new(),
+            args: Vec::new(),
+            working_dir: spec.working_dir.clone(),
+            command_id: spec.command_id.clone(),
+        }
+    }
     async fn launch(&self, _spec: RunSpec) -> PortResult<AgentHandle> {
         Err(PortError::NotImplemented("AgentAdapter"))
     }
@@ -83,9 +94,14 @@ impl WorkspaceFs for LocalWorkspaceFs {
 /// 組出正式執行用的 Port 組合。
 pub fn production_ports() -> Ports {
     let unavailable = Arc::new(Unavailable);
+    // Windows 上使用真實的 Job Object 實作；其他平台維持尚未實作
+    #[cfg(windows)]
+    let process_control: Arc<dyn ProcessControl> = Arc::new(crate::windows_process::WindowsProcessControl::new());
+    #[cfg(not(windows))]
+    let process_control: Arc<dyn ProcessControl> = unavailable.clone();
     Ports {
         clock: Arc::new(SystemClock),
-        process_control: unavailable.clone(),
+        process_control,
         agent_adapter: unavailable.clone(),
         quota_observer: unavailable.clone(),
         workspace_fs: Arc::new(LocalWorkspaceFs),

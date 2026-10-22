@@ -7,19 +7,25 @@ pub mod credentials;
 pub mod log;
 pub mod production_ports;
 pub mod single_instance;
+pub mod supervisor;
 pub mod windows_platform;
+#[cfg(windows)]
+pub mod windows_process;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 
 use baton_api::ApiState;
 use baton_ports::Ports;
 use baton_store::{Store, StoreError};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 pub use baton_domain::config::{self, ConfigError, RuntimeConfig};
 pub use credentials::CredentialIssuer;
+pub use supervisor::Supervisor;
 
 /// 隨機埠（埠 0）時，IPv6 同埠已被占用就重新挑一個的次數上限。
 const BIND_ATTEMPTS: usize = 16;
@@ -40,6 +46,22 @@ pub enum RuntimeError {
     Log(std::io::Error),
 }
 
+/// 啟動 Runtime 的選項；預設值就是正式執行的行為。
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeOptions {
+    /// 是否啟動 Supervisor 的背景迴圈。測試 harness 關閉它，改由測試在想要的時刻呼叫 `Supervisor::tick`，
+    /// 才能用 fake Clock 決定性地重現任何時序。
+    pub background_supervisor: bool,
+    /// 要求 Run 的程序停止時給它的寬限期（spec D-11 的 30 秒）；逾時強制終止整個程序樹。
+    pub stop_grace: Duration,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self { background_supervisor: true, stop_grace: supervisor::DEFAULT_STOP_GRACE }
+    }
+}
+
 pub struct Runtime;
 
 impl Runtime {
@@ -48,6 +70,14 @@ impl Runtime {
     /// 桌面憑證在開始監聽前就已換新並寫入保護檔，所以 App 一旦連得上，讀到的就是目前有效的憑證。
     /// 任何一步失敗都讓啟動失敗，不會退回免驗證的模式。
     pub async fn start(config: RuntimeConfig, ports: Ports) -> Result<RunningRuntime, RuntimeError> {
+        Self::start_with(config, ports, RuntimeOptions::default()).await
+    }
+
+    pub async fn start_with(
+        config: RuntimeConfig,
+        ports: Ports,
+        options: RuntimeOptions,
+    ) -> Result<RunningRuntime, RuntimeError> {
         if !config.bind.ip().is_loopback() {
             return Err(RuntimeError::NotLoopback(config.bind));
         }
@@ -68,6 +98,11 @@ impl Runtime {
         }));
 
         let (stop_tx, stop_rx) = watch::channel(false);
+        let supervisor_wake = Arc::new(Notify::new());
+        let supervisor = Supervisor::new(store.clone(), ports.clone(), log.clone(), options.stop_grace);
+        let supervising = options
+            .background_supervisor
+            .then(|| supervisor.spawn_background(supervisor_wake.clone(), stop_rx.clone()));
         let app = baton_api::router(ApiState {
             boot_count,
             started_at,
@@ -77,6 +112,7 @@ impl Runtime {
             platform_info: ports.platform_info.clone(),
             workspace_fs: ports.workspace_fs.clone(),
             log,
+            supervisor_wake,
             shutdown: stop_rx.clone(),
         });
         let task = tokio::spawn(async move {
@@ -88,7 +124,7 @@ impl Runtime {
             };
             tokio::join!(serve(v4, app.clone(), stop_rx.clone()), serving_v6);
         });
-        Ok(RunningRuntime { addr, addr_v6, credentials, stop_tx, task })
+        Ok(RunningRuntime { addr, addr_v6, credentials, supervisor, supervising, stop_tx, task })
     }
 }
 
@@ -125,6 +161,8 @@ pub struct RunningRuntime {
     addr: SocketAddr,
     addr_v6: Option<SocketAddr>,
     credentials: CredentialIssuer,
+    supervisor: Arc<Supervisor>,
+    supervising: Option<JoinHandle<()>>,
     stop_tx: watch::Sender<bool>,
     task: JoinHandle<()>,
 }
@@ -145,10 +183,18 @@ impl RunningRuntime {
         &self.credentials
     }
 
+    /// Supervisor；測試 harness 以它主動驅動一次處理（`tick`）。
+    pub fn supervisor(&self) -> &Arc<Supervisor> {
+        &self.supervisor
+    }
+
     /// 停止服務並等到資料庫連線釋放；之後可用同一資料目錄重新啟動。
     pub async fn shutdown(mut self) {
         let _ = self.stop_tx.send(true);
         let _ = (&mut self.task).await;
+        if let Some(supervising) = self.supervising.take() {
+            let _ = supervising.await;
+        }
     }
 
     /// 等到服務自行結束（正式執行檔用）。
@@ -161,5 +207,8 @@ impl Drop for RunningRuntime {
     fn drop(&mut self) {
         // 沒有明確 shutdown 就被丟棄時，直接中止服務，避免殘留背景工作
         self.task.abort();
+        if let Some(supervising) = &self.supervising {
+            supervising.abort();
+        }
     }
 }

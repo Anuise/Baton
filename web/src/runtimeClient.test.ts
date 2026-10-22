@@ -160,6 +160,8 @@ describe("Runtime 用戶端", () => {
     await client.checkTaskAdmission("ws_1", "task_1");
     await client.markTaskReady("ws_1", "task_1");
     await client.cancelTask("ws_1", "task_1");
+    await client.dispatchTask("ws_1", "task_1");
+    await client.cancelRun("ws_1", "run_1");
 
     const base = "/api/v1/workspaces/ws_1";
     expect(fetchFn).toHaveBeenNthCalledWith(1, `${base}/tasks`);
@@ -197,6 +199,24 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(9, `${base}/tasks/task_1/admission-check`, { method: "POST" });
     expect(fetchFn).toHaveBeenNthCalledWith(10, `${base}/tasks/task_1/ready`, { method: "POST" });
     expect(fetchFn).toHaveBeenNthCalledWith(11, `${base}/tasks/task_1/cancel`, { method: "POST" });
+    expect(fetchFn).toHaveBeenNthCalledWith(12, `${base}/tasks/task_1/dispatch`, { method: "POST" });
+    expect(fetchFn).toHaveBeenNthCalledWith(13, `${base}/runs/run_1/cancel`, { method: "POST" });
+  });
+
+  it("HTTP 版派工與取消 Run 失敗時，以 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "task_not_ready", message: "Task 不是 ready，不能派工" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await expect(client.dispatchTask("ws_1", "task_1")).rejects.toThrow("Task 不是 ready，不能派工");
+    await expect(client.cancelRun("ws_1", "run_1")).rejects.toThrow("Task 不是 ready，不能派工");
+  });
+
+  it("HTTP 版派工回傳 Runtime 的 Run", async () => {
+    const run = { id: "run_1", status: "queued", lease: null };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(run), { status: 201 }));
+
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).dispatchTask("ws_1", "task_1")).resolves.toEqual(run);
   });
 
   it("HTTP 版把 Task 操作失敗時 Runtime 的說明當成錯誤訊息", async () => {
@@ -231,6 +251,8 @@ describe("Runtime 用戶端", () => {
     await client.checkTaskAdmission("ws_1", "task_1");
     await client.markTaskReady("ws_1", "task_1");
     await client.cancelTask("ws_1", "task_1");
+    await client.dispatchTask("ws_1", "task_1");
+    await client.cancelRun("ws_1", "run_1");
 
     expect(invoke).toHaveBeenNthCalledWith(1, "task_board", { workspaceId: "ws_1" });
     expect(invoke).toHaveBeenNthCalledWith(2, "goal_create", { workspaceId: "ws_1", title: "第一個目標" });
@@ -255,5 +277,7 @@ describe("Runtime 用戶端", () => {
     expect(invoke).toHaveBeenNthCalledWith(7, "task_admission_check", { workspaceId: "ws_1", taskId: "task_1" });
     expect(invoke).toHaveBeenNthCalledWith(8, "task_ready", { workspaceId: "ws_1", taskId: "task_1" });
     expect(invoke).toHaveBeenNthCalledWith(9, "task_cancel", { workspaceId: "ws_1", taskId: "task_1" });
+    expect(invoke).toHaveBeenNthCalledWith(10, "task_dispatch", { workspaceId: "ws_1", taskId: "task_1" });
+    expect(invoke).toHaveBeenNthCalledWith(11, "run_cancel", { workspaceId: "ws_1", runId: "run_1" });
   });
 });

@@ -24,7 +24,9 @@ use baton_domain::Timestamp;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
 
+mod runs;
 mod tasks;
+pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 
 /// 控制資料庫檔名，位於資料目錄之下。
@@ -192,6 +194,56 @@ const MIGRATIONS: &[Migration] = &[
             depends_on TEXT NOT NULL REFERENCES task (id),
             PRIMARY KEY (task_id, depends_on),
             CHECK (task_id <> depends_on)
+        );",
+    },
+    // Run、execution lease 與派工 Outbox（票 10）。
+    // 同一個 Task 任何時刻最多一個尚未釋放的 lease 由唯一索引保證，不只靠應用程式邏輯
+    Migration {
+        name: "run_lease_outbox",
+        sql: "CREATE TABLE run (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            status TEXT NOT NULL CHECK (status IN ('queued', 'starting', 'running', 'succeeded', 'failed',
+                'interrupted', 'cancelled')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            generation INTEGER NOT NULL CHECK (generation >= 1),
+            contract_version INTEGER NOT NULL,
+            authorization_revision INTEGER,
+            command_id TEXT,
+            pid INTEGER,
+            process_created_at INTEGER,
+            command_hash TEXT,
+            cancel_requested_at INTEGER,
+            end_reason TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            started_at INTEGER,
+            ended_at INTEGER,
+            UNIQUE (task_id, generation)
+        );
+        CREATE INDEX run_workspace ON run (workspace_id);
+        CREATE UNIQUE INDEX run_command_id ON run (command_id) WHERE command_id IS NOT NULL;
+        CREATE TABLE execution_lease (
+            run_id TEXT PRIMARY KEY REFERENCES run (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            generation INTEGER NOT NULL,
+            acquired_at INTEGER NOT NULL,
+            last_heartbeat_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            released_at INTEGER,
+            release_reason TEXT
+        );
+        CREATE UNIQUE INDEX execution_lease_one_held_per_task ON execution_lease (task_id)
+            WHERE released_at IS NULL;
+        CREATE TABLE outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,
+            run_id TEXT NOT NULL REFERENCES run (id),
+            payload TEXT NOT NULL CHECK (json_valid(payload)),
+            created_at INTEGER NOT NULL,
+            delivered_at INTEGER,
+            UNIQUE (kind, run_id)
         );",
     },
 ];

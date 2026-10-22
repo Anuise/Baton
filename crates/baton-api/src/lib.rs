@@ -1,10 +1,11 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
 
 mod authorization;
 mod guard;
+mod runs;
 mod tasks;
 mod workspaces;
 
@@ -21,7 +22,7 @@ use baton_ports::{Clock, PlatformInfo, WorkspaceFs};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
@@ -33,6 +34,7 @@ pub use tasks::{
     TaskDetail, UpdateContractRequest,
 };
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
+pub use runs::{run_cancel_path, run_path, runs_path, task_dispatch_path, RunList};
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
 /// 健康端點路徑。
@@ -90,6 +92,8 @@ pub struct ApiState {
     pub platform_info: Arc<dyn PlatformInfo>,
     pub workspace_fs: Arc<dyn WorkspaceFs>,
     pub log: LogSink,
+    /// 派工或要求取消之後通知 Supervisor 儘快處理（背景迴圈等待它；沒有背景迴圈時沒有作用）。
+    pub supervisor_wake: Arc<Notify>,
     /// Runtime 開始停止時變成 `true`；長連線（串流）據此結束，優雅停止才不會被它們卡住。
     pub shutdown: watch::Receiver<bool>,
 }
@@ -113,6 +117,10 @@ pub fn router(state: ApiState) -> Router {
         .route(tasks::ADMISSION_ROUTE, post(tasks::admission_check))
         .route(tasks::READY_ROUTE, post(tasks::mark_ready))
         .route(tasks::CANCEL_ROUTE, post(tasks::cancel))
+        .route(runs::DISPATCH_ROUTE, post(runs::dispatch))
+        .route(runs::RUNS_ROUTE, get(runs::list))
+        .route(runs::RUN_ROUTE, get(runs::detail))
+        .route(runs::CANCEL_ROUTE, post(runs::cancel))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)
