@@ -272,6 +272,7 @@ impl AgentAdapter for FakeAgentAdapter {
             args: vec![spec.run_id.clone()],
             working_dir: spec.working_dir.clone(),
             command_id: spec.command_id.clone(),
+            env: Vec::new(),
         }
     }
 

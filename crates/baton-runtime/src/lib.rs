@@ -99,7 +99,9 @@ impl Runtime {
 
         let (stop_tx, stop_rx) = watch::channel(false);
         let supervisor_wake = Arc::new(Notify::new());
-        let supervisor = Supervisor::new(store.clone(), ports.clone(), log.clone(), options.stop_grace);
+        let runtime_url = format!("http://{addr}");
+        let supervisor =
+            Supervisor::new(store.clone(), ports.clone(), log.clone(), credentials.clone(), runtime_url, options.stop_grace);
         let supervising = options
             .background_supervisor
             .then(|| supervisor.spawn_background(supervisor_wake.clone(), stop_rx.clone()));
@@ -178,7 +180,7 @@ impl RunningRuntime {
         self.addr_v6
     }
 
-    /// 簽發憑證的入口（Agent 憑證由後續的票使用）。
+    /// 簽發憑證的入口（Run 的 Agent 憑證由 Supervisor 在准入時簽發）。
     pub fn credentials(&self) -> &CredentialIssuer {
         &self.credentials
     }

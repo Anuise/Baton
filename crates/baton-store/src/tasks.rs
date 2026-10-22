@@ -4,6 +4,7 @@
 //! 寫入新狀態、契約版本、相依與事件」，以及唯讀的看板投影。範圍一律以 Workspace 為界。
 
 use baton_domain::authorization::AuthorizationRevision;
+use baton_domain::agent::ReportRecord;
 use baton_domain::run::{ExecutionLease, Run, RunView};
 use baton_domain::task::{
     self, ContractContent, Dependency, Goal, MissingItem, Task, TaskChange, TaskCommand, TaskContext, TaskContract,
@@ -52,6 +53,8 @@ pub(crate) struct Loaded {
     pub(crate) contracts: Vec<TaskContract>,
     pub(crate) runs: Vec<Run>,
     pub(crate) leases: Vec<ExecutionLease>,
+    /// 每個 Run 每種回報最新一筆被接受的回報（給面板顯示用）。
+    pub(crate) reports: Vec<ReportRecord>,
 }
 
 impl Loaded {
@@ -225,7 +228,8 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
 
     let runs = super::runs::load_runs(conn, workspace_id)?;
     let leases = super::runs::load_leases(conn, workspace_id)?;
-    Ok(Loaded { workspace, authorization, goals, tasks, dependencies, contracts, runs, leases })
+    let reports = super::agent::load_latest_reports(conn, workspace_id)?;
+    Ok(Loaded { workspace, authorization, goals, tasks, dependencies, contracts, runs, leases, reports })
 }
 
 fn contract_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskContract> {
@@ -238,7 +242,7 @@ fn contract_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskContract> {
     })
 }
 
-fn load_contract_history(conn: &Connection, task_id: &str) -> rusqlite::Result<Vec<TaskContract>> {
+pub(crate) fn load_contract_history(conn: &Connection, task_id: &str) -> rusqlite::Result<Vec<TaskContract>> {
     conn.prepare(
         "SELECT task_id, version, content, note, created_at FROM task_contract_version
          WHERE task_id = ?1 ORDER BY version",

@@ -39,6 +39,7 @@ impl AgentAdapter for TreeAdapter {
             args: ["/c", "cmd.exe", "/c", "ping", "-n", "60", "127.0.0.1"].map(String::from).to_vec(),
             working_dir: spec.working_dir.clone(),
             command_id: spec.command_id.clone(),
+            env: Vec::new(),
         }
     }
 

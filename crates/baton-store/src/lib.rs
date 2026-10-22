@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use baton_domain::auth::{CredentialRecord, Role};
+use baton_domain::auth::{AgentScope, CredentialRecord, Role};
 use baton_domain::authorization::{
     self, Admission, AdmissionDenied, AuthorizationError, AuthorizationRevision, Capability, ConfirmOutcome,
     ConfirmRequest,
@@ -24,8 +24,10 @@ use baton_domain::Timestamp;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
 
+mod agent;
 mod runs;
 mod tasks;
+pub use agent::AgentContext;
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 
@@ -246,6 +248,33 @@ const MIGRATIONS: &[Migration] = &[
             UNIQUE (kind, run_id)
         );",
     },
+    // Agent 憑證的範圍（票 11）：Workspace、Run 與世代；桌面憑證這三欄為空。每個 Run 最多一個憑證
+    Migration {
+        name: "agent_credential_scope",
+        sql: "ALTER TABLE credential ADD COLUMN workspace_id TEXT;
+        ALTER TABLE credential ADD COLUMN run_id TEXT REFERENCES run (id);
+        ALTER TABLE credential ADD COLUMN generation INTEGER;
+        CREATE UNIQUE INDEX credential_one_per_run ON credential (run_id) WHERE run_id IS NOT NULL;",
+    },
+    // Worker 回報的追加式稽核（票 11）：accepted = 0 是來自已不是寫入所有者的世代，內容保留但沒有改變任何狀態
+    Migration {
+        name: "agent_report",
+        sql: "CREATE TABLE agent_report (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            run_id TEXT NOT NULL REFERENCES run (id),
+            generation INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('progress', 'checkpoint', 'blocked')),
+            accepted INTEGER NOT NULL CHECK (accepted IN (0, 1)),
+            content TEXT NOT NULL CHECK (json_valid(content)),
+            received_at INTEGER NOT NULL
+        );
+        CREATE INDEX agent_report_run ON agent_report (run_id, kind, accepted);
+        CREATE TRIGGER agent_report_no_update BEFORE UPDATE ON agent_report
+        BEGIN SELECT RAISE(ABORT, 'agent_report 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER agent_report_no_delete BEFORE DELETE ON agent_report
+        BEGIN SELECT RAISE(ABORT, 'agent_report 是追加式資料表，不可刪除'); END;",
+    },
 ];
 
 /// 一個連線上實際生效的 PRAGMA（啟動時讀回驗證的對象）。
@@ -397,13 +426,18 @@ impl Store {
             if revoke_same_role {
                 tx.execute("DELETE FROM credential WHERE role = ?1", [record.role.as_str()])?;
             }
+            let scope = record.scope.as_ref();
             tx.execute(
-                "INSERT INTO credential (token_hash, role, issued_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO credential (token_hash, role, issued_at, expires_at, workspace_id, run_id, generation)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     record.token_hash,
                     record.role.as_str(),
                     record.issued_at.as_millis(),
                     record.expires_at.map(|t| t.as_millis()),
+                    scope.map(|s| s.workspace_id.as_str()),
+                    scope.map(|s| s.run_id.as_str()),
+                    scope.map(|s| s.generation),
                 ],
             )?;
             Ok(())
@@ -417,21 +451,38 @@ impl Store {
         self.read(move |conn| {
             let row = conn
                 .query_row(
-                    "SELECT role, issued_at, expires_at FROM credential WHERE token_hash = ?1",
+                    "SELECT role, issued_at, expires_at, workspace_id, run_id, generation
+                     FROM credential WHERE token_hash = ?1",
                     [&token_hash],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, Option<i64>>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                            r.get::<_, Option<String>>(4)?,
+                            r.get::<_, Option<i64>>(5)?,
+                        ))
+                    },
                 )
                 .map(Some)
                 .or_else(|e| match e {
                     rusqlite::Error::QueryReturnedNoRows => Ok(None),
                     other => Err(other),
                 })?;
-            Ok(row.and_then(|(role, issued_at, expires_at)| {
+            Ok(row.and_then(|(role, issued_at, expires_at, workspace_id, run_id, generation)| {
+                let scope = match (workspace_id, run_id, generation) {
+                    (Some(workspace_id), Some(run_id), Some(generation)) => {
+                        Some(AgentScope { workspace_id, run_id, generation })
+                    }
+                    _ => None,
+                };
                 Some(CredentialRecord {
                     token_hash,
                     role: Role::parse(&role)?,
                     issued_at: Timestamp::from_millis(issued_at),
                     expires_at: expires_at.map(Timestamp::from_millis),
+                    scope,
                 })
             }))
         })
@@ -790,6 +841,7 @@ mod tests {
             role: Role::Desktop,
             issued_at: Timestamp::from_millis(10),
             expires_at: expires_at.map(Timestamp::from_millis),
+            scope: None,
         }
     }
 
