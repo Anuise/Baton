@@ -99,6 +99,8 @@ pub(crate) async fn answer(
     if !result.resumed_task_ids.is_empty() {
         state.supervisor_wake.notify_one();
     }
+    // 正式裁定是重要裁定：要求備份（同一小時內的要求合併為一次，冪等重送也不會多備份）
+    (state.request_backup)("正式裁定");
     Ok(Json(result))
 }
 

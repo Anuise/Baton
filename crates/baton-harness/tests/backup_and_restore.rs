@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use baton_domain::agent::TOOL_REQUEST_DECISION;
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::auth::hash_token;
 use baton_domain::Timestamp;
@@ -274,7 +275,7 @@ async fn backups_contain_no_credentials_or_native_login_data() {
     let native_login = std::fs::read(config_dir.join(".credentials.json")).unwrap();
 
     harness.run_backups().await;
-    harness.request_milestone_backup("重要裁定").await;
+    harness.request_milestone_backup("重要裁定");
     harness.clock.set(CLOCK_START.plus_millis(HOUR));
     harness.run_backups().await;
 
@@ -381,14 +382,14 @@ async fn backups_are_taken_daily_and_after_milestones_at_most_once_an_hour() {
 
     // 距離上一份備份不到一小時：重要裁定與 Stage 完成的要求先等待，滿一小時後合併成一份
     harness.clock.set(at(HOUR + 10 * 60 * 1000));
-    harness.request_milestone_backup("重要裁定").await;
+    harness.request_milestone_backup("重要裁定");
     harness.run_backups().await;
     assert_eq!(latest().await.1, at(HOUR + 10 * 60 * 1000).as_millis(), "距離上一份已滿一小時：立刻備份");
     harness.clock.set(at(HOUR + 20 * 60 * 1000));
-    harness.request_milestone_backup("Stage 完成").await;
+    harness.request_milestone_backup("Stage 完成");
     harness.run_backups().await;
     harness.clock.set(at(HOUR + 50 * 60 * 1000));
-    harness.request_milestone_backup("重要裁定").await;
+    harness.request_milestone_backup("重要裁定");
     harness.run_backups().await;
     assert_eq!(latest().await.1, at(HOUR + 10 * 60 * 1000).as_millis(), "同一小時內的要求還在等待");
     harness.clock.set(at(2 * HOUR + 10 * 60 * 1000));
@@ -406,6 +407,45 @@ async fn backups_are_taken_daily_and_after_milestones_at_most_once_an_hour() {
     harness.clock.set(at(last + DAY));
     harness.run_backups().await;
     assert_eq!(latest().await, ("daily".into(), at(last + DAY).as_millis()));
+}
+
+#[tokio::test]
+async fn answering_a_decision_requests_a_backup() {
+    let harness = harness().await;
+    let ws = new_workspace(&harness).await;
+    let tid = ready_task(&harness, &ws, "整理").await;
+    let rid = dispatch(&harness, &ws, &tid).await;
+    harness.supervise().await;
+    let token = harness.agent_credential(&rid).unwrap();
+    harness.run_backups().await;
+    let request = json!({
+        "question": "要先出貨還是等報表？",
+        "reason": "取決於使用者價值",
+        "options": [
+            { "id": "ship", "label": "先出貨", "tradeoff": "快，但缺少報表" },
+            { "id": "wait", "label": "等報表完成", "tradeoff": "晚一週" },
+        ],
+        "recommendation": "wait",
+        "evidence": [],
+        "urgency": "high",
+    });
+    let (status, requested) = harness.call_tool(&token, TOOL_REQUEST_DECISION, request).await;
+    assert_eq!(status, StatusCode::OK, "{requested}");
+    let request_id = requested["decision_request_id"].as_str().unwrap();
+
+    // 只是提出請求不會備份；使用者正式裁定之後，下一次處理就建立重要裁定的備份
+    harness.clock.set(CLOCK_START.plus_millis(2 * HOUR));
+    harness.run_backups().await;
+    assert_eq!(backup_status(&harness).await["backups"][0]["trigger"], "daily");
+    let (status, answered) = harness
+        .send_json(Method::POST, &format!("{WORKSPACES}/{ws}/decisions/{request_id}/answer"), Some(json!({ "option_id": "wait" })))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    harness.run_backups().await;
+
+    let status = backup_status(&harness).await;
+    assert_eq!(status["backups"][0]["trigger"], "milestone");
+    assert_eq!(status["backups"][0]["created_at"], CLOCK_START.plus_millis(2 * HOUR).as_millis());
 }
 
 #[tokio::test]

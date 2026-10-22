@@ -260,8 +260,8 @@ impl Harness {
     }
 
     /// 重要裁定或 Stage 完成：要求備份（下一次 `run_backups` 處理）。
-    pub async fn request_milestone_backup(&self, reason: &str) {
-        self.runtime.as_ref().expect("Runtime 尚未啟動").backups().request_milestone_backup(reason).await;
+    pub fn request_milestone_backup(&self, reason: &str) {
+        self.runtime.as_ref().expect("Runtime 尚未啟動").backups().request_milestone_backup(reason);
     }
 
     /// 備份根目錄（`<資料目錄>/backups`）。

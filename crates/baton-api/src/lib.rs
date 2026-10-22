@@ -83,6 +83,10 @@ pub const EVENTS_PATH: &str = "/api/v1/events";
 /// 請求紀錄的輸出位置；內容不含憑證、查詢字串或實際 URL。
 pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// 要求一次重要裁定或 Stage 完成後的備份（票 40，spec D-18）；參數是原因，只用於日誌。
+/// 由 Runtime 的備份排程實作，同一小時內的要求合併為一次。
+pub type BackupRequestSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// 平台狀態端點路徑。
 pub const PLATFORM_PATH: &str = "/api/v1/platform";
 
@@ -139,6 +143,8 @@ pub struct ApiState {
     pub log: LogSink,
     /// 派工或要求取消之後通知 Supervisor 儘快處理（背景迴圈等待它；沒有背景迴圈時沒有作用）。
     pub supervisor_wake: Arc<Notify>,
+    /// 正式裁定之後要求備份。
+    pub request_backup: BackupRequestSink,
     /// Runtime 開始停止時變成 `true`；長連線（串流）據此結束，優雅停止才不會被它們卡住。
     pub shutdown: watch::Receiver<bool>,
 }

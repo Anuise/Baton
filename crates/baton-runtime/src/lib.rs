@@ -112,6 +112,10 @@ impl Runtime {
             .then(|| supervisor.spawn_background(supervisor_wake.clone(), stop_rx.clone()));
         let backups = BackupScheduler::new(store.clone(), config.data_dir.clone(), ports.clock.clone(), log.clone());
         let backing_up = options.background_backup.then(|| backups.spawn_background(stop_rx.clone()));
+        let request_backup: baton_api::BackupRequestSink = {
+            let backups = backups.clone();
+            Arc::new(move |reason: &str| backups.request_milestone_backup(reason))
+        };
         let app = baton_api::router(ApiState {
             boot_count,
             started_at,
@@ -126,6 +130,7 @@ impl Runtime {
             user_settings: ports.user_settings.clone(),
             log,
             supervisor_wake,
+            request_backup,
             shutdown: stop_rx.clone(),
         });
         let task = tokio::spawn(async move {
