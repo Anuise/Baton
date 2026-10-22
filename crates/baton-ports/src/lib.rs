@@ -19,7 +19,7 @@ pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
 pub use secret::SecretProtector;
-pub use workspace_fs::{DirtyState, WorkspaceFs};
+pub use workspace_fs::{directory_state, DirectoryState, DirtyState, WorkspaceFs};
 
 /// Port 呼叫的共同錯誤。
 #[derive(Debug, thiserror::Error)]

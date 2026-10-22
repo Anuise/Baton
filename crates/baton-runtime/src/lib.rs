@@ -75,6 +75,7 @@ impl Runtime {
             store: store.clone(),
             clock: ports.clock.clone(),
             platform_info: ports.platform_info.clone(),
+            workspace_fs: ports.workspace_fs.clone(),
             log,
             shutdown: stop_rx.clone(),
         });

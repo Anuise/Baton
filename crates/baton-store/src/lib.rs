@@ -339,7 +339,7 @@ impl Store {
         Ok(outcome?)
     }
 
-    /// 全部 Workspace（含已封存），依建立順序排列。
+    /// 全部 Workspace（含已封存），依建立順序排列（以寫入順序為準，同一毫秒建立的也不會亂序）。
     pub async fn list_workspaces(&self) -> StoreResult<Vec<Workspace>> {
         self.read(|conn| Ok(load_workspaces(conn)?)).await
     }
@@ -373,7 +373,7 @@ fn applied_version(conn: &Connection) -> StoreResult<usize> {
 
 fn load_workspaces(conn: &Connection) -> rusqlite::Result<Vec<Workspace>> {
     let mut statement = conn.prepare(
-        "SELECT id, name, path, status, version, created_at, archived_at FROM workspace ORDER BY created_at, id",
+        "SELECT id, name, path, status, version, created_at, archived_at FROM workspace ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |r| {
         let status: String = r.get(3)?;
@@ -887,6 +887,22 @@ mod tests {
         assert_eq!(store.list_workspaces().await.unwrap().len(), 1);
         let events: i64 = raw(dir.path()).query_row("SELECT COUNT(*) FROM event", [], |r| r.get(0)).unwrap();
         assert_eq!(events, 1);
+    }
+
+    #[tokio::test]
+    async fn workspaces_created_in_the_same_millisecond_keep_creation_order_even_after_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        let now = Timestamp::from_millis(1);
+        // id 刻意不依字母順序，排序不可依賴 id
+        for (id, path) in [("zz", r"C:\a"), ("aa", r"C:\b"), ("mm", r"C:\c")] {
+            store.apply_workspace_command(create(id, path), now).await.unwrap();
+        }
+        store.apply_workspace_command(WorkspaceCommand::Archive { id: "zz".into() }, now).await.unwrap();
+
+        let ids: Vec<String> = store.list_workspaces().await.unwrap().into_iter().map(|w| w.id).collect();
+
+        assert_eq!(ids, ["zz", "aa", "mm"]);
     }
 
     #[tokio::test]
