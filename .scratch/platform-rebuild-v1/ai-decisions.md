@@ -3259,6 +3259,92 @@
 - 影響：用本票較早的分支（migration 35 是 `cross_login_startup`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R120）提到的 AI-350～AI-355、migration 35 是改號前的編號，分別對應現在的 AI-355～AI-360、migration 36。
 - 審閱：未審
 
+### AI-362：更新的檢查、下載與驗章由 Runtime 負責（UpdateSource Port），桌面殼只執行已驗證的安裝程式；不使用 tauri-plugin-updater
+- 重要度：高
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：Runtime 新增 `UpdateSource` Port（`latest`、`download`），由 `UpdateService` 在啟動時與每 24 小時檢查一次，結果只存在記憶體，只顯示通知。使用者同意後，`POST /api/v1/updates/apply` 先下載安裝程式並以 minisign 公鑰驗證簽章（與 Tauri 更新程式相同的格式，`minisign-verify` crate），通過才開始維護；桌面殼的 `update_install` 只等 Runtime 結束，再以 `/P /UPDATE /R` 執行這個已驗證的檔案並結束 App。不加入 `tauri-plugin-updater`。
+- 理由：「只通知、使用者同意後才維護」與維護的各步驟都在 Runtime，可以用主要 seam（harness 的 fake 更新來源）測試；先下載驗章再停止工作，壞掉或被竄改的安裝程式不會讓工作白白停下。外掛只能在桌面殼內執行，App 沒開時無法檢查；它的下載與安裝也無法插入「維護抑制 → 停止流程 → 備份」這幾步。
+- 替代方案：(1) 桌面殼用 tauri-plugin-updater 檢查與安裝：程式碼較少，但規則落在無法以 harness 測試的殼裡，且外掛的安裝流程會直接結束 App，不經停止流程。(2) Runtime 只檢查、殼用外掛下載安裝：兩處各抓一次清單，驗章時機在停止之後。
+- 影響：Runtime 新增 `reqwest`（native-tls）、`minisign-verify`、`base64` 相依。安裝程式的 `/P /UPDATE /R` 參數取自 Tauri 2.12 的 NSIS 樣板（`.onInstSuccess` 的 `/R` 重新開啟、`/UPDATE` 保留捷徑與 HKCU Run 值），屬 Validation Required。
+- 審閱：未審
+
+### AI-363：更新清單網址與簽章公鑰在建置時設定；沒有設定就是「未設定更新來源」
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：正式版更新來源讀取建置時的環境變數 `BATON_UPDATE_ENDPOINT`（Tauri 格式 `latest.json` 的網址，平台鍵 `windows-x86_64-nsis` 或 `windows-x86_64`）與 `BATON_UPDATE_PUBKEY`（`tauri signer generate` 的公鑰，base64），以 `option_env!` 編進 Runtime。任一個沒有設定時，Port 回 `NotImplemented`，更新狀態是 `unconfigured`，不連線、不能套用。單元測試用 `tauri signer` 產生的測試公鑰與簽章（私鑰產生後即刪除、沒有進 repo）。
+- 理由：repo 目前沒有發行網址與簽章金鑰；寫死一個網址或把私鑰放進 repo 都不對。建置時設定讓發行者自行決定託管位置與保管金鑰，開發版也不會意外連線。
+- 替代方案：(1) 執行時讀環境變數：使用者機器上沒有人會設定，而且可以被改成任意網址（公鑰仍會擋下未簽章的檔案，但清單會被誤導）。(2) 寫死 GitHub Releases 網址：repo 名稱與發行流程都還沒定（D-03 的改名票在最後）。
+- 影響：在發行流程建立之前，所有建置都顯示「未設定更新來源」，更新流程只在 harness 與單元測試中被驗證。發行者需要保管簽章私鑰並託管 `latest.json`（尚未決定，已記在開發指南的 Validation Required）。
+- 審閱：未審
+
+### AI-364：更新的維護順序：下載驗章 → 同一交易持久化維護與停止意圖 → 停止流程 → 更新前備份 → 準備套用；備份失敗就不套用
+- 重要度：高
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：`maintenance` 單列表（migration 37）記錄進行中的維護（`kind`、`phase = stopping | ready | failed`、來源與目標版本、安裝程式路徑、備份識別、訊息）與最近一次結束的結果。開始維護與 `lifecycle::request_exit` 在同一個交易；生命週期檔一律由 `Store::lifecycle_mirror` 產生，維護中的每次鏡像都帶著維護抑制（修正 AI-315 提到的覆蓋問題）。停止流程沿用完全退出（30 + 10 秒、Run 以 `interrupted` 結束、Task 重新排隊）。之後更新做一份觸發原因 `pre_update` 的備份（依一般保留規則），成功進入 `ready`，失敗進入 `failed` 且不套用；Runtime 照完全退出的規則再提供 API 5 秒後結束。完全退出進行中不能開始維護（409 `stop_intent_active`）；同一種維護的重複要求是冪等的，另一種維護進行中回 409 `maintenance_in_progress`。停止異常不阻擋更新：Web UI 列出異常，要使用者按「仍要安裝更新並重新開啟」才安裝；沒有異常就自動安裝。
+- 理由：spec D-19 的順序是「維護抑制 → 停止流程 → 備份 → 套用」；同一交易避免只寫入其中一個；備份是套用的前提，失敗時不冒險。停止異常指的是 Worker 程序，不影響替換 Baton 的執行檔，但使用者應該知道。
+- 替代方案：(1) 先停止再下載：下載失敗時工作已經白停。(2) 完全退出進行中也接受維護並接續：狀態組合變多，而 App 在完全退出後本來就會結束。(3) 有停止異常就拒絕更新：使用者無法自行判斷是否要繼續。
+- 影響：備份失敗時 Baton 仍會完全退出，下次手動開啟依完全退出的規則續跑。更新前備份與更新後第一次啟動的 migration 前備份內容相同，同一天只保留較新的那份。
+- 審閱：未審
+
+### AI-365：只有手動開啟（含安裝程式代為開啟）才結束維護；結束後依 DR-01 重新開啟
+- 重要度：高
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：維護抑制一直留在生命週期檔，直到使用者手動開 App（或安裝程式以 `/R` 代為開啟）啟動的 Runtime 結束維護。這時 Runtime 記下結果：來源版本、執行中的版本，以及是否已套用（有目標版本時以「執行中的版本 = 目標版本」判斷；安裝程式直接要求的更新以「版本有變」判斷；解除安裝為 `null`）。接著依資料庫重寫生命週期檔以清除維護抑制，並刪除 `<資料目錄>\updates`。停止意圖仍在，之後由 Supervisor 依 DR-01 核對，再依各 Workspace 的「完全退出後自動續跑」續跑，不因為是更新就全部續跑。監護與登入啟動入口看到維護抑制都不拉起 Runtime；兩者並存時，`guardian::suppression_of` 改為優先回報較具體的 `Maintenance`。
+- 理由：驗收條件是「更新期間監護與登入啟動不會拉起 Runtime」。安裝時間不定，可能跨越重新登入，以手動開啟作為結束點最保守，也與 DR-01「完全退出後只有手動開 App 才重新開啟」一致。
+- 替代方案：(1) 以版本變化自動結束維護（任何啟動方式都可以）：安裝程式還沒換完檔案時，監護就可能拉起舊版。(2) 更新後一律續跑全部 Workspace：違反各 Workspace 設定。
+- 影響：安裝程式被取消、而使用者遲遲沒有開 App 時，登入啟動會一直受抑制，直到下次手動開啟。升級前的版本沒有這張表，第一次啟動時 migration 37 建立空表。
+- 審閱：未審
+
+### AI-366：解除安裝由 NSIS hook 執行 `baton-runtime.exe maintenance prepare-uninstall`；登入啟動的偏好保留在資料目錄中
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：
+  - **PREUNINSTALL hook**（更新模式除外）執行準備步驟：
+    - 有 Runtime：要求 `uninstall` 維護。Runtime 執行停止流程、移除 HKCU Run 登記、進入 `ready` 後結束，準備步驟等它不再回應。
+    - 沒有 Runtime：直接在生命週期檔加上維護抑制（保留既有的停止抑制；讀不懂的檔案另記為停止）。
+    - 兩種情況最後都等 Runtime 與監護的程序結束（依 `guardian\runtime.json`、`guardian.json`），再移除一次登記。
+    - 生命週期檔已有更新的維護時，什麼都不做。
+    - 每一步失敗都只記下來，不讓解除安裝程式失敗。
+  - **PREINSTALL hook**：覆蓋安裝時以同一個程式的 `prepare-update` 讓舊版完成更新的維護（不下載），並等程序結束。
+  - **登入啟動的偏好**：留在控制資料庫，不改成關閉；重新安裝後第一次手動開啟時，依偏好重新登記。
+  - **資料目錄與埠**：取自環境變數，沒有設定時用預設值，不解析 HKCU Run 的命令列。
+- 理由：
+  - Tauri 的解除安裝程式只檢查 `baton-desktop.exe` 是否在執行。Runtime 與監護不先結束，檔案會刪不掉，監護也可能在刪檔途中拉起 Runtime。
+  - 準備步驟放在 Runtime 執行檔，可以沿用登錄、桌面用戶端與生命週期檔的既有程式碼。
+  - 資料目錄保留，偏好也一併保留，與「資料預設保留」一致。
+- 替代方案：
+  - (1) hook 直接 `taskkill`：等同崩潰，下次會走崩潰恢復，也不尊重停止流程。
+  - (2) 解除安裝時把偏好改成關閉：重新安裝後要再開一次。
+  - (3) 從 HKCU Run 的命令列解析資料目錄：只有開啟登入啟動時才有這個值，而且自訂資料目錄只有開發者會用。
+- 影響：
+  - 使用自訂資料目錄（`BATON_DATA_DIR`）的安裝，準備步驟找不到它的 Runtime，只能靠 Tauri 解除安裝程式本身刪除 HKCU Run 的 `Baton` 值。
+  - 重新安裝並開啟後，若偏好是開啟，會自動恢復登入啟動。
+- 審閱：未審
+
+### AI-367：安裝資料夾沿用 Tauri 的預設 `%LOCALAPPDATA%\Baton`，與資料目錄相同
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：不自訂 NSIS 樣板，單使用者安裝的預設安裝資料夾維持 Tauri 的 `$LOCALAPPDATA\${PRODUCTNAME}`。這個位置與 spec D-17 的資料目錄預設 `%LOCALAPPDATA%\Baton` 相同。
+- 理由：已查看 Tauri 2.12 的 NSIS 樣板。解除安裝程式只刪除它安裝的檔案與 `uninstall.exe`，再以不遞迴的 `RMDir` 移除安裝資料夾，所以資料目錄的內容不會被刪除。「刪除應用程式資料」的勾選只刪除 `%LOCALAPPDATA%\app.baton.desktop`（WebView 資料）。若要換安裝資料夾，就得維護一份自訂樣板，每次升級 Tauri 都要同步。
+- 替代方案：自訂樣板改成 `%LOCALAPPDATA%\Programs\Baton`，執行檔與資料分開較乾淨，但要長期維護樣板。
+- 影響：資料目錄裡會混著執行檔。日後若 Tauri 的解除安裝程式改成遞迴刪除安裝資料夾，資料會被刪掉；升級 Tauri 時必須重新確認（已記在開發指南）。
+- 審閱：未審
+
+### AI-368：維護與更新的 API、事件、資料形狀與 harness 擴充
+- 重要度：低
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：
+  - **端點**：`GET /api/v1/updates`（檢查結果 + `maintenance` + `last_maintenance`；不回傳下載網址與簽章）、`POST /api/v1/updates/apply`（`{ version }`）、`POST /api/v1/maintenance`（`{ kind }`）。錯誤代碼：`update_not_available`、`updates_unconfigured`、`update_download_failed`、`stop_intent_active`、`maintenance_in_progress`。
+  - **事件與備份**：`maintenance` 聚合有 `maintenance_requested`、`maintenance_ready`、`maintenance_failed`、`maintenance_finished`。`BackupTrigger` 新增 `pre_update`。
+  - **健康查詢**：`version` 改報 Runtime 的版本（`RuntimeOptions::app_version`）。
+  - **桌面殼指令**：`update_status`、`update_apply`、`update_install`。
+  - **Web UI**：主區頂端的 `UpdateNotice`（每 60 秒讀一次）、`UpdateProgress`（每 0.5 秒讀一次，沿用完全退出的停止進度）、設定區的 `UpdateSettings`。解除安裝的維護沒有畫面。重新開啟後的結果通知只在同一次 Runtime 啟動內顯示。
+  - **Harness**：`FakeUpdateSource`、`check_updates`、`install_version`、`HarnessBuilder::exit_linger`。
+- 理由：更新與維護是同一件事的兩面，放在同一組端點；版本由選項注入，harness 才能模擬「安裝程式換上新版本」。
+- 替代方案：把維護放進 `GET /api/v1/lifecycle`：生命週期總覽已經很大，而且更新通知需要的是檢查結果。
+- 影響：其他平行的票若也新增第 37 個 migration，整合時依編號規則順延後合併的那一個。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
