@@ -12,7 +12,7 @@ use baton_api::{
     admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview,
     SHA256_HEADER, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
-    task_path, task_ready_path, tasks_path, QueuedDispatch, SchedulingOverview, UpdateSchedulingSettingsRequest,
+    task_accept_path, task_path, task_ready_path, task_verification_path, tasks_path, AcceptTaskRequest, QueuedDispatch, SchedulingOverview, UpdateSchedulingSettingsRequest,
     SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
     CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse,
@@ -25,6 +25,7 @@ use baton_domain::profile::ProfileView;
 use baton_domain::run::RunView;
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::task::{ContractContent, Goal, TaskView};
+use baton_domain::verification::VerificationView;
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
@@ -250,6 +251,21 @@ impl RuntimeClient {
     /// 否則排進佇列並回傳等待原因；Task 不能派（不是 ready、契約失效）時回傳 `ClientError::Rejected`。
     pub async fn dispatch_task(&self, workspace_id: &str, task_id: &str) -> Result<DispatchOutcome, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &task_dispatch_path(workspace_id, task_id), None).await
+    }
+
+    /// 一個 Task 的驗證狀況：接受基礎、宣告的檢查、成果 manifest 與歷次驗證紀錄。
+    pub async fn task_verification(&self, workspace_id: &str, task_id: &str) -> Result<VerificationView, ClientError> {
+        self.get_json(&task_verification_path(workspace_id, task_id)).await
+    }
+
+    /// 使用者手動接受成果；Run 世代、契約版本或成果 manifest 與 `basis` 不符時回傳 `ClientError::Rejected`。
+    pub async fn accept_task(
+        &self,
+        workspace_id: &str,
+        task_id: &str,
+        request: &AcceptTaskRequest,
+    ) -> Result<VerificationView, ClientError> {
+        self.send_json(reqwest::Method::POST, &task_accept_path(workspace_id, task_id), Some(request)).await
     }
 
     /// 排程總覽：容量、各帳號進行中的 Run、佇列與等待原因。

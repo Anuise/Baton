@@ -26,7 +26,7 @@ const client = {
   getAuthorization: vi.fn(async () => {
     throw new Error("授權讀取失敗");
   }),
-  getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [] })),
+  getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [], verifications: [] })),
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
 } as unknown as AppClient;
 

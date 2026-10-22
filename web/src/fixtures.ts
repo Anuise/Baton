@@ -7,6 +7,8 @@ import type {
   SchedulingOverview,
   SetupStatus,
   ToolCheck,
+  VerificationRecord,
+  VerificationView,
 } from "./runtimeClient";
 
 /** 測試用的平台狀態：Windows 11 26H2 Pro x64，正式支援。 */
@@ -199,6 +201,51 @@ export function schedulingOverview(overrides: Partial<SchedulingOverview> = {}):
     },
     accounts: [accountScheduling()],
     queue: [],
+    ...overrides,
+  };
+}
+
+/** 測試用的成果雜湊（64 位小寫十六進位）。 */
+export const REPORT_SHA256 = "0123456789abcdef".repeat(4);
+
+/** 測試用的驗證資料：task_1 在 verifying，第 1 次 Run 產生 report.md v1，Runtime 會自動執行兩項檢查。 */
+export function verificationView(overrides: Partial<VerificationView> = {}): VerificationView {
+  return {
+    task_id: "task_1",
+    status: "verifying",
+    basis: {
+      run_id: "run_1",
+      generation: 1,
+      contract_version: 1,
+      artifacts: [{ artifact_id: "art_1", version: 1 }],
+    },
+    checks: [
+      { kind: "command", program: "cargo", args: ["test"], expected_exit_code: 0 },
+      { kind: "artifact", name: "report.md", sha256: null },
+    ],
+    artifacts: [{ artifact_id: "art_1", name: "report.md", version: 1, sha256: REPORT_SHA256 }],
+    automatic: true,
+    records: [],
+    ...overrides,
+  };
+}
+
+/** 測試用的驗證紀錄：task_1 第 1 次 Run 的自動檢查通過。 */
+export function verificationRecord(overrides: Partial<VerificationRecord> = {}): VerificationRecord {
+  return {
+    id: "ver_1",
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    run_id: "run_1",
+    generation: 1,
+    contract_version: 1,
+    method: "checks",
+    outcome: "passed",
+    checks: [],
+    artifacts: [{ artifact_id: "art_1", name: "report.md", version: 1, sha256: REPORT_SHA256 }],
+    accepted_by: null,
+    note: null,
+    decided_at: CHECKED_AT,
     ...overrides,
   };
 }
