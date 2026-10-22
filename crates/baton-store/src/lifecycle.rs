@@ -229,6 +229,17 @@ impl Store {
         run_id: &str,
         now: Timestamp,
     ) -> Result<RunChange, RunApplyError> {
+        self.stop_run_and_requeue(workspace_id, run_id, RUN_STOPPED_BY_EXIT_REASON, now).await
+    }
+
+    /// 程序已確認停止的 Run：以 `reason` 中斷並讓 Task 重新排隊；已要求取消的則完成取消（完全退出與崩潰恢復共用）。
+    pub(crate) async fn stop_run_and_requeue(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+        reason: &'static str,
+        now: Timestamp,
+    ) -> Result<RunChange, RunApplyError> {
         let (workspace_id, run_id) = (workspace_id.to_string(), run_id.to_string());
         let outcome = self
             .write(move |tx| {
@@ -240,7 +251,7 @@ impl Store {
                 let command = if cancelling {
                     RunCommand::ConfirmCancelled { run_id: run_id.clone() }
                 } else {
-                    RunCommand::Interrupt { run_id: run_id.clone(), reason: RUN_STOPPED_BY_EXIT_REASON.to_string() }
+                    RunCommand::Interrupt { run_id: run_id.clone(), reason: reason.to_string() }
                 };
                 let change = match decide_in(&loaded, &workspace_id, &loaded.tasks, command, now) {
                     Ok(change) => change,
@@ -268,14 +279,18 @@ pub(crate) fn halt_for(conn: &Connection, workspace: Option<&Workspace>, workspa
     let state = load_lifecycle(conn)?;
     let lifecycle = lifecycle::workspace_lifecycle_of(&load_workspace_lifecycles(conn)?, workspace_id);
     let name = workspace.map(|w| w.name.as_str()).unwrap_or(workspace_id);
-    Ok(lifecycle::dispatch_halt(&state, &lifecycle, name))
+    match lifecycle::dispatch_halt(&state, &lifecycle, name) {
+        Some(halt) => Ok(Some(halt)),
+        // 崩潰恢復尚未完成或已用盡時同樣不派工（票 31）
+        None => super::recovery::recovery_halt(conn),
+    }
 }
 
 /// 啟動程序前的最後一道檢查。
 pub(crate) fn launch_halted_in(conn: &Connection, workspace_id: &str) -> rusqlite::Result<bool> {
     let state = load_lifecycle(conn)?;
     let lifecycle = lifecycle::workspace_lifecycle_of(&load_workspace_lifecycles(conn)?, workspace_id);
-    Ok(lifecycle::launch_halted(&state, &lifecycle))
+    Ok(lifecycle::launch_halted(&state, &lifecycle) || super::recovery::recovery_halt(conn)?.is_some())
 }
 
 // ---------------------------------------------------------------- 讀寫

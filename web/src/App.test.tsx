@@ -48,6 +48,7 @@ const client = {
   pendingDecisions: vi.fn(async () => ({ pending_count: 1, by_workspace: [{ workspace_id: "ws_1", pending_count: 1 }] })),
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
   backupStatus: vi.fn(async () => ({ backups: [], latest_drill: null })),
+  recoveryStatus: vi.fn(async () => ({ event: null, max_attempts: 3, can_retry: false, blocking: null })),
   listKnowledge: vi.fn(async () => ({ search_mode: "full_text", entries: [] })),
   listGuards: vi.fn(async () => ({ guards: [] })),
 } as unknown as AppClient;

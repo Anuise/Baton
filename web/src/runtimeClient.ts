@@ -1605,6 +1605,72 @@ export interface BackupClient {
   backupStatus(): Promise<BackupStatus>;
 }
 
+/** 恢復事件的狀態：等待（第一次立即、之後為退避）、嘗試中、穩定觀察中、已恢復、恢復額度用盡。 */
+export type RecoveryStatus = "waiting" | "attempting" | "observing" | "succeeded" | "exhausted";
+
+export type AttemptOutcome = "in_progress" | "observing" | "succeeded" | "failed";
+
+/** 對受影響 Run 的處置：重新排隊、完成取消、無法確認舊程序停止。 */
+export type RunDisposition = "requeued" | "cancelled" | "unconfirmed";
+
+/** 受影響的工作（對應 Rust 的 AffectedRun）。 */
+export interface AffectedRun {
+  run_id: string;
+  workspace_id: string;
+  task_id: string;
+  disposition: RunDisposition;
+  message: string | null;
+}
+
+/** 一次恢復嘗試；`(round, seq)` 在同一事件中唯一。時間是 UTC 毫秒。 */
+export interface RecoveryAttempt {
+  id: string;
+  round: number;
+  seq: number;
+  started_at: number;
+  finished_at: number | null;
+  outcome: AttemptOutcome;
+  failure: string | null;
+  affected: AffectedRun[];
+}
+
+/** 恢復事件（對應 Rust 的 RecoveryEvent）；`attempts` 含所有輪次，依開始順序。 */
+export interface RecoveryEvent {
+  id: string;
+  /** 從 1 開始；每次「重新嘗試恢復」加一。 */
+  round: number;
+  status: RecoveryStatus;
+  /** 本輪已用掉的嘗試次數。 */
+  attempts_used: number;
+  detected_at: number;
+  /** 退避期限：只有 `waiting` 有值。 */
+  next_attempt_at: number | null;
+  /** 穩定觀察的期滿時間：只有 `observing` 有值。 */
+  observe_until: number | null;
+  last_failure: string | null;
+  closed_at: number | null;
+  version: number;
+  updated_at: number;
+  attempts: RecoveryAttempt[];
+}
+
+/** 崩潰恢復總覽（對應 Rust 的 RecoveryStatusView）。 */
+export interface RecoveryStatusView {
+  /** 從未發生過崩潰為 null。 */
+  event: RecoveryEvent | null;
+  max_attempts: number;
+  /** 恢復額度用盡：可以「重新嘗試恢復」。 */
+  can_retry: boolean;
+  /** 不為 null 時派工被擋。 */
+  blocking: WaitReason | null;
+}
+
+/** 崩潰恢復：查詢恢復事件與「重新嘗試恢復」（只在恢復額度用盡時被接受）。 */
+export interface RecoveryClient {
+  recoveryStatus(): Promise<RecoveryStatusView>;
+  retryRecovery(): Promise<RecoveryStatusView>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -1616,6 +1682,7 @@ export type AppClient = RuntimeClient &
   ArtifactClient &
   SharedSettingsClient &
   BackupClient &
+  RecoveryClient &
   KnowledgeClient &
   GuardClient;
 
@@ -1640,6 +1707,7 @@ const LIFECYCLE_PATH = "/api/v1/lifecycle";
 export const FULL_EXIT_EVENT = "baton://full-exit-requested";
 const SHARED_SETTINGS_PATH = "/api/v1/shared-settings";
 const BACKUPS_PATH = "/api/v1/backups";
+const RECOVERY_PATH = "/api/v1/recovery";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
@@ -1776,6 +1844,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     setQuotaLimits: (profileId, limits) =>
       send(`${PROFILES_PATH}/${encodeURIComponent(profileId)}/quota-limits`, { method: "PUT", body: limits }),
     backupStatus: () => send(BACKUPS_PATH),
+    recoveryStatus: () => send(RECOVERY_PATH),
+    retryRecovery: () => send(`${RECOVERY_PATH}/retry`, { method: "POST" }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
     lifecycleStatus: () => send(LIFECYCLE_PATH),
@@ -1898,6 +1968,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     setSchedulingMode: (mode) => call<SchedulingOverview>("scheduling_set_mode", { mode }),
     setQuotaLimits: (id, limits) => call<SchedulingOverview>("profile_set_quota_limits", { id, limits }),
     backupStatus: () => call<BackupStatus>("backup_status"),
+    recoveryStatus: () => call<RecoveryStatusView>("recovery_status"),
+    retryRecovery: () => call<RecoveryStatusView>("recovery_retry"),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
     lifecycleStatus: () => call<LifecycleStatus>("lifecycle_status"),
     requestFullExit: () => call<LifecycleStatus>("lifecycle_exit"),

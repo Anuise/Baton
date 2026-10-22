@@ -14,6 +14,9 @@ import type {
   IntegrationEntry,
   PlatformResponse,
   QuotaAssessment,
+  RecoveryAttempt,
+  RecoveryEvent,
+  RecoveryStatusView,
   QuotaObservation,
   RunView,
   SchedulingOverview,
@@ -421,6 +424,47 @@ export function lifecycleStatus(overrides: Partial<LifecycleStatus> = {}): Lifec
     workspaces: [workspaceLifecycle()],
     ...overrides,
   };
+}
+
+/** 測試用的恢復嘗試：第 1 輪第 1 次，處置中，run_1 已重新排隊。 */
+export function recoveryAttempt(overrides: Partial<RecoveryAttempt> = {}): RecoveryAttempt {
+  return {
+    id: "rcv_1",
+    round: 1,
+    seq: 1,
+    started_at: CHECKED_AT,
+    finished_at: null,
+    outcome: "in_progress",
+    failure: null,
+    affected: [
+      { run_id: "run_1", workspace_id: "ws_1", task_id: "task_1", disposition: "requeued", message: null },
+    ],
+    ...overrides,
+  };
+}
+
+/** 測試用的恢復事件：第 1 輪、嘗試中、已用 1 次。 */
+export function recoveryEvent(overrides: Partial<RecoveryEvent> = {}): RecoveryEvent {
+  return {
+    id: "rec_1",
+    round: 1,
+    status: "attempting",
+    attempts_used: 1,
+    detected_at: CHECKED_AT,
+    next_attempt_at: null,
+    observe_until: null,
+    last_failure: null,
+    closed_at: null,
+    version: 2,
+    updated_at: CHECKED_AT,
+    attempts: [recoveryAttempt()],
+    ...overrides,
+  };
+}
+
+/** 測試用的崩潰恢復總覽：預設沒有恢復事件。 */
+export function recoveryStatus(overrides: Partial<RecoveryStatusView> = {}): RecoveryStatusView {
+  return { event: null, max_attempts: 3, can_retry: false, blocking: null, ...overrides };
 }
 
 /** 測試用的成果雜湊（64 位小寫十六進位）。 */
