@@ -3,6 +3,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::authorization::{AuthorizationRevision, Capability, Grant, RevisionSource, SourceKind};
 use crate::guard::{self, ActiveGuard, GuardRule};
+use crate::handoff::GateState;
 use crate::knowledge::{self, KnowledgeContent, KnowledgeKind, KnowledgeScope, KnowledgeSource, NewKnowledge};
 use crate::task::{
     ContractField, Dependency, Goal, TaskChange, TaskCommand, TaskContract,
@@ -48,6 +49,8 @@ struct World {
     authorization: Option<AuthorizationRevision>,
     /// 這一刻准入的 Run 會固定使用的共同設定版本。
     settings_version: Option<i64>,
+    /// 寫入 launch intent 這一刻，Run 帳號的額度門檻。
+    launch_gate: GateState,
 }
 
 impl World {
@@ -69,6 +72,7 @@ impl World {
             next_run: 0,
             authorization: None,
             settings_version: None,
+            launch_gate: GateState::Open,
         };
         world.task_command(TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() }).unwrap();
         for id in task_ids {
@@ -137,6 +141,7 @@ impl World {
             workdirs: &self.workdirs,
             guards: &self.guards,
             settings_version: self.settings_version,
+            launch_gate: self.launch_gate,
             sessions: &self.sessions,
             budgets: &self.budgets,
         };
@@ -1324,4 +1329,41 @@ fn a_failed_or_quota_limited_exit_after_a_cancel_request_completes_the_cancel() 
     let limited = RunOutcome::QuotaLimited { reason: "usage limit reached".into() };
     let change = world.step(RunCommand::Finish { run_id: run_id.clone(), generation: 2, outcome: limited }, T0).unwrap();
     assert_cancelled_without_charge(&world, &change, &run_id);
+}
+
+// ------------------------------------------------------------ 額度門檻（R151 第 20、21 項）
+
+#[test]
+fn the_launch_intent_rechecks_the_accounts_quota_gate_and_ends_the_run_without_a_process_or_charge() {
+    for gate in [GateState::Paused, GateState::Draining] {
+        let mut world = World::new(&["t1"]);
+        let run_id = world.dispatch("t1", T0).unwrap();
+        // 派工之後帳號才進入 paused／draining
+        world.launch_gate = gate;
+
+        let change = world.begin_launch(&run_id, later(1_000));
+
+        let run = world.run(&run_id);
+        assert_eq!(run.status, RunStatus::Interrupted);
+        assert!(run.end_reason.as_deref().unwrap().starts_with("quota_gate_closed"), "{:?}", run.end_reason);
+        assert_eq!((run.command_id.as_deref(), run.admitted_at, run.agent_session_id.as_deref()), (None, None, None));
+        assert!(world.sessions.is_empty(), "沒有寫入 launch intent，不建立 Session");
+        assert!(!world.lease(&run_id).is_held());
+        assert_eq!(world.task("t1").status, TaskStatus::Ready);
+        assert!(change.requeue, "Task 重新排隊，由排程交給其他帳號");
+        assert_eq!(change.outbox_delivered.as_deref(), Some(run_id.as_str()));
+        assert_eq!((change.budget, used(&world, "t1")), (None, (0, 0, 0)));
+    }
+}
+
+#[test]
+fn a_quota_limited_exit_requeues_the_task_for_another_account() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    let limited = RunOutcome::QuotaLimited { reason: "usage limit reached".into() };
+
+    let change = world.step(RunCommand::Finish { run_id, generation: 1, outcome: limited }, T0).unwrap();
+
+    assert!(change.requeue, "等其他帳號接手：排回派工佇列");
+    assert_eq!((change.budget, world.task("t1").status), (None, TaskStatus::Ready));
 }

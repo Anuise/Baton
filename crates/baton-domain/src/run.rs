@@ -27,6 +27,7 @@ use crate::budget::{self, BudgetKind, ChargeOutcome, TaskBudget};
 use crate::decision::{self, DecisionRequest};
 use crate::event::DomainEvent;
 use crate::guard::{self, ActiveGuard, GuardViolation};
+use crate::handoff::GateState;
 use crate::session::{self, AgentSession, BindOutcome, LaunchFacts, ResumeCheck, SessionEdits};
 use crate::task::{
     self, ContractContent, ContractField, ContractFieldName, MissingItem, Task, TaskContext, TaskStatus, Versioned,
@@ -52,6 +53,8 @@ pub const EVENT_RUN_BLOCKED_REPORTED: &str = "run_blocked_reported";
 pub const EVENT_RUN_ADMISSION_DENIED: &str = "run_admission_denied";
 /// 准入被拒的結束原因前綴。
 pub const ADMISSION_DENIED_REASON: &str = "admission_denied";
+/// 寫入 launch intent 時帳號的額度門檻已不是 open：Run 沒有啟動就結束的結束原因前綴。
+pub const QUOTA_GATE_CLOSED_REASON: &str = "quota_gate_closed";
 pub const EVENT_RUN_NATIVE_SESSION_BOUND: &str = "run_native_session_bound";
 pub const EVENT_RUN_NATIVE_SESSION_CONFLICT: &str = "run_native_session_conflict";
 /// 交接（票 28）：舊程序已確認停止，Run 結束、寫入所有權交給 successor。
@@ -273,8 +276,8 @@ impl RunView {
 pub enum RunOutcome {
     Succeeded,
     Failed { reason: String },
-    /// 帳號突然限流而結束（Adapter 回報額度用盡之後程序以失敗結束）：Run 中斷、Task 回到 `ready` 等其他帳號接手，
-    /// 不計入任何預算（票 36）。
+    /// 帳號突然限流而結束（Adapter 回報額度用盡之後程序以失敗結束）：Run 中斷、Task 回到 `ready` 並排回派工佇列
+    /// 等其他帳號接手，不計入任何預算（票 36）。
     QuotaLimited { reason: String },
 }
 
@@ -361,7 +364,7 @@ pub struct RunChange {
     pub budget: Option<TaskBudget>,
     /// 預算用盡時建立的「預算用盡後的下一步」裁定請求（票 36）。
     pub decision: Option<DecisionRequest>,
-    /// 基礎設施重試在預算內：把 Task 排回派工佇列（排程會等到退避期限）。
+    /// 把 Task 排回派工佇列：基礎設施重試在預算內（排程會等到退避期限）、突然限流的退路，或啟動時帳號門檻已關閉。
     pub requeue: bool,
     /// 因 Run 而改變（或新建）的 Session（票 15）。
     pub sessions: Vec<AgentSession>,
@@ -472,6 +475,8 @@ pub struct RunContext<'a> {
     pub leases: &'a [ExecutionLease],
     /// 這一刻准入的 Run 會固定使用的共同設定版本（沒有採用任何版本為 `None`）；只有 `BeginLaunch` 使用。
     pub settings_version: Option<i64>,
+    /// 這一刻 Run 帳號的額度門檻；只有 `BeginLaunch` 使用（其他命令填 `Open`）。
+    pub launch_gate: GateState,
     /// Workspace 內平台登記的工作目錄（票 20）；派工只認已可用的目錄。
     pub workdirs: &'a [Workdir],
     /// Run 准入時要檢查的 Guard（Store 已篩出「啟用且來源教訓現在有效」者；範圍由 `guard::violations` 判定）。
@@ -688,6 +693,15 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                 Ok(admission) => admission,
                 Err(denied) => return deny_admission(edit, &denied, ctx.task.authorization.map(|a| a.revision)),
             };
+            // 派工之後帳號才進入 paused／draining（或撞上限）：不啟動程序，以不計預算的中斷結束，
+            // Task 重新排隊由排程交給其他帳號
+            if ctx.launch_gate.blocks_dispatch() {
+                let reason = format!("{QUOTA_GATE_CLOSED_REASON}：{}", ctx.launch_gate.as_str());
+                let mut change =
+                    edit.finish(RunStatus::Interrupted, EVENT_RUN_INTERRUPTED, &reason, TaskStatus::Ready, None)?;
+                change.requeue = true;
+                return Ok(change);
+            }
             edit.change_status(RunStatus::Starting)?;
             // 原生識別取得前，平台 Session、launch intent 與 command_id 在同一個交易中持久化
             let check = resume_check.as_ref();
@@ -844,13 +858,19 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                     TaskStatus::Ready,
                     Some(BudgetKind::Implementation),
                 ),
-                RunOutcome::QuotaLimited { reason } => edit.finish_unless_cancelling(
-                    RunStatus::Interrupted,
-                    EVENT_RUN_INTERRUPTED,
-                    &format!("quota_limited：{reason}"),
-                    TaskStatus::Ready,
-                    None,
-                ),
+                RunOutcome::QuotaLimited { reason } => {
+                    let cancelling = run.cancel_requested_at.is_some();
+                    let mut change = edit.finish_unless_cancelling(
+                        RunStatus::Interrupted,
+                        EVENT_RUN_INTERRUPTED,
+                        &format!("quota_limited：{reason}"),
+                        TaskStatus::Ready,
+                        None,
+                    )?;
+                    // 等其他帳號接手：排回派工佇列（已要求取消的不重派）
+                    change.requeue = !cancelling;
+                    Ok(change)
+                }
             }
         }
         // 中斷都來自恢復、完全退出或還原：不計入任何預算

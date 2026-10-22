@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use baton_domain::budget::TaskBudget;
+use baton_domain::handoff::GateState;
 use baton_domain::profile::AccountProfile;
 use baton_domain::run::{self, Run, RunCommand, RunContext, RunError};
 use baton_domain::scheduler::{
@@ -109,6 +110,7 @@ impl Store {
                         workdirs: &loaded.workdirs,
                         guards: &loaded.guards,
                         settings_version: None,
+                        launch_gate: GateState::Open,
                         sessions: &loaded.sessions,
                         budgets: &loaded.budgets,
                     };
@@ -140,6 +142,7 @@ impl Store {
                         workdirs: &loaded.workdirs,
                         guards: &loaded.guards,
                         settings_version: None,
+                        launch_gate: GateState::Open,
                         sessions: &loaded.sessions,
                         budgets: &loaded.budgets,
                     };
@@ -238,6 +241,7 @@ impl Store {
                     workdirs: &loaded.workdirs,
                     guards: &loaded.guards,
                     settings_version: None,
+                    launch_gate: GateState::Open,
                     sessions: &loaded.sessions,
                     budgets: &loaded.budgets,
                 };
