@@ -19,7 +19,7 @@ git commit -q -m "chore(scratch): 票 $NN 結案" -m "Co-Authored-By: Claude Opu
 # node_modules／target 路徑過長時 git 刪不掉，改用 PowerShell 長路徑刪除
 git worktree remove --force "$WT" 2>/dev/null || true
 if [ -d "$WT" ]; then
-  powershell -NoProfile -Command "Remove-Item -LiteralPath ('\\?\' + '$(cygpath -w "$WT")') -Recurse -Force -Confirm:\$false"
+  powershell -NoProfile -Command "Remove-Item -LiteralPath ('\\\\?\\' +'$(cygpath -w "$WT")') -Recurse -Force -Confirm:\$false"
 fi
 git worktree prune
 echo "票 $NN 已結案"
