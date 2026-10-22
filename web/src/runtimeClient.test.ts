@@ -102,6 +102,22 @@ describe("Runtime 用戶端", () => {
     expect(invoke).toHaveBeenNthCalledWith(3, "workspace_archive", { id: "ws_1" });
   });
 
+  it("HTTP 版與 Tauri 版設定 Workspace 依角色的模型覆寫", async () => {
+    const overrides = { controller: "opus", worker: null, reviewer: "sonnet" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const invoke = vi.fn(async () => ({}));
+
+    await createHttpClient(fetchFn as unknown as typeof fetch).setModelOverrides("ws_1", overrides);
+    await createTauriClient(invoke as never).setModelOverrides("ws_1", overrides);
+
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/workspaces/ws_1/model-overrides", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(overrides),
+    });
+    expect(invoke).toHaveBeenCalledWith("workspace_set_model_overrides", { id: "ws_1", overrides });
+  });
+
   it("HTTP 版讀取、預覽與確認 Workspace 授權", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);

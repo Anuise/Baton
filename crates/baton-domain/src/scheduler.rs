@@ -261,7 +261,7 @@ pub fn usable_profiles(profiles: &[AccountProfile]) -> Vec<&AccountProfile> {
 /// 把 Profile 的阻擋原因對應成呼叫端看得懂的類別：還沒核對、無法確認身分是「狀態不明」，其餘是帳號問題。
 fn profile_blocker_category(code: &str) -> WaitCategory {
     match code {
-        "profile_unverified" | "identity_unconfirmed" => WaitCategory::StateUnknown,
+        "profile_unverified" | "identity_unconfirmed" | "cli_version_unknown" => WaitCategory::StateUnknown,
         _ => WaitCategory::Account,
     }
 }

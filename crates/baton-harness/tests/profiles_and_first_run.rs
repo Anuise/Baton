@@ -142,7 +142,7 @@ async fn too_old_claude_code_is_reported_with_the_update_command() {
 
     assert_eq!(status["claude_code"]["status"], "too_old");
     assert_eq!(status["claude_code"]["guidance"][0]["command"], "claude update");
-    assert_eq!(status["claude_code"]["minimum_version"], "2.1.0");
+    assert_eq!(status["claude_code"]["minimum_version"], "2.1.307");
 }
 
 #[tokio::test]

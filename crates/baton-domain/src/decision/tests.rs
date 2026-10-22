@@ -21,6 +21,7 @@ fn workspace() -> Workspace {
         version: 1,
         created_at: T0,
         archived_at: None,
+        model_overrides: Default::default(),
     }
 }
 

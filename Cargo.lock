@@ -238,6 +238,7 @@ name = "baton-harness"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "baton-api",
  "baton-credential",

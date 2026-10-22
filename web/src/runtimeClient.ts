@@ -43,6 +43,14 @@ export interface Workspace {
   version: number;
   created_at: number;
   archived_at: number | null;
+  model_overrides: ModelOverrides;
+}
+
+/** 依角色的模型覆寫（對應 Rust 的 ModelOverrides，spec D-30）；`null` 表示沿用帳號的 Claude Code 預設模型。 */
+export interface ModelOverrides {
+  controller: string | null;
+  worker: string | null;
+  reviewer: string | null;
 }
 
 export interface WorkspaceList {
@@ -157,6 +165,8 @@ export interface ProfileVerification {
   source_detail: string | null;
   account: string | null;
   config_dir_matches: boolean;
+  /** 核對當下 `claude --version` 的輸出；取不到時為 `null`。 */
+  cli_version: string | null;
 }
 
 export interface ProfileBlocker {
@@ -278,6 +288,8 @@ export interface WorkspaceClient {
   listWorkspaces(): Promise<WorkspaceList>;
   createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace>;
   archiveWorkspace(id: string): Promise<Workspace>;
+  /** 整組取代依角色的模型覆寫；只影響之後派出的 Run。 */
+  setModelOverrides(id: string, overrides: ModelOverrides): Promise<Workspace>;
 }
 
 /** Workspace 授權：讀取、確認前的摘要、確認並保存（產生新的 revision）。 */
@@ -1451,6 +1463,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       if (!response.ok) throw await failure(response);
       return (await response.json()) as Workspace;
     },
+    setModelOverrides: (id, overrides) =>
+      send(`${workspacePath(id)}/model-overrides`, { method: "PUT", body: overrides }),
     async getAuthorization(workspaceId) {
       const response = await fetchFn(authorizationPath(workspaceId));
       if (!response.ok) throw await failure(response);
@@ -1582,6 +1596,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     listWorkspaces: () => call<WorkspaceList>("workspace_list"),
     createWorkspace: ({ path, name }) => call<Workspace>("workspace_create", { path, name }),
     archiveWorkspace: (id) => call<Workspace>("workspace_archive", { id }),
+    setModelOverrides: (id, overrides) => call<Workspace>("workspace_set_model_overrides", { id, overrides }),
     getAuthorization: (id) => call<AuthorizationView>("workspace_authorization", { id }),
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
     confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion }) =>

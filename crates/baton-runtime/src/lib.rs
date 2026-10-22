@@ -4,6 +4,7 @@
 //! 所有外部副作用都經由注入的 `Ports`。正式執行檔與測試 harness 共用這個入口。
 
 pub mod backup;
+pub mod claude_adapter;
 pub mod claude_cli;
 pub mod credentials;
 pub mod log;
@@ -19,7 +20,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::{ApiState, LogSink};
+use baton_api::{ApiState, LogSink, RunSettings};
 use baton_domain::lifecycle::{self, ExitTiming, FileStopView, LifecycleFile};
 use baton_ports::Ports;
 use baton_store::{Store, StoreError, StoreOptions};
@@ -132,6 +133,12 @@ impl Runtime {
         let supervisor_wake = Arc::new(Notify::new());
         let exit_signal = Arc::new(Notify::new());
         let runtime_url = format!("http://{addr}");
+        let run_settings = Arc::new(RunSettings::new(
+            store.clone(),
+            ports.workspace_fs.clone(),
+            config.data_dir.clone(),
+            ports.clock.clone(),
+        ));
         let lifecycle = LifecycleSettings {
             exit_timing: options.exit_timing,
             data_dir: config.data_dir.clone(),
@@ -143,6 +150,7 @@ impl Runtime {
             log.clone(),
             credentials.clone(),
             runtime_url,
+            run_settings.clone(),
             options.stop_grace,
             config.data_dir.join(baton_domain::artifact::ARTIFACTS_DIR),
             lifecycle,
@@ -177,6 +185,7 @@ impl Runtime {
             claude_env: ports.claude_env.clone(),
             quota_observer: ports.quota_observer.clone(),
             user_settings: ports.user_settings.clone(),
+            run_settings,
             log,
             supervisor_wake,
             request_backup,

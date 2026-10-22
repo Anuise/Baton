@@ -40,7 +40,7 @@ use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::verification::VerificationView;
-use baton_domain::workspace::Workspace;
+use baton_domain::workspace::{ModelOverrides, Workspace};
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
 use baton_store::{AnswerResult, DecisionList};
@@ -134,6 +134,11 @@ impl RuntimeClient {
 
     pub async fn archive_workspace(&self, id: &str) -> Result<Workspace, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &format!("{WORKSPACES_PATH}/{id}/archive"), None).await
+    }
+
+    /// 整組取代 Workspace 依角色的模型覆寫（`None` 表示沿用帳號的 Claude Code 預設）；只影響之後派出的 Run。
+    pub async fn set_model_overrides(&self, workspace_id: &str, overrides: &ModelOverrides) -> Result<Workspace, ClientError> {
+        self.send_json(reqwest::Method::PUT, &format!("{WORKSPACES_PATH}/{workspace_id}/model-overrides"), Some(overrides)).await
     }
 
     /// 列出全部帳號 Profile（含已封存）與可派工判定。
