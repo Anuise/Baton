@@ -6,3 +6,8 @@
 - 來源：2026-10-22 背景安全審查（中）。
 - 問題：判斷 URL 主機是否為私有位址時，只拆解「四段十進位」的 IPv4。整數、十六進位、八進位 IPv4（例如 `http://2130706433/`、`0x7f.1`）、IPv6（`[::1]`、`[fd00::]`）、結尾帶點的 `localhost.`、以及解析到私有位址的網域名稱，都會落到最後的 `true` 而被當成公開位址自動允許，形成 SSRF。
 - 修法：以 `url::Url` 解析並用 `host()`；`Ipv4`／`Ipv6` 用標準函式排除 loopback、private、link-local、unspecified、CGNAT（100.64/10）、unique-local；網域先去掉結尾點並轉小寫再比對 `localhost`／`.localhost`／`.local`；非標準寫法的 IPv4 一律回傳無法歸類；網域名稱不自動允許，除非在明確的白名單內。補單元測試涵蓋上述每一種繞過。
+
+## 2. 偶發失敗的測試
+- `crates/baton-client/tests/artifacts_client.rs::app_download_of_a_missing_version_or_a_tampered_file_is_rejected_with_the_runtime_code`：R043 在全套測試中於派工時失敗一次，單獨重跑皆通過，根因未查。
+- `web/src/App.test.tsx`「選到 Workspace 後可在授權設定與工作面板之間切換」：R056 冷啟動時在預設 1 秒等待內找不到按鈕，重跑皆通過。
+- 要求：查出根因並修正（例如等待條件或共用狀態），不可只拉長逾時或標記略過。
