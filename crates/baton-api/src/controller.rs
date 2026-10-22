@@ -394,6 +394,13 @@ pub(crate) async fn cancel_task(
     require_controller(&record)?;
     let Json(request) = body?;
     let scope = controller_scope(&state, &record, &request.claims).await?;
+    // 預算用盡後的下一步必須送裁定（spec D-15）：取消再另建相同的 Task 會拿到全新的預算，所以取消也要經使用者核准（R151 第 9 項）
+    let detail = state.store.task_detail(&scope.workspace_id, &request.task_id).await?;
+    if detail.budget.exhausted.is_some() && !detail.task.task.status.is_terminal() {
+        let summary = format!("取消預算已用盡的 Task「{}」（{}）", detail.task.task.title, detail.task.task.id);
+        let reason = "這個 Task 的預算已用盡；取消後另建相同的 Task 會拿到全新的預算，所以取消也屬於「預算用盡後的下一步」";
+        gate(&state, &scope, Matter::NextStepAfterBudget, &request.task_id, &summary, reason).await?;
+    }
     let command = TaskCommand::Cancel { task_id: request.task_id.clone() };
     let change = state.store.apply_task_command(scope.workspace_id.clone(), command, state.clock.now()).await?;
     state.supervisor_wake.notify_one();
