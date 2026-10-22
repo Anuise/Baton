@@ -3005,6 +3005,8 @@
 - 理由：MCP shim 只把錯誤的 `error` 與 `message` 交給模型，所以錯誤訊息本身要含缺項與裁定請求識別；一次派工減少 Controller 的工具呼叫次數。
 - 替代方案：要求 Controller 先建立 Goal 再建立 Task；Task 事件記錄操作者。
 - 影響：時間線（票 41）若要區分 Controller 與使用者建立的 Task，需要另外補上操作者。
+- 審閱：未審
+
 ### AI-334：票 17 整合 rebuild/v1（票 32、29）：migration 順延為第 33 個、AI 編號改為 AI-327～AI-333
 - 重要度：低
 - 時間／階段：2026-10-22，票 17 實作（run R106-17-impl）
