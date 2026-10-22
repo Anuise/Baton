@@ -6,10 +6,10 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析 |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`） |
 | `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl、AgentAdapter、QuotaObserver、WorkspaceFs、PlatformInfo |
 | `crates/baton-store` | SQLite 存取（開啟、migration） |
-| `crates/baton-api` | Axum 路由（目前只有 `/api/v1/health`） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`） |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-harness` | 測試 harness 與全部 Port 的 fake（主要測試 seam，spec D-04） |
 | `crates/baton-client` | 桌面殼用的「連回既有 Runtime 或啟動新的」邏輯 |
@@ -127,3 +127,9 @@ harness.restart().await;                                // 丟棄 Runtime、保�
 ## 產品名稱
 
 產品名稱集中在 `crates/baton-domain/src/product.rs`（`PRODUCT_NAME`、`DATA_DIR_NAME`）與安裝設定 `src-tauri/tauri.conf.json`（`productName`、視窗 `title`）。`crates/baton-domain/tests/product_name.rs` 會檢查兩處一致；Web UI 畫面上的名稱取自 Runtime 回報，不寫死。改名時只需修改這幾處（以及既有使用者的資料目錄）。
+
+## 平台辨識與支援期限表
+
+- PlatformInfo Port 只回報事實（OS build、功能版本、版本別、原生架構、程序架構）；支援狀態由 `baton-domain::platform::assess` 依事實與 Clock 判定，所以到期判斷可用 fake Clock 測試。
+- 正式實作在 `crates/baton-runtime/src/windows_platform.rs`：Windows 11 以 build ≥ 22000 判定（登錄的 `ProductName` 在 Windows 11 上仍可能寫 Windows 10），原生架構取自 `IsWow64Process2`。
+- 支援期限表（`SUPPORT_TABLE`）的來源與查閱日期寫在同一檔案；新增驗證通過的功能版本、或查到官方日期時，一併更新 `SUPPORT_TABLE_CHECKED_ON`。

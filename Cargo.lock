@@ -178,8 +178,10 @@ name = "baton-client"
 version = "0.1.0"
 dependencies = [
  "baton-api",
+ "baton-domain",
  "baton-harness",
  "reqwest 0.12.28",
+ "serde",
  "thiserror 2.0.21",
  "tokio",
 ]

@@ -100,6 +100,16 @@ try {
     return text.includes("Runtime 運作中") ? text : null;
   });
   console.log(`✔ 狀態列：${bar.trim()}`);
+  // 平台辨識：狀態列顯示支援狀態，平台狀態頁顯示本機實際的診斷資訊
+  const platformBar = await waitFor("狀態列顯示平台狀態", async () => {
+    const text = await evaluate(debug1, "document.querySelector('.status-bar')?.innerText ?? ''");
+    return /平台：(正式支援|非正式支援)/.test(text) ? text : null;
+  });
+  const platformPage = await waitFor("平台狀態頁顯示診斷資訊", async () => {
+    const text = await evaluate(debug1, "document.querySelector('.platform-page')?.innerText ?? ''");
+    return text.includes("OS build") && text.includes("原生架構") && text.includes("App 版本") ? text : null;
+  });
+  console.log(`✔ ${platformBar.match(/平台：\S+/)[0]}；${platformPage.replace(/\s+/g, " ").trim()}`);
   const first = await health(runtimePort);
   runtimePid = first.pid;
   console.log(`✔ Runtime 已由 App 啟動（pid ${first.pid}，boot_count ${first.boot_count}）`);
