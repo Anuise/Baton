@@ -1,20 +1,25 @@
 //! Run 端點（桌面角色專用）：派工、列出、讀取、取消。
 //!
-//! 規則都在 Domain（`baton_domain::run`）；端點只做「交給 Store → 對應成穩定的錯誤代碼 → 通知 Supervisor」。
+//! 規則都在 Domain（`baton_domain::run`、`baton_domain::scheduler`）；端點只做「交給 Store → 對應成穩定的錯誤代碼 → 通知 Supervisor」。
+//! 派工要求交給 Scheduler：有帳號與名額就建立 Run（201），否則留在佇列並回報原因（202）；
 //! 派工只寫入 Run、lease 與派工 Outbox，不會同步啟動程序；啟動由 Supervisor 在交易外進行。
 //! 取消不等程序停止：已啟動的 Run 回傳時仍是 `starting`／`running`，並帶著 `cancel_requested_at`。
 
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::run::{RunCommand, RunError, RunView};
-use baton_store::RunApplyError;
+use baton_domain::scheduler::WaitReason;
+use baton_store::{RunApplyError, ScheduleRequest};
 use serde::{Deserialize, Serialize};
 
+use crate::scheduling::schedule_now;
 use crate::tasks::TaskApiError;
-use crate::workspaces::{new_id, ApiError};
+use crate::workspaces::ApiError;
 use crate::ApiState;
 
 pub(crate) const DISPATCH_ROUTE: &str = "/api/v1/workspaces/{id}/tasks/{task_id}/dispatch";
@@ -76,17 +81,69 @@ impl From<RunApplyError> for TaskApiError {
     }
 }
 
-/// 派工：建立 Run（`queued`）、取得 execution lease、寫入派工 Outbox，Task 進入 `running`。
+/// 派工請求的內容（可省略）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DispatchRequest {
+    /// 數字越大越優先，預設 0；同優先序依要求順序。
+    #[serde(default)]
+    pub priority: i32,
+}
+
+/// 派工要求被接受但還沒有名額：留在佇列，名額空出來時由 Scheduler 自動派出。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedDispatch {
+    /// 固定為 `true`，用戶端以它區分「已建立 Run」與「排隊中」。
+    pub queued: bool,
+    pub task_id: String,
+    pub priority: i32,
+    /// 為什麼還沒開始：容量、額度、授權、相依、狀態不明或帳號問題，各自分開。
+    pub reasons: Vec<WaitReason>,
+}
+
+/// 派工的兩種結果：已建立 Run（201，本文是 Run），或排隊中（202，本文是 `QueuedDispatch`）。
+pub(crate) enum DispatchResponse {
+    Started(Box<RunView>),
+    Queued(QueuedDispatch),
+}
+
+impl IntoResponse for DispatchResponse {
+    fn into_response(self) -> Response {
+        match self {
+            DispatchResponse::Started(view) => (StatusCode::CREATED, Json(view)).into_response(),
+            DispatchResponse::Queued(queued) => (StatusCode::ACCEPTED, Json(queued)).into_response(),
+        }
+    }
+}
+
+/// 派工：Scheduler 依相依、授權、帳號狀態與容量決定現在能不能派。能派就選定帳號、建立 Run（`queued`）、
+/// 取得 execution lease、寫入派工 Outbox，Task 進入 `running`；不能派就排進佇列並回報原因。
 pub(crate) async fn dispatch(
     State(state): State<Arc<ApiState>>,
     UrlPath((id, task_id)): UrlPath<(String, String)>,
-) -> Result<(StatusCode, Json<RunView>), TaskApiError> {
-    let run_id = new_id("run")?;
-    let command = RunCommand::Dispatch { run_id: run_id.clone(), task_id };
-    state.store.apply_run_command(id.clone(), command, state.clock.now()).await?;
-    state.supervisor_wake.notify_one();
-    let view = state.store.run_detail(&id, &run_id).await?;
-    Ok((StatusCode::CREATED, Json(view)))
+    body: Bytes,
+) -> Result<DispatchResponse, TaskApiError> {
+    let request = if body.is_empty() {
+        DispatchRequest::default()
+    } else {
+        serde_json::from_slice::<DispatchRequest>(&body).map_err(|e| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "bad_request",
+            message: format!("請求內容不正確：{e}"),
+        })?
+    };
+    let schedule = ScheduleRequest { workspace_id: id.clone(), task_id: task_id.clone(), priority: request.priority };
+    let outcome = schedule_now(&state, Some(schedule)).await?;
+    if let Some(started) = outcome.started.iter().find(|s| s.task_id == task_id) {
+        let view = state.store.run_detail(&id, &started.run_id).await?;
+        return Ok(DispatchResponse::Started(Box::new(view)));
+    }
+    let reasons = outcome
+        .waiting
+        .into_iter()
+        .find(|w| w.task_id == task_id)
+        .map(|w| w.reasons)
+        .unwrap_or_default();
+    Ok(DispatchResponse::Queued(QueuedDispatch { queued: true, task_id, priority: request.priority, reasons }))
 }
 
 pub(crate) async fn list(

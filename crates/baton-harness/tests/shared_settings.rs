@@ -73,7 +73,10 @@ async fn workspace_with_goal(harness: &Harness, name: &str) -> (String, String) 
 }
 
 /// 在 Goal 下建立一個 ready 的 Task 並派工，回傳 Run 識別。
+///
+/// 每個 Run 各用一個新帳號，避免同一測試派多個 Run 時碰到每帳號的並行上限而排隊（票 19）。
 async fn run_in(harness: &Harness, ws: &str, goal: &str, title: &str) -> String {
+    harness.add_account(&format!("帳號{title}"), &format!("{title}@example.com")).await;
     let contract = json!({
         "objective": filled(title), "inputs": filled("既有的資料"), "scope": filled("公開資料"),
         "deliverables": filled("比較表"), "done_criteria": filled("五個產品"), "blocker_handling": filled("卡住時回報"),
@@ -423,7 +426,7 @@ async fn run_settings_snapshot_is_a_read_only_directory_matching_the_version_has
     assert_eq!(snapshot["files"].as_array().unwrap().len(), 4);
     assert!(String::from_utf8(files["CLAUDE.md"].clone()).unwrap().contains("繁體中文"));
 
-    // 唯讀：任何檔案都不能被開啟寫入（Windows 的唯讀屬性不阻止刪除，見 AI-99）
+    // 唯讀：任何檔案都不能被開啟寫入（Windows 的唯讀屬性不阻止刪除，見 AI-107）
     for name in files.keys() {
         let path = PathBuf::from(directory).join(name);
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err(), "{name} 不應可寫");

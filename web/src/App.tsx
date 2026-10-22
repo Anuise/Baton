@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { AccountsPage } from "./AccountsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { PlatformPage } from "./PlatformPage";
+import { SchedulingSettings } from "./SchedulingSettings";
 import { SetupWizard } from "./SetupWizard";
 import { SharedSettingsPage } from "./SharedSettingsPage";
 import { StatusBar } from "./StatusBar";
@@ -41,6 +42,7 @@ export function App() {
           <h1>{health?.product ?? ""}</h1>
           {client && <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
+          {client && <SchedulingSettings client={client} />}
           {client && <SharedSettingsPage client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use baton_api::{CreateTaskRequest, CreateWorkspaceRequest};
-use baton_client::{ClientError, RuntimeClient};
+use baton_client::{ClientError, DispatchOutcome, RuntimeClient};
 use baton_domain::task::{ContractContent, ContractField};
 use baton_harness::fakes::FakeSecretProtector;
 use baton_harness::Harness;
@@ -37,8 +37,9 @@ fn seed_user_settings(harness: &Harness) {
     harness.user_settings.write_user_state(r#"{"mcpServers":{"docs":{"command":"docs-server"}}}"#);
 }
 
-/// 建立 Workspace 與 ready 的 Task 並派工；回傳 (workspace id, run id)。
+/// 建立帳號、Workspace 與 ready 的 Task 並派工；回傳 (workspace id, run id)。
 async fn dispatched_run(harness: &Harness, client: &RuntimeClient) -> (String, String) {
+    harness.add_account("主要帳號", "main@example.com").await;
     let dir = harness.data_dir().join("app");
     std::fs::create_dir_all(&dir).unwrap();
     let workspace_id = client
@@ -52,8 +53,10 @@ async fn dispatched_run(harness: &Harness, client: &RuntimeClient) -> (String, S
         .await
         .unwrap();
     client.mark_task_ready(&workspace_id, &created.task.id).await.unwrap();
-    let run = client.dispatch_task(&workspace_id, &created.task.id).await.unwrap();
-    (workspace_id, run.run.id)
+    match client.dispatch_task(&workspace_id, &created.task.id).await.unwrap() {
+        DispatchOutcome::Started(view) => (workspace_id, view.run.id),
+        DispatchOutcome::Queued(queued) => panic!("應該直接派出，卻排隊中：{queued:?}"),
+    }
 }
 
 #[tokio::test]

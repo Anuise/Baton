@@ -1,6 +1,6 @@
 # 27: 額度觀測與帳號頁
 
-Status: ready-for-agent
+Status: in_progress（Work-9，run R035-27-impl，2026-10-22 16:25）
 Blocked by: 19
 
 **What to build:** 依 spec D-12 實作 QuotaObserver：已觀測來源解析 CLI 的限流訊號與重置時間；推估來源以 Run 結果累計用量估算五小時與七日視窗，使用者可為 Profile 設定方案上限。每筆觀測保存來源、時間、可信度與原始資料參照，未知不填零。帳號頁顯示用量、重置時間、可信度與觀測時間；依 spec D-31 每 5 分鐘輪詢。

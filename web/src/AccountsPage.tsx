@@ -1,17 +1,30 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { formatTimestamp } from "./time";
-import type { AccountClient, AccountProfile, AuthSource } from "./runtimeClient";
+import { RUN_STATUS_LABELS } from "./TaskBoard";
+import type {
+  AccountClient,
+  AccountProfile,
+  AccountScheduling,
+  AuthSource,
+  SchedulingClient,
+  SchedulingOverview,
+} from "./runtimeClient";
 
+/** 排程總覽是選用的：沒有提供時帳號頁只是不顯示進行中的 Run 與用量。 */
 export type AccountsClient = Pick<
   AccountClient,
   "listProfiles" | "createProfile" | "verifyProfile" | "openLoginTerminal" | "archiveProfile"
->;
+> &
+  Partial<Pick<SchedulingClient, "schedulingOverview">>;
 
 type ListState =
   | { state: "loading" }
   | { state: "ready"; profiles: AccountProfile[]; limit: number }
   | { state: "failed"; reason: string };
+
+/** 排程總覽讀取失敗不影響帳號清單，只在清單上說明讀不到。 */
+type OverviewState = { state: "none" } | { state: "ready"; overview: SchedulingOverview } | { state: "failed"; reason: string };
 
 interface Props {
   client: AccountsClient;
@@ -57,6 +70,7 @@ export function profileStateLabel(profile: AccountProfile): string {
 /** 帳號頁：新增最多 8 個 Profile、在終端機完成原生登入、核對實際認證來源與帳號身分（spec D-32、D-20）。 */
 export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
+  const [scheduling, setScheduling] = useState<OverviewState>({ state: "none" });
   const [name, setName] = useState("");
   const [expectedAccount, setExpectedAccount] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
@@ -70,6 +84,13 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       setList({ state: "ready", profiles, limit });
     } catch (error) {
       setList({ state: "failed", reason: reasonOf(error) });
+    }
+    if (client.schedulingOverview) {
+      try {
+        setScheduling({ state: "ready", overview: await client.schedulingOverview() });
+      } catch (error) {
+        setScheduling({ state: "failed", reason: reasonOf(error) });
+      }
     }
   }, [client]);
 
@@ -129,6 +150,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       {list.state === "loading" && <p>載入中…</p>}
       {list.state === "failed" && <p role="alert">無法取得帳號清單：{list.reason}</p>}
       {list.state === "ready" && active.length === 0 && <p>還沒有帳號 Profile</p>}
+      {scheduling.state === "failed" && <p role="alert">無法取得排程總覽：{scheduling.reason}</p>}
       {active.length > 0 && (
         <ul className="profile-list">
           {active.map((profile) => (
@@ -136,6 +158,11 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
               <span className="profile-name">{profile.name}</span>
               <span className="profile-state">{profileStateLabel(profile)}</span>
               <ProfileFacts profile={profile} timeZone={timeZone} />
+              {scheduling.state === "ready" && (
+                <AccountLoad
+                  account={scheduling.overview.accounts.find((account) => account.profile_id === profile.id) ?? null}
+                />
+              )}
               {profile.blockers.map((blocker) => (
                 <p key={blocker.code} role="alert" className="profile-blocker">
                   {blocker.message}
@@ -215,5 +242,33 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
       )}
       {showExpected && <span className="profile-expected">預期帳號：{profile.expected_account}</span>}
     </>
+  );
+}
+
+/** 已知用量的顯示：未觀測就是「未知」，不顯示 0。 */
+function quotaLabel(quotaUsed: number | null): string {
+  return quotaUsed === null ? "未知" : `${Math.round(quotaUsed * 100)}%`;
+}
+
+/** 一個帳號目前的並行使用：進行中 n/上限、已知用量，以及進行中的 Run（Task、狀態、是否已要求取消）。 */
+function AccountLoad({ account }: { account: AccountScheduling | null }) {
+  if (account === null) return null;
+  return (
+    <div className="profile-load" role="group" aria-label={`${account.name} 的進行中 Run`}>
+      <span className="profile-running">
+        進行中 {account.running}/{account.limit}
+      </span>
+      <span className="profile-quota">已知用量：{quotaLabel(account.quota_used)}</span>
+      {account.runs.length > 0 && (
+        <ul className="profile-runs">
+          {account.runs.map((run) => (
+            <li key={run.run_id}>
+              {run.task_title}（第 {run.generation} 次）：{RUN_STATUS_LABELS[run.status]}
+              {run.cancel_requested && "，已要求取消"}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

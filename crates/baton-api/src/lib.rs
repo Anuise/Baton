@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、帳號 Profile 管理與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、帳號 Profile 管理與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -8,8 +8,9 @@ mod agent;
 mod authorization;
 mod guard;
 mod profiles;
-mod setup;
 mod runs;
+mod scheduling;
+mod setup;
 mod shared_settings;
 mod tasks;
 mod workspaces;
@@ -25,7 +26,7 @@ use axum::{middleware, Json, Router};
 use baton_domain::agent::{TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
-use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, UserSettingsSource, WorkspaceFs};
+use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, QuotaObserver, UserSettingsSource, WorkspaceFs};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,11 @@ pub use tasks::{
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
-pub use runs::{run_cancel_path, run_path, runs_path, task_dispatch_path, RunList};
+pub use runs::{run_cancel_path, run_path, runs_path, task_dispatch_path, DispatchRequest, QueuedDispatch, RunList};
+pub use scheduling::{
+    AccountRun, AccountScheduling, CapacityModeInfo, CapacityView, QueueEntryView, SchedulingOverview,
+    SchedulingSettingsView, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
+};
 pub use shared_settings::{
     run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
     RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
@@ -109,6 +114,8 @@ pub struct ApiState {
     pub platform_info: Arc<dyn PlatformInfo>,
     pub workspace_fs: Arc<dyn WorkspaceFs>,
     pub claude_env: Arc<dyn ClaudeEnvironment>,
+    /// 排程判斷額度門檻用；觀測不到的帳號不阻擋派工。
+    pub quota_observer: Arc<dyn QuotaObserver>,
     /// 使用者平常使用的 Claude Code 設定（唯讀；共同設定匯入的來源）。
     pub user_settings: Arc<dyn UserSettingsSource>,
     pub log: LogSink,
@@ -148,6 +155,8 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
+        .route(SCHEDULING_PATH, get(scheduling::view))
+        .route(SCHEDULING_SETTINGS_PATH, axum::routing::put(scheduling::update_settings))
         .route(SHARED_SETTINGS_PATH, get(shared_settings::status))
         .route(SHARED_SETTINGS_PREVIEW_PATH, post(shared_settings::preview))
         .route(SHARED_SETTINGS_ADOPT_PATH, post(shared_settings::adopt))
