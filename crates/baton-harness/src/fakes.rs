@@ -813,6 +813,10 @@ impl WorkspaceFs for FakeWorkspaceFs {
         baton_ports::read_file_if_exists(path)
     }
 
+    async fn read_file_within(&self, root: &Path, relative: &Path) -> PortResult<baton_ports::ContainedFile> {
+        baton_ports::read_file_within(root, relative)
+    }
+
     async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
         baton_ports::list_files_recursive(dir)
     }

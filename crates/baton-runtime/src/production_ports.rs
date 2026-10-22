@@ -149,6 +149,10 @@ impl WorkspaceFs for LocalWorkspaceFs {
         let path = path.to_path_buf();
         blocking(move || read_file_if_exists(&path)).await
     }
+    async fn read_file_within(&self, root: &Path, relative: &Path) -> PortResult<ContainedFile> {
+        let (root, relative) = (root.to_path_buf(), relative.to_path_buf());
+        blocking(move || baton_ports::read_file_within(&root, &relative)).await
+    }
     async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
         let dir = dir.to_path_buf();
         blocking(move || list_files_recursive(&dir)).await
