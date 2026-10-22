@@ -313,12 +313,14 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
     let integrations = super::integration::load_entries(conn, Some(workspace_id))?;
     let sessions = super::sessions::load_sessions(conn, workspace_id)?;
     let budgets = super::budgets::load_budgets(conn, workspace_id)?;
-    // 只有 Controller 提出的待處理請求會讓 Task 不能准入（Worker 的請求以 waiting_decision 表達）
+    // 只有 Controller 待回答的提問（`propose_decision_request`）會讓依賴它的 Task 不能准入：Worker 的請求以
+    // waiting_decision 表達；Controller 的權限表請求（超出授權、修改完成條件）各自由准入與工具判定，不另外擋准入
     let decision_holds = conn
         .prepare(
             "SELECT b.task_id, r.id, r.question FROM decision_request_block b
              JOIN decision_request r ON r.id = b.request_id
-             WHERE r.workspace_id = ?1 AND r.status = 'pending' AND r.origin = 'controller' ORDER BY r.rowid, b.rowid",
+             WHERE r.workspace_id = ?1 AND r.status = 'pending' AND r.origin = 'controller' AND r.kind = 'agent'
+             ORDER BY r.rowid, b.rowid",
         )?
         .query_map([workspace_id], |r| {
             Ok(DecisionHold { task_id: r.get(0)?, request_id: r.get(1)?, question: r.get(2)? })

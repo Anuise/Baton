@@ -331,7 +331,7 @@ async fn a_task_beyond_the_workspace_authorization_is_refused_and_sent_to_the_de
     assert_eq!((again["decision_request_id"].as_str(), again["existing"].as_bool()), (Some(rid.as_str()), Some(true)));
     let (status, user_ready) = harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/tasks/{tid}/ready"), None).await;
     assert_eq!((status, error_code(&user_ready)), (StatusCode::CONFLICT, "task_admission_denied"));
-    assert_eq!(codes(&user_ready["missing"]), vec!["decision_pending", "capability_not_granted"]);
+    assert_eq!(codes(&user_ready["missing"]), vec!["capability_not_granted"]);
     finish_turn(&harness, &controller_run, "部署需要你的裁定，已送到裁定中心").await;
 
     // 使用者核准：Controller 被喚醒（工作事件），但核准不會擴大授權，授權仍不涵蓋時照樣不能派出

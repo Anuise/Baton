@@ -922,7 +922,7 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 
 **Controller 憑證**：Supervisor 喚起 Controller 的一輪時（`launch_controller`：Controller Run 已以 `starting` 持久化、`prepare` 之後、`spawn` 之前）呼叫 `CredentialIssuer::issue_controller`，簽發 Agent 角色、綁定 Workspace 與那一輪的憑證（`ControllerScope`，存在 `credential.controller_run_id`，每一輪最多一張）；簽發失敗就不啟動，這一輪以失敗結束、輸入退回待處理。交給程序的方式與 Worker 相同：只經環境變數 `BATON_AGENT_TOKEN`（與 `BATON_RUNTIME_URL`），資料庫只存雜湊。它沒有時間上限，有效與否取決於那一輪是否仍是 `starting`／`running`。取代票 16 的佔位值 `controller-credential-not-issued`。
 
-**角色分流**（`guard` 接受帶 Worker 範圍或 Controller 範圍的 Agent 憑證，兩者都沒有仍是 401 `credential_invalid`；shim 對兩種角色列出同一份工具清單，Controller 工具的說明註明「Controller 專屬」，由 Runtime 依憑證拒絕）：
+**角色分流**（`guard` 接受帶 Worker 範圍或 Controller 範圍的 Agent 憑證，兩者都沒有仍是 401 `credential_invalid`；它在解析請求之前就依工具路徑分流（`baton_domain::agent::CONTROLLER_TOOLS`），處理函式內另有同樣的檢查；shim 對兩種角色列出同一份工具清單，Controller 工具的說明註明「Controller 專屬」，由 Runtime 依憑證拒絕）：
 
 | 憑證 | 呼叫 | 結果 |
 | --- | --- | --- |
@@ -953,7 +953,7 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 
 沒有可用的核准時變更不執行，建立 `kind: authority`、`origin: controller` 的裁定請求（同一個 Task 同一事項仍待處理時回既有請求），回 409 `requires_decision`（`{error, message, status: "requires_decision", matter, decision_request_id, existing}`）；使用者拒絕時消耗一次，回 409 `decision_denied`。核准的使用記在 `decision_approval_use`（`run_id` 是 Controller 的一輪）。
 
-**漸進拆工**（ADR-0010「邊釐清、邊調查」）：`propose_decision_request` 建立 `kind: agent`、`origin: controller` 的請求，阻擋範圍是 `blocking`。Task 的狀態不變（不進入 `waiting_decision`），而是在回答前多一個准入缺項 `decision_pending`（`task.rs` 的 `DecisionHold`，由 `baton-store` 的 `tasks.rs` 載入 Controller 提出、待處理的請求；Controller 的 `exceed_authorization`／`modify_done_criteria` 請求待處理期間同樣如此），所以不能標為 ready、不能派工；不依賴答案的 Task 照常派出。回答後缺項消失，但 Task 不會自動排隊，由 Controller 依答案更新契約後再派工。過期規則（`stale_reason`）：Controller 的提問問的是使用者的決定，不會因為契約變更而過期，只有依賴它的 Task 全部結束（或不存在）時才過期；Controller 的權限表請求仍依目標 Task 的契約版本過期。Controller 與 Worker 提出的請求不能合併（400 `decision_merge_invalid`，可以改用連結）。裁定中心的請求詳情帶 `origin`。
+**漸進拆工**（ADR-0010「邊釐清、邊調查」）：`propose_decision_request` 建立 `kind: agent`、`origin: controller` 的請求，阻擋範圍是 `blocking`。Task 的狀態不變（不進入 `waiting_decision`），而是在回答前多一個准入缺項 `decision_pending`（`task.rs` 的 `DecisionHold`，由 `baton-store` 的 `tasks.rs` 只載入 Controller 待回答的提問；Controller 的 `exceed_authorization`／`modify_done_criteria` 請求不另外擋准入，分別由授權檢查與 `update_task` 判定），所以不能標為 ready、不能派工；不依賴答案的 Task 照常派出。回答後缺項消失，但 Task 不會自動排隊，由 Controller 依答案更新契約後再派工。過期規則（`stale_reason`）：Controller 的提問問的是使用者的決定，不會因為契約變更而過期，只有依賴它的 Task 全部結束（或不存在）時才過期；Controller 的權限表請求仍依目標 Task 的契約版本過期。Controller 與 Worker 提出的請求不能合併（400 `decision_merge_invalid`，可以改用連結）。裁定中心的請求詳情帶 `origin`。
 
 **喚醒 Controller**：Controller 提出的請求（含被合併進來的）被回答或過期時，`decision::wake` 不寫喚醒 Outbox，而是產生 `ConversationNotice`，在**同一個交易中**成為該 Workspace conversation 的工作事件（`conversations.rs` 的 `enqueue_notice`，`source` = `decision_wake:<請求>:<revision>`，同一個結果只成為一個輸入；內容由 `notice_content` 產生：處理方式、選項、說明與依賴的 Task，或過期原因），由〈Controller 長期對話與事件驅動〉的事件迴圈喚起下一輪。
 
