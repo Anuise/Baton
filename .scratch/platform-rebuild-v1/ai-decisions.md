@@ -2809,6 +2809,78 @@
 - 影響：程序死掉到這一輪被找回最多約 60 秒加一次 tick。Controller 若超過 60 秒沒有任何輸出，每 60 秒會被查證一次（存活就繼續）。票 30 若要讓崩潰恢復也處置 Controller 的輪次，需要另外決定。
 - 審閱：未審
 
+### AI-319：時間線的範圍、順序與恢復事件的歸屬
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：時間線直接讀追加式 `event` 表，不另建資料表，依事件表的提交序號 `seq` 排序。上時間線的事件分十類：票面要求的派工（Run 的建立、准入拒絕、啟動、結束、取消）、交接（`handoff` 聚合與 `run_handed_off`）、裁定（裁定請求聚合）、恢復、驗證（`task_verification_recorded`）、清理（`worktree_cleanup` 聚合），以及指標需要的 Task 狀態、外部操作、教訓重犯、用量。Run 的進度、checkpoint、lease 續約、原生 Session 綁定與權限／決策權限表的稽核事件不上時間線。Task 歸屬依聚合決定（見 docs〈事件時間線與觀測指標〉）；外部操作以事件當時的 Run 判定 Task（操作重試時紀錄上的 `task_id` 會被改成新的 Task）。恢復事件屬於整個 Runtime，出現在每個 Workspace 的時間線上，`task_ids` 是它任何一次嘗試處置過、屬於該 Workspace 的 Task；依 Task 過濾 = 未過濾時間線中 `task_ids` 含該 Task 的事件，順序不變。
+- 理由：「依 Task 過濾後完整且有序」最直接的保證是「過濾結果正好是全部事件的子序列」；`seq` 是同一個寫入佇列的提交順序，比 `occurred_at` 可靠（同一毫秒內也有先後）。指標要「可由事件重新計算」，所以計算用到的事件也必須在時間線上看得到。進度與 lease 續約量大，不是派工的轉折。
+- 替代方案：(a) 在 `event` 表加 `task_id` 欄位：要改所有寫入事件的地方與 migration，和同時進行的票衝突。(b) 只放票面列出的六類：指標的來源事件就看不到，無法對照重算。(c) 恢復事件只在受影響的 Workspace 出現：恢復期間擋住的是所有派工，沒有受影響工作的 Workspace 也被擋。
+- 影響：Workspace 很多事件時一次回傳全部，沒有分頁；需要時再加 `after_seq` 之類的參數。新的事件種類要上時間線，須加到 `baton_domain::timeline::category_of`。
+- 審閱：未審
+
+### AI-320：各項觀測指標的定義，全部只由時間線事件計算
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：`baton_domain::metrics::compute(時間線事件)` 是純函式，`GET …/metrics` 回傳的就是它對未過濾時間線的結果。定義：工作完成率 = 最後狀態為 `completed` 的 Task ÷ 建立的 Task（不含已取消）；交接成功率 = 到達 `handoff_transferred` 的交接 ÷ 已結束（轉移或放棄）的交接，另列已確認接手與進行中；恢復耗時 = `runtime_crash_detected` → 最後成功的那次嘗試的 `recovery_attempt_completed`（工作重新排隊），不含 10 分鐘穩定觀察，未成功的算 `pending`；裁定等待時間 = `decision_requested` → 第一次 `decision_answered`，延後不中斷計時，被取代或合併的不計，未回答的算 `pending`；教訓重犯率 = 有重犯事件的 Task ÷ 建立的 Task，另列攔下與回報次數。沒有資料時比率與平均是 `null`，UI 顯示「無資料」。指標是 Workspace 層級（不依 Task 過濾）。
+- 理由：票面要求「每項指標可由事件重新計算並與顯示一致」；指標不另存計數器，任何人拿時間線呼叫同一個函式就得到相同數字（情境測試正是這樣驗證）。完成率排除取消，否則使用者整理清單會壓低數字；恢復耗時不含穩定觀察，因為觀察期間已可派工，那 10 分鐘是固定的政策值。
+- 替代方案：交接成功率以 `handoff_confirmed` 為成功（AI-291：不確認不阻擋工作，以它為準會低估）；恢復耗時算到 `recovery_succeeded`（每筆都多 10 分鐘）；教訓重犯率以教訓為分母（教訓可能是全域的，不屬於單一 Workspace）。
+- 影響：這些定義改起來只要改 `metrics.rs` 與 docs，不影響資料。
+- 審閱：未審
+
+### AI-321：「重複操作事件」= 另一個 Run 以同一個冪等鍵要求再執行而被擋下；新增 `external_operation_duplicate_blocked`
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：外部操作登記（`begin_external_operation`）回 `already_succeeded`、`result_unknown` 或 `in_progress_elsewhere` 時，在同一個交易追加 `external_operation_duplicate_blocked`（`aggregate_type = 'external_operation_duplicate'`，每次擋下各是一個聚合，識別是這次登記新配的操作識別，不改動原操作的版本；內容含原操作、冪等鍵、`status`、Run、Task）。同一個 Run 重送登記（回應遺失）不算。指標「重複操作事件」= 這個事件的次數，依狀態分開，另列變成結果未知的次數（可能重複的風險）。
+- 理由：平台的保證是「同一個冪等鍵不重送」，真正重複送出的操作平台看不到；看得到、也最能反映 Worker 或恢復流程是否企圖重做的，是被擋下的重複登記。原本這些分支什麼都不寫，無從計算。
+- 替代方案：(a) 以「同一個鍵執行超過一次」（查證沒有生效後的再執行）計數：那是合法的重試，不是重複。(b) 只計結果未知：看不出已成功的操作被要求重做幾次。
+- 影響：原本不寫入的這三種登記現在會寫一筆事件，所以控制資料庫寫入故障時它們也回 503（Worker 稍後重試即可）；Worker 反覆以同一個鍵登記，每次都記一筆。
+- 審閱：未審
+
+### AI-322：用量與 Context 使用量改由不可刪除的 `run_usage_reported` 事件計算；Context = 輸入 + 快取建立 + 快取讀取
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：`Store::record_quota_usage` 在同一個交易追加 `run_usage_reported`（`aggregate_type = 'run_usage'`，`aggregate_id` = Run，版本是這個 Run 第幾次回報），內容 `{ run_id, task_id, profile_id, tokens, context_tokens }`。`AdapterEvent::UsageReported` 加上 `context_tokens: Option<u64>`；真實 Adapter 取 `result.usage` 的 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`，沒有這些欄位為 `None`（未知，不填零）。Context 使用量 = 每個 Run 的 `context_tokens` 加總後的平均與最大，沒有回報的 Run 另計 `runs_unknown`。
+- 理由：`quota_usage` 會在 8 天後刪除（票 27），指標若讀它，過幾天數字就變了，無法「由事件重新計算並與顯示一致」。快取讀取不計入額度推估（票 27），但佔用 Context，所以兩個數字分開。`result.usage` 是整個 `claude -p` 的累計，所以這是「這個 Run 讀入的 Context 總量」，不是某一刻的視窗佔用。
+- 替代方案：在 API 端解析 `quota_usage.raw`：會被刪除，而且把 Claude Code 的格式解析放進 Adapter 以外的地方。以 `modelUsage.contextWindow` 算佔用比例：欄位未經驗證，屬於 Validation Required。
+- 影響：Port 的 `UsageReported` 形狀改變（fake 與契約測試已更新，契約測試要求正常完成時回報 Context）。**Validation Required**：真實 `result.usage` 的欄位以票 14 記錄的樣本為準。
+- 審閱：未審
+
+### AI-323：第一版沒有 Stage，「每階段用量」全部歸在「未分階段」
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：每階段用量依用量事件內容的 `stage` 分組；第一版沒有 Workflow／Stage（票 43），事件沒有這個欄位，全部歸在 `stage: null`，UI 顯示「未分階段」。票 43 加入 Stage 後，在 `run_usage_reported` 帶上 Run 所屬的 Stage 即可分開，指標不必改。
+- 理由：票面要求每階段用量，但 Stage 尚未存在；用 Task 種類或 Task 狀態冒充 Stage 會讓日後的數字前後不一致。
+- 替代方案：以 Task 種類（開發／研究／文件）分組；以 Run 的角色（Worker／Controller）分組。
+- 影響：目前這項指標只有一個分組；票 43 實作時要記得在用量事件帶 `stage`。
+- 審閱：未審
+
+### AI-324：「服務端額度」只採用 Claude Code 回報的帳號層級用量；看不到一律是未知
+- 重要度：低
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：指標回應附 `server_quota`：每個使用中帳號的五小時與七日已用比例，只取該視窗來自 CLI 限流訊號的已觀測用量，其次是外部觀測器的已觀測樣本；本機推估（方案上限 ÷ 本機累計）不是服務端額度，不採用。沒有就是 `null`，UI 顯示「未知」。
+- 理由：票面「不可見的服務端額度顯示未知」；推估只看得到本機 Baton 派出的 Run（票 27），把它當成服務端額度會讓使用者誤以為看得到全部用量。
+- 替代方案：沿用排程的「較保守者」判斷（混入推估，且沒有數字的警告會被當成 75%）。
+- 影響：大多數時間服務端額度會是未知，直到 CLI 送出帶數字的限流訊號。
+- 審閱：未審
+
+### AI-325：Controller Run 的用量計入它的 Workspace，但不屬於任何 Task
+- 重要度：低
+- 時間／階段：2026-10-22，票 41 實作（整合 rebuild/v1 的票 16 之後）
+- 決策：票 16 的 Controller Run 也會回報用量；它的 `run_usage_reported` 沒有 Task，時間線依 `controller_run.workspace_id` 歸到該 Workspace（`task_ids` 為空），計入用量與 Context 指標，依 Task 過濾時不出現。沒有指定 Task 的重犯同樣依它記下的 Workspace 歸屬。
+- 理由：Controller 的用量是這個 Workspace 的真實成本，漏掉會低估；它不屬於任何 Task，硬掛到某個 Task 會讓過濾結果失真。
+- 替代方案：Controller 用量不計入（低估）；另列一個 Controller 分組（等票 43 的 Stage 一起決定）。
+- 影響：用量指標的 Run 數包含 Controller Run。
+- 審閱：未審
+
+### AI-326：時間線與指標的 API、桌面殼指令與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：`GET /api/v1/workspaces/{id}/timeline?task_id=`（`{ workspace_id, task_id, events }`）與 `GET /api/v1/workspaces/{id}/metrics`（`{ workspace_id, metrics, server_quota }`），桌面憑證；Workspace 不存在 404 `workspace_not_found`，Task 不屬於該 Workspace 404 `task_not_found`。桌面殼指令 `workspace_timeline`、`workspace_metrics`（經 `RuntimeClient::timeline`／`metrics`）。UI 在側欄每個 Workspace 加「時間線」按鈕，分頁上方是觀測指標、下方是事件清單與「依 Task 過濾」選擇器（選項取自未過濾時間線出現過的 Task，過濾由 Runtime 做）。
+- 理由：沿用其他 Workspace 分頁（成果、知識、對話）的路徑、錯誤格式與側欄入口慣例（spec D-21 的「時間線」主區分頁）。
+- 替代方案：全域時間線（跨 Workspace）；以 SSE 推送新事件（`/api/v1/events` 目前只有保活）。
+- 影響：時間線分頁不會自動更新，重新開啟或切換過濾才重新讀取。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
