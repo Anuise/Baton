@@ -1,7 +1,8 @@
 //! 知識與教訓端點（票 37，spec D-26、D-28）。
 //!
 //! - 管理 API（桌面憑證）：在「知識」分頁列出與搜尋條目、建立（直接是已驗證）、確認候選、修正、撤銷、淘汰，以及查看版本與變更歷史。
-//! - Agent API：`record_lesson_candidate` 只能提交候選教訓（狀態由 Runtime 決定，請求無法指定）；
+//! - Agent API：`record_lesson_candidate` 只能提交候選教訓（狀態由 Runtime 決定，請求無法指定）；Worker 以自己的 Task 解析範圍，
+//!   Controller（spec D-05，票 54）以 `task_id` 指定 Workspace 內的來源 Task，並先依決策權限表判定「把候選教訓提交給使用者」；
 //!   `search_knowledge` 只回傳這個 Run 適用範圍內「已驗證且在有效期間內」的條目；Controller 憑證（spec D-05 共同工具）
 //!   看得到全域與它的 Workspace 內所有範圍的有效條目。
 //! - 搜尋以 FTS5 + trigram 為主；FTS5 不可用時退回 LIKE，回應的 `search_mode` 會標明降級。
@@ -12,7 +13,10 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
-use baton_domain::auth::CredentialRecord;
+use baton_domain::artifact::sha256_hex;
+use baton_domain::auth::{ControllerScope, CredentialRecord};
+use baton_domain::authority::Matter;
+use baton_domain::decision::{ControllerOutcome, EVIDENCE_MAX_CHARS, EVIDENCE_MAX_ITEMS, REASON_MAX_CHARS};
 use baton_domain::knowledge::{
     self, KnowledgeCommand, KnowledgeContent, KnowledgeEntry, KnowledgeError, KnowledgeEvent, KnowledgeKind,
     KnowledgeVersion, LessonDetail, ScopeKind, SearchMode,
@@ -22,8 +26,9 @@ use baton_store::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, R
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{scope_of, Claims};
-use crate::controller::controller_scope;
+use crate::controller::{controller_scope, ControllerToolError};
 use crate::authorization::bad_json;
+use crate::reviews::{clip, decide, requires_decision};
 use crate::workspaces::{new_id, ApiError};
 use crate::ApiState;
 
@@ -332,9 +337,12 @@ pub(crate) struct LessonCandidateRequest {
     tags: Vec<String>,
     #[serde(default)]
     evidence: Vec<String>,
-    /// `task`（預設）、`goal` 或 `workspace`；一律以憑證所屬 Run 的 Task 解析，不接受識別。
+    /// `task`（預設）、`goal` 或 `workspace`；Worker 一律以憑證所屬 Run 的 Task 解析，Controller 以 `task_id` 解析。
     #[serde(default)]
     scope: Option<ScopeKind>,
+    /// 教訓來源的 Task：Controller 必填（必須在它的 Workspace 內）；Worker 送了也不採信。
+    #[serde(default)]
+    task_id: Option<String>,
     #[serde(flatten)]
     claims: Claims,
 }
@@ -351,30 +359,109 @@ pub(crate) async fn record_lesson_candidate(
     State(state): State<Arc<ApiState>>,
     Extension(record): Extension<CredentialRecord>,
     body: Result<Json<LessonCandidateRequest>, JsonRejection>,
-) -> Result<(StatusCode, Json<LessonCandidateRecorded>), ApiError> {
+) -> Result<(StatusCode, Json<LessonCandidateRecorded>), ControllerToolError> {
     let Json(request) = body.map_err(bad_json)?;
-    let scope = scope_of(&record, &request.claims)?;
+    // Controller（spec D-05 的 Controller 工具）：沒有自己的 Task，以 task_id 指定來源 Task
+    let entry = if record.controller.is_some() {
+        let scope = controller_scope(&state, &record, &request.claims).await?;
+        record_for_controller(&state, &scope, request).await?
+    } else {
+        let scope = scope_of(&record, &request.claims)?;
+        let scope_kind = request.scope.unwrap_or(ScopeKind::Task);
+        let content = lesson_content(request)?;
+        state
+            .store
+            .record_lesson_candidate(&scope, new_id("know")?, scope_kind, content, state.clock.now())
+            .await
+            .map_err(ApiError::from)?
+    };
+    let recorded = LessonCandidateRecorded { entry_id: entry.id, status: entry.status, revision: entry.revision };
+    Ok((StatusCode::CREATED, Json(recorded)))
+}
+
+fn lesson_content(request: LessonCandidateRequest) -> Result<KnowledgeContent, ApiError> {
     let lesson = LessonDetail { trigger: request.trigger, root_cause: request.root_cause, resolution: request.resolution };
-    let content = KnowledgeContent::new(
+    Ok(KnowledgeContent::new(
         KnowledgeKind::Lesson,
         &request.title,
         &request.body,
         &request.tags,
         &request.evidence,
         Some(lesson),
-    )?;
+    )?)
+}
+
+/// Controller 提交候選教訓：先驗證來源 Task、範圍與內容，再依決策權限表判定，可以做才寫入。
+async fn record_for_controller(
+    state: &ApiState,
+    scope: &ControllerScope,
+    request: LessonCandidateRequest,
+) -> Result<KnowledgeEntry, ControllerToolError> {
+    let Some(task_id) = request.task_id.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string) else {
+        let message = "Controller 必須以 task_id 指定教訓來源的 Task（這個 Workspace 內的 Task）".to_string();
+        return Err(ApiError::from(KnowledgeError::ScopeInvalid(message)).into());
+    };
+    let scope_kind = request.scope.unwrap_or(ScopeKind::Task);
+    if scope_kind == ScopeKind::Global {
+        let message = "Agent 只能提交 Workspace、Goal 或 Task 範圍的教訓".to_string();
+        return Err(ApiError::from(KnowledgeError::ScopeInvalid(message)).into());
+    }
+    let content = lesson_content(request)?;
+    // 核准綁定這一次的內容與範圍：內容改了就是另一個裁定
+    let fingerprint = serde_json::to_vec(&(scope_kind, &content)).expect("內容一定可以序列化");
+    let subject = format!("lesson:{}", sha256_hex(&fingerprint));
+    let summary = format!("提交候選教訓「{}」", clip(&content.title, 200));
+    let reason = lesson_reason(&content);
+    let evidence = content.evidence.iter().take(EVIDENCE_MAX_ITEMS).map(|e| clip(e, EVIDENCE_MAX_CHARS - 1)).collect();
+    // 來源 Task 不在這個 Workspace 時，判定就會回報 task_not_found，不建立任何東西
+    match decide(state, scope, Matter::SubmitLessonCandidate, &task_id, &subject, &summary, &reason, evidence).await? {
+        ControllerOutcome::Allowed | ControllerOutcome::Approved { .. } => {}
+        ControllerOutcome::RequiresDecision { request_id, existing } => {
+            return Err(requires_decision(Matter::SubmitLessonCandidate, request_id, existing, "候選教訓還沒有寫入"));
+        }
+        ControllerOutcome::Denied { request_id, note } => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "decision_denied",
+                message: format!(
+                    "使用者沒有核准提交這個候選教訓（裁定請求 {request_id}）{}",
+                    note.map(|n| format!("：{n}")).unwrap_or_default()
+                ),
+            }
+            .into());
+        }
+        ControllerOutcome::HumanOnly => {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                code: "human_only",
+                message: "這個 Workspace 的決策權限表規定只有使用者能提交候選教訓".to_string(),
+            }
+            .into());
+        }
+    }
     let entry = state
         .store
-        .record_lesson_candidate(
-            &scope,
-            new_id("know")?,
-            request.scope.unwrap_or(ScopeKind::Task),
-            content,
-            state.clock.now(),
-        )
-        .await?;
-    let recorded = LessonCandidateRecorded { entry_id: entry.id, status: entry.status, revision: entry.revision };
-    Ok((StatusCode::CREATED, Json(recorded)))
+        .record_controller_lesson_candidate(scope, new_id("know")?, &task_id, scope_kind, content, state.clock.now())
+        .await
+        .map_err(ApiError::from)?;
+    Ok(entry)
+}
+
+/// 裁定請求的理由：教訓的內文、觸發條件、根因與解法（都空白時用標題）。
+fn lesson_reason(content: &KnowledgeContent) -> String {
+    let lesson = content.lesson.clone().unwrap_or_default();
+    let parts: Vec<String> = [
+        ("內文", content.body.as_str()),
+        ("觸發條件", lesson.trigger.as_str()),
+        ("根因", lesson.root_cause.as_str()),
+        ("解法", lesson.resolution.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, text)| !text.is_empty())
+    .map(|(label, text)| format!("{label}：{text}"))
+    .collect();
+    let reason = if parts.is_empty() { content.title.clone() } else { parts.join("\n") };
+    clip(&reason, REASON_MAX_CHARS - 1)
 }
 
 pub(crate) async fn search_knowledge(

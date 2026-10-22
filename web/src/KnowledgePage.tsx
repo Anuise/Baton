@@ -122,7 +122,14 @@ function scopeLabel(entry: KnowledgeEntryView): string {
 
 function sourceLabel(entry: KnowledgeEntryView): string {
   const { source } = entry;
-  return source.kind === "user" ? "使用者" : `Agent（Run ${source.run_id}，第 ${source.generation} 次，Task ${source.task_id}）`;
+  switch (source.kind) {
+    case "user":
+      return "使用者";
+    case "agent":
+      return `Agent（Run ${source.run_id}，第 ${source.generation} 次，Task ${source.task_id}）`;
+    case "controller":
+      return `Controller（Run ${source.controller_run_id}，Task ${source.task_id}）`;
+  }
 }
 
 /** 搜尋前的檢查（與 Runtime 規則相同）：以空白分詞，每個詞至少 2 個字元。 */
