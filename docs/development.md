@@ -1211,7 +1211,7 @@ Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`�
 
 驗證檢查的是真實介面的行為，不是 Worker 的說法（spec D-29）。規則在 `baton_domain::verification_profile`，Port 是 `baton_ports::VerificationDriver`（正式實作 `baton_runtime::verification_driver::LocalVerificationDriver`，harness 是 `FakeVerificationDriver`），Adapter 在 `baton-runtime` 的 `verification_adapter.rs`，持久化在 `baton-store` 的 `verification_profiles.rs`（migration 40 `verification_profiles`），端點在 `baton-api` 的 `verification_profiles.rs`。細節與取捨見 ai-decisions 的票 45 條目。
 
-- **Profile**（每個 Workspace 一個，版本只追加）：`interface`（目前只有 `cli_api`）、`build`（選填：輸出最後一行是 build 識別）、`doctor`、`start`（長駐服務）、`readiness`（有斷言的步驟 + `attempts`、`interval_ms`）、`setup`、`journeys`（`key`、`title`、`representative`、`steps`）、`teardown`、`evidence`（`output_max_chars`、`redact`）、`budget.max_operations`、`feature_map`（功能、驗收準則、對應旅程）與 `uncovered`（明確宣告的未覆蓋範圍）。步驟是 `operation`（`command`、`http`、`manual`）加 `assertions`（`exit_code`、`status`、`contains`、`not_contains`、`json_equals`）；自動化的步驟至少一個程式斷言，至少一條代表旅程。操作中可用 `{{run_id}}`（驗證要求識別）與 `{{state_dir}}`（`<資料目錄>\verification\<驗證要求>`，本次專屬的狀態目錄）。只有使用者能從桌面發布。
+- **Profile**（每個 Workspace 一個，版本只追加）：`interface`（`cli_api`，或票 46 的 `web`）、`build`（選填：輸出最後一行是 build 識別）、`doctor`、`start`（長駐服務）、`readiness`（有斷言的步驟 + `attempts`、`interval_ms`）、`setup`、`journeys`（`key`、`title`、`representative`、`steps`）、`teardown`、`evidence`（`output_max_chars`、`redact`）、`budget.max_operations`、`feature_map`（功能、驗收準則、對應旅程）與 `uncovered`（明確宣告的未覆蓋範圍）。步驟是 `operation`（`command`、`http`、`manual`）加 `assertions`（`exit_code`、`status`、`contains`、`not_contains`、`json_equals`）；自動化的步驟至少一個程式斷言，至少一條代表旅程。操作中可用 `{{run_id}}`（驗證要求識別）與 `{{state_dir}}`（`<資料目錄>\verification\<驗證要求>`，本次專屬的狀態目錄）。只有使用者能從桌面發布。
 - **執行**：要求（桌面或 Controller 的 `run_verification`）固定當時的 Profile 版本與旅程；版本還沒被證明可用時一定加入代表旅程。Supervisor 依序執行：準備狀態目錄 → build → doctor → 啟動服務 → 就緒（重試、間隔經由 Port 等待）→ 資料準備 → 旅程 → teardown → 停止服務 → 移除狀態目錄，結果在一個交易中寫入 Evidence Bundle 並把要求標為完成。Runtime 中途當掉時要求仍是 `queued`，下次重新執行。
 - **判定**：每步驟保存 `verdict`（`passed`、`product_failure`、`inconclusive`、`environment_blocked`、`auth_blocked`、`budget_exhausted`、`automation_unsupported`）、`reason_code`（例如 `assertion_failed`、`not_ready`、`endpoint_unreachable`、`http_unauthorized`、`operation_timed_out`、`not_executed`）與來源引擎的 `engine_code`（`exit:1`、`http:404`、`timeout`…）。只有旅程中的斷言不符才是產品缺陷；doctor、就緒、資料準備未通過是環境阻礙，前置受阻時旅程不執行；旅程中一步沒通過，後面的步驟不執行，旅程不會被拼成通過。整份判定：有產品缺陷 → `product_failure`；否則第一個受阻的前置步驟或第一條沒通過的旅程決定；沒有旅程 → `inconclusive`。teardown 只記在 `cleanup.problems`，不改變判定。
 - **Evidence Bundle**：綁定 `build`、`candidate_revision`（受驗目錄的 Git HEAD）、`requirement_version`（受驗 Task 的契約版本）、`profile_version`，記下 `covered_features` 與這次的 `uncovered`；只追加、不可修改。輸出與實際值依 `evidence.redact` 遮蔽並截斷。
@@ -1228,6 +1228,25 @@ Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`�
 Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journeys? }` 回 201 驗證要求；`get_verification` `{}` 回與桌面相同的概況。桌面殼指令：`workspace_verification`、`verification_publish_profile`、`verification_run`、`verification_bundle`。UI 在側欄的「驗證」（`web/src/VerificationPage.tsx`）：Profile 狀態與是否已證明可用、Feature Map 與未覆蓋範圍、以 JSON 發布新版本、要求執行、Evidence Bundle 與每個步驟的判定。
 
 測試：`crates/baton-harness/tests/verification_profile_cli_api.rs`（情境測試）、`crates/baton-harness/tests/verification_real_adapter.rs`（正式 Port 對真實程序與 HTTP 服務）、`crates/baton-runtime/tests/verification_driver.rs`、`crates/baton-domain/src/verification_profile/tests.rs`、`crates/baton-client/tests/verification_profiles_client.rs`、`web/src/VerificationPage.test.tsx`。
+
+### web 驗證 Adapter（票 46）
+
+`interface: "web"` 的 Profile 以瀏覽器驗證真實畫面（spec D-29），與 CLI／API 共用同一個 Adapter（`verification_adapter.rs`）、判定規則與 Evidence Bundle。新增的 Port：`BrowserDriver`（正式實作 `baton_runtime::browser_driver::LocalBrowserDriver`，以受驗專案自己安裝的 Playwright 執行；harness 是 `FakeBrowserDriver`）、`SemanticJudge`（正式實作 `baton_runtime::semantic_judge::ClaudeSemanticJudge`，一次不給任何工具的 `claude -p`；harness 是 `FakeSemanticJudge`）、`SecretResolver`（正式實作 `EnvSecretResolver`；harness 是 `FakeSecretResolver`）。細節與取捨見 ai-decisions 的票 46 條目。
+
+- **操作與斷言**：`operation` 多了 `{ kind: "browser", action: { kind: goto | click | fill | press | wait_for, … } }`；瀏覽器步驟的斷言可用 `status`（最近一次導覽）、`contains`／`not_contains`（畫面可見文字）、`visible`、`url_contains` 與 `judge`（受限的語意 judge，`expectation` 是固定預期）。web Profile 也可以混用 `command`、`http`（例如以 API 準備資料）；瀏覽器操作只能用在 web Profile。
+- **秘密**：`secrets: [{ key, reference }]`，`reference` 只能是 `env:<環境變數名稱>`（Runtime 的環境變數）；操作中以 `{{secret:KEY}}` 引用。Profile 與資料庫只保存參照，值只在交給 Runner 的操作中代入；證據文字、judge 的輸入都以值遮蔽；解析不到時那個步驟是 `environment_blocked`（`secret_unavailable`），不執行。
+- **persona 與登入身分**：`personas: [{ key, title, description }]` 是扮演的角色（只給 judge 當背景）；`identities: [{ key, title, login, check }]` 是實際登入的帳號，`check` 必須能自動核對實際登入的是誰。旅程以 `persona`、`identity` 分別綁定；Bundle 的旅程結果分別記下兩者。綁定身分的旅程先執行 `login`（階段 `login`），再執行 `check`（階段 `identity`），未通過是 `auth_blocked`（`login_failed`／`identity_not_confirmed`），旅程步驟不執行（`blocked_by_login`／`blocked_by_identity`）。
+- **執行**：每條旅程一個隔離的瀏覽器 Session（`<狀態目錄>\browser\<旅程>` 是 Runner 的暫存目錄），旅程結束就關閉。瀏覽器無法啟動是 `environment_blocked`（`browser_unavailable`）；連不上是 `endpoint_unreachable`；操作本身沒完成（例如找不到元素）是 `inconclusive`（`action_failed`，`engine_code` 為 `playwright:<錯誤名稱>`）。
+- **語意 judge**：輸入只有當前畫面的網址、標題、可見文字（已遮蔽）、Profile 的 `expectation` 與 persona 說明，不含任何 Worker 的敘述。使用第一個可派工的帳號；沒有時 `judge_unavailable`。模型限流是 `inconclusive`（`judge_rate_limited`，`engine_code` 為 `model:rate_limited`），同一次驗證之後不再呼叫模型；`budget.max_model_calls`（預設 20）用盡是 `budget_exhausted`（`model_call_budget_exhausted`）。程式斷言明確不符時仍是產品缺陷。
+- **證據檔案**：`evidence.screenshots`（`on_failure` 預設、`every_step`、`off`）、`trace`、`video`（預設不錄）、`mask`（截圖時遮住的 selector；輸入過秘密的欄位自動加入）。檔案內容定址存在 `<資料目錄>\artifacts\verification\<sha256>.<副檔名>`，Bundle 的 `artifacts` 記下種類、旅程、步驟、雜湊與大小。內容含有秘密的值不保存（`secret_detected`）；輸入過秘密的 Session 的 trace 與錄影一律不保存（`secret_input_recorded`）。證據檔案不在一般備份範圍內（同對話紀錄）。
+
+| 端點（桌面） | 說明 |
+| --- | --- |
+| `GET /api/v1/workspaces/{id}/verification/bundles/{bundle_id}/artifacts/{index}` | `{ bundle_id, index, kind, name, content_type, size_bytes, content_base64 }`；沒有保存、檔案不見或雜湊不符 404 `evidence_artifact_not_found` |
+
+桌面殼指令：`verification_artifact`（`RuntimeClient::evidence_artifact`）。UI 在「驗證」的 Evidence Bundle 檢視中顯示 persona 與登入身分、judge 的預期與理由、限流說明與證據檔案（截圖可開啟、trace 與錄影可下載，沒有保存的顯示原因）。
+
+測試：`crates/baton-harness/tests/web_verification_adapter.rs`（情境測試）、`crates/baton-runtime/tests/browser_driver.rs`（正式 Runner；本機沒有 Playwright 時略過）、`crates/baton-domain/src/verification_profile/tests.rs`、`web/src/VerificationPage.test.tsx`。
 
 ### 本機 API 的存取防護
 
