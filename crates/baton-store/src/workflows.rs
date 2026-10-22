@@ -322,6 +322,8 @@ fn check_evidence(
                 _ => EvidenceStatus::NotFound,
             }
         }
+        // 成果接受只看 Workflow 綁定的 Task（review-notes #21）
+        EvidenceRef::TaskAccepted { task_id } if workflow_task.is_some_and(|bound| bound != task_id) => EvidenceStatus::OtherSubject,
         EvidenceRef::TaskAccepted { task_id } => {
             let found: Option<i64> = conn
                 .query_row(
@@ -352,7 +354,7 @@ fn check_evidence(
             status
         }
         EvidenceRef::Verification { evidence_bundle_id } => {
-            super::verification_profiles::verification_evidence_status(conn, workspace_id, evidence_bundle_id, builds)?
+            super::verification_profiles::verification_evidence_status(conn, workspace_id, evidence_bundle_id, workflow_task, builds)?
         }
     };
     Ok(CheckedEvidence { evidence, status, reviewers })

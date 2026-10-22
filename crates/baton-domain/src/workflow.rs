@@ -1028,6 +1028,8 @@ fn evaluate(stage: &StageDefinition, evidence: &[CheckedEvidence]) -> (AttemptOu
             "驗證沒有通過（證據不足、環境或授權阻礙都不算通過），或依據的 Profile、需求版本已經改變".to_string()
         } else if offered.iter().any(|e| e.status == EvidenceStatus::BuildChanged) {
             "Evidence Bundle 驗證的 build 已不是受驗目錄目前的 revision，請對目前的 build 重新驗證".to_string()
+        } else if offered.iter().any(|e| e.status == EvidenceStatus::OtherSubject) {
+            "證據屬於其他 Task，不是這個 Workflow 綁定的 Task".to_string()
         } else {
             "引用的證據在這個 Workspace 中不存在".to_string()
         };
