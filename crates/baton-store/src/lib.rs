@@ -25,10 +25,12 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
 
 mod agent;
+mod decisions;
 mod profiles;
 mod runs;
 mod tasks;
 pub use agent::AgentContext;
+pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, PendingByWorkspace};
 pub use profiles::ProfileApplyError;
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
@@ -296,6 +298,61 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'agent_report 是追加式資料表，不可更新'); END;
         CREATE TRIGGER agent_report_no_delete BEFORE DELETE ON agent_report
         BEGIN SELECT RAISE(ABORT, 'agent_report 是追加式資料表，不可刪除'); END;",
+    },
+    // 裁定請求與裁定（票 22）。請求只能從 pending 改成 answered（其餘欄位不可變）、不可刪除；
+    // 裁定與單次批准的消耗紀錄是追加式；decided_by 在資料庫層就只允許桌面憑證
+    Migration {
+        name: "decision_request_and_decision",
+        sql: "CREATE TABLE decision_request (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            run_id TEXT NOT NULL REFERENCES run (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            kind TEXT NOT NULL CHECK (kind IN ('agent', 'permission')),
+            status TEXT NOT NULL CHECK (status IN ('pending', 'answered')),
+            question TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            options TEXT NOT NULL CHECK (json_valid(options)),
+            recommendation TEXT,
+            evidence TEXT NOT NULL CHECK (json_valid(evidence)),
+            urgency TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
+            deadline_at INTEGER,
+            permission TEXT CHECK (permission IS NULL OR json_valid(permission)),
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX decision_request_workspace ON decision_request (workspace_id, status);
+        CREATE TRIGGER decision_request_only_answer BEFORE UPDATE ON decision_request
+        WHEN NOT (OLD.status = 'pending' AND NEW.status = 'answered' AND NEW.id = OLD.id
+                  AND NEW.question = OLD.question AND NEW.options = OLD.options)
+        BEGIN SELECT RAISE(ABORT, 'decision_request 只能從 pending 改成 answered'); END;
+        CREATE TRIGGER decision_request_no_delete BEFORE DELETE ON decision_request
+        BEGIN SELECT RAISE(ABORT, 'decision_request 不可刪除'); END;
+        CREATE TABLE decision_request_block (
+            request_id TEXT NOT NULL REFERENCES decision_request (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            PRIMARY KEY (request_id, task_id)
+        );
+        CREATE INDEX decision_request_block_task ON decision_request_block (task_id);
+        CREATE TABLE decision (
+            request_id TEXT PRIMARY KEY REFERENCES decision_request (id),
+            option_id TEXT NOT NULL,
+            note TEXT,
+            decided_by TEXT NOT NULL CHECK (decided_by = 'desktop'),
+            decided_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER decision_no_update BEFORE UPDATE ON decision
+        BEGIN SELECT RAISE(ABORT, 'decision 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER decision_no_delete BEFORE DELETE ON decision
+        BEGIN SELECT RAISE(ABORT, 'decision 是追加式資料表，不可刪除'); END;
+        CREATE TABLE decision_approval_use (
+            request_id TEXT PRIMARY KEY REFERENCES decision (request_id),
+            run_id TEXT NOT NULL REFERENCES run (id),
+            used_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER decision_approval_use_no_update BEFORE UPDATE ON decision_approval_use
+        BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER decision_approval_use_no_delete BEFORE DELETE ON decision_approval_use
+        BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可刪除'); END;",
     },
 ];
 

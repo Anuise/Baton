@@ -17,11 +17,14 @@ pub const MCP_SERVER_NAME: &str = "baton";
 /// Agent API 的工具路徑前綴；每個工具一個路徑：`{AGENT_TOOLS_PREFIX}/{工具名稱}`。
 pub const AGENT_TOOLS_PREFIX: &str = "/agent/v1/tools";
 
-/// 本票提供的共同工具名稱。
+/// 工具名稱。
 pub const TOOL_GET_TASK_CONTRACT: &str = "get_task_contract";
 pub const TOOL_REPORT_PROGRESS: &str = "report_progress";
 pub const TOOL_SAVE_CHECKPOINT: &str = "save_checkpoint";
 pub const TOOL_REPORT_BLOCKED: &str = "report_blocked";
+/// 票 22：裁定請求與權限提示轉接。
+pub const TOOL_REQUEST_DECISION: &str = "request_decision";
+pub const TOOL_PERMISSION_PROMPT: &str = "permission_prompt";
 
 /// 進度與 checkpoint 摘要、受阻原因的長度上限（字元數）。
 pub const SUMMARY_MAX_CHARS: usize = 500;
