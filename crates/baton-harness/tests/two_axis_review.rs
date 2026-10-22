@@ -303,6 +303,35 @@ async fn requirement_met_but_standards_violated_or_standards_met_but_requirement
     assert_eq!(result["workflow"]["current_stage"], "integration");
 }
 
+#[tokio::test]
+async fn a_review_of_an_older_candidate_cannot_open_the_gate_once_more_changes_are_committed() {
+    let w = world().await;
+    let evidence = w.worker("整理證據").await;
+    let reviewer = w.worker("審查匯出功能").await;
+    let token = w.controller_turn("新增 CSV 匯出").await;
+    let author = w.task("新增 CSV 匯出", "development").await;
+    let workflow = w.start_feature(&token, &author).await;
+    let workflow = w.to_review_stage(&token, &evidence, workflow).await;
+    let passing = |candidate: &str| review(&author, candidate, 1, axis("規範沒有問題", &["src"], &[]), axis("需求都符合", &["src"], &[]));
+    w.h().verification_driver.set_revision(&w.dir, "c1");
+    let reviewed = w.submitted(&reviewer, passing("c1")).await;
+
+    // 審查之後又提交了改動：審查的 candidate 已不是受驗目錄目前的 revision，不能開啟 Gate（R151 第 13 項）
+    w.h().verification_driver.set_revision(&w.dir, "c2");
+    let result = w.record(&token, &workflow, json!([{ "check": "review", "review_id": reviewed["id"] }])).await;
+    assert_eq!(
+        (result["attempt"]["outcome"].as_str(), result["attempt"]["evidence"][0]["status"].as_str()),
+        (Some("incomplete"), Some("build_changed")),
+        "{result}"
+    );
+    assert!(result["attempt"]["missing"][0]["reason"].as_str().unwrap().contains("重新審查"), "{result}");
+
+    // 對目前的 candidate 重新審查才能通過
+    let fresh = w.submitted(&reviewer, passing("c2")).await;
+    let result = w.record(&token, &result["workflow"], json!([{ "check": "review", "review_id": fresh["id"] }])).await;
+    assert_eq!(result["attempt"]["outcome"], "passed", "{result}");
+}
+
 // --- 驗收條件：作者不能擔任自己工作的必要 reviewer ---
 
 #[tokio::test]

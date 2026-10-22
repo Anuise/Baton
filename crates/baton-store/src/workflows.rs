@@ -344,7 +344,8 @@ fn check_evidence(
             }
         }
         EvidenceRef::Review { review_id } => {
-            let (status, by) = super::reviews::check_review(conn, workspace_id, review_id, workflow_task)?;
+            let current = builds.get(&subject_dir(conn, workspace_id, workflow_task)?).cloned().flatten();
+            let (status, by) = super::reviews::check_review(conn, workspace_id, review_id, workflow_task, current.as_deref())?;
             reviewers = by;
             status
         }

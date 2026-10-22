@@ -1042,6 +1042,9 @@ fn review_shortfall(check: &ExitCheck, offered: &[&CheckedEvidence]) -> Option<(
         Some(EvidenceStatus::NotPassed) => "審查還有未解決的 finding：Standards 與 Spec 兩軸都要通過".to_string(),
         Some(EvidenceStatus::Stale) => "審查已過期（規格版本已改變，或已有對較新 candidate 的審查），請重新審查".to_string(),
         Some(EvidenceStatus::OtherSubject) => "審查審的不是這個 Workflow 的 Task".to_string(),
+        Some(EvidenceStatus::BuildChanged) => {
+            "審查的 candidate 已不是受驗目錄目前的 revision（審查之後又有提交），請對目前的 build 重新審查".to_string()
+        }
         Some(_) => "引用的審查在這個 Workspace 中不存在".to_string(),
         None => {
             return Some((format!("缺少非作者 reviewer 的雙軸審查：每一軸需要 {need} 位，目前 {have} 位"), true));
