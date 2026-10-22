@@ -946,6 +946,69 @@
 - 影響：本票原本是第 8 個 migration，整合 rebuild/v1（票 11 已有第 8、9 個）時順延為第 10 個；AI 編號同樣由 AI-87～AI-94 順延為 AI-95～AI-102。
 - 審閱：未審
 
+### AI-103：完全退出停下的 Run 以 interrupted 結束，Task 退回 ready 並自動重新排隊；停不下來的保留寫入所有權
+- 重要度：高
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：程序確認停止（`StoppedGracefully`／`ForceKilled`）或根本沒有程序（`queued`、啟動中但以 command_id 找不到）的 Run，以 `interrupted`（`end_reason = stopped_by_full_exit`）結束並釋放寫入所有權；Task 只在仍是 `running` 時退回 `ready`（`blocked`、`verifying` 等不動），並在**同一個交易**中重新放進派工佇列（優先序 0，原本的優先序已不存在）。使用者先前已要求取消的 Run 則完成取消（Task 不重新排隊）。`StillAlive`、停止呼叫失敗、到總上限仍沒有結果的記為停止異常，Run 維持 `running` 並保留 lease。重新開啟核對時，這些 Run 的程序若確定已不在，以 `process_gone_after_full_exit` 中斷、Task 回 `ready` 但**不**自動重新排隊；仍存活的維持原狀（不會再啟動第二個 Worker）。
+- 理由：票面要求「完全退出不會把 Task 標為取消或完成」與「重開後 A 的合格工作自動恢復」，被退出停下的工作必須有恢復的入口；放回佇列後，「續跑」就只是解除暫停，由排程照常判定授權、相依、帳號與容量（即「合格」）。這和 AI-96「Run 失敗不自動重新排隊」不衝突：退出不是失敗，而是使用者明確要求的暫停。停不下來的程序若釋放 lease，續跑時會產生第二個寫入者（使用者故事 43）。查證後才知道已不在的程序，結果不明（它可能已完成部分工作），依 AI-67 的原則交給使用者重新派工。
+- 替代方案：退出時把 Run 標為 `cancelled`（語意上是使用者取消，且 AI-66 會讓人誤以為 Task 被放棄）；不重新排隊，續跑時再掃描「被退出停下的 Task」（需要另外記錄哪些 Task 屬於這一類，且會和使用者的手動派工打架）；停止異常也釋放 lease（可能兩個寫入者）。
+- 影響：被停下的 Task 在重新開啟前一直排隊、等待原因是 `runtime_stopping`；停止異常的 Task 在核對前保持 `running`。重新排隊不保留原本的優先序。
+- 審閱：未審
+
+### AI-104：停止意圖的保存方式與阻擋點：單列狀態加各 Workspace 暫停，擋在 Scheduler 與 launch intent
+- 重要度：高
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：停止意圖存在單列表 `runtime_lifecycle`（`phase` = `running`／`stopping`／`stopped`、`version`、最近一次停止報告 JSON），`stopping` 與 `stopped` 都算停止意圖生效，直到重新開啟。要求退出的同一個交易中，把每個使用中的 Workspace 標為暫停（`workspace_lifecycle.paused_since`）。阻擋點只有兩個：（1）Scheduler 的 `Capacity.halt`（`lifecycle::dispatch_halt`），`place` 一看到就回等待，所以佇列重試、額度恢復後的派工、API 的新派工要求與未來的交接（票 28 以 `SlotKind::Handoff` 呼叫同一個 `place`）都被擋；（2）寫入 launch intent（`BeginLaunch`）的交易再檢查一次（`RunError::LaunchHalted`），擋住停止意圖寫入前就已派出、還沒啟動的 Run。等待原因新增第七類 `lifecycle`（`runtime_stopping`、`awaiting_resume`）。上次退出後尚未重新開啟（`stopped`）時再按「完全退出」，視為新的退出要求（版本加一），停止中則冪等。
+- 理由：ADR-0001 要求「排程、Outbox 與 supervisor 啟動路徑都必須檢查停止意圖，不能只停排程器」；把檢查放在所有派工都會經過的 `place` 與所有啟動都會經過的 `BeginLaunch`，新加入的路徑（交接、重試預算）不必各自記得檢查。暫停在退出時就寫入，重新開啟只需要決定「誰解除」，不必回頭推算哪些 Workspace 受影響。
+- 替代方案：只在 Supervisor 背景迴圈檢查（API 派工、未來的交接會漏掉）；不記錄 Workspace 暫停、重新開啟時才逐一判定（重新開啟前新增的 Workspace 會被誤判，且「繼續工作」沒有可以清除的狀態）；把停止意圖放進 `RunContext`（要改動所有建構點，與排程等待原因的呈現脫節）。
+- 影響：交接（票 28）與重試預算（票 36）只要經過 `scheduler::place`／`evaluate` 就自動遵守停止意圖；若另闢直接呼叫 `RunCommand::Dispatch` 的路徑，必須先呼叫 `lifecycle::dispatch_halt`。
+- 審閱：未審
+
+### AI-105：重新開啟的流程：先核對再解除；資料庫與生命週期檔取保守者；以版本防止清掉新的退出要求
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：Runtime 啟動時讀資料庫與 `<資料目錄>\lifecycle.json`：只有檔案有停止意圖、或檔案存在卻讀不懂（毀損）都視為停止，並把停止意圖補記進資料庫（同時暫停每個使用中的 Workspace、記一筆說明）；只有資料庫有時把它鏡像回檔案。停止意圖仍生效時，Supervisor 的第一次 `tick` 先核對（處理啟動中的 Run：以 command_id 找回或中斷；對每個有程序身分的 Run 不論 lease 是否過期都 `inspect`，`Dead` 才中斷），再以「啟動時看到的生命週期版本」做條件式重新開啟：版本已改變（核對期間使用者又按了完全退出）就不重新開啟。重新開啟後把檔案改寫為沒有停止抑制。
+- 理由：spec D-25「兩者不一致時採較保守者」；票面「重新開啟先核對，再依設定續跑」。核對放在 Supervisor 的同一把鎖裡，與一般處理不會交錯；版本比對避免「剛重新開啟的 Runtime 把使用者新的停止意圖清掉」。
+- 替代方案：重新開啟在 `Runtime::start` 內同步完成（測試無法決定核對時機，且啟動會被慢的 `inspect` 卡住）；檔案毀損時忽略檔案（可能在使用者要求停止後被 launcher 自動啟動）。
+- 影響：Runtime 啟動到第一次處理之間（正式執行約 1 秒），API 仍回報停止意圖生效、「繼續工作」回 409。重新開啟時寫檔失敗只記日誌：下次啟動時會再被視為停止（較保守），使用者需要再次重新開啟。
+- 審閱：未審
+
+### AI-106：「保存並停止」的通知方式：Agent 回報的回應帶 `stop_requested`，強制力仍靠程序樹終止
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：停止意圖生效後，`report_progress`、`save_checkpoint`、`report_blocked` 的成功回應帶 `stop_requested: true`（平常是 `false`），Worker 據此保存 checkpoint 並結束。Runtime 不另外對程序送出任何訊號；停止流程對每個 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`：寬限期內等程序自行結束，逾時以 Job Object 終止整棵程序樹（AI-72）。
+- 理由：`claude -p` 執行中沒有可靠的輸入管道（stdin 在啟動時就導向 NUL，AI-72），送主控台中斷訊號需要與 Worker 共用主控台，且 Windows 上無法對特定程序樹可靠地送 Ctrl+C。回報的回應是 Worker 本來就會定期呼叫的管道，不需要新的工具或協定。
+- 替代方案：新增 `should_stop` 工具讓 Worker 輪詢（Worker 要記得呼叫，提示也要改）；送 `CTRL_BREAK_EVENT`（需要 `CREATE_NEW_PROCESS_GROUP` 與主控台，Validation Required 的範圍更大）。
+- 影響：Worker 在寬限期內沒有回報就收不到通知，只能被終止；Context Builder（票 39）與真實 Adapter（票 14）的 Worker 提示需要寫明「回應出現 `stop_requested` 時保存 checkpoint 並結束」。30 秒是否足夠屬 Validation Required。
+- 審閱：未審
+
+### AI-107：40 秒上限的實作與停止流程結束後的收尾
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：全部 Run 的 `stop` 並行執行，寬限期 30 秒（ProcessControl 在之後 10 秒內終止並確認，AI-72 的既有行為），Runtime 另以 `寬限期 + 確認上限 = 40 秒` 的真實時間作為安全網：到時還沒回來的停止記為停止異常 `stop_unconfirmed`。停止期限（`deadline_at`）以 Clock 記在停止報告中。停止流程期間握住 Supervisor 的 tick 鎖。結束後 Runtime 再提供 API 5 秒（讓 App 讀到最終結果）才結束服務；測試 harness 不自行結束（`exit_linger: None`），以 `exit_timing` 縮短上限測試卡住的情境。
+- 理由：spec D-11 的總上限是 40 秒；ProcessControl 的 `stop` 本身就有上限，但 Port 的實作可能卡住（例如 Windows API 沒有回應），Runtime 不能把有界性完全交給 Port。App 每 0.5 秒輪詢，5 秒足以讀到結果；Runtime 若永遠不結束，App 當掉時會留下無主的 Runtime。
+- 替代方案：停止依序執行（N 個 Run 會變成 N × 40 秒）；Runtime 停止流程結束立即結束服務（App 讀不到停止異常）。
+- 影響：從按下「完全退出」到 Runtime 結束最長約 45 秒；第 40 秒才回來的 `ForceKilled` 若剛好晚於安全網，會被記為 `stop_unconfirmed`（保守）。
+- 審閱：未審
+
+### AI-108：桌面殼：關窗隱藏到系統匣、完全退出由 Web UI 顯示進度，殼有 60 秒後備
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：關閉主視窗改為隱藏（`prevent_close` + `hide`），App 留在系統匣；系統匣選單有停用的狀態項目（每 3 秒以 `GET /api/v1/lifecycle` 更新：運作中與進行中 Run 數、完全退出中、已停止、無法連線）、「開啟 Baton」（左鍵點圖示亦同）與「完全退出」。「完全退出」顯示主視窗並對 Web UI 發 `baton://full-exit-requested`；Web UI 呼叫 `lifecycle_exit`、每 0.5 秒輪詢並顯示每個 Run 的停止結果與期限倒數；沒有停止異常約 1 秒後自動 `app_quit`，有異常則列出並等使用者按「關閉 Baton」；輪詢時 Runtime 已結束也視為完成。要求退出本身失敗時顯示原因與「重試」「返回」，不自動結束 App。殼在按下後 60 秒若 App 仍未結束，自行送出完全退出（冪等）再結束 App。HTTP 版用戶端（瀏覽器開發用）的 `app_quit` 與事件監聽是 no-op。
+- 理由：票面要求「系統匣提供狀態、重新開啟與完全退出」「顯示停止進度與異常」；有異常時自動關閉會讓使用者看不到「哪些程序可能還在背景」。後備避免 Web UI 卡住時 App 永遠不結束；在系統匣按「完全退出」本身就是停止意圖，所以後備也送出退出要求。
+- 替代方案：殼在 Rust 端自己輪詢並以原生對話框顯示進度（與 Web UI 的狀態呈現重複）；有異常也自動結束 App（異常只留在下次開啟才看得到）。
+- 影響：沒有單一執行個體機制，App 隱藏在系統匣時再執行一次執行檔會開出第二個 App（兩者連同一個 Runtime，不會有第二個 Runtime 或 Worker）；可在後續票加入 `tauri-plugin-single-instance`。系統匣與關窗行為只有編譯與元件測試，Windows 上的實際操作屬 Validation Required（已寫入 `docs/development.md`，建議列入票 51）。
+- 審閱：未審
+
+### AI-109：生命週期 API、資料表與事件的形狀
+- 重要度：低
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：端點：`GET /api/v1/lifecycle`（階段、`stop_intent_active`、時間參數、進行中或最近一次的停止報告、進行中 Run 數、各使用中 Workspace 的 `auto_resume_after_exit`／`paused_since`／`awaiting_resume`）、`POST /api/v1/lifecycle/exit`（202）、`PUT /api/v1/workspaces/{id}/lifecycle`（`{ auto_resume_after_exit }`）、`POST /api/v1/workspaces/{id}/resume`（停止意圖生效時 409 `stop_intent_active`）。停止報告的每個 Run：`outcome` = `pending`／`not_started`／`stopped_gracefully`／`force_killed`／`anomaly`，異常再帶 `anomaly` = `still_alive`／`stop_failed`／`stop_unconfirmed` 與說明。migration 11：`runtime_lifecycle`（單列）與 `workspace_lifecycle`（沒有列的 Workspace 等同預設：自動續跑關閉、未暫停）。事件：`full_exit_requested`、`full_exit_completed`（含異常清單）、`runtime_reopened`（含續跑與等待的 Workspace）、`workspace_paused_by_exit`、`workspace_resumed`、`workspace_auto_resume_changed`；停止進度的逐筆更新不追加事件。UI：Workspace 清單每列有「完全退出後自動續跑」勾選與暫停中的「繼續工作」，等待原因第七類標籤為「完全退出」。
+- 理由：一個總覽端點同時供系統匣、退出進度與 Workspace 清單使用；進度更新很頻繁，事件只記開始、結束與重新開啟。
+- 替代方案：把 Workspace 設定放進 `Workspace` 本身（要改 Workspace 狀態機、API 與既有測試）；停止進度用 SSE（事件串流目前還沒有實際事件，輪詢已足夠）。
+- 影響：migration 11 若與平行開發的票衝突，依 AI-75／AI-86 的方式順延。「跨登入自動續跑」（使用者故事 17 的另一個設定）屬票 33，屆時加在同一張 `workspace_lifecycle` 表。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

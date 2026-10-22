@@ -6,16 +6,16 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔） |
 | `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs、PlatformInfo、SecretProtector、ClaudeEnvironment |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`） |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task 與 Run）、`/api/v1/scheduling`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`） |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task 與 Run）、`/api/v1/scheduling`、`/api/v1/lifecycle`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
-| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
+| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`，含啟動時核對停止意圖與完全退出的執行者）、Supervisor（`supervisor.rs`，含完全退出的停止流程與重新開啟）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-mcp-shim` | MCP 工具 shim（`baton-mcp-shim.exe`）：Claude Code 以 stdio 啟動，把工具呼叫轉送到 Runtime 的 Agent API；只依賴 `baton-domain` |
 | `crates/baton-harness` | 測試 harness 與全部 Port 的 fake（主要測試 seam，spec D-04） |
 | `crates/baton-client` | 桌面殼用的 `RuntimeClient`（自動讀取憑證）與「連回既有 Runtime 或啟動新的」邏輯 |
-| `src-tauri` | Tauri 桌面殼與安裝設定（`tauri.conf.json`） |
+| `src-tauri` | Tauri 桌面殼（系統匣、關窗隱藏）與安裝設定（`tauri.conf.json`） |
 | `web` | React + TypeScript + Vite 的 Web UI |
 | `scripts` | 建置、測試、冒煙測試腳本 |
 
@@ -227,6 +227,35 @@ Worker 不直接碰資料庫或管理 API：它的程序啟動時帶著一組**�
 
 測試：`crates/baton-harness/tests/scheduling.rs`（情境測試）、`crates/baton-domain/src/scheduler/tests.rs`（單元與性質測試）、`crates/baton-store/src/scheduling/tests.rs`。harness 的 `harness.add_account(name, email)` 建立一個核對通過、可派工的帳號（同一個 email 不能綁兩個 Profile）。
 
+### 桌面生命週期與完全退出
+
+規則在 `baton_domain::lifecycle`（純邏輯），持久化在 `baton-store` 的 `lifecycle.rs`（migration 11：`runtime_lifecycle`、`workspace_lifecycle`），端點在 `baton-api` 的 `lifecycle.rs`，停止流程與重新開啟在 `Supervisor`（`full_exit`、第一次 `tick` 的重新開啟）。對應 ADR-0001（DR-20261021-01）與 spec D-11、D-25。
+
+**關窗不等於停止**：Runtime 是獨立程序。桌面殼關閉主視窗只會隱藏到系統匣；系統匣有狀態（每 3 秒更新）、「開啟 Baton」與「完全退出」。重開視窗以 `ensure_runtime` 連回同一個 Runtime，不會啟動第二個控制平面，也不會重複啟動 Worker。
+
+**完全退出**（系統匣 → Web UI 的 `ExitProgress` → `POST /api/v1/lifecycle/exit`）：
+
+1. API 在一個交易中持久化停止意圖（`phase = stopping`，期限 = 要求時間 + 40 秒），並暫停每個使用中的 Workspace，回應 202。重複要求是冪等的。
+2. 停止意圖生效後，所有會建立新 Run 的路徑都被擋住：Scheduler 的 `Capacity.halt`（佇列重試、額度恢復後的派工、交接都經過 `scheduler::place`），以及寫入 launch intent（`BeginLaunch`）的交易（`launch_halted`，代碼 `launch_halted`）。被擋住的 Task 留在佇列，等待原因是第七類 `lifecycle`（`runtime_stopping`；Workspace 暫停時是 `awaiting_resume`）。
+3. 停止流程（Runtime 背景）：先把停止意圖鏡像到 `<資料目錄>\lifecycle.json`（暫存檔 + fsync + 改名），再對每個尚未結束的 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`（ProcessControl 在寬限期後以 Job Object 終止程序樹，並在 10 秒內確認），全部並行，總上限 40 秒。期間 Supervisor 的 tick 被鎖住，不會啟動任何程序。Worker 透過 Agent 回報的回應 `stop_requested: true` 得知要保存並停止。
+4. 程序確認停止（或根本沒有程序）的 Run 以 `interrupted`（`stopped_by_full_exit`）結束、釋放寫入所有權，Task 退回 `ready` 並重新排入派工佇列；使用者先前已要求取消的 Run 則完成取消。`StillAlive`、停止呼叫失敗、到總上限仍沒有結果的記為**停止異常**（`still_alive`／`stop_failed`／`stop_unconfirmed`），Run 保留寫入所有權。完全退出不會把任何 Task 標為取消或完成。
+5. 進度（每個 Run 的結果）寫在 `runtime_lifecycle.last_exit`，結束時進入 `stopped` 並追加 `full_exit_completed`（含異常清單）。Runtime 再提供 API 5 秒（讓 App 讀最終結果）後結束。App 沒有停止異常就自動結束；有異常則列出並等使用者按「關閉 Baton」。
+
+**重新開啟**：Runtime 啟動時讀資料庫與生命週期檔，不一致時採較保守者（只有檔案有停止意圖或檔案毀損都視為停止，並補記進資料庫）。停止意圖仍生效時，Supervisor 第一次 `tick` 先核對（以 command_id 找回啟動中的程序、查證上次沒能確認停止的程序：確定已不在才以 `process_gone_after_full_exit` 中斷，不自動重派），再解除停止意圖：開啟「完全退出後自動續跑」的 Workspace 解除暫停，排隊中的工作照常派出；其餘 Workspace 等使用者按「繼續工作」。啟動後若又有新的退出要求（生命週期版本改變），不會重新開啟。
+
+**各 Workspace 的設定**：「完全退出後自動續跑」預設關閉；變更只影響下次重新開啟，不會立即啟動或停止目前的工作。
+
+| 端點（桌面憑證） | 用途 |
+| --- | --- |
+| `GET /api/v1/lifecycle` | 階段（`running`／`stopping`／`stopped`）、`stop_intent_active`、時間參數、進行中或最近一次的停止報告（`exit`）、進行中 Run 數、各 Workspace 的 `auto_resume_after_exit`／`paused_since`／`awaiting_resume` |
+| `POST /api/v1/lifecycle/exit` | 完全退出：202 與目前狀態 |
+| `PUT /api/v1/workspaces/{id}/lifecycle` | `{ "auto_resume_after_exit": bool }`；找不到 Workspace 404 |
+| `POST /api/v1/workspaces/{id}/resume` | 「繼續工作」；停止意圖仍生效時 409 `stop_intent_active` |
+
+事件：`runtime_lifecycle` 聚合有 `full_exit_requested`、`full_exit_completed`、`runtime_reopened`；`workspace_lifecycle` 聚合有 `workspace_paused_by_exit`、`workspace_resumed`、`workspace_auto_resume_changed`。
+
+**Validation Required**：30 秒寬限 + 10 秒確認在真實 Claude Code 與 Windows Job Object 上是否足夠；系統匣、關窗隱藏與停止進度畫面只有編譯與元件測試，需在 Windows 上手動確認（按「完全退出」→ 進度 → App 結束、資料目錄出現 `lifecycle.json`）。
+
 ### 帳號 Profile 與首次啟動精靈
 
 每個 account_profile 有自己的 `CLAUDE_CONFIG_DIR`：`<資料目錄>\profiles\<profile id>`（由 Runtime 建立，識別是隨機值；任兩個 Profile 的目錄不相同也不互相包含，已封存的 Profile 目錄不會被重用）。資料庫只保存核對結果（登入與否、認證來源、帳號身分、核對時間），登入資料（token）只存在該目錄中、由 Claude Code 保管，不進資料庫、日誌、事件、API 回應或備份。最多同時 8 個使用中的 Profile（spec D-32）；封存會釋出名額但不刪除目錄。
@@ -291,7 +320,7 @@ pnpm --filter web test
 node scripts/smoke-desktop.mjs
 ```
 
-它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、關閉 App 後 Runtime 仍在執行、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕。這個測試會開啟視窗，所以不納入 `pnpm test`。
+它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕。這個測試會開啟視窗，所以不納入 `pnpm test`。
 
 ### 測試 harness（主要測試 seam）
 
@@ -315,8 +344,9 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - `Harness::builder().prepare_data_dir(..).try_start()`：Runtime 第一次啟動前先整理資料目錄（例如放入較新版本的資料庫），並回傳啟動錯誤而不是 panic。
 - `harness.supervise()`：讓 Supervisor 處理一次（Harness 不啟動背景迴圈，何時發生由測試決定）；`process_control.hang_next_spawn_at(HangPoint::…)` 讓下一次 spawn 在「啟動前／啟動後回執前」永遠不回來，測試以 `timeout` 丟棄該次處理即等同 Runtime 在那一點崩潰；`agent_adapter.emit(run_id, event)`、`script_next_run(events)` 推送 Adapter 事件。
 - `harness.restart()`：模擬重啟。舊的 Runtime 被丟棄（原位址不再回應），資料目錄與全部 fake 都保留。
+- 完全退出：`POST /api/v1/lifecycle/exit` 之後以 `harness.wait_for_exit()` 等停止流程結束（Harness 的 Runtime 在退出後不會自行結束服務，由測試決定何時 `restart`）；`Harness::builder().exit_timing(..)` 縮短 30 + 10 秒的上限；`process_control.script_stop(identity, FakeStop::Result(..)／Hang／Fail(..))` 指定某個程序停不停得下來，`stop_graces()` 讀取每次停止收到的寬限期；`harness.lifecycle_file_path()` 是生命週期檔的位置。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`、`claude_env`：具體的 fake，可腳本化回應並讀取呼叫紀錄。`claude_env` 可設定 Claude Code／Git 是否存在與版本（`set_claude`、`set_git`、`fail_tool_probes`）、在某個設定目錄完成原生登入（`log_in`，會像真實的 Claude Code 一樣把登入資料寫進該目錄）、模擬環境變數覆蓋（`set_env_override`）、讓開啟登入終端機時順便登入（`script_terminal_login`），並記錄開啟過的終端機（`login_terminals`）。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 
