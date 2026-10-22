@@ -17,6 +17,7 @@ mod lifecycle;
 mod messages;
 mod profiles;
 pub mod quota;
+mod recovery;
 mod runs;
 mod scheduling;
 mod sessions;
@@ -88,6 +89,7 @@ pub use lifecycle::{
     workspace_lifecycle_path, workspace_resume_path, LifecycleStatus, UpdateWorkspaceLifecycleRequest,
     WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
 };
+pub use recovery::{RecoveryStatusView, RECOVERY_PATH, RECOVERY_RETRY_PATH};
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
 pub use sessions::{session_path, sessions_path, SessionList};
@@ -237,6 +239,8 @@ pub fn router(state: ApiState) -> Router {
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
         .route(lifecycle::WORKSPACE_RESUME_ROUTE, post(lifecycle::resume_workspace))
+        .route(RECOVERY_PATH, get(recovery::status))
+        .route(RECOVERY_RETRY_PATH, post(recovery::retry))
         .route(SCHEDULING_PATH, get(scheduling::view))
         .route(INTEGRATION_QUEUE_PATH, get(workdirs::queue))
         .route(SCHEDULING_SETTINGS_PATH, axum::routing::put(scheduling::update_settings))
