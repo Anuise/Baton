@@ -4391,6 +4391,15 @@
 - 影響：無行為差異；本票先前 commit 訊息中的「AI-431～AI-437」指改號前的條目。
 - 審閱：未審
 
+### AI-448：最終 code-review 分三個範圍審查與修正
+- 重要度：中
+- 時間／階段：2026-10-23，最終 code-review
+- 決策：`rebuild/v1` 相對 `main` 有 704 個檔案、約 16.7 萬行，最終 code-review 分成三個範圍各派一個唯讀審查 run（R151 Domain／Store、R152 Runtime／API／Ports／監護／MCP shim／Client／憑證、R153 Web／Tauri／腳本／文件／harness）。審查共回報 51 項（高 4、中 22、低 25），加上執行期間累積的 `review-notes.md` 27 項。修正同樣依三個範圍各派一個修正 run 平行處理全部項目，完成後各自驗證，合併時衝突依 AI-75／AI-109 處理。
+- 理由：implement-spec skill 要求「以單一 implementer 修正 code review 的所有問題」，但項目近 80 項、跨越整個系統，單一 run 處理不完，也無法在一個 context 內完成驗證。依範圍切分可以平行、也讓每個 run 的修改集中在少數 crate，降低合併衝突。
+- 替代方案：單一修正 run（照 skill 字面，但很可能做不完或品質下降）；只修高／中嚴重度（低嚴重度留給後續）。
+- 影響：三個修正 run 之間仍可能改到共用檔案（例如 `crates/baton-store/src/lib.rs`、`docs/development.md`），需要整合 run；低嚴重度項目也會被處理，額度消耗較大。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

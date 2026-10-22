@@ -152,6 +152,9 @@
 | R148-47-verify | 47 | verify | Work-9 | 2026-10-23 03:20 | 2026-10-23 03:28 | FAIL（重現排隊中可先排除疑點，掩蓋缺陷） |
 | R149-47-fix | 47 | fix | Work-3 | 2026-10-23 03:28 | 2026-10-23 03:40 | DONE（c03aff8..ceb8030，修正 1／3） |
 | R150-47-verify | 47 | verify | Work-8 | 2026-10-23 03:40 | 2026-10-23 03:45 | PASS |
-| R151-review-a | — | review | Work-3 | 2026-10-23 03:46 | | |
-| R152-review-b | — | review | Work-8 | 2026-10-23 03:46 | | |
-| R153-review-c | — | review | Work-9 | 2026-10-23 03:46 | | |
+| R151-review-a | — | review | Work-3 | 2026-10-23 03:46 | 2026-10-23 03:59 | DONE |
+| R152-review-b | — | review | Work-8 | 2026-10-23 03:46 | 2026-10-23 03:59 | DONE |
+| R153-review-c | — | review | Work-9 | 2026-10-23 03:46 | 2026-10-23 03:59 | DONE |
+| R154-fix-a | final-a | final-fix | Work-3 | 2026-10-23 03:59 | | |
+| R155-fix-b | final-b | final-fix | Work-8 | 2026-10-23 03:59 | | |
+| R156-fix-c | final-c | final-fix | Work-9 | 2026-10-23 03:59 | | |
