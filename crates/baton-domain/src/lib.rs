@@ -22,6 +22,7 @@ pub mod shared_settings;
 pub mod storage_location;
 pub mod task;
 pub mod time;
+pub mod verification;
 pub mod workspace;
 
 pub use time::Timestamp;

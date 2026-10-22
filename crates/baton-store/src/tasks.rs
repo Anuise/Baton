@@ -6,6 +6,7 @@
 use baton_domain::authorization::AuthorizationRevision;
 use baton_domain::agent::ReportRecord;
 use baton_domain::run::{ExecutionLease, Run, RunView};
+use baton_domain::verification::VerificationRecord;
 use baton_domain::task::{
     self, ContractContent, Dependency, Goal, MissingItem, Task, TaskChange, TaskCommand, TaskContext, TaskContract,
     TaskError, TaskStatus, TaskView,
@@ -34,6 +35,8 @@ pub struct TaskBoardData {
     pub goals: Vec<Goal>,
     pub tasks: Vec<TaskView>,
     pub runs: Vec<RunView>,
+    /// 這個 Workspace 的全部驗證紀錄，由舊到新（票 13）。
+    pub verifications: Vec<VerificationRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -113,7 +116,8 @@ impl Store {
                 }
                 let tasks = task::board(&loaded.ctx(&workspace_id));
                 let runs = super::runs::views(&loaded);
-                Ok(Ok(TaskBoardData { goals: loaded.goals, tasks, runs }))
+                let verifications = super::verification::load_verifications(conn, &workspace_id)?;
+                Ok(Ok(TaskBoardData { goals: loaded.goals, tasks, runs, verifications }))
             })
             .await?;
         Ok(result?)
@@ -341,6 +345,7 @@ mod tests {
             done_criteria: filled("五個產品"),
             blocker_handling: filled("回報"),
             required_capabilities: vec![Capability::ReadFiles],
+            verification_checks: vec![],
         }
     }
 
