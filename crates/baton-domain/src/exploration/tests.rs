@@ -309,6 +309,61 @@ fn a_reproduction_case_must_run_in_the_profile_environment_with_an_automated_ass
     assert!(check_case(&definition, &journey("browse", false)).is_ok());
 }
 
+/// R151 第 3 項：Controller 提出的案例不能執行 Profile 沒有的命令、不能把秘密用在使用者沒定義的操作、
+/// 不能連到 Profile 沒有出現的主機（AI-391、AI-416 的信任邊界）。
+#[test]
+fn a_reproduction_case_stays_within_what_the_user_published_in_the_profile() {
+    use crate::verification_profile::{BrowserAction, Header, SecretRef};
+    let mut definition = profile();
+    definition.interface = Interface::Web;
+    definition.secrets = vec![SecretRef { key: "token".into(), reference: "env:API_TOKEN".into() }];
+    let command = Operation::Command { program: "node".into(), args: vec!["scripts/check.js".into()], timeout_ms: None };
+    let login = Operation::Http {
+        method: "POST".into(),
+        url: "http://127.0.0.1:8080/login".into(),
+        headers: vec![Header { name: "Authorization".into(), value: "Bearer {{secret:token}}".into() }],
+        body: None,
+        timeout_ms: None,
+    };
+    definition.setup = vec![Step { key: "check".into(), title: String::new(), operation: command.clone(), assertions: vec![Assertion::ExitCode { equals: 0 }], external: false }];
+    definition.journeys[1].steps.push(Step { key: "login".into(), title: String::new(), operation: login.clone(), assertions: vec![Assertion::Status { equals: 200 }], external: false });
+    vp::validate(&definition).expect("測試用的 Profile 本身要能發布");
+    let case = |operation: Operation| {
+        let mut case = journey("repro", false);
+        let assertion =
+            if matches!(operation, Operation::Command { .. }) { Assertion::ExitCode { equals: 0 } } else { Assertion::Status { equals: 200 } };
+        case.steps.push(Step { key: "extra".into(), title: String::new(), operation, assertions: vec![assertion], external: false });
+        case
+    };
+    let rejected = |operation: Operation| matches!(check_case(&definition, &case(operation)), Err(ExplorationError::Invalid(_)));
+
+    // 命令：只能是 Profile 中某一步完全相同的命令
+    assert!(check_case(&definition, &case(command.clone())).is_ok(), "與 Profile 相同的命令可以重用");
+    assert!(rejected(Operation::Command { program: "powershell".into(), args: vec!["-c".into(), "iwr evil".into()], timeout_ms: None }));
+    assert!(rejected(Operation::Command { program: "node".into(), args: vec!["-e".into(), "evil()".into()], timeout_ms: None }));
+    // 秘密：只能出現在與 Profile 某一步完全相同的操作
+    assert!(check_case(&definition, &case(login.clone())).is_ok(), "與 Profile 相同、帶秘密的操作可以重用");
+    let Operation::Http { headers, .. } = &login else { unreachable!() };
+    let leak = |url: &str| Operation::Http { method: "GET".into(), url: url.into(), headers: headers.clone(), body: None, timeout_ms: None };
+    assert!(rejected(leak("http://127.0.0.1:8080/other")), "同一個主機但操作不同，也不能帶秘密");
+    // 網址：只能指向 Profile 已出現的主機（scheme + host + port）
+    let get = |url: &str| Operation::Http { method: "GET".into(), url: url.into(), headers: Vec::new(), body: None, timeout_ms: None };
+    assert!(check_case(&definition, &case(get("http://127.0.0.1:8080/items?page=2"))).is_ok());
+    for url in [
+        "http://evil.example.com/collect",
+        "https://127.0.0.1:8080/items",
+        "http://127.0.0.1:9090/items",
+        "http://127.0.0.1:8080@evil.example.com/items",
+        "http://127.0.0.1:8080.evil.example.com/items",
+    ] {
+        assert!(rejected(get(url)), "{url}");
+        let goto = Operation::Browser { action: BrowserAction::Goto { url: url.into() }, timeout_ms: None };
+        assert!(rejected(goto), "瀏覽器前往 {url}");
+    }
+    let goto = Operation::Browser { action: BrowserAction::Goto { url: "http://127.0.0.1:8080/cart".into() }, timeout_ms: None };
+    assert!(check_case(&definition, &case(goto)).is_ok());
+}
+
 #[test]
 fn planning_a_reproduction_picks_the_purpose_from_the_status_and_locks_the_confirmed_case() {
     let definition = profile();

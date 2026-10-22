@@ -18,6 +18,7 @@
 //! - 驗證納入帳號額度；全帳號受限時只執行不需模型的斷言：
 //!   `the_judge_only_uses_accounts_below_the_quota_gate_and_without_any_only_model_free_assertions_run`
 
+use std::path::Path;
 use std::time::Duration;
 
 use baton_domain::Timestamp;
@@ -152,6 +153,8 @@ async fn world(accounts: usize) -> World {
     std::fs::create_dir_all(&dir).unwrap();
     let (status, body) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": dir.to_string_lossy() }))).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    // 受驗目錄是 Git repo（有 revision）：沿用已完成的旅程需要觀察得到的 build 與 revision（AI-427、R151 第 23 項）
+    harness.verification_driver.set_revision(Path::new(body["path"].as_str().unwrap()), "c1");
     let ws = body["id"].as_str().unwrap().to_string();
     World { harness, ws, accounts: ids }
 }

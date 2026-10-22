@@ -1778,6 +1778,13 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER exploration_attempt_no_delete BEFORE DELETE ON exploration_attempt
         BEGIN SELECT RAISE(ABORT, 'exploration_attempt 不可刪除'); END;",
     },
+    // 最終 review 修正（R151 第 1 項，第 46 個 migration）：開發 Task 通過驗證後整合失敗會回到 ready 重做，
+    // 重做的 Run 必須能再通過，所以「同一個 Task 最多一筆通過」放寬為「同一個 Run 最多一筆通過」；
+    // 後者已由 task_verification_one_conclusion（每個 Run 最多一筆有結論的紀錄）保證，只要移除舊索引。
+    Migration {
+        name: "verification_pass_per_run",
+        sql: "DROP INDEX task_verification_one_pass;",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，

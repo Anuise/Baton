@@ -98,7 +98,8 @@ impl Store {
                     .and_then(|t| loaded.contracts.iter().find(|c| c.task_id == t.id && c.version == t.contract_version))
                     .map(|c| c.content.verification_checks.clone())
                     .unwrap_or_default();
-                let ctx = IntegrationContext { entry: &entry, workspace: loaded.workspace.as_ref(), task, checks: &checks };
+                let subject_run = baton_domain::verification::subject_run(&loaded.runs, &entry.task_id).map(|r| r.id.as_str());
+                let ctx = IntegrationContext { entry: &entry, workspace: loaded.workspace.as_ref(), task, subject_run, checks: &checks };
                 match integration::decide(&ctx, command, now) {
                     Err(rejected) => Ok(Err(rejected)),
                     Ok(change) => {

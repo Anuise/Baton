@@ -107,8 +107,48 @@ fn a_completed_journey_is_reused_only_when_the_build_is_the_same() {
         JourneyPlan::Reuse { attempt: from, steps, .. } => assert_eq!((from, steps.len()), (1, 3)),
         other => panic!("同一個 build 應該沿用：{other:?}"),
     }
-    // build 改變：舊的結果不能沿用；完整結束的旅程中送出的外部操作結果已知，以新的 build 整條重測
+    // build 改變：舊的結果不能沿用；旅程中沒有開始過外部操作，以新的 build 整條重測
     assert_eq!(plan_journey(&checkout(), &previous, Some("c2"), Some("revision:c2")), JourneyPlan::Run);
+}
+
+/// R151 第 23 項：build 與 revision 都觀察不到時，無法證明是同一個版本，不沿用（AI-427）。
+#[test]
+fn a_completed_journey_is_not_reused_when_neither_build_nor_revision_was_observed() {
+    let unobserved = JournalEntry::Build { candidate_revision: None, build: None };
+    let first = attempt(
+        1,
+        AttemptStatus::HandedOff,
+        vec![
+            unobserved,
+            done("checkout", "cart"),
+            done("checkout", "pay"),
+            done("checkout", "receipt"),
+            JournalEntry::JourneyCompleted { journey: "checkout".into() },
+        ],
+    );
+    assert_eq!(plan_journey(&checkout(), &[first], None, None), JourneyPlan::Run);
+}
+
+/// review-notes #25：完整結束、但 build 不同而不能沿用的旅程，其中已送出的外部操作也不重送（AI-428）。
+#[test]
+fn a_completed_journey_that_cannot_be_reused_does_not_resend_its_external_operation() {
+    let first = attempt(
+        1,
+        AttemptStatus::HandedOff,
+        vec![
+            build("c1"),
+            done("checkout", "cart"),
+            JournalEntry::ExternalStarted { journey: "checkout".into(), step: "pay".into() },
+            done("checkout", "pay"),
+            done("checkout", "receipt"),
+            JournalEntry::JourneyCompleted { journey: "checkout".into() },
+        ],
+    );
+    let plan = plan_journey(&checkout(), &[first], Some("c2"), Some("revision:c2"));
+    let JourneyPlan::NotResent { attempt: from, step, reason, steps, .. } = plan else {
+        panic!("已送出的外部操作不能因 build 改變而重送：{plan:?}");
+    };
+    assert_eq!((from, step.as_str(), reason, steps.len()), (1, "pay", REASON_EXTERNAL_ALREADY_SENT, 3));
 }
 
 #[test]
