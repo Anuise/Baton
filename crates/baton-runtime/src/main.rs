@@ -24,7 +24,7 @@ async fn run() -> Result<(), String> {
         return Ok(());
     };
 
-    let runtime = Runtime::start(config, production_ports()).await.map_err(|e| e.to_string())?;
+    let runtime = Runtime::start(config.clone(), production_ports(&config.data_dir)).await.map_err(|e| e.to_string())?;
     println!("Runtime 已啟動：http://{}", runtime.local_addr());
 
     tokio::select! {
