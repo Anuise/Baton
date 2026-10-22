@@ -655,6 +655,8 @@ export interface TaskBoard {
   integrations: IntegrationEntry[];
   /** 各 Task 的修正與重試預算，每個 Task 一筆。 */
   budgets: BudgetView[];
+  /** Workspace 全部交接，依建立順序；舊版 Runtime 沒有這個欄位，視為空陣列。 */
+  handoffs?: Handoff[];
 }
 
 /** 修正與重試預算的種類（spec D-16）：三種計數互不影響。 */
@@ -680,6 +682,53 @@ export interface BudgetView {
   exhausted: BudgetKind | null;
   /** 用盡時建立的裁定請求。 */
   decision_request_id: string | null;
+}
+
+/** 交接階段：requested 等待保存檢查點、stopping 停止舊程序、transferred 已轉移等待接手確認、confirmed 已確認、abandoned 已放棄。 */
+export type HandoffPhase = "requested" | "stopping" | "transferred" | "confirmed" | "abandoned";
+
+/** 交接要延續的 checkpoint（對應 Rust 的 CheckpointRef）；時間是 UTC 毫秒。 */
+export interface HandoffCheckpoint {
+  run_id: string;
+  generation: number;
+  summary: string;
+  details: string;
+  saved_at: number;
+}
+
+/** 接手的 Worker 對交接的確認（對應 Rust 的 HandoffConfirmation）。 */
+export interface HandoffConfirmation {
+  completed: string;
+  incomplete: string;
+  unknown_side_effects: string;
+}
+
+/** 一次跨帳號交接（對應 Rust 的 Handoff）；時間是 UTC 毫秒。 */
+export interface Handoff {
+  id: string;
+  workspace_id: string;
+  task_id: string;
+  from_run_id: string;
+  from_profile_id: string;
+  from_generation: number;
+  /** 承接帳號。 */
+  to_profile_id: string;
+  to_run_id: string | null;
+  to_generation: number | null;
+  phase: HandoffPhase;
+  /** 帳號門檻的原因代碼，例如 drain_threshold、limit_warning。 */
+  reason: string;
+  checkpoint: HandoffCheckpoint | null;
+  /** 舊程序怎麼停下的：stopped_gracefully、force_killed、exited、dead、already_ended。 */
+  stop_outcome: string | null;
+  confirmation: HandoffConfirmation | null;
+  abandoned_reason: string | null;
+  requested_at: number;
+  stopping_at: number | null;
+  transferred_at: number | null;
+  confirmed_at: number | null;
+  updated_at: number;
+  version: number;
 }
 
 /** Task 在平台登記的工作目錄（對應 Rust 的 WorkdirView）；時間是 UTC 毫秒。 */
@@ -1378,6 +1427,26 @@ export interface AccountScheduling {
   running: number;
   limit: number;
   runs: AccountRun[];
+  /** 額度門檻；`null` 代表帳號從未離開 open（可派工）。 */
+  quota_gate: QuotaGate | null;
+}
+
+/** 額度門檻狀態（spec D-13）：open 可派工、paused 停止派工、draining 停止派工且交接進行中的 Run。 */
+export type GateState = "open" | "paused" | "draining";
+
+/** 一個帳號目前的額度門檻（對應 Rust 的 QuotaGate）；時間是 UTC 毫秒。 */
+export interface QuotaGate {
+  profile_id: string;
+  state: GateState;
+  /** 進入這個狀態的原因代碼：stop_dispatch_threshold、drain_threshold、limit_warning、recovered、reset_observed、usage_unknown。 */
+  reason: string;
+  /** 轉換當下的判斷用量；未知為 null。 */
+  used: number | null;
+  /** 進入 paused／draining 時記下的重置時間；過了就恢復。 */
+  reset_at: number | null;
+  /** 進入這個狀態的時間。 */
+  since: number;
+  version: number;
 }
 
 /** 佇列中等待名額的 Task；`position` 從 1 起。 */
@@ -1617,6 +1686,81 @@ export interface BackupClient {
   backupStatus(): Promise<BackupStatus>;
 }
 
+/** 對話輸入的種類：使用者訊息、工作事件（Worker 成果或阻礙）、Controller 的回覆。 */
+export type ConversationTurnKind = "user_message" | "work_event" | "controller_reply";
+
+/** 輸入的處理狀態：已收到待處理、某一輪 Controller 正在處理、已處理。 */
+export type ConversationTurnStatus = "pending" | "processing" | "processed";
+
+/** conversation_turns 的一筆；時間是 UTC 毫秒。 */
+export interface ConversationTurn {
+  id: string;
+  conversation_id: string;
+  seq: number;
+  kind: ConversationTurnKind;
+  content: string;
+  status: ConversationTurnStatus;
+  controller_run_id: string | null;
+  /** 交付給 Controller 的次數；大於 1 表示上一輪中斷後重新交付。 */
+  attempts: number;
+  source: string | null;
+  created_at: number;
+  processed_at: number | null;
+}
+
+export type ControllerRunStatus = "starting" | "running" | "succeeded" | "failed" | "interrupted";
+
+/** Controller 的一輪（一次 `claude -p`）；時間是 UTC 毫秒。 */
+export interface ControllerRun {
+  id: string;
+  conversation_id: string;
+  workspace_id: string;
+  profile_id: string;
+  status: ControllerRunStatus;
+  version: number;
+  command_id: string;
+  prompt: string;
+  working_dir: string;
+  model: string | null;
+  input_turn_ids: string[];
+  agent_session_id: string;
+  resume_native_session_id: string | null;
+  native_session_id: string | null;
+  process: { pid: number; created_at_millis: number; command_hash: string } | null;
+  end_reason: string | null;
+  created_at: number;
+  updated_at: number;
+  started_at: number | null;
+  ended_at: number | null;
+}
+
+/** Workspace 的 Controller 對話（對應 GET /conversation）。 */
+export interface ConversationView {
+  /** 還沒有任何訊息時是 null。 */
+  conversation_id: string | null;
+  /** 有一輪 Controller 正在進行。 */
+  busy: boolean;
+  active_run: ControllerRun | null;
+  /** 不忙碌且有待處理輸入時，預計喚醒 Controller 的時間（UTC 毫秒）。 */
+  next_wake_at: number | null;
+  /** 依 seq 由小到大。 */
+  turns: ConversationTurn[];
+  /** 全部 Controller Run，依建立順序。 */
+  runs: ControllerRun[];
+}
+
+export interface SendMessageResponse {
+  turn: ConversationTurn;
+  busy: boolean;
+}
+
+/** Workspace 的 Controller 長期對話（只有桌面憑證能用）。 */
+export interface ConversationClient {
+  getConversation(workspaceId: string): Promise<ConversationView>;
+  /** 空白（message_empty）、過長（message_too_long）或 Workspace 已封存（workspace_archived）會被拒。 */
+  sendConversationMessage(workspaceId: string, text: string): Promise<SendMessageResponse>;
+}
+
 /** 恢復事件的狀態：等待（第一次立即、之後為退避）、嘗試中、穩定觀察中、已恢復、恢復額度用盡。 */
 export type RecoveryStatus = "waiting" | "attempting" | "observing" | "succeeded" | "exhausted";
 
@@ -1696,7 +1840,8 @@ export type AppClient = RuntimeClient &
   BackupClient &
   RecoveryClient &
   KnowledgeClient &
-  GuardClient;
+  GuardClient &
+  ConversationClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
 export function errorCode(error: unknown): string | null {
@@ -1914,6 +2059,9 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     listRecurrences: (lessonId) => send(`${knowledgePath(lessonId)}/recurrences`),
     reportRecurrence: (lessonId, request) =>
       send(`${knowledgePath(lessonId)}/recurrences`, { method: "POST", body: request }),
+    getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
+    sendConversationMessage: (workspaceId, text) =>
+      send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
   };
 }
 
@@ -2038,6 +2186,9 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     disableGuard: (id, expectedRevision) => call<GuardView>("guard_disable", { id, expectedRevision }),
     listRecurrences: (id) => call<RecurrenceList>("knowledge_recurrences", { id }),
     reportRecurrence: (id, request) => call<Recurrence>("knowledge_report_recurrence", { id, request }),
+    getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
+    sendConversationMessage: (workspaceId, text) =>
+      call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),
   };
 }
 

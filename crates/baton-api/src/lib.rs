@@ -8,6 +8,7 @@ mod agent;
 mod artifacts;
 mod authorization;
 mod backups;
+mod conversations;
 mod decisions;
 mod external_operations;
 mod guard;
@@ -38,7 +39,7 @@ use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::agent::{
-    TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
+    TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
     TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
@@ -67,6 +68,7 @@ pub use artifacts::{
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
 pub use backups::{BackupStatus, BackupSummary, BACKUPS_PATH};
+pub use conversations::{conversation_messages_path, conversation_path, PostMessageRequest, PostedMessage};
 pub use external_operations::{external_operations_path, BeginResponse, ExternalOperationList, RecordResponse};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
@@ -240,6 +242,8 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
+        .route(conversations::CONVERSATION_ROUTE, get(conversations::view))
+        .route(conversations::MESSAGES_ROUTE, post(conversations::post_message))
         .route(sessions::SESSIONS_ROUTE, get(sessions::list))
         .route(sessions::SESSION_ROUTE, get(sessions::detail))
         .route(external_operations::EXTERNAL_OPERATIONS_ROUTE, get(external_operations::list))
@@ -282,6 +286,7 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
         .route(&tool_path(TOOL_SEND_MESSAGE), post(messages::send_message))
         .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))
+        .route(&tool_path(TOOL_CONFIRM_HANDOFF), post(agent::confirm_handoff))
         .route(&tool_path(TOOL_RECORD_LESSON_CANDIDATE), post(knowledge::record_lesson_candidate))
         .route(&tool_path(TOOL_SEARCH_KNOWLEDGE), post(knowledge::search_knowledge))
         .route(&tool_path(TOOL_BEGIN_EXTERNAL_OPERATION), post(external_operations::begin))

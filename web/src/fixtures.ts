@@ -6,9 +6,13 @@ import type {
   BackupStatus,
   BackupSummary,
   BudgetView,
+  ControllerRun,
+  ConversationTurn,
+  ConversationView,
   DrillReport,
   DecisionRequestView,
   ExitRunResult,
+  Handoff,
   LifecycleStatus,
   ImportPreview,
   IntegrationEntry,
@@ -309,7 +313,7 @@ export function quotaAssessment(overrides: Partial<QuotaAssessment> = {}): Quota
   };
 }
 
-/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、沒有設定方案上限、每帳號上限 2。 */
+/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、沒有設定方案上限、每帳號上限 2、額度門檻從未離開 open。 */
 export function accountScheduling(overrides: Partial<AccountScheduling> = {}): AccountScheduling {
   return {
     profile_id: "prof_1",
@@ -322,6 +326,7 @@ export function accountScheduling(overrides: Partial<AccountScheduling> = {}): A
     running: 0,
     limit: 2,
     runs: [],
+    quota_gate: null,
     ...overrides,
   };
 }
@@ -584,6 +589,64 @@ export function integrationEntry(overrides: Partial<IntegrationEntry> = {}): Int
   };
 }
 
+/** 測試用的對話輸入：conv_1 的第 1 筆，已處理的使用者訊息。 */
+export function conversationTurn(overrides: Partial<ConversationTurn> = {}): ConversationTurn {
+  return {
+    id: "turn_1",
+    conversation_id: "conv_1",
+    seq: 1,
+    kind: "user_message",
+    content: "先整理文件目錄",
+    status: "processed",
+    controller_run_id: "crun_1",
+    attempts: 1,
+    source: null,
+    created_at: CHECKED_AT,
+    processed_at: CHECKED_AT + 60_000,
+    ...overrides,
+  };
+}
+
+/** 測試用的 Controller Run：conv_1 的第一輪，使用 prof_1，預設 running。 */
+export function controllerRun(overrides: Partial<ControllerRun> = {}): ControllerRun {
+  return {
+    id: "crun_1",
+    conversation_id: "conv_1",
+    workspace_id: "ws_1",
+    profile_id: "prof_1",
+    status: "running",
+    version: 1,
+    command_id: "cmd_1",
+    prompt: "先整理文件目錄",
+    working_dir: "C:\\work\\notes",
+    model: null,
+    input_turn_ids: ["turn_1"],
+    agent_session_id: "ses_1",
+    resume_native_session_id: null,
+    native_session_id: null,
+    process: null,
+    end_reason: null,
+    created_at: CHECKED_AT,
+    updated_at: CHECKED_AT,
+    started_at: CHECKED_AT,
+    ended_at: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的對話：預設還沒有任何訊息、不忙碌。 */
+export function conversationView(overrides: Partial<ConversationView> = {}): ConversationView {
+  return {
+    conversation_id: null,
+    busy: false,
+    active_run: null,
+    next_wake_at: null,
+    turns: [],
+    runs: [],
+    ...overrides,
+  };
+}
+
 /** 測試用的修正與重試預算：task_1 三種計數都還沒用。 */
 export function budgetView(overrides: Partial<BudgetView> = {}): BudgetView {
   return {
@@ -596,6 +659,34 @@ export function budgetView(overrides: Partial<BudgetView> = {}): BudgetView {
     retry_not_before: null,
     exhausted: null,
     decision_request_id: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的交接：task_1 第 1 次 Run 從 prof_1 交接到 prof_2（達 85% 交接門檻），剛要求、尚未保存檢查點。 */
+export function handoff(overrides: Partial<Handoff> = {}): Handoff {
+  return {
+    id: "ho_1",
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    from_run_id: "run_1",
+    from_profile_id: "prof_1",
+    from_generation: 1,
+    to_profile_id: "prof_2",
+    to_run_id: null,
+    to_generation: null,
+    phase: "requested",
+    reason: "drain_threshold",
+    checkpoint: null,
+    stop_outcome: null,
+    confirmation: null,
+    abandoned_reason: null,
+    requested_at: CHECKED_AT,
+    stopping_at: null,
+    transferred_at: null,
+    confirmed_at: null,
+    updated_at: CHECKED_AT,
+    version: 1,
     ...overrides,
   };
 }

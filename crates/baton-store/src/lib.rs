@@ -28,11 +28,13 @@ use tokio::sync::oneshot;
 mod agent;
 mod artifacts;
 mod cleanup;
+mod conversations;
 pub mod backup;
 mod budgets;
 mod decisions;
 mod external_operations;
 mod guards;
+mod handoffs;
 mod health;
 mod integration;
 mod knowledge;
@@ -51,9 +53,11 @@ mod workdirs;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use cleanup::{CleanupApplyError, CleanupWork};
+pub use conversations::{ConversationApplyError, ControllerWake};
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
 pub use external_operations::ExternalApplyError;
 pub use guards::{GuardApplyError, GuardOverview};
+pub use handoffs::{HandoffApplyError, HandoffWork};
 pub use health::classify as storage_fault_of;
 pub use integration::{IntegrationApplyError, IntegrationWork};
 pub use knowledge::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, ScopeRequest};
@@ -1038,7 +1042,106 @@ const MIGRATIONS: &[Migration] = &[
             UNIQUE (event_id, round, seq)
         );",
     },
-    // 票 32（第 29 個 migration）：監護日誌的匯入紀錄。每個嘗試識別只匯入一次（去重），連同處置一起保存：
+    // 票 28（第 29 個 migration）：帳號的額度門檻（遲滯：paused／draining）與交接紀錄（issue §5.2 的 phase）。
+    // 同一個 Run、同一個 Task 任何時刻最多一個進行中（requested／stopping）的交接。
+    Migration {
+        name: "quota_gate_and_handoff",
+        sql: "CREATE TABLE quota_gate (
+            profile_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK (state IN ('open', 'paused', 'draining')),
+            reason TEXT NOT NULL,
+            used REAL,
+            reset_at INTEGER,
+            since INTEGER NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1)
+        );
+        CREATE TABLE handoff (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            from_run_id TEXT NOT NULL REFERENCES run (id),
+            from_profile_id TEXT NOT NULL,
+            from_generation INTEGER NOT NULL,
+            to_profile_id TEXT NOT NULL,
+            to_run_id TEXT REFERENCES run (id),
+            to_generation INTEGER,
+            phase TEXT NOT NULL CHECK (phase IN ('requested', 'stopping', 'transferred', 'confirmed', 'abandoned')),
+            reason TEXT NOT NULL,
+            checkpoint TEXT,
+            stop_outcome TEXT,
+            confirmation TEXT,
+            abandoned_reason TEXT,
+            requested_at INTEGER NOT NULL,
+            stopping_at INTEGER,
+            transferred_at INTEGER,
+            confirmed_at INTEGER,
+            updated_at INTEGER NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            CHECK ((to_run_id IS NOT NULL) = (phase IN ('transferred', 'confirmed')))
+        );
+        CREATE INDEX handoff_workspace ON handoff (workspace_id);
+        CREATE INDEX handoff_task ON handoff (task_id);
+        CREATE INDEX handoff_to_run ON handoff (to_run_id);
+        CREATE UNIQUE INDEX handoff_one_in_flight_per_run ON handoff (from_run_id) WHERE phase IN ('requested', 'stopping');
+        CREATE UNIQUE INDEX handoff_one_in_flight_per_task ON handoff (task_id) WHERE phase IN ('requested', 'stopping');",
+    },
+    // 票 16（第 30 個 migration）：Controller 長期對話。每個 Workspace 一個 conversation；conversation_turn 是使用者訊息、
+    // 工作事件與 Controller 回覆，輸入帶處理狀態；controller_run 是 Controller 的一輪（只綁 conversation，不綁 Task）。
+    // 同一個 conversation 任何時刻最多一輪未結束（B1）由唯一索引保證；同一個工作事件來源只會成為一個輸入
+    Migration {
+        name: "conversation_and_controller_run",
+        sql: "CREATE TABLE conversation (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL UNIQUE REFERENCES workspace (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE controller_run (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES conversation (id),
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            profile_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('starting', 'running', 'succeeded', 'failed', 'interrupted')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            command_id TEXT NOT NULL UNIQUE,
+            prompt TEXT NOT NULL,
+            working_dir TEXT NOT NULL,
+            model TEXT,
+            input_turn_ids TEXT NOT NULL CHECK (json_valid(input_turn_ids)),
+            agent_session_id TEXT NOT NULL REFERENCES agent_session (id),
+            resume_native_session_id TEXT,
+            native_session_id TEXT,
+            pid INTEGER,
+            process_created_at INTEGER,
+            command_hash TEXT,
+            end_reason TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            started_at INTEGER,
+            ended_at INTEGER
+        );
+        CREATE INDEX controller_run_conversation ON controller_run (conversation_id);
+        CREATE UNIQUE INDEX controller_run_one_active ON controller_run (conversation_id)
+            WHERE status IN ('starting', 'running');
+        CREATE TABLE conversation_turn (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES conversation (id),
+            seq INTEGER NOT NULL CHECK (seq >= 1),
+            kind TEXT NOT NULL CHECK (kind IN ('user_message', 'work_event', 'controller_reply')),
+            status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'processed')),
+            content TEXT NOT NULL,
+            controller_run_id TEXT REFERENCES controller_run (id),
+            attempts INTEGER NOT NULL CHECK (attempts >= 0),
+            source TEXT,
+            created_at INTEGER NOT NULL,
+            processed_at INTEGER,
+            UNIQUE (conversation_id, seq),
+            UNIQUE (conversation_id, source),
+            CHECK (status <> 'processing' OR controller_run_id IS NOT NULL)
+        );
+        CREATE INDEX conversation_turn_pending ON conversation_turn (conversation_id) WHERE status = 'pending';",
+    },
+    // 票 32（第 31 個 migration）：監護日誌的匯入紀錄。每個嘗試識別只匯入一次（去重），連同處置一起保存：
     // 計入恢復事件、被監護撤回、因停止意圖或已用盡而不計。監護本身不寫控制資料庫，這張表只由 Runtime 寫入
     Migration {
         name: "guardian_journal",

@@ -75,9 +75,10 @@ pub async fn poll_due(store: &Store, observer: &dyn QuotaObserver, now: Timestam
     store.record_quota_poll(polled, now).await
 }
 
-/// 先輪詢到期的帳號，再回傳全部 Profile 目前的額度判斷。
+/// 先輪詢到期的帳號、依最新判斷推進額度門檻（遲滯、draining，票 28），再回傳全部 Profile 目前的額度判斷。
 pub async fn current(store: &Store, observer: &dyn QuotaObserver, now: Timestamp) -> StoreResult<HashMap<String, AccountQuota>> {
     poll_due(store, observer, now).await?;
+    store.refresh_quota_gates(now).await?;
     store.quota_status(now).await
 }
 

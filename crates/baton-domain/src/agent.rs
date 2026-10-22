@@ -30,6 +30,8 @@ pub const TOOL_CONTROLLER_ACTION: &str = "controller_action";
 /// Worker 間訊息（票 18）。
 pub const TOOL_SEND_MESSAGE: &str = "send_message";
 pub const TOOL_READ_INBOX: &str = "read_inbox";
+/// 交接（票 28）：successor Worker 確認接手。
+pub const TOOL_CONFIRM_HANDOFF: &str = "confirm_handoff";
 
 /// 進度與 checkpoint 摘要、受阻原因的長度上限（字元數）。
 pub const SUMMARY_MAX_CHARS: usize = 500;

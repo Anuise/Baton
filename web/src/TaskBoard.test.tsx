@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   accountScheduling,
   budgetView,
+  handoff,
   integrationEntry,
   REPORT_SHA256,
   schedulingOverview,
@@ -21,6 +22,7 @@ import {
   type Capability,
   type ContractInput,
   type Goal,
+  type Handoff,
   type IntegrationEntry,
   type MissingItem,
   type QueueEntry,
@@ -167,6 +169,8 @@ function fakeClient(
     workdirs?: WorkdirView[];
     integrations?: IntegrationEntry[];
     budgets?: BudgetView[];
+    /** 省略時看板不帶 `handoffs` 欄位（舊版 Runtime）。 */
+    handoffs?: Handoff[];
   } = {},
 ) {
   let goals = initial.goals ?? [goal("goal_1", "整理文件")];
@@ -185,6 +189,7 @@ function fakeClient(
     workdirs: initial.workdirs ?? [],
     integrations: initial.integrations ?? [],
     budgets: initial.budgets ?? [],
+    handoffs: initial.handoffs,
   });
   const replace = (id: string, patch: Partial<TaskView>) => {
     tasks = tasks.map((t) => (t.id === id ? { ...t, ...patch } : t));
@@ -1899,5 +1904,113 @@ describe("修正與重試預算", () => {
     const queued = within(card("部署")).getByRole("group", { name: "排隊原因" });
     const item = within(queued).getByText("重試退避").closest("li")!;
     expect(within(item).getByText("基礎設施重試退避中，10 分鐘後再派工")).toBeInTheDocument();
+  });
+});
+
+describe("交接狀態", () => {
+  const accounts = [accountScheduling(), accountScheduling({ profile_id: "prof_2", name: "備用帳號" })];
+  const runningTask = () => task("task_1", "部署", { status: "running", contract: filledContract("task_1") });
+  /** 舊 Run 已交接，承接帳號的第 2 次 Run 執行中。 */
+  const transferredRuns = () => [
+    run("run_1", "task_1", "interrupted", { end_reason: "handed_off", ended_at: T0 }),
+    run("run_2", "task_1", "running", { profile_id: "prof_2", generation: 2 }),
+  ];
+  const handoffRegion = () => within(card("部署")).getByRole("group", { name: "交接狀態" });
+  const runStatus = () => within(card("部署")).getByRole("group", { name: "Run 狀態" });
+
+  it("transferred：顯示階段、以帳號名稱顯示從哪個帳號到哪個帳號、checkpoint 摘要；只看最新一筆", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [runningTask()],
+        runs: transferredRuns(),
+        accounts,
+        handoffs: [
+          handoff({ id: "ho_0", phase: "abandoned", abandoned_reason: "沒有可承接的帳號" }),
+          handoff({
+            id: "ho_1",
+            phase: "transferred",
+            to_run_id: "run_2",
+            to_generation: 2,
+            stop_outcome: "stopped_gracefully",
+            checkpoint: { run_id: "run_1", generation: 1, summary: "登入表單完成，剩驗證邏輯", details: "", saved_at: T0 },
+            stopping_at: T0,
+            transferred_at: T0,
+          }),
+        ],
+      }),
+    );
+
+    const region = handoffRegion();
+    expect(region).toHaveTextContent("交接：已交接，等待接手確認");
+    expect(region).toHaveTextContent("從 主要帳號 交接到 備用帳號（達 85% 交接門檻）");
+    expect(region).toHaveTextContent("交接 checkpoint：登入表單完成，剩驗證邏輯（2023/11/14 22:13）");
+    expect(region).not.toHaveTextContent("交接已放棄");
+    expect(region).not.toHaveTextContent("已完成：");
+  });
+
+  it("confirmed：顯示接手者確認的已完成、未完成與未知副作用", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [runningTask()],
+        runs: transferredRuns(),
+        accounts,
+        handoffs: [
+          handoff({
+            phase: "confirmed",
+            reason: "limit_warning",
+            to_run_id: "run_2",
+            to_generation: 2,
+            confirmation: { completed: "登入表單", incomplete: "驗證邏輯", unknown_side_effects: "無" },
+            transferred_at: T0,
+            confirmed_at: T0,
+          }),
+        ],
+      }),
+    );
+
+    const region = handoffRegion();
+    expect(region).toHaveTextContent("交接：已交接並確認");
+    expect(region).toHaveTextContent("（Claude Code 回報限流警告）");
+    expect(within(region).getByText("已完成：登入表單")).toBeInTheDocument();
+    expect(within(region).getByText("未完成：驗證邏輯")).toBeInTheDocument();
+    expect(within(region).getByText("未知副作用：無")).toBeInTheDocument();
+  });
+
+  it("abandoned：顯示放棄原因；帳號不在總覽時退回顯示 profile_id", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [runningTask()],
+        runs: [run("run_1", "task_1", "running")],
+        accounts,
+        handoffs: [handoff({ phase: "abandoned", to_profile_id: "prof_gone", abandoned_reason: "舊程序已自行結束" })],
+      }),
+    );
+
+    const region = handoffRegion();
+    expect(region).toHaveTextContent("交接：交接已放棄");
+    expect(region).toHaveTextContent("從 主要帳號 交接到 prof_gone");
+    expect(region).toHaveTextContent("放棄原因：舊程序已自行結束");
+  });
+
+  it("結束原因是 handed_off 的 Run 標成「已交接」，不是一般的中斷", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [runningTask()],
+        runs: [run("run_1", "task_1", "interrupted", { end_reason: "handed_off", ended_at: T0 })],
+        accounts,
+        handoffs: [handoff({ phase: "stopping", stopping_at: T0 })],
+      }),
+    );
+
+    expect(runStatus()).toHaveTextContent("Run（第 1 次）：已交接");
+    expect(runStatus()).not.toHaveTextContent("中斷");
+    expect(runStatus()).not.toHaveTextContent("handed_off");
+    expect(handoffRegion()).toHaveTextContent("交接：交接中：停止舊程序");
+  });
+
+  it("沒有交接時不顯示交接狀態", async () => {
+    await renderBoard(fakeClient({ tasks: [runningTask()], runs: [run("run_1", "task_1", "running")], handoffs: [] }));
+
+    expect(within(card("部署")).queryByRole("group", { name: "交接狀態" })).not.toBeInTheDocument();
   });
 });

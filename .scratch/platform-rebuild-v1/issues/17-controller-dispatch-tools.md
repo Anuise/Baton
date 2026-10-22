@@ -1,6 +1,6 @@
 # 17: Controller 拆工與派工工具、漸進拆工
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R106-17-impl，2026-10-22 20:25）
 Blocked by: 16, 09
 
 **What to build:** 提供 Controller 專屬工具：propose_task、update_task、add_dependency、dispatch_task、cancel_task；Runtime 驗證契約、授權與循環後才接受。Controller 以 DR-20261022-02「邊釐清、邊調查」推進：不依賴未決答案的工作可派出，依賴答案者保持等待。Controller 不能直接寫資料庫或建立未受管理的 Worker。

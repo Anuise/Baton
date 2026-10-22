@@ -1,6 +1,6 @@
 # 41: 事件時間線與觀測指標
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R104-41-impl，2026-10-22 20:09）
 Blocked by: 28
 
 **What to build:** 「時間線」分頁呈現派工、交接、裁定、恢復、驗證與清理事件，可依 Task 過濾；提供指標：工作完成率、交接成功率、恢復耗時、重複操作事件、裁定等待時間、教訓重犯率、每階段用量與 Context 使用量；不可見的服務端額度顯示未知。

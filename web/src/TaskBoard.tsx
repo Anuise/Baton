@@ -8,6 +8,8 @@ import type {
   CheckResult,
   CleanupStatus,
   Goal,
+  Handoff,
+  HandoffPhase,
   IntegrationEntry,
   IntegrationStatus,
   MissingItem,
@@ -111,6 +113,27 @@ const CLEANUP_STATUS_LABELS: Record<CleanupStatus, string> = {
   cleaned: "已清理",
   failed: "清理失敗",
 };
+
+const HANDOFF_PHASE_LABELS: Record<HandoffPhase, string> = {
+  requested: "交接中：等待保存檢查點",
+  stopping: "交接中：停止舊程序",
+  transferred: "已交接，等待接手確認",
+  confirmed: "已交接並確認",
+  abandoned: "交接已放棄",
+};
+
+/** 額度門檻原因代碼的顯示文字（帳號頁的門檻與交接原因共用）；未知代碼原樣顯示。 */
+export const GATE_REASON_LABELS: Record<string, string> = {
+  stop_dispatch_threshold: "達 75% 停止派工門檻",
+  drain_threshold: "達 85% 交接門檻",
+  limit_warning: "Claude Code 回報限流警告",
+  recovered: "用量回到 60% 以下",
+  reset_observed: "已過重置時間",
+  usage_unknown: "用量未知（訊號已失效）",
+};
+
+/** Run 的狀態文字：因交接而結束的 Run 標成「已交接」，不是一般的中斷。 */
+const runStatusLabel = (run: RunView) => (run.end_reason === "handed_off" ? "已交接" : RUN_STATUS_LABELS[run.status]);
 
 /** 整合項目尚未結束（排隊中或處理中）。 */
 const isIntegrationActive = (status: IntegrationStatus) => status !== "integrated" && status !== "failed";
@@ -239,6 +262,9 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
     const found = board.runs.find((r) => r.id === runId);
     return found ? `第 ${found.generation} 次` : runId;
   };
+  /** 帳號名稱；總覽讀不到或帳號已封存時退回 Profile 識別。 */
+  const profileNameOf = (profileId: string) =>
+    overview?.accounts.find((account) => account.profile_id === profileId)?.name ?? profileId;
 
   /** 執行卡片上的操作：失敗時把 Runtime 的說明顯示在該卡片上；無論成敗都重新載入看板。 */
   const act = async (task: TaskView, action: () => Promise<unknown>): Promise<boolean> => {
@@ -307,6 +333,8 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   runLabelOf={runLabelOf}
                   integration={latestIntegration(board.integrations, task.id)}
                   budget={board.budgets.find((b) => b.task_id === task.id) ?? null}
+                  handoff={(board.handoffs ?? []).filter((h) => h.task_id === task.id).at(-1) ?? null}
+                  profileNameOf={profileNameOf}
                   accountName={accountNameOf(overview, board.runs, task.id)}
                   authorizationRevision={board.authorization_revision}
                   queued={queuedInfo(overview, queuedNotice, task)}
@@ -354,6 +382,10 @@ interface CardProps {
   integration: IntegrationEntry | null;
   /** 這個 Task 的修正與重試預算；沒有資料為 null。 */
   budget: BudgetView | null;
+  /** 這個 Task 最新的交接；從未交接為 null。 */
+  handoff: Handoff | null;
+  /** 帳號 Profile 識別 → 顯示名稱。 */
+  profileNameOf: (profileId: string) => string;
   /** 最新 Run 使用的帳號名稱。 */
   accountName: string | null;
   /** Workspace 目前生效的授權 revision；尚未確認為 null。 */
@@ -374,7 +406,7 @@ interface CardProps {
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, accountName, authorizationRevision, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, handoff, profileNameOf, accountName, authorizationRevision, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -437,6 +469,8 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       {run && (
         <RunStatusLine run={run} accountName={accountName} authorizationRevision={authorizationRevision} timeZone={timeZone} />
       )}
+
+      {handoff && <HandoffSummary handoff={handoff} profileNameOf={profileNameOf} timeZone={timeZone} />}
 
       {verification && <VerificationSummary record={verification} timeZone={timeZone} />}
 
@@ -694,7 +728,7 @@ function RunStatusLine({
   return (
     <div className="task-run" role="group" aria-label="Run 狀態">
       <p>
-        Run（第 {run.generation} 次）：<strong>{RUN_STATUS_LABELS[run.status]}</strong>
+        Run（第 {run.generation} 次）：<strong>{runStatusLabel(run)}</strong>
         {accountName && `，帳號 ${accountName}`}
         {run.process && `，程序 pid ${run.process.pid}`}
       </p>
@@ -703,7 +737,7 @@ function RunStatusLine({
           沿用舊授權（revision {run.authorization_revision}，目前 {authorizationRevision}）
         </p>
       )}
-      {run.end_reason && <p>結束原因：{run.end_reason}</p>}
+      {run.end_reason && run.end_reason !== "handed_off" && <p>結束原因：{run.end_reason}</p>}
       {run.lease && <p>最後心跳：{formatTimestamp(run.lease.last_heartbeat_at, timeZone)}</p>}
       {isRunActive(run.status) && run.cancel_requested_at !== null && <p>取消中，等待程序停止…</p>}
       {run.latest_progress && (
@@ -729,6 +763,46 @@ function RunStatusLine({
           受阻：{run.blocked.reason}（{formatTimestamp(run.blocked.reported_at, timeZone)}）
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Task 最新的跨帳號交接（spec D-21）：階段、從哪個帳號到哪個帳號與原因、延續的 checkpoint；
+ * 確認後列出接手者確認的三欄，放棄時顯示原因。
+ */
+function HandoffSummary({
+  handoff,
+  profileNameOf,
+  timeZone,
+}: {
+  handoff: Handoff;
+  profileNameOf: (profileId: string) => string;
+  timeZone?: string;
+}) {
+  const { checkpoint, confirmation } = handoff;
+  return (
+    <div className={`task-handoff task-handoff-${handoff.phase}`} role="group" aria-label="交接狀態">
+      <p>
+        交接：<strong>{HANDOFF_PHASE_LABELS[handoff.phase]}</strong>
+      </p>
+      <p>
+        從 {profileNameOf(handoff.from_profile_id)} 交接到 {profileNameOf(handoff.to_profile_id)}（
+        {GATE_REASON_LABELS[handoff.reason] ?? handoff.reason}）
+      </p>
+      {checkpoint && (
+        <p>
+          交接 checkpoint：{checkpoint.summary}（{formatTimestamp(checkpoint.saved_at, timeZone)}）
+        </p>
+      )}
+      {handoff.phase === "confirmed" && confirmation && (
+        <ul>
+          <li>已完成：{confirmation.completed}</li>
+          <li>未完成：{confirmation.incomplete}</li>
+          <li>未知副作用：{confirmation.unknown_side_effects}</li>
+        </ul>
+      )}
+      {handoff.phase === "abandoned" && handoff.abandoned_reason && <p>放棄原因：{handoff.abandoned_reason}</p>}
     </div>
   );
 }

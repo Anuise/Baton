@@ -10,6 +10,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+use baton_domain::handoff::QuotaGate;
 use baton_domain::profile::{self, BlockerInfo, ProfileStatus};
 use baton_domain::quota::{PlanLimits, QuotaAssessment};
 use baton_domain::run::RunStatus;
@@ -85,6 +86,8 @@ pub struct AccountScheduling {
     pub quota: QuotaAssessment,
     /// 使用者設定的方案上限（推估的分母）。
     pub plan_limits: PlanLimits,
+    /// 額度門檻（票 28）：`paused` 不派新工作、`draining` 另把進行中的工作交接出去；`null` 代表從未離開 `open`。
+    pub quota_gate: Option<QuotaGate>,
     pub running: usize,
     pub limit: usize,
     pub runs: Vec<AccountRun>,
@@ -166,6 +169,7 @@ pub(crate) async fn overview(state: &ApiState) -> Result<SchedulingOverview, Tas
         crate::quota::current(&state.store, &*state.quota_observer, state.clock.now()).await.map_err(ApiError::from)?;
     let quota = crate::quota::known_used(&status);
     let snapshot = state.store.scheduling_snapshot(quota.clone(), state.clock.now()).await.map_err(ApiError::from)?;
+    let mut gates = state.store.quota_gates().await.map_err(ApiError::from)?;
     let limits = snapshot.settings.mode.limits();
     let usable = scheduler::usable_profiles(&snapshot.profiles).len();
 
@@ -204,6 +208,7 @@ pub(crate) async fn overview(state: &ApiState) -> Result<SchedulingOverview, Tas
                 quota_used: quota.get(&p.id).copied(),
                 quota: account_quota.assessment,
                 plan_limits: account_quota.plan_limits,
+                quota_gate: gates.remove(&p.id),
                 running: runs.len(),
                 limit: limits.per_account,
                 runs,
