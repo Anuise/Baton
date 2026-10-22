@@ -194,6 +194,19 @@ async fn two_running_tasks(harness: &Harness) -> Pair {
     Pair { ws, a, run_a, token_a, b, run_b, token_b }
 }
 
+/// 同 `two_running_tasks`，但 Workspace 先確認「可信專案開發」授權再派工：
+/// 權限提示依 Run 准入時固定的授權判定（R1-a，票 24），之後才確認的授權不會套用到已准入的 Run。
+async fn two_running_tasks_under_dev_template(harness: &Harness) -> Pair {
+    let ws = new_workspace(harness, "demo").await;
+    confirm_dev_template(harness, &ws).await;
+    let goal = new_goal(harness, &ws).await;
+    let a = ready_task(harness, &ws, &goal, "需要裁定的工作").await;
+    let b = ready_task(harness, &ws, &goal, "不相關的工作").await;
+    let (run_a, token_a) = start_run(harness, &ws, &a).await;
+    let (run_b, token_b) = start_run(harness, &ws, &b).await;
+    Pair { ws, a, run_a, token_a, b, run_b, token_b }
+}
+
 async fn request_ok(harness: &Harness, token: &str, question: &str) -> String {
     let (status, body) = harness.call_tool(token, TOOL_REQUEST_DECISION, decision_request(question)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -594,8 +607,7 @@ async fn a_permission_request_is_never_released_by_time_passing() {
 #[tokio::test]
 async fn permission_prompts_inside_the_authorization_are_allowed_automatically_and_recorded() {
     let harness = harness().await;
-    let p = two_running_tasks(&harness).await;
-    confirm_dev_template(&harness, &p.ws).await;
+    let p = two_running_tasks_under_dev_template(&harness).await;
     let root = workspace_path(&harness, &p.ws).await;
     let inside = format!("{root}\\src\\main.rs");
 
@@ -632,8 +644,7 @@ async fn permission_prompts_inside_the_authorization_are_allowed_automatically_a
 #[tokio::test]
 async fn permission_prompts_outside_the_authorization_create_a_request_and_answer_waiting() {
     let harness = harness().await;
-    let p = two_running_tasks(&harness).await;
-    confirm_dev_template(&harness, &p.ws).await;
+    let p = two_running_tasks_under_dev_template(&harness).await;
 
     // 範本沒有「遠端寫入」：git push 是範圍外
     let (status, response) = prompt(&harness, &p.token_a, "Bash", json!({ "command": "git push origin main" })).await;
@@ -666,8 +677,7 @@ async fn permission_prompts_outside_the_authorization_create_a_request_and_answe
 #[tokio::test]
 async fn paths_escaping_the_workspace_and_compound_commands_are_out_of_scope() {
     let harness = harness().await;
-    let p = two_running_tasks(&harness).await;
-    confirm_dev_template(&harness, &p.ws).await;
+    let p = two_running_tasks_under_dev_template(&harness).await;
 
     let cases = [
         ("Read", json!({ "file_path": "C:\\Windows\\System32\\drivers\\etc\\hosts" }), Some("read_files")),
@@ -703,8 +713,7 @@ async fn without_a_confirmed_authorization_every_operation_asks() {
 #[tokio::test]
 async fn an_allow_once_decision_is_consumed_by_the_next_identical_prompt_and_then_asks_again() {
     let harness = harness().await;
-    let p = two_running_tasks(&harness).await;
-    confirm_dev_template(&harness, &p.ws).await;
+    let p = two_running_tasks_under_dev_template(&harness).await;
     let push = json!({ "command": "git push origin main" });
     let (_, waiting) = prompt(&harness, &p.token_a, "Bash", push.clone()).await;
     let rid = waiting["decision_request_id"].as_str().unwrap().to_string();
@@ -757,8 +766,7 @@ async fn a_deny_decision_is_reported_to_the_worker_once() {
 #[tokio::test]
 async fn under_the_trusted_dev_template_disguised_out_of_scope_operations_still_ask() {
     let harness = harness().await;
-    let p = two_running_tasks(&harness).await;
-    confirm_dev_template(&harness, &p.ws).await;
+    let p = two_running_tasks_under_dev_template(&harness).await;
     let ws_path = workspace_path(&harness, &p.ws).await;
 
     // 驗證報告列出的繞過手法：改寫 Git 歷史、寫到 Workspace 外、全域安裝、寫進 .git、建置其他專案

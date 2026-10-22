@@ -37,6 +37,8 @@ pub struct TaskBoardData {
     pub runs: Vec<RunView>,
     /// 這個 Workspace 的全部驗證紀錄，由舊到新（票 13）。
     pub verifications: Vec<VerificationRecord>,
+    /// 目前生效的授權 revision；尚未確認為 `None`（面板據此標示沿用舊授權的 Run，票 24）。
+    pub authorization_revision: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,7 +119,8 @@ impl Store {
                 let tasks = task::board(&loaded.ctx(&workspace_id));
                 let runs = super::runs::views(&loaded);
                 let verifications = super::verification::load_verifications(conn, &workspace_id)?;
-                Ok(Ok(TaskBoardData { goals: loaded.goals, tasks, runs, verifications }))
+                let authorization_revision = loaded.authorization.as_ref().map(|a| a.revision);
+                Ok(Ok(TaskBoardData { goals: loaded.goals, tasks, runs, verifications, authorization_revision }))
             })
             .await?;
         Ok(result?)

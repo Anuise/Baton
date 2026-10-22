@@ -469,6 +469,8 @@ pub struct DecisionContext<'a> {
     pub uses: &'a [ApprovalUse],
     /// 各 Task 成果的最新版本（單次批准綁定的成果版本）。
     pub artifacts: &'a [ArtifactMark],
+    /// Workspace 的全部授權 revision（由舊到新）：權限提示依「Run 准入時固定的 revision」判定（R1-a，票 24）。
+    pub authorizations: &'a [AuthorizationRevision],
 }
 
 impl DecisionContext<'_> {
@@ -482,6 +484,12 @@ impl DecisionContext<'_> {
 
     fn use_of(&self, request_id: &str) -> Option<&ApprovalUse> {
         self.uses.iter().find(|u| u.request_id == request_id)
+    }
+
+    /// Run 沿用的授權：准入時固定的 revision，不是 Workspace 目前生效的 revision（R1-a）。
+    /// 准入時還沒有任何授權的 Run 是 `None`：之後才確認的授權不會回頭套用到它身上。
+    fn authorization_of(&self, run: &Run) -> Option<&AuthorizationRevision> {
+        run.authorization_revision.and_then(|number| self.authorizations.iter().find(|r| r.revision == number))
     }
 
     /// 確認 Run 仍是目前的寫入所有者，回傳 Run 與它的 Task。
@@ -616,7 +624,7 @@ fn permission_prompt(
     }
     let (run, task) = ctx.current_run(run_id, generation)?;
     let workspace = ctx.task.workspace.ok_or_else(|| DecisionError::WorkspaceNotFound(ctx.task.workspace_id.to_string()))?;
-    let authorization: Option<&AuthorizationRevision> = ctx.task.authorization;
+    let authorization = ctx.authorization_of(run);
     let summary = permission::summarize(tool_name, &input);
 
     let (capability, reason) = match permission::evaluate(tool_name, &input, &workspace.path, authorization) {

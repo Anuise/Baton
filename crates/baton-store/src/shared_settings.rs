@@ -65,6 +65,15 @@ impl Store {
     }
 }
 
+/// 這一刻准入 `run_id` 時要固定的共同設定版本（票 24）：已經綁定快照的 Run 沿用它的綁定，
+/// 否則是目前最新採用的版本；還沒有採用任何版本為 `None`。在呼叫端的交易中執行。
+pub(crate) fn admission_settings_version(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<i64>> {
+    if let Some(pin) = load_pin(conn, run_id)? {
+        return Ok(Some(pin.version));
+    }
+    conn.query_row("SELECT MAX(version) FROM shared_settings_version", [], |r| r.get(0))
+}
+
 fn to_json<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("可序列化")
 }

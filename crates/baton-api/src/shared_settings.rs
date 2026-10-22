@@ -165,22 +165,26 @@ fn version_not_found(version: i64) -> ApiError {
 
 /// 為 Run 產生唯讀設定快照：第一次呼叫把指定（或最新）版本寫成 Run 專屬的唯讀目錄並綁定；
 /// 之後再呼叫回傳同一個綁定（201 → 200），後來採用的新版本不影響已綁定的 Run。
+/// 已准入的 Run 一律使用准入時固定的版本（票 24）：省略版本就用它，指定別的版本回 409。
 pub(crate) async fn snapshot(
     State(state): State<Arc<ApiState>>,
     UrlPath((workspace_id, run_id)): UrlPath<(String, String)>,
     body: Result<Json<SnapshotRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<RunSettingsSnapshot>), TaskApiError> {
     let Json(request) = body?;
-    state.store.run_detail(&workspace_id, &run_id).await?;
-    let (snapshot, created) = materialize_run_settings(&state, &run_id, request.version).await?;
+    let run = state.store.run_detail(&workspace_id, &run_id).await?.run;
+    let admitted = run.admitted_at.map(|_| run.settings_version);
+    let (snapshot, created) = materialize_run_settings(&state, &run_id, request.version, admitted).await?;
     Ok((if created { StatusCode::CREATED } else { StatusCode::OK }, Json(snapshot)))
 }
 
 /// 供 Run 准入使用：取得設定版本快照並寫成 Run 專屬唯讀目錄；回傳快照與是否為這次新建立。
+/// `admitted` 是已准入 Run 准入時固定的版本（`Some(None)` 代表准入時還沒有採用任何版本）；尚未准入為 `None`。
 pub(crate) async fn materialize_run_settings(
     state: &ApiState,
     run_id: &str,
     requested: Option<i64>,
+    admitted: Option<Option<i64>>,
 ) -> Result<(RunSettingsSnapshot, bool), ApiError> {
     if let Some(pin) = state.store.run_settings_pin(run_id).await? {
         if requested.is_some_and(|v| v != pin.version) {
@@ -194,6 +198,25 @@ pub(crate) async fn materialize_run_settings(
         return Ok((describe(&pin, &version), false));
     }
 
+    // 已准入的 Run 沿用准入時固定的版本，後來採用的新版本不影響它（R1-a）
+    let requested = match admitted {
+        Some(Some(fixed)) if requested.is_some_and(|v| v != fixed) => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "settings_snapshot_pinned",
+                format!("Run {run_id} 准入時已固定使用共同設定版本 {fixed}，不能改用其他版本"),
+            ));
+        }
+        Some(Some(fixed)) => Some(fixed),
+        Some(None) => {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "shared_settings_not_adopted",
+                format!("Run {run_id} 准入時還沒有採用任何共同設定版本，之後採用的版本不會套用到它"),
+            ));
+        }
+        None => requested,
+    };
     let version = match requested {
         Some(number) => state.store.settings_version(number).await?.ok_or_else(|| version_not_found(number))?,
         None => state.store.latest_settings_version().await?.ok_or_else(|| {

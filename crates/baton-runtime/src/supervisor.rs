@@ -486,10 +486,16 @@ impl Supervisor {
         let Some(command_id) = new_command_id() else {
             return self.note(&format!("Run {} 無法取得系統亂數，不啟動程序", item.run.id));
         };
-        // 1. 先持久化 launch intent 與 command_id；這一步完成之前不會有任何程序被啟動
+        // 1. 先持久化 launch intent 與 command_id；這一步完成之前不會有任何程序被啟動。
+        //    這也是准入（票 24）：同一個交易以這一刻生效的授權重新檢查，被拒時 Run 直接結束、Task 重新排隊
         let begin = RunCommand::BeginLaunch { run_id: item.run.id.clone(), command_id: command_id.clone() };
-        if let Err(error) = self.store.apply_run_command(item.run.workspace_id.clone(), begin, self.ports.clock.now()).await {
-            return self.note(&format!("Run {} 無法寫入 launch intent，不啟動程序：{error}", item.run.id));
+        match self.store.apply_run_command(item.run.workspace_id.clone(), begin, self.ports.clock.now()).await {
+            Err(error) => return self.note(&format!("Run {} 無法寫入 launch intent，不啟動程序：{error}", item.run.id)),
+            Ok(change) if change.run.as_ref().is_some_and(|r| r.status != RunStatus::Starting) => {
+                let reason = change.run.and_then(|r| r.end_reason).unwrap_or_default();
+                return self.note(&format!("Run {} 沒有通過啟動准入，不啟動程序：{reason}", item.run.id));
+            }
+            Ok(_) => {}
         }
         // 2. Run 准入：簽發綁定這個 Run 與世代的 Agent 憑證，只經環境變數交給 MCP shim。
         //    憑證不進 Prompt、指令列、設定檔或日誌；啟動前失敗就不啟動（下一次 tick 會把 Run 標為 interrupted）
