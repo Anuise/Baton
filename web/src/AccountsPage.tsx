@@ -225,7 +225,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   );
 }
 
-/** 一個 Profile 的事實：實際認證來源、帳號、最近核對時間；尚未核對時只顯示預期帳號。 */
+/** 一個 Profile 的事實：實際認證來源、帳號、最近核對時間、Claude Code 版本；尚未核對時只顯示預期帳號。 */
 function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone?: string }) {
   const { verification } = profile;
   const showExpected =
@@ -238,6 +238,7 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
           認證來源：{sourceLabel(verification.source, verification.source_detail)}
           {verification.account ? `；帳號：${verification.account}` : ""}；最近核對：
           {formatTimestamp(verification.checked_at, timeZone)}
+          {verification.cli_version ? `；Claude Code 版本：${verification.cli_version}` : ""}
         </span>
       )}
       {showExpected && <span className="profile-expected">預期帳號：{profile.expected_account}</span>}

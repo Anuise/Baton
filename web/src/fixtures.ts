@@ -66,6 +66,7 @@ export function profile(overrides: Partial<AccountProfile> = {}): AccountProfile
       source_detail: null,
       account: "me@example.com",
       config_dir_matches: true,
+      cli_version: "2.1.307 (Claude Code)",
     },
     version: 3,
     created_at: CHECKED_AT,

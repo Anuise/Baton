@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
+import { ModelOverridesPanel } from "./ModelOverridesPanel";
 import { PlatformPage } from "./PlatformPage";
 import { SchedulingSettings } from "./SchedulingSettings";
 import { SetupWizard } from "./SetupWizard";
@@ -12,7 +13,7 @@ import { createRuntimeClient, type AppClient, type HealthResponse, type Workspac
 import { TaskBoard } from "./TaskBoard";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選到某個 Workspace 後，主區顯示它的授權設定、工作面板或成果與驗證。 */
+/** 使用者選到某個 Workspace 後，主區顯示它的授權與模型設定、工作面板或成果與驗證。 */
 type Opened = { view: "authorization" | "tasks" | "artifacts"; workspace: Workspace };
 
 export function App() {
@@ -47,6 +48,7 @@ export function App() {
           {client && <SchedulingSettings client={client} />}
           {client && <SharedSettingsPage client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
+          {client && opened?.view === "authorization" && <ModelOverridesPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
           {client && opened?.view === "artifacts" && <ArtifactsPage client={client} workspace={opened.workspace} />}
           {client && <PlatformPage client={client} />}

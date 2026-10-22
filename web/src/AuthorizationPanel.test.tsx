@@ -23,6 +23,7 @@ const workspace: Workspace = {
   version: 1,
   created_at: 1_700_000_000_000,
   archived_at: null,
+  model_overrides: { controller: null, worker: null, reviewer: null },
 };
 
 const RISK = "專案與第三方依賴程式會以目前 Windows 使用者的身分執行。";

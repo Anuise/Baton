@@ -17,6 +17,7 @@ function workspace(overrides: Partial<Workspace> = {}): Workspace {
     version: 1,
     created_at: CREATED_AT,
     archived_at: null,
+    model_overrides: { controller: null, worker: null, reviewer: null },
     ...overrides,
   };
 }
@@ -35,6 +36,9 @@ function fakeClient(initial: Workspace[] = []) {
       const archived = { ...items.find((w) => w.id === id)!, status: "archived" as const, archived_at: CREATED_AT + 1 };
       items = items.map((w) => (w.id === id ? archived : w));
       return archived;
+    }),
+    setModelOverrides: vi.fn(async () => {
+      throw new Error("側欄不會設定模型");
     }),
   };
   return client;
