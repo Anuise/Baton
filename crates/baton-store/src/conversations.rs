@@ -101,8 +101,18 @@ impl Store {
     /// 現在需要喚醒 Controller 的 conversation（跨 Workspace）；停止意圖生效或 Workspace 暫停的不列出（票 25）。
     pub async fn controller_wakes(&self, now: Timestamp) -> StoreResult<Vec<ControllerWake>> {
         self.read(move |conn| {
+            // 每次 tick 都會查：只載入有待處理輸入的 conversation，沒有事件時不讀任何對話內容
+            let waiting: Vec<String> = conn
+                .prepare(
+                    "SELECT DISTINCT c.workspace_id FROM conversation c
+                     JOIN conversation_turn t ON t.conversation_id = c.id WHERE t.status = 'pending'",
+                )?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             let mut wakes = Vec::new();
-            for workspace in load_workspaces(conn)?.into_iter().filter(|w| w.status == WorkspaceStatus::Active) {
+            let workspaces = load_workspaces(conn)?;
+            let active = workspaces.into_iter().filter(|w| w.status == WorkspaceStatus::Active && waiting.contains(&w.id));
+            for workspace in active {
                 let Some(state) = load_state_of_workspace(conn, &workspace.id)? else { continue };
                 if !matches!(conversation::plan_wake(&state, now), WakePlan::Wake { .. }) {
                     continue;

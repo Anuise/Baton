@@ -1012,7 +1012,8 @@ const MIGRATIONS: &[Migration] = &[
             UNIQUE (conversation_id, seq),
             UNIQUE (conversation_id, source),
             CHECK (status <> 'processing' OR controller_run_id IS NOT NULL)
-        );",
+        );
+        CREATE INDEX conversation_turn_pending ON conversation_turn (conversation_id) WHERE status = 'pending';",
     },
 ];
 
