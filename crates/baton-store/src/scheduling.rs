@@ -171,8 +171,8 @@ impl Store {
                             };
                             match run::decide(&ctx, command, now) {
                                 Ok(mut change) => {
-                                    // 與 apply_run_command 的派工相同：Prompt 附上收件 Task 的未讀訊息摘要（票 18）
-                                    super::messages::attach_unread_summary(tx, &mut change, now)?;
+                                    // 與 apply_run_command 的派工相同：以 Context Builder 組裝 Prompt 並保存 context receipt（票 39）
+                                    super::context::attach_context(tx, &loaded, &mut change, None, now)?;
                                     let run_id = change.run.as_ref().map(|r| r.id.clone()).unwrap_or_default();
                                     save(tx, &change, now)?;
                                     outcome.started.push(StartedRun {
