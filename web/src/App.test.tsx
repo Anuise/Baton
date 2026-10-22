@@ -29,7 +29,7 @@ const client = {
   getAuthorization: vi.fn(async () => {
     throw new Error("授權讀取失敗");
   }),
-  getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [], verifications: [], workdirs: [], integrations: [] })),
+  getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [], verifications: [], workdirs: [], integrations: [], budgets: [] })),
   lifecycleStatus: vi.fn(async () => {
     throw new Error("離線");
   }),

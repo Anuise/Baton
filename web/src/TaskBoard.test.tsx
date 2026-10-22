@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   accountScheduling,
+  budgetView,
   integrationEntry,
   REPORT_SHA256,
   schedulingOverview,
@@ -15,6 +16,7 @@ import { TaskBoard, type TaskBoardClient } from "./TaskBoard";
 import {
   CONTRACT_FIELDS,
   type AccountScheduling,
+  type BudgetView,
   type Capability,
   type ContractInput,
   type Goal,
@@ -159,6 +161,7 @@ function fakeClient(
     verification?: VerificationView;
     workdirs?: WorkdirView[];
     integrations?: IntegrationEntry[];
+    budgets?: BudgetView[];
   } = {},
 ) {
   let goals = initial.goals ?? [goal("goal_1", "整理文件")];
@@ -175,6 +178,7 @@ function fakeClient(
     verifications,
     workdirs: initial.workdirs ?? [],
     integrations: initial.integrations ?? [],
+    budgets: initial.budgets ?? [],
   });
   const replace = (id: string, patch: Partial<TaskView>) => {
     tasks = tasks.map((t) => (t.id === id ? { ...t, ...patch } : t));
@@ -197,6 +201,7 @@ function fakeClient(
     getTask: vi.fn(async (_ws: string, id: string) => ({
       task: tasks.find((t) => t.id === id)!,
       contract_history: initial.history ?? [tasks.find((t) => t.id === id)!.contract],
+      budget: initial.budgets?.find((b) => b.task_id === id) ?? budgetView({ task_id: id }),
     })),
     updateTaskContract: vi.fn(async (_ws: string, id: string, input: ContractInput, note?: string) => {
       const current = tasks.find((t) => t.id === id)!;
@@ -1261,6 +1266,39 @@ describe("成果驗證", () => {
     expect(details).not.toHaveTextContent("out/report.md");
   });
 
+  it("上次驗證不完整：列出不完整的檢查與證據（預設收合），不顯示為未通過", async () => {
+    const user = await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "ready", contract: filledContract("task_1") })],
+        verifications: [
+          verificationRecord({
+            outcome: "inconclusive",
+            decided_at: T0 + 3_600_000,
+            note: "測試環境無法連線",
+            checks: [
+              {
+                check: { kind: "command", program: "cargo", args: ["test"], expected_exit_code: 0 },
+                status: "inconclusive",
+                detail: "無法啟動 cargo：找不到執行檔",
+              },
+              { check: { kind: "file", path: "out/report.md", sha256: null }, status: "passed", detail: "檔案存在" },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    const record = within(card("部署")).getByRole("group", { name: "驗證紀錄" });
+    expect(record).toHaveTextContent("上次驗證不完整（第 1 次 Run，2023/11/14 23:13）");
+    expect(record).toHaveTextContent("測試環境無法連線");
+    expect(record).not.toHaveTextContent("未通過");
+    const details = record.querySelector("details")!;
+    expect(details).not.toHaveAttribute("open");
+    await user.click(within(details).getByText("不完整的檢查（1）"));
+    expect(details).toHaveTextContent("指令 cargo test（預期結束碼 0）：無法啟動 cargo：找不到執行檔");
+    expect(details).not.toHaveTextContent("out/report.md");
+  });
+
   it("只看該 Task 最新的驗證紀錄：先未通過、後自動檢查通過時顯示已通過驗證（自動檢查）", async () => {
     await renderBoard(
       fakeClient({
@@ -1541,6 +1579,33 @@ describe("Task 種類、工作目錄與整合佇列", () => {
     expect(group).not.toHaveTextContent("out/report.md");
   });
 
+  it("未通過整合時，不完整的整合檢查與未通過的分開列出", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask()],
+        integrations: [
+          integrationEntry({
+            status: "failed",
+            failure: "整合驗證不完整，目標分支未變更",
+            checks: [
+              {
+                check: { kind: "command", program: "cargo", args: ["test"], expected_exit_code: 0 },
+                status: "inconclusive",
+                detail: "磁碟空間不足，無法建置",
+              },
+            ],
+            finished_at: T0,
+          }),
+        ],
+      }),
+    );
+
+    const group = integration("加登入頁");
+    expect(group).toHaveTextContent("不完整的整合檢查（1）");
+    expect(group).toHaveTextContent("指令 cargo test（預期結束碼 0）：磁碟空間不足，無法建置");
+    expect(group).not.toHaveTextContent("未通過的整合檢查");
+  });
+
   it("已整合：顯示合併 commit 前 8 碼；只看該 Task 最新的整合項目", async () => {
     const merge = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     await renderBoard(
@@ -1603,5 +1668,98 @@ describe("Task 種類、工作目錄與整合佇列", () => {
     await user.click(within(panel).getByRole("button", { name: "檢視驗證" }));
 
     expect(await within(panel).findByText("最新整合項目：未通過整合（第 1 次 Run）")).toBeInTheDocument();
+  });
+});
+
+describe("修正與重試預算", () => {
+  const budgets = (taskTitle: string) => within(card(taskTitle)).queryByRole("group", { name: "修正與重試預算" });
+
+  /** 依序設定三種計數的已用次數。 */
+  const used = (implementation: number, verification: number, infrastructure: number) =>
+    budgetView().counters.map((counter, index) => ({ ...counter, used: [implementation, verification, infrastructure][index] }));
+
+  it("有計數時列出三種預算的已用次數與上限", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "ready", contract: filledContract("task_1") })],
+        budgets: [budgetView({ counters: used(1, 0, 2) })],
+      }),
+    );
+
+    const group = budgets("部署")!;
+    const items = within(group).getAllByRole("listitem");
+    expect(items.map((item) => item.textContent)).toEqual(["實作失敗修正 1/3", "驗證不完整重驗 0/2", "基礎設施重試 2/5"]);
+    expect(within(group).queryByRole("alert")).not.toBeInTheDocument();
+    expect(group).not.toHaveTextContent("下次重試");
+  });
+
+  it("三種計數都是 0 且沒有用盡時不顯示；沒有預算資料的 Task 也不顯示", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "ready" }), task("task_2", "其他", { status: "ready" })],
+        budgets: [budgetView()],
+      }),
+    );
+
+    expect(budgets("部署")).not.toBeInTheDocument();
+    expect(budgets("其他")).not.toBeInTheDocument();
+  });
+
+  it("基礎設施重試退避中：顯示下次重試不早於的時間（當地時間）", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "ready" })],
+        budgets: [budgetView({ counters: used(0, 0, 1), retry_not_before: T0 + 600_000 })],
+      }),
+    );
+
+    expect(budgets("部署")).toHaveTextContent("下次重試不早於 2023/11/14 22:23");
+  });
+
+  it("預算用盡：提示該類預算已用完、Task 已阻擋，請到裁定中心", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "blocked" })],
+        budgets: [budgetView({ counters: used(3, 1, 0), exhausted: "implementation", decision_request_id: "dec_1" })],
+      }),
+    );
+
+    const group = budgets("部署")!;
+    expect(within(group).getByText("實作失敗修正 3/3")).toBeInTheDocument();
+    expect(within(group).getByRole("alert")).toHaveTextContent("實作失敗修正預算已用完，Task 已阻擋，請到裁定中心決定下一步");
+  });
+
+  it("用盡的種類即使計數資料為 0 也會顯示提示", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "blocked" })],
+        budgets: [budgetView({ exhausted: "verification" })],
+      }),
+    );
+
+    expect(within(budgets("部署")!).getByRole("alert")).toHaveTextContent("驗證不完整重驗預算已用完");
+  });
+
+  it("等待原因有「重試退避」類別時分開標示", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "ready" })],
+        queue: [
+          {
+            workspace_id: "ws_1",
+            task_id: "task_1",
+            title: "部署",
+            priority: 0,
+            requested_at: T0,
+            position: 1,
+            reasons: [{ category: "backoff", code: "retry_backoff", message: "基礎設施重試退避中，10 分鐘後再派工" }],
+          },
+        ],
+      }),
+    );
+
+    const queued = within(card("部署")).getByRole("group", { name: "排隊原因" });
+    const item = within(queued).getByText("重試退避").closest("li")!;
+    expect(within(item).getByText("基礎設施重試退避中，10 分鐘後再派工")).toBeInTheDocument();
   });
 });

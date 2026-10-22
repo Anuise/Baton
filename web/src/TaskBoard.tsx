@@ -4,6 +4,8 @@ import { buildContract, ContractEditor, draftFromContract, emptyDraft, type Cont
 import { formatTimestamp } from "./time";
 import type {
   AcceptanceBasis,
+  BudgetView,
+  CheckResult,
   Goal,
   IntegrationEntry,
   IntegrationStatus,
@@ -80,6 +82,7 @@ const WAIT_CATEGORY_LABELS: [WaitCategory, string][] = [
   ["workdir", "工作目錄"],
   ["lifecycle", "完全退出"],
   ["guard", "Guard 擋下"],
+  ["backoff", "重試退避"],
 ];
 
 /** 建立表單的選項順序：預設的「研究」排第一。 */
@@ -294,6 +297,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   workdir={board.workdirs.filter((w) => w.task_id === task.id).at(-1) ?? null}
                   runLabelOf={runLabelOf}
                   integration={latestIntegration(board.integrations, task.id)}
+                  budget={board.budgets.find((b) => b.task_id === task.id) ?? null}
                   accountName={accountNameOf(overview, board.runs, task.id)}
                   queued={queuedInfo(overview, queuedNotice, task)}
                   timeZone={timeZone}
@@ -338,6 +342,8 @@ interface CardProps {
   runLabelOf: (runId: string) => string;
   /** 這個 Task 最新的整合項目；沒有排入過整合為 null。 */
   integration: IntegrationEntry | null;
+  /** 這個 Task 的修正與重試預算；沒有資料為 null。 */
+  budget: BudgetView | null;
   /** 最新 Run 使用的帳號名稱。 */
   accountName: string | null;
   /** 在佇列中等待名額時的順位（未知為 null）與原因；不在佇列為 null。 */
@@ -356,7 +362,7 @@ interface CardProps {
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -421,6 +427,8 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       {verification && <VerificationSummary record={verification} timeZone={timeZone} />}
 
       {integration && <IntegrationSummary entry={integration} awaiting={awaitingIntegration} />}
+
+      {budget && isBudgetUsed(budget) && <BudgetStatus budget={budget} timeZone={timeZone} />}
 
       {task.status === "verifying" && !awaitingIntegration && (
         <VerificationPanel client={client} workspaceId={workspaceId} taskId={task.id} onAccepted={onAccepted} />
@@ -554,9 +562,8 @@ function WorkdirStatus({ workdir, runLabelOf }: { workdir: WorkdirView; runLabel
   );
 }
 
-/** 開發 Task 最新的整合項目：狀態、未通過的原因與整合檢查、已整合的合併 commit。 */
+/** 開發 Task 最新的整合項目：狀態、未通過的原因與整合檢查（未通過與不完整分開）、已整合的合併 commit。 */
 function IntegrationSummary({ entry, awaiting }: { entry: IntegrationEntry; awaiting: boolean }) {
-  const failedChecks = entry.checks.filter((result) => result.status === "failed");
   return (
     <div
       className={entry.status === "failed" ? "task-integration task-integration-failed" : "task-integration"}
@@ -573,23 +580,13 @@ function IntegrationSummary({ entry, awaiting }: { entry: IntegrationEntry; awai
       </p>
       {entry.status === "integrated" && entry.merge_commit && <p>合併 commit {entry.merge_commit.slice(0, 8)}</p>}
       {entry.failure && <p>{entry.failure}</p>}
-      {failedChecks.length > 0 && (
-        <details>
-          <summary>未通過的整合檢查（{failedChecks.length}）</summary>
-          <ul>
-            {failedChecks.map((result, index) => (
-              <li key={index}>
-                {describeCheck(result.check)}：{result.detail}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+      <CheckResultList title="未通過的整合檢查" results={entry.checks.filter((result) => result.status === "failed")} />
+      <CheckResultList title="不完整的整合檢查" results={entry.checks.filter((result) => result.status === "inconclusive")} />
     </div>
   );
 }
 
-/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、完全退出、工作目錄、Guard 擋下）。 */
+/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、完全退出、工作目錄、Guard 擋下、重試退避）。 */
 function QueuedStatus({ position, reasons }: { position: number | null; reasons: WaitReason[] }) {
   return (
     <div className="task-queued" role="group" aria-label="排隊原因">
@@ -660,7 +657,7 @@ function RunStatusLine({ run, accountName, timeZone }: { run: RunView; accountNa
   );
 }
 
-/** 最新驗證紀錄：未通過時列出未通過的檢查與證據（預設收合）。 */
+/** 最新驗證紀錄：未通過或不完整時列出未通過、不完整的檢查與證據（預設收合）。 */
 function VerificationSummary({ record, timeZone }: { record: VerificationRecord; timeZone?: string }) {
   const decidedAt = formatTimestamp(record.decided_at, timeZone);
   if (record.outcome === "passed") {
@@ -672,25 +669,60 @@ function VerificationSummary({ record, timeZone }: { record: VerificationRecord;
       </div>
     );
   }
-  const failed = record.checks.filter((result) => result.status === "failed");
+  // 不完整是證據不足或環境問題，不是產品缺陷：與未通過分開標示
+  const heading = record.outcome === "inconclusive" ? "上次驗證不完整" : "上次驗證未通過";
   return (
     <div className="task-verification-failed" role="group" aria-label="驗證紀錄">
       <p>
-        <strong>上次驗證未通過</strong>（第 {record.generation} 次 Run，{decidedAt}）
+        <strong>{heading}</strong>（第 {record.generation} 次 Run，{decidedAt}）
       </p>
       {record.note && <p>{record.note}</p>}
-      {failed.length > 0 && (
-        <details>
-          <summary>未通過的檢查（{failed.length}）</summary>
-          <ul>
-            {failed.map((result, index) => (
-              <li key={index}>
-                {describeCheck(result.check)}：{result.detail}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+      <CheckResultList title="未通過的檢查" results={record.checks.filter((result) => result.status === "failed")} />
+      <CheckResultList title="不完整的檢查" results={record.checks.filter((result) => result.status === "inconclusive")} />
+    </div>
+  );
+}
+
+/** 檢查結果與證據的清單（預設收合）；沒有項目時不顯示。 */
+function CheckResultList({ title, results }: { title: string; results: CheckResult[] }) {
+  if (results.length === 0) return null;
+  return (
+    <details>
+      <summary>
+        {title}（{results.length}）
+      </summary>
+      <ul>
+        {results.map((result, index) => (
+          <li key={index}>
+            {describeCheck(result.check)}：{result.detail}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+/** 有任何計數用過或已用盡才顯示預算，避免卡片雜訊。 */
+const isBudgetUsed = (budget: BudgetView) => budget.exhausted !== null || budget.counters.some((counter) => counter.used > 0);
+
+/** 修正與重試預算（spec D-16）：三種計數、基礎設施重試的退避期限；用盡時 Task 已阻擋，提示到裁定中心。 */
+function BudgetStatus({ budget, timeZone }: { budget: BudgetView; timeZone?: string }) {
+  const exhaustedLabel = budget.counters.find((counter) => counter.kind === budget.exhausted)?.label ?? budget.exhausted;
+  return (
+    <div
+      className={budget.exhausted === null ? "task-budget" : "task-budget task-budget-exhausted"}
+      role="group"
+      aria-label="修正與重試預算"
+    >
+      <ul>
+        {budget.counters.map((counter) => (
+          <li key={counter.kind}>
+            {counter.label} {counter.used}/{counter.limit}
+          </li>
+        ))}
+      </ul>
+      {budget.retry_not_before !== null && <p>下次重試不早於 {formatTimestamp(budget.retry_not_before, timeZone)}</p>}
+      {budget.exhausted !== null && <p role="alert">{exhaustedLabel}預算已用完，Task 已阻擋，請到裁定中心決定下一步</p>}
     </div>
   );
 }
