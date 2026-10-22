@@ -5,8 +5,12 @@
 //! （外部操作重試時 `task_id` 會換成新的 Task，所以以事件當時的 Run 為準）。
 //! 恢復事件屬於整個 Runtime，出現在每個 Workspace 的時間線上，關聯到它任何一次嘗試處置過、屬於這個 Workspace 的 Task。
 //! 不屬於任何 Task 的事件依它記下的 Workspace 歸屬：沒有指定 Task 的重犯、Controller Run 的用量（票 16）。
+//! 裁定請求除了發起的 Task，也關聯到它阻擋的每個 Task（`decision_request_block`）。
+//! 不屬於這個 Workspace 的事件在 SQL 端就濾掉，不讀出、不解析內容。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use baton_domain::decision::DECISION_AGGREGATE;
 
 use baton_domain::recovery::{AffectedRun, RECOVERY_AGGREGATE};
 use baton_domain::timeline::{self, TimelineEntry, TIMELINE_AGGREGATES};
@@ -46,16 +50,28 @@ fn read_timeline(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -
     if exists.is_none() {
         return Err(TimelineError::WorkspaceNotFound(workspace_id.to_string()));
     }
-    let task_workspace: HashMap<String, String> = conn
-        .prepare("SELECT id, workspace_id FROM task")?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let workspace_tasks: HashSet<String> = conn
+        .prepare("SELECT id FROM task WHERE workspace_id = ?1")?
+        .query_map([workspace_id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     if let Some(task_id) = task_id {
-        if task_workspace.get(task_id).map(String::as_str) != Some(workspace_id) {
+        if !workspace_tasks.contains(task_id) {
             return Err(TimelineError::TaskNotFound(task_id.to_string()));
         }
     }
-    let in_workspace = |task: &String| task_workspace.get(task).map(String::as_str) == Some(workspace_id);
+    let in_workspace = |task: &String| workspace_tasks.contains(task);
+
+    // 裁定請求 → 它阻擋的 Task（依加入阻擋範圍的順序）
+    let mut blocked: HashMap<String, Vec<String>> = HashMap::new();
+    let mut blocks = conn.prepare(
+        "SELECT b.request_id, b.task_id FROM decision_request_block b
+         JOIN decision_request d ON d.id = b.request_id
+         WHERE d.workspace_id = ?1 ORDER BY b.rowid",
+    )?;
+    for row in blocks.query_map([workspace_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        let (request_id, task) = row?;
+        blocked.entry(request_id).or_default().push(task);
+    }
 
     // 恢復事件 → 它處置過的 Task（所有輪次、所有嘗試）
     let mut recovered: HashMap<String, Vec<String>> = HashMap::new();
@@ -72,14 +88,16 @@ fn read_timeline(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -
     }
 
     let aggregates = TIMELINE_AGGREGATES.map(|a| format!("'{a}'")).join(", ");
+    // 與下面逐筆判斷的歸屬相同：恢復事件一律讀出；其餘只讀出 Task 屬於這個 Workspace、或沒有 Task 但記下這個 Workspace 的事件
     let sql = format!(
-        "SELECT e.seq, e.aggregate_type, e.aggregate_id, e.event_type, e.occurred_at, e.payload,
+        "SELECT seq, aggregate_type, aggregate_id, event_type, occurred_at, payload, task_id, run_id, owner_workspace FROM (
+         SELECT e.seq, e.aggregate_type, e.aggregate_id, e.event_type, e.occurred_at, e.payload,
                 COALESCE(r.task_id, h.task_id, d.task_id,
                          CASE WHEN e.aggregate_type IN ('task', 'worktree_cleanup') THEN e.aggregate_id END,
-                         json_extract(e.payload, '$.task_id'), pr.task_id, x.task_id),
+                         json_extract(e.payload, '$.task_id'), pr.task_id, x.task_id) AS task_id,
                 COALESCE(CASE WHEN e.aggregate_type = 'run' THEN e.aggregate_id END, h.from_run_id, d.run_id,
-                         json_extract(e.payload, '$.run_id'), x.run_id),
-                COALESCE(lr.workspace_id, cr.workspace_id)
+                         json_extract(e.payload, '$.run_id'), x.run_id) AS run_id,
+                COALESCE(lr.workspace_id, cr.workspace_id) AS owner_workspace
          FROM event e
          LEFT JOIN run r ON e.aggregate_type = 'run' AND r.id = e.aggregate_id
          LEFT JOIN handoff h ON e.aggregate_type = 'handoff' AND h.id = e.aggregate_id
@@ -88,11 +106,14 @@ fn read_timeline(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -
          LEFT JOIN lesson_recurrence lr ON e.aggregate_type = 'lesson_recurrence' AND lr.id = e.aggregate_id
          LEFT JOIN controller_run cr ON e.aggregate_type = 'run_usage' AND cr.id = e.aggregate_id
          LEFT JOIN run pr ON pr.id = json_extract(e.payload, '$.run_id')
-         WHERE e.aggregate_type IN ({aggregates})
-         ORDER BY e.seq"
+         WHERE e.aggregate_type IN ({aggregates}))
+         WHERE aggregate_type = '{RECOVERY_AGGREGATE}'
+            OR task_id IN (SELECT id FROM task WHERE workspace_id = ?1)
+            OR (task_id IS NULL AND owner_workspace = ?1)
+         ORDER BY seq"
     );
     let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map([], |r| {
+    let rows = statement.query_map([workspace_id], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, String>(1)?,
@@ -114,7 +135,17 @@ fn read_timeline(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -
         } else {
             // 屬於別的 Workspace 的事件不上這個時間線；沒有 Task 的事件看它記下的 Workspace
             match task {
-                Some(task) if in_workspace(&task) => vec![task],
+                Some(task) if in_workspace(&task) => {
+                    let mut tasks = vec![task];
+                    if aggregate_type == DECISION_AGGREGATE {
+                        for other in blocked.get(&aggregate_id).into_iter().flatten() {
+                            if !tasks.contains(other) && in_workspace(other) {
+                                tasks.push(other.clone());
+                            }
+                        }
+                    }
+                    tasks
+                }
                 Some(_) => continue,
                 None if owner_workspace.as_deref() == Some(workspace_id) => Vec::new(),
                 None => continue,

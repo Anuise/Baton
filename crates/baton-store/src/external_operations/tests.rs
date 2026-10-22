@@ -169,3 +169,24 @@ async fn a_rejected_command_writes_nothing() {
     let operations = store.external_operations("w1").await.unwrap();
     assert_eq!((operations.len(), operations[0].target.as_str()), (1, "production"));
 }
+
+#[tokio::test]
+async fn a_decision_blocking_several_tasks_appears_on_each_blocked_tasks_timeline() {
+    // review-notes #17：擋多個 Task 的裁定請求，被擋的每個 Task 的時間線都看得到
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_running_tasks(dir.path()).await;
+    store.begin_external_operation(&scope("r1"), "op1".into(), deploy("deploy-1"), T1).await.unwrap();
+    store.apply_run_command("w1".into(), RunCommand::Interrupt { run_id: "r1".into(), reason: "x".into() }, T2).await.unwrap();
+    let request_id = store.external_operations("w1").await.unwrap()[0].decision_request_id.clone().unwrap();
+    store.begin_external_operation(&scope("r2"), "ignored".into(), deploy("deploy-1"), T2).await.unwrap();
+    verify(&store, &request_id, OPTION_VERIFIED_DONE, None).await.unwrap();
+
+    let decision_events = |entries: Vec<baton_domain::timeline::TimelineEntry>| -> Vec<String> {
+        entries.into_iter().filter(|e| e.aggregate_id == request_id).map(|e| e.event_type).collect()
+    };
+    let for_t2 = decision_events(store.timeline("w1", Some("t2")).await.unwrap());
+    assert!(for_t2.contains(&"decision_requested".to_string()), "{for_t2:?}");
+    assert!(for_t2.contains(&"decision_answered".to_string()), "{for_t2:?}");
+    let entry = store.timeline("w1", None).await.unwrap().into_iter().find(|e| e.aggregate_id == request_id).unwrap();
+    assert_eq!(entry.task_ids, vec!["t1".to_string(), "t2".to_string()]);
+}
