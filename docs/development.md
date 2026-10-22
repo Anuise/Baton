@@ -1279,6 +1279,20 @@ Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journ
 
 測試：`crates/baton-harness/tests/gate_invalidation.rs`（情境測試）、`crates/baton-domain/src/workflow/gate_tests.rs`、`crates/baton-domain/src/decision/tests.rs`、`crates/baton-domain/src/task.rs`、`web/src/WorkflowPage.test.tsx`。
 
+### 已驗證動作重播與 no_live_model（票 48）
+
+web Profile 的旅程步驟可以寫成目標導向動作，由模型依當前畫面決定具體動作；被後續有效斷言證明的動作會錄製下來，之後可以不呼叫模型重播。規則在 `baton_domain::verification_profile::replay`，錄製保存在 `baton-store` 的 `replay_action`（migration 43 `verified_action_replay`），執行在 `verification_adapter.rs` 的 `run_act`。細節與取捨見 ai-decisions 的票 48 條目。
+
+- **目標導向動作**：`{ kind: "browser", action: { kind: "act", goal, params?, replay_in_production? } }`，只能用在旅程步驟（登入與身分核對必須是固定操作），至少要有一個不靠模型的斷言（後置條件），目標與參數不能引用秘密。模型（`SemanticJudge::plan`，正式實作同樣是一次不給工具的 `claude -p`）只看目標、參數、persona 與這個 Session 最近一次的畫面（已遮蔽），只能選點擊、輸入或按鍵；selector 依可見文字建立（`role=…[name="…"]` 或 `text=…`）。與語意 judge 共用 `budget.max_model_calls` 與限流狀態。
+- **錄製**：步驟通過、而且至少一個不靠模型的斷言成立，才把具體動作連同錄製身分記下來（Bundle 的 `actions[].recorded`）；後置條件不成立、只有語意判斷成立或含秘密的動作都不錄製。每個 Workspace、每個案例（`<旅程>/<步驟>`）一筆，新的錄製取代舊的。
+- **錄製身分與 stale**：案例（旅程、步驟與它之前的全部操作，含登入路徑）、目標、參數、persona 與登入身分、引擎（`BrowserDriver::engine`，正式 Runner 回報 Playwright 與瀏覽器版本）、資料相容性（`replay.dataset` 與資料準備步驟）。任何一個維度不同就標為 stale（`<維度>_changed`），重播時動作無法完成或不靠模型的斷言明確不成立也標為 stale（`postcondition_failed`）；環境阻礙、授權阻礙、預算用盡與模型無法判定都不推翻錄製。stale 的錄製不再沿用，直到同一個案例有新的錄製。
+- **重播**：仍實際執行錄製的動作並重新檢查全部斷言，判定只看這次的觀察（快取命中不是通過）。目標導向步驟的後置條件不成立是 `inconclusive`（`act_postcondition_failed`／`replay_postcondition_failed`），不是產品缺陷；要判定產品缺陷請寫成固定的操作。重播失敗後同一次驗證不改由模型重做（動作已經執行過）。
+- **正式環境**：Profile 的 `replay.production: true` 時，錄製預設不重播（`cache: production_not_replayable`），步驟以 `replay_in_production: true` 個別允許。
+- **no_live_model**：驗證要求的 `no_live_model: true`（桌面 API、`run_verification` 工具與驗證頁的勾選框）。Adapter 把這次的模型 Port 換成一律拒絕的實作，並在每個需要模型的地方呼叫前擋下：語意判斷是 `inconclusive`（`live_model_disabled`，`engine_code` 為 `model:disabled`），沒有可用錄製的目標導向步驟也是 `live_model_disabled`、不執行任何動作。
+- **用量**：Bundle 的 `usage` 分開記錄 `live_model_calls`（實際的模型呼叫）、`live_actions`（模型決定的動作）、`replayed_actions`（重播的動作）與 `blocked_model_calls`（no_live_model 擋下的呼叫）；`actions` 記下每個目標導向步驟執行前的錄製狀態（`none`、`valid`、`stale`、`mismatch`、`production_not_replayable`）、來源（`live`／`replay`）、實際動作與這次的 stale 原因。驗證頁分開顯示即時與重播的用量。
+
+測試：`crates/baton-harness/tests/verified_action_replay.rs`（情境測試）、`crates/baton-domain/src/verification_profile/replay/tests.rs`、`crates/baton-runtime/src/semantic_judge.rs`（動作規劃的 Prompt 與解析）、`crates/baton-runtime/tests/browser_driver.rs`（引擎回報；本機沒有 Playwright 時略過）、`web/src/VerificationPage.test.tsx`。
+
 ### 本機 API 的存取防護
 
 Runtime 同時監聽 IPv4 與 IPv6 loopback（`127.0.0.1:<port>`、`[::1]:<port>`），拒絕非 loopback 的監聽位址。所有端點（含 `/api/v1/events` 串流與未知路徑）都要求：
