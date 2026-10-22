@@ -474,6 +474,7 @@ impl Execution<'_> {
                 _ => vec![Assertion::ExitCode { equals: 0 }],
             },
             operation: operation.clone(),
+            external: false,
         };
         let (observation, _) = if operation.secret_keys().iter().any(|k| self.unresolved.contains(k)) {
             (Observation::NotStarted { reason: "引用的秘密解析不到".into() }, None)
@@ -576,6 +577,7 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
             title: "build 識別".into(),
             operation: Operation::Command { program: identity.program.clone(), args: identity.args.clone(), timeout_ms: None },
             assertions: vec![Assertion::ExitCode { equals: 0 }],
+            external: false,
         };
         build = None;
         run.prerequisite(Phase::Build, &step).await;
@@ -662,6 +664,7 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         reason_code,
         cleanup: CleanupRecord { state_dir: run.state_dir, state_dir_removed, service_stopped, problems },
         artifacts: run.artifacts,
+        attempts: Vec::new(),
         started_at,
         finished_at: ports.clock.now(),
     }
