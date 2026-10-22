@@ -21,7 +21,7 @@ use crate::event::DomainEvent;
 use crate::task::{
     self, ContractContent, ContractField, ContractFieldName, MissingItem, Task, TaskContext, TaskStatus, Versioned,
 };
-use crate::workspace::Workspace;
+use crate::workdir::{Workdir, WorkdirKind};
 use crate::Timestamp;
 
 pub const RUN_AGGREGATE: &str = "run";
@@ -186,7 +186,7 @@ pub struct OutboxItem {
 pub struct LaunchPayload {
     pub task_id: String,
     pub prompt: String,
-    /// Worker 的工作目錄（目前是 Workspace 目錄；worktree 由票 20 加入）。
+    /// Worker 的工作目錄：Task 在平台登記的 worktree 或輸出目錄（票 20）。
     pub working_dir: String,
 }
 
@@ -343,6 +343,17 @@ pub enum RunError {
     LeaseNotExpired,
     #[error("Run 沒有被要求取消，不能完成取消")]
     CancelNotRequested,
+    #[error("Task 的{}還沒有準備好", workdir_label(*.0))]
+    WorkdirNotPrepared(WorkdirKind),
+    #[error("Task 的工作目錄不可用：{0}")]
+    WorkdirUnavailable(String),
+}
+
+fn workdir_label(kind: WorkdirKind) -> &'static str {
+    match kind {
+        WorkdirKind::Worktree => " worktree ",
+        WorkdirKind::OutputDir => "輸出目錄",
+    }
 }
 
 fn join_messages(items: &[MissingItem]) -> String {
@@ -365,6 +376,8 @@ impl RunError {
             RunError::StaleReport => "run_report_stale",
             RunError::LeaseNotExpired => "lease_not_expired",
             RunError::CancelNotRequested => "run_cancel_not_requested",
+            RunError::WorkdirNotPrepared(_) => "workdir_not_prepared",
+            RunError::WorkdirUnavailable(_) => "workdir_unavailable",
         }
     }
 }
@@ -376,6 +389,8 @@ pub struct RunContext<'a> {
     pub task: &'a TaskContext<'a>,
     pub runs: &'a [Run],
     pub leases: &'a [ExecutionLease],
+    /// Workspace 內平台登記的工作目錄（票 20）；派工只認已可用的目錄。
+    pub workdirs: &'a [Workdir],
 }
 
 impl RunContext<'_> {
@@ -491,10 +506,9 @@ impl<'a> Editing<'a> {
 
 /// 套用一個命令。
 pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Result<RunChange, RunError> {
-    let workspace =
-        ctx.task.workspace.ok_or_else(|| RunError::WorkspaceNotFound(ctx.task.workspace_id.to_string()))?;
+    ctx.task.workspace.ok_or_else(|| RunError::WorkspaceNotFound(ctx.task.workspace_id.to_string()))?;
     if let RunCommand::Dispatch { run_id, task_id, profile_id } = command {
-        return dispatch(ctx, workspace, run_id, task_id, profile_id, now);
+        return dispatch(ctx, run_id, task_id, profile_id, now);
     }
 
     let run = ctx.run(command.run_id())?;
@@ -665,10 +679,11 @@ struct Checked<'a> {
     task: &'a Task,
     contract: &'a task::TaskContract,
     admission: authorization::Admission,
+    workdir: &'a Workdir,
 }
 
 /// 派工的前置檢查（與帳號、容量無關）：Task 必須是 `ready`、沒有人持有寫入所有權、准入檢查通過（授權可能在
-/// ready 之後被撤銷，AI-61）、相依都已完成。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
+/// ready 之後被撤銷，AI-61）、相依都已完成，而且 Task 的工作目錄已經登記為可用（票 20）。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
 pub fn check_dispatch(ctx: &RunContext<'_>, task_id: &str) -> Result<(), RunError> {
     check_dispatch_inner(ctx, task_id).map(|_| ())
 }
@@ -706,18 +721,24 @@ fn check_dispatch_inner<'a>(ctx: &'a RunContext<'a>, task_id: &str) -> Result<Ch
     if !unfinished.is_empty() {
         return Err(RunError::DependenciesUnfinished(unfinished));
     }
-    Ok(Checked { task, contract, admission })
+    // 工作目錄在交易外由 Runtime 準備並登記；沒有可用的目錄就不派工
+    let kind = task.kind.workdir_kind();
+    let workdir = match ctx.workdirs.iter().find(|w| w.task_id == task.id && w.kind == kind) {
+        Some(w) if w.is_ready() => w,
+        Some(w) => return Err(RunError::WorkdirUnavailable(w.failure.clone().unwrap_or_default())),
+        None => return Err(RunError::WorkdirNotPrepared(kind)),
+    };
+    Ok(Checked { task, contract, admission, workdir })
 }
 
 fn dispatch(
     ctx: &RunContext<'_>,
-    workspace: &Workspace,
     run_id: String,
     task_id: String,
     profile_id: String,
     now: Timestamp,
 ) -> Result<RunChange, RunError> {
-    let Checked { task, contract, admission } = check_dispatch_inner(ctx, &task_id)?;
+    let Checked { task, contract, admission, workdir } = check_dispatch_inner(ctx, &task_id)?;
 
     let generation = ctx.runs.iter().filter(|r| r.task_id == task.id).map(|r| r.generation).max().unwrap_or(0) + 1;
     let mut run = Run {
@@ -755,7 +776,7 @@ fn dispatch(
         payload: LaunchPayload {
             task_id: task.id.clone(),
             prompt: render_prompt(&task.title, &contract.content),
-            working_dir: workspace.path.clone(),
+            working_dir: workdir.path.clone(),
         },
         created_at: now,
         delivered_at: None,
@@ -770,6 +791,7 @@ fn dispatch(
             "generation": generation,
             "contract_version": task.contract_version,
             "authorization_revision": admission.authorization_revision,
+            "working_dir": workdir.path,
         }),
     );
     run = edit.run;
