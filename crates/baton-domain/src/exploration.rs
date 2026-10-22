@@ -65,7 +65,7 @@ pub enum ExplorationError {
     DefectLocked(String),
     #[error("{0}")]
     TransitionRefused(String),
-    #[error("疑點 {0} 已有排隊中的重現，請等結果出來再要求")]
+    #[error("疑點 {0} 已有排隊中的重現，請等結果出來再要求重現或分流")]
     ReproductionPending(String),
     /// 排除為「預期設計」沒有使用者的裁定（API 依決策權限表先送裁定）。
     #[error("排除為預期設計必須由使用者裁定")]

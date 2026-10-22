@@ -159,6 +159,18 @@ fn record(conn: &Connection, finding: ExplorationFinding) -> rusqlite::Result<Fi
     Ok(FindingRecord { finding, task_title, attempts })
 }
 
+/// 疑點是否有排隊中（還沒有結果）的重現或修復驗證。
+fn reproduction_pending(conn: &Connection, finding_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM exploration_attempt WHERE finding_id = ?1 AND outcome IS NULL
+             AND purpose IN ('reproduce', 'verify_fix') LIMIT 1",
+        [finding_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|found| found.is_some())
+}
+
 /// 確認 Workspace 存在而且沒有封存。
 fn active_workspace(conn: &Connection, workspace_id: &str) -> Result<(), ExplorationApplyError> {
     let found: Option<(String, String)> = conn
@@ -482,6 +494,10 @@ impl Store {
                 let Some(finding) = load_finding(tx, &workspace_id, &finding_id)? else {
                     return Ok(Err(ExplorationError::FindingNotFound(finding_id).into()));
                 };
+                // 重現排隊中不能分流：否則結果證實是缺陷時，疑點已被排除而不會升為已確認
+                if reproduction_pending(tx, &finding.id)? {
+                    return Ok(Err(ExplorationError::ReproductionPending(finding.id).into()));
+                }
                 let change = match exploration::triage(&finding, action, approved_decision) {
                     Ok(change) => change,
                     Err(rejected) => return Ok(Err(rejected.into())),
@@ -517,15 +533,7 @@ impl Store {
                 let Some(finding) = load_finding(tx, &workspace_id, &finding_id)? else {
                     return Ok(Err(ExplorationError::FindingNotFound(finding_id).into()));
                 };
-                let pending: Option<i64> = tx
-                    .query_row(
-                        "SELECT 1 FROM exploration_attempt WHERE finding_id = ?1 AND outcome IS NULL
-                             AND purpose IN ('reproduce', 'verify_fix') LIMIT 1",
-                        [&finding.id],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if pending.is_some() {
+                if reproduction_pending(tx, &finding.id)? {
                     return Ok(Err(ExplorationError::ReproductionPending(finding.id).into()));
                 }
                 let Some(profile) = latest_profile(tx, &workspace_id)? else {

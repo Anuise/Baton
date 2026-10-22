@@ -7,7 +7,8 @@
 //! 每個測試名稱對應票 47 的驗收條件：
 //! - 環境故障不被記為產品缺陷：`an_environment_failure_is_never_recorded_as_a_product_defect`
 //! - 未經重現的疑點不會顯示為 confirmed：`a_suspicion_is_only_shown_as_confirmed_after_a_reproduction_fails_on_a_product_assertion`
-//! - 不能以排除標籤或刪除案例掩蓋缺陷：`a_defect_cannot_be_hidden_by_exclusion_labels_or_by_dropping_its_case`
+//! - 不能以排除標籤或刪除案例掩蓋缺陷：`a_defect_cannot_be_hidden_by_exclusion_labels_or_by_dropping_its_case`、
+//!   `a_suspicion_cannot_be_triaged_away_while_its_reproduction_is_queued`
 //! - 探索先定章程、無法重現保留為未驗風險、預期設計由使用者裁定：
 //!   `exploration_starts_from_a_charter_and_unreproducible_or_expected_findings_are_kept_with_their_reason`
 
@@ -492,6 +493,36 @@ async fn a_defect_cannot_be_hidden_by_exclusion_labels_or_by_dropping_its_case()
     let regular = w.verify(json!([])).await;
     assert_eq!(journey_of(&regular, &key).unwrap()["verdict"], "product_failure", "發布新的 Profile 也拿不掉回歸案例");
     assert_eq!(regular["verdict"], "product_failure");
+}
+
+#[tokio::test]
+async fn a_suspicion_cannot_be_triaged_away_while_its_reproduction_is_queued() {
+    let (w, controller, _, _, finding) = explored().await;
+    w.shop(160);
+    let (status, queued) =
+        w.h().call_tool(&controller, "reproduce_exploration_finding", json!({ "finding_id": finding["id"], "journey": case() })).await;
+    assert_eq!(status, StatusCode::CREATED, "{queued}");
+
+    // 重現排隊中：任何分流都被拒絕，預期設計也不會先建立裁定請求
+    for body in [
+        json!({ "action": "exclude", "reason": "environment", "rationale": "應該是環境問題" }),
+        json!({ "action": "exclude", "reason": "expected_design", "rationale": "規格本來就這樣" }),
+        json!({ "action": "mark_unverified", "rationale": "先不管" }),
+    ] {
+        let (status, rejected) = w.triage(&controller, &finding, body).await;
+        assert_eq!((status, error_code(&rejected)), (StatusCode::CONFLICT, "exploration_reproduction_pending"), "{rejected}");
+    }
+    let (status, decisions) = w.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/decisions", w.ws), None).await;
+    assert_eq!(status, StatusCode::OK, "{decisions}");
+    assert!(!decisions.to_string().contains("預期設計"), "{decisions}");
+    assert_eq!(w.finding(&finding["id"]).await["status"], "suspected");
+
+    // 結果出來：Runtime 證實是產品缺陷，疑點升為已確認，沒有被先排除掉
+    w.h().supervise().await;
+    let confirmed = w.finding(&finding["id"]).await;
+    assert_eq!((confirmed["status"].as_str(), confirmed["attempts"][0]["outcome"].as_str()), (Some("confirmed"), Some("reproduced")), "{confirmed}");
+    assert_eq!(confirmed.get("exclusion"), None, "{confirmed}");
+    assert_eq!(section(&w.exploration().await, "confirmed").len(), 1);
 }
 
 // --- 章程、未驗風險與預期設計 ---

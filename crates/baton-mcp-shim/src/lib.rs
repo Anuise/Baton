@@ -858,7 +858,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_TRIAGE_EXPLORATION_FINDING,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：分流一個探索疑點。exclude（排除，必須附 reason：environment 環境、seed_data 測試資料、tool_limitation 工具限制、expected_design 預期設計）、mark_unverified（無法重現或無法驗證，保留為未驗風險 unverified_risk）、reopen（重新開啟已排除的疑點）。已確認的缺陷（confirmed、fixed、regressed）不能排除或改為未驗風險（exploration_defect_locked），修復後以 reproduce_exploration_finding 驗證。排除為 expected_design 是產品取捨，必須由使用者裁定：Runtime 依決策權限表回 requires_decision 並建立裁定請求，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用。排除的疑點仍保留紀錄，可以 reopen；任何疑點都不能刪除。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：分流一個探索疑點。exclude（排除，必須附 reason：environment 環境、seed_data 測試資料、tool_limitation 工具限制、expected_design 預期設計）、mark_unverified（無法重現或無法驗證，保留為未驗風險 unverified_risk）、reopen（重新開啟已排除的疑點）。已確認的缺陷（confirmed、fixed、regressed）不能排除或改為未驗風險（exploration_defect_locked），修復後以 reproduce_exploration_finding 驗證。疑點有排隊中的重現時任何分流都被拒絕（exploration_reproduction_pending），等結果出來再分流。排除為 expected_design 是產品取捨，必須由使用者裁定：Runtime 依決策權限表回 requires_decision 並建立裁定請求，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用。排除的疑點仍保留紀錄，可以 reopen；任何疑點都不能刪除。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

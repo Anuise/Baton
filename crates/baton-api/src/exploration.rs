@@ -233,6 +233,10 @@ pub(crate) async fn triage_exploration_finding(
     let finding = &current.finding;
     // 先以 Domain 檢查這個分流是否成立（已確認的缺陷、狀態不符、理由空白都直接拒絕），不為注定被拒的分流建立裁定請求
     exploration::triage(finding, request.action.clone(), Some(String::new())).map_err(ApiError::from)?;
+    // 重現排隊中不能分流，也不為此建立裁定請求（Store 會在寫入交易內再檢查一次）
+    if current.attempts.iter().any(|a| a.purpose.is_diagnostic() && a.outcome.is_none()) {
+        return Err(ApiError::from(ExplorationError::ReproductionPending(finding.id.clone())).into());
+    }
 
     let mut approved = None;
     if let TriageAction::Exclude { reason: ExclusionReason::ExpectedDesign, rationale } = &request.action {
