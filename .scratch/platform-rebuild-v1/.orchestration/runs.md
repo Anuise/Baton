@@ -51,6 +51,6 @@
 | R047-25-verify | 25 | verify | Work-9 | 2026-10-22 16:56 | 2026-10-22 17:02 | FAIL（完全退出受 tick 鎖拖延，40 秒上限不成立） |
 | R048-18-integrate | 18 | integrate | Work-9 | 2026-10-22 16:57 | 2026-10-22 17:03 | 失敗：開 Monitor 等測試後結束回合，合併未完成；不計次數 |
 | R049-25-fix | 25 | fix | Work-9 | 2026-10-22 17:02 | | |
-| R050-18-integrate | 18 | integrate | Work-9 | 2026-10-22 17:03 | | |
-| R051-13-verify | 13 | verify | Work-8 | 2026-10-22 17:04 | | |
-| R052-22-verify | 22 | verify | Work-8 | 2026-10-22 17:04 | | |
+| R050-18-integrate | 18 | integrate | Work-9 | 2026-10-22 17:03 | 2026-10-22 17:14 | DONE，依 AI-109 直接合併 |
+| R051-13-verify | 13 | verify | Work-8 | 2026-10-22 17:04 | 2026-10-22 17:14 | FAIL（封存 Workspace 的驗證命令無限重跑） |
+| R052-22-verify | 22 | verify | Work-8 | 2026-10-22 17:04 | 2026-10-22 17:14 | PASS |
