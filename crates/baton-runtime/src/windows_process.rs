@@ -1,6 +1,10 @@
 //! 正式的 ProcessControl：每個 Run 一個 Windows Job Object（spec D-10）。
 //!
 //! - Job 具名 `Local\Baton-Run-{command_id}`：Runtime 重啟後可用 `find` 以 OpenJobObject 找回。
+//!   具名物件在最後一個 handle 關閉時就失去名稱（即使 Job 內仍有程序），所以根程序會繼承一個只能查詢的 Job handle；
+//!   Runtime 關閉自己的 handle（含崩潰）之後，只要 Worker 的程序（或繼承了 handle 的子孫）還在就找得回。
+//! - 子程序只繼承標準輸入輸出與上述 Job handle（`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`），
+//!   同時啟動的其他程序不會繼承到彼此的 handle。
 //! - 不設 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`：關閉 Job handle（含 Runtime 崩潰）不會殺掉程序。
 //! - 子孫程序預設繼承 Job 成員資格（本實作不允許 breakaway），所以 `stop` 能終止整棵程序樹。
 //! - 程序的 stdin/stdout/stderr 依 `SpawnSpec` 導向檔案，未指定時導向 NUL。
@@ -15,7 +19,7 @@ use baton_ports::{
     command_hash, Liveness, PortError, PortResult, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult,
 };
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER,
+    CloseHandle, DuplicateHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER,
     ERROR_MORE_DATA, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -29,9 +33,11 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_BASIC_PROCESS_ID_LIST,
 };
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, GetProcessTimes, OpenProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOW,
+    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetProcessTimes, InitializeProcThreadAttributeList,
+    OpenProcess, ResumeThread, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+    PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW,
 };
 
 /// Job Object 存取權限（windows-sys 沒有提供這兩個常數）。
@@ -75,6 +81,8 @@ impl Drop for OwnedHandle {
 struct Entry {
     job: OwnedHandle,
     process: OwnedHandle,
+    /// 由 `find` 找回：登記的是當時 Job 內最早的程序，根程序已結束時與資料庫記下的根身分不同。
+    found: bool,
 }
 
 /// 以 Windows Job Object 管理程序樹的 ProcessControl。
@@ -89,11 +97,36 @@ impl WindowsProcessControl {
     }
 
     fn entry(&self, identity: &ProcessIdentity) -> Option<Arc<Entry>> {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner()).get(identity).cloned()
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        key_for(&entries, identity).and_then(|key| entries.get(&key).cloned())
+    }
+
+    /// 不再管理這個身分：關閉 Job 與程序 handle。
+    fn forget(&self, identity: &ProcessIdentity) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(key) = key_for(&entries, identity) {
+            entries.remove(&key);
+        }
     }
 
     fn register(&self, identity: ProcessIdentity, entry: Entry) {
         self.entries.lock().unwrap_or_else(|e| e.into_inner()).insert(identity, Arc::new(entry));
+    }
+}
+
+/// 身分對應的登記鍵。沒有完全相同的登記時，找 `find` 找回、同一個啟動指令、在根程序之後建立的登記：
+/// Runtime 重建時根程序若已結束，`find` 只能以 Job 內現存最早的子孫程序登記，呼叫端卻仍用資料庫記下的根身分查詢。
+/// 啟動指令雜湊含 Run 專屬的檔案路徑，正式環境每個 Run 都不同；仍對應到不只一個時不猜。
+fn key_for(entries: &HashMap<ProcessIdentity, Arc<Entry>>, identity: &ProcessIdentity) -> Option<ProcessIdentity> {
+    if entries.contains_key(identity) {
+        return Some(identity.clone());
+    }
+    let mut candidates = entries.iter().filter(|(key, entry)| {
+        entry.found && key.command_hash == identity.command_hash && key.created_at_millis >= identity.created_at_millis
+    });
+    match (candidates.next(), candidates.next()) {
+        (Some((key, _)), None) => Some(key.clone()),
+        _ => None,
     }
 }
 
@@ -195,6 +228,65 @@ fn open_std_handle(
         )
     };
     OwnedHandle::from_raw(raw).ok_or_else(|| last_error(&format!("開啟 {path} 失敗")))
+}
+
+/// 複製一個可繼承、只有 `access` 權限的 handle。
+fn inheritable_copy(handle: HANDLE, access: u32) -> PortResult<OwnedHandle> {
+    let mut copy: HANDLE = std::ptr::null_mut();
+    // SAFETY：handle 是有效 handle，來源與目標都是目前程序，copy 指向本地變數。
+    let ok = unsafe { DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &mut copy, access, 1, 0) };
+    if ok == 0 {
+        return Err(last_error("DuplicateHandle 失敗"));
+    }
+    OwnedHandle::from_raw(copy).ok_or_else(|| last_error("DuplicateHandle 失敗"))
+}
+
+/// 只讓子程序繼承指定 handle 的屬性清單。清單引用 `handles` 的記憶體，兩者一起保存到 CreateProcessW 之後。
+struct InheritList {
+    buffer: Vec<u64>,
+    handles: Vec<HANDLE>,
+}
+
+impl InheritList {
+    fn new(mut handles: Vec<HANDLE>) -> PortResult<Self> {
+        handles.dedup();
+        let mut size = 0usize;
+        // SAFETY：第一次呼叫只查詢需要的大小（預期以 ERROR_INSUFFICIENT_BUFFER 失敗）。
+        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+        let mut buffer = vec![0u64; size.div_ceil(8)];
+        // SAFETY：buffer 至少 size 位元組且 8 位元組對齊。
+        if unsafe { InitializeProcThreadAttributeList(buffer.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST, 1, 0, &mut size) } == 0 {
+            return Err(last_error("InitializeProcThreadAttributeList 失敗"));
+        }
+        let mut list = Self { buffer, handles };
+        // SAFETY：清單已初始化；handles 的堆積記憶體在 list 存活期間不會移動或釋放。
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                list.as_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                list.handles.as_ptr() as *const c_void,
+                list.handles.len() * std::mem::size_of::<HANDLE>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_error("UpdateProcThreadAttribute 失敗"));
+        }
+        Ok(list)
+    }
+
+    fn as_ptr(&mut self) -> LPPROC_THREAD_ATTRIBUTE_LIST {
+        self.buffer.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST
+    }
+}
+
+impl Drop for InheritList {
+    fn drop(&mut self) {
+        // SAFETY：清單在 new 中初始化成功才會建立 Self。
+        unsafe { DeleteProcThreadAttributeList(self.as_ptr()) };
+    }
 }
 
 /// 程序建立時間（Unix epoch 毫秒）。
@@ -332,20 +424,26 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
         _ => Some(open_output(spec.stderr_file.as_deref())?),
     };
 
-    // SAFETY：全零是 STARTUPINFOW 的有效初始值，之後設定必要欄位。
-    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
-    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = stdin.0;
-    startup.hStdOutput = stdout.0;
-    startup.hStdError = stderr.as_ref().unwrap_or(&stdout).0;
+    // 根程序持有的 Job handle 只能查詢：讓具名 Job 在 Runtime 關閉 handle 之後仍找得回，但 Worker 不能藉它改 Job 的限制
+    let keeper = inheritable_copy(job.0, JOB_OBJECT_QUERY)?;
+    let stderr_handle = stderr.as_ref().unwrap_or(&stdout).0;
+    let mut inherit = InheritList::new(vec![stdin.0, stdout.0, stderr_handle, keeper.0])?;
+
+    // SAFETY：全零是 STARTUPINFOEXW 的有效初始值，之後設定必要欄位。
+    let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = stdin.0;
+    startup.StartupInfo.hStdOutput = stdout.0;
+    startup.StartupInfo.hStdError = stderr_handle;
+    startup.lpAttributeList = inherit.as_ptr();
     // SAFETY：全零是 PROCESS_INFORMATION 的有效初始值，由 CreateProcessW 填寫。
     let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let mut cmd = command_line(spec);
     let dir = spec.working_dir.as_deref().map(wide);
     let environment = environment_block(spec);
     // SAFETY：cmd 是可寫、NUL 結尾的緩衝區；environment 是以雙 NUL 結尾的 Unicode 環境區塊或 NULL；
-    // dir 為 NUL 結尾或 NULL；startup 與 info 皆為有效結構。
+    // dir 為 NUL 結尾或 NULL；startup（含屬性清單）與 info 皆為有效結構。
     let ok = unsafe {
         CreateProcessW(
             std::ptr::null(),
@@ -353,10 +451,10 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
             std::ptr::null(),
             std::ptr::null(),
             1,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
             environment.as_ref().map_or(std::ptr::null(), |e| e.as_ptr() as *const c_void),
             dir.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
-            &startup,
+            &startup.StartupInfo,
             &mut info,
         )
     };
@@ -385,7 +483,7 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
     }
 
     let identity = ProcessIdentity { pid: info.dwProcessId, created_at_millis: created, command_hash: command_hash(spec) };
-    Ok((identity, Entry { job, process }))
+    Ok((identity, Entry { job, process, found: false }))
 }
 
 /// 以 `spec.command_id` 找回具名 Job 與其根程序；沒有或已無程序回傳 `None`。
@@ -405,7 +503,7 @@ fn find_blocking_impl(spec: &SpawnSpec) -> PortResult<Option<(ProcessIdentity, E
     }
     let (pid, created, process) = root_of_job(job.0)?;
     let identity = ProcessIdentity { pid, created_at_millis: created, command_hash: command_hash(spec) };
-    Ok(Some((identity, Entry { job, process })))
+    Ok(Some((identity, Entry { job, process, found: true })))
 }
 
 fn join_error(error: tokio::task::JoinError) -> PortError {
@@ -480,6 +578,15 @@ impl ProcessControl for WindowsProcessControl {
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
+    }
+
+    /// 以 Job 判斷整個程序樹（不只根程序）：等 `grace` 內自行結束，否則終止 Job；確認後關閉 handle、不再管理。
+    async fn release(&self, identity: &ProcessIdentity, grace: Duration) -> PortResult<StopResult> {
+        let result = self.stop(identity, grace).await?;
+        if result != StopResult::StillAlive {
+            self.forget(identity);
+        }
+        Ok(result)
     }
 }
 

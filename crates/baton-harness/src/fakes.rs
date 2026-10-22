@@ -80,6 +80,9 @@ struct ProcessState {
     stop_scripts: HashMap<ProcessIdentity, FakeStop>,
     stop_calls: Vec<ProcessIdentity>,
     stop_graces: Vec<Duration>,
+    /// `release` 的結果（預設確認整個程序樹已結束）與收到的身分，依呼叫順序。
+    release_result: StopResult,
+    release_calls: Vec<ProcessIdentity>,
     inspect_count: usize,
     hang: Option<HangPoint>,
     fail_spawn: Option<String>,
@@ -103,6 +106,8 @@ impl Default for FakeProcessControl {
                 stop_scripts: HashMap::new(),
                 stop_calls: Vec::new(),
                 stop_graces: Vec::new(),
+                release_result: StopResult::StoppedGracefully,
+                release_calls: Vec::new(),
                 inspect_count: 0,
                 hang: None,
                 fail_spawn: None,
@@ -169,6 +174,16 @@ impl FakeProcessControl {
     /// 被要求停止的程序身分，依呼叫順序。
     pub fn stop_calls(&self) -> Vec<ProcessIdentity> {
         lock(&self.state).stop_calls.clone()
+    }
+
+    /// 之後每次 `release` 的結果（例如 `StillAlive`：程序樹裡還有清不掉的程序）。
+    pub fn set_release_result(&self, result: StopResult) {
+        lock(&self.state).release_result = result;
+    }
+
+    /// Run 結束前被要求收尾的程序身分，依呼叫順序。
+    pub fn release_calls(&self) -> Vec<ProcessIdentity> {
+        lock(&self.state).release_calls.clone()
     }
 
     /// 目前仍存活（含無法判定）的程序身分；用來斷言同一時間沒有第二個 writer。
@@ -268,6 +283,16 @@ impl ProcessControl for FakeProcessControl {
             }
         }
     }
+
+    async fn release(&self, identity: &ProcessIdentity, _grace: Duration) -> PortResult<StopResult> {
+        let mut state = lock(&self.state);
+        state.release_calls.push(identity.clone());
+        let result = state.release_result;
+        if result != StopResult::StillAlive {
+            state.liveness.insert(identity.clone(), Liveness::Dead);
+        }
+        Ok(result)
+    }
 }
 
 /// 單一 Run 的事件管道：測試隨時 `emit`，Supervisor 隨時取用；Runtime 重建後再接上同一條管道，沒取走的事件還在。
@@ -316,6 +341,11 @@ impl Default for FakeAgentAdapter {
 impl FakeAgentAdapter {
     fn channel(&self, run_id: &str) -> SharedChannel {
         lock(&self.state).channels.entry(run_id.to_string()).or_default().clone()
+    }
+
+    /// 某個 Run 目前還沒被丟棄的事件串流數（Supervisor 不再需要時應該丟棄）。
+    pub fn live_streams(&self, run_id: &str) -> usize {
+        lock(&self.state).channels.get(run_id).map_or(0, |channel| Arc::strong_count(channel) - 1)
     }
 
     /// 事先放入某個 run 的事件（run_id 已知時使用）。

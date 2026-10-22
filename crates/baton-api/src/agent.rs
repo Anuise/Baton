@@ -184,9 +184,11 @@ async fn report(
     let content = content?;
     let kind = content.kind();
     state.store.apply_agent_report(&scope, content, state.clock.now()).await?;
-    // 回報的回應是 Runtime 通知 Worker「保存進度並停止」的管道：停止意圖生效或正在交接時告訴它
+    // 回報的回應是 Runtime 通知 Worker「保存進度並停止」的管道：使用者取消了這個 Run、停止意圖生效或正在交接時告訴它
     let handoff_requested = state.store.in_flight_handoff_of_run(&scope.run_id).await?.is_some();
-    let stop_requested = handoff_requested || state.store.lifecycle_state().await?.stop_intent_active();
+    let cancel_requested = state.store.agent_context(&scope).await?.run.cancel_requested_at.is_some();
+    let stop_requested =
+        handoff_requested || cancel_requested || state.store.lifecycle_state().await?.stop_intent_active();
     Ok(Json(ReportAck { accepted: true, kind, stop_requested, handoff_requested }))
 }
 

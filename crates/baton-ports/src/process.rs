@@ -94,4 +94,11 @@ pub trait ProcessControl: Send + Sync {
     async fn find(&self, spec: &SpawnSpec) -> PortResult<Option<Receipt>>;
     async fn inspect(&self, identity: &ProcessIdentity) -> PortResult<Liveness>;
     async fn stop(&self, identity: &ProcessIdentity, grace: Duration) -> PortResult<StopResult>;
+    /// Run 結束前呼叫：根程序已經（或即將）結束，等整個程序樹在 `grace` 內自行結束，否則終止仍留在 Job 內的程序
+    /// （例如 Worker 放到背景的子程序），確認之後不再管理這個身分。回傳 `StillAlive` 或錯誤時，呼叫端不能結束 Run。
+    /// 沒有程序樹概念的實作預設視為已經結束。
+    async fn release(&self, identity: &ProcessIdentity, grace: Duration) -> PortResult<StopResult> {
+        let _ = (identity, grace);
+        Ok(StopResult::StoppedGracefully)
+    }
 }

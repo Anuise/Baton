@@ -97,6 +97,9 @@ pub const TRANSCRIPTS_DIR: &str = "transcripts";
 /// 受控停止的預設寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
 
+/// Worker 回報結束後，等它的程序樹自行結束的上限；之後終止 Job 內殘留的程序（例如放到背景的子程序）。
+const EXIT_RELEASE_GRACE: Duration = Duration::from_secs(5);
+
 /// 背景迴圈沒有被喚醒時，最久多久檢查一次。
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -1193,6 +1196,12 @@ impl Supervisor {
                 return false;
             }
         };
+        // 已經結束的 Run（例如經 lease 核對或取消結束）不再需要事件串流與暫存的錯誤、限流訊號；
+        // 留著的串流會讓 Adapter 的背景讀取一直進行
+        let active: HashSet<String> = executing.iter().map(|e| e.view.run.id.clone()).collect();
+        self.streams.lock().await.retain(|run_id, _| active.contains(run_id));
+        self.last_errors.lock().await.retain(|run_id, _| active.contains(run_id));
+        self.quota_limited.lock().await.retain(|run_id| active.contains(run_id));
         for item in executing.into_iter().filter(|e| e.view.run.status == RunStatus::Running) {
             let run_id = item.view.run.id.clone();
             let existing = self.streams.lock().await.remove(&run_id);
@@ -1230,6 +1239,12 @@ impl Supervisor {
                         self.last_errors.lock().await.insert(run_id.clone(), message);
                     }
                     AdapterEvent::Exited { success } => {
+                        // 結束（或交接轉移）之前先確認整個程序樹都已結束：Worker 留在背景的子孫程序會繼續寫同一個
+                        // worktree（D-10）。確認不了就把結束事件放回串流，下一次處理再試，這段期間仍是寫入所有者
+                        if !self.release_process_tree(&item, EXIT_RELEASE_GRACE).await {
+                            stream = Box::pin(futures::stream::iter([AdapterEvent::Exited { success }]).chain(stream));
+                            break;
+                        }
                         // 交接中的 Worker 結束（多半是收到 stop_requested 後保存 checkpoint 並結束）：程序已經不在，
                         // 視同舊程序確認停止，轉移給 successor；不論結束碼都不算失敗（票 28）
                         match self.store.in_flight_handoff_of_run(&run_id).await {
@@ -2172,7 +2187,33 @@ impl Supervisor {
                     ProcessObservation::Unknown
                 }
             };
+            // 根程序不在不代表整個程序樹都結束了：殘留的子孫程序清掉之前不下結論，避免交出寫入所有權後出現第二個 writer
+            let observed = match observed {
+                ProcessObservation::Dead if !self.release_process_tree(&item, Duration::ZERO).await => {
+                    ProcessObservation::Unknown
+                }
+                other => other,
+            };
             self.apply(&item.view.run, RunCommand::ReconcileLease { run_id: item.view.run.id.clone(), observed }).await;
+        }
+    }
+
+    /// Run 結束前收尾它的程序樹（D-10）：等 `grace` 內自行結束，否則終止 Job 內殘留的程序。
+    /// 回傳 false 表示無法確認整個程序樹都已結束，呼叫端不能結束 Run。
+    async fn release_process_tree(&self, item: &ExecutingRun, grace: Duration) -> bool {
+        let run = &item.view.run;
+        let Some(process) = run.process.as_ref() else { return true };
+        self.ensure_managed(item).await;
+        match self.ports.process_control.release(&identity_of(process), grace).await {
+            Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => true,
+            Ok(StopResult::StillAlive) => {
+                self.note(&format!("Run {} 的程序樹裡還有程序沒有結束，保留寫入所有權並稍後重試", run.id));
+                false
+            }
+            Err(error) => {
+                self.note(&format!("Run {} 無法確認程序樹已結束，保留寫入所有權並稍後重試：{error}", run.id));
+                false
+            }
         }
     }
 
