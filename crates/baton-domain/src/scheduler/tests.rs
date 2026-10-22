@@ -136,6 +136,7 @@ struct World {
     settings: SchedulerSettings,
     runs: Vec<Run>,
     quota: HashMap<String, f64>,
+    gates: HashMap<String, GateState>,
     halt: Option<WaitReason>,
 }
 
@@ -146,6 +147,7 @@ impl World {
             settings: SchedulerSettings { mode, version: 0, updated_at: None },
             runs: Vec::new(),
             quota: HashMap::new(),
+            gates: HashMap::new(),
             halt: None,
         }
     }
@@ -160,6 +162,11 @@ impl World {
         self
     }
 
+    fn with_gate(mut self, profile_id: &str, state: GateState) -> Self {
+        self.gates.insert(profile_id.into(), state);
+        self
+    }
+
     fn place(&self, kind: SlotKind) -> Placement {
         place(
             &Capacity {
@@ -167,6 +174,7 @@ impl World {
                 settings: &self.settings,
                 active_runs: &self.runs,
                 quota_used: &self.quota,
+                quota_gates: &self.gates,
                 halt: self.halt.clone(),
             },
             kind,
@@ -179,6 +187,7 @@ impl World {
             settings: &self.settings,
             active_runs: &self.runs,
             quota_used: &self.quota,
+            quota_gates: &self.gates,
             halt: self.halt.clone(),
         };
         place_preferring(&capacity, SlotKind::Normal, preferred)
@@ -888,4 +897,42 @@ proptest! {
             }
         }
     }
+}
+
+// --- 額度門檻的遲滯與 draining（票 28）---
+
+#[test]
+fn a_paused_account_stays_closed_below_the_stop_threshold_until_it_recovers() {
+    // 用量已降到 70%（低於 75%），但門檻狀態仍是 paused：要回到 60% 以下或重置後才恢復
+    let world = World::new(vec![usable("p1")], CapacityMode::ReserveHandoff)
+        .with_quota("p1", 0.7)
+        .with_gate("p1", GateState::Paused);
+    let reasons = waiting(world.place(SlotKind::Normal));
+    assert_eq!(summary(&reasons), [(WaitCategory::Quota, "quota_near_limit", Some("p1"))]);
+    assert!(reasons[0].message.contains("60%"), "{}", reasons[0].message);
+
+    let open = World::new(vec![usable("p1")], CapacityMode::ReserveHandoff).with_quota("p1", 0.7);
+    assert_eq!(placed(open.place(SlotKind::Normal)), "p1", "沒有門檻紀錄、用量 70%：可派");
+}
+
+#[test]
+fn a_draining_account_takes_neither_new_work_nor_a_handoff_successor() {
+    let world = World::new(vec![usable("p1"), usable("p2")], CapacityMode::ReserveHandoff)
+        .with_gate("p1", GateState::Draining);
+    assert_eq!(placed(world.place(SlotKind::Normal)), "p2");
+    assert_eq!(placed(world.place(SlotKind::Handoff)), "p2");
+
+    let only = World::new(vec![usable("p1")], CapacityMode::ReserveHandoff).with_gate("p1", GateState::Draining);
+    for kind in [SlotKind::Normal, SlotKind::Handoff] {
+        let reasons = waiting(only.place(kind));
+        assert_eq!(summary(&reasons), [(WaitCategory::Quota, "quota_draining", Some("p1"))]);
+        assert!(reasons[0].message.contains("未知"), "用量未知時照實顯示：{}", reasons[0].message);
+    }
+}
+
+#[test]
+fn a_preferred_account_that_is_paused_is_not_chosen() {
+    let world = World::new(vec![usable("p1"), usable("p2")], CapacityMode::ReserveHandoff)
+        .with_gate("p1", GateState::Paused);
+    assert_eq!(placed(world.place_preferring(Some("p1"))), "p2");
 }
