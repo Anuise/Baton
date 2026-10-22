@@ -1560,8 +1560,10 @@ impl VerificationDriver for FakeVerificationDriver {
 }
 
 /// 腳本化網站上的一個畫面（票 46）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FakePage {
+    /// 導覽到這個畫面時的 HTTP 狀態碼。
+    pub status: u16,
     pub title: String,
     pub text: String,
     /// 畫面上可見（也就是可以操作）的 selector。
@@ -1570,7 +1572,13 @@ pub struct FakePage {
 
 impl FakePage {
     pub fn new(title: &str, text: &str, visible: &[&str]) -> Self {
-        Self { title: title.into(), text: text.into(), visible: visible.iter().map(|s| s.to_string()).collect() }
+        Self { status: 200, title: title.into(), text: text.into(), visible: visible.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// 以這個狀態碼回應的畫面（例如 403 權限不足）。
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = status;
+        self
     }
 }
 
@@ -1594,7 +1602,7 @@ struct FakeBrowserSessionState {
 ///   錄影是固定內容；讓測試檢查 Runtime 是否依政策遮蔽或不保存。
 /// - `commands` 記錄每一個操作（`fill` 記下實際輸入的文字），讓測試確認秘密的值確實交給了 Runner。
 pub struct FakeBrowserDriver {
-    pages: Mutex<HashMap<String, (u16, PageFn)>>,
+    pages: Mutex<HashMap<String, PageFn>>,
     links: Mutex<HashMap<String, String>>,
     open_failure: Mutex<Option<String>>,
     sessions: Mutex<HashMap<String, FakeBrowserSessionState>>,
@@ -1620,14 +1628,14 @@ impl Default for FakeBrowserDriver {
 }
 
 impl FakeBrowserDriver {
-    /// 這個網址顯示固定的畫面（HTTP 200）。
+    /// 這個網址顯示固定的畫面。
     pub fn script_page(&self, url: &str, page: FakePage) {
-        self.script_page_with(url, 200, move |_| page.clone());
+        self.script_page_with(url, move |_| page.clone());
     }
 
-    /// 這個網址以 `status` 回應，畫面依這個 Session 輸入過的值決定。
-    pub fn script_page_with(&self, url: &str, status: u16, page: impl Fn(&[(String, String)]) -> FakePage + Send + Sync + 'static) {
-        lock(&self.pages).insert(url.to_string(), (status, Arc::new(page)));
+    /// 這個網址的畫面（含狀態碼）依這個 Session 輸入過的值決定。
+    pub fn script_page_with(&self, url: &str, page: impl Fn(&[(String, String)]) -> FakePage + Send + Sync + 'static) {
+        lock(&self.pages).insert(url.to_string(), Arc::new(page));
     }
 
     /// 點擊（或按鍵於）這個 selector 之後前往 `url`。
@@ -1661,21 +1669,18 @@ impl FakeBrowserDriver {
     }
 
     fn render(&self, state: &FakeBrowserSessionState) -> FakePage {
-        let page = state.url.as_ref().and_then(|url| lock(&self.pages).get(url).map(|(_, f)| f.clone()));
-        page.map(|f| f(&state.fills)).unwrap_or_default()
+        let page = state.url.as_ref().and_then(|url| lock(&self.pages).get(url).cloned());
+        page.map(|f| f(&state.fills)).unwrap_or_else(|| FakePage::new("", "", &[]))
     }
 
     /// 前往網址；沒有腳本的網址連不上。
     fn navigate(&self, state: &mut FakeBrowserSessionState, url: &str) -> Option<BrowserOutcome> {
-        let status = lock(&self.pages).get(url).map(|(status, _)| *status);
-        match status {
-            Some(status) => {
-                state.url = Some(url.to_string());
-                state.status = Some(status);
-                None
-            }
-            None => Some(BrowserOutcome::Unreachable { reason: format!("net::ERR_CONNECTION_REFUSED at {url}") }),
+        if !lock(&self.pages).contains_key(url) {
+            return Some(BrowserOutcome::Unreachable { reason: format!("net::ERR_CONNECTION_REFUSED at {url}") });
         }
+        state.url = Some(url.to_string());
+        state.status = Some(self.render(state).status);
+        None
     }
 }
 
@@ -1732,8 +1737,8 @@ impl BrowserDriver for FakeBrowserDriver {
             },
             BrowserCommand::WaitFor { selector } => needs(selector, state),
         };
-        if let Some(failure) = failure {
-            return Ok(failure);
+        if let Some(BrowserOutcome::Unreachable { reason }) = failure {
+            return Ok(BrowserOutcome::Unreachable { reason });
         }
         let page = self.render(state);
         let url = state.url.clone().unwrap_or_else(|| "about:blank".into());
@@ -1741,16 +1746,21 @@ impl BrowserDriver for FakeBrowserDriver {
             lock(&self.masks).push(mask);
             format!("PNG {url}\n{}", page.text).into_bytes()
         });
-        Ok(BrowserOutcome::Done {
-            page: PageSnapshot {
-                url,
-                title: page.title.clone(),
-                status: state.status,
-                text: page.text.clone(),
-                visible: step.visible.iter().map(|s| page.visible.contains(s)).collect(),
-                screenshot,
-            },
-        })
+        let snapshot = PageSnapshot {
+            url,
+            title: page.title.clone(),
+            status: state.status,
+            text: page.text.clone(),
+            visible: step.visible.iter().map(|s| page.visible.contains(s)).collect(),
+            screenshot,
+        };
+        // 操作失敗時如同真實引擎附上當前畫面
+        match failure {
+            Some(BrowserOutcome::ActionFailed { error, message, .. }) => {
+                Ok(BrowserOutcome::ActionFailed { error, message, page: Some(snapshot) })
+            }
+            _ => Ok(BrowserOutcome::Done { page: snapshot }),
+        }
     }
 
     async fn close(&self, session: &BrowserSession) -> PortResult<Vec<BrowserFile>> {

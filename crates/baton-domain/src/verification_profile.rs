@@ -522,6 +522,8 @@ pub enum ProfileError {
     RequestInvalid(String),
     #[error("找不到 Evidence Bundle {0}")]
     BundleNotFound(String),
+    #[error("找不到證據檔案：{0}")]
+    ArtifactNotFound(String),
 }
 
 impl ProfileError {
@@ -531,6 +533,7 @@ impl ProfileError {
             ProfileError::NotFound => "verification_profile_not_found",
             ProfileError::RequestInvalid(_) => "verification_request_invalid",
             ProfileError::BundleNotFound(_) => "evidence_bundle_not_found",
+            ProfileError::ArtifactNotFound(_) => "evidence_artifact_not_found",
         }
     }
 }
@@ -1628,12 +1631,12 @@ pub fn withhold_reason(kind: EvidenceArtifactKind, bytes: &[u8], secrets: &[Stri
     if bytes.len() > EVIDENCE_ARTIFACT_MAX_BYTES {
         return Some("too_large");
     }
+    if secret_entered && matches!(kind, EvidenceArtifactKind::Trace | EvidenceArtifactKind::Video) {
+        return Some("secret_input_recorded");
+    }
     let contains = |needle: &[u8]| !needle.is_empty() && bytes.windows(needle.len()).any(|w| w == needle);
     if secrets.iter().any(|s| contains(s.as_bytes())) {
         return Some("secret_detected");
-    }
-    if secret_entered && matches!(kind, EvidenceArtifactKind::Trace | EvidenceArtifactKind::Video) {
-        return Some("secret_input_recorded");
     }
     None
 }
