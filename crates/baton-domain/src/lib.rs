@@ -6,6 +6,7 @@ pub mod agent;
 pub mod artifact;
 pub mod auth;
 pub mod authorization;
+pub mod backup;
 pub mod config;
 pub mod event;
 pub mod message;

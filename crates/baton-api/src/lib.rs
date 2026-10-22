@@ -1,12 +1,13 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
 mod agent;
 mod artifacts;
 mod authorization;
+mod backups;
 mod guard;
 mod messages;
 mod profiles;
@@ -44,6 +45,7 @@ pub use artifacts::{
     artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview, ArtifactRegistered,
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
+pub use backups::{BackupStatus, BackupSummary, BACKUPS_PATH};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
@@ -178,6 +180,7 @@ pub fn router(state: ApiState) -> Router {
         .route(artifacts::ARTIFACTS_ROUTE, get(artifacts::list))
         .route(artifacts::PREVIEW_ROUTE, get(artifacts::preview))
         .route(artifacts::CONTENT_ROUTE, get(artifacts::content))
+        .route(BACKUPS_PATH, get(backups::status))
         // Agent API：只接受 Agent 憑證（guard 依路徑前綴決定所需角色）
         .route(&tool_path(TOOL_GET_TASK_CONTRACT), post(agent::get_task_contract))
         .route(&tool_path(TOOL_REPORT_PROGRESS), post(agent::report_progress))
