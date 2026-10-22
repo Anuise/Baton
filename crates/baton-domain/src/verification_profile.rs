@@ -1630,15 +1630,23 @@ pub struct EvidenceArtifact {
     pub sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
-    /// 沒有保存的原因：`secret_detected`（內容含秘密的值）、`secret_input_recorded`（輸入過秘密的 Session 的
+    /// 沒有保存的原因：`secret_detected`（內容含秘密的值，或畫面顯示過秘密）、`secret_input_recorded`（輸入過秘密的 Session 的
     /// trace 或錄影，無法確認已遮蔽）、`too_large`、`storage_failed`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withheld: Option<String>,
 }
 
 /// 證據 Artifact 依政策不能保存的原因（`None` 是可以保存）。不能假設引擎的 trace 與錄影已經遮蔽：
-/// Session 中輸入過秘密時一律不保存 trace 與錄影；任何內容含有秘密的值也不保存。
-pub fn withhold_reason(kind: EvidenceArtifactKind, bytes: &[u8], secrets: &[String], secret_entered: bool) -> Option<&'static str> {
+/// Session 中輸入過秘密時一律不保存 trace 與錄影。影像與壓縮檔中的文字無法從位元組找到，所以
+/// `secret_shown`（截圖：這個畫面顯示秘密；trace 與錄影：這個 Session 的畫面顯示過秘密）時也不保存；
+/// 任何內容含有秘密的值同樣不保存。
+pub fn withhold_reason(
+    kind: EvidenceArtifactKind,
+    bytes: &[u8],
+    secrets: &[String],
+    secret_entered: bool,
+    secret_shown: bool,
+) -> Option<&'static str> {
     if bytes.len() > EVIDENCE_ARTIFACT_MAX_BYTES {
         return Some("too_large");
     }
@@ -1646,7 +1654,7 @@ pub fn withhold_reason(kind: EvidenceArtifactKind, bytes: &[u8], secrets: &[Stri
         return Some("secret_input_recorded");
     }
     let contains = |needle: &[u8]| !needle.is_empty() && bytes.windows(needle.len()).any(|w| w == needle);
-    if secrets.iter().any(|s| contains(s.as_bytes())) {
+    if secret_shown || secrets.iter().any(|s| contains(s.as_bytes())) {
         return Some("secret_detected");
     }
     None

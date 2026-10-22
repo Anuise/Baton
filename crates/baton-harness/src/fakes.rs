@@ -1707,6 +1707,13 @@ impl FakeBrowserDriver {
     }
 }
 
+/// 不透明的檔案內容：固定檔頭加上內容的雜湊，不含任何明文。
+fn opaque(header: &[u8], content: &str) -> Vec<u8> {
+    let mut bytes = header.to_vec();
+    bytes.extend_from_slice(baton_domain::artifact::sha256_hex(content.as_bytes()).as_bytes());
+    bytes
+}
+
 #[async_trait]
 impl BrowserDriver for FakeBrowserDriver {
     async fn open(&self, request: BrowserSessionRequest) -> PortResult<BrowserSession> {
@@ -1767,7 +1774,8 @@ impl BrowserDriver for FakeBrowserDriver {
         let url = state.url.clone().unwrap_or_else(|| "about:blank".into());
         let screenshot = step.screenshot_mask.map(|mask| {
             lock(&self.masks).push(mask);
-            format!("PNG {url}\n{}", page.text).into_bytes()
+            // 如同真實引擎的 PNG：畫面上的文字只是像素，位元組中找不到
+            opaque(b"\x89PNG\r\n\x1a\n", &format!("{url}\n{}", page.text))
         });
         let snapshot = PageSnapshot {
             url,
@@ -1793,7 +1801,9 @@ impl BrowserDriver for FakeBrowserDriver {
         };
         let mut files = Vec::new();
         if state.request.trace {
-            files.push(BrowserFile { kind: "trace".into(), name: "trace.zip".into(), bytes: state.log.join("\n").into_bytes() });
+            // 如同真實引擎壓縮過的 zip：記錄的操作（含輸入的文字）在位元組中找不到
+            let bytes = opaque(b"PK\x03\x04", &state.log.join("\n"));
+            files.push(BrowserFile { kind: "trace".into(), name: "trace.zip".into(), bytes });
         }
         if state.request.video {
             files.push(BrowserFile { kind: "video".into(), name: "video.webm".into(), bytes: format!("WEBM {}", session.0).into_bytes() });

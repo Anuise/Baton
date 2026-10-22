@@ -50,6 +50,8 @@ struct Browser {
     journey: String,
     /// 這個 Session 輸入過秘密：trace 與錄影不保存。
     secret_entered: bool,
+    /// 這個 Session 的畫面顯示過秘密：trace 與錄影不保存。
+    secret_shown: bool,
     /// 截圖時遮住的 selector（政策指定的，加上輸入過秘密的欄位）。
     mask: Vec<String>,
 }
@@ -85,6 +87,18 @@ struct Execution<'a> {
     blocked: bool,
 }
 
+/// 瀏覽器步驟的截圖。
+struct Screenshot {
+    bytes: Vec<u8>,
+    /// 截圖時的畫面顯示了秘密：影像中的文字無法從位元組找到，以畫面文字判斷。
+    shows_secret: bool,
+}
+
+/// 畫面（網址、標題、文字）是否顯示了任何要遮蔽的值。
+fn shows_secret(page: &PageSnapshot, policy: &EvidencePolicy) -> bool {
+    [&page.url, &page.title, &page.text].iter().any(|t| redact(t, policy) != **t)
+}
+
 /// 只遮蔽、不截斷（judge 的輸入需要完整的畫面文字）。
 fn redact(text: &str, policy: &EvidencePolicy) -> String {
     let mut text = text.to_string();
@@ -106,7 +120,7 @@ fn browser_command(action: &BrowserAction) -> BrowserCommand {
 
 impl Execution<'_> {
     /// 執行操作並觀察結果；`operation` 已代換佔位字，秘密在這裡才代入。瀏覽器步驟另外回傳截圖。
-    async fn observe(&mut self, operation: &Operation, assertions: &[Assertion]) -> (Observation, Option<Vec<u8>>) {
+    async fn observe(&mut self, operation: &Operation, assertions: &[Assertion]) -> (Observation, Option<Screenshot>) {
         let timeout = Duration::from_millis(operation.effective_timeout_ms());
         let revealed = vp::reveal_secrets(operation, &self.secrets);
         let driver = &self.ports.verification_driver;
@@ -140,7 +154,7 @@ impl Execution<'_> {
         (observation, None)
     }
 
-    /// 執行瀏覽器操作，觀察當前畫面，再以畫面做語意判斷。
+    /// 執行瀏覽器操作，觀察當前畫面，再以畫面做語意判斷。畫面顯示秘密時，這個 Session 標記為顯示過秘密。
     async fn observe_browser(
         &mut self,
         action: &BrowserAction,
@@ -148,7 +162,7 @@ impl Execution<'_> {
         filled: Option<&str>,
         timeout: Duration,
         assertions: &[Assertion],
-    ) -> (Observation, Option<Vec<u8>>) {
+    ) -> (Observation, Option<Screenshot>) {
         let screenshots = self.policy.screenshots != ScreenshotPolicy::Off;
         let Some(browser) = self.browser.as_mut() else {
             return (Observation::Unsupported { reason: "這個步驟沒有瀏覽器 Session".into() }, None);
@@ -175,7 +189,8 @@ impl Execution<'_> {
         };
         let session = browser.session.clone();
         match self.ports.browser_driver.step(&session, step).await {
-            Ok(BrowserOutcome::Done { page }) => {
+            Ok(BrowserOutcome::Done { mut page }) => {
+                let screenshot = self.screenshot(&mut page);
                 let judgements = self.judge(assertions, &page).await;
                 let observation = Observation::Page {
                     url: page.url,
@@ -184,15 +199,25 @@ impl Execution<'_> {
                     visible: visible.into_iter().zip(page.visible).collect(),
                     judgements,
                 };
-                (observation, page.screenshot)
+                (observation, screenshot)
             }
             Ok(BrowserOutcome::ActionFailed { error, message, page }) => {
-                (Observation::ActionFailed { error, message }, page.and_then(|p| p.screenshot))
+                let screenshot = page.and_then(|mut p| self.screenshot(&mut p));
+                (Observation::ActionFailed { error, message }, screenshot)
             }
             Ok(BrowserOutcome::Unreachable { reason }) => (Observation::Unreachable { reason }, None),
             Ok(BrowserOutcome::TimedOut) => (Observation::TimedOut { output: String::new() }, None),
             Err(error) => (Observation::ActionFailed { error: "RunnerError".into(), message: error.to_string() }, None),
         }
+    }
+
+    /// 取出畫面的截圖；畫面顯示秘密時把目前的 Session 標記為顯示過秘密（即使不截圖）。
+    fn screenshot(&mut self, page: &mut PageSnapshot) -> Option<Screenshot> {
+        let shows_secret = shows_secret(page, &self.policy);
+        if let Some(browser) = self.browser.as_mut().filter(|_| shows_secret) {
+            browser.secret_shown = true;
+        }
+        page.screenshot.take().map(|bytes| Screenshot { bytes, shows_secret })
     }
 
     /// 依序處理步驟中的語意判斷斷言。輸入只有當前畫面（已遮蔽秘密）、Profile 的固定預期與 persona 說明。
@@ -252,10 +277,10 @@ impl Execution<'_> {
         }
         let (observation, screenshot) = self.observe(&operation, &step.assertions).await;
         let record = vp::judge_step(phase, journey, step, &operation, observation, 1, &self.policy);
-        if let Some(bytes) = screenshot {
+        if let Some(Screenshot { bytes, shows_secret }) = screenshot {
             if self.policy.screenshots == ScreenshotPolicy::EveryStep || record.verdict != Verdict::Passed {
                 let name = format!("{}-{}.png", journey.unwrap_or("profile"), step.key);
-                self.store_artifact(EvidenceArtifactKind::Screenshot, journey, Some(&step.key), name, bytes).await;
+                self.store_artifact(EvidenceArtifactKind::Screenshot, journey, Some(&step.key), name, bytes, shows_secret).await;
             }
         }
         self.push(record)
@@ -356,7 +381,8 @@ impl Execution<'_> {
         match self.ports.browser_driver.open(request).await {
             Ok(session) => {
                 let mask = self.policy.mask.clone();
-                self.browser = Some(Browser { session, journey: journey.to_string(), secret_entered: false, mask });
+                let journey = journey.to_string();
+                self.browser = Some(Browser { session, journey, secret_entered: false, secret_shown: false, mask });
                 true
             }
             Err(error) => {
@@ -375,12 +401,13 @@ impl Execution<'_> {
         match self.ports.browser_driver.close(&browser.session).await {
             Ok(files) => {
                 // 關閉後 Session 已不存在，保存時仍需知道它輸入過秘密
+                let secret_shown = browser.secret_shown;
                 self.browser = Some(Browser { mask: Vec::new(), ..browser });
                 for file in files {
                     let kind = if file.kind == "video" { EvidenceArtifactKind::Video } else { EvidenceArtifactKind::Trace };
                     let journey = self.browser.as_ref().map(|b| b.journey.clone());
                     let name = format!("{}-{}", journey.as_deref().unwrap_or("profile"), file.name);
-                    self.store_artifact(kind, journey.as_deref(), None, name, file.bytes).await;
+                    self.store_artifact(kind, journey.as_deref(), None, name, file.bytes, secret_shown).await;
                 }
                 self.browser = None;
             }
@@ -389,6 +416,7 @@ impl Execution<'_> {
     }
 
     /// 保存一個證據檔案（內容定址，寫在成果儲存的 `verification\`）；依政策不能保存時只記下原因。
+    /// `secret_shown`：截圖時畫面顯示了秘密，或 trace 與錄影的 Session 畫面顯示過秘密。
     async fn store_artifact(
         &mut self,
         kind: EvidenceArtifactKind,
@@ -396,6 +424,7 @@ impl Execution<'_> {
         step: Option<&str>,
         name: String,
         bytes: Vec<u8>,
+        secret_shown: bool,
     ) {
         let secret_entered = self.browser.as_ref().is_some_and(|b| b.secret_entered);
         let mut artifact = EvidenceArtifact {
@@ -408,7 +437,7 @@ impl Execution<'_> {
             size_bytes: None,
             withheld: None,
         };
-        if let Some(reason) = vp::withhold_reason(kind, &bytes, &self.policy.redact, secret_entered) {
+        if let Some(reason) = vp::withhold_reason(kind, &bytes, &self.policy.redact, secret_entered, secret_shown) {
             artifact.withheld = Some(reason.into());
             self.artifacts.push(artifact);
             return;

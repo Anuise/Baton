@@ -3,7 +3,7 @@
 //! 受驗的網站是測試在 loopback 上啟動的小型商店；其餘 Port（judge、秘密參照、受驗服務）仍是 fake。
 //! Playwright 不在 repo 中：受驗專案與 `BATON_PLAYWRIGHT_DIR` 都解析不到時印出原因並略過。
 //! 斷言：以秘密參照登入、核對實際身分、旅程通過；保存的截圖是真的 PNG；輸入過秘密的 Session 不保存 trace；
-//! 秘密的值不在 Bundle 與資料目錄的任何檔案中。
+//! 畫面顯示秘密的截圖與那個 Session 的 trace 不保存；秘密的值不在 Bundle 與資料目錄的任何檔案中。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -50,7 +50,9 @@ async fn start_shop() -> String {
         .route(
             "/products",
             get(|| async { Html(r#"<!doctype html><title>商品</title><ul id="list"><li>A 100 元</li><li>B 200 元</li></ul>"#) }),
-        );
+        )
+        // 有缺陷的頁面：不需登入就把密碼顯示在畫面上
+        .route("/status", get(|| async { Html(format!("<!doctype html><title>狀態</title><p id=\"debug\">除錯：{PASSWORD}</p>")) }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -88,9 +90,20 @@ fn profile(site: &str) -> Value {
                 json!({ "kind": "goto", "url": format!("{site}/products") }),
                 json!([{ "kind": "visible", "selector": "#list" }, { "kind": "contains", "text": "A 100 元" }, { "kind": "judge", "expectation": SORTED }]),
             )],
+        }, {
+            "key": "status",
+            "title": "查看狀態",
+            "persona": "shopper",
+            "steps": [
+                step("open-products", json!({ "kind": "goto", "url": format!("{site}/products") }), json!([{ "kind": "visible", "selector": "#list" }])),
+                step("open-status", json!({ "kind": "goto", "url": format!("{site}/status") }), json!([{ "kind": "visible", "selector": "#debug" }])),
+            ],
         }],
         "evidence": { "screenshots": "every_step", "trace": true },
-        "feature_map": [{ "key": "catalog", "title": "商品目錄", "criterion": "看得到商品與價格", "journeys": ["browse"] }],
+        "feature_map": [
+            { "key": "catalog", "title": "商品目錄", "criterion": "看得到商品與價格", "journeys": ["browse"] },
+            { "key": "status", "title": "狀態頁", "criterion": "看得到狀態", "journeys": ["status"] },
+        ],
     })
 }
 
@@ -158,8 +171,14 @@ async fn a_real_browser_logs_in_by_secret_reference_and_keeps_only_safe_evidence
     assert_eq!(status, StatusCode::OK, "{content}");
     let png = base64::engine::general_purpose::STANDARD.decode(content["content_base64"].as_str().unwrap()).unwrap();
     assert!(png.starts_with(b"\x89PNG"), "截圖是 PNG");
-    let trace = artifacts.iter().find(|a| a["kind"] == "trace").expect("有 trace 的紀錄");
-    assert_eq!(trace["withheld"], "secret_input_recorded", "{trace}");
+    let trace = |journey: &str| artifacts.iter().find(|a| a["kind"] == "trace" && a["journey"] == journey).expect("有 trace 的紀錄");
+    assert_eq!(trace("browse")["withheld"], "secret_input_recorded", "{bundle}");
+
+    // 沒有輸入秘密、但畫面顯示了秘密：PNG 的位元組中找不到文字，仍依畫面文字不保存那一步的截圖與整個 Session 的 trace
+    let screenshot = |step: &str| artifacts.iter().find(|a| a["kind"] == "screenshot" && a["step"] == step).unwrap();
+    assert!(screenshot("open-products")["storage_path"].is_string(), "{bundle}");
+    assert_eq!(screenshot("open-status")["withheld"], "secret_detected", "{bundle}");
+    assert_eq!(trace("status")["withheld"], "secret_detected", "{bundle}");
 
     // 秘密的值不在 Bundle，也不在資料目錄的任何檔案中（暫存的 Runner 目錄已隨狀態目錄移除）
     assert!(!bundle.to_string().contains(PASSWORD));

@@ -431,8 +431,12 @@ fn login_and_identity_problems_are_auth_blocked_and_belong_to_the_journey() {
 #[test]
 fn artifacts_that_may_contain_secrets_are_withheld() {
     let secrets = vec!["hunter2".to_string()];
-    assert_eq!(withhold_reason(EvidenceArtifactKind::Screenshot, b"PNG...", &secrets, true), None);
-    assert_eq!(withhold_reason(EvidenceArtifactKind::Screenshot, b"pw=hunter2", &secrets, false), Some("secret_detected"));
-    assert_eq!(withhold_reason(EvidenceArtifactKind::Trace, b"zip", &secrets, true), Some("secret_input_recorded"));
-    assert_eq!(withhold_reason(EvidenceArtifactKind::Video, b"webm", &secrets, false), None);
+    assert_eq!(withhold_reason(EvidenceArtifactKind::Screenshot, b"PNG...", &secrets, true, false), None);
+    assert_eq!(withhold_reason(EvidenceArtifactKind::Screenshot, b"pw=hunter2", &secrets, false, false), Some("secret_detected"));
+    assert_eq!(withhold_reason(EvidenceArtifactKind::Trace, b"zip", &secrets, true, false), Some("secret_input_recorded"));
+    assert_eq!(withhold_reason(EvidenceArtifactKind::Video, b"webm", &secrets, false, false), None);
+    // 畫面顯示過秘密：影像位元組中找不到文字，仍不保存
+    assert_eq!(withhold_reason(EvidenceArtifactKind::Screenshot, b"PNG...", &secrets, false, true), Some("secret_detected"));
+    assert_eq!(withhold_reason(EvidenceArtifactKind::Trace, b"zip", &secrets, false, true), Some("secret_detected"));
+    assert_eq!(withhold_reason(EvidenceArtifactKind::Video, b"webm", &secrets, false, true), Some("secret_detected"));
 }

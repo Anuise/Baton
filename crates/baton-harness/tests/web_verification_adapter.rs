@@ -420,6 +420,11 @@ async fn secrets_reach_only_the_runner_and_never_the_prompt_or_the_evidence() {
         let password = fills.iter().rev().find(|(s, _)| s == "#password").map(|(_, t)| t.clone()).unwrap_or_default();
         FakePage::new("價格管理", &format!("價格管理：A 100 元［修改］ 目前密碼 {password}"), &[])
     });
+    // 顧客旅程沒有輸入任何秘密，但排序後的頁面顯示了 API 權杖
+    w.h().browser_driver.script_page(
+        &url("/products?sort=price"),
+        FakePage::new("商品", &format!("商品清單：A 100 元、B 200 元（除錯：權杖 {API_TOKEN}）"), &["#sort"]),
+    );
 
     let bundle = w.verify(json!({})).await;
     assert_eq!(bundle["verdict"], "passed", "{bundle}");
@@ -448,17 +453,26 @@ async fn secrets_reach_only_the_runner_and_never_the_prompt_or_the_evidence() {
     assert!(password["operation"].as_str().unwrap().contains("{{secret:admin-password}}"), "{password}");
     assert!(step_in(&bundle, "manage-prices", "whoami")["output"].as_str().unwrap().contains("[已遮蔽]"));
 
-    // 證據檔案：畫面含有秘密的截圖不保存；輸入過秘密的 Session 的 trace 與錄影不保存；其他截圖保存，並遮住密碼欄位
-    let whoami = artifacts_of(&bundle, "screenshot").into_iter().find(|a| a["step"] == "whoami").unwrap().clone();
+    // 證據檔案（截圖、trace、錄影的內容都是不透明的位元組，畫面文字在其中找不到）：
+    // 畫面顯示秘密的截圖不保存；輸入過秘密的 Session 的 trace 與錄影不保存；其他截圖保存，並遮住密碼欄位
+    let screenshot = |journey: &str, step: &str| {
+        artifacts_of(&bundle, "screenshot").into_iter().find(|a| a["journey"] == journey && a["step"] == step).unwrap().clone()
+    };
+    let recording = |kind: &str, journey: &str| artifacts_of(&bundle, kind).into_iter().find(|a| a["journey"] == journey).unwrap().clone();
+    let whoami = screenshot("manage-prices", "whoami");
     assert_eq!(whoami["withheld"], "secret_detected", "{whoami}");
     assert!(whoami["storage_path"].is_null());
-    let admin_trace = artifacts_of(&bundle, "trace").into_iter().find(|a| a["journey"] == "manage-prices").unwrap().clone();
-    assert_eq!(admin_trace["withheld"], "secret_input_recorded");
-    let admin_video = artifacts_of(&bundle, "video").into_iter().find(|a| a["journey"] == "manage-prices").unwrap().clone();
-    assert_eq!(admin_video["withheld"], "secret_input_recorded");
-    // 沒有輸入秘密的 Session（顧客瀏覽）的 trace 與錄影照常保存
-    let browse_trace = artifacts_of(&bundle, "trace").into_iter().find(|a| a["journey"] == "browse").unwrap().clone();
-    assert!(browse_trace["withheld"].is_null() && browse_trace["storage_path"].is_string(), "{browse_trace}");
+    assert_eq!(recording("trace", "manage-prices")["withheld"], "secret_input_recorded");
+    assert_eq!(recording("video", "manage-prices")["withheld"], "secret_input_recorded");
+    // 沒有輸入秘密、但畫面顯示過秘密的 Session（顧客瀏覽）：那一步的截圖與整個 Session 的 trace、錄影都不保存
+    let sorted = screenshot("browse", "sort");
+    assert_eq!(sorted["withheld"], "secret_detected", "{sorted}");
+    assert!(screenshot("browse", "open")["storage_path"].is_string(), "顯示秘密之前的截圖照常保存：{bundle}");
+    for kind in ["trace", "video"] {
+        let file = recording(kind, "browse");
+        assert_eq!(file["withheld"], "secret_detected", "{file}");
+        assert!(file["storage_path"].is_null());
+    }
     let masks = w.h().browser_driver.screenshot_masks();
     assert!(masks.last().unwrap().contains(&"#password".to_string()), "輸入過秘密的欄位在之後的截圖都遮住：{masks:?}");
     assert!(!masks[0].contains(&"#password".to_string()));
@@ -481,6 +495,14 @@ async fn secrets_reach_only_the_runner_and_never_the_prompt_or_the_evidence() {
     for secret in [ADMIN_PASSWORD, CLERK_PASSWORD, API_TOKEN] {
         assert_eq!(files_containing(w.h().data_dir(), secret), Vec::<String>::new(), "資料目錄含有秘密 {secret}");
     }
+
+    // 沒有輸入也沒有顯示秘密的 Session：截圖、trace 與錄影照常保存
+    w.healthy();
+    let clean = w.verify(json!({ "journeys": ["browse"] })).await;
+    for file in clean["artifacts"].as_array().unwrap() {
+        assert!(file["withheld"].is_null() && file["storage_path"].is_string(), "{file}");
+    }
+    assert_eq!(artifacts_of(&clean, "trace").len() + artifacts_of(&clean, "video").len(), 2, "{clean}");
 
     // 解析不到的秘密：不執行那個操作，判定為環境阻礙
     let mut missing = shop_profile();
