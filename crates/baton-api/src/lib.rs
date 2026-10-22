@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -18,6 +18,7 @@ mod scheduling;
 mod setup;
 mod shared_settings;
 mod tasks;
+mod verification;
 mod workspaces;
 
 use std::convert::Infallible;
@@ -73,6 +74,7 @@ pub use scheduling::{
     AccountRun, AccountScheduling, CapacityModeInfo, CapacityView, QueueEntryView, SchedulingOverview,
     SchedulingSettingsView, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
 };
+pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
 pub use shared_settings::{
     run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
     RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
@@ -167,6 +169,8 @@ pub fn router(state: ApiState) -> Router {
         .route(tasks::ADMISSION_ROUTE, post(tasks::admission_check))
         .route(tasks::READY_ROUTE, post(tasks::mark_ready))
         .route(tasks::CANCEL_ROUTE, post(tasks::cancel))
+        .route(verification::VERIFICATION_ROUTE, get(verification::view))
+        .route(verification::ACCEPT_ROUTE, post(verification::accept))
         .route(decisions::DECISIONS_ROUTE, get(decisions::list))
         .route(decisions::DECISION_ROUTE, get(decisions::detail))
         .route(decisions::ANSWER_ROUTE, post(decisions::answer))

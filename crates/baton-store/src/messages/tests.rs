@@ -20,6 +20,7 @@ fn complete() -> ContractContent {
         done_criteria: filled("五個產品"),
         blocker_handling: filled("回報"),
         required_capabilities: vec![],
+        verification_checks: vec![],
     }
 }
 

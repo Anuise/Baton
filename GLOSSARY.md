@@ -331,6 +331,16 @@
 - **關係**：支撐 Gate 與 Task 完成；憑證與個資依政策遮蔽；清理只移除本 Run 的測試狀態，保留證據。
 - **避免使用**：test report、log dump、截圖集。
 
+### 確定性檢查（deterministic check）
+- **定義**：契約「完成與驗證條件」中可由 Runtime 機械判定的部分，隨契約版本保存：命令結束碼、工作目錄內檔案存在與雜湊、Task 成果存在與雜湊。
+- **關係**：Run 成功結束、Task 進入 `verifying` 後由 Runtime 執行；全部通過才讓 Task 完成，任一未通過讓 Task 回到 `ready` 並保存證據。沒有宣告時只能由使用者手動接受。
+- **避免使用**：自我檢查、Worker 驗證（檢查由 Runtime 執行，不採信 Worker 的說法）。
+
+### 成果接受（acceptance）與驗證紀錄
+- **定義**：讓 `verifying` 的 Task 進入 `completed` 的唯一交易：依確定性檢查結果或使用者以桌面憑證手動接受，並同時校驗受驗 Run 的世代、契約版本與成果 manifest 仍與觀察當時相同。每次結論保存為一筆不可變的驗證紀錄（方式、結果、證據、manifest、接受者指紋）並追加事件。
+- **關係**：接受基礎（basis）是觀察當時的 Run、世代、契約版本與 manifest；過期 Run 的回報與依過期基礎的接受都被拒絕。同一個 Run 最多一筆紀錄，同一個 Task 最多一筆通過。
+- **避免使用**：Worker 宣稱完成、程序正常退出（兩者都不等於完成）、approve（易與裁定混淆）。
+
 ### Finding 與 confirmed defect
 - **定義**：探索測試的發現。先標為 suspected；排除 seed data、工具限制與預期設計後，建立對應原症狀的重現測試，並確認以產品行為斷言失敗，才升級為 confirmed defect；無法重現者保留為 unverified risk。
 - **關係**：confirmed defect 修復後須納入正常回歸，維持需求到測試的追蹤。

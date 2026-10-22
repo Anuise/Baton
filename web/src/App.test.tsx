@@ -25,7 +25,7 @@ const client = {
   getAuthorization: vi.fn(async () => {
     throw new Error("授權讀取失敗");
   }),
-  getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [] })),
+  getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [], verifications: [] })),
   listDecisions: vi.fn(async () => ({ pending_count: 1, decisions: [decisionView()] })),
   pendingDecisions: vi.fn(async () => ({ pending_count: 1, by_workspace: [{ workspace_id: "ws_1", pending_count: 1 }] })),
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),

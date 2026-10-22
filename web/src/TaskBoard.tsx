@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { buildContract, ContractEditor, draftFromContract, emptyDraft, type ContractDraft } from "./ContractEditor";
 import { formatTimestamp } from "./time";
 import type {
+  AcceptanceBasis,
   Goal,
   MissingItem,
   RunStatus,
@@ -14,6 +15,9 @@ import type {
   TaskContract,
   TaskStatus,
   TaskView,
+  VerificationCheck,
+  VerificationRecord,
+  VerificationView,
   WaitCategory,
   WaitReason,
   Workspace,
@@ -79,6 +83,29 @@ function latestRun(runs: RunView[], taskId: string): RunView | null {
   return runs
     .filter((r) => r.task_id === taskId)
     .reduce<RunView | null>((latest, r) => (latest === null || r.generation > latest.generation ? r : latest), null);
+}
+
+/** 同一個 Task 最新的驗證紀錄（紀錄由舊到新）。 */
+function latestVerification(records: VerificationRecord[], taskId: string): VerificationRecord | null {
+  return records.filter((r) => r.task_id === taskId).at(-1) ?? null;
+}
+
+const statusLabel = (status: TaskStatus) => COLUMNS.find(([s]) => s === status)?.[1] ?? status;
+
+/** SHA-256 只顯示前幾碼。 */
+const shortHash = (sha256: string) => `${sha256.slice(0, 12)}…`;
+
+/** 宣告的確定性檢查的說明文字。 */
+function describeCheck(check: VerificationCheck): string {
+  const hashNote = (sha256: string | null) => (sha256 === null ? "（存在即可）" : `（SHA-256 ${shortHash(sha256)}）`);
+  switch (check.kind) {
+    case "command":
+      return `指令 ${[check.program, ...check.args].join(" ")}（預期結束碼 ${check.expected_exit_code}）`;
+    case "file":
+      return `檔案 ${check.path}${hashNote(check.sha256)}`;
+    case "artifact":
+      return `成果 ${check.name}${hashNote(check.sha256)}`;
+  }
 }
 
 const isClosed = (status: TaskStatus) => status === "completed" || status === "cancelled";
@@ -218,6 +245,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   titleOf={titleOf}
                   others={board.tasks.filter((t) => t.id !== task.id)}
                   run={latestRun(board.runs, task.id)}
+                  verification={latestVerification(board.verifications, task.id)}
                   accountName={accountNameOf(overview, board.runs, task.id)}
                   queued={queuedInfo(overview, queuedNotice, task)}
                   timeZone={timeZone}
@@ -233,6 +261,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   onCancelRun={(runId) => void act(task, () => client.cancelRun(workspace.id, runId))}
                   onEdit={() => setPanel({ kind: "edit", task })}
                   onAddDependency={(dependsOn) => act(task, () => client.addTaskDependency(workspace.id, task.id, dependsOn))}
+                  onAccepted={() => void load()}
                 />
               ))}
             </section>
@@ -253,6 +282,8 @@ interface CardProps {
   others: TaskView[];
   /** 這個 Task 最新的 Run；從未派工過為 null。 */
   run: RunView | null;
+  /** 這個 Task 最新的驗證紀錄；沒有驗證過為 null。 */
+  verification: VerificationRecord | null;
   /** 最新 Run 使用的帳號名稱。 */
   accountName: string | null;
   /** 在佇列中等待名額時的順位（未知為 null）與原因；不在佇列為 null。 */
@@ -265,11 +296,13 @@ interface CardProps {
   onCancelRun: (runId: string) => void;
   onEdit: () => void;
   onAddDependency: (dependsOn: string) => Promise<boolean>;
+  /** 手動接受成功：看板需要重新載入。 */
+  onAccepted: () => void;
 }
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -325,6 +358,12 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
 
       {run && <RunStatusLine run={run} accountName={accountName} timeZone={timeZone} />}
+
+      {verification && <VerificationSummary record={verification} timeZone={timeZone} />}
+
+      {task.status === "verifying" && (
+        <VerificationPanel client={client} workspaceId={workspaceId} taskId={task.id} onAccepted={onAccepted} />
+      )}
 
       <div className="task-actions">
         {task.status === "ready" && (
@@ -468,6 +507,176 @@ function RunStatusLine({ run, accountName, timeZone }: { run: RunView; accountNa
         </p>
       )}
     </div>
+  );
+}
+
+/** 最新驗證紀錄：未通過時列出未通過的檢查與證據（預設收合）。 */
+function VerificationSummary({ record, timeZone }: { record: VerificationRecord; timeZone?: string }) {
+  const decidedAt = formatTimestamp(record.decided_at, timeZone);
+  if (record.outcome === "passed") {
+    return (
+      <div role="group" aria-label="驗證紀錄">
+        <p>
+          <strong>已通過驗證（{record.method === "checks" ? "自動檢查" : "手動接受"}）</strong>，{decidedAt}
+        </p>
+      </div>
+    );
+  }
+  const failed = record.checks.filter((result) => result.status === "failed");
+  return (
+    <div className="task-verification-failed" role="group" aria-label="驗證紀錄">
+      <p>
+        <strong>上次驗證未通過</strong>（第 {record.generation} 次 Run，{decidedAt}）
+      </p>
+      {record.note && <p>{record.note}</p>}
+      {failed.length > 0 && (
+        <details>
+          <summary>未通過的檢查（{failed.length}）</summary>
+          <ul>
+            {failed.map((result, index) => (
+              <li key={index}>
+                {describeCheck(result.check)}：{result.detail}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+type VerificationState = { state: "loading" } | { state: "ready"; view: VerificationView } | { state: "failed"; reason: string };
+
+interface VerificationPanelProps {
+  client: TaskClient;
+  workspaceId: string;
+  taskId: string;
+  onAccepted: () => void;
+}
+
+/**
+ * verifying 的 Task：Worker 成功結束不代表完成，要通過確定性檢查或由使用者手動接受。
+ * 展開後顯示宣告的檢查與成果 manifest；接受時把 Runtime 給的依據原樣送回。
+ */
+function VerificationPanel({ client, workspaceId, taskId, onAccepted }: VerificationPanelProps) {
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState<VerificationState>({ state: "loading" });
+  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const reload = useCallback(async () => {
+    try {
+      setLoaded({ state: "ready", view: await client.taskVerification(workspaceId, taskId) });
+    } catch (e) {
+      setLoaded({ state: "failed", reason: reasonOf(e) });
+    }
+  }, [client, workspaceId, taskId]);
+
+  useEffect(() => {
+    if (!open) return;
+    setLoaded({ state: "loading" });
+    void reload();
+  }, [open, reload]);
+
+  const accept = async (basis: AcceptanceBasis) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await client.acceptTask(workspaceId, taskId, { basis, note: note.trim() === "" ? null : note.trim() });
+      onAccepted();
+    } catch (e) {
+      // 依據過期（409）等失敗：顯示 Runtime 的說明，並重新讀取最新的驗證資料
+      setError(reasonOf(e));
+      await reload();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="task-verification" role="group" aria-label="成果驗證">
+      <p>
+        <strong>驗證中</strong>：Worker 已結束，成果尚待確定性檢查或手動接受
+      </p>
+      <div className="task-actions">
+        <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
+          檢視驗證
+        </button>
+      </div>
+      {open && loaded.state === "loading" && <p>載入中…</p>}
+      {open && loaded.state === "failed" && <p role="alert">無法取得驗證資料：{loaded.reason}</p>}
+      {open && loaded.state === "ready" && (
+        <VerificationDetail
+          view={loaded.view}
+          note={note}
+          busy={busy}
+          onNoteChange={setNote}
+          onAccept={(basis) => void accept(basis)}
+        />
+      )}
+      {error && <p role="alert">{error}</p>}
+    </div>
+  );
+}
+
+interface VerificationDetailProps {
+  view: VerificationView;
+  note: string;
+  busy: boolean;
+  onNoteChange: (note: string) => void;
+  onAccept: (basis: AcceptanceBasis) => void;
+}
+
+/** 驗證資料：自動檢查的說明、宣告的檢查、成果 manifest 與手動接受。 */
+function VerificationDetail({ view, note, busy, onNoteChange, onAccept }: VerificationDetailProps) {
+  const { basis } = view;
+  return (
+    <>
+      <p>
+        {view.automatic
+          ? `Runtime 正在執行 ${view.checks.length} 項確定性檢查，全部通過後自動完成`
+          : "Runtime 不會自動判定，需要手動接受成果"}
+      </p>
+      {view.checks.length > 0 && (
+        <div>
+          <strong>宣告的檢查</strong>
+          <ul>
+            {view.checks.map((check, index) => (
+              <li key={index}>{describeCheck(check)}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div>
+        <strong>成果 manifest</strong>
+        {view.artifacts.length === 0 ? (
+          <p>沒有登記的成果</p>
+        ) : (
+          <ul>
+            {view.artifacts.map((entry) => (
+              <li key={entry.artifact_id}>
+                {entry.name} v{entry.version}，SHA-256 {shortHash(entry.sha256)}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {view.status !== "verifying" && <p>Task 目前是「{statusLabel(view.status)}」，不能接受成果</p>}
+      <label>
+        附註（選填）
+        <input value={note} onChange={(e) => onNoteChange(e.target.value)} />
+      </label>
+      <div className="task-actions">
+        <button
+          type="button"
+          disabled={busy || basis === null || view.status !== "verifying"}
+          onClick={() => basis !== null && onAccept(basis)}
+        >
+          接受成果
+        </button>
+      </div>
+    </>
   );
 }
 

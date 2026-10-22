@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    AdmissionReport, ArtifactList, ArtifactPreview, AuthorizationView, ConfirmAuthorizationRequest, CreateProfileRequest,
-    CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions,
-    PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard,
-    TaskDetail, WorkspaceList,
+    AcceptTaskRequest, AdmissionReport, ArtifactList, ArtifactPreview, AuthorizationView, ConfirmAuthorizationRequest,
+    CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview, LoginTerminalResponse,
+    PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus, SummaryRequest,
+    TaskBoard, TaskDetail, WorkspaceList,
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
 };
@@ -24,6 +24,7 @@ use baton_domain::profile::ProfileView;
 use baton_domain::quota::PlanLimits;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
 use baton_domain::run::RunView;
+use baton_domain::verification::VerificationView;
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
@@ -423,6 +424,33 @@ async fn task_dispatch(
     link.client.dispatch_task(&workspace_id, &task_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 檢視一個 Task 的驗證狀況（接受基礎、檢查、成果 manifest 與驗證紀錄）。
+#[tauri::command]
+async fn task_verification(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+) -> Result<VerificationView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.task_verification(&workspace_id, &task_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 手動接受成果；`request.basis` 必須是檢視時拿到的接受基礎。
+#[tauri::command]
+async fn task_accept(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+    request: AcceptTaskRequest,
+) -> Result<VerificationView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.accept_task(&workspace_id, &task_id, &request).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 讀取排程總覽：容量、各帳號進行中的 Run、佇列與等待原因。
 #[tauri::command]
 async fn scheduling_overview(link: State<'_, RuntimeLink>) -> Result<SchedulingOverview, String> {
@@ -684,6 +712,8 @@ fn main() {
             task_ready,
             task_cancel,
             task_dispatch,
+            task_verification,
+            task_accept,
             run_cancel,
             scheduling_overview,
             scheduling_set_mode,
