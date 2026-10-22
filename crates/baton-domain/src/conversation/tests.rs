@@ -33,9 +33,12 @@ fn apply_sessions(sessions: &mut Vec<AgentSession>, change: &ConversationChange)
     }
 }
 
-fn input(state: &mut ConversationState, kind: TurnKind, id: &str, text: &str, now: Timestamp) {
-    let change = receive(state, kind, id, text, None, now).unwrap();
+/// 收到一則輸入，回傳它的識別。
+fn input(state: &mut ConversationState, kind: TurnKind, text: &str, now: Timestamp) -> String {
+    let change = receive(state, kind, text, None, now).unwrap();
+    let id = change.turns[0].id.clone();
     apply(state, &change);
+    id
 }
 
 fn begin(run_id: &str, check: Option<ResumeCheck>) -> BeginTurn {
@@ -49,21 +52,19 @@ fn begin(run_id: &str, check: Option<ResumeCheck>) -> BeginTurn {
     }
 }
 
-fn ids(turns: &[&str]) -> Vec<String> {
-    turns.iter().map(|t| t.to_string()).collect()
-}
-
 #[test]
 fn the_first_input_creates_the_conversation_and_later_inputs_only_append() {
-    let mut state = start("ws", "conv_1", T0);
-    let first = receive(&state, TurnKind::UserMessage, "turn_1", "  幫我整理需求  ", None, T0).unwrap();
+    let mut state = start("ws_1", T0);
+    let first = receive(&state, TurnKind::UserMessage, "  幫我整理需求  ", None, T0).unwrap();
     let types: Vec<_> = first.events.iter().map(|e| e.event_type).collect();
     assert_eq!(types, [EVENT_CONVERSATION_CREATED, EVENT_CONVERSATION_INPUT_RECEIVED]);
     assert_eq!(first.turns[0].content, "幫我整理需求");
     assert_eq!(first.turns[0].status, TurnStatus::Pending);
     assert_eq!(first.turns[0].seq, 1);
+    assert_eq!(first.turns[0].id, "turn_1_1");
+    assert_eq!(first.conversation.as_ref().unwrap().id, "conv_1");
     apply(&mut state, &first);
-    let second = receive(&state, TurnKind::WorkEvent, "turn_2", "Run 成功", Some("run_succeeded:run_1".into()), T0).unwrap();
+    let second = receive(&state, TurnKind::WorkEvent, "Run 成功", Some("run_succeeded:run_1".into()), T0).unwrap();
     assert_eq!(second.events.len(), 1);
     assert_eq!(second.turns[0].seq, 2);
     assert_eq!(second.conversation.unwrap().version, 3);
@@ -71,42 +72,42 @@ fn the_first_input_creates_the_conversation_and_later_inputs_only_append() {
 
 #[test]
 fn blank_or_overlong_user_messages_are_rejected() {
-    let state = start("ws", "conv_1", T0);
-    assert_eq!(receive(&state, TurnKind::UserMessage, "t", "   ", None, T0).unwrap_err(), ConversationError::MessageEmpty);
+    let state = start("ws_1", T0);
+    assert_eq!(receive(&state, TurnKind::UserMessage, "   ", None, T0).unwrap_err(), ConversationError::MessageEmpty);
     let long = "字".repeat(MAX_MESSAGE_CHARS + 1);
-    assert_eq!(receive(&state, TurnKind::UserMessage, "t", &long, None, T0).unwrap_err(), ConversationError::MessageTooLong);
+    assert_eq!(receive(&state, TurnKind::UserMessage, &long, None, T0).unwrap_err(), ConversationError::MessageTooLong);
 }
 
 #[test]
 fn without_pending_inputs_the_controller_is_not_woken() {
-    let state = start("ws", "conv_1", T0);
+    let state = start("ws_1", T0);
     assert_eq!(plan_wake(&state, at(3_600_000)), WakePlan::Idle);
 }
 
 #[test]
 fn inputs_within_the_merge_window_are_handled_in_one_turn() {
-    let mut state = start("ws", "conv_1", T0);
-    input(&mut state, TurnKind::UserMessage, "u1", "第一則", T0);
-    input(&mut state, TurnKind::UserMessage, "u2", "第二則", at(3_000));
+    let mut state = start("ws_1", T0);
+    let u1 = input(&mut state, TurnKind::UserMessage, "第一則", T0);
+    let u2 = input(&mut state, TurnKind::UserMessage, "第二則", at(3_000));
     assert_eq!(plan_wake(&state, at(4_999)), WakePlan::Wait { due_at: at(MERGE_WINDOW_MS) });
-    assert_eq!(plan_wake(&state, at(5_000)), WakePlan::Wake { input_turn_ids: ids(&["u1", "u2"]) });
+    assert_eq!(plan_wake(&state, at(5_000)), WakePlan::Wake { input_turn_ids: vec![u1.clone(), u2.clone()] });
 }
 
 #[test]
 fn user_messages_go_before_work_events() {
-    let mut state = start("ws", "conv_1", T0);
-    input(&mut state, TurnKind::WorkEvent, "e1", "Run 成功", T0);
-    input(&mut state, TurnKind::UserMessage, "u1", "先做這個", at(1_000));
-    assert_eq!(plan_wake(&state, at(5_000)), WakePlan::Wake { input_turn_ids: ids(&["u1"]) });
+    let mut state = start("ws_1", T0);
+    input(&mut state, TurnKind::WorkEvent, "Run 成功", T0);
+    let u1 = input(&mut state, TurnKind::UserMessage, "先做這個", at(1_000));
+    assert_eq!(plan_wake(&state, at(5_000)), WakePlan::Wake { input_turn_ids: vec![u1.clone()] });
 }
 
 #[test]
 fn a_busy_conversation_never_starts_a_second_turn() {
-    let mut state = start("ws", "conv_1", T0);
-    input(&mut state, TurnKind::UserMessage, "u1", "第一則", T0);
+    let mut state = start("ws_1", T0);
+    input(&mut state, TurnKind::UserMessage, "第一則", T0);
     let change = begin_turn(&state, &[], begin("ctl_1", None), at(5_000)).unwrap();
     apply(&mut state, &change);
-    input(&mut state, TurnKind::UserMessage, "u2", "忙碌時送出", at(6_000));
+    input(&mut state, TurnKind::UserMessage, "忙碌時送出", at(6_000));
     assert_eq!(plan_wake(&state, at(60_000)), WakePlan::Busy { run_id: "ctl_1".into() });
     let busy = begin_turn(&state, &[], begin("ctl_2", None), at(60_000)).unwrap_err();
     assert_eq!(busy, ConversationError::Busy("ctl_1".into()));
@@ -114,13 +115,13 @@ fn a_busy_conversation_never_starts_a_second_turn() {
 
 #[test]
 fn begin_turn_persists_the_launch_intent_claims_the_inputs_and_creates_a_controller_session() {
-    let mut state = start("ws", "conv_1", T0);
-    input(&mut state, TurnKind::UserMessage, "u1", "第一則", T0);
+    let mut state = start("ws_1", T0);
+    let u1 = input(&mut state, TurnKind::UserMessage, "第一則", T0);
     let change = begin_turn(&state, &[], begin("ctl_1", None), at(5_000)).unwrap();
     let run = change.run.as_ref().unwrap();
     assert_eq!(run.status, ControllerRunStatus::Starting);
     assert_eq!(run.command_id, "cmd_ctl_1");
-    assert_eq!(run.input_turn_ids, ids(&["u1"]));
+    assert_eq!(run.input_turn_ids, vec![u1.clone()]);
     assert!(run.prompt.contains("你是 Baton 這個 Workspace 的 Controller"));
     assert!(run.prompt.contains("1. 第一則"));
     assert_eq!(change.turns[0].status, TurnStatus::Processing);
@@ -136,8 +137,8 @@ fn begin_turn_persists_the_launch_intent_claims_the_inputs_and_creates_a_control
 
 #[test]
 fn the_merge_window_rejects_an_early_begin() {
-    let mut state = start("ws", "conv_1", T0);
-    input(&mut state, TurnKind::UserMessage, "u1", "第一則", T0);
+    let mut state = start("ws_1", T0);
+    input(&mut state, TurnKind::UserMessage, "第一則", T0);
     assert_eq!(begin_turn(&state, &[], begin("ctl_1", None), at(1_000)).unwrap_err(), ConversationError::NothingToWake);
 }
 
@@ -164,7 +165,7 @@ fn complete_turn(
     apply(state, &change);
     apply_sessions(sessions, &change);
     let run = state.latest_run.clone().unwrap();
-    let outcome = TurnOutcome::Succeeded { reply: reply.into(), reply_turn_id: format!("reply_{run_id}") };
+    let outcome = TurnOutcome::Succeeded { reply: reply.into() };
     let change = finish(state, &run, sessions, outcome, now).unwrap();
     apply(state, &change);
     apply_sessions(sessions, &change);
@@ -173,13 +174,13 @@ fn complete_turn(
 
 #[test]
 fn a_successful_turn_marks_its_inputs_processed_and_saves_the_reply() {
-    let mut state = start("ws", "conv_1", T0);
+    let mut state = start("ws_1", T0);
     let mut sessions = Vec::new();
-    input(&mut state, TurnKind::UserMessage, "u1", "第一則", T0);
+    let u1 = input(&mut state, TurnKind::UserMessage, "第一則", T0);
     let run = complete_turn(&mut state, &mut sessions, "ctl_1", None, "native_1", "收到，我先整理", at(5_000));
     assert_eq!(run.status, ControllerRunStatus::Succeeded);
     assert_eq!(run.native_session_id.as_deref(), Some("native_1"));
-    let u1 = state.turns.iter().find(|t| t.id == "u1").unwrap();
+    let u1 = state.turns.iter().find(|t| t.id == u1).unwrap();
     assert_eq!((u1.status, u1.controller_run_id.as_deref()), (TurnStatus::Processed, Some("ctl_1")));
     let reply = state.turns.last().unwrap();
     assert_eq!((reply.kind, reply.content.as_str(), reply.seq), (TurnKind::ControllerReply, "收到，我先整理", 2));
@@ -192,11 +193,11 @@ fn a_successful_turn_marks_its_inputs_processed_and_saves_the_reply() {
 
 #[test]
 fn a_resumable_session_is_resumed_and_the_prompt_only_carries_the_new_inputs() {
-    let mut state = start("ws", "conv_1", T0);
+    let mut state = start("ws_1", T0);
     let mut sessions = Vec::new();
-    input(&mut state, TurnKind::UserMessage, "u1", "第一則", T0);
+    input(&mut state, TurnKind::UserMessage, "第一則", T0);
     complete_turn(&mut state, &mut sessions, "ctl_1", None, "native_1", "好", at(5_000));
-    input(&mut state, TurnKind::UserMessage, "u2", "第二則", at(10_000));
+    input(&mut state, TurnKind::UserMessage, "第二則", at(10_000));
     let check = ResumeCheck { session_id: sessions[0].id.clone(), capability: ResumeCapability::Resumable };
     let change = begin_turn(&state, &sessions, begin("ctl_2", Some(check)), at(15_000)).unwrap();
     let run = change.run.unwrap();
@@ -208,11 +209,11 @@ fn a_resumable_session_is_resumed_and_the_prompt_only_carries_the_new_inputs() {
 
 #[test]
 fn a_replacement_session_keeps_the_conversation_and_only_lists_pending_inputs_as_instructions() {
-    let mut state = start("ws", "conv_1", T0);
+    let mut state = start("ws_1", T0);
     let mut sessions = Vec::new();
-    input(&mut state, TurnKind::UserMessage, "u1", "第一則指示", T0);
+    input(&mut state, TurnKind::UserMessage, "第一則指示", T0);
     complete_turn(&mut state, &mut sessions, "ctl_1", None, "native_1", "已處理第一則", at(5_000));
-    input(&mut state, TurnKind::UserMessage, "u2", "第二則指示", at(10_000));
+    let u2 = input(&mut state, TurnKind::UserMessage, "第二則指示", at(10_000));
     let check = ResumeCheck { session_id: sessions[0].id.clone(), capability: ResumeCapability::NotResumable };
     let change = begin_turn(&state, &sessions, begin("ctl_2", Some(check)), at(15_000)).unwrap();
     let run = change.run.clone().unwrap();
@@ -228,13 +229,13 @@ fn a_replacement_session_keeps_the_conversation_and_only_lists_pending_inputs_as
     assert!(history.contains("不要重新執行"));
     assert!(instructions.contains("1. 第二則指示"));
     assert!(!instructions.contains("第一則指示"));
-    assert_eq!(run.input_turn_ids, ids(&["u2"]));
+    assert_eq!(run.input_turn_ids, vec![u2.clone()]);
 }
 
 #[test]
 fn an_interrupted_turn_releases_its_inputs_for_redelivery_after_a_backoff() {
-    let mut state = start("ws", "conv_1", T0);
-    input(&mut state, TurnKind::UserMessage, "u1", "第一則", T0);
+    let mut state = start("ws_1", T0);
+    let u1 = input(&mut state, TurnKind::UserMessage, "第一則", T0);
     let change = begin_turn(&state, &[], begin("ctl_1", None), at(5_000)).unwrap();
     let mut sessions = change.sessions.clone();
     apply(&mut state, &change);
@@ -244,10 +245,10 @@ fn an_interrupted_turn_releases_its_inputs_for_redelivery_after_a_backoff() {
     assert_eq!(change.run.as_ref().unwrap().status, ControllerRunStatus::Interrupted);
     apply(&mut state, &change);
     apply_sessions(&mut sessions, &change);
-    let u1 = &state.turns[0];
-    assert_eq!((u1.status, u1.controller_run_id.as_deref(), u1.attempts), (TurnStatus::Pending, None, 1));
+    let released = &state.turns[0];
+    assert_eq!((released.status, released.controller_run_id.as_deref(), released.attempts), (TurnStatus::Pending, None, 1));
     assert_eq!(plan_wake(&state, at(6_000 + RETRY_BACKOFF_BASE_MS - 1)), WakePlan::Wait { due_at: at(6_000 + RETRY_BACKOFF_BASE_MS) });
-    assert_eq!(plan_wake(&state, at(6_000 + RETRY_BACKOFF_BASE_MS)), WakePlan::Wake { input_turn_ids: ids(&["u1"]) });
+    assert_eq!(plan_wake(&state, at(6_000 + RETRY_BACKOFF_BASE_MS)), WakePlan::Wake { input_turn_ids: vec![u1.clone()] });
     let change = begin_turn(&state, &sessions, begin("ctl_2", None), at(6_000 + RETRY_BACKOFF_BASE_MS)).unwrap();
     assert_eq!(change.turns[0].attempts, 2);
     assert!(change.run.unwrap().prompt.contains("可能已部分處理"));

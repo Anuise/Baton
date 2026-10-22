@@ -234,6 +234,44 @@ impl ConversationState {
     }
 }
 
+/// 「對話」分頁的內容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationView {
+    /// 還沒有任何訊息時為 `None`。
+    pub conversation_id: Option<String>,
+    /// 有一輪 Controller 正在進行（B1）。
+    pub busy: bool,
+    pub active_run: Option<ControllerRun>,
+    /// 不忙碌且有待處理輸入時，預計喚醒 Controller 的時間（已到期而尚未喚醒時是現在）。
+    pub next_wake_at: Option<Timestamp>,
+    /// 依 `seq`。
+    pub turns: Vec<ConversationTurn>,
+    /// 全部 Controller Run，依建立順序。
+    pub runs: Vec<ControllerRun>,
+}
+
+impl ConversationView {
+    pub fn of(state: Option<&ConversationState>, runs: Vec<ControllerRun>, now: Timestamp) -> Self {
+        let Some(state) = state else {
+            return Self { conversation_id: None, busy: false, active_run: None, next_wake_at: None, turns: Vec::new(), runs };
+        };
+        let next_wake_at = match plan_wake(state, now) {
+            WakePlan::Wait { due_at } => Some(due_at),
+            WakePlan::Wake { .. } => Some(now),
+            WakePlan::Idle | WakePlan::Busy { .. } => None,
+        };
+        let active_run = state.active_run().cloned();
+        Self {
+            conversation_id: Some(state.conversation.id.clone()),
+            busy: active_run.is_some(),
+            active_run,
+            next_wake_at,
+            turns: state.turns.clone(),
+            runs,
+        }
+    }
+}
+
 // ---------------------------------------------------------------- 錯誤
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -252,6 +290,8 @@ pub enum ConversationError {
     Busy(String),
     #[error("conversation 的 Session {session_id} 仍由 {run_id} 驅動")]
     SessionBusy { session_id: String, run_id: String },
+    #[error("完全退出的停止意圖生效中或 Workspace 已暫停，不喚醒 Controller")]
+    LaunchHalted,
     #[error("找不到 Controller Run {0}")]
     RunNotFound(String),
     #[error("Controller Run {run_id} 目前是 {from}，不能{action}")]
@@ -269,6 +309,7 @@ impl ConversationError {
             ConversationError::NothingToWake => "nothing_to_wake",
             ConversationError::Busy(_) => "controller_busy",
             ConversationError::SessionBusy { .. } => "session_busy",
+            ConversationError::LaunchHalted => "launch_halted",
             ConversationError::RunNotFound(_) => "controller_run_not_found",
             ConversationError::TransitionInvalid { .. } => "transition_invalid",
         }
@@ -322,11 +363,21 @@ impl ConversationChange {
     }
 }
 
+/// 每個 Workspace 只有一個 conversation，識別由 Workspace 導出。
+pub fn conversation_id_for(workspace_id: &str) -> String {
+    format!("conv_{}", workspace_id.strip_prefix("ws_").unwrap_or(workspace_id))
+}
+
+/// turn 的識別由 conversation 與順序導出（同一個順序只會有一筆）。
+pub fn turn_id_for(conversation_id: &str, seq: i64) -> String {
+    format!("turn_{}_{seq}", conversation_id.strip_prefix("conv_").unwrap_or(conversation_id))
+}
+
 /// 建立 Workspace 的 conversation（第一則使用者訊息到達時，與那則訊息在同一個交易中）。
-pub fn start(workspace_id: &str, conversation_id: &str, now: Timestamp) -> ConversationState {
+pub fn start(workspace_id: &str, now: Timestamp) -> ConversationState {
     ConversationState {
         conversation: Conversation {
-            id: conversation_id.to_string(),
+            id: conversation_id_for(workspace_id),
             workspace_id: workspace_id.to_string(),
             version: 0,
             created_at: now,
@@ -341,7 +392,6 @@ pub fn start(workspace_id: &str, conversation_id: &str, now: Timestamp) -> Conve
 pub fn receive(
     state: &ConversationState,
     kind: TurnKind,
-    turn_id: &str,
     content: &str,
     source: Option<String>,
     now: Timestamp,
@@ -360,10 +410,11 @@ pub fn receive(
         let payload = serde_json::json!({ "workspace_id": state.conversation.workspace_id });
         change.conversation_event(&state.conversation, EVENT_CONVERSATION_CREATED, payload, now);
     }
+    let seq = state.last_seq() + 1;
     let turn = ConversationTurn {
-        id: turn_id.to_string(),
+        id: turn_id_for(&state.conversation.id, seq),
         conversation_id: state.conversation.id.clone(),
-        seq: state.last_seq() + 1,
+        seq,
         kind,
         content: content.to_string(),
         status: TurnStatus::Pending,
@@ -634,7 +685,7 @@ pub fn bind_native(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
     /// 程序成功結束：輸入標為已處理，回覆（非空白時）成為一則 turn。
-    Succeeded { reply: String, reply_turn_id: String },
+    Succeeded { reply: String },
     /// 程序以失敗結束：輸入退回待處理，退避後重新交付。
     Failed { reason: String },
     /// 程序不在了、啟動結果不明或被停止，結果沒有保存：輸入退回待處理。
@@ -659,7 +710,7 @@ pub fn finish(
         .collect();
     let held_ids: Vec<String> = held.iter().map(|t| t.id.clone()).collect();
     let (status, event, reason) = match &outcome {
-        TurnOutcome::Succeeded { reply, reply_turn_id } => {
+        TurnOutcome::Succeeded { reply } => {
             change.turns = held
                 .iter()
                 .map(|t| ConversationTurn { status: TurnStatus::Processed, processed_at: Some(now), ..(*t).clone() })
@@ -668,10 +719,11 @@ pub fn finish(
             change.conversation_event(&state.conversation, EVENT_CONVERSATION_INPUTS_PROCESSED, payload, now);
             let reply = reply.trim();
             if !reply.is_empty() {
+                let seq = state.last_seq() + 1;
                 change.turns.push(ConversationTurn {
-                    id: reply_turn_id.clone(),
+                    id: turn_id_for(&state.conversation.id, seq),
                     conversation_id: state.conversation.id.clone(),
-                    seq: state.last_seq() + 1,
+                    seq,
                     kind: TurnKind::ControllerReply,
                     content: reply.to_string(),
                     status: TurnStatus::Processed,
