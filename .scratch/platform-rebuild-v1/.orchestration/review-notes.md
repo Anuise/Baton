@@ -100,3 +100,7 @@
 ## 27. 整合時加入的行為（票 48 × 49，AI-438）
 - 整合 run 讓動作規劃收到 RateLimited 時也走票 49 的 `hand_off_if_possible`，並新增 harness 測試；這是整合時才加的行為，最終 review 請確認合理。
 - Bundle 的 `actions` 與 `usage` 只計最後一次嘗試；交接前嘗試的動作紀錄與用量不計入，沿用舊嘗試的旅程中被證明的動作不錄製、被推翻的重播不標 stale。
+
+## 28. 【高】harness 測試遺留暫存資料目錄（2026-10-23 主控發現）
+- Runtime harness 每次建立的資料目錄（`%TEMP%\.tmpXXXX`，含 `control.sqlite`、`logs`、`guardian`、`profiles`）測試結束後沒有刪除；重建期間累積約 13.6 萬個，把 C 槽吃到只剩 13 GB。
+- 修法：harness 在 drop 時刪除資料目錄（重建 Runtime 時保留，整個 Harness 結束才刪）；檢查其他測試是否用了 `TempDir::into_path`／`keep` 或在 Windows 上因 SQLite 檔案鎖刪除失敗而靜默略過，並補一個測試斷言 harness 結束後資料目錄不存在。
