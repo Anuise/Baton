@@ -529,15 +529,24 @@ pub fn lifecycle_file_path(data_dir: &Path) -> PathBuf {
 
 /// 原子寫入生命週期檔：先寫暫存檔並 fsync，再改名取代（Windows 上改名會取代既有檔案）。
 pub fn write_lifecycle_file(data_dir: &Path, file: &LifecycleFile) -> std::io::Result<()> {
+    // 每次寫入用自己的暫存檔：API 與 Supervisor 可能同時寫入，共用暫存檔會互相覆寫或被對方先改名
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let target = lifecycle_file_path(data_dir);
-    let temp = data_dir.join(format!("{LIFECYCLE_FILE_NAME}.tmp"));
+    let temp = data_dir.join(format!("{LIFECYCLE_FILE_NAME}.{}-{sequence}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(file).map_err(std::io::Error::other)?;
-    {
+    let written = (|| {
         let mut out = std::fs::File::create(&temp)?;
         out.write_all(&bytes)?;
         out.sync_all()?;
+        drop(out);
+        std::fs::rename(&temp, &target)
+    })();
+    // 暫存檔名每次不同，失敗時要自己清掉，不能等下一次寫入覆寫
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    std::fs::rename(&temp, &target)
+    written
 }
 
 /// 讀取生命週期檔。檔案存在卻解析不了（毀損）時保守地視為停止（spec D-25）。

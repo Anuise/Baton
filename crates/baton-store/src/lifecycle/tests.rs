@@ -30,3 +30,25 @@ fn a_corrupted_lifecycle_file_is_read_as_a_stop_intent() {
     std::fs::write(lifecycle_file_path(dir.path()), b"{ not json").unwrap();
     assert_eq!(read_lifecycle_file(dir.path()), FileStopView::Stop { requested_at: None });
 }
+
+#[test]
+fn concurrent_writers_of_the_lifecycle_file_do_not_trip_over_each_other() {
+    // API 的 request_exit 與 Supervisor 的鏡像可能同時寫入（最終 code-review 修正）：各自的暫存檔不能互相覆寫或被搶先改名
+    let dir = tempfile::tempdir().unwrap();
+    let file = LifecycleFile {
+        version: LIFECYCLE_FILE_VERSION,
+        stop: Some(StopSuppression { requested_at: Timestamp::from_millis(7), reason: "full_exit".into() }),
+        maintenance: None,
+        updated_at: Timestamp::from_millis(7),
+    };
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let writers: Vec<_> = (0..8)
+            .map(|_| scope.spawn(|| (0..50).filter_map(|_| write_lifecycle_file(dir.path(), &file).err()).map(|e| e.to_string()).collect::<Vec<_>>()))
+            .collect();
+        writers.into_iter().flat_map(|w| w.join().unwrap()).collect()
+    });
+    assert!(failures.is_empty(), "{} 次寫入失敗，例如：{:?}", failures.len(), failures.first());
+    assert_eq!(read_lifecycle_file(dir.path()), FileStopView::Stop { requested_at: Some(Timestamp::from_millis(7)) });
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(leftovers, [std::ffi::OsString::from(LIFECYCLE_FILE_NAME)], "不留下暫存檔");
+}

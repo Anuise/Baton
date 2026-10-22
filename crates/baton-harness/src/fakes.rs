@@ -90,6 +90,8 @@ struct ProcessState {
     fail_spawn_after_start: Option<String>,
     /// 設定時每次 `find` 都失敗（無法查證程序在不在）。
     fail_find: Option<String>,
+    /// 設定時每次 `find` 都永遠不回來。
+    hang_find: bool,
     /// 下一次 `spawn` 啟動並登記程序之後、回傳之前執行（在這個邊界注入別的故障）。
     on_next_spawn: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -113,6 +115,7 @@ impl Default for FakeProcessControl {
                 fail_spawn: None,
                 fail_spawn_after_start: None,
                 fail_find: None,
+                hang_find: false,
                 on_next_spawn: None,
             }),
         }
@@ -156,6 +159,11 @@ impl FakeProcessControl {
     /// `Some` 之後每次 `find` 都失敗（無法查證程序在不在），`None` 恢復。
     pub fn fail_finds(&self, reason: Option<&str>) {
         lock(&self.state).fail_find = reason.map(str::to_string);
+    }
+
+    /// `true` 之後每次 `find` 都永遠不回來（模擬卡住的查證），`false` 恢復。
+    pub fn hang_finds(&self, hang: bool) {
+        lock(&self.state).hang_find = hang;
     }
 
     /// 下一次 `spawn` 啟動並登記程序之後、回傳回執之前執行 `action`，只生效一次。
@@ -244,6 +252,9 @@ impl ProcessControl for FakeProcessControl {
 
     /// 與正式版一致：程序已經全部結束就找不到。
     async fn find(&self, spec: &SpawnSpec) -> PortResult<Option<Receipt>> {
+        if lock(&self.state).hang_find {
+            std::future::pending::<()>().await;
+        }
         let state = lock(&self.state);
         if let Some(reason) = &state.fail_find {
             return Err(PortError::Failed(reason.clone()));

@@ -5,6 +5,7 @@
 //! - 使用者取消 Run 後，Worker 的回報回應帶 `stop_requested`，讓它在寬限期內自行保存並結束。
 //! - 經 lease 核對結束的 Run，Supervisor 不再持有它的事件串流。
 
+use baton_domain::lifecycle::ExitTiming;
 use baton_domain::run::LEASE_DURATION_MS;
 use baton_domain::Timestamp;
 use baton_harness::fakes::FakeStop;
@@ -210,4 +211,29 @@ async fn a_recovery_mirror_that_failed_to_write_is_written_again_on_the_next_pas
     harness.supervise().await;
     assert_eq!(harness.send_json(Method::GET, "/api/v1/recovery", None).await, before, "恢復事件沒有變動");
     assert!(baton_guardian::files::read_recovery_mirror(harness.data_dir()).is_some(), "寫入失敗後應重寫鏡像");
+}
+
+#[tokio::test]
+async fn full_exit_keeps_its_deadline_even_when_finding_a_process_hangs() {
+    let mut harness = Harness::builder()
+        .clock_at(CLOCK_START)
+        .exit_timing(ExitTiming { stop_grace_ms: 150, kill_confirm_ms: 150 })
+        .start()
+        .await;
+    harness.add_account("主要帳號", "main@example.com").await;
+    let (_, _, rid) = running_run(&harness).await;
+    // 重新啟動後的 Runtime 要先以 command_id 找回程序才能停止它；這次查證永遠不回來
+    harness.restart().await;
+    harness.process_control.hang_finds(true);
+
+    let began = std::time::Instant::now();
+    let (status, body) = harness.send_json(Method::POST, "/api/v1/lifecycle/exit", None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), harness.wait_for_exit()).await;
+    assert!(finished.is_ok(), "退出流程卡在查證程序，超過總上限");
+    assert!(began.elapsed() < std::time::Duration::from_secs(5));
+
+    let lifecycle: Value = harness.get_json("/api/v1/lifecycle").await;
+    let record = lifecycle["exit"]["runs"].as_array().unwrap().iter().find(|r| r["run_id"] == rid.as_str()).unwrap().clone();
+    assert_eq!((record["outcome"].as_str(), record["anomaly"].as_str()), (Some("anomaly"), Some("stop_unconfirmed")), "{record}");
 }

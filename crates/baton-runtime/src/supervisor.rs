@@ -383,7 +383,12 @@ impl Supervisor {
             return self.finish_exit(report, total).await;
         };
         for item in targets {
-            match self.process_of(&item).await {
+            // 找回程序（ProcessControl 的 find）同樣受總上限約束：到期限仍找不到，這個與之後的 Run 都在收尾記為無法確認
+            let Ok(found) = tokio::time::timeout_at(deadline, self.process_of(&item)).await else {
+                report.notes.push("到上限仍無法以 command_id 找回程序，其餘的 Run 沒有要求停止".to_string());
+                break;
+            };
+            match found {
                 Ok(Some(identity)) => {
                     let process_control = self.ports.process_control.clone();
                     stopping.push(async move {
