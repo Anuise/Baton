@@ -74,6 +74,8 @@ pub struct Supervisor {
     data_dir: PathBuf,
     /// 啟動時停止意圖仍生效：記下當時的生命週期版本，第一次 tick 核對完後重新開啟（版本變了就不重新開啟）。
     reopen_from: Mutex<Option<i64>>,
+    /// 完全退出的停止流程正在等待或進行：握著 tick 鎖、可能久等的步驟（取消時的停止程序）看到就讓出，交給停止流程。
+    exiting: watch::Sender<bool>,
 }
 
 /// Supervisor 的生命週期參數（票 25）。
@@ -107,6 +109,7 @@ impl Supervisor {
             exit_timing: lifecycle.exit_timing,
             data_dir: lifecycle.data_dir,
             reopen_from: Mutex::new(lifecycle.reopen_from),
+            exiting: watch::Sender::new(false),
         })
     }
 
@@ -206,13 +209,18 @@ impl Supervisor {
         problem
     }
 
-    /// 完全退出的停止流程（停止意圖已由 API 持久化在資料庫）：鏡像到生命週期檔，再停下全部尚未結束的 Run。
+    /// 完全退出的停止流程（停止意圖已由 API 持久化在資料庫與生命週期檔）：再鏡像一次生命週期檔，停下全部尚未結束的 Run。
     /// 要求每個 Run 在寬限期內保存並停止，逾時由 ProcessControl 終止整個程序樹並確認；到總上限仍沒有結果的記為停止異常。
-    /// 握住 tick 的鎖直到結束，所以這段期間不會啟動任何程序。回傳最終的停止報告。
+    /// 總上限從要求退出的那一刻（停止報告的 `deadline_at`）算起，等 tick 鎖也算在內；拿到鎖之後握到結束，
+    /// 所以這段期間不會啟動任何程序。回傳最終的停止報告。
     pub async fn full_exit(&self) -> Option<ExitReport> {
-        let _serial = self.tick_lock.lock().await;
-        // 這個實例自己要退出了，不再做啟動時的重新開啟
-        *self.reopen_from.lock().await = None;
+        self.exiting.send_replace(true);
+        let report = self.run_full_exit().await;
+        self.exiting.send_replace(false);
+        report
+    }
+
+    async fn run_full_exit(&self) -> Option<ExitReport> {
         let state = match self.store.lifecycle_state().await {
             Ok(state) => state,
             Err(error) => {
@@ -224,9 +232,16 @@ impl Supervisor {
             return state.last_exit;
         }
         let mut report = state.last_exit.clone()?;
+        // 期限以 Clock 持久化在停止報告中；換算成剩下的真實時間（Clock 已過期限則不再等待）
+        let remaining = (report.deadline_at.as_millis() - self.ports.clock.now().as_millis()).max(0);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining as u64);
         if let Some(problem) = self.mirror_lifecycle_file().await {
             report.notes.push(problem);
         }
+
+        let serial = tokio::time::timeout_at(deadline, self.tick_lock.lock()).await;
+        // 這個實例自己要退出了，不再做啟動時的重新開啟
+        *self.reopen_from.lock().await = None;
 
         let targets = match self.store.runs_to_stop_for_exit().await {
             Ok(targets) => targets,
@@ -242,8 +257,12 @@ impl Supervisor {
 
         let total = Duration::from_millis(self.exit_timing.total_ms().max(0) as u64);
         let grace = Duration::from_millis(self.exit_timing.stop_grace_ms.max(0) as u64);
-        let deadline = tokio::time::Instant::now() + total;
         let mut stopping = FuturesUnordered::new();
+        // 到期限仍拿不到 tick 鎖（另一個處理卡住）：不在它進行中時停止程序，全部記為無法確認
+        let Ok(_serial) = serial else {
+            report.notes.push("到上限仍等不到 Supervisor 的其他處理結束，沒有要求任何 Run 停止".to_string());
+            return self.finish_exit(report, total).await;
+        };
         for item in targets {
             match self.process_of(&item).await {
                 Ok(Some(identity)) => {
@@ -266,7 +285,7 @@ impl Supervisor {
             }
         }
 
-        // 到總上限仍沒有結果就不再等待（逾時的那些在下面記為停止異常）
+        // 到總上限仍沒有結果就不再等待（逾時的那些在 `finish_exit` 記為停止異常）
         while let Ok(Some((item, result))) = tokio::time::timeout_at(deadline, stopping.next()).await {
             let record = match result {
                 Ok(StopResult::StoppedGracefully) => self.finish_stopped(&item, RunStopOutcome::StoppedGracefully).await,
@@ -281,6 +300,11 @@ impl Supervisor {
             report.record(record);
             self.save_progress(&report).await;
         }
+        self.finish_exit(report, total).await
+    }
+
+    /// 停止流程的收尾：仍沒有結果的 Run 記為停止異常 `stop_unconfirmed`（保留寫入所有權），寫入最終的停止報告。
+    async fn finish_exit(&self, mut report: ExitReport, total: Duration) -> Option<ExitReport> {
         let unconfirmed: Vec<RunStopRecord> = report
             .runs
             .iter()
@@ -574,7 +598,15 @@ impl Supervisor {
             let (true, Some(process)) = (run.cancel_requested_at.is_some(), run.process.as_ref()) else { continue };
             self.ensure_managed(&item).await;
             let identity = identity_of(process);
-            match self.ports.process_control.stop(&identity, self.stop_grace).await {
+            // 停止最長要等寬限期加確認上限；完全退出開始時就不再等，讓出 tick 鎖，這個 Run 改由停止流程處理
+            let mut exiting = self.exiting.subscribe();
+            let result = tokio::select! {
+                result = self.ports.process_control.stop(&identity, self.stop_grace) => result,
+                _ = exiting.wait_for(|exiting| *exiting) => {
+                    return self.note(&format!("完全退出開始：Run {} 的取消改由停止流程處理", run.id));
+                }
+            };
+            match result {
                 Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
                     self.streams.lock().await.remove(&run.id);
                     self.apply(run, RunCommand::ConfirmCancelled { run_id: run.id.clone() }).await;

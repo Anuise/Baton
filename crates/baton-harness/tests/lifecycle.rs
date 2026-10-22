@@ -388,6 +388,95 @@ async fn full_exit_ends_within_its_deadline_and_records_unconfirmed_processes_as
     assert_eq!(payload["anomalies"].as_array().unwrap().len(), 3, "{payload}");
 }
 
+#[tokio::test]
+async fn full_exit_is_not_delayed_by_a_cancellation_stuck_in_stopping_its_process() {
+    let harness = start_with_short_exit().await;
+    harness.add_account("帳號 1", "a@example.com").await;
+    harness.add_account("帳號 2", "b@example.com").await;
+    let (ws, goal) = workspace(&harness, "A").await;
+    let (stuck_task, stuck) = running_task(&harness, &ws, &goal, "取消中卡住").await;
+    let (_, other) = running_task(&harness, &ws, &goal, "一般執行中").await;
+    let stuck_identity = identity(&harness, &ws, &stuck).await;
+    harness.process_control.script_stop(&stuck_identity, FakeStop::Hang);
+    let (status, body) = harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/runs/{stuck}/cancel"), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Supervisor 處理取消時，停止呼叫卡住（握著處理的鎖）；這時使用者要求完全退出
+    let ticking = harness.supervise();
+    let exiting = async {
+        while !harness.process_control.stop_calls().contains(&stuck_identity) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let began = Instant::now();
+        let (status, body) = harness.send_json(Method::POST, LIFECYCLE_EXIT, None).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        // 停止意圖在回應前就已寫進生命週期檔（spec D-25），不必等停止流程拿到處理的鎖
+        let file: Value = serde_json::from_slice(&std::fs::read(harness.lifecycle_file_path()).unwrap()).unwrap();
+        assert_eq!(file["stop"]["requested_at"], CLOCK_START.as_millis(), "{file}");
+        harness.wait_for_exit().await;
+        // 縮短後的總上限是 300ms，從要求退出的那一刻算起
+        assert!(began.elapsed() < Duration::from_secs(2), "退出流程花了 {:?}", began.elapsed());
+        lifecycle(&harness).await
+    };
+    let ((), status) = tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(ticking, exiting) })
+        .await
+        .expect("完全退出開始後，卡在停止程序的處理也要讓出");
+
+    assert_eq!(status["phase"], "stopped", "{status}");
+    let record = run_outcome(&status, &stuck);
+    assert_eq!(record["outcome"], "anomaly", "{status}");
+    assert_eq!(record["anomaly"], "stop_unconfirmed", "{status}");
+    assert_eq!(run_outcome(&status, &other)["outcome"], "stopped_gracefully", "{status}");
+
+    // 卡住的 Run 不假裝已停止：仍持有寫入所有權，Task 也不會被取消或完成
+    let run = run_view(&harness, &ws, &stuck).await;
+    assert_eq!(run["status"], "running", "{run}");
+    assert!(run["lease"]["released_at"].is_null(), "{run}");
+    assert_eq!(task_status(&harness, &ws, &stuck_task).await, "running");
+}
+
+#[tokio::test]
+async fn full_exit_still_ends_within_its_deadline_when_another_supervisor_step_never_returns() {
+    let harness = start_with_short_exit().await;
+    harness.add_account("帳號 1", "a@example.com").await;
+    harness.add_account("帳號 2", "b@example.com").await;
+    let (ws, goal) = workspace(&harness, "A").await;
+    let (running_tid, running) = running_task(&harness, &ws, &goal, "執行中").await;
+    let launching_tid = ready_task(&harness, &ws, &goal, "啟動中卡住").await;
+    let (status, run) = dispatch(&harness, &ws, &launching_tid).await;
+    assert_eq!(status, StatusCode::CREATED, "{run}");
+    let launching = run["id"].as_str().unwrap().to_string();
+    harness.process_control.hang_next_spawn_at(baton_harness::fakes::HangPoint::BeforeSpawn);
+
+    // Supervisor 啟動程序時永遠不回來（握著處理的鎖）；這時使用者要求完全退出
+    let ticking = harness.supervise();
+    let exiting = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let began = Instant::now();
+        let (status, body) = harness.send_json(Method::POST, LIFECYCLE_EXIT, None).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        harness.wait_for_exit().await;
+        assert!(began.elapsed() < Duration::from_secs(2), "退出流程花了 {:?}", began.elapsed());
+        lifecycle(&harness).await
+    };
+    let status = tokio::select! {
+        _ = ticking => panic!("啟動程序的呼叫不該回來"),
+        status = exiting => status,
+    };
+
+    // 不能在另一個處理進行中停止程序：沒有要求任何程序停止，全部記為無法確認，並保留寫入所有權
+    assert_eq!(status["phase"], "stopped", "{status}");
+    for rid in [&running, &launching] {
+        assert_eq!(run_outcome(&status, rid)["anomaly"], "stop_unconfirmed", "{status}");
+    }
+    assert!(!status["exit"]["notes"].as_array().unwrap().is_empty(), "{status}");
+    assert!(harness.process_control.stop_calls().is_empty());
+    let run = run_view(&harness, &ws, &running).await;
+    assert_eq!(run["status"], "running", "{run}");
+    assert!(run["lease"]["released_at"].is_null(), "{run}");
+    assert_eq!(task_status(&harness, &ws, &running_tid).await, "running");
+}
+
 // ============================================================ 完全退出不改變 Task 的結論
 
 #[tokio::test]

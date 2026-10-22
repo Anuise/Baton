@@ -10,7 +10,7 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use baton_domain::lifecycle::{ExitReport, ExitTiming, LifecycleError, LifecyclePhase, WorkspaceLifecycle};
+use baton_domain::lifecycle::{ExitReport, ExitTiming, LifecycleError, LifecycleFile, LifecyclePhase, WorkspaceLifecycle};
 use baton_domain::Timestamp;
 use baton_store::{LifecycleApplyError, LifecycleSnapshot};
 use serde::{Deserialize, Serialize};
@@ -117,12 +117,21 @@ pub(crate) async fn status(State(state): State<Arc<ApiState>>) -> Result<Json<Li
     Ok(Json(status_of(snapshot, state.exit_timing)))
 }
 
-/// 完全退出：持久化停止意圖（資料庫；生命週期檔由停止流程的第一步鏡像），再通知 Runtime 開始停止。
+/// 完全退出：持久化停止意圖（先資料庫、再生命週期檔，spec D-25），再通知 Runtime 開始停止。
+/// 生命週期檔在回應前寫入，不必等停止流程開始；寫入失敗只記日誌，停止流程開始時會再鏡像一次。
 /// 重複要求是冪等的。回應 202 與目前的狀態，停止進度之後以 `GET` 查詢。
 pub(crate) async fn request_exit(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
     let now = state.clock.now();
-    state.store.request_exit(state.exit_timing, now).await?;
+    let lifecycle = state.store.request_exit(state.exit_timing, now).await?;
     (state.log)("生命週期：已持久化完全退出的停止意圖");
+    let file = LifecycleFile::mirror(&lifecycle, now);
+    let data_dir = state.data_dir.clone();
+    if !matches!(
+        tokio::task::spawn_blocking(move || baton_store::write_lifecycle_file(&data_dir, &file)).await,
+        Ok(Ok(()))
+    ) {
+        (state.log)("生命週期：無法把停止意圖寫入生命週期檔，交給停止流程再試");
+    }
     state.exit_signal.notify_one();
     let snapshot = state.store.lifecycle_snapshot().await?;
     Ok((StatusCode::ACCEPTED, Json(status_of(snapshot, state.exit_timing))).into_response())
