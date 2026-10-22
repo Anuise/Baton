@@ -598,7 +598,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 | `cleanup` | `worktree_cleanup` 聚合的全部事件 |
 | `task`、`external_operation`、`lesson`、`usage` | 指標用到的事件：`task_created`／`task_status_changed`；外部操作的全部事件（含 `external_operation_duplicate_blocked`）；`lesson_recurrence_recorded`；`run_usage_reported` |
 
-**Task 歸屬**：Run、交接、裁定請求依各自資料表的 `task_id`；Task 與清理的聚合識別就是 Task；外部操作、重犯、用量依事件內容的 `task_id`／`run_id`（外部操作重試時操作紀錄的 `task_id` 會換成新的 Task，所以以事件當時的 Run 為準）。恢復事件屬於整個 Runtime，出現在每個 Workspace 的時間線上，`task_ids` 是它任何一次嘗試處置過、屬於這個 Workspace 的 Task。別的 Workspace 的事件不會出現。依 Task 過濾 = 未過濾的時間線中 `task_ids` 含這個 Task 的事件，順序不變。
+**Task 歸屬**：Run、交接、裁定請求依各自資料表的 `task_id`；Task 與清理的聚合識別就是 Task；外部操作、重犯、用量依事件內容的 `task_id`／`run_id`（外部操作重試時操作紀錄的 `task_id` 會換成新的 Task，所以以事件當時的 Run 為準）。恢復事件屬於整個 Runtime，出現在每個 Workspace 的時間線上，`task_ids` 是它任何一次嘗試處置過、屬於這個 Workspace 的 Task。不屬於任何 Task 的事件依它記下的 Workspace 歸屬：沒有指定 Task 的重犯、Controller Run 的用量（票 16；計入 Workspace 的用量指標，`task_ids` 為空）。別的 Workspace 的事件不會出現。依 Task 過濾 = 未過濾的時間線中 `task_ids` 含這個 Task 的事件，順序不變。
 
 **新事件**：
 - `run_usage_reported`（`aggregate_type = 'run_usage'`，`aggregate_id` = Run，版本是這個 Run 第幾次回報）：每次記下 Run 的用量（`record_quota_usage`）時在同一個交易追加，內容 `{ run_id, task_id, profile_id, tokens, context_tokens }`。`quota_usage` 會在 8 天後刪除，指標改由這個不可刪除的事件計算。`context_tokens` 由 Adapter 的 `AdapterEvent::UsageReported.context_tokens` 提供（真實 Adapter：`result.usage` 的輸入 + 快取建立 + 快取讀取；沒有這些欄位為 `null`）。

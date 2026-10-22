@@ -1,9 +1,10 @@
-//! 鈭辣??蝺?霈??蟡?41嚗?敺蕭??鈭辣銵刻??箸???銝?鈭辣嚗圾??蝑?隞嗥?? Task ??Run??
+//! 事件時間線的讀取（票 41）：從追加式事件表讀出時間線上的事件，解析每筆事件相關的 Task 與 Run。
 //!
-//! ??閬???Domain嚗baton_domain::timeline`嚗ask ?飛撅砌???瘙箏?嚗un?漱?乓?摰?瘙?????”嚗?
-//! Task ??worktree 皜??????亙停??Task嚗??冽?雿??胯??鈭辣?批捆鋆∠? `task_id`嚗run_id`
-//! 嚗??冽?雿?閰行? `task_id` ?????Task嚗?隞乩誑鈭辣?嗆???Run ?箸?嚗?
-//! ?Ｗ儔鈭辣撅祆?游?Runtime嚗?曉瘥?Workspace ????銝???啣?隞颱?銝甈∪?閰西?蝵桅??惇?潮?Workspace ??Task??
+//! 分類規則在 Domain（`baton_domain::timeline`）。Task 的歸屬依聚合決定：Run、交接、裁定請求看各自的資料表；
+//! Task 與 worktree 清理的聚合識別就是 Task；外部操作、重犯、用量看事件內容裡的 `task_id`／`run_id`
+//! （外部操作重試時 `task_id` 會換成新的 Task，所以以事件當時的 Run 為準）。
+//! 恢復事件屬於整個 Runtime，出現在每個 Workspace 的時間線上，關聯到它任何一次嘗試處置過、屬於這個 Workspace 的 Task。
+//! 不屬於任何 Task 的事件依它記下的 Workspace 歸屬：沒有指定 Task 的重犯、Controller Run 的用量（票 16）。
 
 use std::collections::HashMap;
 
@@ -13,12 +14,12 @@ use rusqlite::OptionalExtension;
 
 use super::*;
 
-/// 霈?????仃??
+/// 讀取時間線的失敗。
 #[derive(Debug, thiserror::Error)]
 pub enum TimelineError {
-    #[error("?曆???Workspace {0}")]
+    #[error("找不到 Workspace {0}")]
     WorkspaceNotFound(String),
-    #[error("Workspace 銝剜???Task {0}")]
+    #[error("Workspace 中沒有 Task {0}")]
     TaskNotFound(String),
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -31,7 +32,7 @@ impl From<rusqlite::Error> for TimelineError {
 }
 
 impl Store {
-    /// Workspace ????嚗?鈭辣?漱??嚗?摰?Task ?????????隞嗚?
+    /// Workspace 的時間線，依事件提交順序；指定 Task 時只留下與它有關的事件。
     pub async fn timeline(&self, workspace_id: &str, task_id: Option<&str>) -> Result<Vec<TimelineEntry>, TimelineError> {
         let workspace_id = workspace_id.to_string();
         let task_id = task_id.map(str::to_string);
@@ -56,7 +57,7 @@ fn read_timeline(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -
     }
     let in_workspace = |task: &String| task_workspace.get(task).map(String::as_str) == Some(workspace_id);
 
-    // ?Ｗ儔鈭辣 ??摰?蝵桅???Task嚗??憚甈～???閰佗?
+    // 恢復事件 → 它處置過的 Task（所有輪次、所有嘗試）
     let mut recovered: HashMap<String, Vec<String>> = HashMap::new();
     let mut attempts = conn.prepare("SELECT event_id, affected FROM recovery_attempt ORDER BY started_at, id")?;
     for row in attempts.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
@@ -78,13 +79,14 @@ fn read_timeline(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -
                          json_extract(e.payload, '$.task_id'), pr.task_id, x.task_id),
                 COALESCE(CASE WHEN e.aggregate_type = 'run' THEN e.aggregate_id END, h.from_run_id, d.run_id,
                          json_extract(e.payload, '$.run_id'), x.run_id),
-                lr.workspace_id
+                COALESCE(lr.workspace_id, cr.workspace_id)
          FROM event e
          LEFT JOIN run r ON e.aggregate_type = 'run' AND r.id = e.aggregate_id
          LEFT JOIN handoff h ON e.aggregate_type = 'handoff' AND h.id = e.aggregate_id
          LEFT JOIN decision_request d ON e.aggregate_type = 'decision_request' AND d.id = e.aggregate_id
          LEFT JOIN external_operation x ON e.aggregate_type = 'external_operation' AND x.id = e.aggregate_id
          LEFT JOIN lesson_recurrence lr ON e.aggregate_type = 'lesson_recurrence' AND lr.id = e.aggregate_id
+         LEFT JOIN controller_run cr ON e.aggregate_type = 'run_usage' AND cr.id = e.aggregate_id
          LEFT JOIN run pr ON pr.id = json_extract(e.payload, '$.run_id')
          WHERE e.aggregate_type IN ({aggregates})
          ORDER BY e.seq"
@@ -105,16 +107,16 @@ fn read_timeline(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -
     })?;
     let mut entries = Vec::new();
     for row in rows {
-        let (seq, aggregate_type, aggregate_id, event_type, occurred_at, payload, task, run_id, recurrence_workspace) = row?;
+        let (seq, aggregate_type, aggregate_id, event_type, occurred_at, payload, task, run_id, owner_workspace) = row?;
         let Some(category) = timeline::category_of(&aggregate_type, &event_type) else { continue };
         let task_ids: Vec<String> = if aggregate_type == RECOVERY_AGGREGATE {
             recovered.get(&aggregate_id).into_iter().flatten().filter(|t| in_workspace(t)).cloned().collect()
         } else {
-            // 撅祆?亦? Workspace ??隞嗡?銝???嚗???Task ???舐?摰?銝? Workspace
+            // 屬於別的 Workspace 的事件不上這個時間線；沒有 Task 的事件看它記下的 Workspace
             match task {
                 Some(task) if in_workspace(&task) => vec![task],
                 Some(_) => continue,
-                None if recurrence_workspace.as_deref() == Some(workspace_id) => Vec::new(),
+                None if owner_workspace.as_deref() == Some(workspace_id) => Vec::new(),
                 None => continue,
             }
         };

@@ -7,13 +7,15 @@
 //! 每個測試名稱對應票 41 的驗收條件：
 //! - 時間線依 Task 過濾後事件完整且有序：`filtering_the_timeline_by_task_keeps_every_event_of_that_task_in_commit_order`、
 //!   `a_task_outside_the_workspace_cannot_be_used_as_a_filter`
-//! - 每項指標可由事件重新計算並與顯示一致：`every_metric_is_recomputed_from_the_timeline_events_and_matches_what_is_shown`
+//! - 每項指標可由事件重新計算並與顯示一致：`every_metric_is_recomputed_from_the_timeline_events_and_matches_what_is_shown`、
+//!   `controller_usage_counts_for_its_workspace_but_belongs_to_no_task`
 //! - 不可見的服務端額度顯示未知：`server_side_quota_that_cannot_be_seen_is_unknown_even_when_local_usage_is_estimated`
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use baton_domain::agent::{TOOL_CONFIRM_HANDOFF, TOOL_REQUEST_DECISION};
+use baton_domain::conversation::MERGE_WINDOW_MS;
 use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT};
 use baton_domain::metrics::{self, Metrics, Ratio, StageUsage};
 use baton_domain::quota::{LimitStatus, QuotaWindow};
@@ -393,6 +395,39 @@ async fn every_metric_is_recomputed_from_the_timeline_events_and_matches_what_is
     let later: Metrics = serde_json::from_value(w.metrics().await["metrics"].clone()).unwrap();
     assert_eq!(later.usage, m.usage);
     assert_eq!(later.context, m.context);
+}
+
+#[tokio::test]
+async fn controller_usage_counts_for_its_workspace_but_belongs_to_no_task() {
+    let w = world().await;
+    let tid = w.ready_task("整理資料", "research", json!([])).await;
+    let rid = w.start_run(&tid).await;
+    w.report_usage(&rid, 300, Some(9_000)).await;
+
+    // 使用者找 Controller 說話：Controller Run 回報用量後回覆
+    let path = format!("{WORKSPACES}/{}/conversation/messages", w.ws);
+    let (status, body) = w.h().send_json(Method::POST, &path, Some(json!({ "text": "目前進度？" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    w.h().clock.advance_millis(MERGE_WINDOW_MS);
+    w.h().supervise().await;
+    let (_, conversation) = w.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/conversation", w.ws), None).await;
+    let controller = conversation["runs"][0]["id"].as_str().expect("已啟動 Controller Run").to_string();
+    w.h().agent_adapter.emit(&controller, AdapterEvent::UsageReported { tokens: 700, context_tokens: Some(21_000), raw: "{}".into() });
+    w.h().agent_adapter.emit(&controller, AdapterEvent::Message { text: "還在整理".into() });
+    w.h().agent_adapter.emit(&controller, AdapterEvent::Exited { success: true });
+    w.h().supervise().await;
+
+    let all = w.timeline(None).await;
+    let usage: Vec<&TimelineEntry> = all.iter().filter(|e| e.category == TimelineCategory::Usage).collect();
+    assert_eq!(usage.len(), 2, "{:?}", types(&all));
+    let of_controller = usage.iter().find(|e| e.aggregate_id == controller).expect("Controller 的用量在 Workspace 的時間線上");
+    assert!(of_controller.task_ids.is_empty(), "Controller 不屬於任何 Task");
+    assert!(w.timeline(Some(&tid)).await.iter().all(|e| e.aggregate_id != controller));
+
+    let shown: Metrics = serde_json::from_value(w.metrics().await["metrics"].clone()).unwrap();
+    assert_eq!(shown, metrics::compute(&all));
+    assert_eq!((shown.usage.total_tokens, shown.usage.runs), (1_000, 2));
+    assert_eq!((shown.context.runs_known, shown.context.max_tokens), (2, Some(21_000)));
 }
 
 // --- 不可見的服務端額度顯示未知 ---
