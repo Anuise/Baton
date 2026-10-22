@@ -265,8 +265,32 @@ export interface ExecutionLease {
   release_reason: string | null;
 }
 
-/** Run 加上它的 lease（Run 的欄位展平在同一層）。 */
-export type RunView = Run & { lease: ExecutionLease | null };
+/** Worker 回報的最新進度；時間是 UTC 毫秒。 */
+export interface ProgressNote {
+  summary: string;
+  reported_at: number;
+}
+
+/** Worker 儲存的最新 checkpoint；details 是可展開查看的細節。 */
+export interface CheckpointNote {
+  summary: string;
+  details: string;
+  saved_at: number;
+}
+
+/** Worker 回報的受阻原因。 */
+export interface BlockedNote {
+  reason: string;
+  reported_at: number;
+}
+
+/** Run 加上它的 lease 與 Worker 最新的回報（Run 的欄位展平在同一層；沒有回報時為 null）。 */
+export type RunView = Run & {
+  lease: ExecutionLease | null;
+  latest_progress: ProgressNote | null;
+  latest_checkpoint: CheckpointNote | null;
+  blocked: BlockedNote | null;
+};
 
 export interface TaskBoard {
   workspace_id: string;

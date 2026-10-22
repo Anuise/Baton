@@ -109,6 +109,9 @@ function run(id: string, taskId: string, status: RunStatus, overrides: Partial<R
     started_at: null,
     ended_at: null,
     lease: null,
+    latest_progress: null,
+    latest_checkpoint: null,
+    blocked: null,
     ...overrides,
   };
 }
@@ -434,6 +437,94 @@ describe("派工與 Run", () => {
     expect(status).not.toHaveTextContent("pid");
     expect(status).not.toHaveTextContent("結束原因");
     expect(status).not.toHaveTextContent("最後心跳");
+  });
+
+  it("Run 狀態列顯示最新進度、Checkpoint 與受阻原因（含當地時間）", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "blocked" })],
+        runs: [
+          run("run_1", "task_1", "running", {
+            latest_progress: { summary: "已完成 3/5 個檔案", reported_at: T0 + 3_600_000 },
+            latest_checkpoint: { summary: "資料表遷移完成", details: "遷移腳本 v3 已套用", saved_at: T0 + 7_200_000 },
+            blocked: { reason: "缺少部署金鑰", reported_at: T0 + 10_800_000 },
+          }),
+        ],
+      }),
+    );
+
+    const status = runStatus("部署");
+    expect(status).toHaveTextContent("最新進度：已完成 3/5 個檔案（2023/11/14 23:13）");
+    expect(status).toHaveTextContent("Checkpoint：資料表遷移完成（2023/11/15 00:13）");
+    expect(within(status).getByRole("alert")).toHaveTextContent("受阻：缺少部署金鑰（2023/11/15 01:13）");
+  });
+
+  it("沒有回報時不顯示進度、Checkpoint 與受阻", async () => {
+    await renderBoard(fakeClient({ tasks: [task("task_1", "部署", { status: "running" })], runs: [run("run_1", "task_1", "running")] }));
+
+    const status = runStatus("部署");
+    expect(status).not.toHaveTextContent("最新進度");
+    expect(status).not.toHaveTextContent("Checkpoint");
+    expect(status).not.toHaveTextContent("受阻");
+    expect(within(status).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("Checkpoint 細節預設收合，點開後可看到", async () => {
+    const user = await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "running" })],
+        runs: [
+          run("run_1", "task_1", "running", {
+            latest_checkpoint: { summary: "資料表遷移完成", details: "遷移腳本 v3 已套用", saved_at: T0 },
+          }),
+        ],
+      }),
+    );
+
+    const details = runStatus("部署").querySelector("details")!;
+    expect(details).not.toHaveAttribute("open");
+    await user.click(within(details).getByText("細節"));
+    expect(details).toHaveAttribute("open");
+    expect(details).toHaveTextContent("遷移腳本 v3 已套用");
+  });
+
+  it("Checkpoint 的細節為空時沒有可展開的區塊", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "running" })],
+        runs: [run("run_1", "task_1", "running", { latest_checkpoint: { summary: "資料表遷移完成", details: "", saved_at: T0 } })],
+      }),
+    );
+
+    expect(runStatus("部署")).toHaveTextContent("Checkpoint：資料表遷移完成");
+    expect(runStatus("部署").querySelector("details")).toBeNull();
+  });
+
+  it("只顯示 generation 最大的 Run 的回報，舊世代的回報不顯示", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "running" })],
+        runs: [
+          run("run_1", "task_1", "failed", {
+            generation: 1,
+            latest_progress: { summary: "舊進度", reported_at: T0 },
+            latest_checkpoint: { summary: "舊 checkpoint", details: "舊細節", saved_at: T0 },
+            blocked: { reason: "舊受阻", reported_at: T0 },
+          }),
+          run("run_2", "task_1", "running", {
+            generation: 2,
+            latest_progress: { summary: "新進度", reported_at: T0 },
+          }),
+        ],
+      }),
+    );
+
+    const status = runStatus("部署");
+    expect(status).toHaveTextContent("最新進度：新進度");
+    for (const old of ["舊進度", "舊 checkpoint", "舊細節", "舊受阻"]) {
+      expect(status).not.toHaveTextContent(old);
+    }
+    expect(status).not.toHaveTextContent("受阻");
   });
 
   it("進行中的 Run 可取消：尚未啟動的立即變已取消，Task 回到「可派工」", async () => {
