@@ -288,6 +288,21 @@ impl Harness {
         self.runtime.as_ref().expect("Runtime 尚未啟動").supervisor().tick().await;
     }
 
+    /// 讓備份排程處理一次：該備份就備份（並套用保留規則）、該演練就做還原演練。時間由 fake Clock 決定。
+    pub async fn run_backups(&self) {
+        self.runtime.as_ref().expect("Runtime 尚未啟動").backups().tick().await;
+    }
+
+    /// 重要裁定或 Stage 完成：要求備份（下一次 `run_backups` 處理）。
+    pub fn request_milestone_backup(&self, reason: &str) {
+        self.runtime.as_ref().expect("Runtime 尚未啟動").backups().request_milestone_backup(reason);
+    }
+
+    /// 備份根目錄（`<資料目錄>/backups`）。
+    pub fn backups_dir(&self) -> std::path::PathBuf {
+        baton_store::backup::backups_root(self.data_dir.path())
+    }
+
     /// 生命週期檔（停止意圖的鏡像，spec D-25）的位置。
     pub fn lifecycle_file_path(&self) -> std::path::PathBuf {
         baton_store::lifecycle_file_path(self.data_dir.path())
@@ -332,10 +347,11 @@ async fn try_start_runtime(
         // 埠 0 讓作業系統配置；每個 Harness 與每次重建都不會互相衝突
         bind: "127.0.0.1:0".parse().expect("固定位址"),
     };
-    // 測試自己決定何時讓 Supervisor 動作（`Harness::supervise`），所以不啟動背景迴圈；
+    // 測試自己決定何時讓 Supervisor 與備份排程動作（`Harness::supervise`、`Harness::run_backups`），所以不啟動背景迴圈；
     // 完全退出後也不自行結束服務，由測試決定何時丟棄或重啟 Runtime
     let options = RuntimeOptions {
         background_supervisor: false,
+        background_backup: false,
         exit_timing,
         exit_linger: None,
         full_text_search,

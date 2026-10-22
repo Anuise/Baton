@@ -1,12 +1,13 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
 mod agent;
 mod artifacts;
 mod authorization;
+mod backups;
 mod decisions;
 mod guard;
 mod knowledge;
@@ -53,6 +54,7 @@ pub use artifacts::{
     artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview, ArtifactRegistered,
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
+pub use backups::{BackupStatus, BackupSummary, BACKUPS_PATH};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
@@ -95,6 +97,10 @@ pub const EVENTS_PATH: &str = "/api/v1/events";
 
 /// 請求紀錄的輸出位置；內容不含憑證、查詢字串或實際 URL。
 pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// 要求一次重要裁定或 Stage 完成後的備份（票 40，spec D-18）；參數是原因，只用於日誌。
+/// 由 Runtime 的備份排程實作，同一小時內的要求合併為一次。
+pub type BackupRequestSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// 平台狀態端點路徑。
 pub const PLATFORM_PATH: &str = "/api/v1/platform";
@@ -152,6 +158,8 @@ pub struct ApiState {
     pub log: LogSink,
     /// 派工或要求取消之後通知 Supervisor 儘快處理（背景迴圈等待它；沒有背景迴圈時沒有作用）。
     pub supervisor_wake: Arc<Notify>,
+    /// 正式裁定之後要求備份。
+    pub request_backup: BackupRequestSink,
     /// Runtime 開始停止時變成 `true`；長連線（串流）據此結束，優雅停止才不會被它們卡住。
     pub shutdown: watch::Receiver<bool>,
     /// 完全退出的時間參數（spec D-11）：停止意圖記錄的期限由它計算。
@@ -211,6 +219,7 @@ pub fn router(state: ApiState) -> Router {
         .route(artifacts::ARTIFACTS_ROUTE, get(artifacts::list))
         .route(artifacts::PREVIEW_ROUTE, get(artifacts::preview))
         .route(artifacts::CONTENT_ROUTE, get(artifacts::content))
+        .route(BACKUPS_PATH, get(backups::status))
         .route(KNOWLEDGE_PATH, get(knowledge::list).post(knowledge::create))
         .route(knowledge::ENTRY_ROUTE, get(knowledge::detail))
         .route(knowledge::CONFIRM_ROUTE, post(knowledge::confirm))
