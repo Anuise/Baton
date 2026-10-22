@@ -1,6 +1,6 @@
 # 12: Artifact 儲存與成果瀏覽
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R027-12-impl，2026-10-22 16:10）
 Blocked by: 11
 
 **What to build:** Worker 透過 register_artifact 工具登記成果：檔案先寫暫存、fsync、原子改名，再提交含位置、大小、雜湊、版本、產生者與 Task 關聯的 manifest；未登記的暫存檔於恢復時可辨識。App 的「成果與驗證」分頁可瀏覽、預覽與下載成果（下載同樣驗證身分）。
