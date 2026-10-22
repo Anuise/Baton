@@ -51,10 +51,6 @@ fn contract(done: &str) -> Value {
     })
 }
 
-fn error_code(body: &Value) -> &str {
-    body["error"].as_str().unwrap_or_default()
-}
-
 /// 只有一條代表旅程的記帳 API Profile；`memo` 是讀回時預期的內容（換一個值就是新的 Profile 版本）。
 fn profile(memo: &str) -> Value {
     json!({
@@ -412,6 +408,18 @@ async fn an_answer_that_overturns_an_assumption_revokes_stale_requests_and_block
     // 重新整理裁定中心時也看得到它已過期；答案本身照常保存
     let (status, list) = w.h().send_json(Method::GET, &w.ws_path("/decisions"), None).await;
     assert_eq!(status, StatusCode::OK, "{list}");
+    let listed = |rid: &str| {
+        list["decisions"].as_array().unwrap().iter().find(|d| d["id"] == rid).cloned().unwrap_or_else(|| panic!("清單中沒有 {rid}：{list}"))
+    };
+    let stale = listed(&about_api);
+    assert_eq!(stale["status"], "superseded", "{stale}");
+    assert!(stale["status_reason"].as_str().unwrap().contains("假設"), "{stale}");
+    assert_eq!(stale["allowed_actions"], json!([]), "過期的請求不能再處理：{stale}");
+    assert_eq!(listed(&about_report)["status"], "pending");
+    // 待處理數不把過期的請求算進去
+    let pending = list["decisions"].as_array().unwrap().iter().filter(|d| d["status"] == "pending").count();
+    assert_eq!(list["pending_count"], json!(pending), "{list}");
+    assert_eq!(pending, 1, "只剩獨立的提問在等待：{list}");
     assert_eq!(w.decision(&protocol).await["status"], "answered");
     // Controller 收到「假設被推翻」的工作事件，點名受影響的 Task、不提獨立的 Task
     let events = w.work_events().await;
