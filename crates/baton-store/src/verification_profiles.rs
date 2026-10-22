@@ -208,17 +208,21 @@ fn active_workspace(conn: &Connection, workspace_id: &str) -> Result<String, Ver
 /// 在交易中查驗 Stage 的驗證證據（票 43 的 exit check）：Bundle 必須判定為 passed，依據的是這個 Workspace 目前的
 /// Profile 版本，而且綁定 Task 時，那個 Task 的契約版本仍與驗證當時相同。
 /// 證據為 passed 之外，Bundle 驗證的 build 也必須是受驗目錄目前的 revision（票 50；`builds` 是 Runtime 觀察到的目前 build，
-/// 沒有觀察到的目錄不比較）。
+/// 沒有觀察到的目錄不比較）。Workflow 綁定 Task（`workflow_task`）時，Bundle 必須是那個 Task 的驗證（review-notes #21）。
 pub(crate) fn verification_evidence_status(
     conn: &Connection,
     workspace_id: &str,
     bundle_id: &str,
+    workflow_task: Option<&str>,
     builds: &super::workflows::Builds,
 ) -> rusqlite::Result<baton_domain::workflow::EvidenceStatus> {
     use baton_domain::workflow::EvidenceStatus;
     let Some(bundle) = load_bundles(conn, "id = ?1 AND workspace_id = ?2", [bundle_id, workspace_id])?.pop() else {
         return Ok(EvidenceStatus::NotFound);
     };
+    if workflow_task.is_some_and(|task| bundle.task_id.as_deref() != Some(task)) {
+        return Ok(EvidenceStatus::OtherSubject);
+    }
     let current_profile = latest_profile(conn, workspace_id)?.map(|p| p.id);
     let current_requirement: Option<i64> = match &bundle.task_id {
         Some(task_id) => {

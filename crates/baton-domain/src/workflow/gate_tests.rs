@@ -67,6 +67,7 @@ fn pass_at(workflow: &WorkflowInstance, playbook: &PlaybookVersion, prior: &mut 
         note: String::new(),
         build: Some(build.into()),
         basis_overturned: None,
+        budget_decision: BudgetDecision::default(),
     };
     let change = record_result(workflow, playbook, prior, input, format!("att_{}", prior.len()), recorder(), T0).unwrap();
     prior.push(change.attempt.unwrap());
@@ -215,6 +216,7 @@ fn an_overturned_assumption_invalidates_all_but_user_decisions_and_blocks_passin
         note: String::new(),
         build: Some("c1".into()),
         basis_overturned: Some("使用者推翻了假設「用 REST」".into()),
+        budget_decision: BudgetDecision::default(),
     };
     let change = record_result(&workflow, &playbook, &prior, input, "att_x".into(), recorder(), T1).unwrap();
     assert_eq!(change.attempt.unwrap().outcome, AttemptOutcome::Blocked, "舊成果不能在被推翻的前提下通過");

@@ -447,6 +447,75 @@ async fn an_answer_that_overturns_an_assumption_revokes_stale_requests_and_block
     assert_eq!(passed["current_stage"], "sign_off");
 }
 
+#[tokio::test]
+async fn an_overturned_assumption_does_not_strand_the_workflow_of_a_task_that_already_ended() {
+    let w = world().await;
+    let controller = w.controller_turn("規劃 API").await;
+    let approval = w.answered_decision(&controller, "要開始做嗎？").await;
+    let integration = w.task("最終整合").await;
+    let protocol = w.ask(&controller, "API 用哪種協定？", "rest", &[&integration]).await;
+    let built_on = json!({
+        "status": "filled",
+        "text": "照建議先用 REST",
+        "references": [{ "kind": "decision", "target": protocol, "version": 1 }],
+    });
+    let api = w.task_with("記帳 API（假設用 REST）", Some(built_on)).await;
+    let flow = w.to_sign_off(&controller, &api, &approval).await;
+    // Task 已經結束（以取消代表；完成也一樣不能再改契約）
+    let (status, body) = w.h().send_json(Method::POST, &w.ws_path(&format!("/tasks/{api}/cancel")), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 之後假設才被推翻：已結束的 Task 不能「先更新契約」，Workflow 不能因此退回並卡住（R151 第 12 項）
+    w.answer(&protocol, "grpc").await;
+    w.h().supervise().await;
+    let now = w.workflow(&flow["id"]).await;
+    assert_eq!((now["current_stage"].as_str(), now["revision"].as_i64()), (Some("sign_off"), flow["revision"].as_i64()), "{now}");
+    let signed = w.pass(&controller, &now, json!({ "decision_request_id": approval })).await;
+    assert_eq!(signed["status"], "completed", "{signed}");
+}
+
+#[tokio::test]
+async fn verification_and_acceptance_evidence_must_belong_to_the_task_the_workflow_is_bound_to() {
+    let w = world().await;
+    // 兩個 Stage：真實介面驗證（Evidence Bundle）→ 整合（成果接受）
+    let (_, catalog) = w.h().send_json(Method::GET, PLAYBOOKS, None).await;
+    let mut playbook =
+        catalog["playbooks"].as_array().unwrap().iter().filter(|p| p["key"] == "investigation").last().unwrap()["definition"].clone();
+    let stage = |key: &str, requires: &str| {
+        let mut stage = playbook["stages"][0].clone();
+        stage["key"] = json!(key);
+        stage["gate"] = json!("safety");
+        stage["exit_checks"] = json!([{ "key": format!("{key}_check"), "description": key, "requires": requires }]);
+        stage
+    };
+    let stages = json!([stage("real_interface", "verification"), stage("integration", "task_accepted")]);
+    playbook["stages"] = stages;
+    let (status, body) = w.h().send_json(Method::POST, PLAYBOOKS, Some(playbook)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let a = w.task("新增支出的 API").await;
+    let b = w.task("月報的 API").await;
+    let controller = w.controller_turn("驗證新增支出").await;
+    let flow = w.start_workflow(&controller, &a).await;
+
+    // B 的驗證通過了，但 Workflow 綁定的是 A：不能拿來開 A 的 Gate（review-notes #21）
+    let other = w.verify(&controller, &b).await;
+    let (_, body) = w.record(&controller, &flow, json!({ "evidence_bundle_id": other })).await;
+    assert_eq!(
+        (body["attempt"]["outcome"].as_str(), body["attempt"]["evidence"][0]["status"].as_str()),
+        (Some("incomplete"), Some("other_subject")),
+        "{body}"
+    );
+    let own = w.verify(&controller, &a).await;
+    let flow = w.pass(&controller, &body["workflow"], json!({ "evidence_bundle_id": own })).await;
+    assert_eq!(flow["current_stage"], "integration");
+
+    // 成果接受同樣只看綁定的 Task
+    let (_, body) = w.record(&controller, &flow, json!({ "task_id": b })).await;
+    assert_eq!(body["attempt"]["evidence"][0]["status"], "other_subject", "{body}");
+    let (_, body) = w.record(&controller, &body["workflow"], json!({ "task_id": a })).await;
+    assert_eq!(body["attempt"]["evidence"][0]["status"], "not_accepted", "{body}");
+}
+
 // --- 驗收條件：完成條件不能被 Agent 改寫以讓舊成果通過 ---
 
 #[tokio::test]
