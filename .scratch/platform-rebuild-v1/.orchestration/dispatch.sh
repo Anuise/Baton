@@ -24,5 +24,5 @@ MSYS_NO_PATHCONV=1 env $CLEAN \
     "$(cat "$ORCH/runs/$RUN.prompt.md")" > "$ORCH/runs/$RUN.log" 2>&1
 RC=$?
 # 印出最後的 result 事件
-grep '"type":"result"' "$ORCH/runs/$RUN.log" | tail -1 | python -I -c "import sys,json; t=sys.stdin.read(); d=json.loads(t) if t.strip() else {}; print('subtype:', d.get('subtype'), 'is_error:', d.get('is_error')); print(d.get('result',''))"
+grep '"type":"result"' "$ORCH/runs/$RUN.log" | tail -1 | python -I -X utf8 -c "import sys,json; t=sys.stdin.buffer.read().decode('utf-8'); d=json.loads(t) if t.strip() else {}; print('subtype:', d.get('subtype'), 'is_error:', d.get('is_error')); print(d.get('result',''))"
 echo "exit: $RC"
