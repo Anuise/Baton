@@ -318,6 +318,9 @@ pub enum RunCommand {
     /// 交接（票 28）：舊程序已確認停止（或已自行結束），Run 以 `interrupted`（`handed_off`）結束並釋放寫入所有權；
     /// Task 退回 `ready`，由同一個交易中的 successor 派工立刻接手。不是失敗，不計入任何預算。
     HandOff { run_id: String, handoff_id: String },
+    /// 突然限流（票 29）：舊程序已確認停止，但所有合適帳號都受限。Run 以 `interrupted`（`handed_off_waiting_resource`）
+    /// 結束並釋放寫入所有權，Task 進入 `waiting_resource`，資源恢復時由交接的 successor 接手。不計入任何預算。
+    ParkForResource { run_id: String, handoff_id: String },
 }
 
 impl RunCommand {
@@ -335,7 +338,8 @@ impl RunCommand {
             | RunCommand::ReconcileLease { run_id, .. }
             | RunCommand::RequestCancel { run_id }
             | RunCommand::ConfirmCancelled { run_id }
-            | RunCommand::HandOff { run_id, .. } => run_id,
+            | RunCommand::HandOff { run_id, .. }
+            | RunCommand::ParkForResource { run_id, .. } => run_id,
         }
     }
 }
@@ -889,6 +893,19 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             // 交接不是失敗：不計入任何預算（spec D-16）
             let reason = crate::handoff::HANDED_OFF_REASON;
             let mut change = edit.finish(RunStatus::Interrupted, EVENT_RUN_HANDED_OFF, reason, TaskStatus::Ready, None)?;
+            if let Some(event) = change.events.iter_mut().find(|e| e.event_type == EVENT_RUN_HANDED_OFF) {
+                event.payload["handoff_id"] = serde_json::json!(handoff_id);
+            }
+            Ok(change)
+        }
+        RunCommand::ParkForResource { handoff_id, .. } => {
+            if !matches!(run.status, RunStatus::Starting | RunStatus::Running) {
+                return Err(RunError::TransitionInvalid { from: run.status, to: RunStatus::Interrupted });
+            }
+            // 突然限流不是失敗：不計入任何預算（spec D-16）
+            let reason = crate::handoff::HANDED_OFF_WAITING_REASON;
+            let mut change =
+                edit.finish(RunStatus::Interrupted, EVENT_RUN_HANDED_OFF, reason, TaskStatus::WaitingResource, None)?;
             if let Some(event) = change.events.iter_mut().find(|e| e.event_type == EVENT_RUN_HANDED_OFF) {
                 event.payload["handoff_id"] = serde_json::json!(handoff_id);
             }
