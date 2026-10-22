@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、帳號 Profile 管理與首次啟動精靈端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、帳號 Profile 管理與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
 
 mod authorization;
@@ -8,6 +8,7 @@ mod guard;
 mod profiles;
 mod setup;
 mod runs;
+mod shared_settings;
 mod tasks;
 mod workspaces;
 
@@ -21,7 +22,7 @@ use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
-use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, WorkspaceFs};
+use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, UserSettingsSource, WorkspaceFs};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -40,6 +41,11 @@ pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
 pub use runs::{run_cancel_path, run_path, runs_path, task_dispatch_path, RunList};
+pub use shared_settings::{
+    run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
+    RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
+    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH,
+};
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
 /// 健康端點路徑。
@@ -99,6 +105,8 @@ pub struct ApiState {
     pub platform_info: Arc<dyn PlatformInfo>,
     pub workspace_fs: Arc<dyn WorkspaceFs>,
     pub claude_env: Arc<dyn ClaudeEnvironment>,
+    /// 使用者平常使用的 Claude Code 設定（唯讀；共同設定匯入的來源）。
+    pub user_settings: Arc<dyn UserSettingsSource>,
     pub log: LogSink,
     /// 派工或要求取消之後通知 Supervisor 儘快處理（背景迴圈等待它；沒有背景迴圈時沒有作用）。
     pub supervisor_wake: Arc<Notify>,
@@ -136,6 +144,11 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
+        .route(SHARED_SETTINGS_PATH, get(shared_settings::status))
+        .route(SHARED_SETTINGS_PREVIEW_PATH, post(shared_settings::preview))
+        .route(SHARED_SETTINGS_ADOPT_PATH, post(shared_settings::adopt))
+        .route(shared_settings::VERSION_ROUTE, get(shared_settings::version))
+        .route(shared_settings::SNAPSHOT_ROUTE, post(shared_settings::snapshot))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

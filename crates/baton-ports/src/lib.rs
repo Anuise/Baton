@@ -10,6 +10,7 @@ mod platform;
 mod process;
 mod quota;
 mod secret;
+mod user_settings;
 mod workspace_fs;
 
 use std::sync::Arc;
@@ -21,7 +22,8 @@ pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
 pub use secret::SecretProtector;
-pub use workspace_fs::{directory_state, DirectoryState, DirtyState, WorkspaceFs};
+pub use user_settings::{DirUserSettingsSource, SourceFile, SourceFiles, UserSettingsSource};
+pub use workspace_fs::{directory_state, write_readonly_tree, DirectoryState, DirtyState, WorkspaceFs};
 
 /// Port 呼叫的共同錯誤。
 #[derive(Debug, thiserror::Error)]
@@ -46,4 +48,5 @@ pub struct Ports {
     pub platform_info: Arc<dyn PlatformInfo>,
     pub secret_protector: Arc<dyn SecretProtector>,
     pub claude_env: Arc<dyn ClaudeEnvironment>,
+    pub user_settings: Arc<dyn UserSettingsSource>,
 }

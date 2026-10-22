@@ -497,6 +497,17 @@ pub fn adopt(latest_version: Option<i64>, candidate: ImportCandidate, now: Times
     Adoption { version, event }
 }
 
+/// 某個 Run 固定使用的設定版本與快照目錄（D-09）：第一次產生後不再改變，之後採用新版本也不影響已准入的 Run。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunSettingsPin {
+    pub run_id: String,
+    pub version: i64,
+    pub content_hash: String,
+    /// 唯讀快照目錄的路徑。
+    pub directory: String,
+    pub created_at: Timestamp,
+}
+
 /// 快照目錄中的一個檔案。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFile {
