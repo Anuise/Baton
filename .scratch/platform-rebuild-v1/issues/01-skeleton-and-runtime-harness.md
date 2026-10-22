@@ -1,6 +1,6 @@
 # 01: 專案骨架與 Runtime harness
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R001-01-impl，2026-10-22 13:29）
 Blocked by: None
 
 **What to build:** 建立第一版的可執行骨架並打通最細的一條路徑：以 git tag 封存現有 skill 版本；建立 Rust workspace（Domain 核心、Store、Runtime、API）、Tauri 桌面殼與 React + TypeScript + Vite Web UI；Runtime 提供一個健康狀態端點，桌面 App 啟動時啟動或連回 Runtime 並在頂部狀態列顯示「Runtime 運作中」。同時建立 spec D-04 的 Runtime harness：在測試中以程序內方式啟動完整 Runtime、注入 fake Clock／ProcessControl／AgentAdapter／QuotaObserver／WorkspaceFs／PlatformInfo，並透過真實 HTTP API 操作；harness 支援「丟棄 Runtime 實例、保留資料目錄後重建」以模擬重啟。現有 `skills/` 目錄與 README 不動（spec D-03）。
