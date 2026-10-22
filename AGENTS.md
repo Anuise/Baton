@@ -10,7 +10,7 @@ Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `
 
 ### Feature 執行方式：platform-rebuild-v1
 
-實作 `.scratch/platform-rebuild-v1/` 的票之前，必須先讀該目錄下的 `execution.md` 與 `ai-decisions.md`。子代理一律以 `claude -p` 指定 Work-n 帳號執行；**Work-0 是主帳號，不可用來執行 `claude -p`**。遇到問題先自行決定，再追加到 `ai-decisions.md` 並標記重要度（高／中／低）。
+實作 `.scratch/platform-rebuild-v1/` 的票之前，必須先讀該目錄下的 `execution.md` 與 `ai-decisions.md`。子代理一律以 `claude -p` 指定 Work-n 帳號執行；**Work-0 是主帳號，不可用來執行 `claude -p`**。查詢各帳號額度一律執行 `python -I .scratch/platform-rebuild-v1/.orchestration/usage.py`，不要用 `claude -p "/usage"`。遇到問題先自行決定，再追加到 `ai-decisions.md` 並標記重要度（高／中／低）。
 
 ### Domain docs
 

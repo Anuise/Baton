@@ -13,14 +13,12 @@
 
 ## 派出前檢查
 
-1. 用該帳號的 `/usage` 查詢額度（不消耗額度），取兩個數字：
-   - `Current session: X% used` → 5h 剩餘 = 100 − X
-   - `Current week (all models): Y% used` → 7d 剩餘 = 100 − Y
+1. **一律用 `python -I .scratch/platform-rebuild-v1/.orchestration/usage.py` 查詢額度**（不消耗額度），不要再用 `claude -p "/usage"`。〔使用者指定，見 AI-20〕腳本每個帳號印一行 `<n> | <5h 已用>% (reset …) | <7d 已用>% (reset …)`：
+   - 5h 剩餘 = 100 − 第二欄
+   - 7d 剩餘 = 100 − 第三欄
 2. **5h 剩餘 ≥ 3 且 7d 剩餘 ≥ 3** 才可以派出。〔使用者指定；「≥3」解讀為剩餘百分比，見 AI-01〕
-3. 輸出出現 `You've hit your … limit` 或解析不到數字時，視為該帳號不可用，改用下一個帳號。〔AI-05〕
+3. 該行顯示 `err …` 或解析不到數字時，視為該帳號不可用，改用下一個帳號。〔AI-05〕
 4. 該帳號目前進行中的 run 必須 < 3。〔使用者指定〕
-
-在 Git Bash 執行 `/usage` 時要設定 `MSYS_NO_PATHCONV=1`，否則 `/usage` 會被轉換成 `C:/Program Files/Git/usage` 並被當成一般 Prompt 送出，反而消耗額度。〔AI-06〕
 
 ## 啟動參數
 

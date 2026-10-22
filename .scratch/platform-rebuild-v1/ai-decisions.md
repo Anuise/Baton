@@ -180,6 +180,15 @@
 - 替代方案：只寫在 `.scratch` 裡，靠使用者每次提醒。
 - 影響：AGENTS.md 多出一段 feature 專屬內容；feature 完成後應移除。
 
+### AI-20：額度查詢改用 usage.py
+- 重要度：高
+- 時間／階段：2026-10-22，實作開始前
+- 決策：派出前檢查一律執行 `python -I .scratch/platform-rebuild-v1/.orchestration/usage.py`，不再使用 `claude -p "/usage"`。本條取代 AI-06 的查詢方式；AI-05 的「不可用」判斷改為看腳本輸出的 `err` 或缺少百分比。
+- 理由：Claude Code 2.1.307 在 `-p` 模式下的 `/usage` 只回傳花費摘要（`Total cost: …`），沒有 5h／7d 百分比，所有帳號都會被判為不可用。使用者提供的腳本讀各帳號的 OAuth 憑證查 usage 端點，可取得兩個百分比與重置時間。
+- 替代方案：互動模式手動查詢；或從 run 的 stream-json 限流事件推斷。
+- 影響：腳本依賴非公開的 `/api/oauth/usage` 端點與 `.credentials.json` 格式；改版時會全部回報 `err`，主控必須回報並暫停。
+- 使用者指定：2026-10-22
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
