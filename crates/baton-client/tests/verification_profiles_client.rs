@@ -83,7 +83,7 @@ async fn the_desktop_shell_publishes_a_profile_requests_a_run_and_reads_bundles(
     let areas: Vec<&str> = overview.uncovered.iter().map(|u| u.area.as_str()).collect();
     assert_eq!(areas, ["匯出", "圖形介面"]);
 
-    let request = RunVerificationRequest { task_id: None, journeys: vec!["smoke".into()] };
+    let request = RunVerificationRequest { task_id: None, journeys: vec!["smoke".into()], no_live_model: false };
     let queued = client.run_verification(&ws, &request).await.unwrap();
     assert_eq!(queued.workspace_id, ws);
     assert_eq!(queued.profile_version_id, published.profile.id);

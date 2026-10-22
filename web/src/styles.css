@@ -2146,6 +2146,41 @@ body {
   color: #9a6700;
 }
 
+.verification-usage ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.verification-no-live-model {
+  color: #9a6700;
+  font-weight: 600;
+}
+
+.verification-actions {
+  display: grid;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.verification-actions p {
+  margin: 0;
+  color: #656d76;
+}
+
+.verification-actions table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.verification-actions th,
+.verification-actions td {
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #d0d7de;
+  overflow-wrap: anywhere;
+}
+
 .exploration-page {
   display: grid;
   gap: 12px;

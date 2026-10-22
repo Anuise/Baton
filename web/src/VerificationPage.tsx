@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { formatTimestamp } from "./time";
 import {
   errorCode,
+  type ActionRecord,
   type EvidenceArtifact,
   type EvidenceArtifactContent,
   type EvidenceBundle,
@@ -17,6 +18,7 @@ import {
   type VerificationProfileVersion,
   type VerificationRequest,
   type VerificationStepRecord,
+  type VerificationUsage,
   type VerificationVerdict,
   type Workspace,
 } from "./runtimeClient";
@@ -65,6 +67,13 @@ const REASON_LABELS: Record<string, string> = {
   secret_unavailable: "取不到秘密的值",
   blocked_by_login: "登入失敗，旅程沒有執行",
   blocked_by_identity: "無法確認登入身分，旅程沒有執行",
+  // 票 48：目標導向動作與 no_live_model
+  live_model_disabled: "這次驗證不呼叫模型（no_live_model），無法判定，不是產品缺陷",
+  planner_unavailable: "無法使用模型決定動作，無法判定，不是產品缺陷",
+  planner_rate_limited: "模型限流，無法決定動作，不是產品缺陷",
+  act_not_achievable: "模型判斷在目前畫面無法達成目標，無法判定",
+  act_postcondition_failed: "模型決定的動作沒有通過後置條件，證據不足，不是產品缺陷",
+  replay_postcondition_failed: "重播的動作沒有通過後置條件，錄製已標為 stale，證據不足",
   external_outcome_unknown: "外部操作結果未知，不重送",
   external_already_sent: "外部操作已送出、旅程沒完成，不重跑",
   journal_unavailable: "無法先記下外部操作，所以沒有送出",
@@ -85,7 +94,38 @@ const END_REASON_LABELS: Record<string, string> = {
 };
 
 /** 語意判斷沒有做出判定時步驟的 reason_code；這時 judge 斷言未通過不代表不符合。 */
-const UNDECIDED_JUDGE_REASONS = new Set(["judge_rate_limited", "judge_unavailable", "model_call_budget_exhausted"]);
+const UNDECIDED_JUDGE_REASONS = new Set([
+  "judge_rate_limited",
+  "judge_unavailable",
+  "model_call_budget_exhausted",
+  "live_model_disabled",
+]);
+
+/** 目標導向動作執行前錄製的狀態（票 48）。 */
+const CACHE_LABELS: Record<ActionRecord["cache"], string> = {
+  none: "無錄製",
+  valid: "已重播",
+  stale: "先前已 stale",
+  mismatch: "身分不一致",
+  production_not_replayable: "正式環境不重播",
+};
+
+/** 動作的來源；沒有 source 表示這次沒有執行任何動作。 */
+const SOURCE_LABELS: Record<NonNullable<ActionRecord["source"]>, string> = {
+  live: "即時",
+  replay: "重播",
+};
+
+/** 這次把錄製標為 stale 的原因；其他代碼只顯示代碼本身。 */
+const STALE_REASON_LABELS: Record<string, string> = {
+  case_changed: "案例改變",
+  goal_changed: "目標改變",
+  params_changed: "參數改變",
+  persona_changed: "persona 或登入身分改變",
+  engine_changed: "引擎改變",
+  data_changed: "資料相容性改變",
+  postcondition_failed: "重播後置條件不成立",
+};
 
 const ARTIFACT_KIND_LABELS: Record<EvidenceArtifact["kind"], string> = {
   screenshot: "截圖",
@@ -434,6 +474,7 @@ function RunForm({
 }) {
   const [taskId, setTaskId] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
+  const [noLiveModel, setNoLiveModel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [queued, setQueued] = useState<string | null>(null);
@@ -449,9 +490,13 @@ function RunForm({
     setQueued(null);
     try {
       const task = taskId.trim();
-      const request = await onRun(task === "" ? { journeys: selected } : { task_id: task, journeys: selected });
+      const body: RunVerificationRequest = task === "" ? { journeys: selected } : { task_id: task, journeys: selected };
+      // 沒勾選時不送 no_live_model，維持原本的要求內容
+      if (noLiveModel) body.no_live_model = true;
+      const request = await onRun(body);
       const titles = request.journeys.map((key) => journeyTitle(profile, key)).join("、");
-      setQueued(`已排入：要求 ${request.id}（Profile 第 ${request.profile_version} 版，旅程：${titles}）`);
+      const mode = request.no_live_model ? "；不呼叫模型" : "";
+      setQueued(`已排入：要求 ${request.id}（Profile 第 ${request.profile_version} 版，旅程：${titles}${mode}）`);
       await onQueued();
     } catch (e) {
       setError(`無法要求執行：${describeError(e)}`);
@@ -485,6 +530,11 @@ function RunForm({
               </label>
             ))}
           </fieldset>
+          <label>
+            <input type="checkbox" checked={noLiveModel} onChange={(e) => setNoLiveModel(e.target.checked)} />
+            不呼叫模型（no_live_model）
+          </label>
+          <p>只執行不需模型的斷言與已驗證動作的重播，需要模型的步驟記為證據不足。</p>
           {overview.proven_by === null && <p>這個版本還沒被證明可用，代表旅程一定會一起執行。</p>}
           <button type="submit" disabled={busy}>
             要求執行
@@ -578,6 +628,10 @@ function BundleCard({
           </ul>
         )}
       </div>
+      <UsageView bundle={bundle} />
+      {bundle.actions !== undefined && bundle.actions.length > 0 && (
+        <ActionsView actions={bundle.actions} bundle={bundle} profile={profile} />
+      )}
       {handedOver && <AttemptsView attempts={attempts} journeyTitle={(key) => journeyTitle(profile, key)} />}
       {bundle.artifacts.length > 0 && (
         <div className="verification-artifacts">
@@ -604,6 +658,83 @@ function BundleCard({
       </details>
     </section>
   );
+}
+
+/** 舊的 Bundle 沒有用量時視為 0。 */
+const NO_USAGE: VerificationUsage = { live_model_calls: 0, live_actions: 0, replayed_actions: 0, blocked_model_calls: 0 };
+
+/** 用量（票 48）：即時模型與重播分開呈現，重播不呼叫模型。 */
+function UsageView({ bundle }: { bundle: EvidenceBundle }) {
+  const usage = { ...NO_USAGE, ...bundle.usage };
+  return (
+    <div className="verification-usage">
+      <strong>用量</strong>
+      {bundle.no_live_model && <p className="verification-no-live-model">這次驗證禁止即時模型（no_live_model）</p>}
+      <ul aria-label="用量">
+        <li aria-label="即時">
+          即時：模型呼叫 {usage.live_model_calls} 次、模型決定的動作 {usage.live_actions} 個
+        </li>
+        <li aria-label="重播">重播：重播的動作 {usage.replayed_actions} 個（不呼叫模型）</li>
+        <li aria-label="擋下的模型呼叫">no_live_model 擋下的模型呼叫 {usage.blocked_model_calls} 次</li>
+      </ul>
+    </div>
+  );
+}
+
+/** 目標導向動作（票 48）：每個動作的來源與錄製的處理；判定仍看步驟結果。 */
+function ActionsView({
+  actions,
+  bundle,
+  profile,
+}: {
+  actions: ActionRecord[];
+  bundle: EvidenceBundle;
+  profile: VerificationProfileVersion | null;
+}) {
+  return (
+    <div className="verification-actions">
+      <strong>目標導向動作</strong>
+      <p>重播是重新執行真實動作並檢查後置條件；快取命中不是通過，判定看步驟結果。</p>
+      <table aria-label="目標導向動作">
+        <thead>
+          <tr>
+            <th>旅程／步驟</th>
+            <th>目標</th>
+            <th>來源</th>
+            <th>實際動作</th>
+            <th>執行前錄製狀態</th>
+            <th>這次標為 stale 的原因</th>
+            <th>錄製</th>
+          </tr>
+        </thead>
+        <tbody>
+          {actions.map((record) => (
+            <tr key={`${record.journey}/${record.step}`}>
+              <td>
+                {journeyTitle(profile, record.journey)}／{stepTitle(bundle, record.journey, record.step)}
+              </td>
+              <td>{record.goal}</td>
+              <td>{record.source === undefined ? "未執行" : SOURCE_LABELS[record.source]}</td>
+              <td>{record.action ?? "—"}</td>
+              <td>{CACHE_LABELS[record.cache]}</td>
+              <td>
+                {record.stale_reasons === undefined || record.stale_reasons.length === 0
+                  ? "—"
+                  : record.stale_reasons.map((reason) => STALE_REASON_LABELS[reason] ?? reason).join("、")}
+              </td>
+              <td>{record.recorded === undefined ? "未錄製" : "已錄製"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** 步驟的標題（找不到或沒有標題時用 key）。 */
+function stepTitle(bundle: EvidenceBundle, journey: string, key: string): string {
+  const step = bundle.steps.find((s) => s.journey === journey && s.key === key);
+  return step === undefined || step.title === "" ? key : step.title;
 }
 
 /** 嘗試與交接（票 49）：每次嘗試的狀態、judge 帳號、採用的旅程與步驟，以及承接時停止的程序與不重送的外部操作。 */
@@ -679,8 +810,7 @@ function artifactLocation(artifact: EvidenceArtifact, bundle: EvidenceBundle, pr
   if (artifact.journey === undefined) return "整次驗證";
   const journey = `旅程：${journeyTitle(profile, artifact.journey)}`;
   if (artifact.step === undefined) return journey;
-  const step = bundle.steps.find((s) => s.journey === artifact.journey && s.key === artifact.step);
-  return `${journey}／步驟：${step === undefined || step.title === "" ? artifact.step : step.title}`;
+  return `${journey}／步驟：${stepTitle(bundle, artifact.journey, artifact.step)}`;
 }
 
 function ArtifactItem({

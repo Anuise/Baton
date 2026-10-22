@@ -1645,6 +1645,7 @@ struct FakeBrowserSessionState {
 /// - 截圖的內容是「網址 + 畫面文字」，trace 是這個 Session 的完整操作紀錄（含輸入的文字，如同真實引擎的 trace），
 ///   錄影是固定內容；讓測試檢查 Runtime 是否依政策遮蔽或不保存。
 /// - `commands` 記錄每一個操作（`fill` 記下實際輸入的文字），讓測試確認秘密的值確實交給了 Runner。
+/// - `set_engine`：Session 回報的引擎（票 48 錄製身分的一部分），預設 `fake-browser 1`。
 pub struct FakeBrowserDriver {
     pages: Mutex<HashMap<String, PageFn>>,
     links: Mutex<HashMap<String, String>>,
@@ -1654,6 +1655,7 @@ pub struct FakeBrowserDriver {
     commands: Mutex<Vec<String>>,
     requests: Mutex<Vec<BrowserSessionRequest>>,
     masks: Mutex<Vec<Vec<String>>>,
+    engine: Mutex<Option<String>>,
 }
 
 impl Default for FakeBrowserDriver {
@@ -1667,6 +1669,7 @@ impl Default for FakeBrowserDriver {
             commands: Mutex::default(),
             requests: Mutex::default(),
             masks: Mutex::default(),
+            engine: Mutex::new(Some("fake-browser 1".into())),
         }
     }
 }
@@ -1695,6 +1698,11 @@ impl FakeBrowserDriver {
     /// 至今的全部操作，依順序（例如 `open b1`、`goto b1 http://…`、`fill b1 #password hunter2`、`close b1`）。
     pub fn commands(&self) -> Vec<String> {
         lock(&self.commands).clone()
+    }
+
+    /// 之後的 Session 回報這個引擎；`None` 表示取不到。
+    pub fn set_engine(&self, engine: Option<&str>) {
+        *lock(&self.engine) = engine.map(str::to_string);
     }
 
     /// 至今開啟 Session 的要求。
@@ -1831,13 +1839,26 @@ impl BrowserDriver for FakeBrowserDriver {
         }
         Ok(files)
     }
+
+    fn engine(&self, _session: &BrowserSession) -> Option<String> {
+        lock(&self.engine).clone()
+    }
 }
 
-/// 腳本化的語意 judge（票 46）：依預期文字依序回應；沒有腳本時回報無法使用。記錄每一次的輸入。
+/// 腳本化的模型（票 46、48）：語意判斷依預期文字、動作規劃依目標依序回應；沒有腳本時回報無法使用。
+/// 記錄每一次的輸入，`calls` 是至今實際收到的模型呼叫總數。
 #[derive(Default)]
 pub struct FakeSemanticJudge {
     outcomes: Mutex<HashMap<String, VecDeque<JudgeOutcome>>>,
     requests: Mutex<Vec<JudgeRequest>>,
+    plans: Mutex<HashMap<String, VecDeque<ActionPlan>>>,
+    plan_requests: Mutex<Vec<ActionRequest>>,
+}
+
+/// 依序取出腳本的下一個結果；只剩最後一個時之後每次都相同。
+fn next_scripted<T: Clone>(scripts: &Mutex<HashMap<String, VecDeque<T>>>, key: &str) -> Option<T> {
+    let mut scripts = lock(scripts);
+    scripts.get_mut(key).and_then(|queue| if queue.len() > 1 { queue.pop_front() } else { queue.front().cloned() })
 }
 
 impl FakeSemanticJudge {
@@ -1846,9 +1867,24 @@ impl FakeSemanticJudge {
         lock(&self.outcomes).insert(expectation.to_string(), outcomes.into());
     }
 
+    /// 對這個目標依序回應這些規劃；只剩最後一個時之後每次都相同。
+    pub fn script_plan(&self, goal: &str, plans: Vec<ActionPlan>) {
+        lock(&self.plans).insert(goal.to_string(), plans.into());
+    }
+
     /// 至今收到的全部判斷要求（也就是模型 Prompt 的全部輸入）。
     pub fn requests(&self) -> Vec<JudgeRequest> {
         lock(&self.requests).clone()
+    }
+
+    /// 至今收到的全部動作規劃要求。
+    pub fn plan_requests(&self) -> Vec<ActionRequest> {
+        lock(&self.plan_requests).clone()
+    }
+
+    /// 至今實際收到的模型呼叫（語意判斷與動作規劃）總數。
+    pub fn calls(&self) -> usize {
+        lock(&self.requests).len() + lock(&self.plan_requests).len()
     }
 }
 
@@ -1857,9 +1893,15 @@ impl SemanticJudge for FakeSemanticJudge {
     async fn judge(&self, request: JudgeRequest) -> PortResult<JudgeOutcome> {
         let expectation = request.expectation.clone();
         lock(&self.requests).push(request);
-        let mut outcomes = lock(&self.outcomes);
-        let outcome = outcomes.get_mut(&expectation).and_then(|queue| if queue.len() > 1 { queue.pop_front() } else { queue.front().cloned() });
+        let outcome = next_scripted(&self.outcomes, &expectation);
         Ok(outcome.unwrap_or(JudgeOutcome::Unavailable { reason: "測試沒有設定這個預期的判斷".into() }))
+    }
+
+    async fn plan(&self, request: ActionRequest) -> PortResult<ActionPlan> {
+        let goal = request.goal.clone();
+        lock(&self.plan_requests).push(request);
+        let plan = next_scripted(&self.plans, &goal);
+        Ok(plan.unwrap_or(ActionPlan::Unavailable { reason: "測試沒有設定這個目標的規劃".into() }))
     }
 }
 

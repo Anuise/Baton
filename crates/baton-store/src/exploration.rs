@@ -558,6 +558,7 @@ impl Store {
                     status: RequestStatus::Queued,
                     bundle_id: None,
                     created_at: now,
+                    no_live_model: false,
                 };
                 insert_request(tx, &request)?;
                 let attempt = ReproductionAttempt {

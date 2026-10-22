@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CHECKED_AT,
   evidenceBundle,
+  replayEvidenceBundle,
   handoffEvidenceBundle,
   verificationAttempt,
   verificationOverview,
@@ -193,6 +194,25 @@ describe("驗證", () => {
     expect(client.runVerification).toHaveBeenCalledWith("ws_1", { journeys: [] });
     expect(await within(region("要求執行驗證")).findByRole("alert")).toHaveTextContent(
       "無法要求執行：找不到 Task task_9（task_not_found）",
+    );
+  });
+
+  it("要求執行：勾選不呼叫模型時送出 no_live_model: true，已排入的訊息標示不呼叫模型", async () => {
+    const client = fakeClient();
+    client.runVerification.mockResolvedValueOnce(verificationRequest({ no_live_model: true }));
+    const user = userEvent.setup();
+    renderPage(client);
+
+    const run = await screen.findByRole("region", { name: "要求執行驗證" });
+    expect(run).toHaveTextContent("只執行不需模型的斷言與已驗證動作的重播，需要模型的步驟記為證據不足");
+    const noLiveModel = within(run).getByRole("checkbox", { name: "不呼叫模型（no_live_model）" });
+    expect(noLiveModel).not.toBeChecked();
+    await user.click(noLiveModel);
+    await user.click(within(run).getByRole("button", { name: "要求執行" }));
+
+    expect(client.runVerification).toHaveBeenCalledWith("ws_1", { journeys: [], no_live_model: true });
+    expect(await within(run).findByRole("status")).toHaveTextContent(
+      "已排入：要求 vreq_2（Profile 第 2 版，旅程：冒煙測試、匯出報表；不呼叫模型）",
     );
   });
 
@@ -437,6 +457,129 @@ describe("驗證", () => {
     expect(within(shot).queryByRole("img")).not.toBeInTheDocument();
 
     expect(within(region("Evidence Bundle vbun_1")).queryByRole("list", { name: "證據檔案" })).not.toBeInTheDocument();
+  });
+
+  const replayOverview = (bundle = replayEvidenceBundle()) =>
+    verificationOverview({
+      profile: verificationProfileVersion({ definition: webVerificationProfileDefinition() }),
+      uncovered: [],
+      bundles: [bundle],
+    });
+
+  it("用量把即時模型與重播分開顯示；舊的 Bundle 沒有用量時視為 0、沒有動作時不顯示動作表格", async () => {
+    const { unmount } = renderPage(fakeClient(replayOverview()));
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_replay" });
+    const usage = within(card).getByRole("list", { name: "用量" });
+    expect(within(usage).getByRole("listitem", { name: "即時" })).toHaveTextContent(
+      "即時：模型呼叫 2 次、模型決定的動作 1 個",
+    );
+    expect(within(usage).getByRole("listitem", { name: "重播" })).toHaveTextContent(
+      "重播：重播的動作 1 個（不呼叫模型）",
+    );
+    expect(within(usage).getByRole("listitem", { name: "擋下的模型呼叫" })).toHaveTextContent(
+      "no_live_model 擋下的模型呼叫 0 次",
+    );
+    expect(card).not.toHaveTextContent("禁止即時模型");
+    unmount();
+
+    renderPage(fakeClient());
+    const old = await screen.findByRole("region", { name: "Evidence Bundle vbun_1" });
+    expect(within(old).getByRole("list", { name: "用量" })).toHaveTextContent(
+      "即時：模型呼叫 0 次、模型決定的動作 0 個重播：重播的動作 0 個（不呼叫模型）no_live_model 擋下的模型呼叫 0 次",
+    );
+    expect(within(old).queryByRole("table", { name: "目標導向動作" })).not.toBeInTheDocument();
+  });
+
+  it("目標導向動作表格顯示來源、實際動作、執行前錄製狀態、stale 原因（中文）與是否錄製，並說明快取命中不是通過", async () => {
+    renderPage(fakeClient(replayOverview()));
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_replay" });
+    expect(card).toHaveTextContent("重播是重新執行真實動作並檢查後置條件；快取命中不是通過，判定看步驟結果");
+    const rows = within(within(card).getByRole("table", { name: "目標導向動作" })).getAllByRole("row");
+    expect(rows).toHaveLength(4);
+    const cells = (row: HTMLElement) => within(row).getAllByRole("cell").map((cell) => cell.textContent);
+    expect(cells(rows[1])).toEqual([
+      "管理訂單／確認訂單",
+      "確認第一筆訂單",
+      "即時",
+      "瀏覽器點擊「#order-1 .confirm」",
+      "無錄製",
+      "—",
+      "已錄製",
+    ]);
+    expect(cells(rows[2])).toEqual([
+      "瀏覽商品／加入購物車",
+      "把第一項商品加入購物車",
+      "重播",
+      "瀏覽器點擊「#product-1 .add」",
+      "已重播",
+      "—",
+      "未錄製",
+    ]);
+    expect(cells(rows[3])).toEqual([
+      "瀏覽商品／結帳",
+      "完成結帳",
+      "未執行",
+      "—",
+      "身分不一致",
+      "引擎改變、資料相容性改變",
+      "未錄製",
+    ]);
+    expect(card).toHaveTextContent("判定：證據不足 planner_rate_limited（模型限流，無法決定動作，不是產品缺陷）");
+  });
+
+  it("no_live_model 的 Bundle 標示禁止即時模型與擋下的模型呼叫；被擋下的語意判斷是無法判定而不是不符合", async () => {
+    const bundle = replayEvidenceBundle({
+      no_live_model: true,
+      steps: [
+        verificationStepRecord({
+          journey: "orders",
+          key: "open_orders",
+          title: "開啟訂單頁",
+          verdict: "inconclusive",
+          reason_code: "live_model_disabled",
+          engine_code: "model:disabled",
+          assertions: [
+            { assertion: { kind: "judge", expectation: "畫面列出今天的訂單" }, passed: false, actual: "no_live_model：不呼叫模型，沒有判定" },
+          ],
+        }),
+      ],
+      actions: [
+        {
+          journey: "browse",
+          step: "add_to_cart",
+          goal: "把第一項商品加入購物車",
+          cache: "stale",
+          stale_reasons: ["postcondition_failed"],
+        },
+      ],
+      usage: { live_model_calls: 0, live_actions: 0, replayed_actions: 0, blocked_model_calls: 2 },
+    });
+    const user = userEvent.setup();
+    renderPage(fakeClient(replayOverview(bundle)));
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_replay" });
+    expect(card).toHaveTextContent("這次驗證禁止即時模型（no_live_model）");
+    const usage = within(card).getByRole("list", { name: "用量" });
+    expect(within(usage).getByRole("listitem", { name: "即時" })).toHaveTextContent("模型呼叫 0 次");
+    expect(within(usage).getByRole("listitem", { name: "擋下的模型呼叫" })).toHaveTextContent(
+      "no_live_model 擋下的模型呼叫 2 次",
+    );
+    const row = within(within(card).getByRole("table", { name: "目標導向動作" })).getAllByRole("row")[1];
+    expect(row).toHaveTextContent("瀏覽商品／add_to_cart");
+    expect(row).toHaveTextContent("未執行");
+    expect(row).toHaveTextContent("先前已 stale");
+    expect(row).toHaveTextContent("重播後置條件不成立");
+
+    await user.click(within(card).getByText("步驟（1）"));
+    const step = within(card).getByRole("listitem", { name: "旅程：開啟訂單頁" });
+    expect(step).toHaveTextContent(
+      "證據不足 live_model_disabled（這次驗證不呼叫模型（no_live_model），無法判定，不是產品缺陷） 引擎代碼 model:disabled",
+    );
+    expect(within(step).getByRole("list", { name: "斷言結果" })).toHaveTextContent(
+      "語意判斷（預期：畫面列出今天的訂單）：無法判定（理由：no_live_model：不呼叫模型，沒有判定）",
+    );
   });
 
   it("交接的 Bundle 顯示每次嘗試的狀態、結束原因、judge 帳號、採用的旅程與步驟，以及承接內容與不重送的外部操作", async () => {

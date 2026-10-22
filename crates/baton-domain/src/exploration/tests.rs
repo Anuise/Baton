@@ -47,6 +47,7 @@ fn profile() -> ProfileDefinition {
         teardown: Vec::new(),
         evidence: EvidencePolicy::default(),
         budget: VerificationBudget::default(),
+        replay: crate::verification_profile::ReplayPolicy::default(),
         feature_map: vec![Feature {
             key: "items".into(),
             title: "項目".into(),
@@ -147,6 +148,9 @@ fn bundle(journeys: Vec<JourneyResult>) -> EvidenceBundle {
         },
         artifacts: Vec::new(),
         attempts: Vec::new(),
+        no_live_model: false,
+        actions: Vec::new(),
+        usage: crate::verification_profile::replay::VerificationUsage::default(),
         started_at: now(),
         finished_at: now(),
     }

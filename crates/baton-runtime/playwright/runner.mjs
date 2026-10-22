@@ -32,14 +32,23 @@ function redact(text) {
   return result;
 }
 
-/** 依序從受驗專案、`BATON_PLAYWRIGHT_DIR` 解析 Playwright；都沒有時回傳 null。 */
+/** 實際載入的 Playwright 套件版本（取自它的 package.json）；取不到時為 null。 */
+function packageVersion(require, name) {
+  try {
+    return require(`${name}/package.json`).version || null;
+  } catch {
+    return null;
+  }
+}
+
+/** 依序從受驗專案、`BATON_PLAYWRIGHT_DIR` 解析 Playwright 與其版本；都沒有時回傳 null。 */
 function loadPlaywright(workingDir) {
   const bases = [workingDir, process.env.BATON_PLAYWRIGHT_DIR].filter(Boolean);
   for (const base of bases) {
     const require = createRequire(path.join(path.resolve(base), 'package.json'));
     for (const name of ['playwright', '@playwright/test']) {
       try {
-        return require(name);
+        return { playwright: require(name), version: packageVersion(require, name) };
       } catch (error) {
         if (error?.code !== 'MODULE_NOT_FOUND') throw error;
       }
@@ -49,14 +58,15 @@ function loadPlaywright(workingDir) {
 }
 
 async function open(request) {
-  const playwright = loadPlaywright(request.workingDir);
-  if (!playwright) {
+  const loaded = loadPlaywright(request.workingDir);
+  if (!loaded) {
     return {
       ok: false,
       missingPlaywright: true,
       message: `受驗專案（${request.workingDir}）找不到 Playwright；請在受驗專案安裝 playwright 或 @playwright/test 與其瀏覽器（Baton 不代為安裝或下載）`,
     };
   }
+  const { playwright, version } = loaded;
   const browser = await playwright.chromium.launch({ headless: true });
   try {
     const options = request.videoDir ? { recordVideo: { dir: request.videoDir } } : {};
@@ -70,7 +80,9 @@ async function open(request) {
         session.status = response.status();
       }
     });
-    return { ok: true };
+    // 實際使用的引擎（錄製身分的一部分，票 48）；Playwright 版本取不到時省略
+    const engine = ['playwright', version, 'chromium', browser.version()].filter(Boolean).join(' ');
+    return { ok: true, engine };
   } catch (error) {
     await browser.close().catch(() => {});
     throw error;

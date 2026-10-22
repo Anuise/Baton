@@ -4064,7 +4064,176 @@
 - 影響：與票 47、48 平行開發，整合時 migration 編號與 AI 編號可能需要順延。
 - 審閱：未審
 
-### AI-431：疑點升為 confirmed 的唯一路徑：Runtime 在 Profile 環境中執行重現案例，並以代表旅程當對照
+### AI-431：重播的對象是新增的目標導向動作（`act`）：模型依當前畫面選一個具體動作，只有被不靠模型的後續斷言證明才錄製
+- 重要度：高
+- 時間／階段：2026-10-23，票 48 實作
+- 決策：
+  - 新增瀏覽器動作 `{ kind: "act", goal, params?, replay_in_production? }`。執行時由模型（`SemanticJudge::plan`）依目標、參數、persona 與這個 Session 最近一次的畫面選一個具體動作；只能是點擊、輸入或按鍵。
+  - 「有效斷言」解讀為不靠模型的程式斷言。錄製條件是步驟通過，而且至少一個非 judge 的斷言成立。只有語意判斷成立、後置條件不成立或動作沒完成，都不錄製。
+  - 因此 `act` 步驟發布時至少要有一個非 judge 的斷言，否則重播時無法不呼叫模型重新檢查。
+  - 只能用在旅程步驟。登入與身分核對要輸入秘密、證明身分，必須是固定操作。目標與參數會交給模型，不能引用秘密。
+  - 錄製的動作描述若含有要遮蔽的值（秘密），不錄製。
+- 理由：
+  - 票 45、46 的 Profile 步驟本身就是寫定的操作，「錄製」它們沒有意義。
+  - 票面的快取身分包含「目標」，GLOSSARY 的 Replay 也說錄製的是「動作」。合理的對象只有由模型即時決定的動作。
+  - judge 的判定由模型做出，不能當成「後續有效斷言」的證明，否則等於快取一次模型的成功。
+- 替代方案：
+  - 快取 judge 的判定結果。這正是票面禁止的「沿用舊成功」。
+  - 錄製整條旅程的操作序列。旅程原本就是固定的，沒有需要模型的部分可以省。
+- 影響：
+  - 需要模型決定動作的旅程寫成 `act`；全部帳號受限或 `no_live_model` 時，有可用錄製的步驟仍能重播。
+  - 正式的動作規劃 Prompt 與解析有單元測試，但沒有以真實帳號實際呼叫過（本票沒有使用任何帳號額度）。
+- 審閱：未審
+
+### AI-432：錄製身分的六個維度與 stale 規則；後置條件不屬於身分，每次重播重新檢查
+- 重要度：高
+- 時間／階段：2026-10-23，票 48 實作
+- 決策：
+  - 錄製以「Workspace + 案例鍵 `<旅程>/<步驟>`」為單位，每個案例一筆，新的錄製取代舊的。
+  - 錄製身分的六個維度都使用 Profile 原文（佔位字代換前，所以 `{{run_id}}` 不會讓錄製失效）：
+    - **case**：旅程、步驟，以及它之前的全部操作（含綁定身分的登入與核對步驟）的雜湊。前面的路徑改變，到達這一步時的畫面就可能不同。
+    - **goal**：目標原文。
+    - **params**：參數的雜湊。
+    - **persona**：persona 的識別與內容，加上登入身分的識別。
+    - **engine**：`BrowserDriver::engine` 回報的值，正式 Runner 是 `playwright <版本> chromium <版本>`，取不到時是 `unknown`。
+    - **data**：資料相容性，即 Profile 的 `replay.dataset`（使用者宣告的資料集版本）與資料準備步驟的雜湊。
+  - stale 規則：
+    - 任何維度不同，就標為 stale（原因 `<維度>_changed`），這次不重播。
+    - 重播時動作沒完成（`action_failed`），或非 judge 的斷言明確不成立，也標為 stale（`postcondition_failed`）。
+    - 環境阻礙、授權阻礙、預算用盡與模型無法判定都不推翻錄製。
+    - stale 的錄製不再沿用，直到同一案例有新的 live 錄製。
+  - 後置條件（步驟的斷言）不列入身分：重播一定重新檢查全部斷言。
+- 理由：
+  - 票面列出「案例、目標、參數、persona、引擎與資料相容性」。
+  - 只要觀察不出錄製的動作錯了，就不該作廢錄製；反過來，任何一個前提改變，舊的成功都不能沿用。
+- 替代方案：
+  - 把 build 或 Profile 版本列入身分。每個 commit 都會讓錄製失效，重播就幾乎用不到。重播本來就會重新檢查後置條件，不需要這麼保守。
+  - 保留錄製歷史（只追加）。Bundle 已經記下每次的錄製與 stale 原因，快取表本身不需要歷史。
+- 影響：
+  - 升級 Playwright 或瀏覽器後，所有錄製都會 stale，需要重新以模型規劃一次。
+  - 資料準備改變或使用者提高 `replay.dataset` 時也一樣。
+- 審閱：未審
+
+### AI-433：目標導向步驟的後置條件不成立是證據不足，不是產品缺陷；重播失敗後同一次驗證不改由模型重做
+- 重要度：中
+- 時間／階段：2026-10-23，票 48 實作
+- 決策：
+  - 判定：`act` 步驟的斷言明確不符時，判定是 `inconclusive`，不是 `product_failure`。live 的原因是 `act_postcondition_failed`，重播的原因是 `replay_postcondition_failed`。
+  - 401／403 與環境問題沿用原本的規則。
+  - 重播失敗後：錄製標為 stale，這一步就此結束，同一次驗證不再呼叫模型重新規劃。下一次驗證會以模型重新規劃。
+- 理由：
+  - 動作是模型或錄製選的，不是 Profile 寫定的操作。後置條件不成立，可能是選錯元素，不足以證明產品壞了（與 AI-419「找不到元素不算產品缺陷」同一個原則）。
+  - 重播的動作已經實際執行過，畫面狀態已經改變，接著再規劃可能在錯的狀態上操作，也可能重複產生副作用。
+- 替代方案：重播失敗時立刻以模型重新規劃（自我修復）。會在被改變過的畫面上動作，副作用也可能重複。
+- 影響：
+  - 要以產品缺陷論斷的檢查要寫成固定操作。
+  - 網站改版後，第一次驗證可能是 `inconclusive`，第二次才會由模型重新錄製。
+- 審閱：未審
+
+### AI-434：no_live_model 是驗證要求的旗標，由 Adapter 換掉模型 Port 並在每次呼叫前擋下
+- 重要度：高
+- 時間／階段：2026-10-23，票 48 實作
+- 決策：
+  - 旗標位置：`no_live_model` 是驗證要求的欄位（`verification_request.no_live_model`）。設定方式有三種：桌面 API 的 `POST …/verification/runs`、Controller 的 `run_verification` 工具，以及驗證頁的勾選框。Gate 重驗自動排入的要求一律是 false。
+  - 強制方式：Adapter 開始時把這次的模型 Port 換成一律拒絕的 `NoLiveModel`，而且每個需要模型的地方（語意判斷、動作規劃）在呼叫前就擋下。
+  - 被擋下的結果：
+    - 語意判斷是 `inconclusive`（`live_model_disabled`，`engine_code` 為 `model:disabled`）。
+    - 沒有可用錄製的 `act` 步驟也是 `live_model_disabled`，不執行任何動作。
+    - 每次擋下都計入 `usage.blocked_model_calls`。
+  - 帶入範圍：Bundle 與驗證要求事件都記下 `no_live_model`。
+- 理由：
+  - 這是執行方式，不是「如何驗證」的描述，不放在 Profile 中。
+  - 票 49 要在全部帳號受限時只跑不需模型的斷言與重播，可以直接設定這個旗標。
+  - 兩道防線讓遺漏的呼叫路徑也到不了模型。
+- 替代方案：
+  - 放在 Profile 或 Workspace 設定。每次切換都要發布新版本，也無法讓票 49 依當下情況決定。
+  - 只在呼叫端檢查。新增的呼叫路徑一旦漏掉檢查，就會呼叫模型。
+- 影響：
+  - `no_live_model` 的驗證中，依賴 judge 的旅程一定不會是 `passed`。
+  - 正式 Port 的其他使用者（目前沒有）不受影響。
+- 審閱：未審
+
+### AI-435：正式環境以 Profile 的 `replay.production` 宣告，錄製預設不重播，步驟可個別允許
+- 重要度：中
+- 時間／階段：2026-10-23，票 48 實作
+- 決策：
+  - Profile 新增 `replay: { production?, dataset? }`。
+  - `production: true` 時，即使錄製有效也不重播，執行前狀態記為 `production_not_replayable`。之後照常由模型規劃（允許時），或在 `no_live_model` 下記為 `live_model_disabled`。
+  - `act` 步驟以 `replay_in_production: true` 個別允許重播。
+  - 錄製本身照常進行。
+- 理由：
+  - 票面規定「正式環境副作用預設不可重播」。
+  - 重播的是動作，平台無法分辨一個點擊有沒有副作用，所以正式環境預設全部不重播，由使用者對確定安全的步驟逐一開放。
+- 替代方案：
+  - 依動作種類推斷副作用（例如只禁止點擊）。輸入與按鍵同樣可能送出表單。
+  - 以網址判斷是否為正式環境。不可靠。
+- 影響：
+  - 對正式環境的 web 驗證在 `no_live_model` 下，`act` 步驟一律不執行。
+  - 新欄位都有預設值，而且不輸出空值，既有 Profile 的內容雜湊不變。
+- 審閱：未審
+
+### AI-436：動作規劃與 judge 共用同一個模型 Port、帳號、預算與限流狀態；只能點擊、輸入或按鍵
+- 重要度：中
+- 時間／階段：2026-10-23，票 48 實作
+- 決策：
+  - Port：`SemanticJudge` 新增 `plan`，不另開 Port。web 驗證的所有即時模型呼叫都經過同一個 Port，`no_live_model` 只需要在一個地方強制。
+  - 帳號：正式實作與 judge 同樣是一次不給工具的 `claude -p`，使用同一個帳號（AI-418 的第一個可派工帳號）。
+  - 預算與限流：與 judge 共用 `budget.max_model_calls`。任一種呼叫遇到限流後，同一次驗證不再呼叫模型（`planner_rate_limited`）。
+  - 輸入：目標、參數、persona，以及這個 Session 最近一次觀察到的畫面（網址、標題、可見文字，已遮蔽，最多 20,000 字）。旅程第一步就是 `act` 時，畫面是空的。
+  - 規劃結果：
+    - 模型只能回 click、fill、press；回 goto、wait_for 或其他種類時，記為 `planner_unavailable`，Adapter 也會再擋一次。
+    - 模型回答目標無法推進時，記為 `act_not_achievable`。
+    - 沒有帳號或回應無法解讀時，記為 `planner_unavailable`。
+  - selector：Prompt 要求依可見文字建立，優先 `role=<role>[name="…"]`，否則 `text=…`。
+  - 引擎值：Playwright 版本取不到時省略版本，引擎記為 `playwright chromium <版本>`。
+- 理由：
+  - 不給 goto 可以避免模型把瀏覽器導到 Profile 沒寫的網址。
+  - judge 的輸入只有可見文字（AI-418），role 與 text selector 不需要 DOM 就能指定元素。
+- 替代方案：
+  - 交給模型 DOM 或無障礙樹。輸入大幅變大，也要另外遮蔽秘密。
+  - 另開 `ActionPlanner` Port。`no_live_model` 要在兩個地方強制。
+- 影響：
+  - 模型看不到 `<input>` 的值與隱藏元素，複雜表單的規劃可能失敗（記為 `inconclusive`）。
+  - 動作規劃的用量與 judge 一樣，不計入額度推估。
+- 審閱：未審
+
+### AI-437：重播的資料形狀、migration 44、用量欄位與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-23，票 48 實作
+- 決策：
+  - migration 44 `verified_action_replay`：
+    - `verification_request.no_live_model`（0／1，預設 0）。
+    - 新表 `replay_action`，以 (workspace_id, case_key) 為主鍵，欄位是 identity、action、status（valid／stale）、stale_reasons、bundle_id、recorded_at、updated_at。CHECK 限制 stale 一定有原因。
+  - 錄製的變更由 `Store::record_evidence_bundle` 依 Bundle 的 `actions` 在同一個交易中套用：有 `recorded` 就取代，否則有 stale 原因就標記。驗證執行時，`PendingVerificationRun.replay` 帶入這個 Workspace 的錄製。
+  - Evidence Bundle 新增三個欄位：
+    - `no_live_model`。
+    - `actions`：每個 `act` 步驟的執行前錄製狀態、來源（live／replay）、實際動作、stale 原因與新錄製。
+    - `usage`：`live_model_calls`、`live_actions`、`replayed_actions`、`blocked_model_calls`。
+  - `BrowserDriver::engine` 是有預設實作的方法，其他實作不需要修改。
+  - UI：驗證頁的執行表單有「不呼叫模型」勾選框；Bundle 檢視分開顯示即時與重播的用量，並列出目標導向動作。驗證頁原本沒有驗證要求清單，所以「不呼叫模型」的標記顯示在送出後的「已排入」訊息中。
+- 理由：
+  - Bundle 是證據的唯一來源，錄製的變更從它推導，就不會出現「Bundle 已保存、錄製沒更新」的狀態。
+- 替代方案：把錄製變更另外傳給 store。多一條需要保持一致的路徑。
+- 影響：
+  - 錄製還沒有清單 UI，也不能手動清除；要讓錄製失效，可以改 `replay.dataset`。
+  - 與同時進行的票 47、49 整合時，migration 與 AI 編號可能需要順延。
+- 審閱：未審
+
+### AI-438：票 48 整合 rebuild/v1（票 49）：AI 編號改為 AI-431～AI-437、migration 改為 44；動作規劃限流也交接
+- 重要度：中
+- 時間／階段：2026-10-23，票 48 整合
+- 決策：
+  - 票 49 已先佔用 AI-425～AI-430 與 migration 43，本票的條目順延為 AI-431～AI-437（原 AI-425～AI-431，內容不變），migration `verified_action_replay` 改為第 44 個，排在 `verification_attempts` 之後；兩邊的 schema 都會套用。
+  - 依 AI-436（動作規劃與 judge 共用帳號與限流狀態），動作規劃（`plan`）收到 `RateLimited` 時也呼叫票 49 的 `hand_off_if_possible`：另有合適帳號就在那個步驟之後交接，由新的嘗試從新的 fixture 重跑這條旅程；沒有時照舊留在原地、之後不呼叫模型。
+  - 其餘衝突都是兩邊各自新增的欄位、函式、UI 區塊與測試，全部並存：Evidence Bundle 同時有 `no_live_model`、`actions`、`usage` 與 `attempts`；`push`／`skip` 依票 49 改為 async，`run_act` 隨之加上 `.await`；`LocalBrowserDriver` 同時有引擎表與 Runtime 實例前綴。
+- 理由：
+  - 只讓 judge 交接、規劃不交接，會讓同一個限流的帳號在規劃時直接判為證據不足，與 AI-436 的「共用限流狀態」不一致。
+- 替代方案：規劃限流不交接，維持票 48 原本的行為。交接機制就只涵蓋一半的模型呼叫。
+- 影響：
+  - Bundle 的 `actions` 與 `usage` 只來自最後一次嘗試：交接前那次嘗試的動作紀錄與用量不計入，從先前嘗試沿用的旅程也沒有動作紀錄，所以那些旅程中被證明的動作這次不錄製（保守：不會錄製未經確認的動作）。同理，那些旅程中重播被推翻而要標為 stale 的錄製這次也不會標記；下次重播仍會實際執行並重新檢查後置條件，到時再標為 stale，不會被當成成功。之後需要跨嘗試的用量或錄製時，要把它們寫入驗證日誌。
+- 審閱：未審
+
+### AI-439：疑點升為 confirmed 的唯一路徑：Runtime 在 Profile 環境中執行重現案例，並以代表旅程當對照
 - 重要度：高
 - 時間／階段：2026-10-23，票 47 實作
 - 決策：
@@ -4089,7 +4258,7 @@
   - 「排除 seed data」只能靠 Profile 的資料準備與 Controller 的分流，Runtime 不另外判斷。
 - 審閱：未審
 
-### AI-432：已確認的缺陷不能排除、降級或換案例；修復後的案例納入每一次一般驗證
+### AI-440：已確認的缺陷不能排除、降級或換案例；修復後的案例納入每一次一般驗證
 - 重要度：高
 - 時間／階段：2026-10-23，票 47 實作
 - 決策：
@@ -4113,7 +4282,7 @@
   - 第一版沒有任何退役回歸案例的途徑，使用者也不行。功能被移除、案例永久無法執行時，該 Workspace 的驗證會一直不通過；需要時另開票，設計由使用者在桌面退役並保留紀錄的流程。
 - 審閱：未審
 
-### AI-433：回歸案例與目前的 Profile 不相容時，以無法自動化的替代旅程執行
+### AI-441：回歸案例與目前的 Profile 不相容時，以無法自動化的替代旅程執行
 - 重要度：中
 - 時間／階段：2026-10-23，票 47 實作
 - 決策：執行一般驗證前，以目前的 Profile 重新檢查每個回歸案例。不相容時改執行只有一個人工步驟的替代旅程，判定為 `automation_unsupported`，說明列出不相容的原因。這次驗證因此不會通過，缺陷狀態不變。不相容的例子：引用的登入身分或秘密已不存在、介面改成 CLI／API 卻含瀏覽器操作。
@@ -4127,7 +4296,7 @@
 - 影響：替代旅程的 `reason_code` 是 `manual_step`，要看步驟說明才知道是不相容；使用者要調整 Profile，讓案例重新可執行。
 - 審閱：未審
 
-### AI-434：排除原因分四種；「預期設計」送裁定，其他三種由 Controller 自主，排除可以重新開啟
+### AI-442：排除原因分四種；「預期設計」送裁定，其他三種由 Controller 自主，排除可以重新開啟
 - 重要度：中
 - 時間／階段：2026-10-23，票 47 實作
 - 決策：
@@ -4146,10 +4315,10 @@
   - 新增一個決策權限事項。要改動權限表、Workspace 收窄設定與 UI。
 - 影響：
   - Controller 可以把真正的缺陷誤排為環境問題。這只適用於尚未重現的疑點，紀錄保留且可以重新開啟。
-  - 已重現確認的缺陷不受影響（AI-432）。
+  - 已重現確認的缺陷不受影響（AI-440）。
 - 審閱：未審
 
-### AI-435：章程由 Controller 定義、只追加版本；上限套用在 Runtime 執行的重現，並交給 Worker 的 Prompt
+### AI-443：章程由 Controller 定義、只追加版本；上限套用在 Runtime 執行的重現，並交給 Worker 的 Prompt
 - 重要度：中
 - 時間／階段：2026-10-23，票 47 實作
 - 決策：
@@ -4167,14 +4336,14 @@
 - 影響：Worker 探索時的步數與成本上限只是指示，Runtime 不會強制。禁止的副作用同樣只交給 Worker，Runtime 不攔截（同 spec 的 Out of Scope：不保證攔截可信專案內部的副作用）。
 - 審閱：未審
 
-### AI-436：探索的工具分工、資料形狀、API、錯誤碼、migration 44 與 UI 位置
+### AI-444：探索的工具分工、資料形狀、API、錯誤碼、migration 45 與 UI 位置
 - 重要度：低
 - 時間／階段：2026-10-23，票 47 實作
 - 決策：
   - Worker 工具：`report_exploration_finding`，只能在自己的 Task 下回報，呼叫者必須仍是寫入所有者。`feature` 必須在目前 Profile 的 Feature Map 中；`evidence` 必須是這個 Workspace 已登記的成果或 Evidence Bundle。
   - Controller 工具：`define_exploration_charter`、`triage_exploration_finding`、`reproduce_exploration_finding`（`task_id` 預設是回報疑點的 Task；驗證修復時可指定修復的 Task）、`get_exploration`。Worker 不能要求重現，同 AI-391。
   - 案例的識別：`finding.<疑點>`。Profile 的旅程識別不能含 `.`，所以不會撞名。
-  - migration 44 `exploration_findings`：`exploration_charter`、`exploration_finding`、`exploration_attempt` 三張表。主鍵是驗證要求加疑點，一個一般驗證要求可以有多個回歸案例。
+  - migration 45 `exploration_findings`：`exploration_charter`、`exploration_finding`、`exploration_attempt` 三張表。主鍵是驗證要求加疑點，一個一般驗證要求可以有多個回歸案例。
   - 事件：
     - 疑點聚合：回報、狀態變更。
     - 重現聚合：`exploration_attempt`，排入是第 1 版，判定是第 2 版。
@@ -4186,7 +4355,9 @@
   - 「finding」已被雙軸審查使用（`review_finding`、`finding_not_found`），所以探索的名稱一律加 `exploration` 前綴。
 - 替代方案：把疑點放進「驗證」頁。驗證頁以 Profile 與 Bundle 為中心，而疑點有自己的狀態與分流。
 - 影響：與同時進行的票整合時，migration 與 AI 編號可能需要順延。
-### AI-437：票 47 整合 rebuild/v1（票 49）：`exploration_findings` 順延為第 44 個 migration、AI 編號改為 AI-431～AI-436
+- 審閱：未審
+
+### AI-445：票 47 整合 rebuild/v1（票 49）：`exploration_findings` 順延為第 44 個 migration、AI 編號改為 AI-431～AI-436
 - 重要度：低
 - 時間／階段：2026-10-23，票 47 實作（R142-47-impl 結束前合併整合分支）
 - 決策：
@@ -4195,6 +4366,29 @@
 - 理由：已合併的 migration 順序與整合分支已有的條目都不能改，只能移動本票的內容。
 - 替代方案：無。
 - 影響：無行為差異；本票的 commit 訊息中的「AI-425～AI-430」指改號前的條目。
+- 審閱：未審
+
+### AI-446：疑點有排隊中的重現時拒絕任何分流（exploration_reproduction_pending）
+- 重要度：中
+- 時間／階段：2026-10-23，票 47 實作（R149-47-fix，修正 R148 驗證指出的缺口）
+- 決策：
+  - 疑點有排隊中（`outcome` 為 NULL）的重現或修復驗證時，`triage_exploration_finding` 的排除、改為未驗風險與重新開啟一律回 409 `exploration_reproduction_pending`。Store 在分流的寫入交易內檢查（與 `reproduce_exploration_finding` 共用同一個查詢），先檢查後寫入之間不會被重現插隊。
+  - API 在送裁定之前也先以疑點的重現紀錄檢查，`expected_design` 不會為注定被拒的排除建立裁定請求。
+  - 錯誤訊息改為「請等結果出來再要求重現或分流」，同時適用重現與分流。
+- 理由：原本重現排隊中可以先排除疑點；結果出來時 `judge_bundle` 只在疑點仍是疑點或未驗風險時才改狀態，Runtime 證實的缺陷就會留在「已排除」，等於以排除標籤掩蓋缺陷。拒絕分流只需一個檢查，比在判定時清掉排除、改寫已排除的疑點簡單，也不會讓 Controller 的排除被靜悄悄推翻。
+- 替代方案：重現結果是 `reproduced` 而疑點已排除時仍升為 confirmed（同一交易內清掉排除）——需要改判定規則、處理已綁定的裁定請求，未採用。只擋排除、不擋改為未驗風險——改為未驗風險在等待重現時沒有意義，一併擋下規則較單純。
+- 影響：Controller 要等重現結果出來才能分流；重現卡在佇列時疑點維持原狀，不會被排除或降級。情境測試 `a_suspicion_cannot_be_triaged_away_while_its_reproduction_is_queued`。
+- 審閱：未審
+
+### AI-447：票 47 整合 rebuild/v1（票 48）：`exploration_findings` 順延為第 45 個 migration、AI 編號改為 AI-439～AI-445
+- 重要度：低
+- 時間／階段：2026-10-23，票 47 實作（R149-47-fix 開始修正後，整合分支併入票 48）
+- 決策：
+  - 票 48 先合併進整合分支，佔用了第 44 個 migration（`verified_action_replay`）與 AI-431～AI-438。本票的 migration 改排在它之後成為第 45 個；本票原 AI-431～AI-436 依序加 8 改編為 AI-439～AI-444、原 AI-437 改為 AI-445（內容保留當時的紀錄），移到票 48 條目之後，條目間的互相引用一併改號。
+  - `verification_profiles.rs` 的衝突：待執行的驗證要求同時帶票 48 的錄製（`replay`）與本票的回歸案例（`augment_pending`）；保存 Evidence Bundle 時依序判定探索重現與更新錄製，兩者都在同一個交易內。`fixtures.ts`、`styles.css` 是兩票各自新增，兩邊都保留。
+- 理由：已合併的 migration 順序與整合分支已有的條目都不能改，只能移動本票的內容。
+- 替代方案：無。
+- 影響：無行為差異；本票先前 commit 訊息中的「AI-431～AI-437」指改號前的條目。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

@@ -98,12 +98,15 @@ pub struct PublishProfileResponse {
 
 /// 要求執行驗證：`task_id` 指定受驗的 Task（在它的工作目錄中驗證並綁定它的契約版本）；
 /// `journeys` 空的時候執行全部旅程。Profile 版本還沒被證明可用時一定包含代表旅程。
+/// `no_live_model` 時這次驗證不呼叫任何即時模型，只執行不需模型的斷言與已驗證動作的重播（票 48）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunVerificationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     #[serde(default)]
     pub journeys: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_live_model: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,7 +180,15 @@ async fn request_run(
     let journeys = request.journeys.into_iter().map(|j| j.trim().to_string()).filter(|j| !j.is_empty()).collect();
     let created = state
         .store
-        .request_verification(workspace_id, task_id, journeys, requested_by, new_id("vreq")?, state.clock.now())
+        .request_verification(
+            workspace_id,
+            task_id,
+            journeys,
+            request.no_live_model,
+            requested_by,
+            new_id("vreq")?,
+            state.clock.now(),
+        )
         .await?;
     state.supervisor_wake.notify_one();
     Ok(created)
