@@ -1300,7 +1300,18 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER decision_approval_use_no_delete BEFORE DELETE ON decision_approval_use
         BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可刪除'); END;",
     },
-    // 專案理解（票 42，第 34 個 migration）：Project Brief、Glossary、Project Map 的項目，每個 Workspace 內以（文件別, 名稱）識別；
+    // 票 30（第 34 個 migration）：Controller 跨帳號交接。conversation 記下沒有可用帳號時的等待原因（下一輪開始時清除）；
+    // controller_run 記下承接換帳號的那一輪的來源帳號、上一輪與原因
+    Migration {
+        name: "controller_handoff",
+        sql: "ALTER TABLE conversation ADD COLUMN wait_code TEXT;
+        ALTER TABLE conversation ADD COLUMN wait_message TEXT;
+        ALTER TABLE conversation ADD COLUMN wait_since INTEGER;
+        ALTER TABLE controller_run ADD COLUMN handoff_from_run_id TEXT REFERENCES controller_run (id);
+        ALTER TABLE controller_run ADD COLUMN handoff_from_profile_id TEXT;
+        ALTER TABLE controller_run ADD COLUMN handoff_reason TEXT;",
+    },
+    // 專案理解（票 42，第 35 個 migration）：Project Brief、Glossary、Project Map 的項目，每個 Workspace 內以（文件別, 名稱）識別；
     // 每一版的完整內容保存在追加式的 event（understanding_item_recorded）。投影檔記下最後寫入（或採用）的雜湊與協調狀態。
     Migration {
         name: "project_understanding",
