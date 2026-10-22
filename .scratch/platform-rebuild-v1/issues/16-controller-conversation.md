@@ -19,4 +19,4 @@ Blocked by: 15, 11
 
 ## Comments
 
-- 2026-10-22 主控：票 37 的 AI-140（原 AI-130，整合時順延）——目前沒有 Controller 憑證，`record_lesson_candidate` 暫時開放給所有 Agent 憑證（Worker 也能提交候選教訓）。本票建立 Controller 角色時，請決定是否收窄到 Controller。
+- 2026-10-22 主控：票 37 的 AI-150（原 AI-130，整合時順延）——目前沒有 Controller 憑證，`record_lesson_candidate` 暫時開放給所有 Agent 憑證（Worker 也能提交候選教訓）。本票建立 Controller 角色時，請決定是否收窄到 Controller。

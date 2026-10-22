@@ -155,6 +155,11 @@
 - **關係**：回應一個 Decision Request；影響受影響 Task 的狀態；被 Context Builder 載入 Run；被 Decision Map 引用而不重複保存；Agent 的建議與人工的 Decision 分開保存。
 - **避免使用**：ruling（動詞「裁定」可用，名詞統一用 Decision）、choice、approval。
 
+### Permission Prompt（權限提示）
+- **定義**：Worker 以非互動權限模式執行時，未預先允許的工具操作經 `permission_prompt` 工具送到 Runtime 的詢問。Runtime 依 Workspace 目前生效的授權判定：範圍內自動允許並記錄；範圍外（含無法歸類）建立一個 Decision Request 並回「等待裁定」。
+- **關係**：由 Worker 在 Run 中提出；對照 Workspace Authorization；範圍外的結果是 `kind = permission` 的 Decision Request，只阻擋提出提示的 Task；使用者回答「允許這一次」只是單次批准（由同一 Task 的同一操作消耗一次），不擴大 Workspace Authorization。
+- **避免使用**：permission request、approval（回答權限提示的結果仍是 Decision）。
+
 ### Lesson
 - **定義**：從事件與證據得出的教訓，保存觸發條件、根因或待驗假說、有效解法、禁用或重試限制、適用版本與重犯紀錄。是種類為「教訓」的 Knowledge Entry，可信狀態同 Knowledge Entry；Agent（Controller）提交的一律是「候選」，須由使用者在「知識」分頁確認才升為「已驗證」；使用者自己建立的直接是已驗證。
 - **關係**：可轉為一個或多個 Guard（可機械化者），或納入相關 Run 的 context（不可機械化者）；範圍分全域、Workspace、Goal、Task，Agent 只能提交 Workspace、Goal 或 Task 範圍，且範圍以它所屬的 Run 決定；只有有效的 Lesson 會被 Agent 搜尋到。錯誤的 Lesson（含被否決的候選）以撤銷處理，保留歷史、不刪除。
