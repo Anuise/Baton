@@ -1840,6 +1840,137 @@ export interface RecoveryClient {
   retryRecovery(): Promise<RecoveryStatusView>;
 }
 
+/** 時間線事件的類別：派工、交接、裁定、恢復、驗證、清理、工作狀態、外部操作、教訓重犯、用量。 */
+export type TimelineCategory =
+  | "dispatch"
+  | "handoff"
+  | "decision"
+  | "recovery"
+  | "verification"
+  | "cleanup"
+  | "task"
+  | "external_operation"
+  | "lesson"
+  | "usage";
+
+/** 時間線上的一個事件（對應 Rust 的 TimelineEntry）；時間是 UTC 毫秒。 */
+export interface TimelineEvent {
+  seq: number;
+  occurred_at: number;
+  category: TimelineCategory;
+  aggregate_type: string;
+  aggregate_id: string;
+  event_type: string;
+  /** 事件相關的 Task；可能是空陣列。 */
+  task_ids: string[];
+  run_id: string | null;
+  payload: unknown;
+}
+
+/** Workspace 的時間線；`events` 依 `seq` 遞增。`task_id` 是過濾條件，未過濾為 null。 */
+export interface TimelineResponse {
+  workspace_id: string;
+  task_id: string | null;
+  events: TimelineEvent[];
+}
+
+/** 比率；`rate` 為 null 代表分母為 0（沒有資料）。 */
+export interface MetricRatio {
+  numerator: number;
+  denominator: number;
+  rate: number | null;
+}
+
+/** 耗時統計；沒有已完成的樣本時平均與最大值為 null。 */
+export interface DurationStats {
+  count: number;
+  /** 尚未結束（仍在等待）的件數。 */
+  pending: number;
+  average_ms: number | null;
+  max_ms: number | null;
+}
+
+export interface TaskCompletionMetrics {
+  completion: MetricRatio;
+  cancelled: number;
+}
+
+export interface HandoffMetrics {
+  success: MetricRatio;
+  abandoned: number;
+  confirmed: number;
+  in_flight: number;
+}
+
+export interface DuplicateOperationMetrics {
+  blocked: number;
+  already_succeeded: number;
+  result_unknown: number;
+  in_progress_elsewhere: number;
+  unknown_outcomes: number;
+}
+
+export interface LessonRecurrenceMetrics {
+  rate: MetricRatio;
+  recurrences: number;
+  prevented: number;
+  reported: number;
+}
+
+/** 一個階段的用量；`stage` 為 null 代表未分階段。 */
+export interface StageUsage {
+  stage: string | null;
+  tokens: number;
+  runs: number;
+}
+
+export interface UsageMetrics {
+  total_tokens: number;
+  runs: number;
+  by_stage: StageUsage[];
+}
+
+export interface ContextMetrics {
+  runs_known: number;
+  runs_unknown: number;
+  average_tokens: number | null;
+  max_tokens: number | null;
+}
+
+/** 觀測指標（對應 Rust 的 Metrics）：全部由時間線事件計算而來。 */
+export interface Metrics {
+  events: number;
+  task_completion: TaskCompletionMetrics;
+  handoff: HandoffMetrics;
+  recovery: DurationStats;
+  duplicate_operations: DuplicateOperationMetrics;
+  decision_wait: DurationStats;
+  lesson_recurrence: LessonRecurrenceMetrics;
+  usage: UsageMetrics;
+  context: ContextMetrics;
+}
+
+/** 帳號的服務端額度（Claude Code 回報的帳號層級已用比例 0–1）；null 代表看不到。 */
+export interface ServerQuota {
+  profile_id: string;
+  name: string;
+  five_hour_used: number | null;
+  seven_day_used: number | null;
+}
+
+export interface MetricsResponse {
+  workspace_id: string;
+  metrics: Metrics;
+  server_quota: ServerQuota[];
+}
+
+/** 時間線與觀測指標（只有桌面憑證能用）。 */
+export interface ObservabilityClient {
+  /** `taskId` 指定時由 Runtime 只回傳該 Task 的事件。 */
+  timeline(workspaceId: string, taskId?: string): Promise<TimelineResponse>;
+  metrics(workspaceId: string): Promise<MetricsResponse>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -1854,6 +1985,7 @@ export type AppClient = RuntimeClient &
   RecoveryClient &
   KnowledgeClient &
   GuardClient &
+  ObservabilityClient &
   ConversationClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
@@ -1889,6 +2021,9 @@ const KNOWLEDGE_PATH = "/api/v1/knowledge";
 const knowledgePath = (id: string) => `${KNOWLEDGE_PATH}/${encodeURIComponent(id)}`;
 const GUARDS_PATH = "/api/v1/guards";
 const guardPath = (id: string) => `${GUARDS_PATH}/${encodeURIComponent(id)}`;
+/** 未指定 Task 時不送出 task_id。 */
+const timelinePath = (workspaceId: string, taskId?: string) =>
+  `${workspacePath(workspaceId)}/timeline${taskId === undefined ? "" : `?task_id=${encodeURIComponent(taskId)}`}`;
 
 /** 列表查詢字串：未指定的 workspace_id 與空白的 q 不送出。 */
 function knowledgeListPath({ workspaceId, q, includeInactive }: KnowledgeListQuery): string {
@@ -2072,6 +2207,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     listRecurrences: (lessonId) => send(`${knowledgePath(lessonId)}/recurrences`),
     reportRecurrence: (lessonId, request) =>
       send(`${knowledgePath(lessonId)}/recurrences`, { method: "POST", body: request }),
+    timeline: (workspaceId, taskId) => send(timelinePath(workspaceId, taskId)),
+    metrics: (workspaceId) => send(`${workspacePath(workspaceId)}/metrics`),
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
@@ -2199,6 +2336,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     disableGuard: (id, expectedRevision) => call<GuardView>("guard_disable", { id, expectedRevision }),
     listRecurrences: (id) => call<RecurrenceList>("knowledge_recurrences", { id }),
     reportRecurrence: (id, request) => call<Recurrence>("knowledge_report_recurrence", { id, request }),
+    timeline: (workspaceId, taskId) => call<TimelineResponse>("workspace_timeline", { workspaceId, taskId }),
+    metrics: (workspaceId) => call<MetricsResponse>("workspace_metrics", { workspaceId }),
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),

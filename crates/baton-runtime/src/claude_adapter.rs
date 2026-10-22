@@ -266,7 +266,7 @@ async fn read_from(path: &Path, offset: u64) -> Vec<u8> {
 /// - `system/init`：原生 Session 識別 → `Started`。
 /// - `assistant`：文字內容 → `Message`。
 /// - `rate_limit_event`：→ `RateLimited`（見 `rate_limits`；`resetsAt` 是秒）。
-/// - `result`：有 `usage` 時先 `UsageReported`；`is_error` 為 false 且 `subtype` 為 `success` → `Exited { success: true }`；
+/// - `result`：有 `usage` 時先 `UsageReported`（Context = 輸入 + 快取建立 + 快取讀取）；`is_error` 為 false 且 `subtype` 為 `success` → `Exited { success: true }`；
 ///   否則先 `Error`（`result` 文字或結束原因）再 `Exited { success: false }`。
 /// - 不是 JSON 的行 → `Error`（輸出被截斷或混入非協定內容）。
 pub fn parse_stream_line(line: &str) -> Vec<AdapterEvent> {
@@ -295,8 +295,11 @@ pub fn parse_stream_line(line: &str) -> Vec<AdapterEvent> {
         Some("rate_limit_event") => value.get("rate_limit_info").map(|info| rate_limits(info, line)).unwrap_or_default(),
         Some("result") => {
             let mut events = Vec::new();
-            if let Some(tokens) = value.get("usage").and_then(usage_tokens) {
-                events.push(AdapterEvent::UsageReported { tokens, raw: line.to_string() });
+            if let Some(usage) = value.get("usage") {
+                if let Some(tokens) = usage_tokens(usage) {
+                    let context_tokens = context_tokens(usage);
+                    events.push(AdapterEvent::UsageReported { tokens, context_tokens, raw: line.to_string() });
+                }
             }
             let is_error = value.get("is_error").and_then(Value::as_bool).unwrap_or(true);
             let subtype = text(&value, "subtype").unwrap_or_default();
@@ -356,6 +359,13 @@ fn usage_tokens(usage: &Value) -> Option<u64> {
     let field = |name: &str| usage.get(name).and_then(Value::as_u64);
     let counted = ["input_tokens", "output_tokens", "cache_creation_input_tokens"].map(field);
     counted.iter().any(Option::is_some).then(|| counted.iter().flatten().sum())
+}
+
+/// 模型讀入的 Context：輸入、快取建立與快取讀取的 token（快取讀取不計入額度推估，但佔用 Context）。
+fn context_tokens(usage: &Value) -> Option<u64> {
+    let field = |name: &str| usage.get(name).and_then(Value::as_u64);
+    let read = ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].map(field);
+    read.iter().any(Option::is_some).then(|| read.iter().flatten().sum())
 }
 
 fn truncate(text: &str) -> String {
@@ -437,7 +447,7 @@ mod tests {
     fn a_successful_result_reports_its_usage_then_ends_the_run_successfully() {
         assert_eq!(
             parse_stream_line(RESULT_OK),
-            [AdapterEvent::UsageReported { tokens: 1_210, raw: RESULT_OK.into() }, AdapterEvent::Exited { success: true }],
+            [AdapterEvent::UsageReported { tokens: 1_210, context_tokens: Some(51_010), raw: RESULT_OK.into() }, AdapterEvent::Exited { success: true }],
             "快取讀取不計入"
         );
     }
@@ -613,7 +623,7 @@ mod tests {
                 transcript(2, ASSISTANT),
                 AdapterEvent::Message { text: "OK".into() },
                 transcript(3, RESULT_OK),
-                AdapterEvent::UsageReported { tokens: 1_210, raw: RESULT_OK.into() },
+                AdapterEvent::UsageReported { tokens: 1_210, context_tokens: Some(51_010), raw: RESULT_OK.into() },
                 AdapterEvent::Exited { success: true },
             ]
         );

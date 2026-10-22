@@ -997,6 +997,48 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版讀取時間線與觀測指標：task_id 以 URL 編碼放在查詢字串，未指定時不送出", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.timeline("ws/1");
+    await client.timeline("ws_1", "task 1&x");
+    await client.metrics("ws_1");
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/workspaces/ws%2F1/timeline"],
+      ["/api/v1/workspaces/ws_1/timeline?task_id=task%201%26x"],
+      ["/api/v1/workspaces/ws_1/metrics"],
+    ]);
+  });
+
+  it("HTTP 版時間線的 Task 不屬於 Workspace 時保留 Runtime 的說明與錯誤代碼", async () => {
+    const body = { error: "task_not_found", message: "找不到 Task：task_9" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 404 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .timeline("ws_1", "task_9")
+      .catch((e: unknown) => e);
+
+    expect((error as Error).message).toBe("找不到 Task：task_9");
+    expect(errorCode(error)).toBe("task_not_found");
+  });
+
+  it("Tauri 版以 workspace_timeline 與 workspace_metrics 指令讀取時間線與觀測指標", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.timeline("ws_1");
+    await client.timeline("ws_1", "task_1");
+    await client.metrics("ws_1");
+
+    expect(invoke.mock.calls).toEqual([
+      ["workspace_timeline", { workspaceId: "ws_1", taskId: undefined }],
+      ["workspace_timeline", { workspaceId: "ws_1", taskId: "task_1" }],
+      ["workspace_metrics", { workspaceId: "ws_1" }],
+    ]);
+  });
+
   const basis = { run_id: "run_1", generation: 2, contract_version: 3, artifacts: [{ artifact_id: "art_1", version: 1 }] };
 
   it("HTTP 版讀取驗證資料與手動接受：接受時以 JSON 送出 basis 與附註", async () => {

@@ -698,8 +698,8 @@ impl Supervisor {
                 let observation = baton_domain::quota::observe_signal(profile_id, run_id, &signal, now);
                 self.store.record_quota_signal(observation).await
             }
-            AdapterEvent::UsageReported { tokens, raw } => {
-                self.store.record_quota_usage(profile_id.to_string(), run_id.to_string(), tokens, raw, now).await
+            AdapterEvent::UsageReported { tokens, context_tokens, raw } => {
+                self.store.record_quota_usage(profile_id.to_string(), run_id.to_string(), tokens, context_tokens, raw, now).await
             }
             _ => return,
         };

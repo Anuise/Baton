@@ -17,7 +17,7 @@ use baton_api::{
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
-    RecoveryStatusView,
+    RecoveryStatusView, MetricsResponse, TimelineResponse,
 };
 use baton_client::{
     ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, Connection, DispatchOutcome,
@@ -1011,6 +1011,28 @@ async fn knowledge_recurrences(link: State<'_, RuntimeLink>, id: String) -> Resu
     link.client.lesson_recurrences(&id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 的時間線分頁：Workspace 的事件時間線，可依 Task 過濾。
+#[tauri::command]
+async fn workspace_timeline(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: Option<String>,
+) -> Result<TimelineResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.timeline(&workspace_id, task_id.as_deref()).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的時間線分頁：由事件計算的觀測指標與服務端額度。
+#[tauri::command]
+async fn workspace_metrics(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<MetricsResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.metrics(&workspace_id).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 回報一次沒被 Guard 攔下的重犯。
 #[tauri::command]
 async fn knowledge_report_recurrence(
@@ -1100,7 +1122,9 @@ fn main() {
             guard_enable,
             guard_disable,
             knowledge_recurrences,
-            knowledge_report_recurrence
+            knowledge_report_recurrence,
+            workspace_timeline,
+            workspace_metrics
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {
