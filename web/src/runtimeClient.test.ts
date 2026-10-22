@@ -1231,7 +1231,7 @@ describe("Runtime 用戶端", () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);
     const definition = { interface: "cli_api", journeys: [], feature_map: [] };
-    const request = { task_id: "task_1", journeys: ["smoke"] };
+    const request = { task_id: "task_1", journeys: ["smoke"], no_live_model: true };
 
     await client.verificationOverview("ws/1");
     await client.publishVerificationProfile("ws_1", definition);

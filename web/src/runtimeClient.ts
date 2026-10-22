@@ -2460,7 +2460,12 @@ export type VerificationBrowserAction =
   | { kind: "click"; selector: string }
   | { kind: "fill"; selector: string; text: string }
   | { kind: "press"; selector: string; key: string }
-  | { kind: "wait_for"; selector: string };
+  | { kind: "wait_for"; selector: string }
+  /**
+   * 目標導向動作（票 48）：模型依當前畫面、目標與參數決定一個具體動作；只能用在旅程步驟，至少要有一個不靠模型的斷言。
+   * replay_in_production：Profile 宣告為正式環境時仍允許重播這個步驟的錄製。
+   */
+  | { kind: "act"; goal: string; params?: Record<string, string>; replay_in_production?: boolean };
 
 /** 程式斷言（對應 Rust 的 Assertion）。 */
 export type VerificationAssertion =
@@ -2552,6 +2557,8 @@ export interface VerificationProfileDefinition {
   secrets?: VerificationSecretRef[];
   personas?: VerificationPersona[];
   identities?: VerificationIdentity[];
+  /** 錄製與重播的政策（票 48）：production 時錄製預設不重播；dataset 是資料集版本，改變時之前的錄製都是 stale。 */
+  replay?: { production?: boolean; dataset?: string };
 }
 
 /** Profile 的一個不可變版本（對應 Rust 的 ProfileVersion）。 */
@@ -2667,8 +2674,53 @@ export interface EvidenceBundle {
   cleanup: VerificationCleanup;
   /** 截圖、trace 與錄影；依 bundle 中的位置（從 0 起）以 evidenceArtifact 讀取內容。 */
   artifacts: EvidenceArtifact[];
+  /** 這次驗證禁止即時模型呼叫（票 48）；只有 true 時出現。 */
+  no_live_model?: boolean;
+  /** 目標導向動作的來源與錄製的處理（票 48）；空的時候省略。 */
+  actions?: ActionRecord[];
+  /** 即時模型與重播分開計算的用量（票 48）；舊資料可能沒有，視為 0。 */
+  usage?: VerificationUsage;
   started_at: number;
   finished_at: number;
+}
+
+/** 錄製身分（對應 Rust 的 ReplayIdentity）：案例、目標、參數、persona、引擎與資料相容性。 */
+export interface ReplayIdentity {
+  case: string;
+  goal: string;
+  params: string;
+  persona: string;
+  engine: string;
+  data: string;
+}
+
+/** 一個目標導向動作的紀錄（對應 Rust 的 ActionRecord）。 */
+export interface ActionRecord {
+  journey: string;
+  step: string;
+  goal: string;
+  /** 執行前錄製的狀態。 */
+  cache: "none" | "valid" | "stale" | "mismatch" | "production_not_replayable";
+  /** 實際執行的動作來源；省略表示這次沒有執行任何動作。 */
+  source?: "live" | "replay";
+  /** 實際執行的具體動作描述（已遮蔽）。 */
+  action?: string;
+  /** 這次把錄製標為 stale 的原因，例如 engine_changed、postcondition_failed。 */
+  stale_reasons?: string[];
+  /** 這次錄製的動作；有值表示這次錄製了新的動作。 */
+  recorded?: { identity: ReplayIdentity; action: VerificationBrowserAction };
+}
+
+/** 一次驗證的用量（對應 Rust 的 VerificationUsage）：即時模型與重播分開計算。 */
+export interface VerificationUsage {
+  /** 實際呼叫模型的次數（語意判斷與動作規劃）。 */
+  live_model_calls: number;
+  /** 由模型即時決定並執行的動作。 */
+  live_actions: number;
+  /** 重播錄製而執行的動作（沒有呼叫模型）。 */
+  replayed_actions: number;
+  /** no_live_model 擋下、沒有呼叫的模型呼叫。 */
+  blocked_model_calls: number;
 }
 
 /** 證據 Artifact（對應 Rust 的 EvidenceArtifact）；沒有保存時 withheld 記下原因。 */
@@ -2709,6 +2761,8 @@ export interface VerificationRequest {
   status: "queued" | "completed";
   bundle_id: string | null;
   created_at: number;
+  /** 不呼叫任何即時模型（票 48）。 */
+  no_live_model: boolean;
 }
 
 /** Workspace 的驗證概況（對應 Rust 的 VerificationOverviewView）。 */
@@ -2735,6 +2789,8 @@ export interface PublishProfileResponse {
 export interface RunVerificationRequest {
   task_id?: string;
   journeys: string[];
+  /** 這次驗證不呼叫任何即時模型（票 48）；只有 true 時才送。 */
+  no_live_model?: boolean;
 }
 
 /** Verification Profile 與 CLI／API 驗證（Profile 只有使用者能從桌面發布）。 */
