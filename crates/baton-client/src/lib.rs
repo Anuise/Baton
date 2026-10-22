@@ -9,8 +9,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    ErrorBody, HealthResponse, PlatformResponse, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH,
+    CreateWorkspaceRequest, ErrorBody, HealthResponse, PlatformResponse, WorkspaceList, CLIENT_HEADER,
+    CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, WORKSPACES_PATH,
 };
+use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
 
@@ -66,22 +68,46 @@ impl RuntimeClient {
         self.get_json(PLATFORM_PATH).await
     }
 
+    /// 列出全部 Workspace（含已封存）。
+    pub async fn workspaces(&self) -> Result<WorkspaceList, ClientError> {
+        self.get_json(WORKSPACES_PATH).await
+    }
+
+    /// 以使用者選擇的目錄建立 Workspace。
+    pub async fn create_workspace(&self, request: &CreateWorkspaceRequest) -> Result<Workspace, ClientError> {
+        self.send_json(reqwest::Method::POST, WORKSPACES_PATH, Some(request)).await
+    }
+
+    pub async fn archive_workspace(&self, id: &str) -> Result<Workspace, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &format!("{WORKSPACES_PATH}/{id}/archive"), None).await
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
+        self.send_json::<(), T>(reqwest::Method::GET, path, None).await
+    }
+
+    async fn send_json<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<T, ClientError> {
         let token = baton_credential::read_desktop_credential(&self.data_dir, &*self.protector)?;
         let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
         // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
-        let response = reqwest::Client::builder()
+        let mut request = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(300))
             .build()
             .map_err(unreachable)?
-            .get(format!("http://{}{path}", self.addr))
+            .request(method, format!("http://{}{path}", self.addr))
             .bearer_auth(token)
             .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-            // reqwest 的錯誤訊息只含 URL（不含憑證，憑證在標頭裡）
-            .map_err(unreachable)?;
+            .timeout(Duration::from_secs(2));
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        // reqwest 的錯誤訊息只含 URL（不含憑證，憑證在標頭裡）
+        let response = request.send().await.map_err(unreachable)?;
 
         if response.status().is_success() {
             return response.json().await.map_err(unreachable);

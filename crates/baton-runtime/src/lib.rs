@@ -51,8 +51,8 @@ impl Runtime {
         if !config.bind.ip().is_loopback() {
             return Err(RuntimeError::NotLoopback(config.bind));
         }
-        let store = Store::open(&config.data_dir).await?;
         let started_at = ports.clock.now();
+        let store = Store::open(&config.data_dir, started_at).await?;
         let boot_count = store.record_boot(started_at).await?;
         let log = log::open_log(&config.data_dir, ports.clock.clone()).map_err(RuntimeError::Log)?;
 
@@ -75,6 +75,7 @@ impl Runtime {
             store: store.clone(),
             clock: ports.clock.clone(),
             platform_info: ports.platform_info.clone(),
+            workspace_fs: ports.workspace_fs.clone(),
             log,
             shutdown: stop_rx.clone(),
         });

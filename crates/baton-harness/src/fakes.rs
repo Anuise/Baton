@@ -212,6 +212,10 @@ impl FakeWorkspaceFs {
 
 #[async_trait]
 impl WorkspaceFs for FakeWorkspaceFs {
+    async fn inspect_directory(&self, path: &Path) -> PortResult<DirectoryState> {
+        baton_ports::directory_state(path)
+    }
+
     async fn create_worktree(&self, _repo: &Path, _branch: &str, target: &Path) -> PortResult<()> {
         tokio::fs::create_dir_all(target).await.map_err(|e| PortError::Failed(e.to_string()))?;
         lock(&self.worktrees).insert(target.to_path_buf());

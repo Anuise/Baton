@@ -1,6 +1,6 @@
 //! 正式執行環境使用的 Port。
 //!
-//! 目前只有系統時鐘、平台辨識與 DPAPI 憑證保護是真實實作；其餘 Port 的正式版由後續的票提供，
+//! 目前只有系統時鐘、平台辨識、DPAPI 憑證保護與目錄檢查是真實實作；其餘 Port 的正式版由後續的票提供，
 //! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
 
 use std::path::Path;
@@ -58,19 +58,25 @@ impl QuotaObserver for Unavailable {
     }
 }
 
+/// 本機檔案系統的 WorkspaceFs：目前只有目錄檢查是真實實作，其餘由後續的票補上。
+pub struct LocalWorkspaceFs;
+
 #[async_trait]
-impl WorkspaceFs for Unavailable {
+impl WorkspaceFs for LocalWorkspaceFs {
+    async fn inspect_directory(&self, path: &Path) -> PortResult<DirectoryState> {
+        baton_ports::directory_state(path)
+    }
     async fn create_worktree(&self, _repo: &Path, _branch: &str, _target: &Path) -> PortResult<()> {
-        Err(PortError::NotImplemented("WorkspaceFs"))
+        Err(PortError::NotImplemented("WorkspaceFs::create_worktree"))
     }
     async fn remove_worktree(&self, _target: &Path) -> PortResult<()> {
-        Err(PortError::NotImplemented("WorkspaceFs"))
+        Err(PortError::NotImplemented("WorkspaceFs::remove_worktree"))
     }
     async fn inspect_dirty(&self, _target: &Path) -> PortResult<DirtyState> {
-        Err(PortError::NotImplemented("WorkspaceFs"))
+        Err(PortError::NotImplemented("WorkspaceFs::inspect_dirty"))
     }
     async fn write_artifact_atomic(&self, _path: &Path, _bytes: &[u8]) -> PortResult<()> {
-        Err(PortError::NotImplemented("WorkspaceFs"))
+        Err(PortError::NotImplemented("WorkspaceFs::write_artifact_atomic"))
     }
 }
 
@@ -82,7 +88,7 @@ pub fn production_ports() -> Ports {
         process_control: unavailable.clone(),
         agent_adapter: unavailable.clone(),
         quota_observer: unavailable.clone(),
-        workspace_fs: unavailable.clone(),
+        workspace_fs: Arc::new(LocalWorkspaceFs),
         platform_info: Arc::new(WindowsPlatformInfo),
         // DPAPI 是真實實作：桌面憑證檔一定要受保護
         secret_protector: Arc::new(baton_credential::DpapiProtector),

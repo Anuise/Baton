@@ -1,26 +1,28 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! 目前有健康狀態、平台狀態、Workspace 管理端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
 
 mod guard;
+mod workspaces;
 
 use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
-use baton_ports::{Clock, PlatformInfo};
+use baton_ports::{Clock, PlatformInfo, WorkspaceFs};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
+pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
 /// 健康端點路徑。
 pub const HEALTH_PATH: &str = "/api/v1/health";
@@ -75,6 +77,7 @@ pub struct ApiState {
     pub store: Store,
     pub clock: Arc<dyn Clock>,
     pub platform_info: Arc<dyn PlatformInfo>,
+    pub workspace_fs: Arc<dyn WorkspaceFs>,
     pub log: LogSink,
     /// Runtime 開始停止時變成 `true`；長連線（串流）據此結束，優雅停止才不會被它們卡住。
     pub shutdown: watch::Receiver<bool>,
@@ -86,6 +89,8 @@ pub fn router(state: ApiState) -> Router {
         .route(HEALTH_PATH, get(health))
         .route(PLATFORM_PATH, get(platform_status))
         .route(EVENTS_PATH, get(events))
+        .route(WORKSPACES_PATH, get(workspaces::list).post(workspaces::create))
+        .route(workspaces::ARCHIVE_ROUTE, post(workspaces::archive))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

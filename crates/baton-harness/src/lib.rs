@@ -18,7 +18,7 @@ use baton_api::{CLIENT_HEADER, CLIENT_HEADER_VALUE};
 use baton_domain::auth::Role;
 use baton_domain::Timestamp;
 use baton_ports::Ports;
-use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig};
+use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
 
@@ -27,8 +27,12 @@ pub use fakes::FakePorts;
 /// 預設的 fake 時鐘起點（任意固定值，避免與真實時間混淆）。
 const DEFAULT_CLOCK_START: Timestamp = Timestamp::from_millis(1_000_000_000_000);
 
+/// 在 Runtime 第一次啟動之前整理資料目錄的函式（例如放入較新版本的資料庫）。
+type PrepareDataDir = Box<dyn FnOnce(&Path)>;
+
 pub struct HarnessBuilder {
     clock_start: Timestamp,
+    prepare: Option<PrepareDataDir>,
 }
 
 impl HarnessBuilder {
@@ -37,11 +41,25 @@ impl HarnessBuilder {
         self
     }
 
+    /// Runtime 第一次啟動之前，先對資料目錄做準備。
+    pub fn prepare_data_dir(mut self, prepare: impl FnOnce(&Path) + 'static) -> Self {
+        self.prepare = Some(Box::new(prepare));
+        self
+    }
+
     pub async fn start(self) -> Harness {
+        self.try_start().await.unwrap_or_else(|e| panic!("Runtime 啟動失敗：{e}"))
+    }
+
+    /// 啟動；Runtime 拒絕啟動時回傳錯誤（測試「啟動被拒絕」的情境用）。
+    pub async fn try_start(self) -> Result<Harness, RuntimeError> {
         let data_dir = tempfile::tempdir().expect("無法建立暫存資料目錄");
+        if let Some(prepare) = self.prepare {
+            prepare(data_dir.path());
+        }
         let fakes = FakePorts::new(self.clock_start);
-        let runtime = start_runtime(data_dir.path(), &fakes.to_ports()).await;
-        Harness { data_dir, fakes, runtime: Some(runtime), http: reqwest::Client::new() }
+        let runtime = try_start_runtime(data_dir.path(), &fakes.to_ports()).await?;
+        Ok(Harness { data_dir, fakes, runtime: Some(runtime), http: reqwest::Client::new() })
     }
 }
 
@@ -63,7 +81,7 @@ impl Deref for Harness {
 
 impl Harness {
     pub fn builder() -> HarnessBuilder {
-        HarnessBuilder { clock_start: DEFAULT_CLOCK_START }
+        HarnessBuilder { clock_start: DEFAULT_CLOCK_START, prepare: None }
     }
 
     /// 以預設設定啟動。
@@ -138,20 +156,51 @@ impl Harness {
         response.json().await.expect("回應不是預期的 JSON")
     }
 
+    /// 對目前 Runtime 發出已帶桌面憑證的請求，回傳狀態碼與 JSON 本文（無本文時為 `Null`）；
+    /// 不論成功與否都不會讓測試失敗，由測試自行斷言。
+    pub async fn send_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> (reqwest::StatusCode, serde_json::Value) {
+        let mut request = self
+            .request(method, path)
+            .bearer_auth(self.desktop_credential())
+            .header(CLIENT_HEADER, CLIENT_HEADER_VALUE);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.expect("HTTP 請求失敗");
+        let status = response.status();
+        let bytes = response.bytes().await.expect("無法讀取回應");
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// 以唯讀方式直接開啟控制資料庫，檢查實際落地的內容（不經過 Runtime）。
+    pub fn db(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open_with_flags(
+            self.data_dir.path().join(baton_store::DB_FILE_NAME),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("無法開啟控制資料庫")
+    }
+
     /// 模擬重啟：丟棄目前的 Runtime，保留資料目錄與 fake，重新建立。
     pub async fn restart(&mut self) {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown().await;
         }
-        self.runtime = Some(start_runtime(self.data_dir.path(), &self.fakes.to_ports()).await);
+        let runtime = try_start_runtime(self.data_dir.path(), &self.fakes.to_ports()).await;
+        self.runtime = Some(runtime.unwrap_or_else(|e| panic!("Runtime 重啟失敗：{e}")));
     }
 }
 
-async fn start_runtime(data_dir: &Path, ports: &Ports) -> RunningRuntime {
+async fn try_start_runtime(data_dir: &Path, ports: &Ports) -> Result<RunningRuntime, RuntimeError> {
     let config = RuntimeConfig {
         data_dir: data_dir.to_path_buf(),
         // 埠 0 讓作業系統配置；每個 Harness 與每次重建都不會互相衝突
         bind: "127.0.0.1:0".parse().expect("固定位址"),
     };
-    Runtime::start(config, ports.clone()).await.expect("Runtime 啟動失敗")
+    Runtime::start(config, ports.clone()).await
 }
