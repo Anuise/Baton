@@ -44,7 +44,7 @@ interface Props {
   timeZone?: string;
 }
 
-const COLUMNS: [TaskStatus, string][] = [
+export const COLUMNS: [TaskStatus, string][] = [
   ["pending", "待處理"],
   ["ready", "可派工"],
   ["running", "執行中"],

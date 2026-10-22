@@ -1243,7 +1243,97 @@
 - 影響：測試失敗時的 backtrace 只有函式名稱、沒有行號；每次建置都是非增量，第一次編譯時間不變、反覆修改時較慢。
 - 審閱：未審
 
-### AI-138：確定性檢查放在契約內，第一版三種：命令結束碼、工作目錄內檔案、Task 成果
+### AI-138：權限提示的判定是保守的詞法判定；範圍外或看不懂一律建立裁定請求
+- 重要度：高
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：`permission_prompt` 先把「工具名稱＋輸入」歸類成 Workspace 授權的能力（`baton_domain::permission`），再對照**目前生效（最新）的授權 revision**：(1) 檔案工具（Read／Glob／Grep／LS → 讀取；Edit／MultiEdit／Write／NotebookEdit → 編輯）的路徑必須落在該能力的授權目標目錄內（詞法正規化：不分大小寫、斜線方向、`.`／`..`；相對路徑以 Workspace 目錄為基準；`..` 逃出根目錄、`~` 開頭、UNC 與其他磁碟都算範圍外），寫入 `.git` 一律範圍外（授權限制「不修改 Git 歷史」）；(2) WebFetch 只允許公開 http／https（本機、內網、IPv6 字面位址都算範圍外），WebSearch 需要「讀取公開網頁」；(3) Bash 只認一小張白名單（`cargo`／`npm`／`pnpm`／`yarn`／`pytest`／`go`／`dotnet` 的建置、測試、安裝子命令，`git status|diff|log|show`、`git add|commit`、`git push`），含任何 shell 組合語法（`; & | < > \` $ ( ) { } * ?`、換行）的指令、未知子命令、不認得的程式一律無法歸類；指令以 bash 規則斷詞（去掉引號；引號不成對、反斜線緊接引號一律無法歸類；判斷旗標前去掉反斜線，所以 `'--amend'`、`\-\-amend` 都認得），**每個子命令只接受白名單內的旗標**，其他旗標一律無法歸類——例如 `git commit --amend|--fixup|--squash|-C|--reset-author`、`git diff|log|status --output|-o`、`git -C …`、`git push --force` 與 `+分支`／`:分支` refspec、`npm|pnpm|yarn|bun --prefix|-C|--dir`、`cargo --manifest-path|-Z|--config|--target-dir`；帶值旗標的值不可以 `-` 開頭；`-g`、`--global`、`--global=…`、`-g=…`、`--location=global`、`--location global` 一律歸為「全域安裝」（`--global=false` 也是，保守處理）；指令參數中像路徑的字詞（含 `/`、`\`、磁碟代號或以 `.`、`~` 開頭）必須在 Workspace 目錄內（檔案能力則對照授權目錄），否則範圍外；(4) 未知工具、缺少必要欄位、尚未確認任何授權，全部範圍外；(5) 路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`）；只剩點與空白的元件、磁碟代號以外含 `:` 的元件（NTFS 替代資料流，例如 `.git::$INDEX_ALLOCATION`）、`\\?\`／`\\.\` 裝置路徑都視為無法正規化而算範圍外；8.3 短檔名 `GIT~n` 視同 `.git`。範圍外建立裁定請求並回「等待裁定」，不是回傳錯誤。（第 (3) 項的旗標白名單與第 (5) 項由修正 run R041 依驗證報告 R038 補上。）
+- 理由：D-08 要求「授權範圍內自動允許並記錄，範圍外建立裁定請求」，而且 Worker 可能被提示注入；把「看不懂」當成範圍外才不會讓組合指令（`cargo test && curl … | sh`）借白名單前綴溜進去。用最新 revision 而不是 Run 准入時的 revision，是因為使用者收窄授權後，仍在跑的 Worker 不應該繼續沿用舊的寬鬆授權。
+- 替代方案：真的解析 shell 語法（Windows 的 cmd、PowerShell、bash 語法都不同，錯一個就是漏洞）；用 Run 准入時固定的 revision（擴權安全、收權不安全）；把無法歸類的操作直接拒絕而不問使用者（Worker 卡住且使用者看不到任何東西）。
+- 影響：保守的代價是 Worker 常用的 `cargo test 2>&1 | tail`、`ls`、`cat`、`curl` 這類指令每次都會變成裁定請求；使用者可用「允許這一次」，或日後把常見指令加進白名單／在 Adapter 的預先允許清單（票 14）列出。詞法判定不解析符號連結，授權目錄內指向外部的連結不會在這裡被攔下（Workspace 目錄本來就不是安全邊界，ADR-0002）。Adapter 預先允許的工具清單與 `--permission-prompt-tool` 參數屬票 14，這裡只定義 Runtime 端的判定。
+- 審閱：未審
+
+### AI-139：範圍外的權限提示只有兩個選項；「允許這一次」是單次批准，且由同一 Task 的同一操作消耗一次
+- 重要度：高
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：權限提示建立的裁定請求固定兩個選項 `allow_once`（允許這一次）與 `deny`（拒絕），**沒有**「永遠允許」或「擴大授權」選項；高風險能力或無法歸類的操作建議 `deny`，其餘不給建議。使用者回答之後，**同一個 Task** 再次提出**同一個操作**（工具名稱＋輸入的指紋相同）時，這次提示消耗那個批准：`allow_once` → 回 allow（`status: approved`），`deny` → 回 deny（`status: denied`），消耗紀錄存在追加式的 `decision_approval_use`，每個請求最多消耗一次；消耗之後再提示同一個操作要重新裁定。同一個 Task 對同一個操作在請求仍待處理時重複提示，回到既有請求（不重複建立）。
+- 理由：回答權限提示若沒有人消耗答案，Task 恢復後 Worker 會再被問到一次、無限循環；單次批准對應 spec 的「E1 單次批准」，也維持「Agent 不能擴大授權」。把 `deny` 也消耗一次，讓 Worker 能得到明確的拒絕理由，而不是又被無限期擱置。
+- 替代方案：回答後永遠記住（等於偷偷擴大授權，且沒有失效機制）；只記錄答案、不消耗（Worker 無法得知結果）；批准綁 Run 而不是 Task（Task 恢復後一定是新的 Run，批准會永遠用不到）。
+- 影響：批准以 Task 為界，Task 取消後批准自然失效；擴大 Workspace 授權仍只能由使用者在授權設定頁做。使用者想永久放行某類操作要去改授權。
+- 審閱：未審
+
+### AI-140：裁定請求對 Task 與 Run 的影響：只有 `running` 的 Task 進入 `waiting_decision`，Run 不結束；恢復條件是「沒有其他待處理請求」
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：(1) 請求建立時，只有提出請求的 Run 所屬的 Task 在 `running` 時才轉成 `waiting_decision`（`blocking` 欄位記下受影響的 Task，Agent 提出的請求目前永遠只有那一個 Task）；Task 已是別的狀態（例如 `blocked`）時請求照常建立，Task 不動。(2) **Run 不因此結束**（與 AI-90 的 `report_blocked` 一致）：Worker 依 D-08 保存 checkpoint 後自行結束，或繼續做不需要這項裁定的事；Run 結束時 Task 不在 `running`，所以不會被拉到 `verifying` 或 `ready`。(3) 回答時，每個 `blocking` 的 Task 只有在「仍是 `waiting_decision`，而且沒有任何其他待處理請求也阻擋它」時才回到 `ready`；已取消或已離開 `waiting_decision` 的 Task 不動。(4) 只有仍是 execution lease 持有者的 Run 能提出請求（沿用 `is_current_writer`），已結束或被接替的 Run 提出請求回 409 `run_report_stale`，不建立任何東西。(5) 回到 `ready` 的 Task 在**同一個交易**重新排進派工佇列（`dispatch_request`，優先序 0、`requested_at` 是裁定時間；已在佇列中的保留原位置），之後由 Scheduler 派出：Supervisor 每次處理都會排程佇列，回答的 API 也會立刻叫醒 Supervisor。舊 Run 若還活著、還持有 execution lease，排程判定為 `execution_conflict`，Task 留在佇列（等待原因歸「狀態不明」）而不是被丟掉；舊 Run 結束後的下一次排程派出新的 Run。不必有人再按派工。
+- 理由：D-08／使用者故事 55 的「恢復排程」＝Task 回到 `ready` 並交回 Scheduler，而不是由裁定直接啟動程序（程序只能由 Supervisor 啟動，I3；准入與容量檢查仍由 Scheduler 做）。票 19 的 Scheduler 只處理佇列內的 Task、派出時就移出佇列，所以只把 Task 改成 `ready` 不會被自動派出，必須重新排隊（原本「由票 19 的 Scheduler 看到 `ready` 後處理」的前提與實作不符，由修正 run R041 依驗證報告 R038 改正）。多個請求阻擋同一個 Task 時只回答其中一個就恢復，會讓 Worker 帶著未解決的問題重新開工。
+- 替代方案：裁定時直接派工（繞過准入與容量檢查）；Run 提出請求時一併結束 Run（Worker 要做收尾，Domain 沒有「Worker 自述結束」的路徑）；每個請求獨立恢復 Task（上述問題）；讓 Scheduler 自動派出所有 `ready` 的 Task（會讓失敗的 Run 無限重派，違反 AI-96）。
+- 影響：`waiting_decision` 的 Task 在使用者沒有回答之前不會有任何出口（取消除外）；回答之後自動恢復，是 AI-96「Task 回到 `ready` 不會自動重新排隊」的唯一例外。原本派工的優先序沒有保存，恢復時一律用預設值 0。Controller 專屬的 `propose_decision_request`（可阻擋多個 Task）屬票 16、17，Domain 的 `blocking` 已經是清單，不需要改資料模型。
+- 審閱：未審
+
+### AI-141：逾時不是同意——期限只標示「已逾期」，沒有任何因時間而發生的狀態變化
+- 重要度：高
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：`request_decision` 可帶 `deadline_minutes`（1 分鐘到 30 天，從 Runtime 的 Clock 起算，存成 UTC 時間）；請求的投影帶 `overdue`（待處理且現在超過期限）。**沒有任何命令或背景處理會因為時間流逝而回答請求、放行權限提示或讓 Task 恢復**；逾期後使用者仍可回答，回答才會恢復 Task。權限提示建立的請求沒有期限。測試涵蓋：推進 fake Clock 數天、重啟 Runtime、再次 supervise，請求仍是 pending、Task 仍是 `waiting_decision`；同一個權限提示放三天後仍回「等待裁定」。
+- 理由：使用者故事 55「我的沉默不會變成授權」是安全邊界，不是可調參數；把「逾期」做成純顯示欄位，可以保證沒有程式路徑能把時間當成同意。
+- 替代方案：逾期自動採用建議選項或自動拒絕（前者是沉默即同意；後者會讓 Task 無人知曉地失敗，也需要新的狀態）；逾期把請求標為 expired（spec 的 expired／superseded 屬完整裁定中心，見 AI-143）。
+- 影響：Agent 看不到使用者的期限壓力以外的任何回饋；使用者錯過的請求會一直留在待處理清單（以緊急程度與建立時間排序，逾期者有標示）。
+- 審閱：未審
+
+### AI-142：裁定的資料結構、交易邊界與喚醒 Outbox
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：(1) migration 15（`decision_request_and_decision`，排在票 18 的 `message_and_delivery`（migration 14）之後）新增 `decision_request`（只能從 `pending` 改成 `answered`，其餘欄位由觸發器鎖住、不可刪除）、`decision_request_block`（阻擋範圍）、`decision`（追加式，`decided_by` 以 CHECK 限定為 `desktop`，所以連程式寫錯也寫不進非桌面的裁定）、`decision_approval_use`（追加式）。(2) 回答在**同一個交易**寫入裁定、請求狀態、受影響 Task 的狀態與事件、喚醒 Outbox。(3) 喚醒 Outbox 的 `kind` 是 `decision_wake:<請求識別>`（Outbox 的唯一鍵是 `(kind, run_id)`，同一個 Run 可以提出多個請求，所以種類帶上請求識別；沒有改既有資料表），`run_id` 是提出請求的 Run，內容有 Workspace、請求、選項、阻擋的與實際恢復的 Task。**本票沒有消費者**：Controller 的事件迴圈（票 16 之後）會讀它，`delivered_at` 保持空白。(4) 事件：請求聚合 `decision_request`（v1 `decision_requested`、v2 `decision_answered`、v3 `permission_approval_used`），自動允許的權限提示每筆一個獨立聚合 `permission_audit`（`permission_auto_allowed`，內容含 Run、Task、工具、摘要、能力與授權 revision；不節流）。(5) 回答同樣的選項重送是冪等的（200、不再追加任何東西）；不同的選項回 409 `decision_already_answered`；未知選項 400 `decision_option_unknown`；請求內容無效 400 `decision_invalid`。
+- 理由：「裁定已存、Task 還卡住」的中間狀態不能被觀察到（驗收條件）；不改 Outbox 的唯一鍵可避免與同時進行的票互相衝突；稽核事件與狀態變更同交易才能保證記錄與實際行為一致。
+- 替代方案：用新的 `wake` 資料表（多一張沒有消費者的表）；重建 Outbox 表移除唯一鍵（動到其他票也在使用的表）；自動允許只記日誌（日誌可被輪替、不在備份範圍，也不能和 Run 關聯查詢）。
+- 影響：自動允許每次都追加事件，讀取密集的 Worker 會讓事件表成長較快，需要之後的清理／彙總策略（與事件表清理一併處理）；`decision_wake` 項目在 Controller 票實作前會累積。
+- 審閱：未審
+
+### AI-143：本票的裁定中心只做最小版本，其餘留給「裁定中心完整功能」
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：本票做：Agent 以 `request_decision` 提出、權限提示轉接、待處理清單與單筆詳情、單筆回答、受影響 Task 恢復、喚醒 Outbox、狀態列與導覽的待處理數。**不做**（spec 第三階段的完整裁定中心）：`expected_revision` 校驗與 `superseded`／過期標記、批次回答、相似請求合併或互相連結、`goal_revision`、決策權限表（D-15）的強制檢查、Decision 的適用範圍／有效期間／supersedes、Controller 專屬的 `propose_decision_request`。選項限制：2–8 個、識別限英數字與底線連字號；問題 500、原因 1000、選項名稱 200、取捨 500、證據最多 10 項各 500 字元、備註 1000 字元。Agent 工具另外去重：同一個 Run 對同一個問題在仍待處理時重複提出，回到既有請求並標示 `existing: true`。
+- 理由：票面與 spec 第 214 行都限定第一階段只需「建立請求、顯示、單筆回答、喚醒工作」；長度與選項數量的上限避免 Agent 用超大內容塞滿裁定畫面。
+- 替代方案：一次做完整裁定中心（範圍遠超出本票，且依賴尚未存在的 Goal revision、Context Builder）。
+- 影響：Decision 目前只保存「選了哪個選項與備註」，Context Builder（票 15、28）要載入決策時從 `decision` 與請求讀取；完整版會在同一組資料表上追加欄位或新表，不需要重建。
+- 審閱：未審
+
+### AI-144：Agent 工具與權限提示回應的形狀（遵循 Claude Code 的 permission-prompt 協定，待票 14 驗證）
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：新增兩個 Agent 工具：`request_decision`（欄位 `question`、`reason`、`options[{id,label,tradeoff?}]`、`recommendation?`、`evidence?`、`urgency?`、`deadline_minutes?`；回 `{decision_request_id, status: "waiting_decision", existing, message}`）與 `permission_prompt`（欄位 `tool_name`、`input`，可另帶 `tool_use_id`；回 `{behavior: "allow"|"deny", updatedInput?, message?, status, decision_request_id?, authorization_revision?}`）。回應遵循 Claude Code `--permission-prompt-tool` 的形狀（`behavior`／`updatedInput`／`message`），允許時原樣帶回輸入；等待裁定與拒絕都是 HTTP 200 的 `behavior: "deny"`（MCP 結果不是 `isError`），`status` 區分 `auto_allowed`、`approved`、`waiting_decision`、`denied`。Agent API 沒有任何回答或批准的工具；桌面 API 一律在 `/api/v1/` 下，Agent 憑證被 guard 擋成 403 `role_not_allowed`。桌面端點：`GET workspaces/{id}/decisions`、`GET …/decisions/{rid}`、`POST …/decisions/{rid}/answer`（`{option_id, note?}`）、全域 `GET /api/v1/decisions/pending`。
+- 理由：沿用已知協定可讓票 14 的 Adapter 直接把 `permission_prompt` 指給 `--permission-prompt-tool`；`deny` 不用 `isError` 是因為它是正常的協定回覆，不是工具故障。
+- 替代方案：自訂回應格式再由 shim 轉換（多一層轉換就多一處可能不一致）。
+- 影響：**Validation Required（票 14，以真實 Claude Code 驗證）**：(a) CLI 是否接受 `behavior` 之外的額外欄位、是否要求 `updatedInput` 一定存在；(b) 收到 `deny` 的 Worker 是否真的能繼續做其他步驟而不重試相同操作；(c) 被阻擋的權限提示是否需要 `tool_use_id` 才能對應。若與協定衝突，只需要修改 `PermissionResponse` 的序列化，Domain 判定不受影響。前端的 Tauri 指令名稱（`decision_list`／`decision_detail`／`decision_answer`／`decisions_pending`）與 HTTP 路徑一一對應。
+- 審閱：未審
+
+### AI-145：票 22 整合 rebuild/v1（票 12、08、27）：migration 與 AI 編號順延、衝突合併方式
+- 重要度：低
+- 時間／階段：2026-10-22，票 22 實作（修正 run R041）
+- 決策：整合分支在本票開發期間先後併入票 12（`artifact`，migration 11）、票 08（`shared_settings_version`，migration 12）與票 27（`quota`，migration 13），所以票 22 的 migration `decision_request_and_decision` 由第 11 個順延為第 14 個，排在最後；彼此互不參照。票 22 的 AI 編號由 AI-103～AI-109 順延為 AI-138～AI-144，修正 run 新增的條目是 AI-145、AI-146；內容不變，開發指南的引用同步改號；整合分支既有條目不動。其餘衝突一律兩邊都保留：API 路由、Tauri 指令、MCP 工具清單（共 7 個）、`AppClient` 的各組用戶端、側欄入口（「裁定」與「成果與驗證」並列）、開發指南的 crate 表與測試清單。
+- 理由：不可修改整合分支已有的 migration 與 AI 條目；這幾張票的功能彼此獨立。
+- 替代方案：合併 migration（已套用的開發資料庫會漏掉其中一部分）。
+- 影響：無行為變更。
+- 審閱：未審
+
+### AI-146：修正 R038 的判斷：以 bash 斷詞、旗標白名單擴及全部指令、指令參數的路徑檢查、恢復時的優先序
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作（修正 run R041）
+- 決策：(1) 權限提示的指令以 **bash** 規則斷詞（Claude Code 在 Windows 上的 Bash 工具由 Git Bash 執行）；各 shell 解讀不一致的寫法（反斜線緊接引號、引號不成對）一律無法歸類，而不是猜一種解讀。(2) 驗證報告只點名 git、npm 家族、cargo；同樣的「旗標白名單」也套用到 pip、pytest、tsc、vitest、jest、go、dotnet，因為它們有同類的旗標（`go build -o`、`tsc --outDir`、`pip --target`）。(3) 指令參數裡像路徑的字詞必須在 Workspace 目錄內（`pytest C:\other`、`npm install ../外部套件`）；commit 訊息、測試篩選這類自由文字旗標的值不檢查。(4) 寫入時 `GIT~n`（`.git` 的 8.3 短檔名）視同 `.git`。(5) 裁定後重新排隊的優先序一律是 0（原本派工的優先序沒有保存；要保存得在 `run` 或 Task 加欄位，超出本次修正）。(6) AI-138、AI-140 是本票自己尚未審閱的條目，依驗證報告的要求直接修正內容並註明來源，不另開取代條目。
+- 理由：保守判定的原則（AI-138）是「看不懂就問」；只修報告點名的旗標，同類的繞過仍會存在。
+- 替代方案：只修報告點名的項目（其他工具有一樣的漏洞）；自行完整解析 bash、cmd、PowerShell 語法（錯一個就是漏洞）；保存原本派工的優先序（要改資料表）。
+- 影響：白名單外的常用旗標（例如 `git log --format=…`、`pnpm --filter web test`、`cargo +nightly`）現在也會變成裁定請求；使用者可「允許這一次」，常用的再逐步加進白名單。
+- 審閱：未審
+
+### AI-147：票 22 整合 rebuild/v1（票 18）：migration 第 15 版、AI 編號再順延、MCP 工具合成 9 個
+- 重要度：低
+- 時間／階段：2026-10-22，票 22 整合（run R053-22-integrate）
+- 決策：整合分支先併入票 18，佔用了 migration 14（`message_and_delivery`）與 AI-128～AI-134，另有 AI-137；所以票 22 的 migration `decision_request_and_decision` 由第 14 個順延為第 15 個，排在最後，兩者互不參照、都會套用。票 22 的 AI-128～AI-136 順延為 AI-138～AI-146（內容只改編號與 migration 序號），開發指南的引用同步改號；整合分支既有條目不動。其餘衝突一律兩邊都保留：Domain 的工具常數與模組、Store 的模組與匯出、API 路由（`request_decision`、`permission_prompt`、`send_message`、`read_inbox` 並存）、MCP shim 的工具定義與已知工具清單（共 9 個），shim 情境測試兩邊的 schema 斷言與轉送測試都保留，工具數的斷言由 7 改為 9（測試名稱改為 `tools_list_has_the_nine_tools_with_their_required_fields`）。
+- 理由：不可修改整合分支已有的 migration 與 AI 條目；兩張票的功能彼此獨立。
+- 替代方案：合併 migration（已套用的開發資料庫會漏掉其中一部分）；把票 22 的條目放在 AI-135、AI-136 的空號（整合分支跳過這兩號的原因不明，且本票有 9 個條目放不下）。
+- 影響：無行為變更。
+- 審閱：未審
+
+### AI-148：確定性檢查放在契約內，第一版三種：命令結束碼、工作目錄內檔案、Task 成果
 - 重要度：高
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：契約內容新增 `verification_checks`（與 `required_capabilities` 一樣隨契約版本保存，屬「完成與驗證條件」的機械可判定部分），最多 20 項，三種：(1) `command`：在受驗 Run 的工作目錄執行（不經過 shell），結束碼等於 `expected_exit_code`（預設 0）；(2) `file`：工作目錄內的相對路徑是存在的檔案，可選 `sha256`；(3) `artifact`：這個 Task 有這個名稱的成果，最新版本的檔案與 manifest 雜湊一致，可選 `sha256`。儲存契約時驗證（路徑不可含 `..`、磁碟代號、從根目錄開始；雜湊必須是 64 個十六進位字元並轉成小寫；成果名稱沿用成果登記的檔名規則），不合規回 400 `contract_invalid`。沒有宣告任何檢查不影響准入（`done_criteria` 文字仍必填），這種 Task 只能由使用者手動接受。Worker 的提示（`render_prompt`）會列出宣告的檢查。命令逾時 10 分鐘、被終止、無法啟動、檔案讀不到，一律判定「未通過」，不另分「環境故障」。
@@ -1252,7 +1342,7 @@
 - 影響：契約 JSON 多一個欄位（舊資料沒有這欄時視為空陣列）。暫時性的環境問題（例如工具一時不在 PATH）會讓 Task 回到 ready，需要使用者重新派工；細分判定留給票 45～50。
 - 審閱：未審
 
-### AI-139：驗證命令以使用者身分在工作目錄執行；契約目前只能由桌面憑證寫入
+### AI-149：驗證命令以使用者身分在工作目錄執行；契約目前只能由桌面憑證寫入
 - 重要度：高
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：新增 `CommandRunner` Port。正式版 `LocalCommandRunner` 以子程序直接執行（`CREATE_NO_WINDOW`、stdin 為 NUL、stdout／stderr 收集後保留結尾 16 KiB，證據再取結尾 4000 字元），逾時就丟棄等待並以 `kill_on_drop` 終止直接啟動的程序；**不放進 Job Object**，命令自己再開的子孫程序可能殘留。檔案檢查以 `WorkspaceFs::read_workspace_file` 讀取，只擋路徑字面上的逃逸，不處理工作目錄內指向外部的符號連結或 junction。命令輸出以 UTF-8 解讀（非 UTF-8 主控台輸出會變成替代字元）。
@@ -1261,7 +1351,7 @@
 - 影響：**Controller 的 `update_task`／`propose_task` 工具（票 17）若能寫入 `verification_checks`，等於讓 Agent 決定 Runtime 以使用者身分執行的命令**；屆時必須經過裁定或授權（D-15「修改完成條件或驗收標準」本來就必須送裁定）。
 - 審閱：未審
 
-### AI-140：成果接受交易的三項校驗與「受驗 Run」的定義
+### AI-150：成果接受交易的三項校驗與「受驗 Run」的定義
 - 重要度：高
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：受驗 Run = 該 Task 世代最大的 Run，而且它已 `succeeded`；沒有這樣的 Run 就沒有可接受的對象。接受基礎（basis）= 受驗 Run 的識別與世代、Task 目前的契約版本、成果 manifest（每個成果最新版本的 `artifact_id`＋版本）。自動檢查與手動接受都經同一個 Domain 判定（`verification::decide`）在單一寫入交易中校驗：Run 或世代不符 → 409 `acceptance_run_stale`；契約版本與檢視時不同，或不等於 Run 派工時的版本 → 409 `acceptance_contract_stale`；manifest 不同 → 409 `acceptance_manifest_stale`；拒絕時什麼都不寫。契約在 Run 派工後被改版時，Supervisor 不執行檢查，直接記一筆「未通過」（`note` 寫明版本），Task 回到 `ready`。資料庫另以唯一索引保證同一個 Run 最多一筆紀錄、同一個 Task 最多一筆「通過」。
@@ -1270,7 +1360,7 @@
 - 影響：手動接受的請求必須帶回檢視時的 `basis`（UI 原樣送回）。契約在 verifying 時被修改會讓這次成果作廢並需要重新派工。
 - 審閱：未審
 
-### AI-141：檢查未通過 Task 回到 ready，不自動重派；沒有「手動駁回」
+### AI-151：檢查未通過 Task 回到 ready，不自動重派；沒有「手動駁回」
 - 重要度：中
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：任何一項檢查未通過，Task 從 `verifying` 回到 `ready`（「可修正狀態」），證據（每項檢查的結果、輸出結尾、manifest）保存在驗證紀錄並顯示在工作面板。不自動放回派工佇列（沿用 AI-66、AI-96：沒有重試預算前不自動重派），也不計入任何預算（票 36）。重新派工時 Worker 的提示不含上次的失敗證據（Context Builder 屬票 39）。本票不提供「手動駁回」：沒有宣告檢查而成果不理想時，只能取消 Task 或修改契約。
@@ -1279,7 +1369,7 @@
 - 影響：失敗後要使用者再按一次派工；新的 Worker 不知道上次為什麼沒通過，直到票 39 把驗證紀錄放進 context。
 - 審閱：未審
 
-### AI-142：手動接受只記錄桌面憑證指紋；允許在自動檢查進行中手動接受
+### AI-152：手動接受只記錄桌面憑證指紋；允許在自動檢查進行中手動接受
 - 重要度：中
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：`POST …/tasks/{task_id}/verification/accept` 屬管理 API，guard 只接受桌面憑證（Agent 憑證 403、無憑證 401）。接受者記為「桌面憑證雜湊的前 16 個十六進位字元」，寫進驗證紀錄與事件 `task_verification_recorded` 的 `accepted_by`，不記錄憑證本身。宣告了檢查的 Task 也可以手動接受（使用者優先）；與 Supervisor 的檢查結果競態時，先提交者生效，後者因 Task 已不是 verifying 而被拒絕，只留日誌。附註最多 1000 字元。
@@ -1288,7 +1378,7 @@
 - 影響：目前只有一個桌面使用者，`accepted_by` 只能區分「哪一次啟動的桌面 App」；多使用者不在範圍內。
 - 審閱：未審
 
-### AI-143：驗證是 Supervisor 的最後一步；背景迴圈另開工作執行；崩潰後重新執行檢查
+### AI-153：驗證是 Supervisor 的最後一步；背景迴圈另開工作執行；崩潰後重新執行檢查
 - 重要度：中
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：Supervisor 新增「驗證」步驟（在排程之後），找出 `verifying`、有受驗 Run、契約宣告了檢查（或契約已改版）的 Task，在交易外逐項取得事實，再以成果接受交易提交。背景迴圈把這一步放在另一個 tokio 工作執行（`verify_lock` 保證同時只有一輪），長時間的檢查不擋住啟動、取消與 lease 核對；`Supervisor::tick`（harness 的 `supervise()`）則等它做完，測試保持決定性。檢查途中 Runtime 崩潰時沒有任何紀錄，重啟後**重新執行全部檢查**（命令若有副作用會被執行兩次）。驗證結果寫入失敗（儲存層錯誤）時下一輪也會重新執行。
@@ -1297,16 +1387,16 @@
 - 影響：完全退出（票 25）需要一併停止進行中的驗證命令；目前 Runtime 停止時只靠 `kill_on_drop`。
 - 審閱：未審
 
-### AI-144：驗證紀錄的資料模型與 API 形狀（migration 15）
+### AI-154：驗證紀錄的資料模型與 API 形狀（migration 16）
 - 重要度：低
 - 時間／階段：2026-10-22，票 13 實作
-- 決策：migration 15 `task_verification`（排在票 08 的 `shared_settings_version`、票 27 的 `quota`、票 18 的 `message_and_delivery` 之後）：識別、Workspace、Task、受驗 Run（唯一）、世代、契約版本、方式（`checks`／`manual`）、結果（`passed`／`failed`）、`evidence`（JSON：每項檢查結果、manifest、接受者、附註）、時間；觸發器禁止更新與刪除；部分唯一索引限制每個 Task 最多一筆 `passed`。端點：`GET …/tasks/{task_id}/verification`（`VerificationView`：basis、宣告的檢查、manifest、`automatic`、歷次紀錄）、`POST …/verification/accept`（`{ basis, note? }`）。工作面板 `GET …/tasks` 多回傳 `verifications`。Tauri 指令 `task_verification`、`task_accept`。驗證紀錄識別為 `ver_` 加 96 位元隨機值。
+- 決策：migration 16 `task_verification`（排在票 08 的 `shared_settings_version`、票 27 的 `quota`、票 18 的 `message_and_delivery`、票 22 的 `decision_request_and_decision` 之後）：識別、Workspace、Task、受驗 Run（唯一）、世代、契約版本、方式（`checks`／`manual`）、結果（`passed`／`failed`）、`evidence`（JSON：每項檢查結果、manifest、接受者、附註）、時間；觸發器禁止更新與刪除；部分唯一索引限制每個 Task 最多一筆 `passed`。端點：`GET …/tasks/{task_id}/verification`（`VerificationView`：basis、宣告的檢查、manifest、`automatic`、歷次紀錄）、`POST …/verification/accept`（`{ basis, note? }`）。工作面板 `GET …/tasks` 多回傳 `verifications`。Tauri 指令 `task_verification`、`task_accept`。驗證紀錄識別為 `ver_` 加 96 位元隨機值。
 - 理由：沿用 AI-74、AI-105 的追加式表與路徑慣例；把證據放在 JSON 欄位，避免為每項檢查另開一張表。
 - 替代方案：每項檢查一列（查詢單項較方便，但目前沒有這種查詢）。
-- 影響：本票原本是第 12 個 migration，整合 rebuild/v1（票 08、27）時順延為第 14 個，再整合票 18 時順延為第 15 個（見 AI-146）；以本票分支（合併前）建立過的開發資料庫需刪除重建。
+- 影響：本票原本是第 12 個 migration，整合 rebuild/v1（票 08、27）時順延為第 14 個，再整合票 18 時順延為第 15 個（見 AI-156），再整合票 22 時順延為第 16 個（見 AI-158）；以本票分支（合併前）建立過的開發資料庫需刪除重建。
 - 審閱：未審
 
-### AI-145：契約編輯器以文字行宣告檢查，路徑與名稱不能含空白
+### AI-155：契約編輯器以文字行宣告檢查，路徑與名稱不能含空白
 - 重要度：低
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：Web UI 契約編輯器的「確定性檢查」每行一項：`command: 程式 引數…`（預期結束碼 0）、`command[n]: …`（預期結束碼 n，可為負數）、`file: 相對路徑 [sha256]`、`artifact: 成果名稱 [sha256]`；引數以空白分隔、不支援引號，所以路徑、成果名稱與引數都不能含空白；大寫雜湊自動轉小寫；解析錯誤在送出時顯示且不送出；路徑是否在工作目錄內由 Runtime 判定。驗證失敗時 UI 只重新讀取驗證資料、不區分 409 的種類。
@@ -1315,22 +1405,31 @@
 - 影響：需要含空白的路徑時只能直接呼叫 API。
 - 審閱：未審
 
-### AI-146：票 13 整合 rebuild/v1（票 18）：migration 第 15 版、AI 編號順延
+### AI-156：票 13 整合 rebuild/v1（票 18）：migration 第 15 版、AI 編號順延
 - 重要度：中
 - 時間／階段：2026-10-22，票 13 修正（R054-13-fix）
-- 決策：rebuild/v1 已合併票 18（`message_and_delivery`，第 14 版），本票的 `task_verification` 順延為第 15 個 migration，排在 `message_and_delivery` 之後；本票的決策由 AI-128～AI-135 順延為 AI-138～AI-145（整合分支已用到 AI-137），移到 AI-137 之後，內容不變，只把 AI-144 的 migration 編號改為 15 並在影響加註這次順延。`docs/development.md` 驗證紀錄段落的 migration 編號同步改為 15。其他檔案（API 路由、Domain 模組、GLOSSARY）由 git 自動合併，兩邊新增的內容都保留。
+- 決策：rebuild/v1 已合併票 18（`message_and_delivery`，第 14 版），本票的 `task_verification` 順延為第 15 個 migration，排在 `message_and_delivery` 之後；本票的決策由 AI-128～AI-135 順延為 AI-138～AI-145（整合分支已用到 AI-137；R054 再整合票 22 時順延為 AI-148～AI-155，本條為 AI-156，見 AI-158），移到 AI-137 之後，內容不變，只把 AI-144（現為 AI-154）的 migration 編號改為 15 並在影響加註這次順延。`docs/development.md` 驗證紀錄段落的 migration 編號同步改為 15。其他檔案（API 路由、Domain 模組、GLOSSARY）由 git 自動合併，兩邊新增的內容都保留。
 - 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。驗證紀錄表只參照 `workspace`、`task`、`run`，與訊息表互不相依，先後順序不影響 schema。
 - 替代方案：把本票的 migration 插在 `message_and_delivery` 之前（會改動整合分支已存在的版本號，已套用的開發資料庫會錯位）。
 - 影響：以本票分支（合併前）建立過的開發資料庫需刪除重建。
 - 審閱：未審
 
-### AI-147：封存的 Workspace 中，verifying 的 Task 不再自動驗證
+### AI-157：封存的 Workspace 中，verifying 的 Task 不再自動驗證
 - 重要度：中
 - 時間／階段：2026-10-22，票 13 修正（R054-13-fix）
 - 決策：`verification::pending_check` 在 Workspace 已封存（或不存在）時回傳 `None`，所以 Supervisor 的驗證步驟不再為它執行確定性檢查，`VerificationView.automatic` 也是 `false`。封存 API 仍不檢查 Task 狀態；這種 Task 會停在 `verifying`，因為成果接受交易（自動與手動）都以 `workspace_archived` 拒絕。
 - 理由：驗證 R051 發現封存後 `decide()` 一定拒絕提交，但待驗證清單沒排除封存的 Workspace，背景迴圈每秒重跑一次契約宣告的命令（每次最長 10 分鐘、可能有副作用）。在判定「是否待檢查」的同一個 Domain 函式排除，面板顯示與 Supervisor 行為就一致。
 - 替代方案：封存 API 拒絕有 verifying Task 的 Workspace（改變 Workspace 封存的既有語意，超出本票）；封存時把 verifying 的 Task 改回 ready 或取消（多一條狀態轉移與事件，沒有要求）；允許封存後仍接受成果（與「封存後不再變更」的既有規則衝突）。
 - 影響：若之後提供「取消封存」，這些 Task 會重新成為待驗證項目並照常執行檢查。
+- 審閱：未審
+
+### AI-158：票 13 整合 rebuild/v1（票 22）：migration 第 16 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 13 修正（R054-13-fix）
+- 決策：R054 修正期間 rebuild/v1 合併了票 22（`decision_request_and_decision`，第 15 版，AI-138～AI-147），本票的 `task_verification` 順延為第 16 個 migration；本票的條目由 AI-138～AI-147 順延為 AI-148～AI-157，移到整合分支的 AI-147 之後，內容不變，只更新 AI-154 的 migration 編號與 AI-154、AI-156 中互相引用的編號。衝突合併方式：API 路由、前端 `TaskClient`／`DecisionClient` 型別與 HTTP／Tauri 用戶端、Tauri 的 `baton_api` 匯入、`App.test.tsx` 的假用戶端都兩邊保留；`docs/development.md` 的 crate 表以整合分支的列為準，再加回本票的 `verification.rs`、`CommandRunner`、`task_verification`、「成果接受」，驗證紀錄段落的 migration 編號改為 16。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布。驗證紀錄表與裁定表都只參照 `workspace`、`task`、`run`，互不相依，順序不影響 schema。
+- 替代方案：把本票的 migration 插在裁定表之前（會改動整合分支已存在的版本號）。
+- 影響：以本票分支（合併前）建立過的開發資料庫需刪除重建。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

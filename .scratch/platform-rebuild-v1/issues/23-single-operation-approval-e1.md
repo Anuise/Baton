@@ -1,6 +1,6 @@
 # 23: 單次例外批准（E1）
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R057-23-impl，2026-10-22 17:21）
 Blocked by: 22
 
 **What to build:** 裁定介面區分「允許本次操作」與「修改 Workspace 授權」；E1 批准綁定單一邏輯操作識別、目標資源、重要參數、要求雜湊與成果版本，執行時再核對；改變任何一項不能沿用；操作完成後不可重用。修改 Workspace 授權須顯示新增能力與影響並明確確認。

@@ -2,6 +2,7 @@ import type {
   AccountProfile,
   AccountRun,
   AccountScheduling,
+  DecisionRequestView,
   ImportPreview,
   PlatformResponse,
   QuotaAssessment,
@@ -109,6 +110,35 @@ export function setupStatus(overrides: Partial<SetupStatus> = {}): SetupStatus {
     profile_limit: 8,
     background_notice: { text: "關閉視窗後，Baton 會在背景繼續執行已派出的工作。", acknowledged_at: null },
     ready: true,
+    ...overrides,
+  };
+}
+
+/** 測試用的裁定請求：pending 的 Agent 請求，有兩個選項與一個被阻擋的 Task。 */
+export function decisionView(overrides: Partial<DecisionRequestView> = {}): DecisionRequestView {
+  return {
+    id: "dec_1",
+    workspace_id: "ws_1",
+    run_id: "run_1",
+    task_id: "task_1",
+    task_title: "整理文件",
+    kind: "agent",
+    status: "pending",
+    question: "要保留舊的目錄結構嗎？",
+    reason: "兩種做法都符合契約，需要使用者決定",
+    options: [
+      { id: "keep", label: "保留", tradeoff: "不影響既有連結，但結構較亂" },
+      { id: "restructure", label: "重整", tradeoff: null },
+    ],
+    recommendation: "keep",
+    evidence: ["docs/ 底下有 12 個檔案", "README 引用了舊路徑"],
+    urgency: "normal",
+    deadline_at: null,
+    overdue: false,
+    blocking: [{ task_id: "task_1", task_title: "整理文件", task_status: "waiting_decision" }],
+    permission: null,
+    created_at: CHECKED_AT,
+    decision: null,
     ...overrides,
   };
 }
