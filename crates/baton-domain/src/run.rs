@@ -1147,7 +1147,7 @@ pub fn legacy_runs(runs: &[Run], tasks: &[Task], revisions: &[authorization::Aut
         .collect()
 }
 
-/// 給 Worker 的最小提示：標題與六項契約（Context Builder 由後續的票加入，屆時取代這個函式）。
+/// Prompt 的 Task 契約部分：標題與六項契約。其餘部分由 Store 在同一個派工交易中以 Context Builder（`context`）補上。
 fn render_prompt(title: &str, content: &ContractContent) -> String {
     let mut prompt = format!("Task：{title}");
     for name in ContractFieldName::ALL {
