@@ -65,6 +65,9 @@ pub struct PageSnapshot {
     pub status: Option<u16>,
     /// 畫面上可見的文字。
     pub text: String,
+    /// 輸入欄位（input、textarea，含開放的 shadow DOM）目前的值；畫面會顯示它們，但不在 `text` 中。
+    /// 只用來偵測畫面是否顯示秘密，不交給斷言或 judge。密碼與隱藏欄位不顯示值，不列入。
+    pub fields: Vec<String>,
     /// 依 `BrowserStep::visible` 的順序。
     pub visible: Vec<bool>,
     /// PNG 截圖（有要求時）。

@@ -1811,6 +1811,7 @@ impl BrowserDriver for FakeBrowserDriver {
             title: page.title.clone(),
             status: state.status,
             text: page.text.clone(),
+            fields: Vec::new(),
             visible: step.visible.iter().map(|s| page.visible.contains(s)).collect(),
             screenshot,
         };

@@ -193,9 +193,9 @@ struct Screenshot {
     shows_secret: bool,
 }
 
-/// 畫面（網址、標題、文字）是否顯示了任何要遮蔽的值。
+/// 畫面（網址、標題、文字、輸入欄位的值）是否顯示了任何要遮蔽的值。
 fn shows_secret(page: &PageSnapshot, policy: &EvidencePolicy) -> bool {
-    [&page.url, &page.title, &page.text].iter().any(|t| redact(t, policy) != **t)
+    [&page.url, &page.title, &page.text].into_iter().chain(&page.fields).any(|t| redact(t, policy) != *t)
 }
 
 /// 只遮蔽、不截斷（judge 的輸入需要完整的畫面文字）。
@@ -1171,4 +1171,27 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         started_at,
         finished_at,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_only_in_an_input_value_counts_as_shown_on_the_page() {
+        // 最終 review #24：秘密只出現在輸入欄位的值、不在畫面文字中，畫面仍然顯示了它
+        let policy = EvidencePolicy { redact: vec!["tok-1234".into()], ..EvidencePolicy::default() };
+        let page = PageSnapshot {
+            url: "http://127.0.0.1/settings".into(),
+            title: "設定".into(),
+            status: Some(200),
+            text: "API 設定".into(),
+            fields: vec!["alice".into(), "tok-1234".into()],
+            visible: Vec::new(),
+            screenshot: None,
+        };
+        assert!(shows_secret(&page, &policy));
+        let clean = PageSnapshot { fields: vec!["alice".into()], ..page };
+        assert!(!shows_secret(&clean, &policy));
+    }
 }
