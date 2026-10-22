@@ -155,6 +155,7 @@
 | R151-review-a | — | review | Work-3 | 2026-10-23 03:46 | 2026-10-23 03:59 | DONE |
 | R152-review-b | — | review | Work-8 | 2026-10-23 03:46 | 2026-10-23 03:59 | DONE |
 | R153-review-c | — | review | Work-9 | 2026-10-23 03:46 | 2026-10-23 03:59 | DONE |
-| R154-fix-a | final-a | final-fix | Work-3 | 2026-10-23 03:59 | | |
+| R154-fix-a | final-a | final-fix | Work-3 | 2026-10-23 03:59 | 2026-10-23 04:59 | DONE（修 33 項，未修 6 項附 AI 決策） |
 | R155-fix-b | final-b | final-fix | Work-8 | 2026-10-23 03:59 | | |
 | R156-fix-c | final-c | final-fix | Work-9 | 2026-10-23 03:59 | | |
+| R157-final-verify-a | final-a | final-verify | Work-3 | 2026-10-23 04:59 | | |
