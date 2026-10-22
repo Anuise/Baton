@@ -185,6 +185,7 @@ fn playbook_id(key: &str, version: i64) -> String {
 }
 
 /// 發布一個 Playbook 版本（內容與最新版本相同時不追加），回傳 (目前的最新版本, 是否新增)。
+/// 使用者發布的版本追加事件；啟動時登錄的內建版本不追加（版本列本身就是不可變的紀錄）。
 fn publish_in(
     tx: &Transaction<'_>,
     definition: PlaybookDefinition,
@@ -200,7 +201,9 @@ fn publish_in(
         None => Ok((latest.cloned().expect("沒有新增表示已有最新版本"), false)),
         Some((playbook, event)) => {
             insert_playbook(tx, &playbook)?;
-            append_event(tx, &event)?;
+            if origin == Origin::User {
+                append_event(tx, &event)?;
+            }
             Ok((playbook, true))
         }
     }
@@ -405,7 +408,7 @@ pub(crate) fn worker_stage_item(conn: &Connection, task_id: &str) -> rusqlite::R
 }
 
 impl Store {
-    /// 啟動時登錄內建的方法與 Playbook：內容與上一個內建版本不同時追加新版本，不覆寫舊版本。
+    /// 啟動時登錄內建的方法與 Playbook：內容與上一個內建版本不同時追加新版本，不覆寫舊版本（不追加事件）。
     pub async fn seed_builtin_methods_and_playbooks(&self, now: Timestamp) -> StoreResult<()> {
         self.write(move |tx| {
             let methods = load_method_versions(tx)?;
@@ -413,7 +416,7 @@ impl Store {
                 let of_key: Vec<&MethodVersion> = methods.iter().filter(|m| m.key == definition.key).collect();
                 let latest = of_key.iter().max_by_key(|m| m.version).copied();
                 let id = format!("mtv_{}_v{}", definition.key, latest.map_or(1, |l| l.version + 1));
-                if let Some((method, event)) = publish_method_checked(latest, definition, id, now) {
+                if let Some((method, _)) = publish_method_checked(latest, definition, id, now) {
                     tx.execute(
                         "INSERT INTO method_version (id, key, version, definition, content_hash, origin, created_at)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -427,7 +430,6 @@ impl Store {
                             method.created_at.as_millis(),
                         ],
                     )?;
-                    append_event(tx, &event)?;
                 }
             }
             let playbooks = load_playbook_versions(tx)?;
