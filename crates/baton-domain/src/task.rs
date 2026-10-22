@@ -89,7 +89,8 @@ impl TaskStatus {
             Running => &[Ready, WaitingDecision, WaitingResource, Blocked, Verifying, Cancelled],
             WaitingDecision => &[Ready, Blocked, Cancelled],
             WaitingResource => &[Ready, Blocked, Cancelled],
-            Blocked => &[Pending, Ready, Cancelled],
+            // 驗證不完整的預算用盡後，使用者核准再重驗時回到 verifying（票 36）
+            Blocked => &[Pending, Ready, Verifying, Cancelled],
             Verifying => &[Ready, WaitingDecision, WaitingResource, Blocked, Completed, Cancelled],
             Completed | Cancelled => &[],
         }

@@ -42,6 +42,7 @@ struct World {
     workdirs: Vec<Workdir>,
     guards: Vec<ActiveGuard>,
     sessions: Vec<AgentSession>,
+    budgets: Vec<TaskBudget>,
     next_run: u32,
     /// Workspace 目前生效的授權 revision（測試可以在任何時刻換成新的 revision）。
     authorization: Option<AuthorizationRevision>,
@@ -64,6 +65,7 @@ impl World {
             workdirs: vec![],
             guards: vec![],
             sessions: vec![],
+            budgets: vec![],
             next_run: 0,
             authorization: None,
             settings_version: None,
@@ -134,6 +136,7 @@ impl World {
             guards: &self.guards,
             settings_version: self.settings_version,
             sessions: &self.sessions,
+            budgets: &self.budgets,
         };
         decide(&ctx, command, now)
     }
@@ -149,6 +152,9 @@ impl World {
         }
         if let Some(task) = &change.task {
             upsert(&mut self.tasks, task.clone(), |t| t.id.clone());
+        }
+        if let Some(budget) = &change.budget {
+            upsert(&mut self.budgets, budget.clone(), |b| b.task_id.clone());
         }
         for session in &change.sessions {
             upsert(&mut self.sessions, session.clone(), |s| s.id.clone());
@@ -1137,4 +1143,72 @@ fn a_run_reporting_a_native_session_driven_by_another_run_is_asked_to_stop() {
     let second_session = world.run(&second).agent_session_id.clone().unwrap();
     let second_session = world.sessions.iter().find(|s| s.id == second_session).unwrap();
     assert_eq!(second_session.native_session_id, None, "同一個原生 Session 不會綁到第二個平台 Session");
+}
+
+// ---------------------------------------------------------------- 修正與重試預算（票 36）
+
+fn used(world: &World, task_id: &str) -> (u32, u32, u32) {
+    let budget = TaskBudget::of(&world.budgets, world.task(task_id));
+    (budget.implementation, budget.verification, budget.infrastructure)
+}
+
+#[test]
+fn a_failed_exit_is_an_implementation_failure_and_the_fourth_blocks_the_task_with_a_decision_request() {
+    let mut world = World::new(&["t1"]);
+    for attempt in 1..=3 {
+        let run_id = world.running("t1", T0);
+        let failed = RunOutcome::Failed { reason: "測試失敗".into() };
+        let change = world.step(RunCommand::Finish { run_id, generation: attempt, outcome: failed }, T0).unwrap();
+        assert!(change.decision.is_none() && !change.requeue);
+        assert_eq!(world.task("t1").status, TaskStatus::Ready);
+        assert_eq!(used(&world, "t1"), (attempt as u32, 0, 0));
+    }
+    let run_id = world.running("t1", T0);
+    let failed = RunOutcome::Failed { reason: "測試失敗".into() };
+    let change = world.step(RunCommand::Finish { run_id: run_id.clone(), generation: 4, outcome: failed }, T0).unwrap();
+
+    assert_eq!(world.task("t1").status, TaskStatus::Blocked);
+    let request = change.decision.expect("用盡時建立裁定請求");
+    assert_eq!((request.run_id.as_str(), request.blocking.as_slice()), (run_id.as_str(), ["t1".to_string()].as_slice()));
+    assert_eq!(request.authority.map(|a| a.matter), Some(crate::authority::Matter::NextStepAfterBudget));
+    assert_eq!(used(&world, "t1"), (3, 0, 0));
+    assert_eq!(TaskBudget::of(&world.budgets, world.task("t1")).request_id, Some(request.id));
+}
+
+#[test]
+fn launch_failures_and_vanished_processes_are_infrastructure_retries_that_requeue() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.dispatch("t1", T0).unwrap();
+    world.step(begin(&run_id, "cmd"), T0).unwrap();
+    let change = world.step(RunCommand::LaunchFailed { run_id, reason: "找不到 claude".into() }, T0).unwrap();
+    assert!(change.requeue);
+    assert_eq!(used(&world, "t1"), (0, 0, 1));
+    assert_eq!(TaskBudget::of(&world.budgets, world.task("t1")).retry_not_before, Some(later(60_000)));
+
+    let run_id = world.running("t1", later(60_000));
+    let now = later(60_000 + LEASE_DURATION_MS + 1);
+    let change = world.step(RunCommand::ReconcileLease { run_id, observed: ProcessObservation::Dead }, now).unwrap();
+    assert!(change.requeue);
+    assert_eq!(used(&world, "t1"), (0, 0, 2));
+    assert_eq!(TaskBudget::of(&world.budgets, world.task("t1")).retry_not_before, Some(now.plus_millis(120_000)));
+}
+
+#[test]
+fn quota_limits_recovery_interruptions_and_cancellations_never_charge_any_budget() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    let limited = RunOutcome::QuotaLimited { reason: "usage limit reached".into() };
+    let change = world.step(RunCommand::Finish { run_id: run_id.clone(), generation: 1, outcome: limited }, T0).unwrap();
+    assert_eq!(world.run(&run_id).status, RunStatus::Interrupted);
+    assert!(world.run(&run_id).end_reason.as_deref().unwrap().starts_with("quota_limited"));
+    assert_eq!((change.budget, world.task("t1").status), (None, TaskStatus::Ready));
+
+    let run_id = world.running("t1", T0);
+    world.step(RunCommand::Interrupt { run_id, reason: "launch_outcome_unknown".into() }, T0).unwrap();
+    let run_id = world.running("t1", T0);
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+    world.step(RunCommand::ConfirmCancelled { run_id }, T0).unwrap();
+
+    assert_eq!(used(&world, "t1"), (0, 0, 0));
+    assert!(world.budgets.is_empty());
 }

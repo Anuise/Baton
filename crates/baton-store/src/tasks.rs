@@ -5,6 +5,7 @@
 
 use baton_domain::authorization::AuthorizationRevision;
 use baton_domain::agent::ReportRecord;
+use baton_domain::budget::{self, BudgetView, TaskBudget};
 use baton_domain::guard::ActiveGuard;
 use baton_domain::run::{ExecutionLease, Run, RunView};
 use baton_domain::session::AgentSession;
@@ -47,6 +48,8 @@ pub struct TaskBoardData {
     pub workdirs: Vec<WorkdirView>,
     /// 這個 Workspace 的整合項目，依排入順序（票 20）。
     pub integrations: Vec<IntegrationEntry>,
+    /// 每個 Task 的修正與重試預算，依 Task 的建立順序（票 36）。
+    pub budgets: Vec<BudgetView>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +57,8 @@ pub struct TaskDetailData {
     pub task: TaskView,
     /// 契約的全部版本，由舊到新（含目前版本）。
     pub contract_history: Vec<TaskContract>,
+    /// 修正與重試預算的三種計數（票 36）。
+    pub budget: BudgetView,
 }
 
 /// 一個 Workspace 範圍內、Domain 判定需要的全部狀態。
@@ -76,6 +81,8 @@ pub(crate) struct Loaded {
     pub(crate) integrations: Vec<IntegrationEntry>,
     /// Run 准入時要檢查的 Guard；只有派工路徑以 `guards::load_active_guards` 填入，其他路徑是空的（票 38）。
     pub(crate) guards: Vec<ActiveGuard>,
+    /// 有計入過的 Task 預算（票 36）。
+    pub(crate) budgets: Vec<TaskBudget>,
 }
 
 impl Loaded {
@@ -137,6 +144,7 @@ impl Store {
                 let verifications = super::verification::load_verifications(conn, &workspace_id)?;
                 let authorization_revision = loaded.authorization.as_ref().map(|a| a.revision);
                 let workdirs = super::workdirs::views(conn, &loaded.workdirs)?;
+                let budgets = loaded.tasks.iter().map(|t| budget::view(&loaded.budgets, t)).collect();
                 Ok(Ok(TaskBoardData {
                     goals: loaded.goals,
                     tasks,
@@ -145,6 +153,7 @@ impl Store {
                     authorization_revision,
                     workdirs,
                     integrations: loaded.integrations,
+                    budgets,
                 }))
             })
             .await?;
@@ -166,7 +175,8 @@ impl Store {
                     return Ok(Err(TaskError::TaskNotFound(task_id)));
                 };
                 let contract_history = load_contract_history(conn, &task_id)?;
-                Ok(Ok(TaskDetailData { task: view, contract_history }))
+                let budget = budget::view(&loaded.budgets, &view.task);
+                Ok(Ok(TaskDetailData { task: view, contract_history, budget }))
             })
             .await?;
         Ok(result?)
@@ -267,6 +277,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
     let workdirs = super::workdirs::load_workdirs(conn, workspace_id)?;
     let integrations = super::integration::load_entries(conn, Some(workspace_id))?;
     let sessions = super::sessions::load_sessions(conn, workspace_id)?;
+    let budgets = super::budgets::load_budgets(conn, workspace_id)?;
     Ok(Loaded {
         workspace,
         authorization,
@@ -281,6 +292,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
         integrations,
         guards: Vec::new(),
         sessions,
+        budgets,
     })
 }
 
