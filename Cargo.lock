@@ -210,6 +210,7 @@ dependencies = [
  "baton-client",
  "baton-credential",
  "baton-domain",
+ "baton-store",
  "tauri",
  "tauri-build",
  "tokio",

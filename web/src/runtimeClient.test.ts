@@ -54,4 +54,51 @@ describe("Runtime 用戶端", () => {
 
     expect(invoke).toHaveBeenCalledWith("runtime_platform");
   });
+
+  it("HTTP 版建立 Workspace：POST JSON 並回傳 Runtime 的 Workspace", async () => {
+    const created = { id: "ws_1", name: "docs", path: "C:\\docs", status: "active" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(created), { status: 201 }));
+
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).createWorkspace({ path: "C:\\docs" });
+
+    expect(result).toEqual(created);
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "C:\\docs" }),
+    });
+  });
+
+  it("HTTP 版把 Runtime 回報的說明當成錯誤訊息", async () => {
+    const body = { error: "workspace_path_not_found", message: "找不到目錄：C:\\nope" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 400 }));
+
+    await expect(
+      createHttpClient(fetchFn as unknown as typeof fetch).createWorkspace({ path: "C:\\nope" }),
+    ).rejects.toThrow("找不到目錄：C:\\nope");
+  });
+
+  it("HTTP 版列出與封存 Workspace", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ workspaces: [] }), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.listWorkspaces();
+    await client.archiveWorkspace("ws_1");
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/archive", { method: "POST" });
+  });
+
+  it("Tauri 版以指令與參數管理 Workspace", async () => {
+    const invoke = vi.fn(async () => ({ workspaces: [] }));
+    const client = createTauriClient(invoke as never);
+
+    await client.listWorkspaces();
+    await client.createWorkspace({ path: "C:\\docs", name: "文件" });
+    await client.archiveWorkspace("ws_1");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "workspace_list");
+    expect(invoke).toHaveBeenNthCalledWith(2, "workspace_create", { path: "C:\\docs", name: "文件" });
+    expect(invoke).toHaveBeenNthCalledWith(3, "workspace_archive", { id: "ws_1" });
+  });
 });

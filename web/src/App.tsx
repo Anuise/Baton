@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 
 import { PlatformPage } from "./PlatformPage";
 import { StatusBar } from "./StatusBar";
-import { createRuntimeClient, type HealthResponse, type RuntimeClient } from "./runtimeClient";
+import { createRuntimeClient, type AppClient, type HealthResponse } from "./runtimeClient";
+import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
 export function App() {
-  const [client, setClient] = useState<RuntimeClient | null>(null);
+  const [client, setClient] = useState<AppClient | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
 
   useEffect(() => {
@@ -15,11 +16,14 @@ export function App() {
   return (
     <div className="app">
       {client ? <StatusBar client={client} onHealth={setHealth} /> : <header className="status-bar" />}
-      <main className="main">
-        {/* 產品名稱取自 Runtime 回報，不在前端寫死（spec D-01） */}
-        <h1>{health?.product ?? ""}</h1>
-        {client && <PlatformPage client={client} />}
-      </main>
+      <div className="body">
+        {client && <WorkspaceSidebar client={client} />}
+        <main className="main">
+          {/* 產品名稱取自 Runtime 回報，不在前端寫死（spec D-01） */}
+          <h1>{health?.product ?? ""}</h1>
+          {client && <PlatformPage client={client} />}
+        </main>
+      </div>
     </div>
   );
 }
