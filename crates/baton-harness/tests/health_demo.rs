@@ -121,6 +121,7 @@ async fn every_port_can_be_driven_through_its_fake() {
             command_id: "cmd-1".into(),
             prompt: "hi".into(),
             working_dir: None,
+            ..Default::default()
         })
         .await
         .unwrap();

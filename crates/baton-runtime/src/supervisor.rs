@@ -17,11 +17,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::LogSink;
+use baton_api::{LogSink, RunSettings};
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::AgentScope;
 use baton_domain::profile::ProfileStatus;
-use baton_domain::run::{ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus};
+use baton_domain::run::{LaunchPayload, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus};
 use baton_ports::{
     observe_quota, AdapterEvent, AgentHandle, Liveness, Ports, ProcessIdentity, RunSpec, SpawnSpec, StopResult,
 };
@@ -47,6 +47,8 @@ pub struct Supervisor {
     credentials: CredentialIssuer,
     /// 交給 MCP shim 的 Runtime 位址（loopback IP 字面值加實際埠）。
     runtime_url: String,
+    /// Run 設定快照（與 API 共用，同一個 Run 的快照請求依序處理）。
+    run_settings: Arc<RunSettings>,
     /// 要求程序停止時給它的寬限期。
     stop_grace: Duration,
     /// 同一時間只有一個 tick 在進行（背景迴圈與測試呼叫不會交錯）。
@@ -55,6 +57,8 @@ pub struct Supervisor {
     streams: Mutex<HashMap<String, BoxStream<'static, AdapterEvent>>>,
     /// 這個 Runtime 實例已經向 ProcessControl 「找回」過（取得管理權）的 Run。
     adopted: Mutex<HashSet<String>>,
+    /// 每個 Run 最近一次 Adapter 回報的錯誤；程序以失敗結束時作為失敗原因。
+    last_errors: Mutex<HashMap<String, String>>,
 }
 
 impl Supervisor {
@@ -64,6 +68,7 @@ impl Supervisor {
         log: LogSink,
         credentials: CredentialIssuer,
         runtime_url: String,
+        run_settings: Arc<RunSettings>,
         stop_grace: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -72,10 +77,12 @@ impl Supervisor {
             log,
             credentials,
             runtime_url,
+            run_settings,
             stop_grace,
             tick_lock: Mutex::new(()),
             streams: Mutex::new(HashMap::new()),
             adopted: Mutex::new(HashSet::new()),
+            last_errors: Mutex::new(HashMap::new()),
         })
     }
 
@@ -170,8 +177,26 @@ impl Supervisor {
         }
     }
 
-    fn run_spec(&self, item: &PendingLaunch, command_id: &str) -> RunSpec {
-        run_spec_of(&item.run.id, &item.payload.task_id, command_id, &item.payload.prompt, &item.payload.working_dir)
+    /// 組出 Run 的 `RunSpec`：全部來自持久化的狀態（派工 Outbox、Run 的帳號、設定快照的綁定），
+    /// 所以啟動時與 Runtime 重建後組出的結果相同，Adapter 才能據此找回同一個程序。
+    async fn run_spec(&self, run: &Run, payload: &LaunchPayload, command_id: &str) -> Result<RunSpec, String> {
+        let profiles = self.store.list_profiles().await.map_err(|e| format!("無法讀取帳號 Profile：{e}"))?;
+        let config_dir = profiles
+            .into_iter()
+            .find(|p| p.id == run.profile_id)
+            .map(|p| p.config_dir)
+            .ok_or_else(|| format!("找不到 Run 的帳號 Profile {}", run.profile_id))?;
+        let pin = self.store.run_settings_pin(&run.id).await.map_err(|e| format!("無法讀取設定快照的綁定：{e}"))?;
+        Ok(RunSpec {
+            run_id: run.id.clone(),
+            task_id: payload.task_id.clone(),
+            command_id: command_id.to_string(),
+            prompt: payload.prompt.clone(),
+            working_dir: Some(payload.working_dir.clone()),
+            config_dir: Some(config_dir),
+            settings_dir: pin.map(|p| p.directory),
+            model: payload.model.clone(),
+        })
     }
 
     async fn launch(&self, item: PendingLaunch) {
@@ -183,7 +208,23 @@ impl Supervisor {
         if let Err(error) = self.store.apply_run_command(item.run.workspace_id.clone(), begin, self.ports.clock.now()).await {
             return self.note(&format!("Run {} 無法寫入 launch intent，不啟動程序：{error}", item.run.id));
         }
-        // 2. Run 准入：簽發綁定這個 Run 與世代的 Agent 憑證，只經環境變數交給 MCP shim。
+        // 2. 准入的共同設定：第一次啟動時以最新版本建立 Run 專屬唯讀快照，已綁定的依 manifest 核對（D-09）；
+        //    核對不過就不啟動，不以不確定的設定執行
+        if let Err(reason) = self.run_settings.for_launch(&item.run.id).await {
+            let command = RunCommand::LaunchFailed { run_id: item.run.id.clone(), reason };
+            return self.apply(&item.run, command).await;
+        }
+        let run_spec = match self.run_spec(&item.run, &item.payload, &command_id).await {
+            Ok(spec) => spec,
+            Err(reason) => {
+                return self.apply(&item.run, RunCommand::LaunchFailed { run_id: item.run.id.clone(), reason }).await
+            }
+        };
+        if let Err(error) = self.ports.agent_adapter.prepare(&run_spec).await {
+            let reason = format!("無法準備 Run 的啟動檔案：{error}");
+            return self.apply(&item.run, RunCommand::LaunchFailed { run_id: item.run.id.clone(), reason }).await;
+        }
+        // 3. Run 准入：簽發綁定這個 Run 與世代的 Agent 憑證，只經環境變數交給 MCP shim。
         //    憑證不進 Prompt、指令列、設定檔或日誌；啟動前失敗就不啟動（下一次 tick 會把 Run 標為 interrupted）
         let scope = AgentScope {
             workspace_id: item.run.workspace_id.clone(),
@@ -194,12 +235,12 @@ impl Supervisor {
             Ok(token) => token,
             Err(error) => return self.note(&format!("Run {} 無法簽發 Agent 憑證，不啟動程序：{error}", item.run.id)),
         };
-        // 3. 交易外啟動程序
-        let mut spec = self.ports.agent_adapter.spawn_spec(&self.run_spec(&item, &command_id));
+        // 4. 交易外啟動程序
+        let mut spec = self.ports.agent_adapter.spawn_spec(&run_spec);
         spec.env.push((AGENT_TOKEN_ENV.to_string(), token));
         spec.env.push((RUNTIME_URL_ENV.to_string(), self.runtime_url.clone()));
         match self.ports.process_control.spawn(spec).await {
-            // 4. 回執寫回；寫回之前當掉的話，下一次 tick 以 command_id 找回
+            // 5. 回執寫回；寫回之前當掉的話，下一次 tick 以 command_id 找回
             Ok(receipt) => {
                 let command = RunCommand::RecordReceipt {
                     run_id: item.run.id.clone(),
@@ -219,7 +260,11 @@ impl Supervisor {
     /// 找不到就中斷這個 Run，不自動重新啟動（結果不明的外部操作不重送）。
     async fn recover_launch(&self, item: PendingLaunch) {
         let Some(command_id) = item.run.command_id.clone() else { return };
-        let spec = self.ports.agent_adapter.spawn_spec(&self.run_spec(&item, &command_id));
+        let run_spec = match self.run_spec(&item.run, &item.payload, &command_id).await {
+            Ok(spec) => spec,
+            Err(error) => return self.note(&format!("Run {} 暫時無法核對程序，稍後重試：{error}", item.run.id)),
+        };
+        let spec = self.ports.agent_adapter.spawn_spec(&run_spec);
         match self.ports.process_control.find(&spec).await {
             Ok(Some(receipt)) => {
                 self.note(&format!("Run {} 以 command_id 找回原程序 {}，補寫回執，不重複啟動", item.run.id, receipt.identity.pid));
@@ -265,12 +310,26 @@ impl Supervisor {
                         let command = RunCommand::Heartbeat { run_id: run_id.clone(), generation: item.view.run.generation };
                         self.apply(&item.view.run, command).await;
                     }
+                    AdapterEvent::Started { native_session_id: Some(native_session_id) } => {
+                        // 條件綁定：第一次綁定，之後相同不變，不同只留下衝突紀錄
+                        let command = RunCommand::BindNativeSession {
+                            run_id: run_id.clone(),
+                            generation: item.view.run.generation,
+                            native_session_id,
+                        };
+                        self.apply(&item.view.run, command).await;
+                    }
+                    AdapterEvent::Error { message } => {
+                        self.note(&format!("Run {run_id} 回報錯誤：{message}"));
+                        self.last_errors.lock().await.insert(run_id.clone(), message);
+                    }
                     AdapterEvent::Exited { success } => {
                         // 程序結束只產生 Run 結束事件；Task 是否完成由後續的驗證決定
+                        let last_error = self.last_errors.lock().await.remove(&run_id);
                         let outcome = if success {
                             RunOutcome::Succeeded
                         } else {
-                            RunOutcome::Failed { reason: "程序以失敗結束".into() }
+                            RunOutcome::Failed { reason: last_error.unwrap_or_else(|| "程序以失敗結束".into()) }
                         };
                         let command =
                             RunCommand::Finish { run_id: run_id.clone(), generation: item.view.run.generation, outcome };
@@ -278,8 +337,10 @@ impl Supervisor {
                         finished = true;
                         break;
                     }
-                    // 原生 Session、訊息與限流由後續的票處理
-                    AdapterEvent::Started { .. } | AdapterEvent::Message { .. } | AdapterEvent::RateLimited { .. } => {}
+                    // 訊息與限流由後續的票處理（對話紀錄、額度觀測與交接）
+                    AdapterEvent::Started { native_session_id: None }
+                    | AdapterEvent::Message { .. }
+                    | AdapterEvent::RateLimited { .. } => {}
                 }
             }
             if !finished {
@@ -292,7 +353,13 @@ impl Supervisor {
     async fn attach(&self, item: &ExecutingRun) -> Option<BoxStream<'static, AdapterEvent>> {
         let run = &item.view.run;
         let command_id = run.command_id.clone()?;
-        let spec = run_spec_of(&run.id, &item.payload.task_id, &command_id, &item.payload.prompt, &item.payload.working_dir);
+        let spec = match self.run_spec(run, &item.payload, &command_id).await {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.note(&format!("Run {} 無法接上事件串流：{error}", run.id));
+                return None;
+            }
+        };
         match self.ports.agent_adapter.launch(spec).await {
             Ok(handle) => Some(self.ports.agent_adapter.events(&AgentHandle(handle.0))),
             Err(error) => {
@@ -359,26 +426,11 @@ impl Supervisor {
             return;
         }
         let Some(command_id) = run.command_id.clone() else { return };
-        let spec: SpawnSpec = self.ports.agent_adapter.spawn_spec(&run_spec_of(
-            &run.id,
-            &item.payload.task_id,
-            &command_id,
-            &item.payload.prompt,
-            &item.payload.working_dir,
-        ));
+        let Ok(run_spec) = self.run_spec(run, &item.payload, &command_id).await else { return };
+        let spec: SpawnSpec = self.ports.agent_adapter.spawn_spec(&run_spec);
         if self.ports.process_control.find(&spec).await.is_ok() {
             self.adopted.lock().await.insert(run.id.clone());
         }
-    }
-}
-
-fn run_spec_of(run_id: &str, task_id: &str, command_id: &str, prompt: &str, working_dir: &str) -> RunSpec {
-    RunSpec {
-        run_id: run_id.to_string(),
-        task_id: task_id.to_string(),
-        command_id: command_id.to_string(),
-        prompt: prompt.to_string(),
-        working_dir: Some(working_dir.to_string()),
     }
 }
 

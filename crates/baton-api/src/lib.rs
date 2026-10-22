@@ -58,7 +58,7 @@ pub use scheduling::{
 };
 pub use shared_settings::{
     run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
-    RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
+    RunSettings, RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH,
 };
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
@@ -124,6 +124,8 @@ pub struct ApiState {
     pub quota_observer: Arc<dyn QuotaObserver>,
     /// 使用者平常使用的 Claude Code 設定（唯讀；共同設定匯入的來源）。
     pub user_settings: Arc<dyn UserSettingsSource>,
+    /// Run 設定快照；與 Supervisor 共用同一個實例，同一個 Run 的快照請求才會依序處理。
+    pub run_settings: Arc<RunSettings>,
     pub log: LogSink,
     /// 派工或要求取消之後通知 Supervisor 儘快處理（背景迴圈等待它；沒有背景迴圈時沒有作用）。
     pub supervisor_wake: Arc<Notify>,

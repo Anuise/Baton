@@ -17,7 +17,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::ApiState;
+use baton_api::{ApiState, RunSettings};
 use baton_ports::Ports;
 use baton_store::{Store, StoreError};
 use tokio::net::TcpListener;
@@ -101,8 +101,21 @@ impl Runtime {
         let (stop_tx, stop_rx) = watch::channel(false);
         let supervisor_wake = Arc::new(Notify::new());
         let runtime_url = format!("http://{addr}");
-        let supervisor =
-            Supervisor::new(store.clone(), ports.clone(), log.clone(), credentials.clone(), runtime_url, options.stop_grace);
+        let run_settings = Arc::new(RunSettings::new(
+            store.clone(),
+            ports.workspace_fs.clone(),
+            config.data_dir.clone(),
+            ports.clock.clone(),
+        ));
+        let supervisor = Supervisor::new(
+            store.clone(),
+            ports.clone(),
+            log.clone(),
+            credentials.clone(),
+            runtime_url,
+            run_settings.clone(),
+            options.stop_grace,
+        );
         let supervising = options
             .background_supervisor
             .then(|| supervisor.spawn_background(supervisor_wake.clone(), stop_rx.clone()));
@@ -118,6 +131,7 @@ impl Runtime {
             claude_env: ports.claude_env.clone(),
             quota_observer: ports.quota_observer.clone(),
             user_settings: ports.user_settings.clone(),
+            run_settings,
             log,
             supervisor_wake,
             shutdown: stop_rx.clone(),
