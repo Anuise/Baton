@@ -105,6 +105,7 @@ impl World {
             tasks: &self.tasks,
             dependencies: &self.dependencies,
             contracts: &self.contracts,
+            decision_holds: &[],
         }
     }
 

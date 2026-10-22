@@ -43,6 +43,14 @@ pub struct AgentScope {
     pub generation: i64,
 }
 
+/// Controller 憑證的範圍（票 17）：Controller 的一輪（`controller_run`）喚起時簽發，綁定 Workspace 與那一輪。
+/// 有效與否取決於那一輪是否還沒結束；它只能使用 Controller 專屬的工具，不能冒充任何 Worker 的 Run。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControllerScope {
+    pub workspace_id: String,
+    pub controller_run_id: String,
+}
+
 /// 一筆已簽發的憑證；只含 token 的雜湊，不含 token 本身。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialRecord {
@@ -51,8 +59,10 @@ pub struct CredentialRecord {
     pub issued_at: Timestamp,
     /// `None` 表示沒有時間上限（桌面憑證靠「下次啟動輪替」失效；Agent 憑證的有效性取決於 Run 是否仍是寫入所有者）。
     pub expires_at: Option<Timestamp>,
-    /// 只有 Agent 憑證有範圍；桌面憑證為 `None`。
+    /// Worker 的 Agent 憑證才有範圍；桌面憑證與 Controller 憑證為 `None`。
     pub scope: Option<AgentScope>,
+    /// Controller 的 Agent 憑證（票 17）才有；與 `scope` 不會同時存在。
+    pub controller: Option<ControllerScope>,
 }
 
 impl CredentialRecord {
@@ -126,6 +136,7 @@ mod tests {
             issued_at: Timestamp::from_millis(0),
             expires_at: expires_at.map(Timestamp::from_millis),
             scope: None,
+            controller: None,
         }
     }
 

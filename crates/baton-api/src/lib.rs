@@ -8,6 +8,7 @@ mod agent;
 mod artifacts;
 mod authorization;
 mod backups;
+mod controller;
 mod conversations;
 mod decisions;
 mod external_operations;
@@ -40,7 +41,8 @@ use axum::{middleware, Json, Router};
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::agent::{
     TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
-    TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
+    TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE, TOOL_ADD_DEPENDENCY,
+    TOOL_CANCEL_TASK, TOOL_DISPATCH_TASK, TOOL_PROPOSE_DECISION_REQUEST, TOOL_PROPOSE_TASK, TOOL_UPDATE_TASK,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT};
@@ -291,6 +293,13 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_SEARCH_KNOWLEDGE), post(knowledge::search_knowledge))
         .route(&tool_path(TOOL_BEGIN_EXTERNAL_OPERATION), post(external_operations::begin))
         .route(&tool_path(TOOL_RECORD_EXTERNAL_OPERATION_RESULT), post(external_operations::record_result))
+        // Controller 專屬的拆工與派工工具（票 17）：只接受 Controller 憑證
+        .route(&tool_path(TOOL_PROPOSE_TASK), post(controller::propose_task))
+        .route(&tool_path(TOOL_UPDATE_TASK), post(controller::update_task))
+        .route(&tool_path(TOOL_ADD_DEPENDENCY), post(controller::add_dependency))
+        .route(&tool_path(TOOL_DISPATCH_TASK), post(controller::dispatch_task))
+        .route(&tool_path(TOOL_CANCEL_TASK), post(controller::cancel_task))
+        .route(&tool_path(TOOL_PROPOSE_DECISION_REQUEST), post(controller::propose_decision_request))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

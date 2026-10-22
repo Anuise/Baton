@@ -13,6 +13,7 @@ use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
 use baton_domain::workdir::{TaskKind, Workdir, WorkdirView};
 use baton_domain::task::{
+    DecisionHold,
     self, ContractContent, Dependency, Goal, MissingItem, Task, TaskChange, TaskCommand, TaskContext, TaskContract,
     TaskError, TaskStatus, TaskView,
 };
@@ -83,6 +84,8 @@ pub(crate) struct Loaded {
     pub(crate) guards: Vec<ActiveGuard>,
     /// 有計入過的 Task 預算（票 36）。
     pub(crate) budgets: Vec<TaskBudget>,
+    /// Controller 提出、尚未回答的裁定請求所阻擋的 Task（票 17）。
+    pub(crate) decision_holds: Vec<DecisionHold>,
 }
 
 impl Loaded {
@@ -95,6 +98,7 @@ impl Loaded {
             tasks: &self.tasks,
             dependencies: &self.dependencies,
             contracts: &self.contracts,
+            decision_holds: &self.decision_holds,
         }
     }
 }
@@ -180,6 +184,37 @@ impl Store {
             })
             .await?;
         Ok(result?)
+    }
+
+    /// Controller 的 `propose_task`（票 17）：需要時先建立 Goal，再建立 Task，兩者在**同一個交易**中判定與寫入；
+    /// 任一個被 Domain 拒絕就什麼都不寫（不會留下沒有 Task 的 Goal）。規則與使用者手動建立完全相同（`task::decide`）。
+    pub async fn propose_task(
+        &self,
+        workspace_id: String,
+        new_goal: Option<TaskCommand>,
+        create_task: TaskCommand,
+        now: Timestamp,
+    ) -> Result<Vec<TaskChange>, TaskApplyError> {
+        let outcome = self
+            .write(move |tx| {
+                let mut loaded = load(tx, &workspace_id)?;
+                let mut changes = Vec::new();
+                for command in new_goal.into_iter().chain([create_task]) {
+                    let change = match task::decide(&loaded.ctx(&workspace_id), command, now) {
+                        Err(rejected) => return Ok(Err(rejected)),
+                        Ok(change) => change,
+                    };
+                    // 後面的命令要看得到前面建立的 Goal
+                    loaded.goals.extend(change.goal.clone());
+                    changes.push(change);
+                }
+                for change in &changes {
+                    save(tx, change)?;
+                }
+                Ok(Ok(changes))
+            })
+            .await?;
+        Ok(outcome?)
     }
 
     /// 對任何狀態的 Task 做完整的准入檢查（唯讀預覽，不改狀態）。
@@ -278,6 +313,19 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
     let integrations = super::integration::load_entries(conn, Some(workspace_id))?;
     let sessions = super::sessions::load_sessions(conn, workspace_id)?;
     let budgets = super::budgets::load_budgets(conn, workspace_id)?;
+    // 只有 Controller 待回答的提問（`propose_decision_request`）會讓依賴它的 Task 不能准入：Worker 的請求以
+    // waiting_decision 表達；Controller 的權限表請求（超出授權、修改完成條件）各自由准入與工具判定，不另外擋准入
+    let decision_holds = conn
+        .prepare(
+            "SELECT b.task_id, r.id, r.question FROM decision_request_block b
+             JOIN decision_request r ON r.id = b.request_id
+             WHERE r.workspace_id = ?1 AND r.status = 'pending' AND r.origin = 'controller' AND r.kind = 'agent'
+             ORDER BY r.rowid, b.rowid",
+        )?
+        .query_map([workspace_id], |r| {
+            Ok(DecisionHold { task_id: r.get(0)?, request_id: r.get(1)?, question: r.get(2)? })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Loaded {
         workspace,
         authorization,
@@ -293,6 +341,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
         guards: Vec::new(),
         sessions,
         budgets,
+        decision_holds,
     })
 }
 

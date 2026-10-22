@@ -13,6 +13,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use baton_domain::agent::{CONTROLLER_TOOLS, TOOL_PERMISSION_PROMPT};
 use baton_domain::auth::{hash_token, CredentialRecord, Role};
 
 use crate::{ApiState, ErrorBody};
@@ -23,6 +24,8 @@ pub const CLIENT_HEADER_VALUE: &str = "baton-desktop";
 
 /// Agent API 的路徑前綴：這個前綴之下只接受 Agent 角色，其餘路徑只接受桌面角色。
 const AGENT_API_PREFIX: &str = "/agent/v1/";
+/// Agent 工具的路徑前綴（後面接工具名稱）。
+const AGENT_TOOLS_PATH: &str = "/agent/v1/tools/";
 
 /// Tauri WebView 的 origin（Windows 預設為 http，啟用 https 方案時為 https；其他平台為 tauri 方案）。
 const APP_ORIGINS: [&str; 3] = ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"];
@@ -38,6 +41,10 @@ pub enum Denial {
     CredentialInvalid,
     CredentialExpired,
     RoleNotAllowed,
+    /// Worker 的憑證呼叫 Controller 專屬的工具（票 17）。
+    ControllerOnly,
+    /// Controller 的憑證呼叫 Worker 的工具（票 17）。
+    WorkerOnly,
     Internal,
 }
 
@@ -52,6 +59,8 @@ impl Denial {
             Denial::CredentialInvalid => "credential_invalid",
             Denial::CredentialExpired => "credential_expired",
             Denial::RoleNotAllowed => "role_not_allowed",
+            Denial::ControllerOnly => "controller_only",
+            Denial::WorkerOnly => "worker_only",
             Denial::Internal => "internal_error",
         }
     }
@@ -61,7 +70,9 @@ impl Denial {
             Denial::HostNotAllowed
             | Denial::OriginNotAllowed
             | Denial::ClientHeaderMissing
-            | Denial::RoleNotAllowed => StatusCode::FORBIDDEN,
+            | Denial::RoleNotAllowed
+            | Denial::ControllerOnly
+            | Denial::WorkerOnly => StatusCode::FORBIDDEN,
             Denial::PreflightRefused => StatusCode::METHOD_NOT_ALLOWED,
             Denial::CredentialMissing | Denial::CredentialInvalid | Denial::CredentialExpired => {
                 StatusCode::UNAUTHORIZED
@@ -81,6 +92,12 @@ impl Denial {
             Denial::CredentialInvalid => "憑證無效（Runtime 可能已重新啟動，請重新讀取桌面憑證）",
             Denial::CredentialExpired => "憑證已過期",
             Denial::RoleNotAllowed => "這個憑證的角色不能使用這組 API",
+            Denial::ControllerOnly => {
+                "這個工具只有 Controller 能使用；Worker 需要調整工作時請以 report_blocked 或 request_decision 回報"
+            }
+            Denial::WorkerOnly => {
+                "這個工具只有 Worker 能使用；Controller 請以 propose_task、dispatch_task 等工具把工作交給 Worker"
+            }
             Denial::Internal => "Runtime 內部錯誤，無法驗證憑證",
         }
     }
@@ -154,9 +171,19 @@ async fn check(
     if record.role != required {
         return Err(Denial::RoleNotAllowed);
     }
-    // Agent 憑證一定要有範圍；沒有範圍的 Agent 憑證不能退回任何預設
-    if record.role == Role::Agent && record.scope.is_none() {
+    // Agent 憑證一定要有範圍（Worker 的 Run 或 Controller 的一輪）；沒有範圍的 Agent 憑證不能退回任何預設
+    if record.role == Role::Agent && record.scope.is_none() && record.controller.is_none() {
         return Err(Denial::CredentialInvalid);
+    }
+    // Worker 與 Controller 各自只能用自己的工具（票 17）；Controller 的權限提示由處理函式一律拒絕
+    if let Some(tool) = path.strip_prefix(AGENT_TOOLS_PATH) {
+        let controller_tool = CONTROLLER_TOOLS.contains(&tool);
+        if record.controller.is_some() && !controller_tool && tool != TOOL_PERMISSION_PROMPT {
+            return Err(Denial::WorkerOnly);
+        }
+        if record.scope.is_some() && controller_tool {
+            return Err(Denial::ControllerOnly);
+        }
     }
     Ok(record)
 }

@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_domain::auth::{hash_token, token_from_entropy, AgentScope, CredentialRecord, Role, TOKEN_ENTROPY_BYTES};
+use baton_domain::auth::{
+    hash_token, token_from_entropy, AgentScope, ControllerScope, CredentialRecord, Role, TOKEN_ENTROPY_BYTES,
+};
 use baton_ports::Clock;
 use baton_store::Store;
 
@@ -36,6 +38,15 @@ impl CredentialIssuer {
         Ok(token)
     }
 
+    /// Controller 的一輪喚起時簽發 Controller 憑證（票 17），綁定 Workspace 與那一輪。沒有時間上限：
+    /// 有效與否取決於那一輪是否還沒結束；它只能使用 Controller 專屬的工具。
+    pub async fn issue_controller(&self, scope: ControllerScope) -> Result<String, RuntimeError> {
+        let (token, mut record) = self.mint(Role::Agent, None, None)?;
+        record.controller = Some(scope);
+        self.store.issue_credential(record).await?;
+        Ok(token)
+    }
+
     /// 輪替桌面憑證：撤銷所有舊的桌面憑證，只留下新的。桌面憑證沒有時間上限，
     /// 失效靠下一次 Runtime 啟動時再輪替。
     pub(crate) async fn rotate_desktop(&self) -> Result<String, RuntimeError> {
@@ -60,6 +71,7 @@ impl CredentialIssuer {
             issued_at: now,
             expires_at: ttl.map(|ttl| now.plus_millis(ttl.as_millis() as i64)),
             scope,
+            controller: None,
         };
         Ok((token, record))
     }
