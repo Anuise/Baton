@@ -1513,16 +1513,124 @@
 - 影響：以本票分支（先前任一次整合後）建立過的開發資料庫，`schema_migrations` 中 `knowledge` 的版本號與整合後不一致，需刪除重建。
 - 審閱：未審
 
-### AI-168：真實 Claude Code Adapter 的啟動參數：不載入任何設定檔來源、權限經 permission_prompt、Prompt 經標準輸入
+### AI-168：完全退出停下的 Run 以 interrupted 結束，Task 退回 ready 並自動重新排隊；停不下來的保留寫入所有權
+- 重要度：高
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：程序確認停止（`StoppedGracefully`／`ForceKilled`）或根本沒有程序（`queued`、啟動中但以 command_id 找不到）的 Run，以 `interrupted`（`end_reason = stopped_by_full_exit`）結束並釋放寫入所有權；Task 只在仍是 `running` 時退回 `ready`（`blocked`、`verifying` 等不動），並在**同一個交易**中重新放進派工佇列（優先序 0，原本的優先序已不存在）。使用者先前已要求取消的 Run 則完成取消（Task 不重新排隊）。`StillAlive`、停止呼叫失敗、到總上限仍沒有結果的記為停止異常，Run 維持 `running` 並保留 lease。重新開啟核對時，這些 Run 的程序若確定已不在，以 `process_gone_after_full_exit` 中斷、Task 回 `ready` 但**不**自動重新排隊；仍存活的維持原狀（不會再啟動第二個 Worker）。
+- 理由：票面要求「完全退出不會把 Task 標為取消或完成」與「重開後 A 的合格工作自動恢復」，被退出停下的工作必須有恢復的入口；放回佇列後，「續跑」就只是解除暫停，由排程照常判定授權、相依、帳號與容量（即「合格」）。這和 AI-96「Run 失敗不自動重新排隊」不衝突：退出不是失敗，而是使用者明確要求的暫停。停不下來的程序若釋放 lease，續跑時會產生第二個寫入者（使用者故事 43）。查證後才知道已不在的程序，結果不明（它可能已完成部分工作），依 AI-67 的原則交給使用者重新派工。
+- 替代方案：退出時把 Run 標為 `cancelled`（語意上是使用者取消，且 AI-66 會讓人誤以為 Task 被放棄）；不重新排隊，續跑時再掃描「被退出停下的 Task」（需要另外記錄哪些 Task 屬於這一類，且會和使用者的手動派工打架）；停止異常也釋放 lease（可能兩個寫入者）。
+- 影響：被停下的 Task 在重新開啟前一直排隊、等待原因是 `runtime_stopping`；停止異常的 Task 在核對前保持 `running`。重新排隊不保留原本的優先序。
+- 審閱：未審
+
+### AI-169：停止意圖的保存方式與阻擋點：單列狀態加各 Workspace 暫停，擋在 Scheduler 與 launch intent
+- 重要度：高
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：停止意圖存在單列表 `runtime_lifecycle`（`phase` = `running`／`stopping`／`stopped`、`version`、最近一次停止報告 JSON），`stopping` 與 `stopped` 都算停止意圖生效，直到重新開啟。要求退出的同一個交易中，把每個使用中的 Workspace 標為暫停（`workspace_lifecycle.paused_since`）。阻擋點只有兩個：（1）Scheduler 的 `Capacity.halt`（`lifecycle::dispatch_halt`），`place` 一看到就回等待，所以佇列重試、額度恢復後的派工、API 的新派工要求與未來的交接（票 28 以 `SlotKind::Handoff` 呼叫同一個 `place`）都被擋；（2）寫入 launch intent（`BeginLaunch`）的交易再檢查一次（`RunError::LaunchHalted`），擋住停止意圖寫入前就已派出、還沒啟動的 Run。等待原因新增第七類 `lifecycle`（`runtime_stopping`、`awaiting_resume`）。上次退出後尚未重新開啟（`stopped`）時再按「完全退出」，視為新的退出要求（版本加一），停止中則冪等。
+- 理由：ADR-0001 要求「排程、Outbox 與 supervisor 啟動路徑都必須檢查停止意圖，不能只停排程器」；把檢查放在所有派工都會經過的 `place` 與所有啟動都會經過的 `BeginLaunch`，新加入的路徑（交接、重試預算）不必各自記得檢查。暫停在退出時就寫入，重新開啟只需要決定「誰解除」，不必回頭推算哪些 Workspace 受影響。
+- 替代方案：只在 Supervisor 背景迴圈檢查（API 派工、未來的交接會漏掉）；不記錄 Workspace 暫停、重新開啟時才逐一判定（重新開啟前新增的 Workspace 會被誤判，且「繼續工作」沒有可以清除的狀態）；把停止意圖放進 `RunContext`（要改動所有建構點，與排程等待原因的呈現脫節）。
+- 影響：交接（票 28）與重試預算（票 36）只要經過 `scheduler::place`／`evaluate` 就自動遵守停止意圖；若另闢直接呼叫 `RunCommand::Dispatch` 的路徑，必須先呼叫 `lifecycle::dispatch_halt`。
+- 審閱：未審
+
+### AI-170：重新開啟的流程：先核對再解除；資料庫與生命週期檔取保守者；以版本防止清掉新的退出要求
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：Runtime 啟動時讀資料庫與 `<資料目錄>\lifecycle.json`：只有檔案有停止意圖、或檔案存在卻讀不懂（毀損）都視為停止，並把停止意圖補記進資料庫（同時暫停每個使用中的 Workspace、記一筆說明）；只有資料庫有時把它鏡像回檔案。停止意圖仍生效時，Supervisor 的第一次 `tick` 先核對（處理啟動中的 Run：以 command_id 找回或中斷；對每個有程序身分的 Run 不論 lease 是否過期都 `inspect`，`Dead` 才中斷），再以「啟動時看到的生命週期版本」做條件式重新開啟：版本已改變（核對期間使用者又按了完全退出）就不重新開啟。重新開啟後把檔案改寫為沒有停止抑制。
+- 理由：spec D-25「兩者不一致時採較保守者」；票面「重新開啟先核對，再依設定續跑」。核對放在 Supervisor 的同一把鎖裡，與一般處理不會交錯；版本比對避免「剛重新開啟的 Runtime 把使用者新的停止意圖清掉」。
+- 替代方案：重新開啟在 `Runtime::start` 內同步完成（測試無法決定核對時機，且啟動會被慢的 `inspect` 卡住）；檔案毀損時忽略檔案（可能在使用者要求停止後被 launcher 自動啟動）。
+- 影響：Runtime 啟動到第一次處理之間（正式執行約 1 秒），API 仍回報停止意圖生效、「繼續工作」回 409。重新開啟時寫檔失敗只記日誌：下次啟動時會再被視為停止（較保守），使用者需要再次重新開啟。
+- 審閱：未審
+
+### AI-171：「保存並停止」的通知方式：Agent 回報的回應帶 `stop_requested`，強制力仍靠程序樹終止
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：停止意圖生效後，`report_progress`、`save_checkpoint`、`report_blocked` 的成功回應帶 `stop_requested: true`（平常是 `false`），Worker 據此保存 checkpoint 並結束。Runtime 不另外對程序送出任何訊號；停止流程對每個 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`：寬限期內等程序自行結束，逾時以 Job Object 終止整棵程序樹（AI-72）。
+- 理由：`claude -p` 執行中沒有可靠的輸入管道（stdin 在啟動時就導向 NUL，AI-72），送主控台中斷訊號需要與 Worker 共用主控台，且 Windows 上無法對特定程序樹可靠地送 Ctrl+C。回報的回應是 Worker 本來就會定期呼叫的管道，不需要新的工具或協定。
+- 替代方案：新增 `should_stop` 工具讓 Worker 輪詢（Worker 要記得呼叫，提示也要改）；送 `CTRL_BREAK_EVENT`（需要 `CREATE_NEW_PROCESS_GROUP` 與主控台，Validation Required 的範圍更大）。
+- 影響：Worker 在寬限期內沒有回報就收不到通知，只能被終止；Context Builder（票 39）與真實 Adapter（票 14）的 Worker 提示需要寫明「回應出現 `stop_requested` 時保存 checkpoint 並結束」。30 秒是否足夠屬 Validation Required。
+- 審閱：未審
+
+### AI-172：40 秒上限的實作與停止流程結束後的收尾
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：全部 Run 的 `stop` 並行執行，寬限期 30 秒（ProcessControl 在之後 10 秒內終止並確認，AI-72 的既有行為），Runtime 另以 `寬限期 + 確認上限 = 40 秒` 的真實時間作為安全網：到時還沒回來的停止記為停止異常 `stop_unconfirmed`。停止期限（`deadline_at`）以 Clock 記在停止報告中。停止流程期間握住 Supervisor 的 tick 鎖。結束後 Runtime 再提供 API 5 秒（讓 App 讀到最終結果）才結束服務；測試 harness 不自行結束（`exit_linger: None`），以 `exit_timing` 縮短上限測試卡住的情境。
+- 理由：spec D-11 的總上限是 40 秒；ProcessControl 的 `stop` 本身就有上限，但 Port 的實作可能卡住（例如 Windows API 沒有回應），Runtime 不能把有界性完全交給 Port。App 每 0.5 秒輪詢，5 秒足以讀到結果；Runtime 若永遠不結束，App 當掉時會留下無主的 Runtime。
+- 替代方案：停止依序執行（N 個 Run 會變成 N × 40 秒）；Runtime 停止流程結束立即結束服務（App 讀不到停止異常）。
+- 影響：從按下「完全退出」到 Runtime 結束最長約 45 秒；第 40 秒才回來的 `ForceKilled` 若剛好晚於安全網，會被記為 `stop_unconfirmed`（保守）。
+- 審閱：未審
+
+### AI-173：桌面殼：關窗隱藏到系統匣、完全退出由 Web UI 顯示進度，殼有 60 秒後備
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：關閉主視窗改為隱藏（`prevent_close` + `hide`），App 留在系統匣；系統匣選單有停用的狀態項目（每 3 秒以 `GET /api/v1/lifecycle` 更新：運作中與進行中 Run 數、完全退出中、已停止、無法連線）、「開啟 Baton」（左鍵點圖示亦同）與「完全退出」。「完全退出」顯示主視窗並對 Web UI 發 `baton://full-exit-requested`；Web UI 呼叫 `lifecycle_exit`、每 0.5 秒輪詢並顯示每個 Run 的停止結果與期限倒數；沒有停止異常約 1 秒後自動 `app_quit`，有異常則列出並等使用者按「關閉 Baton」；輪詢時 Runtime 已結束也視為完成。要求退出本身失敗時顯示原因與「重試」「返回」，不自動結束 App。殼在按下後 60 秒若 App 仍未結束，自行送出完全退出（冪等）再結束 App。HTTP 版用戶端（瀏覽器開發用）的 `app_quit` 與事件監聽是 no-op。
+- 理由：票面要求「系統匣提供狀態、重新開啟與完全退出」「顯示停止進度與異常」；有異常時自動關閉會讓使用者看不到「哪些程序可能還在背景」。後備避免 Web UI 卡住時 App 永遠不結束；在系統匣按「完全退出」本身就是停止意圖，所以後備也送出退出要求。
+- 替代方案：殼在 Rust 端自己輪詢並以原生對話框顯示進度（與 Web UI 的狀態呈現重複）；有異常也自動結束 App（異常只留在下次開啟才看得到）。
+- 影響：沒有單一執行個體機制，App 隱藏在系統匣時再執行一次執行檔會開出第二個 App（兩者連同一個 Runtime，不會有第二個 Runtime 或 Worker）；可在後續票加入 `tauri-plugin-single-instance`。系統匣與關窗行為只有編譯與元件測試，Windows 上的實際操作屬 Validation Required（已寫入 `docs/development.md`，建議列入票 51）。
+- 審閱：未審
+
+### AI-174：生命週期 API、資料表與事件的形狀
+- 重要度：低
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：端點：`GET /api/v1/lifecycle`（階段、`stop_intent_active`、時間參數、進行中或最近一次的停止報告、進行中 Run 數、各使用中 Workspace 的 `auto_resume_after_exit`／`paused_since`／`awaiting_resume`）、`POST /api/v1/lifecycle/exit`（202）、`PUT /api/v1/workspaces/{id}/lifecycle`（`{ auto_resume_after_exit }`）、`POST /api/v1/workspaces/{id}/resume`（停止意圖生效時 409 `stop_intent_active`）。停止報告的每個 Run：`outcome` = `pending`／`not_started`／`stopped_gracefully`／`force_killed`／`anomaly`，異常再帶 `anomaly` = `still_alive`／`stop_failed`／`stop_unconfirmed` 與說明。migration 16：`runtime_lifecycle`（單列）與 `workspace_lifecycle`（沒有列的 Workspace 等同預設：自動續跑關閉、未暫停）。事件：`full_exit_requested`、`full_exit_completed`（含異常清單）、`runtime_reopened`（含續跑與等待的 Workspace）、`workspace_paused_by_exit`、`workspace_resumed`、`workspace_auto_resume_changed`；停止進度的逐筆更新不追加事件。UI：Workspace 清單每列有「完全退出後自動續跑」勾選與暫停中的「繼續工作」，等待原因第七類標籤為「完全退出」。
+- 理由：一個總覽端點同時供系統匣、退出進度與 Workspace 清單使用；進度更新很頻繁，事件只記開始、結束與重新開啟。
+- 替代方案：把 Workspace 設定放進 `Workspace` 本身（要改 Workspace 狀態機、API 與既有測試）；停止進度用 SSE（事件串流目前還沒有實際事件，輪詢已足夠）。
+- 影響：migration 若與平行開發的票衝突，依 AI-75／AI-86 的方式順延（整合時已順延為第 18 個，見 AI-175、AI-176、AI-178、AI-179）。「跨登入自動續跑」（使用者故事 17 的另一個設定）屬票 33，屆時加在同一張 `workspace_lifecycle` 表。
+- 審閱：未審
+
+### AI-175：票 25 整合 rebuild/v1（票 12、08）：migration 與 AI 編號順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作（合併 rebuild/v1）
+- 決策：(1) 整合分支已有 `artifact`（第 11 版）與 `shared_settings_version`（第 12 版），本票的 `lifecycle` migration 順延為第 13 版；三者沒有共用資料表。(2) 本票原本的 AI-103～AI-109 與整合分支的票 12、08 條目重號，順延為 AI-121～AI-127（內文沒有互相引用，只把 AI-127 的 migration 編號改為 13）；整合分支的條目沒有改動。(3) `baton-api`、`baton-client`、Tauri 殼、Web UI 與 `docs/development.md` 兩邊新增的端點、指令、型別、樣式與段落全部保留（生命週期與成果、共同設定並存）。
+- 理由：已發布的 migration 不可修改，順延尚未合併的本票版本（與 AI-86、AI-117 相同做法）。
+- 替代方案：把本票的 migration 插在前面（會改動整合分支已有的版本號，不可行）。
+- 影響：開發中的本機資料庫若套用過本票舊版本號的 migration，需要重建。
+- 審閱：未審
+
+### AI-176：票 25 再次整合 rebuild/v1（票 27）：migration 第 14 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 修正 run R049（合併 rebuild/v1）
+- 決策：(1) 整合分支已先合併票 27，其 migration `quota` 是第 13 版，本票的 `lifecycle` 順延為第 14 版（排在 `quota` 之後；兩者沒有共用資料表）。(2) 本票條目原本的 AI-121～AI-128 與票 27 的 AI-121～AI-127 重號，順延為 AI-128～AI-135，移到票 27 條目之後；條目內的交互引用（AI-127 中的「見 AI-128」→ AI-134 中的「見 AI-135、AI-136」）與 migration 編號（AI-134 的 13 → 14、`docs/development.md`）同步更新，記錄歷史編號的敘述（AI-135）保留原文。原 AI-127、AI-128 缺少的審閱行與空行在順延時補上。(3) 其餘衝突兩邊都保留：Supervisor 同時有生命週期（重新開啟、完全退出）與額度輪詢、Adapter 額度事件；`baton-api`、`baton-client`、`baton-domain`、`baton-store` 的模組與匯出、Tauri 指令（`app_quit` 與 `profile_set_quota_limits`）、開發指南的 crate 表與情境測試清單合併為同時描述兩張票。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-175 同）。
+- 替代方案：把兩個 migration 合併成一個（會改動整合分支已有的第 13 版）。
+- 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 13 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-177：完全退出的 40 秒從要求退出時算起；生命週期檔在回應前寫入，等 Supervisor 的鎖也有上限
+- 重要度：高
+- 時間／階段：2026-10-22，票 25 修正 run R049（驗證 R047 未通過）
+- 決策：修正 AI-172「停止流程期間握住 tick 鎖」造成的延遲：(1) `POST /api/v1/lifecycle/exit` 持久化資料庫後、回應 202 前就把停止意圖寫進生命週期檔（寫入失敗只記日誌，停止流程開始時再鏡像一次並把失敗記在停止報告的 notes）。(2) 停止流程的期限改由停止報告持久化的 `deadline_at` 減去 Clock 的目前時間換算成真實時間，等 tick 鎖的時間也算在內。(3) Supervisor 增加「完全退出進行中」的旗標；處理取消時呼叫 `ProcessControl::stop` 以 `select!` 同時等這個旗標，一看到就放棄等待並讓出 tick 鎖，該 Run 由停止流程再要求停止一次（同一個寬限期、共用總上限）。(4) 其他握鎖的處理卡住（例如 Port 的 spawn 不回來）時，等鎖以期限為上限；到期限仍拿不到鎖就**不**要求任何程序停止（不能在另一個處理進行中停止程序或結束 Run），把全部尚未結束的 Run 記為 `stop_unconfirmed`、保留寫入所有權，退出照常進入 `stopped`。
+- 理由：驗收條件要求退出在 40 秒內結束；取消中的 `stop` 最長 30 + 10 秒且依序處理，Port 卡住時更永遠不結束，桌面殼的 60 秒後備會先關掉 App，使用者看不到停止異常。spec D-25 要求停止意圖先寫入資料庫與生命週期檔再開始停止，不應排在鎖後面。讓出鎖而不是不握鎖，是因為停止流程仍需要與 `launch_pending` 互斥：否則可能把啟動中的 Run 結束後，那個 spawn 才完成。
+- 替代方案：處理取消時完全不握 tick 鎖、改在背景任務停止程序（現有情境測試依賴「一次 `supervise` 就確認取消」的確定性，改動面大）；停止流程完全不拿 tick 鎖（啟動中的 Run 會有競態）；只把等鎖加上逾時、不讓出（取消卡住時其他 Run 一個都沒被要求停止）。
+- 影響：從按下「完全退出」到停止流程結束最長 40 秒（加上資料庫寫入），Runtime 結束仍再加 5 秒。被讓出的取消在停止流程中可能收到第二次 `stop`（Port 的 `stop` 必須可重複呼叫且可中途放棄；Windows 實作是輪詢 Job 內的程序數再 `TerminateJobObject`，放棄等待不留下半套狀態，重複呼叫沒有副作用）。Clock 被調整時，期限以持久化值為準（Clock 已過期限則不再等待，全部記為無法確認）。
+- 審閱：未審
+
+### AI-178：票 25 第三次整合 rebuild/v1（票 18、22）：migration 第 16 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 修正 run R049（合併 rebuild/v1）
+- 決策：(1) 整合分支在本次修正期間先後併入票 18（`message_and_delivery`，migration 14）與票 22（`decision_request_and_decision`，migration 15），本票的 `lifecycle` 順延為第 16 版，排在最後；彼此沒有共用資料表。(2) 整合分支已用到 AI-147（AI-135、AI-136 空號，依規則不回填），本票條目原本的 AI-128～AI-137 順延為 AI-148～AI-157，移到票 22 條目之後；條目內的交互引用（AI-154 的「見 AI-155、AI-156、AI-158」、AI-156 的「與 AI-155 同」、AI-157 的「修正 AI-152」）與 migration 編號（AI-154、`docs/development.md` 改為 16）同步更新，記錄歷史編號的敘述（AI-155、AI-156 的決策內文）保留原文。(3) 其餘衝突兩邊都保留：`baton-api`／`baton-domain`／`baton-store` 的模組與匯出、`RuntimeClient` 的生命週期與裁定方法、Tauri 的型別匯入；Web UI 的 `AppClient`（HTTP 與 Tauri 兩種實作）同時有生命週期與裁定方法，`App` 同時掛上 `ExitProgress` 與 `DecisionCenter`，`WorkspaceSidebar` 採票 22 的參數（含裁定入口）並保留自動續跑說明，`styles.css` 兩邊新增的區塊依序並存，元件測試兩邊都保留；開發指南的 crate 表與情境測試清單合併為同時描述三張票。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-175、AI-176 同）。
+- 替代方案：把本票條目放進 AI-135、AI-136 的空號（會與條目順序脫節，且其他平行的票也可能想用）。
+- 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 13 或 14 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-179：票 25 第四次整合 rebuild/v1（票 13、37）：migration 第 18 版、AI 編號再順延、Supervisor 同時有生命週期與驗證
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 整合 run R063-25-integrate
+- 決策：(1) 整合分支先後併入票 13（`task_verification`，migration 16）與票 37（`knowledge`，migration 17），本票的 `lifecycle` 順延為第 18 版，排在最後；三者沒有共用資料表，都會套用。整合途中 rebuild/v1 又併入票 37，所以分兩次合併：第一次（只含票 13）的合併 commit 暫時把本票編成 migration 17、AI-159～AI-170，第二次合併後才定為下面的編號。(2) 整合分支已用到 AI-167（票 13 的 AI-148～AI-158、票 37 的 AI-159～AI-167），本票條目原本的 AI-148～AI-158 順延為 AI-168～AI-178，移到票 37 條目之後；條目內的交互引用（AI-174 的「見 AI-175、AI-176、AI-178、AI-179」與 migration 編號 18、AI-176 的「與 AI-175 同」、AI-177 的「修正 AI-172」、AI-178 理由中的「AI-175、AI-176」）與 `docs/development.md` 的 migration 編號同步更新；記錄歷史編號的敘述（AI-175、AI-176、AI-178 的決策內文）保留原文。程式碼與票面沒有引用這些編號。(3) 其餘衝突兩邊都保留：`Supervisor::new` 同時接收成果根目錄（票 13）與 `LifecycleSettings`（本票）；`supervise_once` 先做重新開啟再做原本的六個步驟（註解改為「七個步驟」），驗證仍是最後一步（開發指南改為「第 8 步」）；`RuntimeOptions` 與測試 harness 同時有 `exit_timing`／`exit_linger`（本票）與 `full_text_search`（票 37），`try_start_runtime` 兩個參數都接；`baton-api`／`baton-domain`／`baton-store` 的模組與匯出、`baton-client` 與 Tauri 的型別匯入與指令（生命週期、`app_quit`、知識）、Web UI `AppClient` 的 HTTP／Tauri 實作（生命週期與驗證方法）、`App.tsx`（`ExitProgress` 與 `KnowledgePage`）、`fixtures.ts`、`App.test.tsx` 的假用戶端（工作面板加 `verifications: []`，並保留生命週期方法）、開發指南的 crate 表、章節與情境測試清單都合併為同時描述三張票。`lifecycle_client` 測試的契約補上票 13 新增的必填欄位 `verification_checks: vec![]`（斷言不變）。(4) 停止意圖生效期間不阻擋確定性檢查：驗證不是新 Run，不在票 25「新派工、交接與重試」的阻擋範圍；Runtime 結束時驗證命令隨 `kill_on_drop` 終止，重新開啟後依票 13 的規則重新執行檢查（AI-153）。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-175、AI-176、AI-178 同）。
+- 替代方案：停止意圖生效時也暫停驗證（屬新行為，超出整合範圍；需要時另開票）。
+- 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 16 或 17 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-180：真實 Claude Code Adapter 的啟動參數：不載入任何設定檔來源、權限經 permission_prompt、Prompt 經標準輸入
 - 重要度：高
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：Worker 以 `claude -p --output-format stream-json --verbose --setting-sources "" --strict-mcp-config --mcp-config <Run 的 mcp.json> [<快照的 mcp.json>] --allowedTools mcp__baton --permission-prompt-tool mcp__baton__permission_prompt [--settings …] [--append-system-prompt-file …] [--model …]` 啟動。Prompt 寫成 Run 目錄的 `prompt.md` 經標準輸入交付。權限模式維持 CLI 預設（不使用 `bypassPermissions`），只預先允許 Baton 自己的 MCP 工具，其餘需要核准的操作經票 22 的 `permission_prompt` 交給 Runtime 判定。執行檔是 `claude`（CreateProcessW 依 PATH 找 `claude.exe`），MCP shim 是與 Runtime 同目錄的 `baton-mcp-shim.exe`。
-- 理由：`--setting-sources ""` 讓使用者層與 Workspace 內的 `.claude\settings*.json` 都不載入。實測 `project,local` 時 Workspace 設定的 `defaultMode: acceptEdits` 會生效，而 P3 授權下 Worker 可以寫這些檔案（票 22 驗證 R052 的意見），等於 Worker 能改自己的權限；設定改為只來自 Run 的唯讀快照（D-09）。`--strict-mcp-config` 讓 Worker 只看到 Baton 的 shim 與快照中的共同 MCP 伺服器（D-05）。Prompt 經標準輸入可避開 Windows 指令列長度上限，也不會出現在程序清單。全部參數已在 Claude Code 2.1.307 實測（見 AI-176）。
+- 理由：`--setting-sources ""` 讓使用者層與 Workspace 內的 `.claude\settings*.json` 都不載入。實測 `project,local` 時 Workspace 設定的 `defaultMode: acceptEdits` 會生效，而 P3 授權下 Worker 可以寫這些檔案（票 22 驗證 R052 的意見），等於 Worker 能改自己的權限；設定改為只來自 Run 的唯讀快照（D-09）。`--strict-mcp-config` 讓 Worker 只看到 Baton 的 shim 與快照中的共同 MCP 伺服器（D-05）。Prompt 經標準輸入可避開 Windows 指令列長度上限，也不會出現在程序清單。全部參數已在 Claude Code 2.1.307 實測（見 AI-188）。
 - 替代方案：`--setting-sources project,local`（Worker 可藉 Workspace 設定放寬權限）；`--bare`（會改變認證來源的讀取方式）；`bypassPermissions`（違反 D-08）。npm 安裝的 `claude.cmd` 不能直接以 CreateProcessW 啟動，目前不支援，需要時改為經 `cmd.exe` 或解析實際路徑。
 - 影響：repo 自己的 `.claude\settings.json`（hooks、權限、環境變數）對 Worker 不生效；需要的設定要放進共同設定。
 - 審閱：未審
 
-### AI-169：啟動 Worker 前移除繼承的 `ANTHROPIC*`、`CLAUDE*` 環境變數
+### AI-181：啟動 Worker 前移除繼承的 `ANTHROPIC*`、`CLAUDE*` 環境變數
 - 重要度：高
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：Runtime 啟動時記下繼承到的環境變數名稱；啟動 Worker 前移除名稱以 `ANTHROPIC` 或 `CLAUDE` 開頭（不分大小寫）的全部變數，只保留 `CLAUDE_CODE_GIT_BASH_PATH`，再設定 `CLAUDE_CONFIG_DIR` 為 Run 帳號 Profile 的目錄。移除以新增的 `SpawnSpec.env_remove` 交給 ProcessControl，憑證以 `env` 交付，都不進指令列或 `command_hash`。
@@ -1531,7 +1639,7 @@
 - 影響：使用者若以環境變數調整 Claude Code 行為（例如 `CLAUDE_CODE_MAX_OUTPUT_TOKENS`），對 Worker 不生效；需要時應改放共同設定或擴充保留清單。
 - 審閱：未審
 
-### AI-170：CLI 輸出寫入 Run 目錄的檔案，Adapter 追蹤檔案取得事件
+### AI-182：CLI 輸出寫入 Run 目錄的檔案，Adapter 追蹤檔案取得事件
 - 重要度：中
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：ProcessControl 依新增的 `SpawnSpec.stdin_file`／`stdout_file`／`stderr_file`，把 `claude` 的標準輸出寫入 `<資料目錄>\runs\<run_id>\stream.jsonl`、標準錯誤寫入 `stderr.log`（share read/write/delete）。Adapter 的事件串流每 250 毫秒讀取檔案新內容並逐行解析，有新輸出就送一次 `Heartbeat`。Runtime 重建後重新接上同一個檔案，從頭重播。
@@ -1540,7 +1648,7 @@
 - 影響：重建後重播會重送限流與用量事件，票 27 的觀測會多記一次同一筆用量（推估偏高、偏保守）；stream 檔案隨 Run 保留在資料目錄，目前沒有清理流程。
 - 審閱：未審
 
-### AI-171：stream-json 事件對應：限流訊號、用量與錯誤
+### AI-183：stream-json 事件對應：限流訊號、用量與錯誤
 - 重要度：中
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：`system/init` → `Started`（`session_id`）；`assistant` 的文字區塊 → `Message`。`rate_limit_event`：`status` 的 `allowed`／`allowed_warning`／`rejected` 對應票 27 的 `Allowed`／`Warning`／`Exhausted`（其他狀態不轉換），屬於 `rateLimitType` 的視窗（不認識的視窗為 `None`），`used` 取 `utilization`，沒有時取 `unifiedWindows` 中該視窗的值；`unifiedWindows` 的其他視窗以 `Allowed` 加已用比例各送一個訊號。`result`：有 `usage` 時先送 `UsageReported`，`tokens` = 輸入 + 輸出 + 快取建立（快取讀取不計，採用 AI-121 的建議）；`is_error` 為 false 且 `subtype` 為 `success` 才是成功，否則先送新增的 `AdapterEvent::Error`（`result` 文字，500 字元內）再送 `Exited { success: false }`。不是 JSON 的行送 `Error`。Supervisor 以最後一個錯誤作為 Run 的失敗原因。`resume_capability` 一律回報 `Unknown`。
@@ -1549,7 +1657,7 @@
 - 影響：撞到限制時的實際形狀尚未實測（`docs/adapter-contract.md`）；resume 屬後續票。
 - 審閱：未審
 
-### AI-172：原生 Session 的條件綁定：不同的 Session 只記錄衝突，不改綁定也不結束 Run
+### AI-184：原生 Session 的條件綁定：不同的 Session 只記錄衝突，不改綁定也不結束 Run
 - 重要度：中
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：Run 新增 `native_session_id`。`BindNativeSession` 需要目前寫入所有者的世代；沒有綁定時綁定並記 `run_native_session_bound`；相同時沒有任何變動；不同時保留原綁定並記 `run_native_session_conflict`（含兩個識別），Run 照常執行。
@@ -1558,7 +1666,7 @@
 - 影響：UI 目前不顯示衝突事件，只能從事件表查看。
 - 審閱：未審
 
-### AI-173：Claude Code 最低版本固定為 2.1.307，版本記在 Profile 核對中，未知也阻擋
+### AI-185：Claude Code 最低版本固定為 2.1.307，版本記在 Profile 核對中，未知也阻擋
 - 重要度：高
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：新增 `baton_domain::claude_code`，最低版本 `MIN_SUPPORTED_VERSION = 2.1.307`（真實 Adapter 契約實測通過的版本）。首次啟動精靈的 `MIN_CLAUDE_CODE_VERSION` 改由它導出（原暫定 2.1.0）。核對 Profile 時同時執行 `claude --version` 並記入 `verification.cli_version`；低於最低版本是 `cli_version_unsupported`（帳號問題），找不到 Claude Code、取不到或看不懂版本是 `cli_version_unknown`（狀態不明），兩者都阻擋該 Profile 的派工並顯示原因。票 14 之前的核對沒有版本，需要重新核對。
@@ -1567,7 +1675,7 @@
 - 影響：既有的 Profile 在重新核對前都不能派工；CLI 降版後要重新核對才會被阻擋。
 - 審閱：未審
 
-### AI-174：設定快照在啟動前自動准入與核對，API 與 Supervisor 共用並依 Run 序列化
+### AI-186：設定快照在啟動前自動准入與核對，API 與 Supervisor 共用並依 Run 序列化
 - 重要度：中
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：新增 `baton_api::RunSettings`（取代 `materialize_run_settings`），API 的快照端點與 Supervisor 共用同一個實例，每個 Run 一把鎖。Supervisor 在 launch intent 持久化之後、簽發憑證之前取得快照：尚未綁定就以最新版本建立；已綁定就核對目錄中的檔案（含 `manifest.json`）與版本渲染結果完全相同。核對失敗以 `LaunchFailed`（`settings_snapshot_mismatch…`）結束 Run，不啟動程序；API 再要求已綁定的快照也做同樣核對，不一致回 409 `settings_snapshot_mismatch`。還沒有採用任何共同設定版本時，Run 不帶共同設定啟動。
@@ -1576,16 +1684,16 @@
 - 影響：鎖只在單一 Runtime 實例內有效（Runtime 本身是單實例）；Run 啟動後快照被改動不會被偵測。
 - 審閱：未審
 
-### AI-175：模型依 Workspace 角色覆寫的資料形狀與生效時機
+### AI-187：模型依 Workspace 角色覆寫的資料形狀與生效時機
 - 重要度：低
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：Workspace 新增 `model_overrides { controller, worker, reviewer }`（`null` = 不覆寫），以 `PUT /api/v1/workspaces/{id}/model-overrides` 整組取代；名稱去除空白後只允許英數字與 `. _ - : [ ] @ /`、最長 100 字元。派工時把 Worker 角色的模型固定進派工 Outbox（`LaunchPayload.model`），只影響之後派出的 Run。Controller 與 Reviewer 的覆寫先保存，由各自的票使用。UI 放在 Workspace「授權設定」畫面下方。
 - 理由：spec D-30。模型名稱會成為 `--model` 的引數，限制字元避免被當成其他旗標或夾帶參數；在派工時固定讓 Runtime 重建後組出相同的啟動指令。
 - 替代方案：在 Run 啟動時才讀取 Workspace 的覆寫（重建後可能組出不同指令）；放進共同設定（共同設定是全域的，不能依 Workspace 區分）。
-- 影響：migration `model_overrides_and_native_session` 新增 `workspace.model_overrides` 與 `run.native_session_id`（序號見 AI-177）。
+- 影響：migration `model_overrides_and_native_session` 新增 `workspace.model_overrides` 與 `run.native_session_id`（序號見 AI-189、AI-190）。
 - 審閱：未審
 
-### AI-176：真實 Adapter 契約以 Work-3 實際執行，並把輸出錄進 repo 作為 replay 對象；AI-144 的三個問題已實測
+### AI-188：真實 Adapter 契約以 Work-3 實際執行，並把輸出錄進 repo 作為 replay 對象；AI-144 的三個問題已實測
 - 重要度：中
 - 時間／階段：2026-10-22，票 14 實作
 - 決策：契約測試有三種對象：fake、replay（真實 Adapter 讀取真實 CLI 錄下的 stream-json）、live（`#[ignore]`，手動）。本票以 Work-3（`BATON_LIVE_PROFILE_DIR=C:\Users\User\.claude-Work-3`、模型 `haiku`）實際執行 live（最後一次 5/5 通過，另有權限轉接 1/1），把兩個情境的輸出錄成 `crates/baton-harness/tests/fixtures/claude-2.1.307-*.jsonl`（路徑中的使用者名稱改成範例值）。權限轉接以本機假 Agent API 驗證 AI-144：(a) CLI 接受 `behavior` 以外的欄位，`deny` 不需要 `updatedInput`；(b) 收到 `deny` 的 Worker 沒有重試同一個操作並正常結束；(c) CLI 會帶 `tool_use_id`，Runtime 不需要它也能運作。結果記錄在 `docs/adapter-contract.md`。
@@ -1594,13 +1702,22 @@
 - 影響：CLI 升版後需要依 `docs/adapter-contract.md` 重新執行 live 並更新錄製檔；`allow` 是否可省略 `updatedInput` 仍未實測（Runtime 一律帶上）。
 - 審閱：未審
 
-### AI-177：票 14 整合 rebuild/v1（票 27、18、22、13、37）：AdapterEvent 合併、migration 第 18 版、AI 編號順延
+### AI-189：票 14 整合 rebuild/v1（票 27、18、22、13、37）：AdapterEvent 合併、migration 第 18 版、AI 編號順延
 - 重要度：低
 - 時間／階段：2026-10-22，票 14 實作（整合 rebuild/v1）
 - 決策：整合分支已併入票 27（migration 13 `quota`）、票 18（14 `message_and_delivery`）、票 22（15 `decision_request_and_decision`）、票 13（16 `task_verification`）與票 37（17 `knowledge`），所以本票的 migration `model_overrides_and_native_session` 由第 13 個順延為第 18 個，排在最後。本票原本以 AI-121～AI-129 追加的條目與整合分支的編號重複，改為 AI-168～AI-177（內容依整合後的實作更新）。票 13 的驗證測試中自行建立的 `Run` 補上 `native_session_id`；Supervisor 同時接收設定快照服務與成果目錄；harness 的 builder 同時保留取代 Agent Adapter 與 `full_text_search` 兩個選項。`AdapterEvent` 採用票 27 的 `RateLimited { window, status, used, reset_at_millis, raw }` 與 `UsageReported`，保留本票新增的 `Error`；Supervisor 同時處理額度事件與原生 Session 綁定。前端 `App.tsx` 同時保留模型設定面板、票 22 的裁定中心與票 37 的知識分頁。裁定中心與知識分頁測試中自建的 Workspace 補上 `model_overrides`。
 - 理由：不可修改整合分支已有的 migration 與 AI 條目；功能彼此獨立。
 - 替代方案：合併 migration（已套用的開發資料庫會漏掉其中一部分）。
 - 影響：用本票分支建過的開發資料庫（第 13 個 migration 是本票的）與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-190：票 14 整合 rebuild/v1（票 25）：migration 第 19 版、AI 編號順延為 AI-180～AI-189、完全退出找回程序改用本票的 RunSpec
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 整合 run R069-14-integrate
+- 決策：(1) 整合分支已併入票 25 的 `lifecycle`（migration 18），本票的 `model_overrides_and_native_session` 由第 18 個順延為第 19 個，排在最後；兩者沒有共用欄位（本票只對 `workspace`、`run` 加欄，票 25 新建 `runtime_lifecycle`、`workspace_lifecycle`），都會套用。(2) 整合分支已用到 AI-179（票 25 的 AI-168～AI-179），本票條目 AI-168～AI-177 順延為 AI-180～AI-189，移到票 25 條目之後；條目間的交互引用（AI-180 的「見 AI-188」、AI-187 的 migration 序號）同步更新，AI-189 決策內文記錄歷史編號的敘述保留原文。自動合併時原 AI-177 的 `- 審閱：未審` 行與票 25 的 AI-168 標題相鄰而被吃掉，重建時補回。程式碼、文件與票面沒有引用這些編號。(3) 票 25 的完全退出要以 command_id 找回「啟動中、回執未寫回」的程序，原本用同步的 `run_spec_of`（只有 prompt 與工作目錄）；本票已把 RunSpec 改為由持久化狀態（Profile 的 CLAUDE_CONFIG_DIR、設定快照綁定、模型）非同步組出，Adapter 依此算出與啟動時相同的 command_hash，所以 `process_of` 改呼叫本票的 `run_spec`，移除 `run_spec_of`；組不出 RunSpec（例如找不到 Profile）時回傳錯誤，由停止流程記為停止異常 `stop_failed`、保留寫入所有權，而不是當作沒有程序。(4) 其餘衝突兩邊都保留：Supervisor 同時有 `run_settings`、`last_errors`（本票）與生命週期欄位（票 25），`Supervisor::new` 同時接收設定快照服務與 `LifecycleSettings`；Runtime 的 `baton_api` 匯入同時有 `RunSettings` 與 `LogSink`；harness 的 builder 同時有 `agent_adapter` 與 `exit_timing`，啟動與重啟都以 `Harness::ports()`（含取代的 Adapter）加上 `exit_timing` 呼叫 `try_start_runtime`；`WorkspaceSidebar.test.tsx` 的假用戶端同時有 `setModelOverrides` 與生命週期方法；開發指南 crate 表的 `baton-runtime` 列以整合分支為準再加回 `claude_adapter.rs`。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-175、AI-179 同）。找回程序時若用與啟動時不同的 RunSpec，真實 Adapter 算出的 command_hash 會不同，找不回程序，停止流程會誤把仍在跑的程序當作「未啟動」而結束 Run。
+- 替代方案：保留 `run_spec_of` 只給停止流程用（真實 Adapter 下找不回程序）；組不出 RunSpec 時視為沒有程序（可能讓仍在跑的程序失去寫入所有權的保護）。
+- 影響：用本票分支建過的開發資料庫，`model_overrides_and_native_session` 記在第 18 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

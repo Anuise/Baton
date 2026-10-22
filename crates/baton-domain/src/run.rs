@@ -354,6 +354,8 @@ pub enum RunError {
     LeaseNotExpired,
     #[error("Run 沒有被要求取消，不能完成取消")]
     CancelNotRequested,
+    #[error("完全退出的停止意圖生效中（或 Workspace 在完全退出後等待「繼續工作」），不啟動新的程序")]
+    LaunchHalted,
 }
 
 fn join_messages(items: &[MissingItem]) -> String {
@@ -376,6 +378,7 @@ impl RunError {
             RunError::StaleReport => "run_report_stale",
             RunError::LeaseNotExpired => "lease_not_expired",
             RunError::CancelNotRequested => "run_cancel_not_requested",
+            RunError::LaunchHalted => "launch_halted",
         }
     }
 }

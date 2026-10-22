@@ -549,6 +549,31 @@ describe("派工與 Run", () => {
     expect(within(queued).getByText("沒有可派工的帳號")).toBeInTheDocument();
   });
 
+  it("完全退出中或等待「繼續工作」的原因標示為「完全退出」", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [readyTask()],
+        queue: [
+          {
+            workspace_id: "ws_1",
+            task_id: "task_1",
+            title: "部署",
+            priority: 0,
+            requested_at: T0,
+            position: 1,
+            reasons: [
+              { category: "lifecycle", code: "awaiting_resume", message: "Workspace 在完全退出後等待「繼續工作」" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const queued = within(card("部署")).getByRole("group", { name: "排隊原因" });
+    const lifecycle = within(queued).getByText("完全退出").closest("li")!;
+    expect(within(lifecycle).getByText("Workspace 在完全退出後等待「繼續工作」")).toBeInTheDocument();
+  });
+
   it("讀不到排程總覽時看板照常顯示，Run 狀態列改顯示 profile_id", async () => {
     const client = fakeClient({
       tasks: [task("task_1", "部署", { status: "running" })],

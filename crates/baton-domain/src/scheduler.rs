@@ -157,6 +157,8 @@ pub enum WaitCategory {
     StateUnknown,
     /// 帳號本身不可用（未登入、認證被覆蓋、身分不符、已封存）或根本沒有帳號。
     Account,
+    /// 完全退出的停止意圖生效中，或 Workspace 在完全退出後等待「繼續工作」（票 25）。
+    Lifecycle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +233,9 @@ pub struct Capacity<'a> {
     pub active_runs: &'a [Run],
     /// Profile 識別 → 已知的用量比例（0.0–1.0）；未觀測的帳號沒有項目，不當作 0。
     pub quota_used: &'a HashMap<String, f64>,
+    /// 生命週期的阻擋（完全退出的停止意圖、Workspace 等待「繼續工作」，`lifecycle::dispatch_halt`）。
+    /// 有值時任何名額（含交接）都不派，佇列重試與額度恢復也就不會啟動新的 Run。
+    pub halt: Option<WaitReason>,
 }
 
 impl Capacity<'_> {
@@ -266,6 +271,9 @@ fn profile_blocker_category(code: &str) -> WaitCategory {
 /// 選帳號：在「核對無誤、額度未達門檻、帳號名額未滿」的帳號中，挑進行中 Run 最少的，同數時取較早建立的。
 /// 這讓兩個帳號同時有空時，第一個 Task 給第一個帳號、第二個 Task 給第二個帳號。
 pub fn place(capacity: &Capacity<'_>, kind: SlotKind) -> Placement {
+    if let Some(halt) = &capacity.halt {
+        return Placement::Wait(vec![halt.clone()]);
+    }
     let limits = capacity.settings.mode.limits();
     let active: Vec<&AccountProfile> = capacity.profiles.iter().filter(|p| p.status == ProfileStatus::Active).collect();
     if active.is_empty() {
@@ -381,7 +389,13 @@ pub fn evaluate(
 ) -> Result<Evaluation, RunError> {
     if let Err(error) = run::check_dispatch(ctx, task_id) {
         return match task_wait_reasons(&error) {
-            Some(reasons) => Ok(Evaluation::Wait(reasons)),
+            Some(mut reasons) => {
+                // 生命週期的阻擋也一併列出，使用者才知道等授權或相依之外還要「繼續工作」
+                if let Some(halt) = &capacity.halt {
+                    reasons.insert(0, halt.clone());
+                }
+                Ok(Evaluation::Wait(reasons))
+            }
             None => Err(error),
         };
     }
