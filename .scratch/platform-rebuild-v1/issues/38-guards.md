@@ -1,6 +1,6 @@
 # 38: Guard 與執行前檢查
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R066-38-impl，2026-10-22 17:46）
 Blocked by: 37
 
 **What to build:** 已驗證教訓可轉為 Guard（啟動前檢查、工具限制或重試政策），由使用者啟用；Run 准入時執行適用 Guard，違反時阻擋並顯示對應教訓。記錄重犯事件與 Guard 成效。
