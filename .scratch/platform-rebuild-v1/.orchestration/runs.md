@@ -81,6 +81,6 @@
 | R077-15-impl | 15 | impl | Work-3 | 2026-10-22 18:18 | | |
 | R078-38-integrate | 38 | integrate | Work-9 | 2026-10-22 18:19 | 2026-10-22 18:24 | DONE，依 AI-109 直接合併 |
 | R079-35-verify | 35 | verify | Work-3 | 2026-10-22 18:22 | 2026-10-22 18:28 | PASS（基底早於票 38，依 AI-109 整合後合併） |
-| R080-20-integrate | 20 | integrate | Work-8 | 2026-10-22 18:24 | | |
+| R080-20-integrate | 20 | integrate | Work-8 | 2026-10-22 18:24 | 2026-10-22 18:33 | DONE，依 AI-109 直接合併 |
 | R081-24-verify | 24 | verify | Work-8 | 2026-10-22 18:28 | | |
 | R082-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:28 | | |
