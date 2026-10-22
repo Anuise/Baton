@@ -99,7 +99,7 @@ describe("帳號頁", () => {
       blockers: [
         {
           code: "cli_version_unsupported",
-          message: "Claude Code 版本 2.0.5 低於支援的最低版本 2.1.0，已阻擋派工；請更新 Claude Code 後重新核對",
+          message: "Claude Code 版本 2.0.5 低於支援的最低版本 2.1.307，已阻擋派工；請更新 Claude Code 後重新核對",
         },
       ],
     });

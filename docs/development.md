@@ -11,7 +11,7 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 | `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式） |
 | `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照與成果瀏覽）、`/api/v1/scheduling`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
-| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
+| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、Claude Code Adapter（`claude_adapter.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-mcp-shim` | MCP 工具 shim（`baton-mcp-shim.exe`）：Claude Code 以 stdio 啟動，把工具呼叫轉送到 Runtime 的 Agent API；只依賴 `baton-domain` |
 | `crates/baton-harness` | 測試 harness 與全部 Port 的 fake（主要測試 seam，spec D-04） |
 | `crates/baton-client` | 桌面殼用的 `RuntimeClient`（自動讀取憑證）與「連回既有 Runtime 或啟動新的」邏輯 |
@@ -298,7 +298,7 @@ Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 
 - `POST /api/v1/profiles/{id}/login-terminal`：開啟終端機，以該 Profile 的 `CLAUDE_CONFIG_DIR` 執行 `claude auth login`（`cmd /c start … cmd /k claude auth login`）。登入完成後由使用者按「重新核對」。
 - `POST /api/v1/profiles/{id}/archive`。
 - `GET /api/v1/setup`：精靈狀態（Claude Code 是否在 PATH 與版本、Git、使用中 Profile 的登入狀態、`ready`、背景行為告知）；`POST /api/v1/setup/recheck`（「重新檢查」，另外重新核對每個使用中的 Profile）；`POST /api/v1/setup/background-notice/acknowledge`。
-- 缺項只回傳官方指令供顯示（`guidance`），Runtime 不下載、不執行任何安裝腳本；Port 上也沒有安裝動作。最低 Claude Code 版本暫定 2.1.0（`MIN_CLAUDE_CODE_VERSION`，Adapter 驗證時固定）。
+- 缺項只回傳官方指令供顯示（`guidance`），Runtime 不下載、不執行任何安裝腳本；Port 上也沒有安裝動作。最低 Claude Code 版本是 Adapter 契約驗證過的 2.1.307（`baton_domain::claude_code::MIN_SUPPORTED_VERSION`，精靈的 `MIN_CLAUDE_CODE_VERSION` 與它相同）。核對 Profile 時同時記下 `claude --version`（`verification.cli_version`）：版本低於最低版本回報 `cli_version_unsupported`，找不到 Claude Code 或看不懂版本回報 `cli_version_unknown`，兩者都阻擋該 Profile 的派工（票 14 之前的核對沒有版本，需要重新核對）。
 
 核對時沿用 Runtime 目前的環境變數，只覆寫 `CLAUDE_CONFIG_DIR`，所以環境變數造成的覆蓋會如實顯示。正式實作（`ClaudeCli`）在本機的手動驗證：
 
@@ -358,7 +358,8 @@ Runtime 的環境設了 `CLAUDE_CONFIG_DIR` 時，改讀該目錄下的 `setting
 | `settings_version_not_found` | 404 | 指定的版本不存在（讀版本、或快照指定了不存在的版本） |
 | `shared_settings_not_adopted` | 409 | 還沒有採用任何版本，卻要求最新版本的快照 |
 | `settings_snapshot_pinned` | 409 | Run 已固定使用某版本，要求改用別的版本 |
-| `settings_snapshot_failed` | 500 | 無法寫入快照目錄 |
+| `settings_snapshot_failed` | 500 | 無法寫入或讀取快照目錄 |
+| `settings_snapshot_mismatch` | 409 | 已綁定的快照目錄與版本內容或 `manifest.json` 不一致（被修改、刪除或多出檔案） |
 
 **版本不可變**：版本存在追加式的 `shared_settings_version` 表（版本號從 1 連續遞增；觸發器禁止更新與刪除），採用時在同一交易追加 `shared_settings_adopted` 事件（`aggregate_type = 'shared_settings'`，聚合版本 = 版本號）。**每次採用都建立新版本**，即使內容與目前版本相同（預覽的 `changed` 會告知這一點）；舊版本內容永遠不變。**採用必須帶預覽的 `candidate_hash`**：使用者採用的一定是他看過的內容，預覽之後來源檔有任何改變，採用就被拒絕。
 
@@ -371,13 +372,36 @@ Runtime 的環境設了 `CLAUDE_CONFIG_DIR` 時，改讀該目錄下的 `setting
 | `CLAUDE.md` | 全域指示 |
 | `manifest.json` | 版本、內容雜湊與上列每個檔案的 SHA-256（供核對） |
 
-渲染完全由版本內容決定（鍵排序、固定縮排），同一版本永遠得到相同的位元組；`bundle_from_snapshot_files` 可從目錄還原內容核對版本雜湊。寫入由 `WorkspaceFs::write_readonly_files` 完成：先寫到同層的 `<run_id>.staging`、每個檔案 `fsync` 並設為唯讀屬性，才改名成正式目錄，最後把目錄也設為唯讀，所以讀取端不會看到寫到一半的目錄。Run 與版本的綁定存在追加式的 `run_settings_snapshot` 表（觸發器禁止更新與刪除）：**Run 第一次產生快照時綁定版本，之後再採用新版本也不影響它**；再次呼叫回傳同一個綁定，要求別的版本回 409 `settings_snapshot_pinned`。快照端點目前由 API 呼叫，Run 准入流程尚未自動呼叫它。
+渲染完全由版本內容決定（鍵排序、固定縮排），同一版本永遠得到相同的位元組；`bundle_from_snapshot_files` 可從目錄還原內容核對版本雜湊。寫入由 `WorkspaceFs::write_readonly_files` 完成：先寫到同層的 `<run_id>.staging`、每個檔案 `fsync` 並設為唯讀屬性，才改名成正式目錄，最後把目錄也設為唯讀，所以讀取端不會看到寫到一半的目錄。Run 與版本的綁定存在追加式的 `run_settings_snapshot` 表（觸發器禁止更新與刪除）：**Run 第一次產生快照時綁定版本，之後再採用新版本也不影響它**；再次呼叫回傳同一個綁定，要求別的版本回 409 `settings_snapshot_pinned`。
+
+**准入與核對（票 14）**：快照由 `baton_api::RunSettings` 產生，API 端點與 Supervisor 共用同一個實例：**同一個 Run 的請求依序處理**（不會兩個請求同時寫同一個目錄）；**已綁定的快照每次都核對**：目錄中的檔案必須與版本渲染出的檔案（含 `manifest.json`）完全相同，不一致回 409 `settings_snapshot_mismatch`。Supervisor 啟動 Run 前自動取得快照：尚未綁定就以最新版本建立，已綁定就核對；核對不過 Run 以 `launch_failed：settings_snapshot_mismatch…` 結束，**不啟動程序**。還沒有採用任何版本時 Run 不帶共同設定啟動。
 
 > **Validation Required**（spec D-09）：
 >
-> - 快照目錄在 Windows 上只靠**檔案的唯讀屬性**保護：它能阻止直接覆寫檔案（情境測試驗證），但**不阻止刪除檔案**（實測 Rust 標準函式庫的刪除會忽略唯讀屬性，Node 的 `unlink` 也會先取消它）、**目錄本身無法阻止新增檔案**，唯讀屬性也不是安全邊界（同一 Windows 使用者可以取消它）。快照檔的內容雜湊記在 `manifest.json`，可用來偵測被竄改或刪除，但目前沒有任何流程自動核對（AI-114）。
+> - 快照目錄在 Windows 上只靠**檔案的唯讀屬性**保護：它能阻止直接覆寫檔案（情境測試驗證），但**不阻止刪除檔案**（實測 Rust 標準函式庫的刪除會忽略唯讀屬性，Node 的 `unlink` 也會先取消它）、**目錄本身無法阻止新增檔案**，唯讀屬性也不是安全邊界（同一 Windows 使用者可以取消它）。快照檔的內容雜湊記在 `manifest.json`；Run 啟動前會核對（見上），但啟動之後被改動不會被偵測（AI-114）。
 > - Claude Code 是否能完全阻擋使用者層設定（`~\.claude\settings.json` 等）的合併與熱重載，**尚未實測**；在實測之前不可宣稱 Run 的設定已被固定。無法維持時，依 D-09 必須阻擋並顯示，不宣稱固定成功。
-> - Adapter 啟動 Run 時如何以設定參數把快照檔傳給 Claude Code，**尚未接上**（屬後續票，正式執行檔的 AgentAdapter 仍是「尚未實作」）。
+> - Adapter 以 `--settings`、`--append-system-prompt-file` 與 `--mcp-config` 把快照檔傳給 Claude Code，並以 `--setting-sources project,local` 不載入使用者層設定（見「Claude Code Adapter」）；是否完全阻擋使用者層 `CLAUDE.md` 與熱重載仍待實測（`docs/adapter-contract.md`）。
+
+### Claude Code Adapter
+
+正式的 AgentAdapter 是 `baton_runtime::claude_adapter::ClaudeCodeAdapter`（spec D-06、D-07）：每個 Worker Run 是一次 `claude -p`。Supervisor 啟動 Run 時依序做：持久化 launch intent → 取得並核對設定快照 → 組出 `RunSpec`（Prompt、工作目錄、Run 帳號 Profile 的設定目錄、快照目錄、Worker 模型；全部來自持久化的狀態，Runtime 重建後組出相同結果）→ `prepare` 寫入 Run 檔案 → 簽發 Agent 憑證 → spawn。
+
+| 項目 | 內容 |
+| --- | --- |
+| 指令 | `claude -p --output-format stream-json --verbose --setting-sources project,local --strict-mcp-config --mcp-config <Run 的 mcp.json> [<快照的 mcp.json>] --allowedTools mcp__baton [--settings <快照的 settings.json>] [--append-system-prompt-file <快照的 CLAUDE.md>] [--model <模型>]` |
+| Run 檔案 | `<資料目錄>\runs\<run_id>\`：`prompt.md`（經標準輸入交付，不放進指令列）、`mcp.json`（只指向 shim，憑證以 `${BATON_AGENT_TOKEN}` 參照）、`stream.jsonl`（標準輸出）、`stderr.log` |
+| 環境 | `CLAUDE_CONFIG_DIR` = Run 帳號 Profile 的目錄；移除 Runtime 繼承到的 `ANTHROPIC*`、`CLAUDE*` 變數（`CLAUDE_CODE_GIT_BASH_PATH` 除外）；Supervisor 再加上 `BATON_AGENT_TOKEN`、`BATON_RUNTIME_URL` |
+| 憑證 | 啟動參數只有旗標、檔案路徑與模型名稱，**不含任何憑證值**（情境測試比對 Agent 憑證與 Profile 的登入資料） |
+| 事件 | 從 `stream.jsonl` 追蹤（Runtime 重建後重新接上同一個檔案）：`system/init` → `Started`（原生 Session）、`assistant` 文字 → `Message`、`rate_limit_event` 的 `rejected` → `RateLimited`、`result` → 失敗時先 `Error` 再 `Exited`；有新輸出就是 `Heartbeat` |
+| 原生 Session | 第一次回報時以 `BindNativeSession` 綁定到 Run（`run.native_session_id`，事件 `run_native_session_bound`）；之後相同不變，不同則只記錄 `run_native_session_conflict`，**不改綁定** |
+| 失敗原因 | `result` 的 `is_error` 為 true（即使 `subtype` 是 `success`）時，Run 以 CLI 回報的文字作為 `end_reason` |
+| resume | `resume_capability` 一律回報 `Unknown`（屬 Session 持久化與 resume 的票） |
+
+ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdin_file`、`stdout_file`、`stderr_file` 處理環境與標準輸入輸出；輸出檔以 share read/write/delete 開啟，Adapter 可在程序執行中讀取。
+
+**模型（spec D-30）**：平台預設不指定模型。Workspace 可依角色覆寫：`PUT /api/v1/workspaces/{id}/model-overrides`，本文 `{ "controller"?, "worker"?, "reviewer"? }`（`null`、省略或空白 = 不覆寫；名稱只允許英數字與 `. _ - : [ ] @ /`，否則 400 `model_name_invalid`；封存的 Workspace 409 `workspace_already_archived`），回 200 與 Workspace（`model_overrides`）。派工時把 Worker 角色的模型固定進派工 Outbox（`LaunchPayload.model`），所以**只影響之後派出的 Run**。UI 在 Workspace 的「授權設定」畫面下方。
+
+**Adapter 契約測試**：`crates/baton-harness/tests/adapter_contract.rs`，同一份契約跑在 fake、replay（真實 CLI 錄下的 stream-json）與 live（真實 CLI，手動）上；執行方式與結果記錄見 [adapter-contract.md](adapter-contract.md)。
 
 ### 本機 API 的存取防護
 
