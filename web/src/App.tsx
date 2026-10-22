@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { AccountsPage } from "./AccountsPage";
+import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { PlatformPage } from "./PlatformPage";
 import { SchedulingSettings } from "./SchedulingSettings";
@@ -11,8 +12,8 @@ import { createRuntimeClient, type AppClient, type HealthResponse, type Workspac
 import { TaskBoard } from "./TaskBoard";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選到某個 Workspace 後，主區顯示它的授權設定或工作面板。 */
-type Opened = { view: "authorization" | "tasks"; workspace: Workspace };
+/** 使用者選到某個 Workspace 後，主區顯示它的授權設定、工作面板或成果與驗證。 */
+type Opened = { view: "authorization" | "tasks" | "artifacts"; workspace: Workspace };
 
 export function App() {
   const [client, setClient] = useState<AppClient | null>(null);
@@ -35,6 +36,7 @@ export function App() {
             client={client}
             onSelect={(workspace) => setOpened({ view: "authorization", workspace })}
             onOpenTasks={(workspace) => setOpened({ view: "tasks", workspace })}
+            onOpenArtifacts={(workspace) => setOpened({ view: "artifacts", workspace })}
           />
         )}
         <main className="main">
@@ -46,6 +48,7 @@ export function App() {
           {client && <SharedSettingsPage client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
+          {client && opened?.view === "artifacts" && <ArtifactsPage client={client} workspace={opened.workspace} />}
           {client && <PlatformPage client={client} />}
         </main>
       </div>

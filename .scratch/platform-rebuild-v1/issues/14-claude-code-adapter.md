@@ -18,3 +18,5 @@ Blocked by: 10, 08
 - [ ] 以主要 seam（Runtime harness，spec D-04）撰寫的情境測試涵蓋本票行為並通過；本票所做的 AI 決策已追加至 ai-decisions.md
 
 ## Comments
+
+- 2026-10-22 主控：票 08 驗證 R040 的觀察——`materialize_run_settings` 同一 Run 並行要求不同版本時共用 staging 目錄；已綁定的 Run 再要求快照時不核對目錄內容。本票接上准入流程時，請依 Run 序列化並在啟動前依 manifest.json 核對快照。

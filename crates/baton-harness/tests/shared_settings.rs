@@ -426,7 +426,7 @@ async fn run_settings_snapshot_is_a_read_only_directory_matching_the_version_has
     assert_eq!(snapshot["files"].as_array().unwrap().len(), 4);
     assert!(String::from_utf8(files["CLAUDE.md"].clone()).unwrap().contains("繁體中文"));
 
-    // 唯讀：任何檔案都不能被開啟寫入（Windows 的唯讀屬性不阻止刪除，見 AI-107）
+    // 唯讀：任何檔案都不能被開啟寫入（Windows 的唯讀屬性不阻止刪除，見 AI-114）
     for name in files.keys() {
         let path = PathBuf::from(directory).join(name);
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err(), "{name} 不應可寫");

@@ -10,6 +10,7 @@ use baton_domain::agent::{
     AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED,
     TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT,
 };
+use baton_domain::artifact::{ARTIFACT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS, TOOL_REGISTER_ARTIFACT};
 use baton_mcp_shim::{serve, ShimConfig};
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -115,12 +116,15 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_four_tools_with_their_required_fields() {
+async fn tools_list_has_the_five_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, [TOOL_GET_TASK_CONTRACT, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT, TOOL_REPORT_BLOCKED]);
+    assert_eq!(
+        names,
+        [TOOL_GET_TASK_CONTRACT, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT, TOOL_REPORT_BLOCKED, TOOL_REGISTER_ARTIFACT]
+    );
     for tool in tools {
         assert!(!tool["description"].as_str().unwrap().is_empty());
         assert_eq!(tool["inputSchema"]["type"], "object");
@@ -131,6 +135,94 @@ async fn tools_list_has_the_four_tools_with_their_required_fields() {
     assert_eq!(schema(TOOL_SAVE_CHECKPOINT)["required"], json!(["summary"]));
     assert_eq!(schema(TOOL_SAVE_CHECKPOINT)["properties"]["details"]["type"], "string");
     assert_eq!(schema(TOOL_REPORT_BLOCKED)["required"], json!(["reason"]));
+
+    let artifact = schema(TOOL_REGISTER_ARTIFACT);
+    assert_eq!(artifact["required"], json!(["name"]));
+    let properties = &artifact["properties"];
+    for field in ["name", "description", "content", "content_base64"] {
+        assert_eq!(properties[field]["type"], "string", "{field}");
+    }
+    assert_eq!(properties["name"]["maxLength"], NAME_MAX_CHARS);
+    assert_eq!(properties["description"]["maxLength"], DESCRIPTION_MAX_CHARS);
+    // 大小上限寫在說明文字裡（單位 MiB，由常數換算）
+    let limit = format!("{} MiB", ARTIFACT_MAX_BYTES / (1024 * 1024));
+    for field in ["content", "content_base64"] {
+        assert!(properties[field]["description"].as_str().unwrap().contains(&limit), "{field}");
+    }
+}
+
+#[tokio::test]
+async fn register_artifact_is_forwarded_with_credentials_and_an_unchanged_body() {
+    let created = r#"{"artifact_id":"a1","version":1,"name":"report.md","size_bytes":5,"sha256":"ab","created":true}"#;
+    let (url, log) = spawn_stub(201, created).await;
+    let arguments = json!({"name":"report.md","description":"期末報告","content":"你好\nworld"});
+
+    let reply = call(&url, tool_call(11, TOOL_REGISTER_ARTIFACT, arguments.clone())).await;
+
+    assert_eq!(reply["id"], 11);
+    assert_eq!(reply["result"]["isError"], false);
+    assert_eq!(reply["result"]["content"][0]["text"], created);
+
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    let request = &log[0];
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, format!("{AGENT_TOOLS_PREFIX}/{TOOL_REGISTER_ARTIFACT}"));
+    assert_eq!(request.headers["authorization"], format!("Bearer {TOKEN}"));
+    assert_eq!(request.headers["x-baton-client"], "baton-desktop");
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body, arguments);
+    // 歸屬由憑證決定，shim 不填 workspace_id／run_id
+    assert!(body.get("workspace_id").is_none() && body.get("run_id").is_none());
+}
+
+#[tokio::test]
+async fn register_artifact_runtime_errors_become_tool_errors_like_other_tools() {
+    let cases = [
+        (400, r#"{"error":"artifact_invalid","message":"成果名稱必須是檔名"}"#, "artifact_invalid：成果名稱必須是檔名"),
+        (413, r#"{"error":"artifact_too_large","message":"成果內容過大"}"#, "artifact_too_large：成果內容過大"),
+        (409, r#"{"error":"run_report_stale","message":"這個 Run 已結束"}"#, "run_report_stale：這個 Run 已結束"),
+    ];
+    for (status, body, expected) in cases {
+        let (url, _) = spawn_stub(status, body).await;
+
+        let reply = call(&url, tool_call(12, TOOL_REGISTER_ARTIFACT, json!({"name":"../x","content":"c"}))).await;
+
+        assert_eq!(reply["result"]["isError"], true, "HTTP {status}");
+        assert!(reply.get("error").is_none());
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(expected), "{text}");
+        assert!(text.contains(&status.to_string()), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn register_artifact_accepts_a_request_line_of_about_14_mib() {
+    // 10 MiB 的內容以 base64 編碼後約 14 MiB；單行 JSON-RPC 不可有長度上限
+    let content_base64 = "QUJD".repeat(ARTIFACT_MAX_BYTES / 3 + 1);
+    let request = tool_call(13, TOOL_REGISTER_ARTIFACT, json!({"name":"big.bin","content_base64":content_base64}));
+    let line = format!("{request}\n");
+    assert!(line.len() > 13 * 1024 * 1024);
+    let (url, log) = spawn_stub(201, r#"{"artifact_id":"a1","version":1}"#).await;
+
+    // 輸入遠大於 duplex 緩衝，寫入端必須與 serve 並行
+    let (mut client_write, server_read) = duplex(1 << 16);
+    let (server_write, mut client_read) = duplex(1 << 16);
+    let writer = tokio::spawn(async move {
+        client_write.write_all(line.as_bytes()).await.unwrap();
+        client_write.shutdown().await.unwrap();
+    });
+    let config = ShimConfig::new(url, TOKEN.to_string());
+    serve(BufReader::new(server_read), server_write, config).await.unwrap();
+    writer.await.unwrap();
+
+    let mut output = String::new();
+    client_read.read_to_string(&mut output).await.unwrap();
+    let reply: Value = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let log = log.lock().unwrap();
+    let body: Value = serde_json::from_slice(&log[0].body).unwrap();
+    assert_eq!(body["content_base64"].as_str().unwrap().len(), ARTIFACT_MAX_BYTES / 3 * 4 + 4);
 }
 
 #[tokio::test]
