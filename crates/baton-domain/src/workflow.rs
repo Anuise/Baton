@@ -209,6 +209,8 @@ pub enum EvidenceKind {
     Decision,
     /// 已通過成果接受（最小完成驗證）的 Task。
     TaskAccepted,
+    /// 判定為 passed、而且依據目前 Profile 版本與需求版本的 Evidence Bundle（票 45）。
+    Verification,
 }
 
 /// 離開 Stage 前必須滿足的一項檢查。
@@ -628,6 +630,7 @@ pub enum EvidenceRef {
     Artifact { artifact_id: String },
     Decision { decision_request_id: String },
     TaskAccepted { task_id: String },
+    Verification { evidence_bundle_id: String },
 }
 
 impl EvidenceRef {
@@ -636,6 +639,7 @@ impl EvidenceRef {
             EvidenceRef::Artifact { .. } => EvidenceKind::Artifact,
             EvidenceRef::Decision { .. } => EvidenceKind::Decision,
             EvidenceRef::TaskAccepted { .. } => EvidenceKind::TaskAccepted,
+            EvidenceRef::Verification { .. } => EvidenceKind::Verification,
         }
     }
 }
@@ -650,6 +654,8 @@ pub struct EvidenceInput {
     pub decision_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_bundle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -671,6 +677,8 @@ pub enum EvidenceStatus {
     Pending,
     /// Task 還沒有通過成果接受。
     NotAccepted,
+    /// Evidence Bundle 的判定不是 passed，或它依據的 Profile 版本、需求版本已經不是目前的版本（票 45）。
+    NotPassed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -693,11 +701,21 @@ pub fn normalize_evidence(inputs: &[EvidenceInput]) -> Result<Vec<Evidence>, Wor
                 return Err(invalid("每項 evidence 都要指明 check（exit check 的 key）"));
             }
             let present = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
-            let reference = match (present(&input.artifact_id), present(&input.decision_request_id), present(&input.task_id)) {
-                (Some(artifact_id), None, None) => EvidenceRef::Artifact { artifact_id },
-                (None, Some(decision_request_id), None) => EvidenceRef::Decision { decision_request_id },
-                (None, None, Some(task_id)) => EvidenceRef::TaskAccepted { task_id },
-                _ => return Err(invalid(format!("evidence {check} 必須剛好提供 artifact_id、decision_request_id 或 task_id 其中一個"))),
+            let reference = match (
+                present(&input.artifact_id),
+                present(&input.decision_request_id),
+                present(&input.task_id),
+                present(&input.evidence_bundle_id),
+            ) {
+                (Some(artifact_id), None, None, None) => EvidenceRef::Artifact { artifact_id },
+                (None, Some(decision_request_id), None, None) => EvidenceRef::Decision { decision_request_id },
+                (None, None, Some(task_id), None) => EvidenceRef::TaskAccepted { task_id },
+                (None, None, None, Some(evidence_bundle_id)) => EvidenceRef::Verification { evidence_bundle_id },
+                _ => {
+                    return Err(invalid(format!(
+                        "evidence {check} 必須剛好提供 artifact_id、decision_request_id、task_id 或 evidence_bundle_id 其中一個"
+                    )))
+                }
             };
             Ok(Evidence { check, reference })
         })
@@ -909,6 +927,8 @@ fn evaluate(stage: &StageDefinition, evidence: &[CheckedEvidence]) -> (AttemptOu
             "裁定還沒有回答".to_string()
         } else if offered.iter().any(|e| e.status == EvidenceStatus::NotAccepted) {
             "Task 還沒有通過成果接受".to_string()
+        } else if offered.iter().any(|e| e.status == EvidenceStatus::NotPassed) {
+            "驗證沒有通過（證據不足、環境或授權阻礙都不算通過），或依據的 Profile、需求版本已經改變".to_string()
         } else {
             "引用的證據在這個 Workspace 中不存在".to_string()
         };
