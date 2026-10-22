@@ -4,6 +4,7 @@
 //! 寫入請求、裁定、受影響的 Task、喚醒 Outbox 與事件」，以及給裁定中心與狀態列的唯讀查詢。
 //! 回答一個請求時，裁定、請求狀態、Task 恢復與喚醒 Outbox 在**同一個交易**提交：不會出現「裁定已存、Task 還卡住」。
 
+use baton_domain::approval::ArtifactMark;
 use baton_domain::auth::AgentScope;
 use baton_domain::decision::{
     self, ApprovalUse, Decision, DecisionChange, DecisionCommand, DecisionContext, DecisionError, DecisionKind,
@@ -56,6 +57,7 @@ struct DecisionData {
     requests: Vec<DecisionRequest>,
     decisions: Vec<Decision>,
     uses: Vec<ApprovalUse>,
+    artifacts: Vec<ArtifactMark>,
 }
 
 impl DecisionData {
@@ -67,6 +69,7 @@ impl DecisionData {
             requests: &self.requests,
             decisions: &self.decisions,
             uses: &self.uses,
+            artifacts: &self.artifacts,
         }
     }
 }
@@ -171,7 +174,11 @@ impl Store {
                 let mut views: Vec<DecisionView> = data
                     .requests
                     .iter()
-                    .map(|r| decision::view(r, data.decisions.iter().find(|d| d.request_id == r.id), &loaded.tasks, now))
+                    .map(|r| {
+                        let decision = data.decisions.iter().find(|d| d.request_id == r.id);
+                        let used = data.uses.iter().find(|u| u.request_id == r.id);
+                        decision::view(r, decision, used, &loaded.tasks, now)
+                    })
                     .collect();
                 views.sort_by_key(|v| match &v.decision {
                     // 待處理：緊急程度高者在前，同級先建立者在前
@@ -298,7 +305,17 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
             Ok(ApprovalUse { request_id: r.get(0)?, run_id: r.get(1)?, used_at: Timestamp::from_millis(r.get(2)?) })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(DecisionData { requests, decisions, uses })
+
+    // 各成果的最新版本：單次批准綁定 Task 的成果版本（票 23）
+    let artifacts = conn
+        .prepare(
+            "SELECT a.task_id, a.name, MAX(v.version) FROM artifact a
+             JOIN artifact_version v ON v.artifact_id = a.id
+             WHERE a.workspace_id = ?1 GROUP BY a.id ORDER BY a.rowid",
+        )?
+        .query_map([workspace_id], |r| Ok(ArtifactMark { task_id: r.get(0)?, name: r.get(1)?, version: r.get(2)? }))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(DecisionData { requests, decisions, uses, artifacts })
 }
 
 /// 把 Domain 的結果寫進同一個交易：請求、裁定、單次批准的消耗、受影響的 Task、喚醒 Outbox 與事件。

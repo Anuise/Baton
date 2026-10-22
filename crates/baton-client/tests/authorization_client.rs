@@ -35,6 +35,7 @@ async fn app_confirms_the_p3_template_and_only_then_runs_needing_build_are_admit
                 template_id: Some(TEMPLATE_TRUSTED_DEV.into()),
                 grants,
                 acknowledged_risk: true,
+                acknowledged_expansion: false,
             },
         )
         .await
