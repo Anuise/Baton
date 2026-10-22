@@ -148,6 +148,189 @@ body {
   padding: 24px;
 }
 
+.workspace-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.authorization {
+  display: grid;
+  gap: 12px;
+  max-width: 720px;
+  margin-bottom: 24px;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.authorization h2,
+.authorization h3 {
+  margin: 0;
+}
+
+.authorization h3 {
+  font-size: 14px;
+}
+
+.authorization-unconfirmed,
+.authorization-risk {
+  padding: 8px 12px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  border-radius: 6px;
+}
+
+.authorization-template-description {
+  margin-left: 8px;
+  color: #656d76;
+  font-size: 12px;
+}
+
+.authorization-capability {
+  display: grid;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.authorization-capability textarea {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+}
+
+.authorization-high-risk {
+  margin-left: 4px;
+  color: #cf222e;
+  font-size: 12px;
+}
+
+.authorization [role="alert"] {
+  margin: 0;
+  color: #cf222e;
+  overflow-wrap: anywhere;
+}
+
+.task-board {
+  display: grid;
+  gap: 12px;
+}
+
+.task-board h2,
+.task-board h3,
+.task-board h4 {
+  margin: 0;
+}
+
+.task-board h3 {
+  font-size: 14px;
+}
+
+.task-board h4 {
+  font-size: 13px;
+}
+
+.task-columns {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding-bottom: 8px;
+  overflow-x: auto;
+}
+
+.task-column {
+  display: grid;
+  flex: 0 0 240px;
+  gap: 8px;
+  padding: 8px;
+  background: #eaeef2;
+  border-radius: 6px;
+}
+
+.task-card {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.task-card p,
+.task-card ul,
+.task-card ol {
+  margin: 0;
+}
+
+.task-goal,
+.task-contract-version,
+.task-dependencies {
+  color: #656d76;
+}
+
+.task-missing {
+  padding: 6px 8px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  border-radius: 6px;
+}
+
+.task-missing ul,
+.task-history ol {
+  padding-left: 18px;
+}
+
+.task-missing-unknown {
+  color: #9a6700;
+}
+
+.task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.task-dependency-form {
+  display: grid;
+  gap: 4px;
+}
+
+.task-card [role="alert"],
+.task-form [role="alert"] {
+  color: #cf222e;
+  overflow-wrap: anywhere;
+}
+
+.task-form {
+  max-width: 720px;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.task-form form,
+.contract-editor {
+  display: grid;
+  gap: 12px;
+}
+
+.task-form label {
+  display: grid;
+  gap: 4px;
+}
+
+.task-form fieldset label:has(input[type="checkbox"]) {
+  display: flex;
+  gap: 6px;
+}
+
+.task-form textarea {
+  min-height: 48px;
+}
+
 .setup-wizard,
 .accounts-page {
   margin-bottom: 24px;

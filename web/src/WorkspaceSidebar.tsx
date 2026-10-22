@@ -9,6 +9,10 @@ interface Props {
   client: WorkspaceClient;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
+  /** 使用者要設定某個 Workspace 的授權：點「授權設定」，或剛建立完成（建立後直接進入授權設定）。 */
+  onSelect?: (workspace: Workspace) => void;
+  /** 使用者要開啟某個 Workspace 的工作面板。 */
+  onOpenTasks?: (workspace: Workspace) => void;
 }
 
 function reasonOf(error: unknown): string {
@@ -16,7 +20,7 @@ function reasonOf(error: unknown): string {
 }
 
 /** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace。 */
-export function WorkspaceSidebar({ client, timeZone }: Props) {
+export function WorkspaceSidebar({ client, timeZone, onSelect, onOpenTasks }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
@@ -45,10 +49,11 @@ export function WorkspaceSidebar({ client, timeZone }: Props) {
     setBusy(true);
     setFormError(null);
     try {
-      await client.createWorkspace({ path, name: name.trim() === "" ? undefined : name });
+      const created = await client.createWorkspace({ path, name: name.trim() === "" ? undefined : name });
       setPath("");
       setName("");
       await refresh();
+      onSelect?.(created);
     } catch (error) {
       // 保留輸入，讓使用者修正後重送
       setFormError(reasonOf(error));
@@ -82,9 +87,17 @@ export function WorkspaceSidebar({ client, timeZone }: Props) {
               <span className="workspace-name">{workspace.name}</span>
               <span className="workspace-path">{workspace.path}</span>
               <span className="workspace-created">建立於 {formatTimestamp(workspace.created_at, timeZone)}</span>
-              <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
-                封存
-              </button>
+              <div className="workspace-actions">
+                <button type="button" aria-label={`授權設定 ${workspace.name}`} onClick={() => onSelect?.(workspace)}>
+                  授權設定
+                </button>
+                <button type="button" aria-label={`工作面板 ${workspace.name}`} onClick={() => onOpenTasks?.(workspace)}>
+                  工作面板
+                </button>
+                <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
+                  封存
+                </button>
+              </div>
             </li>
           ))}
         </ul>

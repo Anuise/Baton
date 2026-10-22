@@ -149,4 +149,55 @@ describe("左側 Workspace 清單", () => {
     render(<WorkspaceSidebar client={fakeClient([workspace()])} timeZone="UTC" />);
     expect(await screen.findByText(/2023\/11\/14 22:13/)).toBeInTheDocument();
   });
+
+  it("建立完成後直接進入該 Workspace 的授權設定", async () => {
+    const client = fakeClient();
+    const onSelect = vi.fn();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} onSelect={onSelect} />);
+    await screen.findByText("還沒有 Workspace");
+
+    await user.type(screen.getByLabelText("目錄"), "C:\\work\\docs");
+    await user.click(screen.getByRole("button", { name: "建立 Workspace" }));
+
+    await waitFor(() => expect(onSelect).toHaveBeenCalledTimes(1));
+    expect(onSelect.mock.calls[0][0]).toMatchObject({ path: "C:\\work\\docs", name: "docs" });
+  });
+
+  it("建立失敗時不進入授權設定", async () => {
+    const client = fakeClient();
+    vi.mocked(client.createWorkspace).mockRejectedValueOnce(new Error("找不到目錄"));
+    const onSelect = vi.fn();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} onSelect={onSelect} />);
+    await screen.findByText("還沒有 Workspace");
+
+    await user.type(screen.getByLabelText("目錄"), "C:\\nope");
+    await user.click(screen.getByRole("button", { name: "建立 Workspace" }));
+
+    await screen.findByRole("alert");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("既有的 Workspace 可以隨時重新開啟授權設定", async () => {
+    const onSelect = vi.fn();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} onSelect={onSelect} />);
+
+    await user.click(await screen.findByRole("button", { name: "授權設定 筆記" }));
+
+    expect(onSelect).toHaveBeenCalledWith(workspace());
+  });
+
+  it("每個 Workspace 都有「工作面板」入口，不會觸發授權設定", async () => {
+    const onSelect = vi.fn();
+    const onOpenTasks = vi.fn();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} onSelect={onSelect} onOpenTasks={onOpenTasks} />);
+
+    await user.click(await screen.findByRole("button", { name: "工作面板 筆記" }));
+
+    expect(onOpenTasks).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });

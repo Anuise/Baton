@@ -101,6 +101,162 @@ describe("Runtime 用戶端", () => {
     expect(invoke).toHaveBeenNthCalledWith(2, "workspace_create", { path: "C:\\docs", name: "文件" });
     expect(invoke).toHaveBeenNthCalledWith(3, "workspace_archive", { id: "ws_1" });
   });
+
+  it("HTTP 版讀取、預覽與確認 Workspace 授權", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const grants = [{ capability: "read_files" as const, targets: ["C:\\docs"], restrictions: [] }];
+
+    await client.getAuthorization("ws_1");
+    await client.summarizeAuthorization("ws_1", grants);
+    await client.confirmAuthorization("ws_1", { templateId: "research_docs", grants, acknowledgedRisk: false });
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/authorization");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/authorization/summary", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grants }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/authorization", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false }),
+    });
+  });
+
+  it("Tauri 版以指令與參數管理 Workspace 授權", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+    const grants = [{ capability: "read_files" as const, targets: ["C:\\docs"], restrictions: [] }];
+
+    await client.getAuthorization("ws_1");
+    await client.summarizeAuthorization("ws_1", grants);
+    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true });
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "workspace_authorization", { id: "ws_1" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "workspace_authorization_summary", { id: "ws_1", grants });
+    expect(invoke).toHaveBeenNthCalledWith(3, "workspace_authorization_confirm", {
+      id: "ws_1",
+      templateId: null,
+      grants,
+      acknowledgedRisk: true,
+    });
+  });
+
+  it("HTTP 版以契約的路徑與 body 操作 Goal 與 Task", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const json = { "content-type": "application/json" };
+    const contract = { objective: { status: "filled" as const, text: "整理文件" }, required_capabilities: ["read_files" as const] };
+
+    await client.getTaskBoard("ws_1");
+    await client.createGoal("ws_1", "第一個目標");
+    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", contract });
+    await client.createTask("ws_1", { goalId: "goal_1", title: "空契約" });
+    await client.getTask("ws_1", "task_1");
+    await client.updateTaskContract("ws_1", "task_1", contract, "補上目標");
+    await client.updateTaskContract("ws_1", "task_1", contract);
+    await client.addTaskDependency("ws_1", "task_1", "task_2");
+    await client.checkTaskAdmission("ws_1", "task_1");
+    await client.markTaskReady("ws_1", "task_1");
+    await client.cancelTask("ws_1", "task_1");
+
+    const base = "/api/v1/workspaces/ws_1";
+    expect(fetchFn).toHaveBeenNthCalledWith(1, `${base}/tasks`);
+    expect(fetchFn).toHaveBeenNthCalledWith(2, `${base}/goals`, {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ title: "第一個目標" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(3, `${base}/tasks`, {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ goal_id: "goal_1", title: "寫文件", contract }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(4, `${base}/tasks`, {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ goal_id: "goal_1", title: "空契約" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(5, `${base}/tasks/task_1`);
+    expect(fetchFn).toHaveBeenNthCalledWith(6, `${base}/tasks/task_1/contract`, {
+      method: "PUT",
+      headers: json,
+      body: JSON.stringify({ contract, note: "補上目標" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(7, `${base}/tasks/task_1/contract`, {
+      method: "PUT",
+      headers: json,
+      body: JSON.stringify({ contract }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(8, `${base}/tasks/task_1/dependencies`, {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ depends_on: "task_2" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(9, `${base}/tasks/task_1/admission-check`, { method: "POST" });
+    expect(fetchFn).toHaveBeenNthCalledWith(10, `${base}/tasks/task_1/ready`, { method: "POST" });
+    expect(fetchFn).toHaveBeenNthCalledWith(11, `${base}/tasks/task_1/cancel`, { method: "POST" });
+  });
+
+  it("HTTP 版把 Task 操作失敗時 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "dependency_cycle", message: "相依會形成循環：A → B → A" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    await expect(
+      createHttpClient(fetchFn as unknown as typeof fetch).addTaskDependency("ws_1", "task_1", "task_2"),
+    ).rejects.toThrow("相依會形成循環：A → B → A");
+  });
+
+  it("HTTP 版在准入被拒時取得 Runtime 的說明", async () => {
+    const body = { error: "task_admission_denied", message: "Task 尚未符合派工條件", missing: [] };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).markTaskReady("ws_1", "task_1")).rejects.toThrow(
+      "Task 尚未符合派工條件",
+    );
+  });
+
+  it("Tauri 版以指令與參數操作 Goal 與 Task", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+    const contract = { objective: { status: "unknown" as const } };
+
+    await client.getTaskBoard("ws_1");
+    await client.createGoal("ws_1", "第一個目標");
+    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", contract });
+    await client.getTask("ws_1", "task_1");
+    await client.updateTaskContract("ws_1", "task_1", contract, "補上目標");
+    await client.addTaskDependency("ws_1", "task_1", "task_2");
+    await client.checkTaskAdmission("ws_1", "task_1");
+    await client.markTaskReady("ws_1", "task_1");
+    await client.cancelTask("ws_1", "task_1");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "task_board", { workspaceId: "ws_1" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "goal_create", { workspaceId: "ws_1", title: "第一個目標" });
+    expect(invoke).toHaveBeenNthCalledWith(3, "task_create", {
+      workspaceId: "ws_1",
+      goalId: "goal_1",
+      title: "寫文件",
+      contract,
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "task_detail", { workspaceId: "ws_1", taskId: "task_1" });
+    expect(invoke).toHaveBeenNthCalledWith(5, "task_contract_update", {
+      workspaceId: "ws_1",
+      taskId: "task_1",
+      contract,
+      note: "補上目標",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(6, "task_dependency_add", {
+      workspaceId: "ws_1",
+      taskId: "task_1",
+      dependsOn: "task_2",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(7, "task_admission_check", { workspaceId: "ws_1", taskId: "task_1" });
+    expect(invoke).toHaveBeenNthCalledWith(8, "task_ready", { workspaceId: "ws_1", taskId: "task_1" });
+    expect(invoke).toHaveBeenNthCalledWith(9, "task_cancel", { workspaceId: "ws_1", taskId: "task_1" });
+  });
+
   it("HTTP 版管理帳號 Profile：新增送出 expected_account，其餘為 POST 並解析 Runtime 的回應", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ profiles: [], limit: 8 }), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);

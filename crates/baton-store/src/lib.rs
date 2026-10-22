@@ -13,14 +13,21 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use baton_domain::auth::{CredentialRecord, Role};
+use baton_domain::authorization::{
+    self, Admission, AdmissionDenied, AuthorizationError, AuthorizationRevision, Capability, ConfirmOutcome,
+    ConfirmRequest,
+};
 use baton_domain::event::DomainEvent;
-use baton_domain::profile::{self, AccountProfile, ProfileCommand, ProfileError, ProfileStatus, Verification};
-use baton_domain::setup;
 use baton_domain::storage_location::{self, RejectedLocation};
 use baton_domain::workspace::{self, Workspace, WorkspaceCommand, WorkspaceError, WorkspaceStatus};
 use baton_domain::Timestamp;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
+
+mod profiles;
+mod tasks;
+pub use profiles::ProfileApplyError;
+pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 
 /// 控制資料庫檔名，位於資料目錄之下。
 pub const DB_FILE_NAME: &str = "control.sqlite";
@@ -61,19 +68,22 @@ impl From<rusqlite::Error> for WorkspaceApplyError {
     }
 }
 
-/// 套用 account_profile 命令的失敗：Domain 拒絕（使用者可修正）或儲存層錯誤。
+/// 確認授權的失敗：Domain 拒絕（使用者可修正）或儲存層錯誤。
 #[derive(Debug, thiserror::Error)]
-pub enum ProfileApplyError {
+pub enum AuthorizationApplyError {
     #[error(transparent)]
-    Rejected(#[from] ProfileError),
+    Rejected(#[from] AuthorizationError),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
 
-impl From<rusqlite::Error> for ProfileApplyError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::Store(error.into())
-    }
+/// 准入檢查的失敗：被拒絕（附原因）或儲存層錯誤。
+#[derive(Debug, thiserror::Error)]
+pub enum AdmissionCheckError {
+    #[error(transparent)]
+    Denied(#[from] AdmissionDenied),
+    #[error(transparent)]
+    Store(#[from] StoreError),
 }
 
 struct Migration {
@@ -127,6 +137,64 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'event 是追加式資料表，不可更新'); END;
         CREATE TRIGGER event_no_delete BEFORE DELETE ON event
         BEGIN SELECT RAISE(ABORT, 'event 是追加式資料表，不可刪除'); END;",
+    },
+    // 每次確認授權追加一個 revision，之後不可修改（改授權 = 追加新的 revision）
+    Migration {
+        name: "authorization_revision",
+        sql: "CREATE TABLE authorization_revision (
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            grants TEXT NOT NULL CHECK (json_valid(grants)),
+            source TEXT NOT NULL CHECK (json_valid(source)),
+            confirmed_at INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, revision)
+        );
+        CREATE TRIGGER authorization_revision_no_update BEFORE UPDATE ON authorization_revision
+        BEGIN SELECT RAISE(ABORT, 'authorization_revision 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER authorization_revision_no_delete BEFORE DELETE ON authorization_revision
+        BEGIN SELECT RAISE(ABORT, 'authorization_revision 是追加式資料表，不可刪除'); END;",
+    },
+    // Goal、Task 與六項最小契約；契約每次變更追加一個版本，之後不可修改
+    Migration {
+        name: "goal_task_contract",
+        sql: "CREATE TABLE goal (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            title TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            goal_id TEXT NOT NULL REFERENCES goal (id),
+            title TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'running', 'waiting_decision',
+                'waiting_resource', 'blocked', 'verifying', 'completed', 'cancelled')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            contract_version INTEGER NOT NULL CHECK (contract_version >= 1),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX task_workspace ON task (workspace_id);
+        CREATE TABLE task_contract_version (
+            task_id TEXT NOT NULL REFERENCES task (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            content TEXT NOT NULL CHECK (json_valid(content)),
+            note TEXT,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (task_id, version)
+        );
+        CREATE TRIGGER task_contract_version_no_update BEFORE UPDATE ON task_contract_version
+        BEGIN SELECT RAISE(ABORT, 'task_contract_version 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER task_contract_version_no_delete BEFORE DELETE ON task_contract_version
+        BEGIN SELECT RAISE(ABORT, 'task_contract_version 是追加式資料表，不可刪除'); END;
+        CREATE TABLE task_dependency (
+            task_id TEXT NOT NULL REFERENCES task (id),
+            depends_on TEXT NOT NULL REFERENCES task (id),
+            PRIMARY KEY (task_id, depends_on),
+            CHECK (task_id <> depends_on)
+        );",
     },
     // 只保存核對結果（登入與否、認證來源、帳號身分），不保存任何登入資料；設定目錄不重複（不分大小寫）
     Migration {
@@ -354,7 +422,9 @@ impl Store {
                     Err(rejected) => Ok(Err(rejected)),
                     Ok(decision) => {
                         save_workspace(tx, &decision.workspace)?;
-                        append_events(tx, &decision.events)?;
+                        for event in &decision.events {
+                            append_event(tx, event)?;
+                        }
                         Ok(Ok(decision.workspace))
                     }
                 }
@@ -363,27 +433,28 @@ impl Store {
         Ok(outcome?)
     }
 
-    /// 全部 Workspace（含已封存），依建立順序排列（以寫入順序為準，同一毫秒建立的也不會亂序）。
-    pub async fn list_workspaces(&self) -> StoreResult<Vec<Workspace>> {
-        self.read(|conn| Ok(load_workspaces(conn)?)).await
-    }
-
-    /// 套用一個 account_profile 命令：在同一個交易中載入目前狀態、交給 Domain 判定，
-    /// 再寫入新狀態並追加事件。Domain 拒絕（例如第 9 個 Profile）時不寫入任何東西。
-    pub async fn apply_profile_command(
+    /// 確認並保存 Workspace 授權：同一個交易中載入目前生效的 revision、交給 Domain 判定，
+    /// 再追加新的 revision 與事件。Domain 拒絕或內容沒有變動時不寫入任何東西。
+    pub async fn confirm_authorization(
         &self,
-        command: ProfileCommand,
+        workspace_id: String,
+        request: ConfirmRequest,
         now: Timestamp,
-    ) -> Result<AccountProfile, ProfileApplyError> {
+    ) -> Result<ConfirmOutcome, AuthorizationApplyError> {
         let outcome = self
             .write(move |tx| {
-                let existing = load_profiles(tx)?;
-                match profile::decide(&existing, command, now) {
+                let Some(workspace) = load_workspaces(tx)?.into_iter().find(|w| w.id == workspace_id) else {
+                    return Ok(Err(AuthorizationError::WorkspaceNotFound(workspace_id)));
+                };
+                let current = load_authorization_revisions(tx, &workspace_id)?.pop();
+                match authorization::confirm(&workspace, current.as_ref(), request, now) {
                     Err(rejected) => Ok(Err(rejected)),
-                    Ok(decision) => {
-                        save_profile(tx, &decision.profile)?;
-                        append_events(tx, &decision.events)?;
-                        Ok(Ok(decision.profile))
+                    Ok(outcome) => {
+                        if let ConfirmOutcome::Created { revision, event } = &outcome {
+                            save_authorization_revision(tx, revision)?;
+                            append_event(tx, event)?;
+                        }
+                        Ok(Ok(outcome))
                     }
                 }
             })
@@ -391,113 +462,34 @@ impl Store {
         Ok(outcome?)
     }
 
-    /// 全部 account_profile（含已封存），依建立順序排列。
-    pub async fn list_profiles(&self) -> StoreResult<Vec<AccountProfile>> {
-        self.read(|conn| Ok(load_profiles(conn)?)).await
+    /// Workspace 的全部授權 revision，由舊到新；最後一個是目前生效的授權。
+    pub async fn authorization_revisions(&self, workspace_id: &str) -> StoreResult<Vec<AuthorizationRevision>> {
+        let workspace_id = workspace_id.to_string();
+        self.read(move |conn| Ok(load_authorization_revisions(conn, &workspace_id)?)).await
     }
 
-    /// 背景執行行為告知被確認的時間；還沒確認為 `None`。
-    pub async fn background_notice_acknowledged_at(&self) -> StoreResult<Option<Timestamp>> {
-        self.read(|conn| Ok(load_notice_acknowledgement(conn)?)).await
+    /// Run 的准入檢查：依目前生效的授權判定 `required` 能力是否都已授權。
+    /// 通過時回傳這次依據的授權 revision；被拒絕時回傳原因。
+    pub async fn check_admission(
+        &self,
+        workspace_id: &str,
+        required: Vec<Capability>,
+    ) -> Result<Admission, AdmissionCheckError> {
+        let workspace_id = workspace_id.to_string();
+        let verdict = self
+            .read(move |conn| {
+                let workspace = load_workspaces(conn)?.into_iter().find(|w| w.id == workspace_id);
+                let current = load_authorization_revisions(conn, &workspace_id)?.pop();
+                Ok(authorization::admit(&workspace_id, workspace.as_ref(), current.as_ref(), &required))
+            })
+            .await?;
+        Ok(verdict?)
     }
 
-    /// 確認背景執行行為告知；重複確認不改變時間，也不追加事件。
-    pub async fn acknowledge_background_notice(&self, now: Timestamp) -> StoreResult<Timestamp> {
-        self.write(move |tx| {
-            let acknowledgement = setup::acknowledge_background_notice(load_notice_acknowledgement(tx)?, now);
-            if let Some(event) = &acknowledgement.event {
-                tx.execute(
-                    "INSERT INTO setup_state (key, acknowledged_at) VALUES (?1, ?2)",
-                    rusqlite::params![setup::BACKGROUND_NOTICE_ID, acknowledgement.acknowledged_at.as_millis()],
-                )?;
-                append_events(tx, std::slice::from_ref(event))?;
-            }
-            Ok(acknowledgement.acknowledged_at)
-        })
-        .await
+    /// 全部 Workspace（含已封存），依建立順序排列（以寫入順序為準，同一毫秒建立的也不會亂序）。
+    pub async fn list_workspaces(&self) -> StoreResult<Vec<Workspace>> {
+        self.read(|conn| Ok(load_workspaces(conn)?)).await
     }
-}
-
-fn append_events(tx: &Transaction<'_>, events: &[DomainEvent]) -> rusqlite::Result<()> {
-    for event in events {
-        tx.execute(
-            "INSERT INTO event
-             (aggregate_type, aggregate_id, aggregate_version, event_type, occurred_at, payload)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                event.aggregate_type,
-                event.aggregate_id,
-                event.aggregate_version,
-                event.event_type,
-                event.occurred_at.as_millis(),
-                event.payload.to_string(),
-            ],
-        )?;
-    }
-    Ok(())
-}
-
-fn load_notice_acknowledgement(conn: &Connection) -> rusqlite::Result<Option<Timestamp>> {
-    let millis: Option<i64> = conn
-        .query_row("SELECT acknowledged_at FROM setup_state WHERE key = ?1", [setup::BACKGROUND_NOTICE_ID], |r| r.get(0))
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })?;
-    Ok(millis.map(Timestamp::from_millis))
-}
-
-fn load_profiles(conn: &Connection) -> rusqlite::Result<Vec<AccountProfile>> {
-    let mut statement = conn.prepare(
-        "SELECT id, name, config_dir, expected_account, status, verification, version, created_at, archived_at
-         FROM account_profile ORDER BY rowid",
-    )?;
-    let rows = statement.query_map([], |r| {
-        let status: String = r.get(4)?;
-        let verification: Option<String> = r.get(5)?;
-        let conversion = |column: usize, what: &str| {
-            rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, what.to_string().into())
-        };
-        Ok(AccountProfile {
-            id: r.get(0)?,
-            name: r.get(1)?,
-            config_dir: r.get(2)?,
-            expected_account: r.get(3)?,
-            status: ProfileStatus::parse(&status).ok_or_else(|| conversion(4, "未知的 Profile 狀態"))?,
-            verification: verification
-                .map(|json| serde_json::from_str::<Verification>(&json).map_err(|e| conversion(5, &e.to_string())))
-                .transpose()?,
-            version: r.get(6)?,
-            created_at: Timestamp::from_millis(r.get(7)?),
-            archived_at: r.get::<_, Option<i64>>(8)?.map(Timestamp::from_millis),
-        })
-    })?;
-    rows.collect()
-}
-
-fn save_profile(tx: &Transaction<'_>, profile: &AccountProfile) -> rusqlite::Result<()> {
-    let verification = profile.verification.as_ref().map(|v| serde_json::to_string(v).expect("Verification 可序列化"));
-    tx.execute(
-        "INSERT INTO account_profile
-         (id, name, config_dir, expected_account, status, verification, version, created_at, archived_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(id) DO UPDATE SET
-           expected_account = excluded.expected_account, status = excluded.status,
-           verification = excluded.verification, version = excluded.version, archived_at = excluded.archived_at",
-        rusqlite::params![
-            profile.id,
-            profile.name,
-            profile.config_dir,
-            profile.expected_account,
-            profile.status.as_str(),
-            verification,
-            profile.version,
-            profile.created_at.as_millis(),
-            profile.archived_at.map(|t| t.as_millis()),
-        ],
-    )?;
-    Ok(())
 }
 
 fn run_in_transaction<T>(
@@ -563,6 +555,58 @@ fn save_workspace(tx: &Transaction<'_>, workspace: &Workspace) -> rusqlite::Resu
             workspace.created_at.as_millis(),
             workspace.archived_at.map(|t| t.as_millis()),
         ],
+    )?;
+    Ok(())
+}
+
+fn append_event(tx: &Transaction<'_>, event: &DomainEvent) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO event
+         (aggregate_type, aggregate_id, aggregate_version, event_type, occurred_at, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            event.aggregate_type,
+            event.aggregate_id,
+            event.aggregate_version,
+            event.event_type,
+            event.occurred_at.as_millis(),
+            event.payload.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn json_column<T: serde::de::DeserializeOwned>(index: usize, raw: &str) -> rusqlite::Result<T> {
+    serde_json::from_str(raw)
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, Box::new(e)))
+}
+
+/// 由舊到新（revision 遞增）。
+fn load_authorization_revisions(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<AuthorizationRevision>> {
+    let mut statement = conn.prepare(
+        "SELECT revision, grants, source, confirmed_at FROM authorization_revision
+         WHERE workspace_id = ?1 ORDER BY revision",
+    )?;
+    let rows = statement.query_map([workspace_id], |r| {
+        Ok(AuthorizationRevision {
+            workspace_id: workspace_id.to_string(),
+            revision: r.get(0)?,
+            grants: json_column(1, &r.get::<_, String>(1)?)?,
+            source: json_column(2, &r.get::<_, String>(2)?)?,
+            confirmed_at: Timestamp::from_millis(r.get(3)?),
+        })
+    })?;
+    rows.collect()
+}
+
+fn save_authorization_revision(tx: &Transaction<'_>, revision: &AuthorizationRevision) -> rusqlite::Result<()> {
+    // Domain 型別只含字串與數字，序列化不會失敗
+    let grants = serde_json::to_string(&revision.grants).expect("grants 可序列化");
+    let source = serde_json::to_string(&revision.source).expect("source 可序列化");
+    tx.execute(
+        "INSERT INTO authorization_revision (workspace_id, revision, grants, source, confirmed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![revision.workspace_id, revision.revision, grants, source, revision.confirmed_at.as_millis()],
     )?;
     Ok(())
 }
@@ -1081,6 +1125,129 @@ mod tests {
 
         let update = conn.execute("UPDATE event SET event_type = 'x'", []);
         let delete = conn.execute("DELETE FROM event", []);
+
+        assert!(update.is_err() && delete.is_err());
+    }
+
+    // --- 授權 revision ---
+
+    fn confirm_request(template_id: Option<&str>, grants: Vec<authorization::Grant>) -> ConfirmRequest {
+        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: true }
+    }
+
+    fn research_grants(path: &str) -> Vec<authorization::Grant> {
+        authorization::templates(path).into_iter().find(|t| t.id == authorization::TEMPLATE_RESEARCH_DOCS).unwrap().grants
+    }
+
+    #[tokio::test]
+    async fn confirmed_authorization_is_persisted_with_event_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        store.apply_workspace_command(create("w1", "C:\\work\\notes"), Timestamp::from_millis(1)).await.unwrap();
+        let grants = research_grants("C:\\work\\notes");
+
+        let outcome = store
+            .confirm_authorization(
+                "w1".into(),
+                confirm_request(Some(authorization::TEMPLATE_RESEARCH_DOCS), grants),
+                Timestamp::from_millis(5),
+            )
+            .await
+            .unwrap();
+        drop(store);
+
+        let ConfirmOutcome::Created { revision, .. } = outcome else { panic!("{outcome:?}") };
+        let reopened = open(dir.path()).await;
+        assert_eq!(reopened.authorization_revisions("w1").await.unwrap(), vec![revision]);
+        let event: (String, i64, i64) = raw(dir.path())
+            .query_row(
+                "SELECT event_type, aggregate_version, occurred_at FROM event WHERE aggregate_type = 'workspace_authorization'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(event, ("authorization_confirmed".to_string(), 1, 5));
+    }
+
+    #[tokio::test]
+    async fn each_change_appends_a_revision_and_unchanged_or_rejected_confirmations_write_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        store.apply_workspace_command(create("w1", "C:\\work\\notes"), Timestamp::from_millis(1)).await.unwrap();
+        let grants = research_grants("C:\\work\\notes");
+        let confirm = |grants: Vec<authorization::Grant>, at: i64| {
+            store.confirm_authorization("w1".into(), confirm_request(None, grants), Timestamp::from_millis(at))
+        };
+
+        confirm(grants.clone(), 2).await.unwrap();
+        let same = confirm(grants.clone(), 3).await.unwrap();
+        let emptied = confirm(vec![], 4).await; // 空授權是合法的修改（撤回全部能力）
+        let rejected_duplicate = confirm(vec![grants[0].clone(), grants[0].clone()], 5).await;
+
+        assert!(matches!(same, ConfirmOutcome::Unchanged(_)));
+        assert!(emptied.is_ok());
+        assert!(matches!(
+            rejected_duplicate,
+            Err(AuthorizationApplyError::Rejected(AuthorizationError::DuplicateCapability(_)))
+        ));
+        let revisions = store.authorization_revisions("w1").await.unwrap();
+        assert_eq!(revisions.iter().map(|r| r.revision).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(revisions.iter().map(|r| r.confirmed_at.as_millis()).collect::<Vec<_>>(), [2, 4]);
+        let events: i64 = raw(dir.path())
+            .query_row("SELECT COUNT(*) FROM event WHERE aggregate_type = 'workspace_authorization'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events, 2);
+    }
+
+    #[tokio::test]
+    async fn authorization_of_unknown_or_archived_workspace_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        store.apply_workspace_command(create("w1", "C:\\work\\notes"), Timestamp::from_millis(1)).await.unwrap();
+        store.apply_workspace_command(WorkspaceCommand::Archive { id: "w1".into() }, Timestamp::from_millis(2)).await.unwrap();
+
+        let unknown = store.confirm_authorization("zz".into(), confirm_request(None, vec![]), T0).await;
+        let archived = store.confirm_authorization("w1".into(), confirm_request(None, vec![]), T0).await;
+
+        assert!(matches!(unknown, Err(AuthorizationApplyError::Rejected(AuthorizationError::WorkspaceNotFound(_)))));
+        assert!(matches!(archived, Err(AuthorizationApplyError::Rejected(AuthorizationError::WorkspaceArchived(_)))));
+    }
+
+    #[tokio::test]
+    async fn admission_follows_the_latest_confirmed_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        store.apply_workspace_command(create("w1", "C:\\work\\notes"), Timestamp::from_millis(1)).await.unwrap();
+
+        let before = store.check_admission("w1", vec![Capability::WriteFiles]).await;
+        store
+            .confirm_authorization("w1".into(), confirm_request(None, research_grants("C:\\work\\notes")), T0)
+            .await
+            .unwrap();
+        let granted = store.check_admission("w1", vec![Capability::WriteFiles]).await.unwrap();
+        let outside = store.check_admission("w1", vec![Capability::RunBuildTest]).await;
+        store.confirm_authorization("w1".into(), confirm_request(None, vec![]), T0).await.unwrap();
+        let revoked = store.check_admission("w1", vec![Capability::WriteFiles]).await;
+
+        assert!(matches!(before, Err(AdmissionCheckError::Denied(AdmissionDenied::AuthorizationUnconfirmed(_)))));
+        assert_eq!(granted.authorization_revision, Some(1));
+        assert!(matches!(outside, Err(AdmissionCheckError::Denied(AdmissionDenied::CapabilityNotGranted { .. }))));
+        assert!(matches!(revoked, Err(AdmissionCheckError::Denied(AdmissionDenied::CapabilityNotGranted { revision: 2, .. }))));
+    }
+
+    #[tokio::test]
+    async fn authorization_revisions_are_immutable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        store.apply_workspace_command(create("w1", "C:\\work\\notes"), Timestamp::from_millis(1)).await.unwrap();
+        store
+            .confirm_authorization("w1".into(), confirm_request(None, research_grants("C:\\work\\notes")), T0)
+            .await
+            .unwrap();
+        let conn = raw(dir.path());
+
+        let update = conn.execute("UPDATE authorization_revision SET grants = '[]'", []);
+        let delete = conn.execute("DELETE FROM authorization_revision", []);
 
         assert!(update.is_err() && delete.is_err());
     }

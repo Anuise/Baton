@@ -144,7 +144,7 @@ pub(crate) async fn archive(
     Ok(Json(archived))
 }
 
-/// 穩定識別：前綴（`ws`、`prof`）加 96 位元隨機值（Domain 不產生亂數，由呼叫端提供）。
+/// 穩定識別：前綴加 96 位元隨機值（Domain 不產生亂數，由呼叫端提供）。
 pub(crate) fn new_id(prefix: &str) -> Result<String, ApiError> {
     let mut entropy = [0u8; 12];
     getrandom::fill(&mut entropy).map_err(|e| ApiError {

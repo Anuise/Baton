@@ -1,11 +1,13 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 與帳號 Profile 管理端點、首次啟動精靈與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、帳號 Profile 管理與首次啟動精靈端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
 
+mod authorization;
 mod guard;
 mod profiles;
 mod setup;
+mod tasks;
 mod workspaces;
 
 use std::convert::Infallible;
@@ -24,6 +26,15 @@ use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+pub use authorization::{
+    admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
+    AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
+};
+pub use tasks::{
+    goals_path, task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_path,
+    task_ready_path, tasks_path, AddDependencyRequest, AdmissionReport, CreateGoalRequest, CreateTaskRequest, TaskBoard,
+    TaskDetail, UpdateContractRequest,
+};
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
@@ -99,6 +110,17 @@ pub fn router(state: ApiState) -> Router {
         .route(EVENTS_PATH, get(events))
         .route(WORKSPACES_PATH, get(workspaces::list).post(workspaces::create))
         .route(workspaces::ARCHIVE_ROUTE, post(workspaces::archive))
+        .route(authorization::AUTHORIZATION_ROUTE, get(authorization::view).put(authorization::confirm))
+        .route(authorization::SUMMARY_ROUTE, post(authorization::summary))
+        .route(authorization::ADMISSION_ROUTE, post(authorization::admission_check))
+        .route(tasks::GOALS_ROUTE, post(tasks::create_goal))
+        .route(tasks::TASKS_ROUTE, get(tasks::board).post(tasks::create_task))
+        .route(tasks::TASK_ROUTE, get(tasks::detail))
+        .route(tasks::CONTRACT_ROUTE, axum::routing::put(tasks::update_contract))
+        .route(tasks::DEPENDENCIES_ROUTE, post(tasks::add_dependency))
+        .route(tasks::ADMISSION_ROUTE, post(tasks::admission_check))
+        .route(tasks::READY_ROUTE, post(tasks::mark_ready))
+        .route(tasks::CANCEL_ROUTE, post(tasks::cancel))
         .route(PROFILES_PATH, get(profiles::list).post(profiles::create))
         .route(profiles::VERIFY_ROUTE, post(profiles::verify))
         .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))

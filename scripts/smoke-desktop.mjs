@@ -4,8 +4,10 @@
 //   1. App 啟動後自動啟動 Runtime，狀態列顯示「Runtime 運作中」
 //   2. 關閉 App 視窗後 Runtime 仍在執行
 //   3. 再次開啟 App 時連回同一個 Runtime（boot_count 不增加、pid 不變）
-//   4. 不帶憑證的請求被 Runtime 拒絕（桌面憑證由 App 自動讀取 DPAPI 保護檔，不需人工複製）
-//   5. 首次設定精靈以本機真實的 claude 與 git 檢查；帳號頁新增 Profile 並以真實的 claude auth status 核對，
+//   4. 在 App 內建立 Workspace 後進入授權設定，套用 P3 範本、檢視摘要、承認風險並確認保存；
+//      確認之前需要「建置與測試」的 Run 被准入檢查拒絕，確認之後通過
+//   5. 不帶憑證的請求被 Runtime 拒絕（桌面憑證由 App 自動讀取 DPAPI 保護檔，不需人工複製）
+//   6. 首次設定精靈以本機真實的 claude 與 git 檢查；帳號頁新增 Profile 並以真實的 claude auth status 核對，
 //      第 9 個 Profile 被拒絕（不會開啟登入終端機，避免在測試中彈出視窗）
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -74,6 +76,17 @@ function readDesktopCredential(dir) {
   return result.stdout.trim();
 }
 
+/** 在頁面內操作 React 畫面（以文字找元素，模擬使用者操作）。 */
+const ui = {
+  type: (label, value) =>
+    `(() => { const l = [...document.querySelectorAll('label')].find((l) => l.innerText.trim().startsWith(${JSON.stringify(label)})); const i = l?.querySelector('input'); if (!i) return false; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(i, ${JSON.stringify(value)}); i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+  click: (text) =>
+    `(() => { const b = [...document.querySelectorAll('button')].find((b) => b.innerText.trim() === ${JSON.stringify(text)}); if (!b || b.disabled) return false; b.click(); return true; })()`,
+  check: (text) =>
+    `(() => { const l = [...document.querySelectorAll('label')].find((l) => l.innerText.trim() === ${JSON.stringify(text)}); const i = l?.querySelector('input[type=checkbox]'); if (!i) return false; if (!i.checked) i.click(); return true; })()`,
+  text: (selector) => `document.querySelector(${JSON.stringify(selector)})?.innerText ?? ''`,
+};
+
 const runtimeUrl = (port) => `http://127.0.0.1:${port}/api/v1/health`;
 
 /** 帶桌面憑證呼叫 Runtime API，回傳狀態碼與 JSON。 */
@@ -129,6 +142,7 @@ function killWebviewProcesses(dir) {
 }
 
 const dataDir = mkdtempSync(join(tmpdir(), "baton-smoke-data-"));
+const projectDir = mkdtempSync(join(tmpdir(), "baton-smoke-project-"));
 const webviewDir = mkdtempSync(join(tmpdir(), "baton-smoke-webview-"));
 const runtimePort = await freePort();
 let runtimePid;
@@ -220,7 +234,47 @@ try {
   }
   console.log("✔ 再次開啟時連回同一個 Runtime（沒有重複啟動）");
 
-  // 4. 不帶憑證的請求（例如瀏覽器中的其他程式）被拒絕
+  // 4. 在 App 內建立 Workspace → 授權設定 → 確認 P3；確認前後的准入檢查結果不同
+  const api = async (path, init = {}) =>
+    fetch(`http://127.0.0.1:${runtimePort}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${readDesktopCredential(dataDir)}`,
+        "X-Baton-Client": "baton-desktop",
+        "content-type": "application/json",
+      },
+    });
+  const step = (description, expression) => waitFor(description, async () => (await evaluate(debug2, expression)) === true);
+  await step("輸入目錄", ui.type("目錄", projectDir));
+  await step("建立 Workspace", ui.click("建立 Workspace"));
+  await waitFor("建立後進入授權設定", async () => (await evaluate(debug2, ui.text(".authorization"))).includes("尚未確認授權"));
+  const { workspaces } = await (await api("/api/v1/workspaces")).json();
+  const workspaceId = workspaces.at(-1).id;
+  const needsBuild = () =>
+    api(`/api/v1/workspaces/${workspaceId}/admission-check`, {
+      method: "POST",
+      body: JSON.stringify({ required_capabilities: ["run_build_test"] }),
+    });
+  const before = await needsBuild();
+  if (before.status !== 409 || (await before.json()).error !== "authorization_unconfirmed") {
+    throw new Error("確認授權之前，需要建置與測試的 Run 應被准入檢查拒絕");
+  }
+  console.log("✔ 建立 Workspace 後進入授權設定；未確認前准入檢查拒絕需要能力的 Run");
+  await step("套用 P3 範本", ui.click("套用「可信專案開發（P3）」"));
+  await step("檢視確認摘要", ui.click("檢視確認摘要"));
+  await waitFor("摘要揭露可信程式風險", async () =>
+    (await evaluate(debug2, ui.text(".authorization-summary"))).includes("Windows 使用者的身分執行"),
+  );
+  await step("承認風險", ui.check("我了解並接受上述風險"));
+  await step("確認並保存授權", ui.click("確認並保存授權"));
+  await waitFor("保存為 revision 1", async () => (await evaluate(debug2, ui.text(".authorization"))).includes("已保存為 revision 1"));
+  const after = await needsBuild();
+  if (after.status !== 200 || (await after.json()).authorization_revision !== 1) {
+    throw new Error("確認授權之後，需要建置與測試的 Run 應通過准入檢查");
+  }
+  console.log("✔ 在 App 內確認 P3 授權（revision 1）後，准入檢查通過");
+
+  // 5. 不帶憑證的請求（例如瀏覽器中的其他程式）被拒絕
   const anonymous = await fetch(runtimeUrl(runtimePort));
   if (anonymous.status !== 403 && anonymous.status !== 401) {
     throw new Error(`未帶憑證的請求應被拒絕，實際回應 ${anonymous.status}`);
@@ -235,5 +289,5 @@ try {
   if (runtimePid) killProcess(runtimePid);
   killWebviewProcesses(webviewDir);
   await sleep(1000);
-  for (const dir of [dataDir, webviewDir]) rmSync(dir, { recursive: true, force: true });
+  for (const dir of [dataDir, webviewDir, projectDir]) rmSync(dir, { recursive: true, force: true });
 }

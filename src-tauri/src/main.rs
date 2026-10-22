@@ -8,13 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    CreateProfileRequest, CreateWorkspaceRequest, HealthResponse, LoginTerminalResponse, PlatformResponse, ProfileList,
-    SetupStatus, WorkspaceList,
+    AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest, CreateProfileRequest, CreateTaskRequest,
+    CreateWorkspaceRequest, HealthResponse, LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus,
+    SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, RuntimeClient};
 use baton_credential::DpapiProtector;
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
 use baton_domain::profile::ProfileView;
+use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
+use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use tauri::{Manager, State};
 use tokio::sync::OnceCell;
@@ -195,6 +198,169 @@ async fn setup_acknowledge_notice(link: State<'_, RuntimeLink>) -> Result<SetupS
         return Err(reason.clone());
     }
     link.client.acknowledge_background_notice().await.map_err(|e| e.to_string())
+    }
+
+/// Web UI 讀取 Workspace 的授權設定（目前授權、歷史、建議範本）。
+#[tauri::command]
+async fn workspace_authorization(link: State<'_, RuntimeLink>, id: String) -> Result<AuthorizationView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.authorization(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 取得確認前的摘要（預覽，不保存）。
+#[tauri::command]
+async fn workspace_authorization_summary(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    grants: Vec<Grant>,
+) -> Result<ConfirmationSummary, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.authorization_summary(&id, &SummaryRequest { grants }).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 確認並保存授權（產生新的 revision）。
+#[tauri::command]
+async fn workspace_authorization_confirm(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    template_id: Option<String>,
+    grants: Vec<Grant>,
+    acknowledged_risk: bool,
+) -> Result<AuthorizationRevision, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client
+        .confirm_authorization(&id, &ConfirmAuthorizationRequest { template_id, grants, acknowledged_risk })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Web UI 讀取工作面板：Workspace 內全部 Goal 與 Task。
+#[tauri::command]
+async fn task_board(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+) -> Result<TaskBoard, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.task_board(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 建立 Goal。
+#[tauri::command]
+async fn goal_create(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    title: String,
+) -> Result<Goal, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.create_goal(&workspace_id, &title).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 手動建立 Task（可附部分契約，契約版本從 1 開始）。
+#[tauri::command]
+async fn task_create(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    goal_id: String,
+    title: String,
+    contract: Option<ContractContent>,
+) -> Result<TaskView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client
+        .create_task(&workspace_id, &CreateTaskRequest { goal_id, title, contract: contract.unwrap_or_default() })
+        .await.map_err(|e| e.to_string())
+}
+
+/// Web UI 讀取單一 Task 與契約版本歷史。
+#[tauri::command]
+async fn task_detail(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+) -> Result<TaskDetail, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.task_detail(&workspace_id, &task_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 變更契約（整份取代，內容相同不新增版本）。
+#[tauri::command]
+async fn task_contract_update(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+    contract: ContractContent,
+    note: Option<String>,
+) -> Result<TaskView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.update_task_contract(&workspace_id, &task_id, contract, note).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 新增相依（循環與自我相依會被拒絕）。
+#[tauri::command]
+async fn task_dependency_add(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+    depends_on: String,
+) -> Result<TaskView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.add_task_dependency(&workspace_id, &task_id, &depends_on).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 預覽准入檢查（唯讀）。
+#[tauri::command]
+async fn task_admission_check(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+) -> Result<AdmissionReport, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.check_task_admission(&workspace_id, &task_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 標記 Task 為 ready；准入檢查未通過時回報缺項。
+#[tauri::command]
+async fn task_ready(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+) -> Result<TaskView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.mark_task_ready(&workspace_id, &task_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 取消 Task。
+#[tauri::command]
+async fn task_cancel(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    task_id: String,
+) -> Result<TaskView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.cancel_task(&workspace_id, &task_id).await.map_err(|e| e.to_string())
 }
 
 fn main() {
@@ -214,7 +380,19 @@ fn main() {
             profile_archive,
             setup_status,
             setup_recheck,
-            setup_acknowledge_notice
+            setup_acknowledge_notice,
+            workspace_authorization,
+            workspace_authorization_summary,
+            workspace_authorization_confirm,
+            task_board,
+            goal_create,
+            task_create,
+            task_detail,
+            task_contract_update,
+            task_dependency_add,
+            task_admission_check,
+            task_ready,
+            task_cancel
         ])
         .setup(|app| {
             // 不等 Web UI 來問：App 一開啟就連回或啟動 Runtime
