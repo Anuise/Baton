@@ -1698,6 +1698,24 @@ export interface ConversationTurn {
 
 export type ControllerRunStatus = "starting" | "running" | "succeeded" | "failed" | "interrupted";
 
+/** 這一輪是 Controller 換帳號後的第一輪：新的 Controller Session 從保存的對話、決策與檢查點重建（票 30）。 */
+export interface ControllerRunHandoff {
+  from_run_id: string | null;
+  from_profile_id: string;
+  /** "quota_draining"、"quota_near_limit" 或 "account_unavailable"。 */
+  reason: string;
+}
+
+/** Controller 有到期的待處理輸入但沒有可用帳號；訊息已保存、等待中。 */
+export interface ControllerWait {
+  /** 例如 "quota_draining"、"quota_near_limit"、"profile_unverified"、"no_account"。 */
+  code: string;
+  /** 給使用者看的說明；多個原因以「；」串接。 */
+  message: string;
+  /** 開始等待的時間（UTC 毫秒）。 */
+  since: number;
+}
+
 /** Controller 的一輪（一次 `claude -p`）；時間是 UTC 毫秒。 */
 export interface ControllerRun {
   id: string;
@@ -1716,6 +1734,8 @@ export interface ControllerRun {
   native_session_id: string | null;
   process: { pid: number; created_at_millis: number; command_hash: string } | null;
   end_reason: string | null;
+  /** 換帳號後的第一輪才有，其餘是 null。 */
+  handoff: ControllerRunHandoff | null;
   created_at: number;
   updated_at: number;
   started_at: number | null;
@@ -1731,6 +1751,8 @@ export interface ConversationView {
   active_run: ControllerRun | null;
   /** 不忙碌且有待處理輸入時，預計喚醒 Controller 的時間（UTC 毫秒）。 */
   next_wake_at: number | null;
+  /** 有到期的待處理輸入但沒有可用帳號時的等待原因；忙碌時一定是 null。 */
+  waiting: ControllerWait | null;
   /** 依 seq 由小到大。 */
   turns: ConversationTurn[];
   /** 全部 Controller Run，依建立順序。 */

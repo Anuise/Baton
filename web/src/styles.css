@@ -1437,12 +1437,24 @@ body {
 }
 
 .conversation-busy,
-.conversation-wake {
+.conversation-wake,
+.conversation-waiting {
   margin: 0;
   padding: 8px 12px;
   background: #fff8c5;
   border: 1px solid #d4a72c;
   border-radius: 6px;
+}
+
+/* 沒有可用帳號而等待時，比一般忙碌更顯眼 */
+.conversation-waiting {
+  background: #fff1e5;
+  border-color: #bc4c00;
+  font-weight: 600;
+}
+
+.conversation-busy .conversation-status {
+  margin-left: 6px;
 }
 
 .conversation-turns {

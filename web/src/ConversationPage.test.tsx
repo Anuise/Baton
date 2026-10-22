@@ -109,6 +109,85 @@ describe("ConversationPage", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("預計於 2023/11/15 06:18");
   });
 
+  it("沒有可用帳號而等待時顯示等待原因與開始等待時間", async () => {
+    renderPage(
+      fakeClient(
+        conversationView({
+          conversation_id: "conv_1",
+          waiting: {
+            code: "quota_draining",
+            message: "prof_1 接近額度上限；prof_2 尚未核對",
+            since: CHECKED_AT + 240_000,
+          },
+          // 已到期而沒有喚起：不另外顯示預計喚醒時間
+          next_wake_at: CHECKED_AT + 300_000,
+          turns: history,
+        }),
+      ),
+    );
+
+    const waiting = await screen.findByRole("status");
+    expect(waiting).toHaveTextContent("Controller 等待可用帳號：prof_1 接近額度上限；prof_2 尚未核對");
+    expect(waiting).toHaveTextContent("2023/11/15 06:17");
+    expect(screen.queryByText(/預計於/)).toBeNull();
+  });
+
+  it("換帳號後第一輪的 Controller 回覆顯示交接來源與原因，成功時另標已確認", async () => {
+    const turns = [
+      ...history,
+      conversationTurn({ id: "turn_4", seq: 4, kind: "controller_reply", content: "接手繼續整理", controller_run_id: "crun_2" }),
+      conversationTurn({ id: "turn_5", seq: 5, kind: "controller_reply", content: "還在處理", controller_run_id: "crun_3" }),
+    ];
+    renderPage(
+      fakeClient(
+        conversationView({
+          conversation_id: "conv_1",
+          turns,
+          runs: [
+            controllerRun({ status: "interrupted", end_reason: "handed_off: quota_draining" }),
+            controllerRun({
+              id: "crun_2",
+              profile_id: "prof_2",
+              status: "succeeded",
+              handoff: { from_run_id: "crun_1", from_profile_id: "prof_1", reason: "quota_draining" },
+            }),
+            controllerRun({
+              id: "crun_3",
+              profile_id: "prof_3",
+              status: "failed",
+              handoff: { from_run_id: "crun_2", from_profile_id: "prof_2", reason: "weird_code" },
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const handedOff = await screen.findByRole("listitem", { name: "Controller #2" });
+    expect(handedOff).toHaveTextContent("已交接");
+    expect(handedOff).not.toHaveTextContent("已從帳號");
+
+    const confirmed = screen.getByRole("listitem", { name: "Controller #4" });
+    expect(confirmed).toHaveTextContent("已從帳號 prof_1 交接（帳號接近上限）");
+    expect(confirmed).toHaveTextContent("已確認");
+
+    const unknown = screen.getByRole("listitem", { name: "Controller #5" });
+    expect(unknown).toHaveTextContent("已從帳號 prof_2 交接（weird_code）");
+    expect(unknown).not.toHaveTextContent("已確認");
+  });
+
+  it("進行中的一輪是交接後的第一輪時，在忙碌狀態旁顯示交接來源", async () => {
+    const activeRun = controllerRun({
+      id: "crun_2",
+      profile_id: "prof_2",
+      handoff: { from_run_id: "crun_1", from_profile_id: "prof_1", reason: "quota_near_limit" },
+    });
+    renderPage(fakeClient(conversationView({ conversation_id: "conv_1", busy: true, active_run: activeRun, runs: [activeRun], turns: history })));
+
+    const status = await screen.findByRole("status");
+    expect(status).toHaveTextContent("已從帳號 prof_1 交接（帳號達停止派工門檻）");
+    expect(status).not.toHaveTextContent("已確認");
+  });
+
   it("沒有對話時顯示空狀態，不顯示忙碌或預計時間", async () => {
     renderPage(fakeClient());
 
