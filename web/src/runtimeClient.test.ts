@@ -109,7 +109,12 @@ describe("Runtime 用戶端", () => {
 
     await client.getAuthorization("ws_1");
     await client.summarizeAuthorization("ws_1", grants);
-    await client.confirmAuthorization("ws_1", { templateId: "research_docs", grants, acknowledgedRisk: false });
+    await client.confirmAuthorization("ws_1", {
+      templateId: "research_docs",
+      grants,
+      acknowledgedRisk: false,
+      acknowledgedExpansion: true,
+    });
 
     expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/authorization");
     expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/authorization/summary", {
@@ -120,7 +125,7 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/authorization", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false }),
+      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false, acknowledged_expansion: true }),
     });
   });
 
@@ -131,7 +136,7 @@ describe("Runtime 用戶端", () => {
 
     await client.getAuthorization("ws_1");
     await client.summarizeAuthorization("ws_1", grants);
-    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true });
+    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true, acknowledgedExpansion: false });
 
     expect(invoke).toHaveBeenNthCalledWith(1, "workspace_authorization", { id: "ws_1" });
     expect(invoke).toHaveBeenNthCalledWith(2, "workspace_authorization_summary", { id: "ws_1", grants });
@@ -140,6 +145,7 @@ describe("Runtime 用戶端", () => {
       templateId: null,
       grants,
       acknowledgedRisk: true,
+      acknowledgedExpansion: false,
     });
   });
 
@@ -277,6 +283,24 @@ describe("Runtime 用戶端", () => {
     await client.setSchedulingMode("reserve_handoff");
 
     expect(invoke.mock.calls).toEqual([["scheduling_overview"], ["scheduling_set_mode", { mode: "reserve_handoff" }]]);
+  });
+
+  it("HTTP 版向 /api/v1/backups 取得備份狀態", async () => {
+    const status = { backups: [], latest_drill: null };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(status), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    expect(await client.backupStatus()).toEqual(status);
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/backups");
+  });
+
+  it("Tauri 版透過 backup_status 指令取得備份狀態", async () => {
+    const invoke = vi.fn(async () => ({ backups: [], latest_drill: null }));
+    const client = createTauriClient(invoke as never);
+
+    await client.backupStatus();
+
+    expect(invoke.mock.calls).toEqual([["backup_status"]]);
   });
 
   it("HTTP 版設定方案上限：PUT 到 Profile 的 quota-limits，未設定的視窗送 null", async () => {

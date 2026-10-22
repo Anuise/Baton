@@ -10,6 +10,7 @@
 ## 2. 偶發失敗的測試
 - `crates/baton-client/tests/artifacts_client.rs::app_download_of_a_missing_version_or_a_tampered_file_is_rejected_with_the_runtime_code`：R043 在全套測試中於派工時失敗一次，單獨重跑皆通過，根因未查。
 - `web/src/App.test.tsx`「選到 Workspace 後可在授權設定與工作面板之間切換」：R056 冷啟動時在預設 1 秒等待內找不到按鈕，重跑皆通過。
+- `crates/baton-runtime/tests/process_tree.rs::duplicate_command_id_is_rejected`：R045 在完整執行時失敗一次（程序數比對），單獨重跑皆通過。
 - 要求：查出根因並修正（例如等待條件或共用狀態），不可只拉長逾時或標記略過。
 
 ## 3. 驗證命令的程序樹與路徑檢查（票 13）
@@ -18,3 +19,7 @@
 ## 4. 完全退出的兩個邊界（票 25）
 - `request_exit`（API）與 Supervisor 的 `mirror_lifecycle_file` 共用同一個 `baton-lifecycle…tmp` 暫存檔名，同時寫入時一方 rename 會失敗；改為各自唯一的暫存檔名。
 - `run_full_exit` 裡的 `process_of`（`ProcessControl.find`／`ensure_managed`）不受 40 秒期限約束，find 卡住時退出可能超時；納入同一個期限。
+
+## 5. 備份還原的兩個小問題（票 40）
+- `restore_backup` 直接把 manifest 的 `storage_path` 接到目標路徑，沒有防 `..` 路徑穿越；改為拒絕絕對路徑與任何 `..` 元件。
+- `baton-runtime restore` 失敗時的錯誤訊息帶著「Runtime 啟動失敗：」前綴，改用還原專用的訊息。

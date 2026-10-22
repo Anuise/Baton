@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
+import { BackupSettings } from "./BackupSettings";
 import { DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
 import { KnowledgePage } from "./KnowledgePage";
@@ -59,6 +60,7 @@ export function App() {
           {client && <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <SchedulingSettings client={client} />}
           {client && <SharedSettingsPage client={client} />}
+          {client && <BackupSettings client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
           {client && opened?.view === "decisions" && (

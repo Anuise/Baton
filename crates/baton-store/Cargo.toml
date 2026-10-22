@@ -7,7 +7,7 @@ publish.workspace = true
 
 [dependencies]
 baton-domain = { path = "../baton-domain" }
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 serde = "1"
 serde_json = "1"
 thiserror = "2"

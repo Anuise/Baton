@@ -156,7 +156,7 @@ async fn confirm_template(harness: &Harness, ws: &str, template_id: &str) {
         .unwrap_or_else(|| panic!("沒有範本 {template_id}"))["grants"]
         .clone();
     let acknowledged = template_id == "trusted_dev_p3";
-    let body = json!({ "template_id": template_id, "grants": grants, "acknowledged_risk": acknowledged });
+    let body = json!({ "template_id": template_id, "grants": grants, "acknowledged_risk": acknowledged, "acknowledged_expansion": true });
     let (status, revision) = harness.send_json(Method::PUT, &path, Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "{revision}");
 }

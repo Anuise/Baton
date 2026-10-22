@@ -79,6 +79,9 @@ pub struct ConfirmAuthorizationRequest {
     /// 使用者已看過確認摘要並承認其中的風險。
     #[serde(default)]
     pub acknowledged_risk: bool,
+    /// 使用者已看過確認摘要中「新增的能力與影響」並明確確認擴大授權；修改既有授權而且擴大時必須為真。
+    #[serde(default)]
+    pub acknowledged_expansion: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +102,8 @@ impl From<AuthorizationError> for ApiError {
             AuthorizationError::UnknownTemplate(_)
             | AuthorizationError::DuplicateCapability(_)
             | AuthorizationError::MissingTarget(_)
-            | AuthorizationError::RiskNotAcknowledged => StatusCode::BAD_REQUEST,
+            | AuthorizationError::RiskNotAcknowledged
+            | AuthorizationError::ExpansionNotAcknowledged => StatusCode::BAD_REQUEST,
         };
         ApiError { status, code: error.code(), message: error.to_string() }
     }
@@ -180,7 +184,9 @@ pub(crate) async fn summary(
 ) -> Result<Json<ConfirmationSummary>, ApiError> {
     let Json(request) = body.map_err(bad_json)?;
     find_workspace(&state, &id).await?;
-    Ok(Json(authorization::summarize(request.grants)?))
+    // 已經有生效的授權時，摘要另外列出「新增的能力與影響」
+    let current = state.store.authorization_revisions(&id).await?.pop();
+    Ok(Json(authorization::summarize(request.grants, current.as_ref())?))
 }
 
 /// 確認並保存：新內容回 201 與新的 revision；與目前生效的內容相同則回 200 與既有 revision。
@@ -194,6 +200,7 @@ pub(crate) async fn confirm(
         template_id: request.template_id,
         grants: request.grants,
         acknowledged_risk: request.acknowledged_risk,
+        acknowledged_expansion: request.acknowledged_expansion,
     };
     Ok(match state.store.confirm_authorization(id, request, state.clock.now()).await? {
         ConfirmOutcome::Created { revision, .. } => (StatusCode::CREATED, Json(revision)),
