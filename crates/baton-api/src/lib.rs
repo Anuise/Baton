@@ -60,6 +60,7 @@ use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UN
 use baton_domain::review::{
     TOOL_CLASSIFY_FINDING, TOOL_GET_REVIEWS, TOOL_REPORT_DESIGN_DEVIATION, TOOL_RESOLVE_DESIGN_DEVIATION, TOOL_SUBMIT_REVIEW,
 };
+use baton_domain::verification::TOOL_ACCEPT_ARTIFACT;
 use baton_domain::verification_profile::{TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION};
 use baton_domain::exploration::{
     TOOL_DEFINE_EXPLORATION_CHARTER, TOOL_GET_EXPLORATION, TOOL_REPORT_EXPLORATION_FINDING, TOOL_REPRODUCE_EXPLORATION_FINDING,
@@ -395,6 +396,7 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_TRIAGE_EXPLORATION_FINDING), post(exploration::triage_exploration_finding))
         .route(&tool_path(TOOL_REPRODUCE_EXPLORATION_FINDING), post(exploration::reproduce_exploration_finding))
         .route(&tool_path(TOOL_GET_EXPLORATION), post(exploration::get_exploration))
+        .route(&tool_path(TOOL_ACCEPT_ARTIFACT), post(verification::accept_artifact))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

@@ -165,22 +165,9 @@ impl Store {
                 let Some(task) = loaded.tasks.iter().find(|t| t.id == run.task_id) else {
                     return Ok(Err(KnowledgeApplyError::Run(RunError::TaskNotFound(run.task_id.clone()))));
                 };
-                let workspace_id = Some(agent.workspace_id.clone());
-                let scope = match scope_kind {
-                    ScopeKind::Global => {
-                        let message = "Agent 只能提交 Workspace、Goal 或 Task 範圍的教訓".to_string();
-                        return Ok(Err(KnowledgeError::ScopeInvalid(message).into()));
-                    }
-                    ScopeKind::Workspace => KnowledgeScope { kind: scope_kind, workspace_id, goal_id: None, task_id: None },
-                    ScopeKind::Goal => {
-                        KnowledgeScope { kind: scope_kind, workspace_id, goal_id: Some(task.goal_id.clone()), task_id: None }
-                    }
-                    ScopeKind::Task => KnowledgeScope {
-                        kind: scope_kind,
-                        workspace_id,
-                        goal_id: Some(task.goal_id.clone()),
-                        task_id: Some(task.id.clone()),
-                    },
+                let scope = match lesson_scope(scope_kind, &agent.workspace_id, &task.goal_id, &task.id) {
+                    Ok(scope) => scope,
+                    Err(rejected) => return Ok(Err(rejected.into())),
                 };
                 let new = NewKnowledge {
                     id,
@@ -192,6 +179,59 @@ impl Store {
                         generation: agent.generation,
                         task_id: task.id.clone(),
                     },
+                    valid_from: None,
+                    valid_until: None,
+                };
+                match knowledge::create(new, None, now) {
+                    Err(rejected) => Ok(Err(rejected.into())),
+                    Ok(change) => Ok(Ok(save_change(tx, change, full_text)?)),
+                }
+            })
+            .await?;
+        outcome
+    }
+
+    /// Controller 提交候選教訓（票 54，spec D-05）。Controller 沒有自己的 Task，所以由它指定教訓來源的 Task：
+    /// 在同一個交易中確認 Task 屬於 Controller 的 Workspace（否則回報 `RunError::TaskNotFound`，什麼都不寫），
+    /// 範圍一律以這個 Task 解析（`scope_kind` 只能是 Workspace、Goal 或 Task）。
+    pub async fn record_controller_lesson_candidate(
+        &self,
+        controller: &ControllerScope,
+        id: String,
+        task_id: &str,
+        scope_kind: ScopeKind,
+        content: KnowledgeContent,
+        now: Timestamp,
+    ) -> Result<KnowledgeEntry, KnowledgeApplyError> {
+        let controller = controller.clone();
+        let task_id = task_id.to_string();
+        let full_text = self.inner.full_text;
+        let outcome = self
+            .write(move |tx| {
+                let goal_id = tx
+                    .query_row(
+                        "SELECT goal_id FROM task WHERE id = ?1 AND workspace_id = ?2",
+                        [&task_id, &controller.workspace_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map(Some)
+                    .or_else(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(other),
+                    })?;
+                let Some(goal_id) = goal_id else {
+                    return Ok(Err(KnowledgeApplyError::Run(RunError::TaskNotFound(task_id))));
+                };
+                let scope = match lesson_scope(scope_kind, &controller.workspace_id, &goal_id, &task_id) {
+                    Ok(scope) => scope,
+                    Err(rejected) => return Ok(Err(rejected.into())),
+                };
+                let new = NewKnowledge {
+                    id,
+                    kind: KnowledgeKind::Lesson,
+                    scope,
+                    content,
+                    source: KnowledgeSource::Controller { controller_run_id: controller.controller_run_id, task_id },
                     valid_from: None,
                     valid_until: None,
                 };
@@ -317,6 +357,21 @@ impl Store {
             .await?;
         Ok(result?)
     }
+}
+
+/// Agent（Worker 或 Controller）提交的教訓的範圍：以來源 Task 解析；全域一律拒絕。
+fn lesson_scope(kind: ScopeKind, workspace_id: &str, goal_id: &str, task_id: &str) -> Result<KnowledgeScope, KnowledgeError> {
+    let workspace_id = Some(workspace_id.to_string());
+    Ok(match kind {
+        ScopeKind::Global => {
+            return Err(KnowledgeError::ScopeInvalid("Agent 只能提交 Workspace、Goal 或 Task 範圍的教訓".to_string()));
+        }
+        ScopeKind::Workspace => KnowledgeScope { kind, workspace_id, goal_id: None, task_id: None },
+        ScopeKind::Goal => KnowledgeScope { kind, workspace_id, goal_id: Some(goal_id.to_string()), task_id: None },
+        ScopeKind::Task => {
+            KnowledgeScope { kind, workspace_id, goal_id: Some(goal_id.to_string()), task_id: Some(task_id.to_string()) }
+        }
+    })
 }
 
 fn escape_like(term: &str) -> String {

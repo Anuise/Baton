@@ -159,12 +159,13 @@ impl KnowledgeScope {
     }
 }
 
-/// 條目的來源：使用者，或提交它的 Agent Run（含世代與當時的 Task）。
+/// 條目的來源：使用者、提交它的 Worker Run（含世代與當時的 Task），或提交它的 Controller 一輪（含它指定的來源 Task）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum KnowledgeSource {
     User,
     Agent { run_id: String, generation: i64, task_id: String },
+    Controller { controller_run_id: String, task_id: String },
 }
 
 /// 教訓特有的內容；每一欄都可以是空字串。
@@ -458,8 +459,10 @@ pub fn create(
 ) -> Result<KnowledgeChange, KnowledgeError> {
     let status = match &new.source {
         KnowledgeSource::User => KnowledgeStatus::Verified,
-        KnowledgeSource::Agent { .. } if new.kind == KnowledgeKind::Lesson => KnowledgeStatus::Candidate,
-        KnowledgeSource::Agent { .. } => return Err(invalid("Agent 只能提交候選教訓")),
+        KnowledgeSource::Agent { .. } | KnowledgeSource::Controller { .. } if new.kind == KnowledgeKind::Lesson => {
+            KnowledgeStatus::Candidate
+        }
+        KnowledgeSource::Agent { .. } | KnowledgeSource::Controller { .. } => return Err(invalid("Agent 只能提交候選教訓")),
     };
     if new.content.lesson.is_some() != (new.kind == KnowledgeKind::Lesson) {
         return Err(invalid("只有教訓可以填寫觸發條件、根因與解法"));

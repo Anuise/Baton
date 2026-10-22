@@ -714,7 +714,12 @@ pub fn build_prompt(
              案例以產品行為斷言失敗才確認為缺陷，環境或授權問題不會被當成缺陷，無法重現的保留為未驗風險。\
              以 triage_exploration_finding 排除（預期設計須經使用者裁定）、改為未驗風險或重新開啟；已確認的缺陷不能排除，\
              修復後以同一個案例驗證，通過後自動納入正常回歸。重現的 Evidence Bundle 只用於診斷，不能當作 Stage 的驗證證據。\
-             以 get_exploration 查看章程、疑點與重現結果。\n",
+             以 get_exploration 查看章程、疑點與重現結果。\n\
+             共同工具：以 search_knowledge 查這個 Workspace 的有效知識；以 send_message 寄訊息給 Task 的 Worker\
+             （Worker 寄給你時收件人是 controller），每一輪開始時以 read_inbox 讀取寄給你的訊息（上一輪沒讀的也在）；\
+             以 record_lesson_candidate 附上來源 Task 提交候選教訓（使用者確認後才生效）；\
+             verifying 的 Task 沒有宣告確定性檢查時，以 accept_artifact 接受成果，一定要經使用者裁定，\
+             宣告了檢查的 Task 由 Runtime 依檢查結果接受。\n",
         );
         if let Some(gap) = history_gap {
             prompt.push_str(&format!("\n注意：{gap}\n"));

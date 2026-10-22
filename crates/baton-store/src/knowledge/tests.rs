@@ -112,3 +112,108 @@ async fn versions_are_append_only_and_entries_cannot_be_deleted() {
     assert!(conn.execute("DELETE FROM knowledge_entry_version", []).is_err());
     assert!(conn.execute("DELETE FROM knowledge_entry", []).is_err());
 }
+
+// --- Controller 提交候選教訓（票 54，spec D-05） ---
+
+fn complete_contract() -> baton_domain::task::ContractContent {
+    use baton_domain::task::{ContractContent, ContractField};
+    let filled = |text: &str| Some(ContractField::Filled { text: text.into(), references: vec![] });
+    ContractContent {
+        objective: filled("整理資料"),
+        inputs: Some(ContractField::NotApplicable { reason: "沒有輸入".into() }),
+        scope: filled("公開資料"),
+        deliverables: filled("比較表"),
+        done_criteria: filled("五個產品"),
+        blocker_handling: filled("回報"),
+        required_capabilities: vec![],
+        verification_checks: vec![],
+    }
+}
+
+/// 兩個 Workspace（w1、w2），各有一個 Goal（g1、g2）與一個 Task（t1、t2）。
+async fn two_workspaces(dir: &Path) -> Store {
+    use baton_domain::task::TaskCommand;
+    let store = open(dir, true).await;
+    for (ws, goal, task) in [("w1", "g1", "t1"), ("w2", "g2", "t2")] {
+        let path = format!("C:\\work\\{ws}");
+        store.apply_workspace_command(WorkspaceCommand::Create { id: ws.into(), name: None, path }, T1).await.unwrap();
+        let create_goal = TaskCommand::CreateGoal { id: goal.into(), title: "目標".into() };
+        store.apply_task_command(ws.into(), create_goal, T1).await.unwrap();
+        let create_task = TaskCommand::CreateTask {
+            id: task.into(),
+            goal_id: goal.into(),
+            title: task.into(),
+            kind: Default::default(),
+            contract: complete_contract(),
+        };
+        store.apply_task_command(ws.into(), create_task, T1).await.unwrap();
+    }
+    store
+}
+
+fn lesson(title: &str) -> KnowledgeContent {
+    KnowledgeContent::new(KnowledgeKind::Lesson, title, "內文", &[], &[], None).unwrap()
+}
+
+fn controller_of(ws: &str) -> ControllerScope {
+    ControllerScope { workspace_id: ws.into(), controller_run_id: "ctl_1".into() }
+}
+
+#[tokio::test]
+async fn a_controller_lesson_is_a_candidate_scoped_by_the_named_task_of_its_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = two_workspaces(dir.path()).await;
+    let controller = controller_of("w1");
+
+    let expected = [
+        (ScopeKind::Task, Some("g1"), Some("t1")),
+        (ScopeKind::Goal, Some("g1"), None),
+        (ScopeKind::Workspace, None, None),
+    ];
+    for (i, (kind, goal, task)) in expected.into_iter().enumerate() {
+        let id = format!("c{i}");
+        let entry =
+            store.record_controller_lesson_candidate(&controller, id.clone(), "t1", kind, lesson("教訓"), T1).await.unwrap();
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.status, KnowledgeStatus::Candidate);
+        assert_eq!(
+            entry.scope,
+            KnowledgeScope {
+                kind,
+                workspace_id: Some("w1".into()),
+                goal_id: goal.map(str::to_string),
+                task_id: task.map(str::to_string),
+            }
+        );
+        assert_eq!(entry.source, KnowledgeSource::Controller { controller_run_id: "ctl_1".into(), task_id: "t1".into() });
+        // 寫入後讀回的內容一致
+        assert_eq!(store.knowledge_detail(&id).await.unwrap().0, entry);
+    }
+}
+
+#[tokio::test]
+async fn a_controller_cannot_attach_a_lesson_to_another_workspace_or_to_the_global_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = two_workspaces(dir.path()).await;
+    let controller = controller_of("w1");
+
+    // 別的 Workspace 的 Task、不存在的 Task：找不到，什麼都不寫
+    for task in ["t2", "t_missing"] {
+        let error = store
+            .record_controller_lesson_candidate(&controller, "x".into(), task, ScopeKind::Task, lesson("教訓"), T1)
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, KnowledgeApplyError::Run(RunError::TaskNotFound(id)) if id == task), "{error:?}");
+    }
+    // 全域範圍一律拒絕
+    let error = store
+        .record_controller_lesson_candidate(&controller, "x".into(), "t1", ScopeKind::Global, lesson("教訓"), T1)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, KnowledgeApplyError::Rejected(KnowledgeError::ScopeInvalid(_))), "{error:?}");
+
+    for ws in ["w1", "w2"] {
+        let audience = KnowledgeAudience::Desktop { workspace_id: Some(ws.into()) };
+        assert!(store.knowledge_search(audience, vec![], true, T1).await.unwrap().is_empty(), "{ws} 不應該有條目");
+    }
+}

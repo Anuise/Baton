@@ -2,12 +2,16 @@
 //!
 //! 規則都在 Domain（`baton_domain::message`）；這裡只做「在同一個交易中載入狀態 → 交給 Domain 判定 → 寫入」。
 //! 範圍（Workspace、Run、世代）一律來自憑證；收件匣以憑證所屬 Run 的 Task 為界，沒有任何查詢接受別人的 Task。
+//! Controller（票 54）以它那一輪所屬的 Workspace 為界：收件匣是寄給這個 Workspace 的 Controller 的交付
+//! （`message_controller_delivery`），可以寄給同一個 Workspace 的任何 Task。
 
 use baton_domain::message::{
-    self, Delivery, InboxMessage, Message, MessageError, MessageKind, ScopeChangeAttempt, SendContext, SendDecision,
-    Sender, StoredMessage, UnreadSummaryItem, UNREAD_SUMMARY_MAX_ITEMS,
+    self, Delivery, InboxMessage, Message, MessageError, MessageKind, MessageSender, ScopeChangeAttempt, SendContext,
+    SendDecision, Sender, StoredMessage, UnreadSummaryItem, CONTROLLER_ADDRESS, CONTROLLER_TITLE, UNREAD_SUMMARY_MAX_ITEMS,
 };
 use baton_domain::run;
+
+use rusqlite::OptionalExtension;
 
 use super::tasks::load;
 use super::*;
@@ -36,28 +40,69 @@ pub struct SendOutcome {
     pub duplicate: bool,
 }
 
+/// 收發訊息的一方：Worker 的 Run（Agent 憑證的範圍），或 Workspace 的 Controller 的一輪（Controller 憑證的範圍，票 54）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageActor {
+    Worker(AgentScope),
+    Controller(ControllerScope),
+}
+
+impl MessageActor {
+    fn workspace_id(&self) -> &str {
+        match self {
+            MessageActor::Worker(scope) => &scope.workspace_id,
+            MessageActor::Controller(scope) => &scope.workspace_id,
+        }
+    }
+}
+
 /// `read_inbox` 的結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Inbox {
+    /// 收件地址：讀取者的 Task，或 [`CONTROLLER_ADDRESS`]。
     pub task_id: String,
     pub messages: Vec<InboxMessage>,
     /// 這次讀取之後，這個 Task 仍未讀的訊息數。
     pub unread_remaining: usize,
 }
 
-/// 憑證所屬的寄件者／讀取者，以及它此刻是否還是 Task 的寫入所有者；Run 不存在時回報 `RunNotFound`。
-fn sender_of(tx: &Connection, scope: &AgentScope) -> Result<(Sender, Vec<String>), MessageApplyError> {
-    let loaded = load(tx, &scope.workspace_id)?;
-    let Some(run) = loaded.runs.iter().find(|r| r.id == scope.run_id) else {
-        return Err(MessageApplyError::RunNotFound(scope.run_id.clone()));
-    };
-    let lease = loaded.leases.iter().find(|l| l.run_id == run.id);
-    let sender = Sender {
-        workspace_id: scope.workspace_id.clone(),
-        run_id: run.id.clone(),
-        task_id: run.task_id.clone(),
-        generation: scope.generation,
-        is_current: run::is_current_writer(run, lease, scope.generation),
+/// 憑證所屬的寄件者／讀取者與它所在 Workspace 的全部 Task。Worker 記下它此刻是否還是 Task 的寫入所有者，
+/// Controller 記下這一輪是否仍在進行；Run（或這一輪）不存在時回報 `RunNotFound`。
+fn sender_of(tx: &Connection, actor: &MessageActor) -> Result<(Sender, Vec<String>), MessageApplyError> {
+    let loaded = load(tx, actor.workspace_id())?;
+    let sender = match actor {
+        MessageActor::Worker(scope) => {
+            let Some(run) = loaded.runs.iter().find(|r| r.id == scope.run_id) else {
+                return Err(MessageApplyError::RunNotFound(scope.run_id.clone()));
+            };
+            let lease = loaded.leases.iter().find(|l| l.run_id == run.id);
+            Sender {
+                workspace_id: scope.workspace_id.clone(),
+                identity: MessageSender::Worker {
+                    run_id: run.id.clone(),
+                    task_id: run.task_id.clone(),
+                    generation: scope.generation,
+                },
+                is_current: run::is_current_writer(run, lease, scope.generation),
+            }
+        }
+        MessageActor::Controller(scope) => {
+            let status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2",
+                    [&scope.controller_run_id, &scope.workspace_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(status) = status else {
+                return Err(MessageApplyError::RunNotFound(scope.controller_run_id.clone()));
+            };
+            Sender {
+                workspace_id: scope.workspace_id.clone(),
+                identity: MessageSender::Controller { controller_run_id: scope.controller_run_id.clone() },
+                is_current: matches!(status.as_str(), "starting" | "running"),
+            }
+        }
     };
     Ok((sender, loaded.tasks.iter().map(|t| t.id.clone()).collect()))
 }
@@ -67,24 +112,25 @@ impl Store {
     /// 同一個寄件 Task 以同一個 `message_id` 重送相同內容時回傳既有的訊息（`duplicate`），不新增任何交付。
     pub async fn send_message(
         &self,
-        scope: &AgentScope,
+        actor: &MessageActor,
         input: message::NewMessage,
         generated_id: String,
         now: Timestamp,
     ) -> Result<SendOutcome, MessageApplyError> {
-        let scope = scope.clone();
+        let actor = actor.clone();
         self.write(move |tx| {
-            let (sender, task_ids) = match sender_of(tx, &scope) {
+            let workspace_id = actor.workspace_id();
+            let (sender, task_ids) = match sender_of(tx, &actor) {
                 Ok(found) => found,
                 Err(MessageApplyError::Store(store)) => return Err(store),
                 Err(other) => return Ok(Err(other)),
             };
             let existing = match &input.message_id {
-                Some(id) => load_message(tx, &scope.workspace_id, id)?,
+                Some(id) => load_message(tx, workspace_id, id)?,
                 None => None,
             };
             let parent = match &input.in_reply_to {
-                Some(id) => load_message(tx, &scope.workspace_id, id)?,
+                Some(id) => load_message(tx, workspace_id, id)?,
                 None => None,
             };
             let ctx = SendContext {
@@ -113,9 +159,9 @@ impl Store {
         attempt_id: String,
         now: Timestamp,
     ) -> Result<(), MessageApplyError> {
-        let scope = scope.clone();
+        let actor = MessageActor::Worker(scope.clone());
         self.write(move |tx| {
-            let (sender, _) = match sender_of(tx, &scope) {
+            let (sender, _) = match sender_of(tx, &actor) {
                 Ok(found) => found,
                 Err(MessageApplyError::Store(store)) => return Err(store),
                 Err(other) => return Ok(Err(other)),
@@ -129,18 +175,20 @@ impl Store {
         .await?
     }
 
-    /// 讀取寄給憑證所屬 Task 的訊息，依送出順序；回傳的未讀訊息會被標為已讀。
-    /// Run 已結束或被接替時拒絕（`MessageError::Revoked`），不改變任何已讀狀態。
+    /// 讀取寄給讀取者的訊息，依送出順序；回傳的未讀訊息會被標為已讀。Worker 讀寄給它 Task 的，
+    /// Controller 讀寄給這個 Workspace 的 Controller 的（票 54）。
+    /// Run 已結束或被接替（Controller 這一輪已結束）時拒絕（`MessageError::Revoked`），不改變任何已讀狀態。
     pub async fn read_inbox(
         &self,
-        scope: &AgentScope,
+        actor: &MessageActor,
         include_read: bool,
         limit: usize,
         now: Timestamp,
     ) -> Result<Inbox, MessageApplyError> {
-        let scope = scope.clone();
+        let actor = actor.clone();
         self.write(move |tx| {
-            let (reader, _) = match sender_of(tx, &scope) {
+            let workspace_id = actor.workspace_id();
+            let (reader, _) = match sender_of(tx, &actor) {
                 Ok(found) => found,
                 Err(MessageApplyError::Store(store)) => return Err(store),
                 Err(other) => return Ok(Err(other)),
@@ -148,19 +196,27 @@ impl Store {
             if !reader.is_current {
                 return Ok(Err(MessageError::Revoked.into()));
             }
+            let address = reader.address().to_string();
+            // Worker 的交付以收件 Task 區分；Controller 的交付表每個 Workspace 只有一個收件人。?2 一律是收件地址
+            let (table, recipient) = if address == CONTROLLER_ADDRESS {
+                ("message_controller_delivery", "?2 = ?2")
+            } else {
+                ("message_delivery", "d.recipient_task_id = ?2")
+            };
             let filter = if include_read { "" } else { "AND d.read_at IS NULL" };
             let sql = format!(
                 "SELECT m.message_id, m.thread_id, m.correlation_id, m.in_reply_to, m.kind, m.subject, m.body,
-                        m.sender_task_id, t.title, m.created_at, d.read_at IS NOT NULL
-                 FROM message_delivery d
+                        COALESCE(m.sender_task_id, ?4), COALESCE(t.title, ?5), m.created_at, d.read_at IS NOT NULL
+                 FROM {table} d
                  JOIN message m ON m.workspace_id = d.workspace_id AND m.message_id = d.message_id
-                 JOIN task t ON t.id = m.sender_task_id
-                 WHERE d.workspace_id = ?1 AND d.recipient_task_id = ?2 {filter}
+                 LEFT JOIN task t ON t.id = m.sender_task_id
+                 WHERE d.workspace_id = ?1 AND {recipient} {filter}
                  ORDER BY m.rowid LIMIT ?3"
             );
+            let params = rusqlite::params![workspace_id, address, limit as i64, CONTROLLER_ADDRESS, CONTROLLER_TITLE];
             let messages = tx
                 .prepare(&sql)?
-                .query_map(rusqlite::params![scope.workspace_id, reader.task_id, limit as i64], |r| {
+                .query_map(params, |r| {
                     Ok(InboxMessage {
                         message_id: r.get(0)?,
                         thread_id: r.get(1)?,
@@ -178,17 +234,19 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for message in messages.iter().filter(|m| !m.already_read) {
                 tx.execute(
-                    "UPDATE message_delivery SET read_at = ?4, delivered_at = COALESCE(delivered_at, ?4)
-                     WHERE workspace_id = ?1 AND message_id = ?2 AND recipient_task_id = ?3",
-                    rusqlite::params![scope.workspace_id, message.message_id, reader.task_id, now.as_millis()],
+                    &format!(
+                        "UPDATE {table} AS d SET read_at = ?4, delivered_at = COALESCE(delivered_at, ?4)
+                         WHERE d.workspace_id = ?1 AND d.message_id = ?3 AND {recipient}"
+                    ),
+                    rusqlite::params![workspace_id, address, message.message_id, now.as_millis()],
                 )?;
             }
             let unread_remaining: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM message_delivery WHERE workspace_id = ?1 AND recipient_task_id = ?2 AND read_at IS NULL",
-                rusqlite::params![scope.workspace_id, reader.task_id],
+                &format!("SELECT COUNT(*) FROM {table} d WHERE d.workspace_id = ?1 AND {recipient} AND d.read_at IS NULL"),
+                rusqlite::params![workspace_id, address],
                 |r| r.get(0),
             )?;
-            Ok(Ok(Inbox { task_id: reader.task_id, messages, unread_remaining: unread_remaining as usize }))
+            Ok(Ok(Inbox { task_id: address, messages, unread_remaining: unread_remaining as usize }))
         })
         .await?
     }
@@ -205,7 +263,7 @@ pub(crate) fn unread_summary(
             "SELECT m.message_id, m.kind, m.subject, t.title
              FROM message_delivery d
              JOIN message m ON m.workspace_id = d.workspace_id AND m.message_id = d.message_id
-             JOIN task t ON t.id = m.sender_task_id
+             LEFT JOIN task t ON t.id = m.sender_task_id
              WHERE d.workspace_id = ?1 AND d.recipient_task_id = ?2 AND d.read_at IS NULL
              ORDER BY m.rowid LIMIT ?3",
         )?
@@ -257,10 +315,15 @@ fn load_message(conn: &Connection, workspace_id: &str, message_id: &str) -> rusq
     let message = conn
         .query_row(
             "SELECT message_id, workspace_id, thread_id, correlation_id, in_reply_to, kind, subject, body,
-                    sender_run_id, sender_task_id, sender_generation, created_at
+                    sender_run_id, sender_task_id, sender_generation, sender_controller_run_id, created_at
              FROM message WHERE workspace_id = ?1 AND message_id = ?2",
             [workspace_id, message_id],
             |r| {
+                // schema 的 CHECK 保證兩種寄件者恰好其中一種
+                let sender = match r.get::<_, Option<String>>(11)? {
+                    Some(controller_run_id) => MessageSender::Controller { controller_run_id },
+                    None => MessageSender::Worker { run_id: r.get(8)?, task_id: r.get(9)?, generation: r.get(10)? },
+                };
                 Ok(Message {
                     message_id: r.get(0)?,
                     workspace_id: r.get(1)?,
@@ -270,10 +333,8 @@ fn load_message(conn: &Connection, workspace_id: &str, message_id: &str) -> rusq
                     kind: kind_column(5, &r.get::<_, String>(5)?)?,
                     subject: r.get(6)?,
                     body: r.get(7)?,
-                    sender_run_id: r.get(8)?,
-                    sender_task_id: r.get(9)?,
-                    sender_generation: r.get(10)?,
-                    created_at: Timestamp::from_millis(r.get(11)?),
+                    sender,
+                    created_at: Timestamp::from_millis(r.get(12)?),
                 })
             },
         )
@@ -283,12 +344,16 @@ fn load_message(conn: &Connection, workspace_id: &str, message_id: &str) -> rusq
             other => Err(other),
         })?;
     let Some(message) = message else { return Ok(None) };
+    // 寄給 Controller 的交付以 CONTROLLER_ADDRESS 表示收件人
     let deliveries = conn
         .prepare(
             "SELECT recipient_task_id, delivered_at, read_at FROM message_delivery
-             WHERE workspace_id = ?1 AND message_id = ?2 ORDER BY rowid",
+             WHERE workspace_id = ?1 AND message_id = ?2
+             UNION ALL
+             SELECT ?3, delivered_at, read_at FROM message_controller_delivery
+             WHERE workspace_id = ?1 AND message_id = ?2",
         )?
-        .query_map([workspace_id, message_id], |r| {
+        .query_map([workspace_id, message_id, CONTROLLER_ADDRESS], |r| {
             Ok(Delivery {
                 message_id: message_id.to_string(),
                 recipient_task_id: r.get(0)?,
@@ -302,10 +367,14 @@ fn load_message(conn: &Connection, workspace_id: &str, message_id: &str) -> rusq
 
 fn save_message(tx: &Transaction<'_>, stored: &StoredMessage) -> rusqlite::Result<()> {
     let m = &stored.message;
+    let (run_id, task_id, generation, controller_run_id) = match &m.sender {
+        MessageSender::Worker { run_id, task_id, generation } => (Some(run_id), Some(task_id), Some(*generation), None),
+        MessageSender::Controller { controller_run_id } => (None, None, None, Some(controller_run_id)),
+    };
     tx.execute(
         "INSERT INTO message (workspace_id, message_id, thread_id, correlation_id, in_reply_to, kind, subject, body,
-                              sender_run_id, sender_task_id, sender_generation, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                              sender_run_id, sender_task_id, sender_generation, sender_controller_run_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             m.workspace_id,
             m.message_id,
@@ -315,17 +384,25 @@ fn save_message(tx: &Transaction<'_>, stored: &StoredMessage) -> rusqlite::Resul
             m.kind.as_str(),
             m.subject,
             m.body,
-            m.sender_run_id,
-            m.sender_task_id,
-            m.sender_generation,
+            run_id,
+            task_id,
+            generation,
+            controller_run_id,
             m.created_at.as_millis(),
         ],
     )?;
     for delivery in &stored.deliveries {
-        tx.execute(
-            "INSERT INTO message_delivery (workspace_id, message_id, recipient_task_id) VALUES (?1, ?2, ?3)",
-            rusqlite::params![m.workspace_id, delivery.message_id, delivery.recipient_task_id],
-        )?;
+        if delivery.recipient_task_id == CONTROLLER_ADDRESS {
+            tx.execute(
+                "INSERT INTO message_controller_delivery (workspace_id, message_id) VALUES (?1, ?2)",
+                rusqlite::params![m.workspace_id, delivery.message_id],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO message_delivery (workspace_id, message_id, recipient_task_id) VALUES (?1, ?2, ?3)",
+                rusqlite::params![m.workspace_id, delivery.message_id, delivery.recipient_task_id],
+            )?;
+        }
     }
     Ok(())
 }

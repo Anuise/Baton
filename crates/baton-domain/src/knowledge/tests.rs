@@ -49,6 +49,36 @@ fn agents_cannot_submit_anything_but_lessons() {
     assert_eq!(error.code(), "knowledge_invalid");
 }
 
+fn controller() -> KnowledgeSource {
+    KnowledgeSource::Controller { controller_run_id: "ctl_1".into(), task_id: "task_1".into() }
+}
+
+#[test]
+fn controller_lessons_are_always_candidates_and_controllers_cannot_submit_anything_else() {
+    let candidate = created("k1", KnowledgeKind::Lesson, controller());
+    assert_eq!(candidate.status, KnowledgeStatus::Candidate);
+    assert!(!candidate.is_effective_at(T0), "候選教訓不是有效知識");
+
+    for kind in [KnowledgeKind::Decision, KnowledgeKind::Fact] {
+        let error = create(new("k2", kind, controller()), None, T0).unwrap_err();
+        assert_eq!(error.code(), "knowledge_invalid", "{kind:?}");
+    }
+}
+
+#[test]
+fn controller_source_is_tagged_controller_with_its_run_and_task() {
+    let json = serde_json::to_value(controller()).unwrap();
+    assert_eq!(json, serde_json::json!({ "kind": "controller", "controller_run_id": "ctl_1", "task_id": "task_1" }));
+    assert_eq!(serde_json::from_value::<KnowledgeSource>(json).unwrap(), controller());
+}
+
+#[test]
+fn controllers_cannot_supersede_entries() {
+    let old = created("old", KnowledgeKind::Lesson, KnowledgeSource::User);
+    let error = create(new("new", KnowledgeKind::Lesson, controller()), Some(&old), T1).unwrap_err();
+    assert_eq!(error.code(), "knowledge_supersede_invalid");
+}
+
 #[test]
 fn creation_records_first_version_and_created_event() {
     let change = create(new("k1", KnowledgeKind::Fact, KnowledgeSource::User), None, T0).unwrap();

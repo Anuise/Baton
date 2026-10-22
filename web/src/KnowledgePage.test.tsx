@@ -253,6 +253,19 @@ describe("知識", () => {
       expect(within(await region("有效條目")).queryByRole("article", { name: "測試前清空快取" })).not.toBeInTheDocument();
     });
 
+    it("Controller 提交的候選教訓顯示 Controller 與來源 Task", async () => {
+      const fromController = entry({
+        ...candidate,
+        id: "kn_ctl",
+        source: { kind: "controller", controller_run_id: "ctl_4", task_id: "task_5" },
+      });
+      renderPage(fakeClient([fromController]));
+
+      const section = await region("待確認的候選教訓");
+      const card = within(section).getByRole("article", { name: "測試前清空快取" });
+      expect(card).toHaveTextContent("來源：Controller（Run ctl_4，Task task_5）");
+    });
+
     it("確認為已驗證：帶 revision 送出，重新讀取後移到有效條目", async () => {
       const user = userEvent.setup();
       const client = fakeClient([candidate]);
