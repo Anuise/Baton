@@ -4631,7 +4631,16 @@
 - 影響：還原後第一次啟動不觸發崩潰恢復。
 - 審閱：未審
 
-### AI-474：Run 結束前收尾整個程序樹；根程序繼承唯讀 Job handle，Runtime 重建後仍能找回 Job
+### AI-474：新增票 53 補齊 UI E2E
+- 重要度：中
+- 時間／階段：2026-10-23，最終 code-review
+- 決策：新增票 53「以 fake Port 組態補齊 UI E2E 旅程」，處理 spec Testing Decisions 第 3 點中「派工到完成」「裁定中心批次處理」兩條沒有被任何票承接的 UI E2E；票 51 的相依加入 53。等最終 review 的三個修正分支合併後再派工，避免衝突。
+- 理由：最終 review（R153 第 8 項）指出缺口，修正 run R156 判斷需要另外設計只供測試的 fake Port 組態，不適合在修正 run 中做（AI-455）；驗證 R158 建議由主控開票，避免像 AI-31 一樣再度沒人承接。
+- 替代方案：在 spec 註記延後到下一版；或併入票 51 由人手動驗。
+- 影響：多一張自動化票與其驗證；需要確保測試用組態不會進入正式建置。
+- 審閱：未審
+
+### AI-475：Run 結束前收尾整個程序樹；根程序繼承唯讀 Job handle，Runtime 重建後仍能找回 Job
 - 重要度：高
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 1、4 項、review-notes #14）
 - 決策：
@@ -4645,7 +4654,7 @@
 - 影響：Worker 正常結束時最多多等 5 秒（通常數十毫秒），殘留的背景程序會被終止。Worker 的子孫若以不繼承 handle 的方式建立，根程序結束且 Runtime 重建後仍可能找不回 Job（此時退回以 PID 判斷）。測試：`run_process_release.rs`、`process_tree.rs` 的 `find_resumes_control_after_the_spawning_instance_is_gone` 等、`supervisor_process_tree.rs::a_finished_worker_leaves_nothing_running_in_its_job`。
 - 審閱：未審
 
-### AI-475：取消 Run 時 Worker 的回報回應帶 `stop_requested`；多個取消同時停止
+### AI-476：取消 Run 時 Worker 的回報回應帶 `stop_requested`；多個取消同時停止
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 2 項）
 - 決策：Agent 回報的回應在 Run 已要求取消（`cancel_requested_at` 有值）時也帶 `stop_requested: true`；`process_cancellations` 改為所有被取消的 Run 同時呼叫 `stop`（同 `stop_old_writers`），完全退出開始時仍立即讓出 tick 鎖。
@@ -4654,7 +4663,7 @@
 - 影響：tick 鎖最多握一個寬限期加確認上限；Worker 下一次回報就會知道要停。
 - 審閱：未審
 
-### AI-476：支援 npm 安裝的 `claude.cmd`：經 `cmd.exe /d /v:off /c call` 啟動並拒絕會被 cmd 重新解讀的引數
+### AI-477：支援 npm 安裝的 `claude.cmd`：經 `cmd.exe /d /v:off /c call` 啟動並拒絕會被 cmd 重新解讀的引數
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 3 項）
 - 決策：新增 `claude_cli::claude_program()`：PATH 上任一處有 `claude.exe` 就維持以 `claude` 啟動（雜湊不變）；只有批次檔時用第一個 `claude.cmd`／`claude.bat` 的完整路徑，Worker、Controller 經 `%SystemRoot%\System32\cmd.exe /d /v:off /c call <路徑> <引數>` 啟動，`prepare` 拒絕含 `" % ! ^ & | < > ( )` 或控制字元的引數（結果是 LaunchFailed 並附原因）。語意 judge、`--version` 探測與 `auth status` 用同一個程式。AI-196 中「目前不支援 claude.cmd」的說法以本條為準。
@@ -4663,7 +4672,7 @@
 - 影響：只有 `.cmd` 的環境，啟動指令雜湊含完整路徑；Runtime 重建期間若重新安裝到別處，雜湊會不一致。
 - 審閱：未審
 
-### AI-477：驗證命令放進匿名、KILL_ON_JOB_CLOSE 的 Job；路徑經連結指向工作目錄外判為不通過
+### AI-478：驗證命令放進匿名、KILL_ON_JOB_CLOSE 的 Job；路徑經連結指向工作目錄外判為不通過
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 7、8 項、review-notes #3）
 - 決策：驗證命令以暫停狀態建立、放進匿名且設 KILL_ON_JOB_CLOSE 的 Job 後才執行；等命令本身結束（不等輸出管道關閉），輸出由背景執行緒分開讀，逾時保留已讀到的部分；命令結束或逾時都終止整個 Job。檔案檢查以 `WorkspaceFs::read_file_within` 正規化路徑，指向工作目錄外的連結不讀內容，Domain 新增 `Observation::FileOutsideWorkdir` 判為 Failed。`write_readonly_files` 改在阻塞執行緒執行。
@@ -4672,7 +4681,7 @@
 - 影響：命令刻意留在背景的子程序會在命令結束時被終止。標準函式庫的 `main_thread_handle` 尚未穩定，主執行緒以 ToolHelp 執行緒快照找出。跨範圍修改 baton-domain（新增 Observation 變體）。
 - 審閱：未審
 
-### AI-478：快照檔參數由 RunSpec 的 `settings_files` 決定；不在每次啟動前比對 CLI 版本
+### AI-479：快照檔參數由 RunSpec 的 `settings_files` 決定；不在每次啟動前比對 CLI 版本
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #6）
 - 決策：`RunSpec` 新增 `settings_files`，由 Supervisor 從綁定的快照版本渲染出快照裡有的檔名，Adapter 只依它決定傳哪些參數，不再以 `is_file()` 判斷，`command_hash` 不再依賴檔案系統狀態。不在每次啟動前比對 CLI 版本（不修）。
@@ -4681,7 +4690,7 @@
 - 影響：降版之後到下次核對前啟動的 Run 仍以舊版執行。
 - 審閱：未審
 
-### AI-479：監護寫下 Attempt 到撤回之間鎖住日誌；OpenProcess 失敗只有程序不存在才算已結束
+### AI-480：監護寫下 Attempt 到撤回之間鎖住日誌；OpenProcess 失敗只有程序不存在才算已結束
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #15、R152 第 11 項）
 - 決策：新增 `guardian/journal.lock`。監護從寫下 Attempt、最後核對到寫入 Withdrawn 都持有這把鎖，決定要啟動時才放開；Runtime 匯入日誌改呼叫 `read_journal_for_import`，在同一把鎖內讀。日誌格式與 store 都不變。`OpenProcess` 失敗時只有 `ERROR_INVALID_PARAMETER`（程序不存在）才算已結束，存取被拒等其他錯誤一律視為仍在，開啟權限降為 `PROCESS_QUERY_LIMITED_INFORMATION`。
@@ -4690,7 +4699,7 @@
 - 影響：仍有更窄的空檔：監護核對時 App 拉起的 Runtime 還沒記下程序身分，監護決定啟動、它拉起的 Runtime 再因單實例鎖自行結束，這次嘗試仍被計次（單實例模型本身的限制）。存取被拒時安裝程式的維護準備會等到逾時；結束碼剛好是 259（STILL_ACTIVE）的已結束程序會被當成仍在。
 - 審閱：未審
 
-### AI-480：重犯回報只帶 `workspace_id` 時保存 Workspace，不回 400
+### AI-481：重犯回報只帶 `workspace_id` 時保存 Workspace，不回 400
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #7）
 - 決策：Domain 的 `guard::report` 多一個 `workspace_id` 參數；Store 的 `report_recurrence` 改收 `(workspace_id, 選填的 task_id)` 並核對 Workspace 存在，不存在回 400 `guard_invalid`。
@@ -4699,7 +4708,7 @@
 - 影響：跨範圍修改 baton-domain `guard.rs` 與 baton-store `guards.rs` 的函式簽名；重犯事件的 payload 沒有加 `workspace_id`。
 - 審閱：未審
 
-### AI-481：主控台 Ctrl-C 與完全退出後服務自行結束都走正常結束（補充 AI-280）
+### AI-482：主控台 Ctrl-C 與完全退出後服務自行結束都走正常結束（補充 AI-280）
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #13、#5 第二點）
 - 決策：`RunningRuntime::wait` 換成 `serve_until(interrupt)`：收到主控台 Ctrl-C 或服務自行結束時呼叫 `shutdown()`，記下正常結束；無法接收 Ctrl-C 時只等服務自行結束。程序被終止、登出、重開機仍判為崩潰。`baton-runtime restore` 失敗的訊息改以「還原失敗：」開頭。
@@ -4708,7 +4717,7 @@
 - 影響：Ctrl-C 之後再啟動，仍在執行的 Worker 照一般重啟的方式找回並核對。票 33 只以「跨登入暫停 Workspace」處理跨登入（AI-355／356），重開機後自啟動仍會建立恢復事件，本條沒有改變這點。
 - 審閱：未審
 
-### AI-482：兩個偶發失敗測試的根因：派工請求套用 2 秒上限、Job 內的 conhost.exe
+### AI-483：兩個偶發失敗測試的根因：派工請求套用 2 秒上限、Job 內的 conhost.exe
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #2、R152 第 10 項）
 - 決策：
@@ -4720,7 +4729,7 @@
 - 影響：派工遇到大 repo 時 App 最多等 60 秒。`web/src/App.test.tsx` 的偶發失敗不在本範圍。
 - 審閱：未審
 
-### AI-483：登入啟動登記依值名稱判定歸屬
+### AI-484：登入啟動登記依值名稱判定歸屬
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #19）
 - 決策：`StartupRegistration` 新增有預設實作的 `has_registration`（預設等同 `is_registered`）；Windows 版只要名為 `Baton` 的值存在就算。偏好為關閉時 `sync_login_startup` 以它判斷要不要移除。
@@ -4729,7 +4738,7 @@
 - 影響：使用者若手動以 `Baton` 為名登記了別的程式，偏好關閉時也會被移除。
 - 審閱：未審
 
-### AI-484：驗證承接者無法確認舊程序已停止時，完全不碰狀態目錄也不 teardown
+### AI-485：驗證承接者無法確認舊程序已停止時，完全不碰狀態目錄也不 teardown
 - 重要度：高
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #25 第二點）
 - 決策：承接受阻（blocked）時不準備狀態目錄、不執行 teardown、不移除狀態目錄；Bundle 的 `cleanup.state_dir_removed` 記為 false 並寫明原因。讀取 Git revision 是唯讀，保留。行為與 AI-429「不執行任何操作」一致。
@@ -4738,7 +4747,7 @@
 - 影響：狀態目錄會留下，等使用者確認舊服務已結束後再處理。情境測試 `verification_takeover_blocked.rs`（harness 新檔；driver 層的測試跑不到 Adapter 的 `execute`）。
 - 審閱：未審
 
-### AI-485：畫面秘密偵測一併讀取輸入欄位的值；trace 改寫為不壓縮，讓既有的內容檢查涵蓋中間畫面
+### AI-486：畫面秘密偵測一併讀取輸入欄位的值；trace 改寫為不壓縮，讓既有的內容檢查涵蓋中間畫面
 - 重要度：高
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #24）
 - 決策：Runner 觀察畫面時另外讀取所有 input／textarea 的值（含開放的 shadow DOM；密碼與隱藏欄位不列入），經 `PageSnapshot.fields` 交回 Runtime，只用來判斷畫面是否顯示秘密，不交給斷言或 judge。Runner 關閉時把 trace 改寫成不壓縮的 zip，一閃而過的中間畫面留在 trace 的 DOM 快照與網路紀錄裡，Runtime 既有的「檔案內容含秘密就不保存」檢查就能找到並扣下。
@@ -4747,7 +4756,7 @@
 - 影響：trace 檔變大（上限仍是 50MB），改寫失敗（例如 zip64）時不交出 trace。仍有限制：錄影與 trace 內的截圖是影像，無法偵測；秘密在 JSON 中被跳脫的形式不會被找到；不檢查 iframe 與封閉的 shadow DOM。
 - 審閱：未審
 
-### AI-486：動作規劃限流也交接維持不變；Bundle 的用量與動作只計最後一次嘗試，不修
+### AI-487：動作規劃限流也交接維持不變；Bundle 的用量與動作只計最後一次嘗試，不修
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #27）
 - 決策：確認 AI-438 整合時加入的「規劃收到 RateLimited 也走 `hand_off_if_possible`」合理（規劃與 judge 共用帳號與限流狀態；那一步記為 `planner_rate_limited`，不執行任何動作，旅程不記為完成，承接者整條重跑），不改程式。Bundle 的 `usage` 與 `actions` 只計最後一次嘗試的問題不修。
@@ -4756,7 +4765,7 @@
 - 影響：交接過的驗證，報告上的用量與動作紀錄偏少；沿用舊嘗試的旅程中被證明的動作不錄製、被推翻的重播不標 stale。
 - 審閱：未審
 
-### AI-487：Controller 可用 `search_knowledge`（全域加整個 Workspace）；其餘共同工具與 `accept_artifact`、Controller 版 `record_lesson_candidate` 留待後續
+### AI-488：Controller 可用 `search_knowledge`（全域加整個 Workspace）；其餘共同工具與 `accept_artifact`、Controller 版 `record_lesson_candidate` 留待後續
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #16）
 - 決策：入口防護新增 Controller 可用的共同工具清單，開放 `search_knowledge`：以既有的 Controller 範圍檢查（這一輪仍在進行、聲稱的 Workspace 一致）查全域加上這個 Workspace 內所有範圍的有效條目。`send_message`、`read_inbox`、`accept_artifact` 與 Controller 版 `record_lesson_candidate` 不實作（不修）。
@@ -4765,7 +4774,7 @@
 - 影響：spec D-05 列為共同工具的 `send_message`、`read_inbox` 對 Controller 仍回 `worker_only`，`accept_artifact` 與 Controller 版 `record_lesson_candidate` 仍不存在，需要另開票。
 - 審閱：未審
 
-### AI-488：Controller 交接的承接判斷不計 Worker 並行量、驗證與整合共用 `verify_lock`，都維持不變
+### AI-489：Controller 交接的承接判斷不計 Worker 並行量、驗證與整合共用 `verify_lock`，都維持不變
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #18 第一點、#21 第二點）
 - 決策：
@@ -4774,18 +4783,16 @@
 - 理由：見上。
 - 替代方案：交接判斷計入 Worker 並行量（與 AI-305 矛盾）；依 repo 分鎖讓驗證與整合平行。
 - 影響：長時間的驗證會延後整合。
-### AI-489：R155-fix-b 合併整合分支：決策編號順延為 AI-474～AI-488；review-notes #22 在 Ports 改用 `git diff -z`
+### AI-490：R155-fix-b 合併整合分支：決策編號順延為 AI-475～AI-489；review-notes #22 在 Ports 改用 `git diff -z`
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b 結束前合併 rebuild/v1）
 - 決策：
-  - 修正 A（R154）先合併進整合分支，佔用了 AI-449～AI-473。本 run 原寫的 AI-449～AI-463 依序加 25 改編為 AI-474～AI-488，移到修正 A 的條目之後；本 run 先前 commit 訊息中的「AI-449～AI-463」指改號前的條目。
+  - 修正 A（R154）先合併進整合分支，佔用了 AI-449～AI-473。本 run 原寫的 AI-449～AI-463 依序加 25，又因主控新增 AI-474（票 53）再加 1，改編為 AI-475～AI-489，移到這些條目之後；本 run 先前 commit 訊息中的「AI-449～AI-463」與合併 commit 中的「AI-474～AI-488」都指改號前的條目。
   - review-notes #22 兩個 run 各修一層：修正 A 在 Domain 比對前還原 git 的引號路徑、無法還原就視為受影響（AI-470）；本 run 在 `crates/baton-ports/src/git.rs` 改以 `git diff -z` 取得 NUL 分隔、不加引號的路徑。兩者並存：正式版不再收到加引號的路徑，Domain 的還原只在其他來源仍帶引號時生效。
-  - `crates/baton-domain/src/guard.rs` 的衝突：修正 A 為 `report` 加上教訓範圍檢查、本 run 加上 `workspace_id` 參數（AI-480），兩者都保留，說明文字合併。
+  - `crates/baton-domain/src/guard.rs` 的衝突：修正 A 為 `report` 加上教訓範圍檢查、本 run 加上 `workspace_id` 參數（AI-481），兩者都保留，說明文字合併。
 - 理由：已合併的條目編號不能改，只能移動本 run 的內容。
 - 替代方案：無。
 - 影響：無行為差異。
-- 審閱：未審
-
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
