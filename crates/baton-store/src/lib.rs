@@ -24,6 +24,9 @@ use baton_domain::Timestamp;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
 
+mod tasks;
+pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
+
 /// 控制資料庫檔名，位於資料目錄之下。
 pub const DB_FILE_NAME: &str = "control.sqlite";
 
@@ -148,6 +151,48 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'authorization_revision 是追加式資料表，不可更新'); END;
         CREATE TRIGGER authorization_revision_no_delete BEFORE DELETE ON authorization_revision
         BEGIN SELECT RAISE(ABORT, 'authorization_revision 是追加式資料表，不可刪除'); END;",
+    },
+    // Goal、Task 與六項最小契約；契約每次變更追加一個版本，之後不可修改
+    Migration {
+        name: "goal_task_contract",
+        sql: "CREATE TABLE goal (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            title TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            goal_id TEXT NOT NULL REFERENCES goal (id),
+            title TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'running', 'waiting_decision',
+                'waiting_resource', 'blocked', 'verifying', 'completed', 'cancelled')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            contract_version INTEGER NOT NULL CHECK (contract_version >= 1),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX task_workspace ON task (workspace_id);
+        CREATE TABLE task_contract_version (
+            task_id TEXT NOT NULL REFERENCES task (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            content TEXT NOT NULL CHECK (json_valid(content)),
+            note TEXT,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (task_id, version)
+        );
+        CREATE TRIGGER task_contract_version_no_update BEFORE UPDATE ON task_contract_version
+        BEGIN SELECT RAISE(ABORT, 'task_contract_version 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER task_contract_version_no_delete BEFORE DELETE ON task_contract_version
+        BEGIN SELECT RAISE(ABORT, 'task_contract_version 是追加式資料表，不可刪除'); END;
+        CREATE TABLE task_dependency (
+            task_id TEXT NOT NULL REFERENCES task (id),
+            depends_on TEXT NOT NULL REFERENCES task (id),
+            PRIMARY KEY (task_id, depends_on),
+            CHECK (task_id <> depends_on)
+        );",
     },
 ];
 
