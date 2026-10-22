@@ -1971,6 +1971,94 @@ export interface ObservabilityClient {
   metrics(workspaceId: string): Promise<MetricsResponse>;
 }
 
+/** 專案理解的三種文件：Project Brief、Glossary、Project Map。 */
+export type UnderstandingSection = "brief" | "glossary" | "map";
+
+/** 未確認的關係是假說；retired 是已移除的項目。 */
+export type UnderstandingStatus = "confirmed" | "hypothesis" | "unknown" | "retired";
+
+/** 描述的來源：repo 內的檔案（版本是查驗時內容的 SHA-256），或外部參考。 */
+export type UnderstandingSource =
+  | {
+      kind: "file";
+      path: string;
+      line: number | null;
+      version: string;
+      checked_at: number;
+      /** 檔案內容已與查驗時不同或已不存在。 */
+      changed: boolean;
+    }
+  | {
+      kind: "external";
+      reference: string;
+      version: string;
+      checked_at: number;
+      /** 外部參考無法比對，一律 false。 */
+      changed: boolean;
+    };
+
+export interface UnderstandingItemView {
+  id: string;
+  workspace_id: string;
+  section: UnderstandingSection;
+  key: string;
+  text: string;
+  status: UnderstandingStatus;
+  sources: UnderstandingSource[];
+  revision: number;
+  recorded_by: string;
+  created_at: number;
+  updated_at: number;
+  /** 已確認，但有檔案來源在查驗後改變：需要重新查驗。 */
+  stale: boolean;
+}
+
+export type ProjectionKind = "glossary" | "adr";
+
+/** conflict：外部修改了投影檔，等待使用者協調；detached：使用者保留外部版本，Baton 停止寫入。 */
+export type ProjectionStatus = "in_sync" | "conflict" | "detached";
+
+/** repo 內 GLOSSARY.md 或 docs/adr/ 的帶版本輸出投影。 */
+export interface Projection {
+  workspace_id: string;
+  path: string;
+  kind: ProjectionKind;
+  version: number;
+  body_hash: string;
+  baseline_hash: string | null;
+  status: ProjectionStatus;
+  /** 偵測到的外部版本雜湊；協調中檔案被刪除時是 null。 */
+  external_hash: string | null;
+  detected_at: number | null;
+  revision: number;
+  updated_at: number;
+}
+
+export interface UnderstandingView {
+  workspace_id: string;
+  /** Workspace 是 Git repo 時才會投影到 repo 內。 */
+  projection_enabled: boolean;
+  /** 依 section、key 排序，含 retired。 */
+  items: UnderstandingItemView[];
+  /** 依 path 排序。 */
+  projections: Projection[];
+}
+
+/** 協調投影：以 Baton 版本覆寫，或保留外部版本。`expected_external_hash` 是使用者看到的那份外部版本。 */
+export interface ReconcileProjectionRequest {
+  path: string;
+  action: "overwrite" | "keep_external";
+  expected_external_hash: string | null;
+}
+
+/** 專案理解與 repo 投影協調（只有桌面憑證能用）。 */
+export interface UnderstandingClient {
+  understanding(workspaceId: string): Promise<UnderstandingView>;
+  /** 重新比對投影檔（偵測外部編輯）後回傳。 */
+  syncUnderstanding(workspaceId: string): Promise<UnderstandingView>;
+  reconcileProjection(workspaceId: string, request: ReconcileProjectionRequest): Promise<UnderstandingView>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -1986,6 +2074,7 @@ export type AppClient = RuntimeClient &
   KnowledgeClient &
   GuardClient &
   ObservabilityClient &
+  UnderstandingClient &
   ConversationClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
@@ -2209,6 +2298,10 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       send(`${knowledgePath(lessonId)}/recurrences`, { method: "POST", body: request }),
     timeline: (workspaceId, taskId) => send(timelinePath(workspaceId, taskId)),
     metrics: (workspaceId) => send(`${workspacePath(workspaceId)}/metrics`),
+    understanding: (workspaceId) => send(`${workspacePath(workspaceId)}/understanding`),
+    syncUnderstanding: (workspaceId) => send(`${workspacePath(workspaceId)}/understanding/sync`, { method: "POST" }),
+    reconcileProjection: (workspaceId, request) =>
+      send(`${workspacePath(workspaceId)}/understanding/projections/reconcile`, { method: "POST", body: request }),
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
@@ -2338,6 +2431,10 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     reportRecurrence: (id, request) => call<Recurrence>("knowledge_report_recurrence", { id, request }),
     timeline: (workspaceId, taskId) => call<TimelineResponse>("workspace_timeline", { workspaceId, taskId }),
     metrics: (workspaceId) => call<MetricsResponse>("workspace_metrics", { workspaceId }),
+    understanding: (workspaceId) => call<UnderstandingView>("workspace_understanding", { workspaceId }),
+    syncUnderstanding: (workspaceId) => call<UnderstandingView>("workspace_understanding_sync", { workspaceId }),
+    reconcileProjection: (workspaceId, request) =>
+      call<UnderstandingView>("workspace_projection_reconcile", { workspaceId, request }),
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),

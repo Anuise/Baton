@@ -1326,7 +1326,8 @@ const MIGRATIONS: &[Migration] = &[
             workspace_id TEXT NOT NULL REFERENCES workspace (id),
             path TEXT NOT NULL,
             kind TEXT NOT NULL CHECK (kind IN ('glossary', 'adr')),
-            version INTEGER NOT NULL CHECK (version >= 1),
+            -- 0 表示還沒有寫入過（接入前就已存在的檔案，開啟協調時）
+            version INTEGER NOT NULL CHECK (version >= 0),
             body_hash TEXT NOT NULL,
             baseline_hash TEXT,
             status TEXT NOT NULL CHECK (status IN ('in_sync', 'conflict', 'detached')),

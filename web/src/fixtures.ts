@@ -19,6 +19,7 @@ import type {
   MetricsResponse,
   IntegrationEntry,
   PlatformResponse,
+  Projection,
   QuotaAssessment,
   RecoveryAttempt,
   RecoveryEvent,
@@ -29,6 +30,8 @@ import type {
   SettingsVersionSummary,
   SetupStatus,
   TimelineEvent,
+  UnderstandingItemView,
+  UnderstandingView,
   ToolCheck,
   WorkspaceLifecycleView,
   VerificationRecord,
@@ -737,6 +740,63 @@ export function metricsResponse(overrides: Partial<MetricsResponse> = {}): Metri
     workspace_id: "ws_1",
     metrics: metrics(),
     server_quota: [{ profile_id: "prof_1", name: "Work-1", five_hour_used: 0.42, seven_day_used: 0.1 }],
+    ...overrides,
+  };
+}
+
+/** 測試用的專案理解項目：Project Brief 的已確認描述，附一個未變更的檔案來源。 */
+export function understandingItem(overrides: Partial<UnderstandingItemView> = {}): UnderstandingItemView {
+  return {
+    id: "und_1",
+    workspace_id: "ws_1",
+    section: "brief",
+    key: "purpose",
+    text: "整理個人筆記的工具",
+    status: "confirmed",
+    sources: [
+      {
+        kind: "file",
+        path: "README.md",
+        line: 3,
+        version: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        checked_at: CHECKED_AT,
+        changed: false,
+      },
+    ],
+    revision: 1,
+    recorded_by: "controller",
+    created_at: CHECKED_AT,
+    updated_at: CHECKED_AT,
+    stale: false,
+    ...overrides,
+  };
+}
+
+/** 測試用的投影：與 Baton 版本同步的 GLOSSARY.md 第 1 版。 */
+export function projection(overrides: Partial<Projection> = {}): Projection {
+  return {
+    workspace_id: "ws_1",
+    path: "GLOSSARY.md",
+    kind: "glossary",
+    version: 1,
+    body_hash: "hash_body",
+    baseline_hash: "hash_body",
+    status: "in_sync",
+    external_hash: null,
+    detected_at: null,
+    revision: 1,
+    updated_at: CHECKED_AT,
+    ...overrides,
+  };
+}
+
+/** 測試用的專案理解：Git repo、一個項目、一個同步中的投影。 */
+export function understandingView(overrides: Partial<UnderstandingView> = {}): UnderstandingView {
+  return {
+    workspace_id: "ws_1",
+    projection_enabled: true,
+    items: [understandingItem()],
+    projections: [projection()],
     ...overrides,
   };
 }

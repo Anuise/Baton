@@ -392,6 +392,27 @@ describe("左側 Workspace 清單", () => {
     expect(onOpenKnowledge).not.toHaveBeenCalled();
   });
 
+  it("每個 Workspace 都有「專案理解」入口，不會觸發其他檢視", async () => {
+    const onSelect = vi.fn();
+    const onOpenTimeline = vi.fn();
+    const onOpenUnderstanding = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenTimeline={onOpenTimeline}
+        onOpenUnderstanding={onOpenUnderstanding}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "專案理解 筆記" }));
+
+    expect(onOpenUnderstanding).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenTimeline).not.toHaveBeenCalled();
+  });
+
   it("每個 Workspace 都有「對話」入口，不會觸發其他檢視", async () => {
     const onSelect = vi.fn();
     const onOpenTasks = vi.fn();

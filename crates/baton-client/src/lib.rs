@@ -22,6 +22,7 @@ use baton_api::{
     BackupStatus, BACKUPS_PATH,
     RecoveryStatusView, RECOVERY_PATH, RECOVERY_RETRY_PATH,
     metrics_path, timeline_path, MetricsResponse, TimelineResponse,
+    projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, UnderstandingView,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
@@ -605,6 +606,25 @@ impl RuntimeClient {
     /// 觀測指標（票 41）：由時間線事件計算，附各帳號的服務端額度（看不到為 `None`）。
     pub async fn metrics(&self, workspace_id: &str) -> Result<MetricsResponse, ClientError> {
         self.get_json(&metrics_path(workspace_id)).await
+    }
+
+    /// 專案理解視圖（票 42）：Project Brief、Glossary、Project Map 與投影檔狀態。
+    pub async fn project_understanding(&self, workspace_id: &str) -> Result<UnderstandingView, ClientError> {
+        self.get_json(&understanding_path(workspace_id)).await
+    }
+
+    /// 重新比對投影檔（偵測外部編輯）後的專案理解視圖。
+    pub async fn sync_understanding(&self, workspace_id: &str) -> Result<UnderstandingView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &understanding_sync_path(workspace_id), None).await
+    }
+
+    /// 協調一個投影檔：以 Baton 版本覆寫，或保留外部版本。
+    pub async fn reconcile_projection(
+        &self,
+        workspace_id: &str,
+        request: &ReconcileRequest,
+    ) -> Result<UnderstandingView, ClientError> {
+        self.send_json(reqwest::Method::POST, &projection_reconcile_path(workspace_id), Some(request)).await
     }
 
     /// 回報一次沒被 Guard 攔下的重犯。
