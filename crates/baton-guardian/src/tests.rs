@@ -38,6 +38,10 @@ impl RuntimeHost for FakeHost {
         self.running
     }
 
+    async fn start_runtime_at_login(&mut self) -> Result<(), String> {
+        self.start_runtime("login").await
+    }
+
     async fn start_runtime(&mut self, attempt_id: &str) -> Result<(), String> {
         self.started.push(attempt_id.to_string());
         match self.fail_start.take() {

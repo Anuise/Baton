@@ -55,7 +55,8 @@ use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UN
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
 use baton_ports::{
-    ClaudeEnvironment, Clock, GuardianProbe, PlatformInfo, QuotaObserver, UserSettingsSource, WorkspaceFs,
+    ClaudeEnvironment, Clock, GuardianProbe, PlatformInfo, QuotaObserver, StartupRegistration, UserSettingsSource,
+    WorkspaceFs,
 };
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
@@ -96,8 +97,9 @@ pub use knowledge::{
     LessonCandidateRecorded, ScopeInput, KNOWLEDGE_PATH,
 };
 pub use lifecycle::{
-    workspace_lifecycle_path, workspace_resume_path, LifecycleStatus, UpdateWorkspaceLifecycleRequest,
-    WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
+    workspace_lifecycle_path, workspace_login_resume_path, workspace_resume_path, LifecycleStatus, LoginStartupView,
+    UpdateLoginResumeRequest, UpdateLoginStartupRequest, UpdateWorkspaceLifecycleRequest, WorkspaceLifecycleView,
+    LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH, LOGIN_STARTUP_PATH,
 };
 pub use recovery::{RecoveryStatusView, RECOVERY_PATH, RECOVERY_RETRY_PATH};
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
@@ -198,6 +200,8 @@ pub struct ApiState {
     pub user_settings: Arc<dyn UserSettingsSource>,
     /// 監護程序是否還在（票 32）：健康查詢回報自動重啟保護是否降級。
     pub guardian_probe: Arc<dyn GuardianProbe>,
+    /// 「登入時自動啟動」的 Windows 登記（票 33）。
+    pub startup_registration: Arc<dyn StartupRegistration>,
     /// Run 設定快照；與 Supervisor 共用同一個實例，同一個 Run 的快照請求才會依序處理。
     pub run_settings: Arc<RunSettings>,
     pub log: LogSink,
@@ -272,6 +276,8 @@ pub fn router(state: ApiState) -> Router {
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
         .route(lifecycle::WORKSPACE_RESUME_ROUTE, post(lifecycle::resume_workspace))
+        .route(LOGIN_STARTUP_PATH, axum::routing::put(lifecycle::update_login_startup))
+        .route(lifecycle::WORKSPACE_LOGIN_RESUME_ROUTE, axum::routing::put(lifecycle::update_login_resume))
         .route(RECOVERY_PATH, get(recovery::status))
         .route(RECOVERY_RETRY_PATH, post(recovery::retry))
         .route(SCHEDULING_PATH, get(scheduling::view))

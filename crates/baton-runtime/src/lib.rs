@@ -14,6 +14,8 @@ pub mod supervisor;
 pub mod verifier;
 pub mod windows_platform;
 #[cfg(windows)]
+pub mod windows_login;
+#[cfg(windows)]
 pub mod windows_process;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -22,6 +24,7 @@ use std::time::Duration;
 
 use baton_api::{ApiState, LogSink, RunSettings};
 use baton_domain::lifecycle::{self, ExitTiming, FileStopView, LifecycleFile};
+use baton_domain::login::LoginBoundary;
 use baton_domain::recovery::{RecoveryStatus, MAX_ATTEMPTS};
 use baton_ports::Ports;
 use baton_store::{Store, StoreError, StoreOptions};
@@ -51,8 +54,9 @@ pub enum RuntimeError {
     CredentialFile(#[from] baton_credential::CredentialFileError),
     #[error("無法開啟日誌：{0}")]
     Log(std::io::Error),
-    /// 監護拉起的 Runtime 發現停止意圖仍生效（完全退出優先，票 32）：不提供服務、直接結束，等使用者手動開 App。
-    #[error("停止意圖仍生效（完全退出），監護啟動的 Runtime 不提供服務")]
+    /// 監護或登入啟動入口拉起的 Runtime 發現停止意圖仍生效（完全退出優先，票 32、33）：不提供服務、直接結束，
+    /// 等使用者手動開 App。
+    #[error("停止意圖仍生效（完全退出），自動啟動的 Runtime 不提供服務")]
     SuppressedByStopIntent,
 }
 
@@ -76,6 +80,9 @@ pub struct RuntimeOptions {
     /// 監護拉起這個 Runtime 時交付的嘗試識別（票 32；環境變數 `BATON_GUARDIAN_ATTEMPT`）。
     /// 有值時這個 Runtime 接續監護已計次的那次嘗試；停止意圖仍生效則不提供服務。使用者或 App 啟動時為 `None`。
     pub guardian_attempt: Option<String>,
+    /// 由 Windows 登入時的啟動入口拉起（票 33；環境變數 `BATON_START_SOURCE=login`）。
+    /// 與監護拉起的相同：停止意圖仍生效則不提供服務（完全退出優先），不會改依跨登入設定續跑。
+    pub login_start: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -88,6 +95,7 @@ impl Default for RuntimeOptions {
             exit_linger: Some(DEFAULT_EXIT_LINGER),
             full_text_search: true,
             guardian_attempt: None,
+            login_start: false,
         }
     }
 }
@@ -118,6 +126,8 @@ impl Runtime {
         let store_options = StoreOptions { full_text_search: options.full_text_search };
         let store = Store::open_with(&config.data_dir, started_at, store_options).await?;
         let boot_count = store.record_boot(started_at).await?;
+        // 這一次啟動是否跨了 Windows 登入（票 33）：與上一次啟動記下的登入識別比較
+        let login_boundary = store.note_login_session(ports.login_session.current_login()).await?;
         // 前一次啟動是否正常結束（票 31）
         let previous_unclean = store.previous_boot_ended_cleanly().await? == Some(false);
         let log = log::open_log(&config.data_dir, ports.clock.clone()).map_err(RuntimeError::Log)?;
@@ -139,13 +149,19 @@ impl Runtime {
         let reopen_from = reconcile_stop_intent(&store, &config.data_dir, options.exit_timing, &ports, &log).await?;
         // 監護日誌先匯入，才做崩潰判定與任何恢復副作用（spec D-24）
         import_guardian_journal(&store, &config.data_dir, &ports, &log).await?;
-        if options.guardian_attempt.is_some() && reopen_from.is_some() {
-            (log)("監護：停止意圖仍生效，完全退出優先；監護啟動的 Runtime 不提供服務，等使用者手動開 App");
+        if (options.guardian_attempt.is_some() || options.login_start) && reopen_from.is_some() {
+            (log)(if options.login_start {
+                "登入啟動：停止意圖仍生效，完全退出優先；登入啟動的 Runtime 不提供服務，等使用者手動開 App"
+            } else {
+                "監護：停止意圖仍生效，完全退出優先；監護啟動的 Runtime 不提供服務，等使用者手動開 App"
+            });
             write_recovery_mirror(&store, &config.data_dir, &ports, &log).await;
             store.mark_clean_shutdown(ports.clock.now()).await?;
             return Err(RuntimeError::SuppressedByStopIntent);
         }
         note_crash_recovery(&store, previous_unclean, options.guardian_attempt.clone(), &ports, &log).await?;
+        note_login_boundary(&store, login_boundary, &ports, &log).await?;
+        sync_login_startup(&store, &ports, &log).await?;
         write_recovery_mirror(&store, &config.data_dir, &ports, &log).await;
 
         let (stop_tx, stop_rx) = watch::channel(false);
@@ -206,6 +222,7 @@ impl Runtime {
             quota_observer: ports.quota_observer.clone(),
             user_settings: ports.user_settings.clone(),
             guardian_probe: ports.guardian_probe.clone(),
+            startup_registration: ports.startup_registration.clone(),
             run_settings,
             log,
             supervisor_wake,
@@ -335,6 +352,54 @@ async fn note_crash_recovery(
             event.status.as_str()
         )),
         None => {}
+    }
+    Ok(())
+}
+
+/// 跨登入啟動的處置（票 33）：停止意圖核對完之後、任何程序副作用之前。跨了登入時，沒有開啟「跨登入自動續跑」的
+/// Workspace 暫停、等「繼續工作」；無法核對時全部暫停。停止意圖生效時不做任何事（之後依 DR-01 重新開啟）。
+/// 不碰恢復事件、退避與額度阻擋：重新登入不重設它們。
+async fn note_login_boundary(
+    store: &Store,
+    boundary: LoginBoundary,
+    ports: &Ports,
+    log: &LogSink,
+) -> Result<(), RuntimeError> {
+    let paused = store.apply_login_boundary(boundary, ports.clock.now()).await?;
+    match boundary {
+        LoginBoundary::NewLogin => (log)(&format!(
+            "跨登入：上一次啟動在另一次 Windows 登入；{} 個 Workspace 沒有開啟跨登入自動續跑，等待「繼續工作」",
+            paused.len()
+        )),
+        LoginBoundary::Unverified => (log)(&format!(
+            "跨登入：無法核對這次啟動是否跨了 Windows 登入，不自動續跑；{} 個 Workspace 等待「繼續工作」",
+            paused.len()
+        )),
+        LoginBoundary::FirstStart | LoginBoundary::SameLogin => {}
+    }
+    Ok(())
+}
+
+/// 讓 Windows 的登入啟動登記與「登入時自動啟動」的偏好一致（票 33）：偏好是依據，登記被移除或殘留時補正。
+/// 失敗只記日誌（不影響工作；設定頁會顯示登記狀態）。完全退出不改變偏好，所以這裡也不因停止意圖而移除登記。
+async fn sync_login_startup(store: &Store, ports: &Ports, log: &LogSink) -> Result<(), RuntimeError> {
+    let enabled = store.login_startup().await?.enabled;
+    let registration = ports.startup_registration.clone();
+    let synced = tokio::task::spawn_blocking(move || match registration.is_registered() {
+        Ok(registered) if registered == enabled => Ok(false),
+        Ok(_) => registration.set_registered(enabled).map(|()| true),
+        Err(error) => Err(error),
+    })
+    .await;
+    match synced {
+        Ok(Ok(true)) => (log)(&format!(
+            "登入啟動：Windows 的登記與偏好不一致，已{}登記",
+            if enabled { "補上" } else { "移除" }
+        )),
+        Ok(Ok(false)) => {}
+        Ok(Err(baton_ports::PortError::NotImplemented(_))) => {}
+        Ok(Err(error)) => (log)(&format!("登入啟動：無法核對 Windows 的登記：{error}")),
+        Err(error) => (log)(&format!("登入啟動：無法核對 Windows 的登記：{error}")),
     }
     Ok(())
 }

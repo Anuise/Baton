@@ -9,6 +9,7 @@ mod command;
 mod clock;
 mod git;
 mod guardian;
+mod login;
 mod platform;
 mod process;
 mod quota;
@@ -27,6 +28,7 @@ pub use git::{
     git_remove_worktree,
 };
 pub use guardian::GuardianProbe;
+pub use login::{LoginSession, StartupRegistration};
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
@@ -65,4 +67,8 @@ pub struct Ports {
     pub user_settings: Arc<dyn UserSettingsSource>,
     /// 監護程序是否還在（票 32；顯示降級用）。
     pub guardian_probe: Arc<dyn GuardianProbe>,
+    /// 目前 Windows 登入工作階段的識別（票 33；判斷是否跨登入啟動）。
+    pub login_session: Arc<dyn LoginSession>,
+    /// 「登入時自動啟動」的 Windows 登記（票 33；HKCU Run 機碼）。
+    pub startup_registration: Arc<dyn StartupRegistration>,
 }

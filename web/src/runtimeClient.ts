@@ -1563,15 +1563,30 @@ export interface ExitReport {
   notes: string[];
 }
 
+/** Workspace 被暫停的原因：完全退出、跨 Windows 登入（未開啟跨登入自動續跑），或無法核對是否跨登入。 */
+export type PauseCause = "full_exit" | "new_login" | "login_unverified";
+
 /** 單一 Workspace 的生命週期設定與狀態（對應 Rust 的 WorkspaceLifecycleView）。 */
 export interface WorkspaceLifecycleView {
   workspace_id: string;
   name: string;
   /** 完全退出後重新開啟時是否自動續跑；預設關閉。 */
   auto_resume_after_exit: boolean;
+  /** 重新登入 Windows 後是否自動續跑；預設關閉，與 auto_resume_after_exit 分開保存。 */
+  auto_resume_across_login: boolean;
   paused_since: number | null;
-  /** 完全退出後暫停中，等使用者按「繼續工作」。 */
+  /** 暫停的原因；沒有暫停時為 null。 */
+  paused_by: PauseCause | null;
+  /** 暫停中，等使用者按「繼續工作」。 */
   awaiting_resume: boolean;
+}
+
+/** 「登入 Windows 時自動啟動 Baton」（對應 Rust 的 LoginStartupView）。 */
+export interface LoginStartupView {
+  /** 使用者的偏好；預設關閉。 */
+  enabled: boolean;
+  /** Windows（HKCU Run 機碼）目前是否已登記；查不到為 null。 */
+  registered: boolean | null;
 }
 
 /** Runtime 生命週期（對應 Rust 的 LifecycleStatus）。 */
@@ -1581,6 +1596,7 @@ export interface LifecycleStatus {
   timing: { stop_grace_ms: number; kill_confirm_ms: number };
   exit: ExitReport | null;
   active_runs: number;
+  login_startup: LoginStartupView;
   workspaces: WorkspaceLifecycleView[];
 }
 
@@ -1592,6 +1608,10 @@ export interface LifecycleClient {
   /** 只影響下次重新開啟，不立即啟停目前的工作。 */
   updateWorkspaceLifecycle(workspaceId: string, autoResumeAfterExit: boolean): Promise<WorkspaceLifecycleView>;
   resumeWorkspace(workspaceId: string): Promise<WorkspaceLifecycleView>;
+  /** 變更「跨登入自動續跑」；只影響之後的登入，不立即啟停目前的工作。 */
+  updateWorkspaceLoginResume(workspaceId: string, autoResumeAcrossLogin: boolean): Promise<WorkspaceLifecycleView>;
+  /** 變更「登入 Windows 時自動啟動」；Windows 登記失敗時拋出錯誤，偏好不變。 */
+  updateLoginStartup(enabled: boolean): Promise<LoginStartupView>;
   /** 結束桌面 App 程序。 */
   quitApp(): Promise<void>;
   /** 使用者在系統匣按「完全退出」時呼叫 handler；回傳取消訂閱的函式。 */
@@ -2307,6 +2327,12 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
         body: { auto_resume_after_exit: autoResumeAfterExit },
       }),
     resumeWorkspace: (workspaceId) => send(`${workspacePath(workspaceId)}/resume`, { method: "POST" }),
+    updateWorkspaceLoginResume: (workspaceId, autoResumeAcrossLogin) =>
+      send(`${workspacePath(workspaceId)}/login-resume`, {
+        method: "PUT",
+        body: { auto_resume_across_login: autoResumeAcrossLogin },
+      }),
+    updateLoginStartup: (enabled) => send(`${LIFECYCLE_PATH}/login-startup`, { method: "PUT", body: { enabled } }),
     // 瀏覽器開發模式沒有桌面程序可結束；window.close() 對使用者自己開的分頁無效，所以不做事
     quitApp: async () => {},
     // 系統匣只存在於桌面殼，瀏覽器裡不會收到完全退出事件
@@ -2437,6 +2463,9 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     updateWorkspaceLifecycle: (workspaceId, autoResumeAfterExit) =>
       call<WorkspaceLifecycleView>("workspace_lifecycle_update", { workspaceId, autoResumeAfterExit }),
     resumeWorkspace: (workspaceId) => call<WorkspaceLifecycleView>("workspace_resume", { workspaceId }),
+    updateWorkspaceLoginResume: (workspaceId, autoResumeAcrossLogin) =>
+      call<WorkspaceLifecycleView>("workspace_login_resume_update", { workspaceId, autoResumeAcrossLogin }),
+    updateLoginStartup: (enabled) => call<LoginStartupView>("lifecycle_login_startup_update", { enabled }),
     quitApp: () => call<void>("app_quit"),
     onFullExitRequested: (handler) => {
       const registered = listen(FULL_EXIT_EVENT, () => handler());

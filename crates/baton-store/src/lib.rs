@@ -1328,7 +1328,25 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER context_receipt_no_delete BEFORE DELETE ON context_receipt
         BEGIN SELECT RAISE(ABORT, 'context_receipt 是追加式資料表，不可刪除'); END;",
     },
-    // 專案理解（票 42，第 36 個 migration）：Project Brief、Glossary、Project Map 的項目，每個 Workspace 內以（文件別, 名稱）識別；
+    // 票 33（第 36 個 migration）：跨 Windows 登入的啟動與續跑。runtime_boot 記下每次啟動時的登入識別（取不到為 NULL）；
+    // 每個 Workspace 的「跨登入自動續跑」與「完全退出後自動續跑」分開成兩個欄位，暫停另記原因（既有的暫停都來自完全退出）；
+    // 「登入時自動啟動」是目前使用者層級的偏好，只有一列
+    Migration {
+        name: "cross_login_startup",
+        sql: "ALTER TABLE runtime_boot ADD COLUMN login_session TEXT;
+        ALTER TABLE workspace_lifecycle ADD COLUMN auto_resume_across_login INTEGER NOT NULL DEFAULT 0
+            CHECK (auto_resume_across_login IN (0, 1));
+        ALTER TABLE workspace_lifecycle ADD COLUMN paused_by TEXT
+            CHECK (paused_by IS NULL OR paused_by IN ('full_exit', 'new_login', 'login_unverified'));
+        UPDATE workspace_lifecycle SET paused_by = 'full_exit' WHERE paused_since IS NOT NULL;
+        CREATE TABLE login_startup (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );",
+    },
+    // 專案理解（票 42，第 37 個 migration）：Project Brief、Glossary、Project Map 的項目，每個 Workspace 內以（文件別, 名稱）識別；
     // 每一版的完整內容保存在追加式的 event（understanding_item_recorded）。投影檔記下最後寫入（或採用）的雜湊與協調狀態。
     Migration {
         name: "project_understanding",

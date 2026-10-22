@@ -1,15 +1,21 @@
 //! 監護程序執行檔（`baton-guardian.exe`，票 32）。由桌面 App 在 Runtime 就緒後啟動，與 `baton-runtime.exe` 放在同一個資料夾。
 //!
 //! 已有監護在執行就直接結束；沒有執行中的 Runtime 可監看也直接結束（監護只重啟它親眼看到結束的 Runtime）。
+//!
+//! `--login` 是登入啟動入口的模式（票 33，spec D-25）：Windows 登入後由 HKCU Run 機碼執行，先讀生命週期檔，
+//! 受抑制就直接結束；否則確保 Runtime 在執行（沒有才以登入啟動的身分啟動），再接著當監護。
+//! 登記的命令列以 `--data-dir`、`--port` 帶上登記當下的資料目錄與埠（Run 機碼不能設定環境變數）。
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
+use baton_domain::login::{LAUNCHER_DATA_DIR_ARG, LAUNCHER_LOGIN_ARG, LAUNCHER_PORT_ARG};
 use baton_domain::Timestamp;
 use baton_guardian::files::{self, InstanceRecord};
 use baton_guardian::host::ProcessHost;
+use baton_guardian::launcher::{self, LoginLaunch};
 use baton_guardian::{Guardian, GuardianStep, RuntimeHost};
 use baton_ports::Clock;
 
@@ -17,6 +23,8 @@ use baton_ports::Clock;
 const RUNTIME_EXE: &str = "baton-runtime.exe";
 /// 監看的間隔：只查詢程序狀態，負擔很輕。
 const POLL: Duration = Duration::from_secs(1);
+/// 登入啟動入口啟動 Runtime 後，等它的程序出現的上限。
+const LOGIN_START_WAIT: Duration = Duration::from_secs(20);
 
 struct SystemClock;
 
@@ -38,25 +46,50 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+/// 命令列中某個參數後面的值。
+fn arg_value(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+}
+
 async fn run() -> Result<(), String> {
-    let config = RuntimeConfig::from_lookup(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let login = args.iter().any(|a| a == LAUNCHER_LOGIN_ARG);
+    // 命令列的資料目錄與埠優先於環境變數
+    let config = RuntimeConfig::from_lookup(|key| match key {
+        ENV_DATA_DIR => arg_value(&args, LAUNCHER_DATA_DIR_ARG).or_else(|| std::env::var(key).ok()),
+        ENV_PORT => arg_value(&args, LAUNCHER_PORT_ARG).or_else(|| std::env::var(key).ok()),
+        _ => std::env::var(key).ok(),
+    })
+    .map_err(|e| e.to_string())?;
     let data_dir = config.data_dir.clone();
     let Some(_lock) = lock::GuardianLock::acquire(&data_dir).map_err(|e| e.to_string())? else {
-        return Ok(()); // 已有監護在執行
+        return Ok(()); // 已有監護在執行（也就是已有 Runtime 在執行）
     };
     let clock = Arc::new(SystemClock);
-    files::write_instance(
-        &files::guardian_instance_path(&data_dir),
-        &InstanceRecord { pid: std::process::id(), recorded_at: clock.now() },
-    )
-    .map_err(|e| format!("無法記下監護的程序身分：{e}"))?;
-
     let runtime_exe = std::env::current_exe().map_err(|e| e.to_string())?.with_file_name(RUNTIME_EXE);
     let envs = vec![
         (ENV_DATA_DIR.to_string(), data_dir.display().to_string()),
         (ENV_PORT.to_string(), config.bind.port().to_string()),
     ];
     let mut host = ProcessHost::new(runtime_exe, data_dir.clone(), envs);
+    if login {
+        match launcher::launch_at_login(&data_dir, &*clock, &mut host).await {
+            LoginLaunch::Suppressed(_) | LoginLaunch::StartFailed(_) => return Ok(()),
+            LoginLaunch::AlreadyRunning => {}
+            LoginLaunch::Started => {
+                let deadline = tokio::time::Instant::now() + LOGIN_START_WAIT;
+                while !host.runtime_running().await && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+    files::write_instance(
+        &files::guardian_instance_path(&data_dir),
+        &InstanceRecord { pid: std::process::id(), recorded_at: clock.now() },
+    )
+    .map_err(|e| format!("無法記下監護的程序身分：{e}"))?;
+
     if !host.runtime_running().await {
         files::append_log(&data_dir, clock.now(), "沒有執行中的 Runtime 可監看，監護結束");
         return Ok(());
