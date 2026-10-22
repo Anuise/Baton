@@ -1,6 +1,6 @@
 # 09: Task、六項最小派工契約與工作面板
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R016-09-impl，2026-10-22 15:04）
 Blocked by: 06
 
 **What to build:** 建立 Goal 與 Task 模型、Task 狀態機（pending、ready、running、waiting_decision、waiting_resource、blocked、verifying、completed、cancelled）、task_dependencies（禁止自我依賴、檢查循環）與 DR-20261022-03 的六項最小契約。使用者可在工作面板手動建立 Task（此時 Controller 尚未存在），面板依狀態分欄顯示；契約不完整、引用失效或授權不符時，准入檢查拒絕並列出缺項。
