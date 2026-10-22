@@ -865,6 +865,15 @@
 - 影響：標頭值若在 `guard.rs` 改變，shim 內的常數要同步。**Validation Required（票 14）**：以真實 Claude Code 驗證協定協商、工具清單顯示與 `isError` 的呈現；shim 的實際輸出沒有 Claude Code 端的契約測試。
 - 審閱：未審
 
+### AI-94：子代理模型改為 Opus 5.5
+- 重要度：中
+- 時間／階段：2026-10-22，票 08、12、18、19、22 進行中
+- 決策：從下一個新派出的 run 起，`claude -p` 改用 `--model claude-opus-5-5`，`--effort high` 不變；實作與整合範本的 Co-Authored-By 改為 Claude Opus 5.5。已在執行中的 R024、R025、R027、R028、R029 維持 Sonnet 5.5，不重派。
+- 理由：使用者指定。
+- 替代方案：維持 Sonnet 5.5。
+- 影響：每個 run 的額度消耗預期上升，帳號較快接近 5h／7d 門檻；派工前檢查照舊。
+- 審閱：認同 2026-10-22（使用者指定）
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
