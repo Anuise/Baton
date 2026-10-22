@@ -1936,6 +1936,114 @@
 - 影響：用本票分支建過的開發資料庫，`guard` 記在第 19 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
+### AI-215：Task 新增「種類」欄位，預設是研究；開發 Task 必須明確宣告
+- 重要度：高
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：Task 新增 `kind`（`development`／`research`／`document`），建立時決定、之後不能改；建立請求省略時是 `research`。只有 `development` 使用 worktree 與整合佇列，`research`、`document` 使用輸出目錄。種類放在 Task 本身（migration 21 的 `task.kind`，舊資料預設 `research`），不放在會改版的契約裡。
+- 理由：票面要求「開發類」與「研究與文件」走不同的目錄，但既有模型沒有區分。預設研究最安全：輸出目錄永遠建得起來、不碰 Git；若預設開發，非 Git Workspace 的既有 Task 會全部無法派工。種類不可改，避免已建立的 worktree／輸出目錄與種類不一致。
+- 替代方案：依 Workspace 是不是 Git repo 自動推斷（同一個 Git repo 內的研究 Task 也會被當成開發）；放在契約中隨版本變更（要處理種類變更時已建立的目錄）。
+- 影響：Controller 的 `propose_task`（票 17）與 UI 建立 Task 時要指定種類；忘了指定的開發工作會在輸出目錄中執行，不會進入整合佇列。
+- 審閱：未審
+
+### AI-216：工作目錄放在 Workspace 目錄內的 `.baton\`，並寫入忽略全部內容的 `.baton\.gitignore`
+- 重要度：中
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：開發 Task 的 worktree 在 `<Workspace>\.baton\worktrees\<Task>`（平台分支 `baton/<Task>`），研究與文件 Task 的輸出目錄在 `<Workspace>\.baton\outputs\<Task>`，整合目錄在 `<Workspace>\.baton\integration`。第一次準備時寫入 `.baton\.gitignore`（內容 `*`），讓主 checkout 不出現未追蹤的檔案；不修改 repo 的 `.gitignore` 或 `.git\info\exclude`。
+- 理由：Workspace 授權的目標是 Workspace 目錄，權限提示（AI-138）以它判定檔案路徑；放在 `%LOCALAPPDATA%\Baton` 會讓 Worker 的每一次編輯都落在授權範圍外而建立裁定。Claude Code 自己的 `--worktree` 也是放在 repo 內的 `.claude\worktrees`。
+- 替代方案：放在 `%LOCALAPPDATA%\Baton\work\…`（需要同時擴充授權目標與權限判定）；放在 Workspace 的同層目錄（授權範圍外，且可能沒有寫入權）。
+- 影響：權限判定仍以 Workspace 目錄為基準，相對路徑以 Workspace 目錄解讀而不是 Run 的工作目錄（Write／Edit 工具用絕對路徑，不受影響）。研究 Task 的成果檔案位於 `.baton\outputs\…`，使用者在 Workspace 目錄中看得到。
+- 審閱：未審
+
+### AI-217：目錄在派工之前準備；不可用時不派工、排隊並顯示原因，每 60 秒自動重試
+- 重要度：高
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：使用者要求派工時與 Supervisor 排程前，對排隊中的 `ready` Task 在交易外建立目錄，成功或失敗都登記到 `task_workdir`。派工判定只認已登記且可用的目錄；不可用時 Task 留在派工佇列，等待原因類別是新增的 `workdir`，訊息就是登記的失敗原因（不是 Git repo、detached HEAD、建立失敗的錯誤）。失敗後排程每 60 秒重試一次，使用者再次要求派工時立即重試。準備以行程內的一把鎖序列化，同一個 Task 同時被要求派工多次時只建立一次。完全退出中或等待「繼續工作」的 Workspace（票 25 的派工阻擋）不準備目錄，不在這時執行 git。
+- 理由：票面要求「目錄不可用時不派工並顯示原因」；若在 Supervisor 啟動程序時才建立，失敗會變成一個已建立又失敗的 Run，與「不派工」不符。建立目錄是外部副作用，不能放在派工交易裡。
+- 替代方案：啟動程序前才建立，失敗時以 `launch_failed` 結束 Run；每次 tick 都重試（Git 指令每秒執行一次）。
+- 影響：派工 API 在回應之前可能要等 `git worktree add`；已可用的目錄不會重建（目錄被使用者手動刪掉的情況交給票 21 的核對）。
+- 審閱：未審
+
+### AI-218：「與 Session／Run 關聯正確」的解讀：一個 Task 一個目錄、跨 Run 沿用，Run 經啟動資訊關聯到目錄
+- 重要度：中
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：同一個 Task 的每個 Run 都在同一個已登記的目錄中執行（第一個 Run 失敗後重新派工也回到同一個 worktree）；不同 Task 的目錄一定不同（可用路徑有唯一索引）。Run 的工作目錄記在派工時固定的啟動資訊中，工作面板的 `workdirs[].run_ids` 由它組出。目前程式中還沒有 Session 實體（票 15），所以 Session 的關聯以「同一個工作目錄」保證：Claude Code 以工作目錄區分專案，換目錄就接不回原生 Session。
+- 理由：讓接手的 Run 看到前一個 Run 留下的變更與原生 Session，也不需要在 Run 資料表加欄位。
+- 替代方案：每個 Run 一個新的 worktree（並行衝突更少，但接不回 Session、前一個 Run 的成果要另外搬）；在 `run` 加 `workdir` 欄位。
+- 影響：票 15 實作 Session 時，Session 應記錄並核對它所在的工作目錄。
+- 審閱：未審
+
+### AI-219：開發 Task 通過驗證後停在 `verifying` 排入整合佇列；不新增 Task 狀態，未通過整合回到 `ready`
+- 重要度：高
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：開發 Task 的成果接受交易（確定性檢查全部通過或手動接受）通過時，不再直接 `completed`，而是在同一個交易中排入整合佇列，Task 停在 `verifying`；這個 Run 不再被自動檢查，也不能再手動接受一次（409 `acceptance_already_queued`）。整合完成才 `completed`；合併衝突、整合驗證未通過、目標分支在整合期間被更新時，Task 回到 `ready`（與 AI-151 相同：可修正、不自動重派），原因與證據保存在整合項目。研究與文件 Task 不受影響，仍在驗證通過時完成。
+- 理由：票面要求「未通過整合不能宣告完成」。新增 `integrating` 狀態要重建 `task` 資料表的 CHECK 約束並影響所有讀取 Task 狀態的地方；以整合項目的狀態表達進度即可。
+- 替代方案：新增 Task 狀態 `integrating`；整合失敗時讓 Task 進入 `blocked` 並建立裁定。
+- 影響：UI 看到開發 Task 在 `verifying` 時，要再看整合項目才知道是「等驗證」還是「等整合」（Web UI 已顯示「成果已通過驗證，等待整合」）。
+- 審閱：未審
+
+### AI-220：整合在平台專用的整合目錄中合併與驗證，通過才 fast-forward 目標分支；整合目標是建立 worktree 時 Workspace 簽出的分支
+- 重要度：高
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：每個項目在 `<Workspace>\.baton\integration`（detached HEAD）簽出目標分支目前的 commit，以 `--no-ff` 合併平台分支、在那裡執行整合驗證；通過後才把目標分支從合併當時的 commit 以 fast-forward 前移到合併結果（有工作目錄簽出目標分支時在那裡 `merge --ff-only`，否則 `update-ref` 比對舊值）。整合目標分支是建立 worktree 當時 Workspace 簽出的分支；Workspace 在 detached HEAD 時不能準備開發 Task 的 worktree。
+- 理由：「合併後執行整合驗證」若直接在主線合併，驗證失敗時主線已經被弄壞，還要 revert；在整合目錄中合併，主線只會前移到驗證過的結果。
+- 替代方案：直接在主 checkout 合併再驗證，失敗時 revert；讓使用者在 Workspace 設定整合目標分支（目前沒有設定頁）。
+- 影響：主 checkout 有未提交的變更擋住 fast-forward 時，整合以「無法前移」失敗，Task 回到 `ready`。平台不 push 遠端，也不刪除平台分支。
+- 審閱：未審
+
+### AI-221：整合驗證執行 Task 契約的同一份確定性檢查；沒有宣告檢查時，乾淨的合併就是整合的證據
+- 重要度：中
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：整合驗證在整合目錄中執行 Task 目前契約宣告的確定性檢查（命令、檔案與成果檢查，與成果驗證同一個執行器），結果依序保存在整合項目的 `checks`。契約沒有宣告檢查（只能手動接受）的開發 Task，合併沒有衝突即視為通過整合驗證。
+- 理由：目前沒有 Workspace 層級的「整合驗證設定」，Verification Profile 屬於第四階段（票 45）；同一份檢查最能回答「合併別人的變更後，這個 Task 的完成條件是否仍成立」。
+- 替代方案：Workspace 設定一組整合命令；沒有檢查時拒絕整合、要求使用者確認。
+- 影響：只宣告了成果檢查的 Task，整合驗證不會實際建置或測試合併結果。之後有 Verification Profile 時，可改為執行 Profile 的整合步驟。
+- 審閱：未審
+
+### AI-222：單一整合佇列是全域的，一次處理一個；與驗證在同一個背景工作中依序執行
+- 重要度：中
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：全部 Workspace 共用一個佇列，依排入順序處理；任何時刻最多一個項目在 `merging`／`verifying`／`advancing`（資料表的部分唯一索引也保證）。Supervisor 在確定性檢查之後、同一個背景工作中處理整合，直到沒有可處理的項目。崩潰後停在合併或整合驗證的項目從合併重做（整合目錄整個重設），停在前移的項目以同一個合併結果重試前移（冪等）。前移時發現目標分支已被更新就失敗，不自動重新排入。
+- 理由：票面寫「單一整合佇列」；一次一個能保證後一個項目在前一個前移後的主線上合併。不同 repo 之間並行的好處在第一版不明顯。
+- 替代方案：每個 Workspace 一個佇列（不同 repo 可並行）；目標分支被更新時自動重新排入。
+- 影響：一個 Workspace 的長時間整合驗證（命令最多 10 分鐘）會讓其他 Workspace 的整合等待；與成果驗證共用同一個背景工作，也會延後其他 Task 的驗證。
+- 審閱：未審
+
+### AI-223：正式版 Git 操作的細節（作者資訊、hook、整合目錄的防呆）
+- 重要度：低
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：以 `git -C <目錄>` 執行、不經過 shell、移除 `GIT_DIR` 等會讓 `-C` 失效的環境變數。合併 commit 預設用使用者自己的 Git 身分，只有 `user.name`／`user.email` 沒有設定時才以 `Baton <baton@localhost>` 補上。不跳過 repo 的 hook；hook 拒絕合併時放棄並回報錯誤。整合目錄若是殘留的普通目錄、主 checkout 或簽出分支的 worktree，拒絕重設並回報錯誤，不刪除任何檔案。建立 worktree、整合合併與前移之前先 `git worktree prune`，讓崩潰後能在同一路徑重建。分支已經包含在目標中時，合併結果就是目標分支目前的 commit。
+- 理由：避免誤刪使用者或 Task 的工作；尊重 repo 的規範。
+- 替代方案：一律以 Baton 身分 commit；以 `--no-verify` 跳過 hook。
+- 影響：缺少作者設定時的補值路徑沒有自動化測試（需要改行程的環境變數）。
+- 審閱：未審
+
+### AI-224：Web UI 在等待整合時隱藏「接受成果」，整合佇列區塊只列這個 Workspace 的項目
+- 重要度：低
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：開發 Task 在 `verifying` 且最新整合項目尚未結束時，卡片顯示「成果已通過驗證，等待整合」，隱藏成果驗證面板與「接受成果」按鈕。工作面板的「整合佇列」區塊只列這個 Workspace 尚未結束的項目並標出處理中的那一個；處理中的項目若在別的 Workspace，這裡不會有任何項目標「處理中」。建立 Task 的表單一律送出 `kind`（預設研究）。
+- 理由：排入整合後再接受一定被拒絕；工作面板是以 Workspace 為範圍的畫面。
+- 替代方案：工作面板另外讀取全域佇列（`GET /api/v1/integration-queue`，需要新增 Tauri 指令）。
+- 影響：使用者要看全域佇列時，目前只有 API 可用。
+- 審閱：未審
+
+### AI-225：票 20 整合 rebuild/v1（票 37、25、23、40）：migration 第 19 版、AI 編號順延為 AI-215～AI-224；還原後的整合項目
+- 重要度：中
+- 時間／階段：2026-10-22，票 20 實作
+- 決策：實作期間整合分支合併了票 37（migration 17 `knowledge`）、票 25（migration 18 `lifecycle`）、票 23 與票 40（沒有新增 migration），本票的 `task_workdir_and_integration_queue` 是第 19 個 migration；本票的條目原本編為 AI-159～AI-168，兩次整合後順延為 AI-215～AI-224，內容不變（只更新其中的 migration 編號）。衝突合併方式：派工錯誤與等待原因兩邊都保留（`launch_halted`／`lifecycle` 與 `workdir_*`／`workdir`）；完全退出中或等待「繼續工作」的 Workspace 不準備工作目錄；開發指南、GLOSSARY、Domain 模組說明兩邊都保留。備份（票 40）整份複製控制資料庫，新的兩張表自然包含在內。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布。
+- 替代方案：把本票的 migration 插在前面（會改動整合分支已存在的版本號）。
+- 影響：以本票分支（合併前）建立過的開發資料庫需刪除重建。還原（票 40）時若備份當下有處理中的整合項目，還原後 Supervisor 會從合併重做並可能前移目標分支（Git 的實際狀態以目前 repo 為準，前移時目標分支已移動就以失敗結束），沒有像 Run 一樣在還原時一律結束；需要時由票 40／31 的恢復規則補上。
+- 審閱：未審
+
+### AI-226：票 20 整合 rebuild/v1（票 14、38）：migration 順延為第 21 版、AI 編號再順延為 AI-215～AI-225
+- 重要度：中
+- 時間／階段：2026-10-22，票 20 整合 run R080-20-integrate
+- 決策：(1) 整合分支已併入票 14（第 19 個 migration `model_overrides_and_native_session`，AI-196～AI-207）與票 38（第 20 個 migration `guard`，AI-208～AI-214）。本票的 `task_workdir_and_integration_queue` 順延為第 21 個，排在最後；三者沒有衝突的資料表（票 14 對 `workspace`、`run` 加欄，票 38 新建 `guard`、`lesson_recurrence`，本票對 `task` 加 `kind` 並新建 `task_workdir`、`integration_entry`），都會套用。migration 註解、開發指南的「migration 19」與 AI-215 內的 migration 序號同步改為 21。(2) 本票條目 AI-196～AI-206 順延為 AI-215～AI-225，移到 AI-214 之後；條目內引用本票編號之處（AI-225 的「順延為 AI-196～AI-205」）一併改為現行編號；AI-225 的「migration 第 19 版」是當時的事實，保留原文（與 AI-214 對 AI-213 的處理相同）。本票原本缺審閱行的 AI-224、AI-225 補上 `- 審閱：未審`。整合分支的條目逐字未動；程式碼、文件與票面沒有引用這些編號。(3) 衝突合併方式：`RunContext` 同時帶本票的 `workdirs` 與票 38 的 `guards`；派工時 `dispatch` 重新接收 `Workspace`，啟動內容的工作目錄用本票登記的工作目錄、模型用票 14 的 Worker 角色覆寫；`check_dispatch` 的順序是授權准入、Guard、相依、工作目錄；等待原因同時有 `guard` 與 `workdir` 類別（Rust 的 `scheduler.rs` 與 Web 的 `WaitCategory`）；Store 的 `Loaded` 同時有 `workdirs`、`integrations` 與 `guards`；桌面殼的匯入、production_ports 的模組說明、開發指南的 crate 表、章節與情境測試清單兩邊都保留。票 38 的 `guard/tests.rs` 建立 Task 的測試輔助函式補上 `kind: TaskKind::default()`（本票為 `Task` 新增的欄位；與本票對其他測試的處理相同，不改變測試內容）。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-214、AI-225 同）。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票分支建過的開發資料庫，`task_workdir_and_integration_queue` 記在第 19 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息與 `.orchestration` 下的驗證紀錄（R076）提到的 AI-196～AI-206 是改號前的編號。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

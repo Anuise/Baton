@@ -43,7 +43,7 @@ async fn verifying_task(harness: &Harness, client: &RuntimeClient) -> (String, S
         .id;
     let goal = client.create_goal(&workspace_id, "研究競品").await.unwrap();
     let created = client
-        .create_task(&workspace_id, &CreateTaskRequest { goal_id: goal.id, title: "整理".into(), contract: complete() })
+        .create_task(&workspace_id, &CreateTaskRequest { goal_id: goal.id, title: "整理".into(), kind: Default::default(), contract: complete() })
         .await
         .unwrap();
     let task_id = created.task.id;

@@ -36,6 +36,8 @@ struct World {
     contracts: Vec<TaskContract>,
     runs: Vec<Run>,
     artifacts: Vec<Artifact>,
+    workdirs: Vec<Workdir>,
+    integrations: Vec<IntegrationEntry>,
 }
 
 impl World {
@@ -47,6 +49,7 @@ impl World {
             workspace_id: "w1".into(),
             goal_id: "g1".into(),
             title: "整理".into(),
+            kind: TaskKind::Research,
             status: TaskStatus::Verifying,
             version: 5,
             contract_version: 1,
@@ -60,7 +63,15 @@ impl World {
         };
         let contract = TaskContract { task_id: "t1".into(), version: 1, content, note: None, created_at: T0 };
         let mut world =
-            Self { workspace, tasks: vec![task], contracts: vec![contract], runs: vec![], artifacts: vec![] };
+            Self {
+            workspace,
+            tasks: vec![task],
+            contracts: vec![contract],
+            runs: vec![],
+            artifacts: vec![],
+            workdirs: vec![],
+            integrations: vec![],
+        };
         world.add_run("r1", 1, RunStatus::Succeeded);
         world
     }
@@ -125,12 +136,18 @@ impl World {
     }
 
     fn basis(&self) -> AcceptanceBasis {
-        current_basis(&self.tasks[0], &self.runs, &self.artifacts).expect("驗證中的 Task 應該有接受基礎")
+        current_basis(&self.tasks[0], &self.runs, &self.artifacts, &self.integrations).expect("驗證中的 Task 應該有接受基礎")
     }
 
     fn decide(&self, command: AcceptanceCommand) -> Result<AcceptanceChange, AcceptanceError> {
         let task_ctx = self.task_ctx();
-        let ctx = AcceptanceContext { task: &task_ctx, runs: &self.runs, artifacts: &self.artifacts };
+        let ctx = AcceptanceContext {
+            task: &task_ctx,
+            runs: &self.runs,
+            artifacts: &self.artifacts,
+            workdirs: &self.workdirs,
+            integrations: &self.integrations,
+        };
         super::decide(&ctx, command, "ver_1".into(), T1)
     }
 
@@ -256,7 +273,7 @@ fn long_evidence_keeps_the_end_of_the_output() {
 #[test]
 fn worker_success_alone_leaves_a_task_without_checks_waiting_for_manual_acceptance() {
     let world = World::verifying(vec![]);
-    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &world.tasks[0]);
+    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &[], &world.tasks[0]);
     assert_eq!(pending, None, "沒有宣告檢查時 Runtime 不會自動完成它");
     assert!(world.basis().run_id == "r1");
 }
@@ -266,7 +283,7 @@ fn declared_checks_make_the_task_pending_with_the_current_basis() {
     let mut world = World::verifying(vec![artifact_check("r.md", None)]);
     world.add_artifact("a1", "r.md", &[SHA_ABC]);
 
-    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &world.tasks[0]).unwrap();
+    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &[], &world.tasks[0]).unwrap();
 
     assert_eq!(pending.checks, vec![artifact_check("r.md", None)]);
     assert_eq!(
@@ -284,7 +301,7 @@ fn declared_checks_make_the_task_pending_with_the_current_basis() {
 fn a_task_whose_latest_run_did_not_succeed_has_nothing_to_verify() {
     let mut world = World::verifying(vec![command("cargo", 0)]);
     world.add_run("r2", 2, RunStatus::Running);
-    assert_eq!(current_basis(&world.tasks[0], &world.runs, &world.artifacts), None);
+    assert_eq!(current_basis(&world.tasks[0], &world.runs, &world.artifacts, &[]), None);
 }
 
 // ---------------------------------------------------------------- 接受交易
@@ -396,7 +413,7 @@ fn work_done_under_an_older_contract_fails_verification_instead_of_being_accepte
     let manual = world.accept(world.basis());
     assert!(matches!(manual, Err(AcceptanceError::ContractStale { run: 1, current: 2, .. })), "{manual:?}");
 
-    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &world.tasks[0]).unwrap();
+    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &[], &world.tasks[0]).unwrap();
     assert!(pending.checks.is_empty(), "契約不符時不執行檢查");
     let change = world.record(vec![]).unwrap();
     assert_eq!((change.task.status, change.record.outcome), (TaskStatus::Ready, VerificationOutcome::Failed));
@@ -422,9 +439,9 @@ fn a_verifying_task_in_an_archived_workspace_is_not_pending_for_checks() {
     let mut world = World::verifying(vec![command("cargo", 0)]);
     world.workspace.status = WorkspaceStatus::Archived;
 
-    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &world.tasks[0]);
+    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &[], &world.tasks[0]);
     assert_eq!(pending, None, "封存後提交一定被拒絕，執行檢查只會白跑命令");
-    assert!(!view(&world.task_ctx(), &world.runs, &world.artifacts, &[], &world.tasks[0]).automatic);
+    assert!(!view(&world.task_ctx(), &world.runs, &world.artifacts, &[], &[], &world.tasks[0]).automatic);
 }
 
 #[test]
@@ -448,13 +465,78 @@ fn view_shows_basis_checks_manifest_and_whether_runtime_will_check_automatically
     world.add_artifact("a1", "r.md", &[SHA_ABC, SHA_ABC]);
     let records = vec![];
 
-    let manual = view(&world.task_ctx(), &world.runs, &world.artifacts, &records, &world.tasks[0]);
+    let manual = view(&world.task_ctx(), &world.runs, &world.artifacts, &records, &[], &world.tasks[0]);
     assert!(!manual.automatic);
     assert_eq!(manual.artifacts[0].version, 2);
     assert_eq!(manual.basis.as_ref().unwrap().artifacts, vec![ManifestRef { artifact_id: "a1".into(), version: 2 }]);
 
     world.contracts[0].content.verification_checks = vec![command("cargo", 0)];
-    let automatic = view(&world.task_ctx(), &world.runs, &world.artifacts, &records, &world.tasks[0]);
+    let automatic = view(&world.task_ctx(), &world.runs, &world.artifacts, &records, &[], &world.tasks[0]);
     assert!(automatic.automatic);
     assert_eq!(automatic.checks.len(), 1);
+}
+
+// ---------------------------------------------------------------- 開發 Task 與整合佇列（票 20）
+
+impl World {
+    /// 把 Task 改成開發 Task，並登記它的 worktree（平台分支 baton/t1，整合目標 main）。
+    fn development(mut self) -> Self {
+        self.tasks[0].kind = TaskKind::Development;
+        let plan = crate::workdir::plan(&self.workspace, &self.tasks[0]);
+        let (workdir, _) = crate::workdir::record_prepared(None, &plan, Some("main".into()), T0);
+        self.workdirs.push(workdir);
+        self
+    }
+}
+
+#[test]
+fn a_passing_development_task_is_queued_for_integration_instead_of_completing() {
+    let world = World::verifying(vec![command("cargo", 0)]).development();
+
+    let change = world.record(vec![passed(command("cargo", 0))]).unwrap();
+
+    assert_eq!(change.record.outcome, VerificationOutcome::Passed);
+    assert_eq!(change.task.status, TaskStatus::Verifying, "通過驗證但還沒整合：不能宣告完成");
+    let entry = change.integration.expect("應該排入整合佇列");
+    assert_eq!((entry.task_id.as_str(), entry.run_id.as_str(), entry.generation), ("t1", "r1", 1));
+    assert_eq!((entry.branch.as_str(), entry.target_branch.as_str()), ("baton/t1", "main"));
+    assert_eq!((entry.status, entry.id.as_str()), (crate::integration::IntegrationStatus::Queued, "int_ver_1"));
+    let types: Vec<_> = change.events.iter().map(|e| e.event_type).collect();
+    assert_eq!(types, vec![EVENT_TASK_VERIFICATION_RECORDED, crate::integration::EVENT_QUEUED]);
+}
+
+#[test]
+fn manual_acceptance_of_a_development_task_also_goes_through_integration() {
+    let world = World::verifying(vec![]).development();
+    let change = world.accept(world.basis()).unwrap();
+    assert_eq!(change.task.status, TaskStatus::Verifying);
+    assert!(change.integration.is_some());
+}
+
+#[test]
+fn a_failing_development_task_goes_back_to_ready_without_integration() {
+    let world = World::verifying(vec![command("cargo", 0)]).development();
+    let change = world.record(vec![failed(command("cargo", 0))]).unwrap();
+    assert_eq!((change.task.status, change.integration), (TaskStatus::Ready, None));
+}
+
+#[test]
+fn a_run_already_queued_for_integration_is_neither_rechecked_nor_accepted_again() {
+    let mut world = World::verifying(vec![command("cargo", 0)]).development();
+    let basis = world.basis();
+    let entry = world.record(vec![passed(command("cargo", 0))]).unwrap().integration.unwrap();
+    world.integrations.push(entry);
+
+    assert_eq!(pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &world.integrations, &world.tasks[0]), None);
+    assert_eq!(current_basis(&world.tasks[0], &world.runs, &world.artifacts, &world.integrations), None);
+    assert_eq!(world.accept(basis), Err(AcceptanceError::AlreadyQueuedForIntegration));
+    let shown = view(&world.task_ctx(), &world.runs, &world.artifacts, &[], &world.integrations, &world.tasks[0]);
+    assert_eq!(shown.integration.map(|e| e.id), Some("int_ver_1".to_string()));
+}
+
+#[test]
+fn a_development_task_without_a_registered_worktree_cannot_be_accepted() {
+    let mut world = World::verifying(vec![]);
+    world.tasks[0].kind = TaskKind::Development;
+    assert_eq!(world.accept(world.basis()), Err(AcceptanceError::WorktreeMissing));
 }

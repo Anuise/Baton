@@ -31,9 +31,10 @@ async fn store_with_ready_tasks(dir: &Path, task_ids: &[&str]) -> Store {
     let goal = TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() };
     store.apply_task_command("w1".into(), goal, T1).await.unwrap();
     for id in task_ids {
-        let task = TaskCommand::CreateTask { id: (*id).into(), goal_id: "g1".into(), title: (*id).into(), contract: complete() };
+        let task = TaskCommand::CreateTask { id: (*id).into(), goal_id: "g1".into(), title: (*id).into(), kind: Default::default(), contract: complete() };
         store.apply_task_command("w1".into(), task, T1).await.unwrap();
         store.apply_task_command("w1".into(), TaskCommand::MarkReady { task_id: (*id).into() }, T1).await.unwrap();
+        crate::workdirs::register_ready(&store, "w1", id, T1).await;
     }
     store
 }
@@ -126,6 +127,7 @@ async fn a_request_that_cannot_ever_be_dispatched_is_rejected_and_nothing_is_wri
         id: "draft".into(),
         goal_id: "g1".into(),
         title: "草稿".into(),
+        kind: Default::default(),
         contract: ContractContent::default(),
     };
     store.apply_task_command("w1".into(), task, T1).await.unwrap();

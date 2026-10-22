@@ -1,6 +1,7 @@
 //! 正式執行環境使用的 Port。
 //!
-//! 目前只有系統時鐘、平台辨識、DPAPI 憑證保護、目錄檢查與建立、成果與工作目錄檔案讀寫、Claude Code／Git 環境探測、驗證命令執行與 Claude Code Adapter 是真實實作；其餘 Port 的正式版由後續的票提供，
+//! 目前只有系統時鐘、平台辨識、DPAPI 憑證保護、目錄檢查與建立、成果與工作目錄檔案讀寫、Claude Code／Git 環境探測、驗證命令執行、
+//! Claude Code Adapter、worktree 建立與整合合併（git CLI，票 20）是真實實作；其餘 Port 的正式版由後續的票提供，
 //! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
 
 use std::path::Path;
@@ -49,7 +50,7 @@ impl QuotaObserver for Unavailable {
     }
 }
 
-/// 本機檔案系統的 WorkspaceFs：目前只有目錄檢查是真實實作，其餘由後續的票補上。
+/// 本機檔案系統的 WorkspaceFs：worktree 的移除與未保存變更檢查由清理的票（票 21）補上，其餘是真實實作。
 pub struct LocalWorkspaceFs;
 
 #[async_trait]
@@ -60,8 +61,35 @@ impl WorkspaceFs for LocalWorkspaceFs {
     async fn ensure_directory(&self, path: &Path) -> PortResult<()> {
         tokio::fs::create_dir_all(path).await.map_err(|e| PortError::Failed(format!("無法建立目錄 {}：{e}", path.display())))
     }
-    async fn create_worktree(&self, _repo: &Path, _branch: &str, _target: &Path) -> PortResult<()> {
-        Err(PortError::NotImplemented("WorkspaceFs::create_worktree"))
+    async fn inspect_git(&self, path: &Path) -> PortResult<GitState> {
+        let path = path.to_path_buf();
+        blocking(move || git_inspect(&path)).await
+    }
+    async fn create_worktree(&self, repo: &Path, branch: &str, target: &Path) -> PortResult<()> {
+        let (repo, branch, target) = (repo.to_path_buf(), branch.to_string(), target.to_path_buf());
+        blocking(move || git_create_worktree(&repo, &branch, &target)).await
+    }
+    async fn merge_for_integration(
+        &self,
+        repo: &Path,
+        target_branch: &str,
+        branch: &str,
+        integration_dir: &Path,
+    ) -> PortResult<MergeOutcome> {
+        let (repo, target_branch, branch, dir) =
+            (repo.to_path_buf(), target_branch.to_string(), branch.to_string(), integration_dir.to_path_buf());
+        blocking(move || git_merge_for_integration(&repo, &target_branch, &branch, &dir)).await
+    }
+    async fn advance_branch(
+        &self,
+        repo: &Path,
+        target_branch: &str,
+        expected_tip: &str,
+        commit: &str,
+    ) -> PortResult<AdvanceOutcome> {
+        let (repo, target_branch, expected_tip, commit) =
+            (repo.to_path_buf(), target_branch.to_string(), expected_tip.to_string(), commit.to_string());
+        blocking(move || git_advance_branch(&repo, &target_branch, &expected_tip, &commit)).await
     }
     async fn remove_worktree(&self, _target: &Path) -> PortResult<()> {
         Err(PortError::NotImplemented("WorkspaceFs::remove_worktree"))

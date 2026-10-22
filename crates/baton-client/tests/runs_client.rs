@@ -54,7 +54,7 @@ async fn ready_task(client: &RuntimeClient, workspace_id: &str) -> String {
     let created = client
         .create_task(
             workspace_id,
-            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), contract: complete() },
+            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), kind: Default::default(), contract: complete() },
         )
         .await
         .unwrap();
@@ -110,7 +110,7 @@ async fn app_is_told_why_a_task_that_is_not_ready_cannot_be_dispatched() {
     let pending = client
         .create_task(
             &workspace_id,
-            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), contract: ContractContent::default() },
+            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), kind: Default::default(), contract: ContractContent::default() },
         )
         .await
         .unwrap();
