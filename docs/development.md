@@ -205,9 +205,9 @@ Worker 需要使用者決定的事，以及超出授權範圍的操作，都變�
 **四條不變條件**（每一條都有情境測試，`crates/baton-harness/tests/decisions.rs`）：
 
 1. **Agent 不能裁定**：回答只有桌面憑證的端點（`/api/v1/…`，Agent 憑證在 `guard` 就得到 403 `role_not_allowed`）；Agent API 沒有任何回答或批准的工具；`decision.decided_by` 在資料庫層 CHECK 為 `desktop`。
-2. **只阻擋受影響的 Task**：請求的 `blocking` 明列受影響的 Task，只有它們進入 `waiting_decision`；回答後只有仍在 `waiting_decision` 而且**沒有其他待處理請求也阻擋它**的 Task 回到 `ready`。其他 Task 從頭到尾不受影響。
+2. **只阻擋受影響的 Task**：請求的 `blocking` 明列受影響的 Task，只有它們進入 `waiting_decision`；回答後只有仍在 `waiting_decision` 而且**沒有其他待處理請求也阻擋它**的 Task 回到 `ready`，並在同一個交易重新排進派工佇列（`dispatch_request`，優先序 0），由 Scheduler 自動派出新的 Run；舊 Run 還持有 execution lease 時留在佇列等待（原因 `execution_conflict`），舊 Run 結束後的下一次排程派出。其他 Task 從頭到尾不受影響。
 3. **逾時不是同意**：`deadline_minutes` 只讓 `overdue` 變成 `true`；沒有任何程式路徑會因時間流逝回答請求、放行權限提示或恢復 Task。
-4. **一次交易**：回答時，裁定、請求狀態、受影響 Task 的狀態與事件、喚醒 Outbox 在同一個交易提交。
+4. **一次交易**：回答時，裁定、請求狀態、受影響 Task 的狀態與事件、重新排隊、喚醒 Outbox 在同一個交易提交。
 
 **Agent 工具**（`POST /agent/v1/tools/{工具}`，範圍取自憑證，只有仍持有 execution lease 的 Run 能呼叫；否則 409 `run_report_stale`）：
 
@@ -216,7 +216,7 @@ Worker 需要使用者決定的事，以及超出授權範圍的操作，都變�
 | `request_decision` | `question`、`reason`、`options`（2–8 個 `{id, label, tradeoff?}`）、`recommendation?`、`evidence?`、`urgency?`（`low`／`normal`／`high`）、`deadline_minutes?` | 建立請求；Task（`running` 時）進入 `waiting_decision`，Run 不結束。回 `{decision_request_id, status: "waiting_decision", existing, message}`；同一個 Run 對同一個問題重複提出時回到既有請求。內容無效 400 `decision_invalid`，不寫入任何東西 |
 | `permission_prompt` | `tool_name`、`input`（Claude Code `--permission-prompt-tool` 協定） | 授權範圍內：回 `{behavior: "allow", updatedInput, status: "auto_allowed"}` 並追加稽核事件 `permission_auto_allowed`。範圍外：建立裁定請求（選項固定為 `allow_once`、`deny`）並回 `{behavior: "deny", message: "等待裁定…", status: "waiting_decision", decision_request_id}`。使用者已回答時，同一個 Task 的同一個操作消耗一次答案：`approved`（允許）或 `denied`（拒絕） |
 
-**權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-110）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 Workspace **目前生效的授權 revision**；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。單次批准的規則見 AI-111。
+**權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-110）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 Workspace **目前生效的授權 revision**；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。Bash 指令以 bash 規則斷詞（去掉引號；引號不成對或反斜線緊接引號一律無法歸類），每個子命令只接受白名單內的旗標，任何其他旗標（例如 `git commit --amend`、`git diff --output=…`、`npm install --prefix …`、`cargo test --manifest-path …`）都無法歸類；`-g`、`--global=…`、`--location=global` 等全域安裝的各種寫法歸為「全域安裝」；指令參數中像路徑的字詞必須在 Workspace 內。路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`），含 `:`（替代資料流）的元件、只有點的元件、`\\?\` 裝置路徑一律範圍外，`GIT~1` 視同 `.git`。單次批准的規則見 AI-111。
 
 **桌面端點**（桌面憑證專用）：
 
@@ -235,7 +235,7 @@ Worker 需要使用者決定的事，以及超出授權範圍的操作，都變�
 
 規則在 `baton_domain::scheduler`（純邏輯：事實 → 要派給誰或為什麼等），持久化在 `baton-store` 的 `scheduling.rs`，端點在 `baton-api` 的 `scheduling.rs` 與 `runs.rs`，佇列的定期重試在 `Supervisor::schedule_queue`。
 
-**一個派工要求怎麼處理**（`Store::schedule`，單一交易）：先用目前狀態判定一次，「不是等一等就好」的錯誤（Task 不是 ready、找不到、契約失效）原樣拒絕且什麼都不寫；否則記入 `dispatch_request` 佇列，再依「優先序高者先、同優先序先要求者先」逐一嘗試派出每個排隊中的 Task（每個 Task 各自判定，被相依擋住的不會擋住後面的）。派出 = 選帳號 + `RunCommand::Dispatch`；等待 = 留在佇列。Task 離開 `ready`（派出、取消、改契約）時 `save_task` 一併把它移出佇列。Run 失敗後 Task 回到 `ready`，**不會**自動重新排隊（沒有重試預算前不自動重派）。
+**一個派工要求怎麼處理**（`Store::schedule`，單一交易）：先用目前狀態判定一次，「不是等一等就好」的錯誤（Task 不是 ready、找不到、契約失效）原樣拒絕且什麼都不寫；否則記入 `dispatch_request` 佇列，再依「優先序高者先、同優先序先要求者先」逐一嘗試派出每個排隊中的 Task（每個 Task 各自判定，被相依擋住的不會擋住後面的）。派出 = 選帳號 + `RunCommand::Dispatch`；等待 = 留在佇列。Task 離開 `ready`（派出、取消、改契約）時 `save_task` 一併把它移出佇列。Run 失敗後 Task 回到 `ready`，**不會**自動重新排隊（沒有重試預算前不自動重派）；裁定後恢復的 Task 例外，回答時就重新排隊（AI-112）。
 
 **容量**（`CapacityMode`，設定頁切換，`PUT /api/v1/scheduling/settings`）：
 

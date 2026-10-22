@@ -95,6 +95,10 @@ pub(crate) async fn answer(
 ) -> Result<Json<AnswerResult>, ApiError> {
     let Json(request) = body.map_err(bad_json)?;
     let result = state.store.answer_decision(&id, &request_id, request.option_id, request.note, state.clock.now()).await?;
+    // 恢復的 Task 已在同一個交易排進派工佇列；叫醒 Supervisor 立刻排程，不必等下一次背景處理
+    if !result.resumed_task_ids.is_empty() {
+        state.supervisor_wake.notify_one();
+    }
     Ok(Json(result))
 }
 

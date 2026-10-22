@@ -363,6 +363,18 @@ fn save(tx: &Transaction<'_>, change: &DecisionChange) -> rusqlite::Result<()> {
         let task: &Task = task;
         save_task(tx, task)?;
     }
+    // 恢復排程：回到 ready 的 Task 重新排進派工佇列，由 Scheduler 派出（舊 Run 還持有 lease 時留在佇列等待）。
+    // 原本派工的優先序沒有保存，一律用派工 API 的預設值 0；已在佇列中的保留原本的位置與優先序
+    if let (DecisionOutcome::Answered { resumed_task_ids }, Some(decision)) = (&change.outcome, &change.decision) {
+        for task in change.tasks.iter().filter(|t| resumed_task_ids.contains(&t.id)) {
+            tx.execute(
+                "INSERT INTO dispatch_request (task_id, workspace_id, priority, requested_at)
+                 VALUES (?1, ?2, 0, ?3)
+                 ON CONFLICT(task_id) DO NOTHING",
+                rusqlite::params![task.id, task.workspace_id, decision.decided_at.as_millis()],
+            )?;
+        }
+    }
     if let Some(item) = &change.outbox {
         tx.execute(
             "INSERT INTO outbox (kind, run_id, payload, created_at, delivered_at) VALUES (?1, ?2, ?3, ?4, NULL)",

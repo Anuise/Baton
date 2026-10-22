@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 const WORKSPACES: &str = "/api/v1/workspaces";
 const PENDING: &str = "/api/v1/decisions/pending";
+const SCHEDULING: &str = "/api/v1/scheduling";
 
 /// 2023-11-14 22:13:20.123 UTC
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
@@ -97,6 +98,20 @@ async fn start_run(harness: &Harness, ws: &str, tid: &str) -> (String, String) {
 async fn worker_exits(harness: &Harness, rid: &str) {
     harness.agent_adapter.emit(rid, AdapterEvent::Exited { success: true });
     harness.supervise().await;
+}
+
+/// 某個 Task 的全部 Run。
+async fn runs_of(harness: &Harness, ws: &str, tid: &str) -> Vec<Value> {
+    let (status, list) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/runs"), None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    list["runs"].as_array().unwrap().iter().filter(|r| r["task_id"] == tid).cloned().collect()
+}
+
+/// 派工佇列中的 Task（排程總覽）。
+async fn queued_task_ids(harness: &Harness) -> Vec<String> {
+    let (status, overview) = harness.send_json(Method::GET, SCHEDULING, None).await;
+    assert_eq!(status, StatusCode::OK, "{overview}");
+    overview["queue"].as_array().unwrap().iter().map(|q| q["task_id"].as_str().unwrap().to_string()).collect()
 }
 
 async fn task_status(harness: &Harness, ws: &str, tid: &str) -> String {
@@ -257,11 +272,21 @@ async fn answering_resumes_only_the_affected_task_and_appends_a_wake_item_in_the
     assert_eq!(result["decision"]["decision"]["option_label"], "等報表完成");
     assert_eq!(result["decision"]["decision"]["note"], "報表比較重要");
     assert_eq!(result["decision"]["decision"]["decided_by"], "desktop");
-    // 受影響的 Task 自動恢復排程（ready，可再派工）；無關的 Task 從頭到尾沒被動過
+    // 受影響的 Task 回到 ready 並重新排進派工佇列；無關的 Task 從頭到尾沒被動過
     assert_eq!(task_status(&harness, &p.ws, &p.a).await, "ready");
     assert_eq!(task_status(&harness, &p.ws, &p.b).await, "running");
-    let (status, run) = harness.send_json(Method::POST, &format!("{}/dispatch", task_path(&p.ws, &p.a)), None).await;
-    assert_eq!(status, StatusCode::CREATED, "{run}");
+    assert_eq!(queued_task_ids(&harness).await, [p.a.clone()]);
+
+    // 不需要任何人再派工：Supervisor 下一次處理就派出新的 Run
+    harness.supervise().await;
+    assert_eq!(task_status(&harness, &p.ws, &p.a).await, "running");
+    let runs = runs_of(&harness, &p.ws, &p.a).await;
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    let new_run = runs.iter().find(|r| r["id"] != p.run_a.as_str()).expect("應該有新的 Run");
+    assert_eq!(new_run["status"], "running", "{new_run}");
+    assert_eq!(task_status(&harness, &p.ws, &p.b).await, "running");
+    assert_eq!(runs_of(&harness, &p.ws, &p.b).await.len(), 1, "無關的 Task 沒有被重新派工");
+    assert!(queued_task_ids(&harness).await.is_empty());
 
     // 同一個交易追加了喚醒 Outbox，並留下事件
     let db = harness.db();
@@ -341,6 +366,36 @@ async fn a_task_stays_waiting_until_every_request_blocking_it_is_answered() {
     let (_, two) = answer(&harness, &p.ws, &second, "wait").await;
     assert_eq!(two["resumed_task_ids"], json!([p.a]));
     assert_eq!(task_status(&harness, &p.ws, &p.a).await, "ready");
+    assert_eq!(queued_task_ids(&harness).await, [p.a.clone()], "全部回答之後才重新排隊");
+}
+
+#[tokio::test]
+async fn a_resumed_task_waits_in_the_queue_while_the_old_worker_still_holds_the_lease() {
+    let harness = harness().await;
+    let p = two_running_tasks(&harness).await;
+    let rid = request_ok(&harness, &p.token_a, "要先出貨還是等報表？").await;
+
+    // 舊的 Worker 還沒結束（仍持有 execution lease）時使用者就回答了
+    let (status, result) = answer(&harness, &p.ws, &rid, "wait").await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["resumed_task_ids"], json!([p.a]));
+    harness.supervise().await;
+
+    // 不會同時有兩個 Worker 做同一個 Task，也不會被丟出佇列：留在佇列並說明原因
+    assert_eq!(runs_of(&harness, &p.ws, &p.a).await.len(), 1);
+    assert_eq!(task_status(&harness, &p.ws, &p.a).await, "ready");
+    let (_, overview) = harness.send_json(Method::GET, SCHEDULING, None).await;
+    let entry = overview["queue"].as_array().unwrap().iter().find(|q| q["task_id"] == p.a.as_str()).cloned();
+    let entry = entry.expect("恢復的 Task 應該留在派工佇列");
+    assert!(!entry["reasons"].as_array().unwrap().is_empty(), "{entry}");
+
+    // 舊的 Worker 結束後，下一次處理自動派出新的 Run；無關的 Task 照常執行
+    worker_exits(&harness, &p.run_a).await;
+    harness.supervise().await;
+    assert_eq!(task_status(&harness, &p.ws, &p.a).await, "running");
+    assert_eq!(runs_of(&harness, &p.ws, &p.a).await.len(), 2);
+    assert_eq!(task_status(&harness, &p.ws, &p.b).await, "running");
+    assert_eq!(runs_of(&harness, &p.ws, &p.b).await.len(), 1);
 }
 
 #[tokio::test]
