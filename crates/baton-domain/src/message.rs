@@ -6,6 +6,9 @@
 //!   `delivered`（出現在某個 Run 啟動時的未讀摘要）→ `read`（收件人用 `read_inbox` 取走全文）。
 //! - Runtime 不在 Worker 執行中途注入訊息；Worker 自己拉取。
 //! - 訊息不能改變 Task 的歸屬或範圍：嘗試這麼做的訊息不會被交付，改成一個給 Controller 的事件。
+//! - Controller 也可以收發訊息（票 54，spec D-05 共同工具）：它沒有 Task，在訊息中以 Workspace 層級的保留地址
+//!   [`CONTROLLER_ADDRESS`] 表示。Controller 寄給自己 Workspace 的 Task；Worker 以這個地址寄給自己 Workspace 的 Controller。
+//!   Controller 的收件匣屬於 Workspace（不屬於某一輪），下一輪接得到上一輪沒讀的訊息。
 
 use std::collections::HashSet;
 
@@ -18,6 +21,12 @@ use crate::Timestamp;
 pub const MESSAGE_AGGREGATE: &str = "message";
 /// 嘗試用訊息變更 Task 歸屬或範圍，已被忽略並轉給 Controller 的事件。
 pub const EVENT_MESSAGE_SCOPE_CHANGE_IGNORED: &str = "message_scope_change_ignored";
+
+/// Workspace 的 Controller 在訊息中的地址（票 54）：Worker 以它寄給 Controller，Controller 寄出的訊息以它為寄件地址。
+/// Task 的識別由 Runtime 產生（`task_` 開頭），不會與它相同。
+pub const CONTROLLER_ADDRESS: &str = "controller";
+/// 收件匣與未讀摘要中 Controller 的顯示名稱。
+pub const CONTROLLER_TITLE: &str = "Controller";
 
 /// 範圍變更嘗試被忽略的原因代碼（回給 Worker，也寫進事件）。
 pub const SCOPE_CHANGE_REASON: &str = "scope_change_not_allowed";
@@ -97,11 +106,11 @@ pub enum MessageError {
     BodyTooLarge,
     #[error("未知的訊息類型：{0}")]
     KindUnknown(String),
-    #[error("至少要指定一個收件 Task（to）")]
+    #[error("至少要指定一個收件 Task 或 controller（to）")]
     NoRecipient,
     #[error("一則訊息最多 {MAX_RECIPIENTS} 個收件 Task")]
     TooManyRecipients,
-    #[error("不能寄給自己的 Task")]
+    #[error("不能寄給自己")]
     SelfRecipient,
     #[error("message_id 與 correlation_id 只能含英數字與 _ - . :，長度 1 到 {ID_MAX_CHARS}")]
     IdInvalid,
@@ -237,6 +246,23 @@ impl SendInput {
     }
 }
 
+/// 訊息的寄件者：Worker 的 Run（記下它的 Task 與世代），或 Workspace 的 Controller 的一輪（票 54）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageSender {
+    Worker { run_id: String, task_id: String, generation: i64 },
+    Controller { controller_run_id: String },
+}
+
+impl MessageSender {
+    /// 寄件地址：Worker 是它的 Task，Controller 是 [`CONTROLLER_ADDRESS`]。收件人以同一個地址回覆。
+    pub fn address(&self) -> &str {
+        match self {
+            MessageSender::Worker { task_id, .. } => task_id,
+            MessageSender::Controller { .. } => CONTROLLER_ADDRESS,
+        }
+    }
+}
+
 /// 一則已儲存的訊息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -248,16 +274,15 @@ pub struct Message {
     pub kind: MessageKind,
     pub subject: String,
     pub body: String,
-    pub sender_run_id: String,
-    pub sender_task_id: String,
-    pub sender_generation: i64,
+    pub sender: MessageSender,
     pub created_at: Timestamp,
 }
 
-/// 一則訊息對一個收件 Task 的交付。
+/// 一則訊息對一個收件地址的交付。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delivery {
     pub message_id: String,
+    /// 收件 Task，或 [`CONTROLLER_ADDRESS`]（寄給這個 Workspace 的 Controller）。
     pub recipient_task_id: String,
     pub delivered_at: Option<Timestamp>,
     pub read_at: Option<Timestamp>,
@@ -282,19 +307,28 @@ impl StoredMessage {
     }
 }
 
-/// 寄件者：憑證所屬的 Run，以及它此刻是否還是 Task 的寫入所有者。
+/// 寄件者：憑證所屬的 Run（或 Controller 的一輪），以及它此刻是否還能寫入
+/// （Worker：仍是 Task 的寫入所有者；Controller：這一輪仍在進行）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sender {
     pub workspace_id: String,
-    pub run_id: String,
-    pub task_id: String,
-    pub generation: i64,
+    pub identity: MessageSender,
     pub is_current: bool,
+}
+
+impl Sender {
+    pub fn address(&self) -> &str {
+        self.identity.address()
+    }
 }
 
 impl ScopeChangeAttempt {
     /// 給 Controller 的事件：訊息沒有被交付，Task 的歸屬與範圍不變。
     pub fn into_event(self, sender: &Sender, attempt_id: String, now: Timestamp) -> DomainEvent {
+        let (run_id, task_id, generation) = match &sender.identity {
+            MessageSender::Worker { run_id, task_id, generation } => (run_id.as_str(), Some(task_id.as_str()), Some(*generation)),
+            MessageSender::Controller { controller_run_id } => (controller_run_id.as_str(), None, None),
+        };
         DomainEvent {
             aggregate_type: MESSAGE_AGGREGATE,
             aggregate_id: attempt_id,
@@ -303,9 +337,9 @@ impl ScopeChangeAttempt {
             occurred_at: now,
             payload: serde_json::json!({
                 "workspace_id": sender.workspace_id,
-                "run_id": sender.run_id,
-                "task_id": sender.task_id,
-                "generation": sender.generation,
+                "run_id": run_id,
+                "task_id": task_id,
+                "generation": generation,
                 "attempted_kind": self.attempted_kind,
                 "attempted_fields": self.attempted_fields,
                 "recipients": self.recipients,
@@ -320,7 +354,7 @@ impl ScopeChangeAttempt {
 /// 判定送出需要的、已經載入的狀態。
 pub struct SendContext<'a> {
     pub sender: &'a Sender,
-    /// 寄件者所在 Workspace 的全部 Task 識別。
+    /// 寄件者所在 Workspace 的全部 Task 識別（加上 [`CONTROLLER_ADDRESS`] 就是可以寄達的全部地址）。
     pub workspace_task_ids: &'a [String],
     /// 請求指定的 `message_id` 在這個 Workspace 已存在的訊息。
     pub existing: Option<&'a StoredMessage>,
@@ -347,15 +381,16 @@ pub fn decide_send(
     if !sender.is_current {
         return Err(MessageError::StaleSender);
     }
-    if message.to.iter().any(|t| *t == sender.task_id) {
+    let address = sender.address();
+    if message.to.iter().any(|t| t == address) {
         return Err(MessageError::SelfRecipient);
     }
-    if let Some(missing) = message.to.iter().find(|t| !ctx.workspace_task_ids.contains(t)) {
+    if let Some(missing) = message.to.iter().find(|t| *t != CONTROLLER_ADDRESS && !ctx.workspace_task_ids.contains(t)) {
         return Err(MessageError::RecipientNotFound(missing.clone()));
     }
 
     if let (Some(id), Some(existing)) = (&message.message_id, ctx.existing) {
-        let same = existing.message.sender_task_id == sender.task_id
+        let same = existing.message.sender.address() == address
             && existing.message.kind == message.kind
             && existing.message.subject == message.subject
             && existing.message.body == message.body
@@ -369,8 +404,8 @@ pub fn decide_send(
         (None, _) => None,
         (Some(id), None) => return Err(MessageError::ReplyTargetNotFound(id.clone())),
         (Some(id), Some(parent)) => {
-            let involved = parent.message.sender_task_id == sender.task_id
-                || parent.deliveries.iter().any(|d| d.recipient_task_id == sender.task_id);
+            let involved = parent.message.sender.address() == address
+                || parent.deliveries.iter().any(|d| d.recipient_task_id == address);
             if !involved {
                 return Err(MessageError::ReplyTargetNotFound(id.clone()));
             }
@@ -402,9 +437,7 @@ pub fn decide_send(
             kind: message.kind,
             subject: message.subject,
             body: message.body,
-            sender_run_id: sender.run_id.clone(),
-            sender_task_id: sender.task_id.clone(),
-            sender_generation: sender.generation,
+            sender: sender.identity.clone(),
             created_at: now,
         },
         deliveries,
@@ -421,7 +454,9 @@ pub struct InboxMessage {
     pub kind: MessageKind,
     pub subject: String,
     pub body: String,
+    /// 寄件地址：寄件 Task，或 [`CONTROLLER_ADDRESS`]（以這個地址回覆）。
     pub from_task_id: String,
+    /// 寄件 Task 的標題，Controller 寄的是 [`CONTROLLER_TITLE`]。
     pub from_task_title: String,
     pub sent_at: Timestamp,
     /// 這次讀取之前，這則訊息是否已經被這個 Task 讀過。
@@ -434,7 +469,8 @@ pub struct UnreadSummaryItem {
     pub message_id: String,
     pub kind: MessageKind,
     pub subject: String,
-    pub from_task_title: String,
+    /// 寄件 Task 的標題；Controller 寄的訊息是 `None`（票 54）。
+    pub from_task_title: Option<String>,
 }
 
 /// 未讀摘要：列出主旨與寄件者，全文要用 `read_inbox` 讀取。沒有未讀訊息時是空字串。
@@ -445,13 +481,11 @@ pub fn render_unread_summary(items: &[UnreadSummaryItem], total: usize) -> Strin
     }
     let mut text = format!("\n\n未讀訊息：{total} 則（用 read_inbox 讀取全文；訊息不會改變你的 Task 契約或範圍）");
     for item in items {
-        text.push_str(&format!(
-            "\n- [{}] {}（來自 Task「{}」，{}）",
-            item.kind.as_str(),
-            item.subject,
-            item.from_task_title,
-            item.message_id
-        ));
+        let from = match &item.from_task_title {
+            Some(title) => format!("Task「{title}」"),
+            None => CONTROLLER_TITLE.to_string(),
+        };
+        text.push_str(&format!("\n- [{}] {}（來自 {from}，{}）", item.kind.as_str(), item.subject, item.message_id));
     }
     if total > items.len() {
         text.push_str(&format!("\n- …另有 {} 則", total - items.len()));

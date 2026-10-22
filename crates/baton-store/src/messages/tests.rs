@@ -70,8 +70,8 @@ async fn a_resent_message_id_stores_one_message_and_one_delivery() {
     let dir = tempfile::tempdir().unwrap();
     let (store, scope) = store_with_running_t1(dir.path()).await;
 
-    let first = store.send_message(&scope, message("t2", "你好", Some("m-1")), "msg_a".into(), T1).await.unwrap();
-    let again = store.send_message(&scope, message("t2", "你好", Some("m-1")), "msg_b".into(), T2).await.unwrap();
+    let first = store.send_message(&MessageActor::Worker(scope.clone()), message("t2", "你好", Some("m-1")), "msg_a".into(), T1).await.unwrap();
+    let again = store.send_message(&MessageActor::Worker(scope.clone()), message("t2", "你好", Some("m-1")), "msg_b".into(), T2).await.unwrap();
 
     assert!(!first.duplicate && again.duplicate);
     assert_eq!(again.stored.message.message_id, "m-1");
@@ -88,7 +88,7 @@ async fn a_resent_message_id_stores_one_message_and_one_delivery() {
 async fn the_database_itself_refuses_a_second_delivery_to_the_same_recipient() {
     let dir = tempfile::tempdir().unwrap();
     let (store, scope) = store_with_running_t1(dir.path()).await;
-    store.send_message(&scope, message("t2", "你好", Some("m-1")), "msg_a".into(), T1).await.unwrap();
+    store.send_message(&MessageActor::Worker(scope.clone()), message("t2", "你好", Some("m-1")), "msg_a".into(), T1).await.unwrap();
 
     let second = raw(dir.path()).execute(
         "INSERT INTO message_delivery (workspace_id, message_id, recipient_task_id) VALUES ('w1', 'm-1', 't2')",
@@ -102,7 +102,7 @@ async fn the_database_itself_refuses_a_second_delivery_to_the_same_recipient() {
 async fn messages_are_append_only_and_deliveries_are_never_deleted() {
     let dir = tempfile::tempdir().unwrap();
     let (store, scope) = store_with_running_t1(dir.path()).await;
-    store.send_message(&scope, message("t2", "你好", Some("m-1")), "msg_a".into(), T1).await.unwrap();
+    store.send_message(&MessageActor::Worker(scope.clone()), message("t2", "你好", Some("m-1")), "msg_a".into(), T1).await.unwrap();
     let conn = raw(dir.path());
 
     assert!(conn.execute("UPDATE message SET subject = '改過' WHERE message_id = 'm-1'", []).is_err());
@@ -114,7 +114,7 @@ async fn messages_are_append_only_and_deliveries_are_never_deleted() {
 async fn the_same_message_id_in_another_workspace_is_a_different_message() {
     let dir = tempfile::tempdir().unwrap();
     let (store, scope) = store_with_running_t1(dir.path()).await;
-    store.send_message(&scope, message("t2", "你好", Some("m-1")), "msg_a".into(), T1).await.unwrap();
+    store.send_message(&MessageActor::Worker(scope.clone()), message("t2", "你好", Some("m-1")), "msg_a".into(), T1).await.unwrap();
 
     // 別的 Workspace 的 Worker 用同一個 message_id：看不到前一個 Workspace 的訊息，所以不是重送也不是衝突
     let create = WorkspaceCommand::Create { id: "w2".into(), name: None, path: "C:\\work\\other".into() };
@@ -130,7 +130,7 @@ async fn the_same_message_id_in_another_workspace_is_a_different_message() {
     store.apply_run_command("w2".into(), command, T1).await.unwrap();
     let other = AgentScope { workspace_id: "w2".into(), run_id: "r9".into(), generation: 1 };
 
-    let sent = store.send_message(&other, message("u2", "你好", Some("m-1")), "msg_b".into(), T2).await.unwrap();
+    let sent = store.send_message(&MessageActor::Worker(other.clone()), message("u2", "你好", Some("m-1")), "msg_b".into(), T2).await.unwrap();
 
     assert!(!sent.duplicate);
     let count: i64 = raw(dir.path()).query_row("SELECT COUNT(*) FROM message", [], |r| r.get(0)).unwrap();
@@ -142,7 +142,7 @@ async fn reading_the_inbox_marks_read_and_the_dispatch_summary_only_lists_what_i
     let dir = tempfile::tempdir().unwrap();
     let (store, scope) = store_with_running_t1(dir.path()).await;
     for (id, subject) in [("m-1", "第一則"), ("m-2", "第二則")] {
-        store.send_message(&scope, message("t2", subject, Some(id)), "x".into(), T1).await.unwrap();
+        store.send_message(&MessageActor::Worker(scope.clone()), message("t2", subject, Some(id)), "x".into(), T1).await.unwrap();
     }
 
     // t2 派工：Prompt 列出兩則（只有主旨），兩則都變成 delivered
@@ -156,12 +156,12 @@ async fn reading_the_inbox_marks_read_and_the_dispatch_summary_only_lists_what_i
 
     // t2 的 Run 讀取其中一則（limit 1）；摘要不會再列出已讀的
     let t2_scope = AgentScope { workspace_id: "w1".into(), run_id: "r2".into(), generation: 1 };
-    let inbox = store.read_inbox(&t2_scope, false, 1, T2).await.unwrap();
+    let inbox = store.read_inbox(&MessageActor::Worker(t2_scope.clone()), false, 1, T2).await.unwrap();
     assert_eq!((inbox.messages.len(), inbox.unread_remaining), (1, 1));
     assert_eq!(inbox.messages[0].subject, "第一則");
-    let again = store.read_inbox(&t2_scope, false, 10, T2).await.unwrap();
+    let again = store.read_inbox(&MessageActor::Worker(t2_scope.clone()), false, 10, T2).await.unwrap();
     assert_eq!(again.messages.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["第二則"]);
-    let all = store.read_inbox(&t2_scope, true, 10, T2).await.unwrap();
+    let all = store.read_inbox(&MessageActor::Worker(t2_scope.clone()), true, 10, T2).await.unwrap();
     assert_eq!(all.messages.iter().map(|m| m.already_read).collect::<Vec<_>>(), [true, true]);
     assert_eq!(all.unread_remaining, 0);
 }
@@ -170,10 +170,10 @@ async fn reading_the_inbox_marks_read_and_the_dispatch_summary_only_lists_what_i
 async fn an_inbox_belongs_to_the_task_not_to_the_run() {
     let dir = tempfile::tempdir().unwrap();
     let (store, scope) = store_with_running_t1(dir.path()).await;
-    store.send_message(&scope, message("t2", "給 t2", Some("m-1")), "x".into(), T1).await.unwrap();
+    store.send_message(&MessageActor::Worker(scope.clone()), message("t2", "給 t2", Some("m-1")), "x".into(), T1).await.unwrap();
 
     // t1 自己的收件匣是空的（寄出的訊息不在裡面）
-    let own = store.read_inbox(&scope, true, 10, T2).await.unwrap();
+    let own = store.read_inbox(&MessageActor::Worker(scope.clone()), true, 10, T2).await.unwrap();
 
     assert_eq!((own.task_id.as_str(), own.messages.len()), ("t1", 0));
 }

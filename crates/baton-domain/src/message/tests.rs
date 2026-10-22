@@ -13,8 +13,18 @@ fn message(to: &[&str], subject: &str) -> NewMessage {
     }
 }
 
+fn worker(task_id: &str, run_id: &str, generation: i64) -> Sender {
+    let identity = MessageSender::Worker { run_id: run_id.into(), task_id: task_id.into(), generation };
+    Sender { workspace_id: "w".into(), identity, is_current: true }
+}
+
 fn sender(is_current: bool) -> Sender {
-    Sender { workspace_id: "w".into(), run_id: "run_a".into(), task_id: "task_a".into(), generation: 1, is_current }
+    Sender { is_current, ..worker("task_a", "run_a", 1) }
+}
+
+fn controller() -> Sender {
+    let identity = MessageSender::Controller { controller_run_id: "crun_1".into() };
+    Sender { workspace_id: "w".into(), identity, is_current: true }
 }
 
 fn tasks() -> Vec<String> {
@@ -85,7 +95,7 @@ fn a_sent_message_starts_a_thread_and_a_correlation_with_one_pending_delivery_pe
     assert_eq!((stored.message.thread_id.as_str(), stored.message.correlation_id.as_str()), ("msg_gen", "msg_gen"));
     assert_eq!(stored.deliveries.len(), 2);
     assert!(stored.deliveries.iter().all(|d| d.state() == DeliveryState::Pending));
-    assert_eq!((stored.message.sender_task_id.as_str(), stored.message.sender_generation), ("task_a", 1));
+    assert_eq!(stored.message.sender, MessageSender::Worker { run_id: "run_a".into(), task_id: "task_a".into(), generation: 1 });
 }
 
 #[test]
@@ -102,7 +112,7 @@ fn resending_the_same_message_id_with_the_same_content_is_a_duplicate() {
 
     // 收件人順序不同也算同一則；新的 Run（世代）重送也一樣
     let again = NewMessage { message_id: Some("m-1".into()), ..message(&["task_b", "task_c"], "x") };
-    let decision = decide(&Sender { generation: 2, run_id: "run_a2".into(), ..sender(true) }, again, Some(&first), None);
+    let decision = decide(&worker("task_a", "run_a2", 2), again, Some(&first), None);
 
     assert_eq!(decision, Ok(SendDecision::Duplicate(first)));
 }
@@ -111,7 +121,7 @@ fn resending_the_same_message_id_with_the_same_content_is_a_duplicate() {
 fn reusing_a_message_id_for_different_content_or_another_sender_is_a_conflict() {
     let first = sent(NewMessage { message_id: Some("m-1".into()), ..message(&["task_b"], "x") });
     let different = NewMessage { message_id: Some("m-1".into()), ..message(&["task_b"], "y") };
-    let other_sender = Sender { task_id: "task_b".into(), ..sender(true) };
+    let other_sender = worker("task_b", "run_a", 1);
     let same_content = NewMessage { message_id: Some("m-1".into()), ..message(&["task_c"], "x") };
 
     assert_eq!(decide(&sender(true), different, Some(&first), None), Err(MessageError::IdConflict("m-1".into())));
@@ -138,7 +148,7 @@ fn a_reply_joins_the_thread_and_inherits_the_correlation() {
     let question = sent(NewMessage { correlation_id: Some("corr-7".into()), ..message(&["task_b"], "問題") });
     let reply = NewMessage { in_reply_to: Some("msg_gen".into()), ..message(&["task_a"], "回答") };
 
-    let b = Sender { task_id: "task_b".into(), run_id: "run_b".into(), ..sender(true) };
+    let b = worker("task_b", "run_b", 1);
     let Ok(SendDecision::New(stored)) = decide(&b, reply, None, Some(&question)) else { panic!("回覆應該成功") };
 
     assert_eq!((stored.message.thread_id.as_str(), stored.message.correlation_id.as_str()), ("msg_gen", "corr-7"));
@@ -148,7 +158,7 @@ fn a_reply_joins_the_thread_and_inherits_the_correlation() {
 #[test]
 fn a_task_cannot_reply_to_a_message_it_is_not_part_of() {
     let question = sent(message(&["task_b"], "問題"));
-    let outsider = Sender { task_id: "task_c".into(), run_id: "run_c".into(), ..sender(true) };
+    let outsider = worker("task_c", "run_c", 1);
     let reply = NewMessage { in_reply_to: Some("msg_gen".into()), ..message(&["task_a"], "插嘴") };
 
     assert_eq!(decide(&outsider, reply.clone(), None, Some(&question)), Err(MessageError::ReplyTargetNotFound("msg_gen".into())));
@@ -172,7 +182,7 @@ fn the_unread_summary_lists_subjects_but_never_bodies_and_notes_the_overflow() {
         message_id: "m1".into(),
         kind: MessageKind::Question,
         subject: "API 的欄位名稱".into(),
-        from_task_title: "後端".into(),
+        from_task_title: Some("後端".into()),
     }];
     let text = render_unread_summary(&items, 3);
 
@@ -200,4 +210,57 @@ fn a_scope_change_attempt_becomes_a_controller_event_that_names_who_tried_what()
     assert_eq!(event.payload["run_id"], "run_a");
     assert_eq!(event.payload["attempted_fields"], serde_json::json!(["owner"]));
     assert_eq!(event.payload["reason"], SCOPE_CHANGE_REASON);
+}
+
+// ---------------------------------------------------------------- Controller 的地址（票 54）
+
+#[test]
+fn the_controller_sends_from_its_reserved_address_to_tasks_of_its_workspace() {
+    let Ok(SendDecision::New(stored)) = decide(&controller(), message(&["task_a", "task_b"], "分工"), None, None) else {
+        panic!("Controller 應該可以寄給 Workspace 內的 Task")
+    };
+
+    assert_eq!(stored.message.sender.address(), CONTROLLER_ADDRESS);
+    assert_eq!(stored.message.sender, MessageSender::Controller { controller_run_id: "crun_1".into() });
+    assert_eq!(decide(&controller(), message(&[CONTROLLER_ADDRESS], "x"), None, None), Err(MessageError::SelfRecipient));
+    assert_eq!(
+        decide(&controller(), message(&["task_other_ws"], "x"), None, None),
+        Err(MessageError::RecipientNotFound("task_other_ws".into()))
+    );
+}
+
+#[test]
+fn a_worker_can_write_to_the_controller_and_reply_to_what_the_controller_sent_it() {
+    assert!(matches!(decide(&sender(true), message(&[CONTROLLER_ADDRESS], "回報"), None, None), Ok(SendDecision::New(_))));
+
+    let Ok(SendDecision::New(question)) = decide(&controller(), message(&["task_a"], "問題"), None, None) else { panic!() };
+    let reply = NewMessage { in_reply_to: Some("msg_gen".into()), ..message(&[CONTROLLER_ADDRESS], "回答") };
+    assert!(matches!(decide(&sender(true), reply.clone(), None, Some(&question)), Ok(SendDecision::New(_))));
+    // 沒有收到這則訊息的 Task 不能回覆它
+    assert_eq!(
+        decide(&worker("task_b", "run_b", 1), reply, None, Some(&question)),
+        Err(MessageError::ReplyTargetNotFound("msg_gen".into()))
+    );
+}
+
+#[test]
+fn the_controller_can_reply_to_messages_sent_to_it_in_any_round() {
+    let report = sent(message(&[CONTROLLER_ADDRESS], "回報"));
+    let reply = NewMessage { in_reply_to: Some("msg_gen".into()), ..message(&["task_a"], "收到") };
+    let next_round = Sender { identity: MessageSender::Controller { controller_run_id: "crun_2".into() }, ..controller() };
+
+    let Ok(SendDecision::New(stored)) = decide(&next_round, reply, None, Some(&report)) else { panic!("應該可以回覆") };
+    assert_eq!(stored.message.thread_id, "msg_gen");
+}
+
+#[test]
+fn the_unread_summary_names_the_controller_as_sender() {
+    let items = vec![UnreadSummaryItem {
+        message_id: "m1".into(),
+        kind: MessageKind::Note,
+        subject: "先做甲".into(),
+        from_task_title: None,
+    }];
+
+    assert!(render_unread_summary(&items, 1).contains("[note] 先做甲（來自 Controller，m1）"));
 }

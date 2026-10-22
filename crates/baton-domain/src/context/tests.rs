@@ -277,7 +277,7 @@ fn unread_messages_and_evidence_are_listed_after_knowledge() {
         message_id: "msg_1".into(),
         kind: MessageKind::Note,
         subject: "介面改了".into(),
-        from_task_title: "後端".into(),
+        from_task_title: Some("後端".into()),
     }];
     let evidence = [EvidenceItem {
         artifact_id: "art_1".into(),
@@ -309,7 +309,7 @@ fn an_omitted_message_summary_is_not_marked_as_delivered() {
         message_id: "msg_1".into(),
         kind: MessageKind::Note,
         subject: "介面改了".into(),
-        from_task_title: "後端".into(),
+        from_task_title: Some("後端".into()),
     }];
     let mut input = inputs(&task, &[]);
     input.unread = &unread;

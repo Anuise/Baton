@@ -76,7 +76,7 @@ pub use lifecycle::{
     WorkspaceLifecycleOutcome, LIFECYCLE_FILE_NAME,
 };
 pub use maintenance::MaintenanceApplyError;
-pub use messages::{Inbox, MessageApplyError, SendOutcome};
+pub use messages::{Inbox, MessageActor, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
 pub use recovery::RecoveryApplyError;
@@ -1785,11 +1785,62 @@ const MIGRATIONS: &[Migration] = &[
         name: "verification_pass_per_run",
         sql: "DROP INDEX task_verification_one_pass;",
     },
+    // 票 54（第 47 個 migration）：Controller 收發訊息。(1) 重建 `message`：寄件者是 Worker 的 Run（`sender_run_id`、
+    // `sender_task_id`、`sender_generation`）或 Controller 的一輪（`sender_controller_run_id`），恰好其中一種；
+    // (2) 寄給 Workspace 的 Controller 的交付另存 `message_controller_delivery`（每則訊息最多一筆，收件匣屬於 Workspace）。
+    // 這個 migration 在 `foreign_keys=OFF` 下套用（見 `FOREIGN_KEYS_OFF_MIGRATIONS`）：參照 `message` 的 `message_delivery`
+    // 不必跟著重建，提交前以 `foreign_key_check` 核對
+    Migration {
+        name: "controller_messages",
+        sql: "CREATE TABLE message_next (
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            message_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            correlation_id TEXT NOT NULL,
+            in_reply_to TEXT,
+            kind TEXT NOT NULL CHECK (kind IN ('note', 'question', 'answer', 'result')),
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            sender_run_id TEXT REFERENCES run (id),
+            sender_task_id TEXT REFERENCES task (id),
+            sender_generation INTEGER,
+            sender_controller_run_id TEXT REFERENCES controller_run (id),
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, message_id),
+            CHECK ((sender_controller_run_id IS NULL
+                    AND sender_run_id IS NOT NULL AND sender_task_id IS NOT NULL AND sender_generation IS NOT NULL)
+                OR (sender_controller_run_id IS NOT NULL
+                    AND sender_run_id IS NULL AND sender_task_id IS NULL AND sender_generation IS NULL))
+        );
+        INSERT INTO message_next
+            (workspace_id, message_id, thread_id, correlation_id, in_reply_to, kind, subject, body,
+             sender_run_id, sender_task_id, sender_generation, created_at)
+        SELECT workspace_id, message_id, thread_id, correlation_id, in_reply_to, kind, subject, body,
+               sender_run_id, sender_task_id, sender_generation, created_at
+        FROM message ORDER BY rowid;
+        DROP TABLE message;
+        ALTER TABLE message_next RENAME TO message;
+        CREATE TRIGGER message_no_update BEFORE UPDATE ON message
+        BEGIN SELECT RAISE(ABORT, 'message 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER message_no_delete BEFORE DELETE ON message
+        BEGIN SELECT RAISE(ABORT, 'message 是追加式資料表，不可刪除'); END;
+        CREATE TABLE message_controller_delivery (
+            workspace_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            delivered_at INTEGER,
+            read_at INTEGER,
+            PRIMARY KEY (workspace_id, message_id),
+            FOREIGN KEY (workspace_id, message_id) REFERENCES message (workspace_id, message_id)
+        );
+        CREATE INDEX message_controller_delivery_inbox ON message_controller_delivery (workspace_id, read_at);
+        CREATE TRIGGER message_controller_delivery_no_delete BEFORE DELETE ON message_controller_delivery
+        BEGIN SELECT RAISE(ABORT, 'message_controller_delivery 不可刪除'); END;",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
 /// 外鍵開著會讓 `DROP TABLE` 的隱含刪除失敗。套用後、提交前以 `foreign_key_check` 確認沒有任何違反。
-const FOREIGN_KEYS_OFF_MIGRATIONS: &[&str] = &["controller_tools"];
+const FOREIGN_KEYS_OFF_MIGRATIONS: &[&str] = &["controller_tools", "controller_messages"];
 
 /// 開啟 Store 的選項；預設值就是正式執行的行為。
 #[derive(Debug, Clone, Copy)]
@@ -2706,6 +2757,77 @@ mod tests {
         assert!(insert("d3", "ctl_nope", "controller").is_err());
         insert("d4", "r1", "worker").unwrap();
         assert!(conn.execute("UPDATE decision_request SET origin = 'controller', revision = 2 WHERE id = 'd4'", []).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_controller_messages_migration_keeps_worker_messages_and_allows_exactly_one_kind_of_sender() {
+        // 套用到票 54 之前的版本，放一則 Worker 寄給另一個 Task、已讀的訊息
+        let dir = tempfile::tempdir().unwrap();
+        let before = MIGRATIONS.iter().position(|m| m.name == "controller_messages").unwrap();
+        {
+            let old = raw(dir.path());
+            old.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (index, migration) in MIGRATIONS[..before].iter().enumerate() {
+                old.execute_batch(migration.sql).unwrap();
+                old.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![index + 1, migration.name],
+                )
+                .unwrap();
+            }
+            old.execute_batch(
+                "INSERT INTO workspace (id, name, path, status, version, created_at) VALUES ('w1', 'w', 'C:/w', 'active', 1, 1);
+                 INSERT INTO goal (id, workspace_id, title, version, created_at) VALUES ('g1', 'w1', 'g', 1, 1);
+                 INSERT INTO task (id, workspace_id, goal_id, title, status, version, contract_version, created_at, updated_at)
+                   VALUES ('t1', 'w1', 'g1', 't', 'running', 1, 1, 1, 1), ('t2', 'w1', 'g1', 'u', 'ready', 1, 1, 1, 1);
+                 INSERT INTO run (id, workspace_id, task_id, status, version, generation, contract_version, created_at, updated_at)
+                   VALUES ('r1', 'w1', 't1', 'running', 1, 1, 1, 1, 1);
+                 INSERT INTO message (workspace_id, message_id, thread_id, correlation_id, kind, subject, body,
+                   sender_run_id, sender_task_id, sender_generation, created_at)
+                   VALUES ('w1', 'm1', 'm1', 'm1', 'note', '你好', '', 'r1', 't1', 1, 2);
+                 INSERT INTO message_delivery (workspace_id, message_id, recipient_task_id, delivered_at, read_at)
+                   VALUES ('w1', 'm1', 't2', 3, 4);",
+            )
+            .unwrap();
+        }
+
+        drop(open(dir.path()).await);
+
+        let conn = raw(dir.path());
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let kept: (String, String, i64, Option<String>) = conn
+            .query_row("SELECT message_id, sender_task_id, sender_generation, sender_controller_run_id FROM message", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap();
+        assert_eq!(kept, ("m1".to_string(), "t1".to_string(), 1, None));
+        let read_at: i64 = conn.query_row("SELECT read_at FROM message_delivery", [], |r| r.get(0)).unwrap();
+        assert_eq!(read_at, 4);
+        // 交付表對重建後的 message 仍有效
+        let violations: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(violations, 0);
+        // 寄件者恰好一種：Worker 的三欄齊全，或只有 Controller 的一輪（而且必須存在）
+        let insert = |id: &str, run: Option<&str>, task: Option<&str>, generation: Option<i64>, controller: Option<&str>| {
+            conn.execute(
+                "INSERT INTO message (workspace_id, message_id, thread_id, correlation_id, kind, subject, body,
+                   sender_run_id, sender_task_id, sender_generation, sender_controller_run_id, created_at)
+                 VALUES ('w1', ?1, ?1, ?1, 'note', 's', '', ?2, ?3, ?4, ?5, 5)",
+                rusqlite::params![id, run, task, generation, controller],
+            )
+        };
+        assert!(insert("m2", None, None, None, None).is_err(), "沒有寄件者");
+        assert!(insert("m3", Some("r1"), None, Some(1), None).is_err(), "Worker 欄位不齊全");
+        assert!(insert("m4", Some("r1"), Some("t1"), Some(1), Some("crun_1")).is_err(), "兩種寄件者");
+        assert!(insert("m5", None, None, None, Some("crun_nope")).is_err(), "Controller 的一輪必須存在");
+        insert("m6", Some("r1"), Some("t1"), Some(1), None).unwrap();
+        // 寄給 Controller 的交付：每則訊息最多一筆、不可刪除
+        conn.execute("INSERT INTO message_controller_delivery (workspace_id, message_id) VALUES ('w1', 'm6')", []).unwrap();
+        assert!(conn.execute("INSERT INTO message_controller_delivery (workspace_id, message_id) VALUES ('w1', 'm6')", []).is_err());
+        assert!(conn.execute("INSERT INTO message_controller_delivery (workspace_id, message_id) VALUES ('w1', 'nope')", []).is_err());
+        assert!(conn.execute("DELETE FROM message_controller_delivery", []).is_err());
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
 //! Controller 是腳本化的：測試在 Controller 的一輪進行中，以那一輪收到的 Controller 憑證呼叫 Agent API。
 //! - `search_knowledge`：Controller 規劃整個 Workspace 的工作，看得到全域與這個 Workspace 內所有範圍的有效條目，
 //!   看不到別的 Workspace；聲稱別的 Workspace 被拒絕；這一輪結束後憑證失效。
-//! - `send_message`、`read_inbox` 以 Worker 的 Task 為收發對象，Controller 沒有 Task，仍然只有 Worker 能使用。
+//! - `send_message`、`read_inbox` 的情境在 `controller_messages.rs`；`record_lesson_candidate` 在 `controller_lesson_candidate.rs`（票 54）。
 
 use baton_domain::knowledge::TOOL_SEARCH_KNOWLEDGE;
 use baton_domain::Timestamp;
@@ -106,12 +106,6 @@ async fn the_controller_searches_effective_knowledge_of_its_own_workspace_only()
     let (status, body) =
         harness.call_tool(&token, TOOL_SEARCH_KNOWLEDGE, json!({ "query": "提交訊息", "workspace_id": other })).await;
     assert_eq!((status, error_code(&body)), (StatusCode::FORBIDDEN, "agent_scope_mismatch"), "{body}");
-
-    // 訊息以 Worker 的 Task 收發，Controller 仍不能使用
-    for tool in ["send_message", "read_inbox"] {
-        let (status, body) = harness.call_tool(&token, tool, json!({})).await;
-        assert_eq!((status, error_code(&body)), (StatusCode::FORBIDDEN, "worker_only"), "{tool}：{body}");
-    }
 
     // 這一輪結束後憑證失效
     harness.agent_adapter.emit(&controller_run, AdapterEvent::Started { native_session_id: Some("native-1".into()) });
