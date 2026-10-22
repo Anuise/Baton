@@ -14,12 +14,13 @@ sed -i -e "s/^Status: in_progress（.*）/Status: completed/" -e 's/^- \[ \] /- 
 sed -i "s/^| $VRUN | \(.*\) | | |$/| $VRUN | \1 | $NOW | PASS |/" "$O/runs.md"
 # 舊格式的 Worker 條目補上審閱行
 python -I "$O/normalize_decisions.py" .scratch/platform-rebuild-v1/ai-decisions.md
-git add "$I/$TICKET" "$O/runs.md" .scratch/platform-rebuild-v1/ai-decisions.md
+git add "$I/$TICKET" "$O/runs.md" "$O/runs" .scratch/platform-rebuild-v1/ai-decisions.md
 git commit -q -m "chore(scratch): 票 $NN 結案" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 # node_modules／target 路徑過長時 git 刪不掉，改用 PowerShell 長路徑刪除
 git worktree remove --force "$WT" 2>/dev/null || true
 if [ -d "$WT" ]; then
-  powershell -NoProfile -Command "Remove-Item -LiteralPath ('\\\\?\\' +'$(cygpath -w "$WT")') -Recurse -Force -Confirm:\$false"
+  # 反斜線經 MSYS 傳給 PowerShell 會被吃掉，改以 [char]92 組出 \\?\ 前綴
+  WTP="$(cygpath -w "$WT")" powershell -NoProfile -Command '$b=[string][char]92; Remove-Item -LiteralPath ($b+$b+"?"+$b+$env:WTP) -Recurse -Force -Confirm:$false'
 fi
 git worktree prune
 echo "票 $NN 已結案"
