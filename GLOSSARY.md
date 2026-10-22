@@ -32,6 +32,16 @@
 - **關係**：屬於 Task（Worker）或 conversation（Controller）；交接會結束舊 Run 並建立 successor Run，兩者屬於同一個 Task；Run 結束只產生「Run 結束」事件，不等於 Task 完成。
 - **避免使用**：job、attempt（Stage 的 step_attempt 另有專義）、execution、process（程序只是 Run 的一個屬性）、session。
 
+### execution lease
+- **定義**：Task 的寫入所有權。派工時由 Run 取得、Run 結束（並確認程序已停止）時釋放；有效期間 60 秒，每次 heartbeat 續約。
+- **關係**：同一個 Task 任何時刻最多一個尚未釋放的 lease；過期只觸發對程序的核對，不證明程序死亡；Worker 的回報帶 lease 的世代（generation），過期世代的回報不改變狀態。
+- **避免使用**：lock、mutex、ownership token、heartbeat（heartbeat 是續約的訊號，不是 lease 本身）。
+
+### launch intent
+- **定義**：Supervisor 在啟動 Run 的程序之前先持久化的啟動意圖，含 `command_id`。
+- **關係**：先於程序存在；Runtime 在啟動與回執之間當掉時，以 `command_id` 找回原程序，不重複啟動；找不到時 Run 標為 interrupted，不自動重送。
+- **避免使用**：spawn request、launch ticket。
+
 ### Session
 - **定義**：Agent 的對話脈絡，分三種識別，不可混用：`conversation_id`（使用者與 Controller 的長期對話）、`agent_session_id`（平台產生的穩定 Session 主鍵）、`native_session_id`（執行工具回報的原生識別，取得前為空）。另有 `process_identity`（程序身分）用來查驗存活，不是 Session。
 - **關係**：一個 conversation 對應多個 Controller Session；一個 Session 對應多個循序 Run；跨帳號交接會建立新的 Session 並保存 predecessor 關係。同一原生 Session 任何時刻只能有一個有效執行者。Session 存在不代表程序存活、對話完整或可 resume。
