@@ -137,12 +137,135 @@ export interface AuthorizationClient {
   confirmAuthorization(workspaceId: string, request: ConfirmAuthorizationRequest): Promise<AuthorizationRevision>;
 }
 
-export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient;
+export interface Goal {
+  id: string;
+  workspace_id: string;
+  title: string;
+  version: number;
+  created_at: number;
+}
+
+/** 契約內的引用；儲存時不檢查是否存在，准入檢查時才判定失效。 */
+export interface ContractReference {
+  kind: "task_contract" | "goal" | "authorization";
+  target: string;
+  version: number;
+}
+
+/** 六項最小契約的單一欄位；欄位省略或為 null 代表「未提供」。 */
+export type ContractField =
+  | { status: "filled"; text: string; references?: ContractReference[] }
+  | { status: "not_applicable"; reason: string }
+  | { status: "unknown"; note?: string | null };
+
+export const CONTRACT_FIELDS = [
+  "objective",
+  "inputs",
+  "scope",
+  "deliverables",
+  "done_criteria",
+  "blocker_handling",
+] as const;
+
+export type ContractFieldName = (typeof CONTRACT_FIELDS)[number];
+
+export type ContractInput = { [K in ContractFieldName]?: ContractField | null } & {
+  required_capabilities?: Capability[];
+};
+
+export type TaskContract = { [K in ContractFieldName]: ContractField | null } & {
+  task_id: string;
+  version: number;
+  required_capabilities: Capability[];
+  note: string | null;
+  created_at: number;
+};
+
+export interface MissingItem {
+  code:
+    | "field_missing"
+    | "field_unknown"
+    | "reference_invalid"
+    | "authorization_unconfirmed"
+    | "capability_not_granted"
+    | "workspace_archived";
+  field: ContractFieldName | null;
+  message: string;
+}
+
+export type TaskStatus =
+  | "pending"
+  | "ready"
+  | "running"
+  | "waiting_decision"
+  | "waiting_resource"
+  | "blocked"
+  | "verifying"
+  | "completed"
+  | "cancelled";
+
+export interface TaskView {
+  id: string;
+  workspace_id: string;
+  goal_id: string;
+  title: string;
+  status: TaskStatus;
+  version: number;
+  contract_version: number;
+  created_at: number;
+  updated_at: number;
+  contract: TaskContract;
+  dependencies: string[];
+  unfinished_dependencies: string[];
+  /** 只有 pending 的 Task 才會計算缺項；其他狀態一律是空陣列。 */
+  missing: MissingItem[];
+}
+
+export interface TaskBoard {
+  workspace_id: string;
+  goals: Goal[];
+  tasks: TaskView[];
+  capabilities: { capability: Capability; label: string; high_risk: boolean }[];
+}
+
+export interface TaskDetail {
+  task: TaskView;
+  /** 由舊到新，含目前版本。 */
+  contract_history: TaskContract[];
+}
+
+export interface AdmissionReport {
+  admissible: boolean;
+  missing: MissingItem[];
+}
+
+export interface CreateTaskRequest {
+  goalId: string;
+  title: string;
+  contract?: ContractInput;
+}
+
+/** Goal、Task、六項最小派工契約與准入（只有桌面憑證能用）。 */
+export interface TaskClient {
+  getTaskBoard(workspaceId: string): Promise<TaskBoard>;
+  createGoal(workspaceId: string, title: string): Promise<Goal>;
+  createTask(workspaceId: string, request: CreateTaskRequest): Promise<TaskView>;
+  getTask(workspaceId: string, taskId: string): Promise<TaskDetail>;
+  updateTaskContract(workspaceId: string, taskId: string, contract: ContractInput, note?: string): Promise<TaskView>;
+  addTaskDependency(workspaceId: string, taskId: string, dependsOn: string): Promise<TaskView>;
+  checkTaskAdmission(workspaceId: string, taskId: string): Promise<AdmissionReport>;
+  markTaskReady(workspaceId: string, taskId: string): Promise<TaskView>;
+  cancelTask(workspaceId: string, taskId: string): Promise<TaskView>;
+}
+
+export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient & TaskClient;
 
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
 const WORKSPACES_PATH = "/api/v1/workspaces";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
+const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
+const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
 
 /** 直接以 HTTP 查詢（開發時用瀏覽器開啟，由 Vite 代理到 Runtime）。 */
 export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
@@ -150,6 +273,20 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
   const failure = async (response: Response) => {
     const body = (await response.json().catch(() => null)) as { message?: string } | null;
     return new Error(body?.message ?? `Runtime 回應 ${response.status}`);
+  };
+  /** Task 相關端點共用：有 body 時以 JSON 送出（`undefined` 欄位不會出現在 JSON 裡）。 */
+  const send = async <T>(path: string, request?: { method: string; body?: unknown }): Promise<T> => {
+    const response = await (request === undefined
+      ? fetchFn(path)
+      : request.body === undefined
+        ? fetchFn(path, { method: request.method })
+        : fetchFn(path, {
+            method: request.method,
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(request.body),
+          }));
+    if (!response.ok) throw await failure(response);
+    return (await response.json()) as T;
   };
   return {
     async getHealth() {
@@ -204,6 +341,18 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       if (!response.ok) throw await failure(response);
       return (await response.json()) as AuthorizationRevision;
     },
+    getTaskBoard: (workspaceId) => send(`${workspacePath(workspaceId)}/tasks`),
+    createGoal: (workspaceId, title) => send(`${workspacePath(workspaceId)}/goals`, { method: "POST", body: { title } }),
+    createTask: (workspaceId, { goalId, title, contract }) =>
+      send(`${workspacePath(workspaceId)}/tasks`, { method: "POST", body: { goal_id: goalId, title, contract } }),
+    getTask: (workspaceId, taskId) => send(taskPath(workspaceId, taskId)),
+    updateTaskContract: (workspaceId, taskId, contract, note) =>
+      send(`${taskPath(workspaceId, taskId)}/contract`, { method: "PUT", body: { contract, note } }),
+    addTaskDependency: (workspaceId, taskId, dependsOn) =>
+      send(`${taskPath(workspaceId, taskId)}/dependencies`, { method: "POST", body: { depends_on: dependsOn } }),
+    checkTaskAdmission: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/admission-check`, { method: "POST" }),
+    markTaskReady: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/ready`, { method: "POST" }),
+    cancelTask: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/cancel`, { method: "POST" }),
   };
 }
 
@@ -229,6 +378,18 @@ export function createTauriClient(invoke: Invoke): AppClient {
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
     confirmAuthorization: (id, { templateId, grants, acknowledgedRisk }) =>
       call<AuthorizationRevision>("workspace_authorization_confirm", { id, templateId, grants, acknowledgedRisk }),
+    getTaskBoard: (workspaceId) => call<TaskBoard>("task_board", { workspaceId }),
+    createGoal: (workspaceId, title) => call<Goal>("goal_create", { workspaceId, title }),
+    createTask: (workspaceId, { goalId, title, contract }) =>
+      call<TaskView>("task_create", { workspaceId, goalId, title, contract }),
+    getTask: (workspaceId, taskId) => call<TaskDetail>("task_detail", { workspaceId, taskId }),
+    updateTaskContract: (workspaceId, taskId, contract, note) =>
+      call<TaskView>("task_contract_update", { workspaceId, taskId, contract, note }),
+    addTaskDependency: (workspaceId, taskId, dependsOn) =>
+      call<TaskView>("task_dependency_add", { workspaceId, taskId, dependsOn }),
+    checkTaskAdmission: (workspaceId, taskId) => call<AdmissionReport>("task_admission_check", { workspaceId, taskId }),
+    markTaskReady: (workspaceId, taskId) => call<TaskView>("task_ready", { workspaceId, taskId }),
+    cancelTask: (workspaceId, taskId) => call<TaskView>("task_cancel", { workspaceId, taskId }),
   };
 }
 

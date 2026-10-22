@@ -188,4 +188,16 @@ describe("左側 Workspace 清單", () => {
 
     expect(onSelect).toHaveBeenCalledWith(workspace());
   });
+
+  it("每個 Workspace 都有「工作面板」入口，不會觸發授權設定", async () => {
+    const onSelect = vi.fn();
+    const onOpenTasks = vi.fn();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} onSelect={onSelect} onOpenTasks={onOpenTasks} />);
+
+    await user.click(await screen.findByRole("button", { name: "工作面板 筆記" }));
+
+    expect(onOpenTasks).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });
