@@ -2,7 +2,7 @@
 //
 // 以暫存資料目錄與隨機埠啟動真正的 baton-desktop.exe，透過 WebView2 的遠端除錯埠讀取畫面，確認：
 //   1. App 啟動後自動啟動 Runtime，狀態列顯示「Runtime 運作中」
-//   2. 關閉 App 視窗後 Runtime 仍在執行
+//   2. App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以這裡直接結束 App 程序）
 //   3. 再次開啟 App 時連回同一個 Runtime（boot_count 不增加、pid 不變）
 //   4. 在 App 內建立 Workspace 後進入授權設定，套用 P3 範本、檢視摘要、承認風險並確認保存；
 //      確認之前需要「建置與測試」的 Run 被准入檢查拒絕，確認之後通過
@@ -130,7 +130,7 @@ function launchApp(env) {
   return spawn(exe, [], { env: { ...process.env, ...env }, stdio: "ignore" });
 }
 
-/** 只結束指定程序，不含子程序（模擬使用者關閉視窗：Runtime 不隨 App 結束）。 */
+/** 只結束指定程序，不含子程序（Runtime 不隨 App 結束）。強制結束不會觸發 CloseRequested，所以不受「關窗隱藏到系統匣」影響。 */
 function killProcess(pid) {
   spawn("taskkill", ["/PID", String(pid), "/F"], { stdio: "ignore" });
 }
@@ -214,7 +214,7 @@ try {
   console.log(`✔ 第 9 個 Profile 被拒絕：${ninth.body.message}`);
   console.log(`✔ Runtime 已由 App 啟動（pid ${first.pid}，boot_count ${first.boot_count}）`);
 
-  // 2. 關閉 App：Runtime 繼續執行
+  // 2. 結束 App 程序（關窗只會隱藏到系統匣，App 不會結束）：Runtime 繼續執行
   killProcess(app1.pid);
   await sleep(2000);
   const afterClose = await health(runtimePort);

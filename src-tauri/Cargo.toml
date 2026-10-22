@@ -14,5 +14,5 @@ baton-client = { path = "../crates/baton-client" }
 baton-credential = { path = "../crates/baton-credential" }
 baton-domain = { path = "../crates/baton-domain" }
 baton-store = { path = "../crates/baton-store" }
-tauri = { version = "2", features = [] }
-tokio = { version = "1", features = ["sync"] }
+tauri = { version = "2", features = ["tray-icon"] }
+tokio = { version = "1", features = ["sync", "time"] }
