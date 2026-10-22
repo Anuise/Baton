@@ -30,3 +30,6 @@
 
 ## 7. 重犯回報靜默丟棄 workspace_id（票 38）
 - `POST /api/v1/knowledge/{id}/recurrences` 只帶 `workspace_id`、不帶 `task_id` 時，`crates/baton-api/src/guards.rs` 的 `report` 會靜默丟棄 `workspace_id`。改為保存或明確回 400。
+
+## 8. 訊息字串內多餘空白（票 35）
+- `crates/baton-api/src/agent.rs:436` 的 `requires_decision` 回應訊息中間夾了約 17 個空白，改用 `\` 續行或刪除。
