@@ -171,6 +171,9 @@ pub enum ReferenceKind {
     Goal,
     /// 這個 Workspace 的授權 revision（`target` 是 Workspace 識別）。
     Authorization,
+    /// 同一個 Workspace 內的裁定請求（`version` 是引用時請求的內容版本）：Task 依它的建議（假設）或答案進行（票 50）。
+    /// 使用者的裁定與建議不同時，假設被推翻，這個引用就失效。
+    Decision,
 }
 
 impl ReferenceKind {
@@ -179,6 +182,7 @@ impl ReferenceKind {
             ReferenceKind::TaskContract => "task_contract",
             ReferenceKind::Goal => "goal",
             ReferenceKind::Authorization => "authorization",
+            ReferenceKind::Decision => "decision",
         }
     }
 }
@@ -230,6 +234,24 @@ pub struct ContractContent {
     /// 「完成與驗證條件」中可由 Runtime 機械判定的部分（票 13）；沒有宣告時只能由使用者手動接受。
     #[serde(default)]
     pub verification_checks: Vec<VerificationCheck>,
+}
+
+impl ContractContent {
+    /// 已填寫欄位中的全部引用。
+    pub fn references(&self) -> impl Iterator<Item = &Reference> {
+        [&self.objective, &self.inputs, &self.scope, &self.deliverables, &self.done_criteria, &self.blocker_handling]
+            .into_iter()
+            .filter_map(|field| match field {
+                Some(ContractField::Filled { references, .. }) => Some(references.iter()),
+                _ => None,
+            })
+            .flatten()
+    }
+
+    /// 是否以 `decision` 引用了這個裁定請求（依它的建議或答案進行，票 50）。
+    pub fn relies_on_decision(&self, request_id: &str) -> bool {
+        self.references().any(|r| r.kind == ReferenceKind::Decision && r.target == request_id)
+    }
 }
 
 impl ContractContent {
@@ -387,6 +409,25 @@ pub struct TaskContext<'a> {
     pub contracts: &'a [TaskContract],
     /// Controller 提出、尚未回答的裁定請求所阻擋的 Task（票 17）：依賴未決答案的 Task 不能進入 ready 或派工。
     pub decision_holds: &'a [DecisionHold],
+    /// 這個 Workspace 的裁定請求作為 Task 依據（假設）的狀態（票 50）。
+    pub assumptions: &'a [Assumption],
+}
+
+/// 一個裁定請求作為 Task 依據（假設）的狀態（票 50）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Assumption {
+    pub request_id: String,
+    /// 請求目前的內容版本（引用的版本不能超過它）。
+    pub revision: i64,
+    /// 使用者的裁定與建議不同（假設被推翻）時的時間與說明；尚未裁定或接受了建議時為 `None`。
+    pub overturned: Option<Overturn>,
+}
+
+/// 假設被使用者的答案推翻。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overturn {
+    pub decided_at: Timestamp,
+    pub reason: String,
 }
 
 /// 一個 Task 正在等待 Controller 提出的裁定請求的答案（票 17）。
@@ -406,7 +447,37 @@ impl TaskContext<'_> {
         self.contracts.iter().find(|c| c.task_id == task.id && c.version == task.contract_version)
     }
 
-    fn title_of(&self, id: &str) -> String {
+    /// 這個 Task 目前的契約依據了哪些已被推翻的假設：(裁定請求, 推翻)。
+    fn overturned_assumptions(&self, task_id: &str) -> Vec<(&str, &Overturn)> {
+        let Some(contract) = self.task(task_id).and_then(|t| self.contract_of(t)) else { return Vec::new() };
+        contract
+            .content
+            .references()
+            .filter(|r| r.kind == ReferenceKind::Decision)
+            .filter_map(|r| {
+                let assumption = self.assumptions.iter().find(|a| a.request_id == r.target)?;
+                assumption.overturned.as_ref().map(|o| (assumption.request_id.as_str(), o))
+            })
+            .collect()
+    }
+
+    /// 這個 Task 目前的契約依據的假設已被推翻時的說明（票 50）：受影響的 Task 不能准入，它的 Gate 不能通過。
+    pub fn overturned_basis(&self, task_id: &str) -> Option<String> {
+        self.overturned_basis_after(task_id, Timestamp::from_millis(i64::MIN))
+    }
+
+    /// 同 [`Self::overturned_basis`]，但只算 `after` 之後才推翻的假設。
+    pub fn overturned_basis_after(&self, task_id: &str, after: Timestamp) -> Option<String> {
+        let reasons: Vec<String> = self
+            .overturned_assumptions(task_id)
+            .into_iter()
+            .filter(|(_, o)| o.decided_at > after)
+            .map(|(id, o)| format!("{}（裁定請求 {id}）", o.reason))
+            .collect();
+        (!reasons.is_empty()).then(|| reasons.join("；"))
+    }
+
+    pub(crate) fn title_of(&self, id: &str) -> String {
         self.task(id).map_or_else(|| id.to_string(), |t| format!("「{}」（{}）", t.title, t.id))
     }
 
@@ -439,6 +510,14 @@ impl TaskContext<'_> {
                         .then(|| format!("授權沒有 revision {}（目前生效的是 {}）", reference.version, current.revision)),
                 }
             }
+            ReferenceKind::Decision => match self.assumptions.iter().find(|a| a.request_id == reference.target) {
+                None => Some("找不到這個裁定請求（引用只能指向同一個 Workspace 內的請求）".into()),
+                Some(a) if reference.version > a.revision => {
+                    Some(format!("裁定請求沒有版本 {}（目前最新是 {}）", reference.version, a.revision))
+                }
+                Some(Assumption { overturned: Some(o), .. }) => Some(format!("依據的假設已被使用者推翻：{}", o.reason)),
+                Some(_) => None,
+            },
         }
     }
 }
@@ -831,6 +910,7 @@ mod tests {
         dependencies: Vec<Dependency>,
         contracts: Vec<TaskContract>,
         holds: Vec<DecisionHold>,
+        assumptions: Vec<Assumption>,
         events: Vec<DomainEvent>,
     }
 
@@ -851,6 +931,7 @@ mod tests {
                 dependencies: vec![],
                 contracts: vec![],
                 holds: vec![],
+                assumptions: vec![],
                 events: vec![],
             }
         }
@@ -872,6 +953,7 @@ mod tests {
                 dependencies: &self.dependencies,
                 contracts: &self.contracts,
                 decision_holds: &self.holds,
+                assumptions: &self.assumptions,
             }
         }
 
@@ -1187,6 +1269,40 @@ mod tests {
         assert_eq!(missing.len(), 6, "{missing:#?}");
         assert!(missing.iter().all(|m| m.code == MissingCode::ReferenceInvalid && m.field == Some(ContractFieldName::Inputs)));
         assert!(missing[0].message.contains("task_contract:dep@2"));
+    }
+
+    #[test]
+    fn a_task_built_on_an_overturned_assumption_cannot_be_admitted() {
+        let mut world = World::with_goal();
+        world.assumptions = vec![
+            Assumption { request_id: "dr_open".into(), revision: 1, overturned: None },
+            Assumption {
+                request_id: "dr_rest".into(),
+                revision: 2,
+                overturned: Some(Overturn { decided_at: T2, reason: "使用者選了 gRPC，不是建議的 REST".into() }),
+            },
+        ];
+        let mut content = complete();
+        content.inputs = filled_with(
+            "依據裁定",
+            vec![
+                reference(ReferenceKind::Decision, "dr_open", 1), // 還沒裁定：照假設先做
+                reference(ReferenceKind::Decision, "dr_open", 2), // 沒有這個版本
+                reference(ReferenceKind::Decision, "dr_none", 1), // 沒有這個請求
+                reference(ReferenceKind::Decision, "dr_rest", 1), // 假設已被推翻
+            ],
+        );
+        world.add_task("t1", content);
+        world.add_task("t2", complete());
+
+        let missing = world.missing_of("t1");
+        assert_eq!(missing.len(), 3, "{missing:#?}");
+        assert!(missing.iter().all(|m| m.code == MissingCode::ReferenceInvalid));
+        assert!(missing[2].message.contains("decision:dr_rest@1") && missing[2].message.contains("gRPC"), "{missing:#?}");
+        let ctx = world.ctx();
+        assert!(ctx.overturned_basis("t1").unwrap().contains("gRPC"));
+        assert_eq!(ctx.overturned_basis("t2"), None, "沒有依據這個假設的 Task 不受影響");
+        assert!(world.missing_of("t2").is_empty());
     }
 
     #[test]
