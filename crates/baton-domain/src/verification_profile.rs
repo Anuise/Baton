@@ -1,4 +1,4 @@
-//! Verification Profile、Feature Map 與 CLI／API 驗證的判定（票 45，spec D-29）。
+//! Verification Profile、Feature Map 與 CLI／API、web 驗證的判定（票 45、46，spec D-29）。
 //!
 //! 純邏輯、無 I/O。驗證檢查的是真實介面的行為，不是 Worker 的說法：
 //! - Profile 是 Workspace 的版本化內容（只追加）：doctor、啟動命令、就緒條件、資料準備、旅程（操作 + 程式斷言）、
@@ -9,6 +9,10 @@
 //! - Evidence Bundle 綁定 build、candidate revision、需求（Task 契約版本）與 Profile 版本；只追加、不可修改。
 //! - 新 Profile 版本要實際跑過至少一條代表旅程並通過才算「已驗證可用」；未覆蓋的範圍（Feature Map 中沒有旅程的
 //!   功能與明確宣告的未覆蓋範圍）隨 Profile 與每份 Evidence Bundle 一起標示。
+//! - web（票 46）：瀏覽器操作之後觀察當前畫面；需要語意判斷的斷言交給受限的 judge，輸入只有當前畫面與固定預期。
+//!   模型限流或無法使用是證據不足（`inconclusive`），不是產品缺陷。秘密只以參照（`{{secret:KEY}}`）出現在 Profile 中，
+//!   值只在 Runner 執行操作時代入，證據與 judge 的輸入都以值遮蔽。測試 persona（扮演的角色）與登入身分（實際的帳號）
+//!   分開宣告、分開綁定到旅程；登入身分要以 `check` 步驟證明實際登入的是誰，不能因 persona 的名稱推定權限。
 
 use serde::{Deserialize, Serialize};
 
@@ -50,14 +54,26 @@ pub const REDACTED: &str = "[已遮蔽]";
 /// 操作中可使用的佔位字：本次驗證的識別與它專屬的狀態目錄（清理只移除這個目錄）。
 pub const PLACEHOLDER_RUN_ID: &str = "{{run_id}}";
 pub const PLACEHOLDER_STATE_DIR: &str = "{{state_dir}}";
+/// 秘密參照的佔位字：`{{secret:KEY}}`，KEY 是 Profile `secrets` 中宣告的識別。
+pub const PLACEHOLDER_SECRET_PREFIX: &str = "{{secret:";
+/// 一次驗證預設最多呼叫幾次語意 judge（模型呼叫）。
+pub const DEFAULT_MAX_MODEL_CALLS: u32 = 20;
+/// 交給語意 judge 的畫面文字上限（字元數，保留開頭）。
+pub const JUDGE_PAGE_TEXT_MAX_CHARS: usize = 20_000;
+/// 單一證據 Artifact（截圖、trace、錄影）的大小上限（位元組）。
+pub const EVIDENCE_ARTIFACT_MAX_BYTES: usize = 50 * 1024 * 1024;
+/// 證據 Artifact 在成果儲存中的子目錄。
+pub const EVIDENCE_ARTIFACTS_DIR: &str = "verification";
 
 // ---------------------------------------------------------------- Profile 內容
 
-/// 受驗的介面；本票只有 CLI／API（web 是票 46，mobile 延後）。
+/// 受驗的介面：CLI／API（票 45）與 web（票 46）；mobile 延後。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Interface {
     CliApi,
+    /// 以 Playwright 為基礎的瀏覽器操作；也可以混用命令與 HTTP（例如以 API 準備資料）。
+    Web,
 }
 
 /// 一個操作：Adapter 只負責執行並回報觀察，不做判定。
@@ -83,8 +99,47 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
     },
-    /// 需要人工或語意判斷的步驟：CLI／API Adapter 無法自動化，判定為 `automation_unsupported`。
+    /// 瀏覽器操作（只用於 `web` 介面）；之後觀察當前畫面。
+    Browser {
+        action: BrowserAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+    },
+    /// 需要人工判斷的步驟：Adapter 無法自動化，判定為 `automation_unsupported`。
     Manual { instruction: String },
+}
+
+/// 瀏覽器操作；`fill` 的文字可以用 `{{secret:KEY}}` 引用秘密。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BrowserAction {
+    Goto { url: String },
+    Click { selector: String },
+    Fill { selector: String, text: String },
+    Press { selector: String, key: String },
+    WaitFor { selector: String },
+}
+
+impl BrowserAction {
+    fn describe(&self) -> String {
+        match self {
+            BrowserAction::Goto { url } => format!("瀏覽器前往 {url}"),
+            BrowserAction::Click { selector } => format!("瀏覽器點擊「{selector}」"),
+            BrowserAction::Fill { selector, text } => format!("瀏覽器在「{selector}」輸入「{text}」"),
+            BrowserAction::Press { selector, key } => format!("瀏覽器在「{selector}」按下 {key}"),
+            BrowserAction::WaitFor { selector } => format!("瀏覽器等待「{selector}」出現"),
+        }
+    }
+
+    fn selector(&self) -> Option<&str> {
+        match self {
+            BrowserAction::Goto { .. } => None,
+            BrowserAction::Click { selector }
+            | BrowserAction::Fill { selector, .. }
+            | BrowserAction::Press { selector, .. }
+            | BrowserAction::WaitFor { selector } => Some(selector),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,14 +157,56 @@ impl Operation {
                 format!("執行「{}」", line.join(" "))
             }
             Operation::Http { method, url, .. } => format!("{method} {url}"),
+            Operation::Browser { action, .. } => action.describe(),
             Operation::Manual { instruction } => format!("人工步驟：{instruction}"),
         }
     }
 
     fn timeout_ms(&self) -> Option<u64> {
         match self {
-            Operation::Command { timeout_ms, .. } | Operation::Http { timeout_ms, .. } => *timeout_ms,
+            Operation::Command { timeout_ms, .. } | Operation::Http { timeout_ms, .. } | Operation::Browser { timeout_ms, .. } => {
+                *timeout_ms
+            }
             Operation::Manual { .. } => None,
+        }
+    }
+
+    /// 這個操作的全部文字欄位（用於找出秘密參照）。
+    fn texts(&self) -> Vec<&str> {
+        match self {
+            Operation::Command { program, args, .. } => std::iter::once(program.as_str()).chain(args.iter().map(String::as_str)).collect(),
+            Operation::Http { url, headers, body, .. } => std::iter::once(url.as_str())
+                .chain(headers.iter().map(|h| h.value.as_str()))
+                .chain(body.as_deref())
+                .collect(),
+            Operation::Browser { action, .. } => match action {
+                BrowserAction::Goto { url } => vec![url],
+                BrowserAction::Fill { selector, text } => vec![selector, text],
+                BrowserAction::Press { selector, key } => vec![selector, key],
+                BrowserAction::Click { selector } | BrowserAction::WaitFor { selector } => vec![selector],
+            },
+            Operation::Manual { instruction } => vec![instruction],
+        }
+    }
+
+    /// 這個操作引用的秘密識別（`{{secret:KEY}}`），依出現順序、不重複。
+    pub fn secret_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for text in self.texts() {
+            for key in secret_keys_in(text) {
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+        }
+        keys
+    }
+
+    /// 瀏覽器 `fill` 的 selector（輸入了秘密時，截圖要遮住這個欄位）。
+    pub fn filled_selector(&self) -> Option<&str> {
+        match self {
+            Operation::Browser { action: BrowserAction::Fill { selector, .. }, .. } => Some(selector),
+            _ => None,
         }
     }
 
@@ -133,6 +230,12 @@ pub enum Assertion {
     NotContains { text: String },
     /// 輸出或本文是 JSON，`pointer`（RFC 6901）指到的值等於 `value`。
     JsonEquals { pointer: String, value: serde_json::Value },
+    /// 瀏覽器：這個 selector 對應的元素在當前畫面上可見。
+    Visible { selector: String },
+    /// 瀏覽器：當前網址包含這段文字。
+    UrlContains { text: String },
+    /// 瀏覽器：需要理解畫面語意時的受限 judge。輸入只有當前畫面與這段固定預期，不採信任何行動者的敘述。
+    Judge { expectation: String },
 }
 
 impl Assertion {
@@ -143,6 +246,9 @@ impl Assertion {
             Assertion::Contains { text } => format!("包含「{text}」"),
             Assertion::NotContains { text } => format!("不包含「{text}」"),
             Assertion::JsonEquals { pointer, value } => format!("JSON {pointer} 等於 {value}"),
+            Assertion::Visible { selector } => format!("「{selector}」可見"),
+            Assertion::UrlContains { text } => format!("網址包含「{text}」"),
+            Assertion::Judge { expectation } => format!("語意判斷：{expectation}"),
         }
     }
 }
@@ -191,7 +297,38 @@ pub struct Journey {
     pub title: String,
     #[serde(default)]
     pub representative: bool,
+    /// 測試 persona（扮演的角色）；只是背景說明，不帶任何權限。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// 登入身分（實際登入的帳號）；與 persona 分開綁定。沒有時以未登入狀態執行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
     pub steps: Vec<Step>,
+}
+
+/// 秘密參照：Profile 與資料庫只保存參照（例如 `env:SHOP_PASSWORD`），值只在 Runner 執行操作時解析。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretRef {
+    pub key: String,
+    pub reference: String,
+}
+
+/// 測試 persona：旅程扮演的角色與目的（給 judge 的領域背景）。名稱不代表任何權限。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Persona {
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// 登入身分：實際登入應用程式的帳號。`login` 執行登入（以秘密參照輸入帳密），`check` 證明實際登入的是誰。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub key: String,
+    pub title: String,
+    pub login: Vec<Step>,
+    pub check: Step,
 }
 
 /// Feature Map 的一項：功能、對應的驗收準則，以及驗證它的旅程（空的就是未覆蓋）。
@@ -221,6 +358,35 @@ pub struct EvidencePolicy {
     /// 在證據（輸出、操作描述）中遮蔽的文字，例如測試用的權杖。
     #[serde(default)]
     pub redact: Vec<String>,
+    /// 瀏覽器截圖的保存時機。
+    #[serde(default, skip_serializing_if = "ScreenshotPolicy::is_default")]
+    pub screenshots: ScreenshotPolicy,
+    /// 保存瀏覽器 trace（Session 中輸入過秘密時不保存）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trace: bool,
+    /// 保存瀏覽器錄影（Session 中輸入過秘密時不保存）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub video: bool,
+    /// 截圖時遮住的 selector（輸入過秘密的欄位會自動加入）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mask: Vec<String>,
+}
+
+/// 瀏覽器截圖的保存時機。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotPolicy {
+    /// 只保存沒有通過的步驟的截圖。
+    #[default]
+    OnFailure,
+    EveryStep,
+    Off,
+}
+
+impl ScreenshotPolicy {
+    fn is_default(&self) -> bool {
+        *self == ScreenshotPolicy::default()
+    }
 }
 
 fn default_output_max_chars() -> usize {
@@ -229,7 +395,14 @@ fn default_output_max_chars() -> usize {
 
 impl Default for EvidencePolicy {
     fn default() -> Self {
-        Self { output_max_chars: DEFAULT_OUTPUT_MAX_CHARS, redact: Vec::new() }
+        Self {
+            output_max_chars: DEFAULT_OUTPUT_MAX_CHARS,
+            redact: Vec::new(),
+            screenshots: ScreenshotPolicy::default(),
+            trace: false,
+            video: false,
+            mask: Vec::new(),
+        }
     }
 }
 
@@ -239,15 +412,26 @@ pub struct VerificationBudget {
     /// 最多執行幾次操作（含就緒重試，不含 teardown）；用盡後其餘步驟判定為 `budget_exhausted`。
     #[serde(default = "default_max_operations")]
     pub max_operations: u32,
+    /// 最多呼叫幾次語意 judge（模型呼叫）；用盡後需要 judge 的斷言判定為 `budget_exhausted`。
+    #[serde(default = "default_max_model_calls", skip_serializing_if = "is_default_max_model_calls")]
+    pub max_model_calls: u32,
 }
 
 fn default_max_operations() -> u32 {
     DEFAULT_MAX_OPERATIONS
 }
 
+fn default_max_model_calls() -> u32 {
+    DEFAULT_MAX_MODEL_CALLS
+}
+
+fn is_default_max_model_calls(value: &u32) -> bool {
+    *value == DEFAULT_MAX_MODEL_CALLS
+}
+
 impl Default for VerificationBudget {
     fn default() -> Self {
-        Self { max_operations: DEFAULT_MAX_OPERATIONS }
+        Self { max_operations: DEFAULT_MAX_OPERATIONS, max_model_calls: DEFAULT_MAX_MODEL_CALLS }
     }
 }
 
@@ -286,11 +470,28 @@ pub struct ProfileDefinition {
     pub feature_map: Vec<Feature>,
     #[serde(default)]
     pub uncovered: Vec<UncoveredArea>,
+    /// 秘密參照（票 46）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<SecretRef>,
+    /// 測試 persona（票 46）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub personas: Vec<Persona>,
+    /// 登入身分（票 46）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<Identity>,
 }
 
 impl ProfileDefinition {
     pub fn journey(&self, key: &str) -> Option<&Journey> {
         self.journeys.iter().find(|j| j.key == key)
+    }
+
+    pub fn persona(&self, key: &str) -> Option<&Persona> {
+        self.personas.iter().find(|p| p.key == key)
+    }
+
+    pub fn identity(&self, key: &str) -> Option<&Identity> {
+        self.identities.iter().find(|i| i.key == key)
     }
 
     pub fn representative_journeys(&self) -> Vec<&Journey> {
@@ -384,6 +585,21 @@ fn check_operation(operation: &Operation, label: &str) -> Result<(), ProfileErro
             }
             Ok(())
         }
+        Operation::Browser { action, .. } => {
+            if let BrowserAction::Goto { url } = action {
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err(invalid(format!("{label}的網址必須以 http:// 或 https:// 開頭")));
+                }
+            }
+            if let Some(selector) = action.selector() {
+                check_text(selector, &format!("{label}的 selector"), true)?;
+            }
+            match action {
+                BrowserAction::Fill { text, .. } => check_text(text, &format!("{label}的輸入文字"), false),
+                BrowserAction::Press { key, .. } => check_text(key, &format!("{label}的按鍵"), true),
+                _ => Ok(()),
+            }
+        }
         Operation::Manual { instruction } => check_text(instruction, &format!("{label}的說明"), true),
     }
 }
@@ -408,17 +624,30 @@ fn check_step(step: &Step, label: &str) -> Result<(), ProfileError> {
                 return Err(invalid(format!("{label}至少要有一個程式斷言；驗證不能只看操作有沒有執行")));
             }
             let is_http = matches!(operation, Operation::Http { .. });
+            let is_browser = matches!(operation, Operation::Browser { .. });
             for assertion in &step.assertions {
                 match assertion {
-                    Assertion::ExitCode { .. } if is_http => {
-                        return Err(invalid(format!("{label}是 HTTP 請求，不能斷言結束碼")));
+                    Assertion::ExitCode { .. } if is_http || is_browser => {
+                        return Err(invalid(format!("{label}不是命令，不能斷言結束碼")));
                     }
-                    Assertion::Status { .. } if !is_http => {
+                    Assertion::Status { .. } if !(is_http || is_browser) => {
                         return Err(invalid(format!("{label}是命令，不能斷言 HTTP 狀態碼")));
                     }
-                    Assertion::Contains { text } | Assertion::NotContains { text } if text.is_empty() => {
+                    Assertion::JsonEquals { .. } if is_browser => {
+                        return Err(invalid(format!("{label}是瀏覽器操作，不能斷言 JSON；請改用畫面文字或語意判斷")));
+                    }
+                    Assertion::Visible { .. } | Assertion::UrlContains { .. } | Assertion::Judge { .. } if !is_browser => {
+                        return Err(invalid(format!("{label}不是瀏覽器操作，不能斷言畫面")));
+                    }
+                    Assertion::Contains { text } | Assertion::NotContains { text } | Assertion::UrlContains { text }
+                        if text.is_empty() =>
+                    {
                         return Err(invalid(format!("{label}的文字斷言不能空白")));
                     }
+                    Assertion::Visible { selector } if selector.trim().is_empty() => {
+                        return Err(invalid(format!("{label}的 selector 不能空白")));
+                    }
+                    Assertion::Judge { expectation } => check_text(expectation, &format!("{label}的語意判斷預期"), true)?,
                     Assertion::JsonEquals { pointer, .. } if !(pointer.is_empty() || pointer.starts_with('/')) => {
                         return Err(invalid(format!("{label}的 JSON pointer「{pointer}」必須是空字串或以 / 開頭")));
                     }
@@ -532,6 +761,97 @@ pub fn validate(definition: &ProfileDefinition) -> Result<(), ProfileError> {
     for area in &definition.uncovered {
         check_text(&area.area, "未覆蓋範圍", true)?;
         check_text(&area.reason, &format!("未覆蓋範圍「{}」的原因", area.area), true)?;
+    }
+    check_secrets_personas_identities(definition)
+}
+
+/// 秘密參照的格式：`env:NAME`（Runtime 的環境變數）。
+fn valid_secret_reference(reference: &str) -> bool {
+    reference.strip_prefix("env:").is_some_and(|name| {
+        !name.is_empty()
+            && name.len() <= 128
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+    })
+}
+
+/// Profile 中全部的操作（含登入身分的登入與核對、teardown）。
+fn all_operations(definition: &ProfileDefinition) -> Vec<&Operation> {
+    let steps = definition
+        .doctor
+        .iter()
+        .chain(definition.readiness.iter().map(|r| &r.step))
+        .chain(&definition.setup)
+        .chain(definition.journeys.iter().flat_map(|j| &j.steps))
+        .chain(definition.identities.iter().flat_map(|i| i.login.iter().chain(std::iter::once(&i.check))));
+    steps.map(|s| &s.operation).chain(&definition.teardown).collect()
+}
+
+/// 票 46 的檢查：瀏覽器操作只用於 web 介面；秘密參照都有宣告；persona 與登入身分分開宣告，旅程引用的都存在；
+/// 登入身分一定有核對實際身分的 `check` 步驟。
+fn check_secrets_personas_identities(definition: &ProfileDefinition) -> Result<(), ProfileError> {
+    let operations = all_operations(definition);
+    if definition.interface != Interface::Web && operations.iter().any(|o| matches!(o, Operation::Browser { .. })) {
+        return Err(invalid("只有 web 介面的 Profile 可以使用瀏覽器操作"));
+    }
+    check_count(&definition.secrets, "秘密參照")?;
+    for secret in &definition.secrets {
+        if !valid_key(&secret.key) {
+            return Err(invalid(format!("秘密識別「{}」只能用小寫英數、_ 與 -（最多 {KEY_MAX_CHARS} 字）", secret.key)));
+        }
+        if !valid_secret_reference(&secret.reference) {
+            return Err(invalid(format!(
+                "秘密「{}」的參照必須是 env:<環境變數名稱>；Profile 只保存參照，不保存秘密的值",
+                secret.key
+            )));
+        }
+    }
+    check_unique(definition.secrets.iter().map(|s| s.key.as_str()), "秘密")?;
+    for operation in &operations {
+        if let Some(missing) = operation.secret_keys().into_iter().find(|k| !definition.secrets.iter().any(|s| &s.key == k)) {
+            return Err(invalid(format!("操作引用的秘密「{missing}」沒有在 secrets 中宣告")));
+        }
+    }
+    check_count(&definition.personas, "persona")?;
+    for persona in &definition.personas {
+        if !valid_key(&persona.key) {
+            return Err(invalid(format!("persona 識別「{}」只能用小寫英數、_ 與 -（最多 {KEY_MAX_CHARS} 字）", persona.key)));
+        }
+        check_text(&persona.title, &format!("persona「{}」的標題", persona.key), true)?;
+        check_text(&persona.description, &format!("persona「{}」的說明", persona.key), false)?;
+    }
+    check_unique(definition.personas.iter().map(|p| p.key.as_str()), "persona")?;
+    check_count(&definition.identities, "登入身分")?;
+    for identity in &definition.identities {
+        if !valid_key(&identity.key) {
+            return Err(invalid(format!("登入身分識別「{}」只能用小寫英數、_ 與 -（最多 {KEY_MAX_CHARS} 字）", identity.key)));
+        }
+        let label = format!("登入身分「{}」", identity.key);
+        check_text(&identity.title, &format!("{label}的標題"), true)?;
+        if identity.login.is_empty() {
+            return Err(invalid(format!("{label}至少要有一個登入步驟")));
+        }
+        check_count(&identity.login, &format!("{label}的登入步驟"))?;
+        for step in &identity.login {
+            check_step(step, &format!("{label}的登入步驟"))?;
+            if matches!(step.operation, Operation::Manual { .. }) {
+                return Err(invalid(format!("{label}的登入步驟必須可以自動執行")));
+            }
+        }
+        check_unique(identity.login.iter().map(|s| s.key.as_str()), &format!("{label}的登入步驟"))?;
+        check_step(&identity.check, &format!("{label}的身分核對"))?;
+        if matches!(identity.check.operation, Operation::Manual { .. }) {
+            return Err(invalid(format!("{label}的身分核對必須可以自動執行；不能只憑名稱推定登入的是誰")));
+        }
+    }
+    check_unique(definition.identities.iter().map(|i| i.key.as_str()), "登入身分")?;
+    for journey in &definition.journeys {
+        if let Some(persona) = journey.persona.as_deref().filter(|p| definition.persona(p).is_none()) {
+            return Err(invalid(format!("旅程「{}」引用的 persona「{persona}」不存在", journey.key)));
+        }
+        if let Some(identity) = journey.identity.as_deref().filter(|i| definition.identity(i).is_none()) {
+            return Err(invalid(format!("旅程「{}」引用的登入身分「{identity}」不存在", journey.key)));
+        }
     }
     Ok(())
 }
@@ -785,13 +1105,33 @@ pub enum Phase {
     Start,
     Readiness,
     Setup,
+    /// 旅程開始前，以旅程綁定的登入身分登入（票 46）；未通過是 `auth_blocked`。
+    Login,
+    /// 核對實際登入的身分（票 46）；未通過是 `auth_blocked`。
+    Identity,
     Journey,
     Teardown,
+}
+
+/// 一個語意 judge 斷言的結果（由 Runtime 呼叫 judge 後轉成這個型別）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Judgement {
+    Decided { satisfied: bool, rationale: String },
+    /// 模型限流：無法判定，不是產品缺陷。
+    RateLimited,
+    /// 模型無法使用（沒有可用帳號、回應無法解讀等）。
+    Unavailable { reason: String },
+    /// 模型呼叫預算已用盡，沒有呼叫。
+    BudgetExhausted,
 }
 
 /// Adapter 執行操作後觀察到的事實（Domain 不依賴 Port，由 Runtime 轉成這個型別）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Observation {
+    /// 瀏覽器操作之後的當前畫面（票 46）。`visible` 是 (selector, 是否可見)；`judgements` 依步驟中語意判斷斷言的順序。
+    Page { url: String, status: Option<u16>, text: String, visible: Vec<(String, bool)>, judgements: Vec<Judgement> },
+    /// 瀏覽器操作本身沒有完成（例如找不到元素）；`error` 是引擎的錯誤名稱。
+    ActionFailed { error: String, message: String },
     Exited { code: i32, output: String },
     /// 程序被強制結束而沒有結束碼。
     Terminated { output: String },
@@ -840,7 +1180,7 @@ pub struct StepRecord {
 /// 遮蔽與截斷：先遮蔽政策列出的文字，再保留結尾的 `max` 個字元。
 pub fn sanitize(text: &str, policy: &EvidencePolicy) -> String {
     let mut text = text.to_string();
-    for secret in &policy.redact {
+    for secret in policy.redact.iter().filter(|s| !s.is_empty()) {
         text = text.replace(secret.as_str(), REDACTED);
     }
     let count = text.chars().count();
@@ -858,7 +1198,12 @@ pub fn substitute(raw: &str, run_id: &str, state_dir: &str) -> String {
 
 /// 代換一個操作中所有欄位的佔位字。
 pub fn bind_operation(operation: &Operation, run_id: &str, state_dir: &str) -> Operation {
-    let s = |raw: &str| substitute(raw, run_id, state_dir);
+    map_operation(operation, |raw| substitute(raw, run_id, state_dir))
+}
+
+/// 以 `f` 轉換操作中所有可以含佔位字的欄位（HTTP 方法與標頭名稱除外）。
+fn map_operation(operation: &Operation, f: impl Fn(&str) -> String) -> Operation {
+    let s = |raw: &str| f(raw);
     match operation {
         Operation::Command { program, args, timeout_ms } => Operation::Command {
             program: s(program),
@@ -872,14 +1217,49 @@ pub fn bind_operation(operation: &Operation, run_id: &str, state_dir: &str) -> O
             body: body.as_deref().map(s),
             timeout_ms: *timeout_ms,
         },
+        Operation::Browser { action, timeout_ms } => Operation::Browser {
+            action: match action {
+                BrowserAction::Goto { url } => BrowserAction::Goto { url: s(url) },
+                BrowserAction::Click { selector } => BrowserAction::Click { selector: s(selector) },
+                BrowserAction::Fill { selector, text } => BrowserAction::Fill { selector: s(selector), text: s(text) },
+                BrowserAction::Press { selector, key } => BrowserAction::Press { selector: s(selector), key: s(key) },
+                BrowserAction::WaitFor { selector } => BrowserAction::WaitFor { selector: s(selector) },
+            },
+            timeout_ms: *timeout_ms,
+        },
         Operation::Manual { instruction } => Operation::Manual { instruction: instruction.clone() },
     }
+}
+
+/// 文字中引用的秘密識別（`{{secret:KEY}}`），依出現順序。
+pub fn secret_keys_in(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(PLACEHOLDER_SECRET_PREFIX) {
+        let after = &rest[start + PLACEHOLDER_SECRET_PREFIX.len()..];
+        let Some(end) = after.find("}}") else { break };
+        keys.push(after[..end].to_string());
+        rest = &after[end + 2..];
+    }
+    keys
+}
+
+/// 把秘密的值代入操作（只在 Runner 執行操作的當下使用；結果不得寫入任何紀錄）。`values` 是 (識別, 值)。
+pub fn reveal_secrets(operation: &Operation, values: &[(String, String)]) -> Operation {
+    map_operation(operation, |raw| {
+        let mut text = raw.to_string();
+        for (key, value) in values {
+            text = text.replace(&format!("{PLACEHOLDER_SECRET_PREFIX}{key}}}}}"), value);
+        }
+        text
+    })
 }
 
 fn check_assertion(assertion: &Assertion, observation: &Observation, policy: &EvidencePolicy) -> AssertionResult {
     let text = match observation {
         Observation::Exited { output, .. } => Some(output.as_str()),
         Observation::Responded { body, .. } => Some(body.as_str()),
+        Observation::Page { text, .. } => Some(text.as_str()),
         _ => None,
     };
     let (passed, actual) = match (assertion, observation) {
@@ -887,6 +1267,18 @@ fn check_assertion(assertion: &Assertion, observation: &Observation, policy: &Ev
         (Assertion::Status { equals }, Observation::Responded { status, .. }) => {
             (status == equals, format!("HTTP {status}"))
         }
+        (Assertion::Status { equals }, Observation::Page { status, .. }) => match status {
+            Some(status) => (status == equals, format!("HTTP {status}")),
+            None => (false, "這個 Session 還沒有導覽回應".into()),
+        },
+        (Assertion::Visible { selector }, Observation::Page { visible, .. }) => {
+            match visible.iter().find(|(s, _)| s == selector) {
+                Some((_, true)) => (true, "可見".into()),
+                Some((_, false)) => (false, "不可見或不存在".into()),
+                None => (false, "沒有檢查這個 selector".into()),
+            }
+        }
+        (Assertion::UrlContains { text: wanted }, Observation::Page { url, .. }) => (url.contains(wanted.as_str()), url.clone()),
         (Assertion::Contains { text: wanted }, _) if text.is_some() => {
             let found = text.unwrap_or_default().contains(wanted.as_str());
             (found, if found { "包含".into() } else { "不包含".into() })
@@ -909,6 +1301,36 @@ fn check_assertion(assertion: &Assertion, observation: &Observation, policy: &Ev
     AssertionResult { assertion: assertion.clone(), passed, actual: sanitize(&actual, policy) }
 }
 
+/// 語意判斷斷言的結果；沒有做出判定時另外回傳 (判定, reason_code, engine_code)。
+fn judgement_result(
+    assertion: &Assertion,
+    judgement: Option<&Judgement>,
+    policy: &EvidencePolicy,
+) -> (AssertionResult, Option<(Verdict, &'static str, &'static str)>) {
+    let (passed, actual, problem) = match judgement {
+        Some(Judgement::Decided { satisfied, rationale }) => (*satisfied, rationale.clone(), None),
+        Some(Judgement::RateLimited) => {
+            (false, "模型限流，無法判定".to_string(), Some((Verdict::Inconclusive, "judge_rate_limited", "model:rate_limited")))
+        }
+        Some(Judgement::Unavailable { reason }) => (
+            false,
+            format!("語意判斷無法使用：{reason}"),
+            Some((Verdict::Inconclusive, "judge_unavailable", "model:unavailable")),
+        ),
+        Some(Judgement::BudgetExhausted) => (
+            false,
+            "模型呼叫預算已用盡，沒有判定".to_string(),
+            Some((Verdict::BudgetExhausted, "model_call_budget_exhausted", "model:budget_exhausted")),
+        ),
+        None => (
+            false,
+            "沒有語意判斷的結果".to_string(),
+            Some((Verdict::Inconclusive, "judge_unavailable", "model:unavailable")),
+        ),
+    };
+    (AssertionResult { assertion: assertion.clone(), passed, actual: sanitize(&actual, policy) }, problem)
+}
+
 /// 斷言明確預期這個授權相關的狀態碼（例如測「未登入會被拒絕」）時，401／403 不是授權阻礙。
 fn expects_status(step: &Step, status: u16) -> bool {
     step.assertions.iter().any(|a| matches!(a, Assertion::Status { equals } if *equals == status))
@@ -924,10 +1346,32 @@ pub fn judge_step(
     attempts: u32,
     policy: &EvidencePolicy,
 ) -> StepRecord {
+    // 每個斷言的結果；語意判斷沒有做出判定（限流、無法使用、預算用盡）時另外記下原因，那不是斷言不符
+    let mut judgements = match &observation {
+        Observation::Page { judgements, .. } => judgements.iter(),
+        _ => [].iter(),
+    };
+    let mut undecided: Option<(Verdict, &'static str, &'static str)> = None;
+    let mut decided_failure = false;
     let assertions: Vec<AssertionResult> = match &observation {
-        Observation::Exited { .. } | Observation::Responded { .. } => {
-            step.assertions.iter().map(|a| check_assertion(a, &observation, policy)).collect()
-        }
+        Observation::Exited { .. } | Observation::Responded { .. } | Observation::Page { .. } => step
+            .assertions
+            .iter()
+            .map(|assertion| {
+                let (result, problem) = match assertion {
+                    Assertion::Judge { .. } => judgement_result(assertion, judgements.next(), policy),
+                    _ => (check_assertion(assertion, &observation, policy), None),
+                };
+                match problem {
+                    Some(problem) => {
+                        undecided.get_or_insert(problem);
+                    }
+                    None if !result.passed => decided_failure = true,
+                    None => {}
+                }
+                result
+            })
+            .collect(),
         _ => Vec::new(),
     };
     let all_passed = !assertions.is_empty() && assertions.iter().all(|a| a.passed);
@@ -937,6 +1381,8 @@ pub fn judge_step(
         Phase::Doctor => (Verdict::EnvironmentBlocked, "doctor_failed"),
         Phase::Start | Phase::Readiness => (Verdict::EnvironmentBlocked, "not_ready"),
         Phase::Setup => (Verdict::EnvironmentBlocked, "setup_failed"),
+        Phase::Login => (Verdict::AuthBlocked, "login_failed"),
+        Phase::Identity => (Verdict::AuthBlocked, "identity_not_confirmed"),
         Phase::Teardown => (Verdict::EnvironmentBlocked, "teardown_failed"),
     };
     let (verdict, reason_code, engine_code, output) = match &observation {
@@ -953,6 +1399,23 @@ pub fn judge_step(
                 failed_reason
             };
             (verdict, reason, Some(format!("http:{status}")), body.clone())
+        }
+        // 畫面：程式斷言或語意判斷明確不符才是失敗；只有語意判斷沒有做出判定時，是證據不足或預算用盡
+        Observation::Page { status, text, .. } => {
+            let http = status.map(|s| format!("http:{s}"));
+            let (verdict, reason, engine) = if all_passed {
+                (Verdict::Passed, "assertions_passed", http)
+            } else if let Some(status) = status.filter(|s| matches!(s, 401 | 403) && !expects_status(step, *s)) {
+                (Verdict::AuthBlocked, if status == 401 { "http_unauthorized" } else { "http_forbidden" }, http)
+            } else if let (false, Some((verdict, reason, engine))) = (decided_failure, undecided) {
+                (verdict, reason, Some(engine.to_string()))
+            } else {
+                (failed_reason.0, failed_reason.1, http)
+            };
+            (verdict, reason, engine, text.clone())
+        }
+        Observation::ActionFailed { error, message } => {
+            (Verdict::Inconclusive, "action_failed", Some(format!("playwright:{error}")), message.clone())
         }
         Observation::Terminated { output } => {
             (Verdict::Inconclusive, "operation_terminated", Some("terminated".into()), output.clone())
@@ -1011,17 +1474,26 @@ pub struct JourneyResult {
     pub key: String,
     pub title: String,
     pub representative: bool,
+    /// 旅程扮演的 persona（票 46）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// 旅程實際登入的身分（票 46）；與 persona 分開記錄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
     pub verdict: Verdict,
     pub reason_code: String,
 }
 
-/// 依步驟紀錄判定一條旅程：第一個未通過的步驟決定結果（它之後的步驟沒有執行）。
+/// 依步驟紀錄判定一條旅程：屬於這條旅程的紀錄（瀏覽器啟動、登入、身分核對、旅程步驟）中，
+/// 第一個未通過的決定結果（它之後的步驟沒有執行）；旅程步驟不齊全時是 `inconclusive`。
 pub fn judge_journey(journey: &Journey, steps: &[StepRecord]) -> JourneyResult {
-    let mine: Vec<&StepRecord> = steps.iter().filter(|s| s.phase == Phase::Journey && s.journey.as_deref() == Some(&journey.key)).collect();
-    let (verdict, reason_code) = if mine.len() != journey.steps.len() {
-        (Verdict::Inconclusive, "journey_incomplete".to_string())
-    } else if let Some(first) = mine.iter().find(|s| s.verdict != Verdict::Passed) {
+    let mine: Vec<&StepRecord> =
+        steps.iter().filter(|s| s.phase != Phase::Teardown && s.journey.as_deref() == Some(&journey.key)).collect();
+    let journey_steps = mine.iter().filter(|s| s.phase == Phase::Journey).count();
+    let (verdict, reason_code) = if let Some(first) = mine.iter().find(|s| s.verdict != Verdict::Passed) {
         (first.verdict, first.reason_code.clone())
+    } else if journey_steps != journey.steps.len() {
+        (Verdict::Inconclusive, "journey_incomplete".to_string())
     } else {
         (Verdict::Passed, "all_steps_passed".to_string())
     };
@@ -1029,6 +1501,8 @@ pub fn judge_journey(journey: &Journey, steps: &[StepRecord]) -> JourneyResult {
         key: journey.key.clone(),
         title: journey.title.clone(),
         representative: journey.representative,
+        persona: journey.persona.clone(),
+        identity: journey.identity.clone(),
         verdict,
         reason_code,
     }
@@ -1036,14 +1510,16 @@ pub fn judge_journey(journey: &Journey, steps: &[StepRecord]) -> JourneyResult {
 
 /// 整份驗證的判定（teardown 不影響）：
 /// - 任何旅程是產品缺陷 → `product_failure`（即使另有其他問題）；
-/// - 否則前置階段（build、doctor、啟動、就緒、資料準備）第一個未通過的步驟決定結果；
-/// - 否則第一條未通過的旅程決定結果；
+/// - 否則前置階段（build、doctor、啟動、就緒、資料準備；不屬於任何旅程）第一個未通過的步驟決定結果；
+/// - 否則第一條未通過的旅程決定結果（登入與身分核對屬於旅程）；
 /// - 沒有執行任何旅程 → `inconclusive`（沒有證據不算通過）；全部通過才是 `passed`。
 pub fn aggregate(steps: &[StepRecord], journeys: &[JourneyResult]) -> (Verdict, String) {
     if let Some(failed) = journeys.iter().find(|j| j.verdict == Verdict::ProductFailure) {
         return (Verdict::ProductFailure, failed.reason_code.clone());
     }
-    if let Some(blocked) = steps.iter().find(|s| !matches!(s.phase, Phase::Journey | Phase::Teardown) && s.verdict != Verdict::Passed) {
+    if let Some(blocked) =
+        steps.iter().find(|s| s.journey.is_none() && s.phase != Phase::Teardown && s.verdict != Verdict::Passed)
+    {
         return (blocked.verdict, blocked.reason_code.clone());
     }
     if let Some(first) = journeys.iter().find(|j| j.verdict != Verdict::Passed) {
@@ -1098,8 +1574,68 @@ pub struct EvidenceBundle {
     pub covered_features: Vec<String>,
     pub uncovered: Vec<UncoveredItem>,
     pub cleanup: CleanupRecord,
+    /// 截圖、trace、錄影（票 46）；依政策遮蔽，無法確認不含秘密的不保存。
+    #[serde(default)]
+    pub artifacts: Vec<EvidenceArtifact>,
     pub started_at: Timestamp,
     pub finished_at: Timestamp,
+}
+
+/// 證據 Artifact 的種類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceArtifactKind {
+    Screenshot,
+    Trace,
+    Video,
+}
+
+impl EvidenceArtifactKind {
+    pub fn content_type(self) -> &'static str {
+        match self {
+            EvidenceArtifactKind::Screenshot => "image/png",
+            EvidenceArtifactKind::Trace => "application/zip",
+            EvidenceArtifactKind::Video => "video/webm",
+        }
+    }
+}
+
+/// 一個證據 Artifact：保存在成果儲存（`storage_path` 相對於成果根目錄，內容定址）；沒有保存時記下原因。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceArtifact {
+    pub kind: EvidenceArtifactKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journey: Option<String>,
+    /// 截圖所屬的步驟。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// 沒有保存的原因：`secret_detected`（內容含秘密的值）、`secret_input_recorded`（輸入過秘密的 Session 的
+    /// trace 或錄影，無法確認已遮蔽）、`too_large`、`storage_failed`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withheld: Option<String>,
+}
+
+/// 證據 Artifact 依政策不能保存的原因（`None` 是可以保存）。不能假設引擎的 trace 與錄影已經遮蔽：
+/// Session 中輸入過秘密時一律不保存 trace 與錄影；任何內容含有秘密的值也不保存。
+pub fn withhold_reason(kind: EvidenceArtifactKind, bytes: &[u8], secrets: &[String], secret_entered: bool) -> Option<&'static str> {
+    if bytes.len() > EVIDENCE_ARTIFACT_MAX_BYTES {
+        return Some("too_large");
+    }
+    let contains = |needle: &[u8]| !needle.is_empty() && bytes.windows(needle.len()).any(|w| w == needle);
+    if secrets.iter().any(|s| contains(s.as_bytes())) {
+        return Some("secret_detected");
+    }
+    if secret_entered && matches!(kind, EvidenceArtifactKind::Trace | EvidenceArtifactKind::Video) {
+        return Some("secret_input_recorded");
+    }
+    None
 }
 
 /// Profile 版本是否已被證明可用：有一份這個版本的 Evidence Bundle，其中有代表旅程通過。回傳證明它的 Bundle 識別。
