@@ -367,4 +367,25 @@ describe("左側 Workspace 清單", () => {
     expect(onOpenTasks).not.toHaveBeenCalled();
     expect(onOpenArtifacts).not.toHaveBeenCalled();
   });
+
+  it("每個 Workspace 都有「對話」入口，不會觸發其他檢視", async () => {
+    const onSelect = vi.fn();
+    const onOpenTasks = vi.fn();
+    const onOpenConversation = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenTasks={onOpenTasks}
+        onOpenConversation={onOpenConversation}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "對話 筆記" }));
+
+    expect(onOpenConversation).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenTasks).not.toHaveBeenCalled();
+  });
 });

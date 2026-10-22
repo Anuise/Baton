@@ -1674,6 +1674,81 @@ export interface BackupClient {
   backupStatus(): Promise<BackupStatus>;
 }
 
+/** 對話輸入的種類：使用者訊息、工作事件（Worker 成果或阻礙）、Controller 的回覆。 */
+export type ConversationTurnKind = "user_message" | "work_event" | "controller_reply";
+
+/** 輸入的處理狀態：已收到待處理、某一輪 Controller 正在處理、已處理。 */
+export type ConversationTurnStatus = "pending" | "processing" | "processed";
+
+/** conversation_turns 的一筆；時間是 UTC 毫秒。 */
+export interface ConversationTurn {
+  id: string;
+  conversation_id: string;
+  seq: number;
+  kind: ConversationTurnKind;
+  content: string;
+  status: ConversationTurnStatus;
+  controller_run_id: string | null;
+  /** 交付給 Controller 的次數；大於 1 表示上一輪中斷後重新交付。 */
+  attempts: number;
+  source: string | null;
+  created_at: number;
+  processed_at: number | null;
+}
+
+export type ControllerRunStatus = "starting" | "running" | "succeeded" | "failed" | "interrupted";
+
+/** Controller 的一輪（一次 `claude -p`）；時間是 UTC 毫秒。 */
+export interface ControllerRun {
+  id: string;
+  conversation_id: string;
+  workspace_id: string;
+  profile_id: string;
+  status: ControllerRunStatus;
+  version: number;
+  command_id: string;
+  prompt: string;
+  working_dir: string;
+  model: string | null;
+  input_turn_ids: string[];
+  agent_session_id: string;
+  resume_native_session_id: string | null;
+  native_session_id: string | null;
+  process: { pid: number; created_at_millis: number; command_hash: string } | null;
+  end_reason: string | null;
+  created_at: number;
+  updated_at: number;
+  started_at: number | null;
+  ended_at: number | null;
+}
+
+/** Workspace 的 Controller 對話（對應 GET /conversation）。 */
+export interface ConversationView {
+  /** 還沒有任何訊息時是 null。 */
+  conversation_id: string | null;
+  /** 有一輪 Controller 正在進行。 */
+  busy: boolean;
+  active_run: ControllerRun | null;
+  /** 不忙碌且有待處理輸入時，預計喚醒 Controller 的時間（UTC 毫秒）。 */
+  next_wake_at: number | null;
+  /** 依 seq 由小到大。 */
+  turns: ConversationTurn[];
+  /** 全部 Controller Run，依建立順序。 */
+  runs: ControllerRun[];
+}
+
+export interface SendMessageResponse {
+  turn: ConversationTurn;
+  busy: boolean;
+}
+
+/** Workspace 的 Controller 長期對話（只有桌面憑證能用）。 */
+export interface ConversationClient {
+  getConversation(workspaceId: string): Promise<ConversationView>;
+  /** 空白（message_empty）、過長（message_too_long）或 Workspace 已封存（workspace_archived）會被拒。 */
+  sendConversationMessage(workspaceId: string, text: string): Promise<SendMessageResponse>;
+}
+
 /** 恢復事件的狀態：等待（第一次立即、之後為退避）、嘗試中、穩定觀察中、已恢復、恢復額度用盡。 */
 export type RecoveryStatus = "waiting" | "attempting" | "observing" | "succeeded" | "exhausted";
 
@@ -1753,7 +1828,8 @@ export type AppClient = RuntimeClient &
   BackupClient &
   RecoveryClient &
   KnowledgeClient &
-  GuardClient;
+  GuardClient &
+  ConversationClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
 export function errorCode(error: unknown): string | null {
@@ -1971,6 +2047,9 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     listRecurrences: (lessonId) => send(`${knowledgePath(lessonId)}/recurrences`),
     reportRecurrence: (lessonId, request) =>
       send(`${knowledgePath(lessonId)}/recurrences`, { method: "POST", body: request }),
+    getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
+    sendConversationMessage: (workspaceId, text) =>
+      send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
   };
 }
 
@@ -2095,6 +2174,9 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     disableGuard: (id, expectedRevision) => call<GuardView>("guard_disable", { id, expectedRevision }),
     listRecurrences: (id) => call<RecurrenceList>("knowledge_recurrences", { id }),
     reportRecurrence: (id, request) => call<Recurrence>("knowledge_report_recurrence", { id, request }),
+    getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
+    sendConversationMessage: (workspaceId, text) =>
+      call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),
   };
 }
 

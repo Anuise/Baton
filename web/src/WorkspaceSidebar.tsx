@@ -11,6 +11,8 @@ interface Props {
   timeZone?: string;
   /** 使用者要設定某個 Workspace 的授權：點「授權設定」，或剛建立完成（建立後直接進入授權設定）。 */
   onSelect?: (workspace: Workspace) => void;
+  /** 使用者要開啟某個 Workspace 與 Controller 的對話。 */
+  onOpenConversation?: (workspace: Workspace) => void;
   /** 使用者要開啟某個 Workspace 的工作面板。 */
   onOpenTasks?: (workspace: Workspace) => void;
   /** 使用者要開啟某個 Workspace 的裁定中心。 */
@@ -32,6 +34,7 @@ export function WorkspaceSidebar({
   client,
   timeZone,
   onSelect,
+  onOpenConversation,
   onOpenTasks,
   onOpenDecisions,
   pendingDecisions,
@@ -162,6 +165,9 @@ export function WorkspaceSidebar({
               <div className="workspace-actions">
                 <button type="button" aria-label={`授權設定 ${workspace.name}`} onClick={() => onSelect?.(workspace)}>
                   授權設定
+                </button>
+                <button type="button" aria-label={`對話 ${workspace.name}`} onClick={() => onOpenConversation?.(workspace)}>
+                  對話
                 </button>
                 <button type="button" aria-label={`工作面板 ${workspace.name}`} onClick={() => onOpenTasks?.(workspace)}>
                   工作面板

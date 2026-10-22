@@ -8,6 +8,7 @@ mod agent;
 mod artifacts;
 mod authorization;
 mod backups;
+mod conversations;
 mod decisions;
 mod external_operations;
 mod guard;
@@ -64,6 +65,7 @@ pub use artifacts::{
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
 pub use backups::{BackupStatus, BackupSummary, BACKUPS_PATH};
+pub use conversations::{conversation_messages_path, conversation_path, PostMessageRequest, PostedMessage};
 pub use external_operations::{external_operations_path, BeginResponse, ExternalOperationList, RecordResponse};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
@@ -232,6 +234,8 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
+        .route(conversations::CONVERSATION_ROUTE, get(conversations::view))
+        .route(conversations::MESSAGES_ROUTE, post(conversations::post_message))
         .route(sessions::SESSIONS_ROUTE, get(sessions::list))
         .route(sessions::SESSION_ROUTE, get(sessions::detail))
         .route(external_operations::EXTERNAL_OPERATIONS_ROUTE, get(external_operations::list))
