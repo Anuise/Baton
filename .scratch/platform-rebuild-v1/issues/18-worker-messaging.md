@@ -1,6 +1,6 @@
 # 18: Worker 間訊息
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R028-18-impl，2026-10-22 16:10）
 Blocked by: 11
 
 **What to build:** 實作 messages 與 message_deliveries：send_message 與 read_inbox 工具（spec D-27），訊息含 message_id、thread_id、correlation_id、類型、寄收者與交付／讀取狀態；每個收件人以 message_id 去重；Run 啟動時附上未讀摘要。訊息不能改變 Task 歸屬或範圍。
