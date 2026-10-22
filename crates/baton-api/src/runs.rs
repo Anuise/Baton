@@ -66,7 +66,8 @@ impl From<RunError> for TaskApiError {
             | RunError::TransitionInvalid { .. }
             | RunError::StaleReport
             | RunError::LeaseNotExpired
-            | RunError::CancelNotRequested => StatusCode::CONFLICT,
+            | RunError::CancelNotRequested
+            | RunError::LaunchHalted => StatusCode::CONFLICT,
         };
         Self::Plain(ApiError { status, code: error.code(), message: error.to_string() })
     }

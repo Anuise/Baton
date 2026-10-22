@@ -3,7 +3,9 @@ import { useEffect, useState } from "react";
 import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
+import { BackupSettings } from "./BackupSettings";
 import { DecisionCenter } from "./DecisionCenter";
+import { ExitProgress } from "./ExitProgress";
 import { KnowledgePage } from "./KnowledgePage";
 import { PlatformPage } from "./PlatformPage";
 import { SchedulingSettings } from "./SchedulingSettings";
@@ -58,6 +60,7 @@ export function App() {
           {client && <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <SchedulingSettings client={client} />}
           {client && <SharedSettingsPage client={client} />}
+          {client && <BackupSettings client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
           {client && opened?.view === "decisions" && (
@@ -72,6 +75,8 @@ export function App() {
           {client && <PlatformPage client={client} />}
         </main>
       </div>
+      {/* 系統匣「完全退出」的停止進度，以覆蓋層顯示 */}
+      {client && <ExitProgress client={client} />}
     </div>
   );
 }

@@ -82,6 +82,9 @@ pub struct TaskContractResponse {
 pub struct ReportAck {
     pub accepted: bool,
     pub kind: ReportKind,
+    /// Runtime 正在完全退出（票 25）：Worker 應儘快保存 checkpoint 並結束；寬限期過後程序樹會被終止。
+    #[serde(default)]
+    pub stop_requested: bool,
 }
 
 fn api_error(status: StatusCode, code: &'static str, message: &str) -> ApiError {
@@ -168,7 +171,9 @@ async fn report(
     let content = content?;
     let kind = content.kind();
     state.store.apply_agent_report(&scope, content, state.clock.now()).await?;
-    Ok(Json(ReportAck { accepted: true, kind }))
+    // 回報的回應是 Runtime 通知 Worker「保存進度並停止」的管道：停止意圖生效時告訴它
+    let stop_requested = state.store.lifecycle_state().await?.stop_intent_active();
+    Ok(Json(ReportAck { accepted: true, kind, stop_requested }))
 }
 
 pub(crate) async fn report_progress(
@@ -287,6 +292,17 @@ pub struct PermissionResponse {
     pub decision_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_revision: Option<i64>,
+    /// 等待裁定時，先前的單次批准為什麼不能用（票 23）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_check: Option<ApprovalCheckView>,
+}
+
+/// 先前的單次批准不能用的原因：`result` 是 `operation_changed`、`target_changed`、`params_changed`、
+/// `request_hash_changed`、`artifact_version_changed`（綁定不符），或 `used_result_unknown`（已用過、結果未知，要先查證）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalCheckView {
+    pub decision_request_id: String,
+    pub result: String,
 }
 
 pub(crate) async fn permission_prompt(
@@ -311,6 +327,7 @@ pub(crate) async fn permission_prompt(
         status: status.to_string(),
         decision_request_id: None,
         authorization_revision: None,
+        approval_check: None,
     };
     Ok(Json(match outcome {
         PermissionOutcome::Allowed { revision, .. } => PermissionResponse {
@@ -323,9 +340,13 @@ pub(crate) async fn permission_prompt(
             decision_request_id: Some(request_id),
             ..response("allow", "approved")
         },
-        PermissionOutcome::Waiting { request_id, message } => PermissionResponse {
+        PermissionOutcome::Waiting { request_id, message, check } => PermissionResponse {
             message: Some(message),
             decision_request_id: Some(request_id),
+            approval_check: check.map(|c| ApprovalCheckView {
+                decision_request_id: c.request_id().to_string(),
+                result: c.code().to_string(),
+            }),
             ..response("deny", "waiting_decision")
         },
         PermissionOutcome::Denied { request_id } => PermissionResponse {

@@ -109,7 +109,12 @@ describe("Runtime 用戶端", () => {
 
     await client.getAuthorization("ws_1");
     await client.summarizeAuthorization("ws_1", grants);
-    await client.confirmAuthorization("ws_1", { templateId: "research_docs", grants, acknowledgedRisk: false });
+    await client.confirmAuthorization("ws_1", {
+      templateId: "research_docs",
+      grants,
+      acknowledgedRisk: false,
+      acknowledgedExpansion: true,
+    });
 
     expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/authorization");
     expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/authorization/summary", {
@@ -120,7 +125,7 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/authorization", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false }),
+      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false, acknowledged_expansion: true }),
     });
   });
 
@@ -131,7 +136,7 @@ describe("Runtime 用戶端", () => {
 
     await client.getAuthorization("ws_1");
     await client.summarizeAuthorization("ws_1", grants);
-    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true });
+    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true, acknowledgedExpansion: false });
 
     expect(invoke).toHaveBeenNthCalledWith(1, "workspace_authorization", { id: "ws_1" });
     expect(invoke).toHaveBeenNthCalledWith(2, "workspace_authorization_summary", { id: "ws_1", grants });
@@ -140,6 +145,7 @@ describe("Runtime 用戶端", () => {
       templateId: null,
       grants,
       acknowledgedRisk: true,
+      acknowledgedExpansion: false,
     });
   });
 
@@ -277,6 +283,24 @@ describe("Runtime 用戶端", () => {
     await client.setSchedulingMode("reserve_handoff");
 
     expect(invoke.mock.calls).toEqual([["scheduling_overview"], ["scheduling_set_mode", { mode: "reserve_handoff" }]]);
+  });
+
+  it("HTTP 版向 /api/v1/backups 取得備份狀態", async () => {
+    const status = { backups: [], latest_drill: null };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(status), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    expect(await client.backupStatus()).toEqual(status);
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/backups");
+  });
+
+  it("Tauri 版透過 backup_status 指令取得備份狀態", async () => {
+    const invoke = vi.fn(async () => ({ backups: [], latest_drill: null }));
+    const client = createTauriClient(invoke as never);
+
+    await client.backupStatus();
+
+    expect(invoke.mock.calls).toEqual([["backup_status"]]);
   });
 
   it("HTTP 版設定方案上限：PUT 到 Profile 的 quota-limits，未設定的視窗送 null", async () => {
@@ -442,6 +466,91 @@ describe("Runtime 用戶端", () => {
       ["setup_acknowledge_notice"],
     ]);
   });
+
+  it("HTTP 版讀取生命週期、完全退出、設定自動續跑與繼續工作", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.lifecycleStatus();
+    await client.requestFullExit();
+    await client.updateWorkspaceLifecycle("ws_1", true);
+    await client.resumeWorkspace("ws_1");
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/lifecycle"],
+      ["/api/v1/lifecycle/exit", { method: "POST" }],
+      [
+        "/api/v1/workspaces/ws_1/lifecycle",
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ auto_resume_after_exit: true }),
+        },
+      ],
+      ["/api/v1/workspaces/ws_1/resume", { method: "POST" }],
+    ]);
+  });
+
+  it("HTTP 版「繼續工作」被拒（停止意圖仍生效）時以 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "stop_intent_active", message: "Runtime 正在完全退出，無法繼續工作" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).resumeWorkspace("ws_1")).rejects.toThrow(
+      "Runtime 正在完全退出，無法繼續工作",
+    );
+  });
+
+  it("HTTP 版沒有桌面程序與系統匣：quitApp 不送請求，完全退出事件不會觸發", async () => {
+    const fetchFn = vi.fn();
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const handler = vi.fn();
+
+    await client.quitApp();
+    const unsubscribe = client.onFullExitRequested(handler);
+    unsubscribe();
+
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("Tauri 版以指令與參數操作生命週期並結束 App", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.lifecycleStatus();
+    await client.requestFullExit();
+    await client.updateWorkspaceLifecycle("ws_1", true);
+    await client.resumeWorkspace("ws_1");
+    await client.quitApp();
+
+    expect(invoke.mock.calls).toEqual([
+      ["lifecycle_status"],
+      ["lifecycle_exit"],
+      ["workspace_lifecycle_update", { workspaceId: "ws_1", autoResumeAfterExit: true }],
+      ["workspace_resume", { workspaceId: "ws_1" }],
+      ["app_quit"],
+    ]);
+  });
+
+  it("Tauri 版監聽系統匣的完全退出事件，取消訂閱時解除監聽", async () => {
+    const unlisten = vi.fn();
+    let emit: () => void = () => {};
+    const listen = vi.fn(async (_event: string, handler: () => void) => {
+      emit = handler;
+      return unlisten;
+    });
+    const handler = vi.fn();
+    const client = createTauriClient(vi.fn() as never, listen);
+
+    const unsubscribe = client.onFullExitRequested(handler);
+    emit();
+    unsubscribe();
+    await vi.waitFor(() => expect(unlisten).toHaveBeenCalledTimes(1));
+
+    expect(listen).toHaveBeenCalledWith("baton://full-exit-requested", expect.any(Function));
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it("Tauri 版以指令與 camelCase 參數操作共同設定", async () => {
     const invoke = vi.fn(async () => ({}));
     const client = createTauriClient(invoke as never);

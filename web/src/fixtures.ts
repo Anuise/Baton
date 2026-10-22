@@ -3,7 +3,12 @@ import type {
   AccountRun,
   AccountScheduling,
   AuthorityTable,
+  BackupStatus,
+  BackupSummary,
+  DrillReport,
   DecisionRequestView,
+  ExitRunResult,
+  LifecycleStatus,
   ImportPreview,
   PlatformResponse,
   QuotaAssessment,
@@ -13,6 +18,7 @@ import type {
   SettingsVersionSummary,
   SetupStatus,
   ToolCheck,
+  WorkspaceLifecycleView,
   VerificationRecord,
   VerificationView,
 } from "./runtimeClient";
@@ -349,6 +355,67 @@ export function schedulingOverview(overrides: Partial<SchedulingOverview> = {}):
   };
 }
 
+/** 測試用的備份摘要：CHECKED_AT 的每日備份，含 2 個成果檔案，同時是每日與每週保留。 */
+export function backupSummary(overrides: Partial<BackupSummary> = {}): BackupSummary {
+  return {
+    id: `${CHECKED_AT}-daily`,
+    trigger: "daily",
+    created_at: CHECKED_AT,
+    artifact_count: 2,
+    retained_as: ["daily", "weekly"],
+    ...overrides,
+  };
+}
+
+/** 生命週期裡的 Workspace：預設不自動續跑、沒有暫停。 */
+export function workspaceLifecycle(overrides: Partial<WorkspaceLifecycleView> = {}): WorkspaceLifecycleView {
+  return {
+    workspace_id: "ws_1",
+    name: "筆記",
+    auto_resume_after_exit: false,
+    paused_since: null,
+    awaiting_resume: false,
+    ...overrides,
+  };
+}
+
+/** 測試用的還原演練結果：演練 backupSummary() 那份備份，五項核對全部通過、沒有中斷的 Run。 */
+export function drillReport(overrides: Partial<DrillReport> = {}): DrillReport {
+  return {
+    backup_id: `${CHECKED_AT}-daily`,
+    backup_created_at: CHECKED_AT,
+    performed_at: CHECKED_AT + 3_600_000,
+    passed: true,
+    checks: [
+      { kind: "restore", passed: true, detail: "已還原到暫存目錄" },
+      { kind: "database_integrity", passed: true, detail: "integrity_check 回報 ok" },
+      { kind: "foreign_keys", passed: true, detail: "沒有違反外鍵的資料" },
+      { kind: "artifact_hashes", passed: true, detail: "2 個成果檔案的 SHA-256 都相符" },
+      { kind: "artifact_relations", passed: true, detail: "成果版本都對得上檔案" },
+    ],
+    interrupted_runs: 0,
+    ...overrides,
+  };
+}
+
+/** 完全退出時 run_1 的停止結果；預設還在等待停止。 */
+export function exitRun(overrides: Partial<ExitRunResult> = {}): ExitRunResult {
+  return { run_id: "run_1", workspace_id: "ws_1", task_id: "task_1", outcome: "pending", ...overrides };
+}
+
+/** 測試用的生命週期：預設 Runtime 運作中、沒有停止意圖、一個 Workspace。 */
+export function lifecycleStatus(overrides: Partial<LifecycleStatus> = {}): LifecycleStatus {
+  return {
+    phase: "running",
+    stop_intent_active: false,
+    timing: { stop_grace_ms: 30_000, kill_confirm_ms: 10_000 },
+    exit: null,
+    active_runs: 0,
+    workspaces: [workspaceLifecycle()],
+    ...overrides,
+  };
+}
+
 /** 測試用的成果雜湊（64 位小寫十六進位）。 */
 export const REPORT_SHA256 = "0123456789abcdef".repeat(4);
 
@@ -370,6 +437,15 @@ export function verificationView(overrides: Partial<VerificationView> = {}): Ver
     artifacts: [{ artifact_id: "art_1", name: "report.md", version: 1, sha256: REPORT_SHA256 }],
     automatic: true,
     records: [],
+    ...overrides,
+  };
+}
+
+/** 測試用的備份狀態：一份備份與一次通過的還原演練。 */
+export function backupStatus(overrides: Partial<BackupStatus> = {}): BackupStatus {
+  return {
+    backups: [backupSummary()],
+    latest_drill: drillReport(),
     ...overrides,
   };
 }

@@ -26,8 +26,10 @@ use tokio::sync::oneshot;
 
 mod agent;
 mod artifacts;
+pub mod backup;
 mod decisions;
 mod knowledge;
+mod lifecycle;
 mod messages;
 mod profiles;
 mod quota;
@@ -40,6 +42,10 @@ pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
 pub use knowledge::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, ScopeRequest};
+pub use lifecycle::{
+    lifecycle_file_path, read_lifecycle_file, write_lifecycle_file, LifecycleApplyError, LifecycleSnapshot,
+    WorkspaceLifecycleOutcome, LIFECYCLE_FILE_NAME,
+};
 pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
@@ -68,6 +74,8 @@ pub enum StoreError {
     Join,
     #[error("資料目錄 {path} 不能使用：{reason}。請改用本機磁碟上的目錄（預設為 %LOCALAPPDATA%\\Baton），或以 BATON_DATA_DIR 指定")]
     UnsupportedLocation { path: PathBuf, reason: RejectedLocation },
+    #[error("套用 migration 之前的備份失敗，沒有套用 migration：{0}")]
+    PreMigrationBackup(String),
     #[error("資料庫的 schema 版本 {found} 比這個程式支援的 {supported} 新，拒絕寫入；請升級程式，不要用舊版修改這份資料")]
     IncompatibleSchema { found: usize, supported: usize },
 }
@@ -593,7 +601,26 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER knowledge_entry_no_delete BEFORE DELETE ON knowledge_entry
         BEGIN SELECT RAISE(ABORT, 'knowledge_entry 不可刪除：撤銷或淘汰只改變狀態'); END;",
     },
-    // 完整裁定中心（票 35，第 18 個 migration）：裁定請求加上目標版本、內容版本、延後、合併與過期，裁定加上處理方式與批次識別。
+    // 桌面生命週期與完全退出（票 25）：Runtime 的停止意圖與最近一次退出的經過只有一列；
+    // 每個 Workspace 的「完全退出後自動續跑」與暫停狀態（沒有列的 Workspace 等同預設：關閉、未暫停）
+    Migration {
+        name: "lifecycle",
+        sql: "CREATE TABLE runtime_lifecycle (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            phase TEXT NOT NULL CHECK (phase IN ('running', 'stopping', 'stopped')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            last_exit TEXT CHECK (last_exit IS NULL OR json_valid(last_exit)),
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE workspace_lifecycle (
+            workspace_id TEXT PRIMARY KEY REFERENCES workspace (id),
+            auto_resume_after_exit INTEGER NOT NULL CHECK (auto_resume_after_exit IN (0, 1)),
+            paused_since INTEGER,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );",
+    },
+    // 完整裁定中心（票 35，第 19 個 migration）：裁定請求加上目標版本、內容版本、延後、合併與過期，裁定加上處理方式與批次識別。
     // SQLite 不能修改既有的 CHECK 約束，所以重建票 22 的四張表：這四張表只互相參照、沒有其他表參照它們，
     // 先建新表、搬資料、由子到父刪除舊表，再改名（外鍵參照會隨改名更新）。既有請求的目標版本取該 Task 目前的契約版本
     // （權限提示另取 Workspace 目前的授權 revision）
@@ -754,6 +781,8 @@ struct Inner {
     writer: Option<Sender<Job>>,
     writer_thread: Option<JoinHandle<()>>,
     reader: Arc<Mutex<Connection>>,
+    /// 資料目錄；備份寫在其下的 `backups/`。
+    data_dir: PathBuf,
     /// 全文檢索（FTS5 + trigram）在開啟時確認可用並已重建索引；否則搜尋退回 LIKE（spec D-26）。
     full_text: bool,
 }
@@ -797,7 +826,7 @@ impl Store {
 
         let mut writer = Connection::open(&db_path)?;
         apply_and_verify(&writer)?;
-        migrate(&mut writer, now)?;
+        migrate(&mut writer, now, Some(data_dir))?;
         // 全文檢索不可用（或被選項關閉）不阻擋啟動：搜尋退回 LIKE 並標示降級
         let full_text = options.full_text_search && knowledge::prepare_full_text(&mut writer).is_ok();
 
@@ -824,6 +853,7 @@ impl Store {
                 writer: Some(sender),
                 writer_thread: Some(thread),
                 reader: Arc::new(Mutex::new(reader)),
+                data_dir: data_dir.to_path_buf(),
                 full_text,
             }),
         })
@@ -1193,7 +1223,10 @@ fn read_pragmas(conn: &Connection) -> StoreResult<PragmaSettings> {
 
 /// 套用尚未套用的 migration，並把版本記進 `schema_migrations`。
 /// 資料庫比程式新時不動它；之後的寫入會被 `ensure_compatible` 拒絕。
-fn migrate(conn: &mut Connection, now: Timestamp) -> StoreResult<()> {
+///
+/// `backup_data_dir` 有值時，對既有的資料庫套用 migration 之前先在該資料目錄建立備份（spec D-18）；
+/// 備份失敗就不套用 migration。還原時不需要（還原的來源本身就是備份）。
+fn migrate(conn: &mut Connection, now: Timestamp, backup_data_dir: Option<&Path>) -> StoreResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
@@ -1206,6 +1239,10 @@ fn migrate(conn: &mut Connection, now: Timestamp) -> StoreResult<()> {
     let applied = applied_version(conn)?;
     if applied > MIGRATIONS.len() {
         return Ok(());
+    }
+    if let Some(data_dir) = backup_data_dir.filter(|_| applied > 0 && applied < MIGRATIONS.len()) {
+        backup::backup_before_migration(conn, data_dir, now)
+            .map_err(|e| StoreError::PreMigrationBackup(e.to_string()))?;
     }
     for (index, migration) in MIGRATIONS.iter().enumerate().skip(applied) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1677,7 +1714,7 @@ mod tests {
     // --- 授權 revision ---
 
     fn confirm_request(template_id: Option<&str>, grants: Vec<authorization::Grant>) -> ConfirmRequest {
-        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: true }
+        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: true, acknowledged_expansion: true }
     }
 
     fn research_grants(path: &str) -> Vec<authorization::Grant> {

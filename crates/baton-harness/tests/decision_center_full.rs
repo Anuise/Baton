@@ -498,24 +498,25 @@ async fn answering_a_request_whose_target_changed_is_refused_and_marks_it_supers
 }
 
 #[tokio::test]
-async fn a_permission_request_is_superseded_when_the_authorization_changes() {
+async fn a_permission_request_is_not_superseded_by_an_authorization_change() {
     let harness = harness().await;
     let p = two_running_tasks(&harness).await;
     // 尚未確認授權時，每個操作都要問
     let (_, waiting) = prompt(&harness, &p.token_a, "Read", json!({ "file_path": "README.md" })).await;
     let rid = waiting["decision_request_id"].as_str().unwrap().to_string();
 
+    // 權限提示的目標是那一個操作（單次批准在執行時逐項核對綁定，票 23），修改授權與回答請求是兩回事：請求仍可回答
     confirm_dev_template(&harness, &p.ws).await;
     let list = decision_list(&harness, &p.ws).await;
 
     let view = listed(&list, &rid);
     assert_eq!(view["kind"], "permission");
-    assert_eq!(view["status"], "superseded", "{view}");
-    assert_eq!(task_status(&harness, &p.ws, &p.a).await, "ready");
+    assert_eq!(view["status"], "pending", "{view}");
+    assert!(view["target"]["authorization_revision"].is_null(), "記下的是判定當時的授權（尚未確認）：{view}");
+    assert_eq!(task_status(&harness, &p.ws, &p.a).await, "waiting_decision");
     let body = json!({ "action": "accept", "expected_revision": view["revision"], "option_id": "allow_once" });
     let (status, response) = act(&harness, &p.ws, &rid, body).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{response}");
-    assert_eq!(error_code(&response), "decision_superseded");
+    assert_eq!(status, StatusCode::OK, "{response}");
 }
 
 #[tokio::test]

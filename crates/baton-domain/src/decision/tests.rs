@@ -100,6 +100,7 @@ impl World {
             decisions: &self.decisions,
             uses: &[],
             authority: &policy,
+            artifacts: &[],
         };
         decide(&ctx, command, T1)
     }

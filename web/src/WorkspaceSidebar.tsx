@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { formatTimestamp } from "./time";
-import type { Workspace, WorkspaceClient } from "./runtimeClient";
+import type { LifecycleClient, Workspace, WorkspaceClient, WorkspaceLifecycleView } from "./runtimeClient";
 
 type ListState = { state: "loading" } | { state: "ready"; workspaces: Workspace[] } | { state: "failed"; reason: string };
 
 interface Props {
-  client: WorkspaceClient;
+  client: WorkspaceClient & Pick<LifecycleClient, "lifecycleStatus" | "updateWorkspaceLifecycle" | "resumeWorkspace">;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
   /** 使用者要設定某個 Workspace 的授權：點「授權設定」，或剛建立完成（建立後直接進入授權設定）。 */
@@ -27,7 +27,7 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace。 */
+/** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace，並提供各自的完全退出後自動續跑設定。 */
 export function WorkspaceSidebar({
   client,
   timeZone,
@@ -43,14 +43,21 @@ export function WorkspaceSidebar({
   const [name, setName] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 各 Workspace 的生命週期；讀不到時不顯示設定，不假裝是預設值
+  const [lifecycles, setLifecycles] = useState<WorkspaceLifecycleView[]>([]);
 
   const refresh = useCallback(async () => {
+    const lifecycle = client.lifecycleStatus().then(
+      (status) => status.workspaces,
+      () => [],
+    );
     try {
       const { workspaces } = await client.listWorkspaces();
       setList({ state: "ready", workspaces });
     } catch (error) {
       setList({ state: "failed", reason: reasonOf(error) });
     }
+    setLifecycles(await lifecycle);
   }, [client]);
 
   useEffect(() => {
@@ -87,6 +94,54 @@ export function WorkspaceSidebar({
     } catch (error) {
       setFormError(reasonOf(error));
     }
+  };
+
+  const setAutoResume = async (workspace: Workspace, autoResume: boolean) => {
+    setFormError(null);
+    try {
+      const updated = await client.updateWorkspaceLifecycle(workspace.id, autoResume);
+      setLifecycles((current) => current.map((view) => (view.workspace_id === updated.workspace_id ? updated : view)));
+    } catch (error) {
+      setFormError(reasonOf(error));
+    }
+  };
+
+  const resume = async (workspace: Workspace) => {
+    setFormError(null);
+    try {
+      await client.resumeWorkspace(workspace.id);
+      await refresh();
+    } catch (error) {
+      setFormError(reasonOf(error));
+    }
+  };
+
+  /** 完全退出後的暫停狀態與「繼續工作」，以及自動續跑設定；沒有生命週期資料時不顯示。 */
+  const lifecycleControls = (workspace: Workspace) => {
+    const lifecycle = lifecycles.find((view) => view.workspace_id === workspace.id);
+    if (!lifecycle) return null;
+    return (
+      <>
+        {lifecycle.awaiting_resume && (
+          <div className="workspace-paused">
+            <span>完全退出後暫停中</span>
+            <button type="button" aria-label={`繼續工作 ${workspace.name}`} onClick={() => void resume(workspace)}>
+              繼續工作
+            </button>
+          </div>
+        )}
+        <label className="workspace-auto-resume">
+          <input
+            type="checkbox"
+            aria-label={`完全退出後自動續跑 ${workspace.name}`}
+            checked={lifecycle.auto_resume_after_exit}
+            onChange={(e) => void setAutoResume(workspace, e.target.checked)}
+          />
+          完全退出後自動續跑
+        </label>
+        <span className="workspace-auto-resume-hint">只影響下次重新開啟，不會立即啟停目前工作</span>
+      </>
+    );
   };
 
   const active = list.state === "ready" ? list.workspaces.filter((w) => w.status === "active") : [];
@@ -127,6 +182,7 @@ export function WorkspaceSidebar({
                   封存
                 </button>
               </div>
+              {lifecycleControls(workspace)}
             </li>
           ))}
         </ul>

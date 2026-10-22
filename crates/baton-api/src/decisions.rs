@@ -214,7 +214,12 @@ pub(crate) async fn answer(
         .answer_decision(&id, &request_id, revision, request.resolution(), None, state.clock.now())
         .await;
     wake_if_resumed(&state, &result);
-    Ok(Json(result?))
+    let result = result?;
+    // 正式裁定是重要裁定：要求備份（同一小時內的要求合併為一次，冪等重送也不會多備份）；延後不是裁定
+    if result.decision.decision.is_some() {
+        (state.request_backup)("正式裁定");
+    }
+    Ok(Json(result))
 }
 
 /// 恢復的 Task 已在同一個交易排進派工佇列；叫醒 Supervisor 立刻排程，不必等下一次背景處理。
@@ -281,6 +286,9 @@ pub(crate) async fn batch(
                 BatchItemResult { error: Some(error.code.to_string()), message: Some(error.message), ..base }
             }
         });
+    }
+    if results.iter().any(|r| r.decision.as_ref().is_some_and(|d| d.decision.is_some())) {
+        (state.request_backup)("正式裁定");
     }
     Ok(Json(BatchResponse { batch_id, results }))
 }

@@ -7,10 +7,17 @@ import { authorityTable, CHECKED_AT, decisionView } from "./fixtures";
 import type {
   AnswerRequest,
   AuthorityTable,
+  AuthorizationClient,
+  AuthorizationRevision,
+  AuthorizationView,
   BatchItem,
+  ConfirmationSummary,
+  ConfirmAuthorizationRequest,
   DecisionClient,
   DecisionOverview,
+  DecisionPermission,
   DecisionRequestView,
+  Grant,
   UpdateAuthorityRequest,
   Workspace,
 } from "./runtimeClient";
@@ -61,17 +68,74 @@ function overviewOf(items: DecisionRequestView[]): DecisionOverview {
   };
 }
 
+const HASH = "3f2a9c1b7d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcd";
+
+/** 權限請求：git push 到 origin main，綁定單一邏輯操作。 */
+const permissionOf = (overrides: Partial<DecisionPermission> = {}): DecisionPermission => ({
+  tool_name: "Bash",
+  input: { command: "git push --force origin main" },
+  capability: "remote_write",
+  capability_label: "寫入遠端",
+  summary: "推送到 origin main",
+  binding: {
+    operation: "Bash:git push",
+    target: "origin main",
+    params: { flags: ["--force"] },
+    request_hash: HASH,
+    artifact_version: "report.md@2,notes.md@1",
+  },
+  prior_use: null,
+  rejected_approval: null,
+  approval_use: null,
+  ...overrides,
+});
+
+const permissionDecision = (overrides: Partial<DecisionRequestView> = {}) =>
+  decisionView({
+    id: "dec_perm",
+    kind: "permission",
+    question: "要允許推送到 origin main 嗎？",
+    options: [
+      { id: "allow_once", label: "允許本次操作", tradeoff: null },
+      { id: "deny", label: "拒絕", tradeoff: null },
+    ],
+    recommendation: null,
+    permission: permissionOf(),
+    allowed_actions: ["accept", "defer", "reject"],
+    ...overrides,
+  });
+
+const currentRevision: AuthorizationRevision = {
+  workspace_id: "ws_1",
+  revision: 3,
+  grants: [{ capability: "read_files", targets: [workspace.path], restrictions: [] }],
+  source: { kind: "template_edited", template_id: "research_docs", base_revision: 2, confirmed_by: "desktop" },
+  confirmed_at: CHECKED_AT,
+};
+
 interface FakeOptions {
   resumed?: string[];
   authority?: AuthorityTable;
   /** 送出時目標版本已變更的請求：Runtime 會把它標為 superseded 並拒絕。 */
   supersedeOnSubmit?: string[];
+  /** 目前生效的 Workspace 授權；省略時用 currentRevision。 */
+  revision?: AuthorizationRevision;
 }
 
-/** 以記憶體模擬 Runtime：處理後更新請求狀態與 revision，並檢查 expected_revision。 */
+/** 以記憶體模擬 Runtime：處理後更新請求狀態與 revision，並檢查 expected_revision；授權可被修改。 */
 function fakeClient(initial: DecisionRequestView[], options: FakeOptions = {}) {
   let items = [...initial];
   let table = options.authority ?? authorityTable();
+  let revisions = [options.revision ?? currentRevision];
+  const authorizationView = (): AuthorizationView => ({
+    workspace_id: "ws_1",
+    status: "confirmed",
+    effective: revisions.at(-1)!,
+    revisions: [...revisions],
+    templates: [],
+    capabilities: [],
+    risk_disclosure: "",
+  });
   const find = (id: string) => items.find((d) => d.id === id)!;
   const replace = (next: DecisionRequestView) => {
     items = items.map((d) => (d.id === next.id ? next : d));
@@ -110,7 +174,39 @@ function fakeClient(initial: DecisionRequestView[], options: FakeOptions = {}) {
       },
     });
   };
-  const client: DecisionClient = {
+  const client: DecisionClient & AuthorizationClient = {
+    getAuthorization: vi.fn(async () => authorizationView()),
+    summarizeAuthorization: vi.fn(
+      async (_ws: string, grants: Grant[]): Promise<ConfirmationSummary> => ({
+        items: grants.map((g) => ({ ...g, label: g.capability, high_risk: false })),
+        risks: ["推送會改變遠端儲存庫，其他人會看到。"],
+        requires_risk_acknowledgement: true,
+        changes: {
+          base_revision: revisions.at(-1)!.revision,
+          changes: [
+            {
+              capability: "remote_write",
+              label: "寫入遠端",
+              high_risk: true,
+              new_capability: true,
+              removed_capability: false,
+              added_targets: [workspace.path],
+              removed_targets: [],
+              added_restrictions: [],
+              removed_restrictions: [],
+              expands: true,
+            },
+          ],
+          expands: true,
+          impact: ["Agent 之後在這個 Workspace 的所有 Task 都能寫入遠端，不必再逐次詢問。"],
+        },
+      }),
+    ),
+    confirmAuthorization: vi.fn(async (_ws: string, { grants }: ConfirmAuthorizationRequest) => {
+      const revision = { ...revisions.at(-1)!, revision: revisions.at(-1)!.revision + 1, grants };
+      revisions = [...revisions, revision];
+      return revision;
+    }),
     listDecisions: vi.fn(async () => ({
       pending_count: items.filter((d) => d.status === "pending").length,
       overview: overviewOf(items),
@@ -168,7 +264,7 @@ function fakeClient(initial: DecisionRequestView[], options: FakeOptions = {}) {
   return client;
 }
 
-const renderCenter = (client: DecisionClient, onChange?: () => void) =>
+const renderCenter = (client: DecisionClient & AuthorizationClient, onChange?: () => void) =>
   render(<DecisionCenter client={client} workspace={workspace} timeZone="Asia/Taipei" onChange={onChange} />);
 
 const detail = () => screen.getByRole("article", { name: "裁定詳情" });
@@ -295,13 +391,13 @@ describe("裁定中心：詳情", () => {
       fakeClient([
         decisionView({
           kind: "permission",
-          permission: {
+          permission: permissionOf({
             tool_name: "Bash",
             input: { command: "npm install" },
             capability: "install_project_dependencies",
             capability_label: "安裝專案依賴",
             summary: "在專案目錄執行 npm install",
-          },
+          }),
         }),
       ]),
     );
@@ -587,6 +683,174 @@ describe("裁定中心：處理單筆", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("這個裁定已經回答過了");
     expect(client.listDecisions).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("button", { name: "送出裁定" })).toBeEnabled();
+  });
+});
+
+describe("裁定中心：允許本次操作與修改 Workspace 授權", () => {
+  it("權限請求把「允許本次操作」與「修改 Workspace 授權」分成兩個區塊，前者列出綁定的單一操作", async () => {
+    const user = userEvent.setup();
+    renderCenter(fakeClient([permissionDecision()]));
+
+    const once = await screen.findByRole("region", { name: "允許本次操作" });
+    expect(within(once).getByText("Bash:git push")).toBeInTheDocument();
+    expect(within(once).getByText("origin main")).toBeInTheDocument();
+    expect(within(once).getByText('flags：["--force"]')).toBeInTheDocument();
+    expect(within(once).getByText(HASH.slice(0, 12))).toBeInTheDocument();
+    expect(within(once).queryByText(HASH)).not.toBeInTheDocument();
+    expect(within(once).getByText("report.md@2,notes.md@1")).toBeInTheDocument();
+    expect(within(once).getByText(/只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權/)).toBeInTheDocument();
+    const modify = screen.getByRole("region", { name: "修改 Workspace 授權" });
+    expect(within(modify).getByRole("button", { name: "修改 Workspace 授權" })).toBeInTheDocument();
+    // 回答仍用既有的處理方式與選項：權限提示只能接受、延後或駁回，接受時選「允許本次操作」或「拒絕」
+    const actions = within(form()).getByRole("group", { name: "處理方式" });
+    expect(within(actions).getAllByRole("radio").map((radio) => radio.closest("label")!.textContent)).toEqual([
+      "接受方案",
+      "延後",
+      "駁回",
+    ]);
+    await user.click(within(actions).getByRole("radio", { name: "接受方案" }));
+    expect(within(form()).getByRole("radio", { name: "允許本次操作" })).toBeInTheDocument();
+    expect(within(form()).getByRole("radio", { name: "拒絕" })).toBeInTheDocument();
+  });
+
+  it("沒有成果時成果版本顯示「尚無成果」，沒有目標資源與重要參數時標示「無」", async () => {
+    renderCenter(
+      fakeClient([
+        permissionDecision({
+          permission: permissionOf({
+            binding: { operation: "Write", target: null, params: {}, request_hash: HASH, artifact_version: "" },
+          }),
+        }),
+      ]),
+    );
+
+    const once = await screen.findByRole("region", { name: "允許本次操作" });
+    expect(within(once).getByText("尚無成果")).toBeInTheDocument();
+    expect(within(once).getAllByText("無")).toHaveLength(2);
+  });
+
+  it("修改 Workspace 授權：檢視新增的能力、影響與風險，承認擴大授權後才能確認，且不會回答這個請求", async () => {
+    const user = userEvent.setup();
+    const client = fakeClient([permissionDecision()]);
+    renderCenter(client);
+    expect(client.getAuthorization).not.toHaveBeenCalled();
+
+    await user.click(await screen.findByRole("button", { name: "修改 Workspace 授權" }));
+
+    const modify = screen.getByRole("region", { name: "修改 Workspace 授權" });
+    expect(await within(modify).findByText("寫入遠端：C:\\work\\notes")).toBeInTheDocument();
+    const proposed: Grant[] = [...currentRevision.grants, { capability: "remote_write", targets: [workspace.path], restrictions: [] }];
+    expect(client.summarizeAuthorization).toHaveBeenCalledWith("ws_1", proposed);
+    expect(within(modify).getByText("Agent 之後在這個 Workspace 的所有 Task 都能寫入遠端，不必再逐次詢問。")).toBeInTheDocument();
+    expect(within(modify).getByText("推送會改變遠端儲存庫，其他人會看到。")).toBeInTheDocument();
+    const confirm = within(modify).getByRole("button", { name: "確認修改授權" });
+    expect(confirm).toBeDisabled();
+
+    await user.click(within(modify).getByRole("checkbox", { name: "我了解這會擴大 Workspace 授權" }));
+    expect(confirm).toBeDisabled();
+    await user.click(within(modify).getByRole("checkbox", { name: "我了解並接受上述風險" }));
+    await user.click(confirm);
+
+    expect(await within(modify).findByRole("status")).toHaveTextContent("授權已更新為第 4 版；這個裁定請求仍待回答");
+    expect(client.confirmAuthorization).toHaveBeenCalledWith("ws_1", {
+      templateId: "research_docs",
+      grants: proposed,
+      acknowledgedRisk: true,
+      acknowledgedExpansion: true,
+    });
+    // 修改授權不會回答這個請求，選項仍可作答
+    expect(client.answerDecision).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "送出裁定" })).toBeInTheDocument();
+  });
+
+  it("無法歸類的操作不能透過修改授權放行", async () => {
+    const user = userEvent.setup();
+    const client = fakeClient([permissionDecision({ permission: permissionOf({ capability: null, capability_label: null }) })]);
+    renderCenter(client);
+
+    await user.click(await screen.findByRole("button", { name: "修改 Workspace 授權" }));
+
+    const modify = screen.getByRole("region", { name: "修改 Workspace 授權" });
+    expect(await within(modify).findByText("無法歸類的操作不能透過修改授權放行，請用允許本次操作或拒絕")).toBeInTheDocument();
+    expect(client.summarizeAuthorization).not.toHaveBeenCalled();
+    expect(within(modify).queryByRole("button", { name: "確認修改授權" })).not.toBeInTheDocument();
+  });
+
+  it("能力已在目前授權中時，請使用者到授權設定頁調整目標或限制", async () => {
+    const user = userEvent.setup();
+    const client = fakeClient([permissionDecision()], {
+      revision: { ...currentRevision, grants: [{ capability: "remote_write", targets: ["origin dev"], restrictions: [] }] },
+    });
+    renderCenter(client);
+
+    await user.click(await screen.findByRole("button", { name: "修改 Workspace 授權" }));
+
+    const modify = screen.getByRole("region", { name: "修改 Workspace 授權" });
+    expect(await within(modify).findByText("這個能力已授權但目標或限制不涵蓋這次操作，請到授權設定頁調整")).toBeInTheDocument();
+    expect(client.summarizeAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("同一操作先前已放行過一次而結果未知時，醒目提醒先查證", async () => {
+    const user = userEvent.setup();
+    renderCenter(
+      fakeClient([
+        permissionDecision({
+          options: [
+            { id: "allow_once", label: "已查證，允許再執行一次", tradeoff: null },
+            { id: "deny", label: "拒絕（不要重送）", tradeoff: null },
+          ],
+          recommendation: "deny",
+          permission: permissionOf({ prior_use: { request_id: "dec_old", run_id: "run_7", used_at: CHECKED_AT } }),
+        }),
+      ]),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "這個操作先前已經放行過一次（2023/11/15 06:13，Run run_7），結果未知。請先查證是否已經生效，再決定是否再允許一次。",
+    );
+    // 建議拒絕：選項與取捨列出「建議」，接受方案時選項也標示（建議）
+    const deny = within(detail()).getByText("拒絕（不要重送）").closest("li")!;
+    expect(within(deny).getByText("建議")).toBeInTheDocument();
+    await user.click(within(form()).getByRole("radio", { name: "接受方案" }));
+    expect(within(form()).getByRole("radio", { name: "拒絕（不要重送）（建議）" })).toBeInTheDocument();
+  });
+
+  it("先前的單次批准因綁定不符而不能沿用時說明原因", async () => {
+    renderCenter(
+      fakeClient([
+        permissionDecision({
+          permission: permissionOf({ rejected_approval: { request_id: "dec_old", reason: "target_changed" } }),
+        }),
+      ]),
+    );
+
+    expect(await screen.findByText("先前的單次批准（dec_old）不能沿用：目標資源不同")).toBeInTheDocument();
+  });
+
+  it("已回答的權限請求顯示批准已被哪個 Run 使用而失效，不再提供修改授權", async () => {
+    renderCenter(
+      fakeClient([
+        permissionDecision({
+          status: "answered",
+          blocking: [],
+          allowed_actions: [],
+          decision: {
+            action: "accept",
+            option_id: "allow_once",
+            option_label: "允許本次操作",
+            note: null,
+            decided_by: "desktop",
+            decided_at: CHECKED_AT,
+            batch_id: null,
+          },
+          permission: permissionOf({ approval_use: { request_id: "dec_perm", run_id: "run_9", used_at: CHECKED_AT + 60_000 } }),
+        }),
+      ]),
+    );
+
+    const outcome = await screen.findByRole("region", { name: "裁定結果" });
+    expect(within(outcome).getByText("這個批准已於 2023/11/15 06:14 由 Run run_9 使用，已失效")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改 Workspace 授權" })).not.toBeInTheDocument();
   });
 });
 

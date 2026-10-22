@@ -16,6 +16,10 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<(), String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("restore") {
+        return restore(&args[1..]);
+    }
     let config = RuntimeConfig::from_lookup(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;
 
     // 單實例：已有 Runtime 在執行就直接結束，呼叫端連回既有的那個即可
@@ -32,4 +36,23 @@ async fn run() -> Result<(), String> {
         _ = tokio::signal::ctrl_c() => {}
     }
     Ok(())
+}
+
+/// `baton-runtime restore <備份目錄> <目標資料目錄>`：把一份備份（`backups/<備份識別>`）還原到乾淨的目錄（票 40）。
+/// 還原後以 `BATON_DATA_DIR` 指向目標目錄啟動 Runtime；備份當下尚未結束的 Run 已被結束，不會自動重做。
+fn restore(args: &[String]) -> Result<(), String> {
+    let [backup_dir, target] = args else {
+        return Err("用法：baton-runtime restore <備份目錄> <目標資料目錄>".into());
+    };
+    let now = production_ports().clock.now();
+    let report = baton_store::backup::restore_backup(backup_dir.as_ref(), target.as_ref(), now).map_err(|e| e.to_string())?;
+    for check in &report.checks {
+        println!("{} {:?}：{}", if check.passed { "通過" } else { "失敗" }, check.kind, check.detail);
+    }
+    println!("已結束 {} 個備份當下尚未結束的 Run（不會自動重做）", report.interrupted_runs);
+    if report.passed() {
+        Ok(())
+    } else {
+        Err("還原完成，但有核對沒有通過；請不要使用這個目錄".into())
+    }
 }

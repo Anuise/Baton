@@ -3,6 +3,7 @@
 //! `Runtime::start` 以程序內方式啟動完整 Runtime（真實 Store、真實 HTTP API），
 //! 所有外部副作用都經由注入的 `Ports`。正式執行檔與測試 harness 共用這個入口。
 
+pub mod backup;
 pub mod claude_cli;
 pub mod credentials;
 pub mod log;
@@ -18,7 +19,8 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::ApiState;
+use baton_api::{ApiState, LogSink};
+use baton_domain::lifecycle::{self, ExitTiming, FileStopView, LifecycleFile};
 use baton_ports::Ports;
 use baton_store::{Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
@@ -26,8 +28,9 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 pub use baton_domain::config::{self, ConfigError, RuntimeConfig};
+pub use backup::BackupScheduler;
 pub use credentials::CredentialIssuer;
-pub use supervisor::Supervisor;
+pub use supervisor::{LifecycleSettings, Supervisor};
 
 /// 隨機埠（埠 0）時，IPv6 同埠已被占用就重新挑一個的次數上限。
 const BIND_ATTEMPTS: usize = 16;
@@ -54,17 +57,34 @@ pub struct RuntimeOptions {
     /// 是否啟動 Supervisor 的背景迴圈。測試 harness 關閉它，改由測試在想要的時刻呼叫 `Supervisor::tick`，
     /// 才能用 fake Clock 決定性地重現任何時序。
     pub background_supervisor: bool,
+    /// 是否啟動備份排程的背景迴圈（票 40）。測試 harness 關閉它，改由測試呼叫 `BackupScheduler::tick`。
+    pub background_backup: bool,
     /// 要求 Run 的程序停止時給它的寬限期（spec D-11 的 30 秒）；逾時強制終止整個程序樹。
     pub stop_grace: Duration,
+    /// 完全退出的寬限期與強制終止確認上限（spec D-11 的 30 + 10 秒）；測試可縮短。
+    pub exit_timing: ExitTiming,
+    /// 完全退出的停止流程結束後，再提供多久 API（讓 App 讀到最終的停止結果）才結束服務；
+    /// `None` 表示不自行結束（測試 harness 用，由測試決定何時丟棄 Runtime）。
+    pub exit_linger: Option<Duration>,
     /// 是否嘗試使用全文檢索（spec D-26）。關閉時視同 FTS5 不可用：知識搜尋退回 LIKE 並標示降級（測試降級情境用）。
     pub full_text_search: bool,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        Self { background_supervisor: true, stop_grace: supervisor::DEFAULT_STOP_GRACE, full_text_search: true }
+        Self {
+            background_supervisor: true,
+            background_backup: true,
+            stop_grace: supervisor::DEFAULT_STOP_GRACE,
+            exit_timing: ExitTiming::default(),
+            exit_linger: Some(DEFAULT_EXIT_LINGER),
+            full_text_search: true,
+        }
     }
 }
+
+/// 停止流程結束後繼續提供 API 的時間（App 每 0.5 秒輪詢一次停止進度）。
+const DEFAULT_EXIT_LINGER: Duration = Duration::from_secs(5);
 
 pub struct Runtime;
 
@@ -105,22 +125,46 @@ impl Runtime {
             (log)("全文檢索（FTS5 + trigram）無法使用，知識搜尋已降級為逐筆 LIKE 比對");
         }
 
+        let reopen_from = reconcile_stop_intent(&store, &config.data_dir, options.exit_timing, &ports, &log).await?;
+
         let (stop_tx, stop_rx) = watch::channel(false);
+        let stop_tx = Arc::new(stop_tx);
         let supervisor_wake = Arc::new(Notify::new());
+        let exit_signal = Arc::new(Notify::new());
         let runtime_url = format!("http://{addr}");
-        let supervisor =
-            Supervisor::new(
-                store.clone(),
-                ports.clone(),
-                log.clone(),
-                credentials.clone(),
-                runtime_url,
-                options.stop_grace,
-                config.data_dir.join(baton_domain::artifact::ARTIFACTS_DIR),
-            );
+        let lifecycle = LifecycleSettings {
+            exit_timing: options.exit_timing,
+            data_dir: config.data_dir.clone(),
+            reopen_from,
+        };
+        let supervisor = Supervisor::new(
+            store.clone(),
+            ports.clone(),
+            log.clone(),
+            credentials.clone(),
+            runtime_url,
+            options.stop_grace,
+            config.data_dir.join(baton_domain::artifact::ARTIFACTS_DIR),
+            lifecycle,
+        );
         let supervising = options
             .background_supervisor
             .then(|| supervisor.spawn_background(supervisor_wake.clone(), stop_rx.clone()));
+        let backups = BackupScheduler::new(store.clone(), config.data_dir.clone(), ports.clock.clone(), log.clone());
+        let backing_up = options.background_backup.then(|| backups.spawn_background(stop_rx.clone()));
+        let request_backup: baton_api::BackupRequestSink = {
+            let backups = backups.clone();
+            Arc::new(move |reason: &str| backups.request_milestone_backup(reason))
+        };
+        let (exits_tx, exits) = watch::channel(0u64);
+        let exiting = spawn_exit_runner(
+            supervisor.clone(),
+            exit_signal.clone(),
+            exits_tx,
+            stop_tx.clone(),
+            stop_rx.clone(),
+            options.exit_linger,
+        );
         let app = baton_api::router(ApiState {
             boot_count,
             started_at,
@@ -135,7 +179,10 @@ impl Runtime {
             user_settings: ports.user_settings.clone(),
             log,
             supervisor_wake,
+            request_backup,
             shutdown: stop_rx.clone(),
+            exit_timing: options.exit_timing,
+            exit_signal,
         });
         let task = tokio::spawn(async move {
             let _store = store; // 與 serve 同生命週期：停止後才釋放資料庫連線
@@ -146,8 +193,81 @@ impl Runtime {
             };
             tokio::join!(serve(v4, app.clone(), stop_rx.clone()), serving_v6);
         });
-        Ok(RunningRuntime { addr, addr_v6, credentials, supervisor, supervising, stop_tx, task })
+        Ok(RunningRuntime {
+            addr,
+            addr_v6,
+            credentials,
+            supervisor,
+            supervising,
+            backups,
+            backing_up,
+            exiting,
+            exits,
+            stop_tx,
+            task,
+        })
     }
+}
+
+/// 啟動時核對停止意圖（spec D-25）：資料庫與生命週期檔不一致時採較保守者（視為停止）。
+/// 只有生命週期檔有停止意圖時補記進資料庫；只有資料庫有時把它鏡像到檔案。
+/// 回傳停止意圖的版本（之後由 Supervisor 核對完程序再重新開啟）；沒有停止意圖為 `None`。
+async fn reconcile_stop_intent(
+    store: &Store,
+    data_dir: &std::path::Path,
+    timing: ExitTiming,
+    ports: &Ports,
+    log: &LogSink,
+) -> Result<Option<i64>, RuntimeError> {
+    let file = {
+        let data_dir = data_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || baton_store::read_lifecycle_file(&data_dir))
+            .await
+            .unwrap_or(FileStopView::Stop { requested_at: None })
+    };
+    let mut state = store.lifecycle_state().await?;
+    if lifecycle::conservative_stop(&state, &file).is_some() {
+        state = store.adopt_file_stop(timing, ports.clock.now()).await?;
+        (log)("生命週期：停止意圖只存在於生命週期檔，依較保守者視為已完全退出");
+    } else if state.stop_intent_active() && !matches!(file, FileStopView::Stop { .. }) {
+        let mirror = LifecycleFile::mirror(&state, ports.clock.now());
+        let data_dir = data_dir.to_path_buf();
+        let written = tokio::task::spawn_blocking(move || baton_store::write_lifecycle_file(&data_dir, &mirror)).await;
+        if !matches!(written, Ok(Ok(()))) {
+            (log)("生命週期：無法把資料庫中的停止意圖鏡像到生命週期檔");
+        }
+    }
+    if state.stop_intent_active() {
+        (log)("生命週期：上次完全退出後重新開啟，先核對程序再依各 Workspace 設定續跑");
+    }
+    Ok(state.stop_intent_active().then_some(state.version))
+}
+
+/// 完全退出的執行者：API 持久化停止意圖後通知它，它請 Supervisor 停下全部 Run；
+/// 停止流程結束後（`linger` 有值時）再提供一段時間 API，讓 App 讀到最終的停止結果，然後結束服務。
+fn spawn_exit_runner(
+    supervisor: Arc<Supervisor>,
+    signal: Arc<Notify>,
+    exits: watch::Sender<u64>,
+    stop_tx: Arc<watch::Sender<bool>>,
+    mut stop_rx: watch::Receiver<bool>,
+    linger: Option<Duration>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stop_rx.wait_for(|stopping| *stopping) => break,
+                _ = signal.notified() => {}
+            }
+            supervisor.full_exit().await;
+            exits.send_modify(|count| *count += 1);
+            if let Some(linger) = linger {
+                tokio::time::sleep(linger).await;
+                let _ = stop_tx.send(true);
+                break;
+            }
+        }
+    })
 }
 
 async fn serve(listener: TcpListener, app: axum::Router, mut stop: watch::Receiver<bool>) {
@@ -185,7 +305,13 @@ pub struct RunningRuntime {
     credentials: CredentialIssuer,
     supervisor: Arc<Supervisor>,
     supervising: Option<JoinHandle<()>>,
-    stop_tx: watch::Sender<bool>,
+    backups: Arc<BackupScheduler>,
+    backing_up: Option<JoinHandle<()>>,
+    /// 完全退出的執行者（票 25）。
+    exiting: JoinHandle<()>,
+    /// 這個實例已完成的完全退出次數（停止流程結束就加一）。
+    exits: watch::Receiver<u64>,
+    stop_tx: Arc<watch::Sender<bool>>,
     task: JoinHandle<()>,
 }
 
@@ -210,6 +336,16 @@ impl RunningRuntime {
         &self.supervisor
     }
 
+    /// 備份排程；重要裁定或 Stage 完成時以它要求備份，測試 harness 以它主動驅動一次處理（`tick`）。
+    pub fn backups(&self) -> &Arc<BackupScheduler> {
+        &self.backups
+    }
+
+    /// 完全退出的停止流程完成次數；測試以它等待「停止流程已結束」。
+    pub fn exits_completed(&self) -> watch::Receiver<u64> {
+        self.exits.clone()
+    }
+
     /// 停止服務並等到資料庫連線釋放；之後可用同一資料目錄重新啟動。
     pub async fn shutdown(mut self) {
         let _ = self.stop_tx.send(true);
@@ -217,6 +353,12 @@ impl RunningRuntime {
         if let Some(supervising) = self.supervising.take() {
             let _ = supervising.await;
         }
+        if let Some(backing_up) = self.backing_up.take() {
+            let _ = backing_up.await;
+        }
+        // 停止流程進行到一半就被要求停止服務，等同當掉：下次啟動時停止意圖仍在，先核對再續跑
+        self.exiting.abort();
+        let _ = (&mut self.exiting).await;
     }
 
     /// 等到服務自行結束（正式執行檔用）。
@@ -232,5 +374,9 @@ impl Drop for RunningRuntime {
         if let Some(supervising) = &self.supervising {
             supervising.abort();
         }
+        if let Some(backing_up) = &self.backing_up {
+            backing_up.abort();
+        }
+        self.exiting.abort();
     }
 }

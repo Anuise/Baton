@@ -5,6 +5,7 @@
 //! 處理一個請求時，裁定、請求狀態、Task 恢復與喚醒 Outbox 在**同一個交易**提交：不會出現「裁定已存、Task 還卡住」。
 //! 批次處理由呼叫端逐項呼叫 `answer_decision`：每一項各自一個交易，一項失敗不影響其他項。
 
+use baton_domain::approval::ArtifactMark;
 use baton_domain::auth::AgentScope;
 use baton_domain::authority::{self, AuthorityEntryRequest, AuthorityError, AuthorityPolicy, AuthorityTable, Matter};
 use baton_domain::decision::{
@@ -80,6 +81,7 @@ struct DecisionData {
     decisions: Vec<Decision>,
     uses: Vec<ApprovalUse>,
     policy: AuthorityPolicy,
+    artifacts: Vec<ArtifactMark>,
 }
 
 impl DecisionData {
@@ -92,6 +94,7 @@ impl DecisionData {
             decisions: &self.decisions,
             uses: &self.uses,
             authority: &self.policy,
+            artifacts: &self.artifacts,
         }
     }
 }
@@ -379,7 +382,7 @@ fn list(loaded: &Loaded, data: &DecisionData, now: Timestamp) -> DecisionList {
         _ => (2, std::cmp::Reverse(0), -r.updated_at.as_millis()),
     });
     let views: Vec<DecisionView> =
-        requests.into_iter().map(|r| decision::view(r, &data.requests, &data.decisions, &loaded.tasks, now)).collect();
+        requests.into_iter().map(|r| decision::view(r, &data.requests, &data.decisions, &data.uses, &loaded.tasks, now)).collect();
     let mut overview = DecisionOverview::default();
     for view in &views {
         match view.status {
@@ -547,7 +550,17 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
             Ok(ApprovalUse { request_id: r.get(0)?, run_id: r.get(1)?, used_at: Timestamp::from_millis(r.get(2)?) })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)? })
+
+    // 各成果的最新版本：單次批准綁定 Task 的成果版本（票 23）
+    let artifacts = conn
+        .prepare(
+            "SELECT a.task_id, a.name, MAX(v.version) FROM artifact a
+             JOIN artifact_version v ON v.artifact_id = a.id
+             WHERE a.workspace_id = ?1 GROUP BY a.id ORDER BY a.rowid",
+        )?
+        .query_map([workspace_id], |r| Ok(ArtifactMark { task_id: r.get(0)?, name: r.get(1)?, version: r.get(2)? }))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)?, artifacts })
 }
 
 /// 把 Domain 的結果寫進同一個交易：請求、阻擋範圍、連結、裁定、單次批准的消耗、受影響的 Task、派工佇列、喚醒 Outbox 與事件。

@@ -8,15 +8,22 @@
 //!   請求結束後也只有它們恢復（`ready`），而且要等**所有**阻擋它們的請求都結束。其他 Task 完全不受影響。
 //! - **逾時與延後都不是同意**：期限（`deadline_at`）只用來標示「已逾期」，延後（`deferred_until`）只改變顯示順序；
 //!   沒有任何命令會因時間流逝而回答請求、放行權限提示或讓 Task 恢復。
-//! - **單次批准**：範圍外的權限提示與 Controller 的「必須送裁定」動作建立裁定請求；使用者核准之後，
-//!   同一個 Task 再次提出**同一個操作**時消耗這個批准（一次），再提出就要重新裁定。
-//! - **版本校驗（票 35）**：請求記下建立時的目標版本（Task 契約版本、權限提示時的授權 revision）；目標版本變了，
-//!   請求標為 `superseded`，不能再套用。使用者提交時必須帶 `expected_revision`，請求在檢視後有任何變動就拒絕。
+//! - **權限提示的單次批准（E1，票 23）**：範圍外的權限提示建立裁定請求並回「等待裁定」；請求建立時就算好它綁定的
+//!   邏輯操作（`approval::ApprovalBinding`：操作識別、目標資源、重要參數、要求雜湊、成果版本）。使用者回答
+//!   「允許這一次」之後，同一個 Task（任何一個 Run、任何一個帳號）再次提出時**逐項核對綁定**，全部相符才消耗這個批准
+//!   （一次）；任何一項不同就不能沿用，改建新的請求並說明哪一項變了。用過之後再提出同一個操作，Runtime 不知道上一次的
+//!   結果，所以新的請求會要求使用者先查證再決定。單次批准從不改變 Workspace 授權。
+//! - **Controller 動作的單次核准（票 35）**：Controller 的「必須送裁定」動作建立裁定請求；使用者核准之後，
+//!   同一個 Task 的同一種事項再次提出時消耗這個核准（一次），再提出就要重新裁定。
+//! - **版本校驗（票 35）**：請求記下建立時的目標版本（目標 Task 與它的契約版本）；目標版本變了或 Task 已結束，
+//!   請求標為 `superseded`，不能再套用。權限提示另外記下判定當時的授權 revision 供查閱，但授權變更不會讓它過期：
+//!   修改授權與回答請求是兩回事，單次批准在執行時逐項核對綁定（票 23）。使用者提交時必須帶 `expected_revision`，請求在檢視後有任何變動就拒絕。
 //! - **每一項各自保存（票 35）**：一筆裁定只對應一個請求；批次處理也是逐項套用，不形成概括授權。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::approval::{self, ApprovalBinding, ArtifactMark, Mismatch};
 use crate::authority::{Authority, AuthorityPolicy, Matter};
 use crate::authorization::{AuthorizationRevision, Capability};
 use crate::event::DomainEvent;
@@ -237,6 +244,30 @@ pub struct PermissionDetail {
     pub capability: Option<Capability>,
     pub summary: String,
     pub fingerprint: String,
+    /// 單次批准綁定的邏輯操作（票 23）。票 23 之前建立的請求沒有綁定，它們的「允許這一次」不能再被使用。
+    #[serde(default)]
+    pub binding: Option<ApprovalBinding>,
+    /// 同一個操作先前已用掉一次批准、結果未知：使用者要先查證再回答。
+    #[serde(default)]
+    pub prior_use: Option<PriorUse>,
+    /// 先前有一個單次批准，但這次的操作與它的綁定不符而不能沿用。
+    #[serde(default)]
+    pub rejected_approval: Option<RejectedApproval>,
+}
+
+/// 先前已被使用的單次批准。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriorUse {
+    pub request_id: String,
+    pub run_id: String,
+    pub used_at: Timestamp,
+}
+
+/// 不能沿用的單次批准與原因。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectedApproval {
+    pub request_id: String,
+    pub reason: Mismatch,
 }
 
 /// Controller 動作的細節（只有 `kind = authority` 的請求有）。
@@ -253,7 +284,7 @@ pub struct AuthorityDetail {
 pub struct DecisionTarget {
     pub task_id: String,
     pub contract_version: i64,
-    /// 權限提示判定時的授權 revision（尚未確認授權時為 `None`）；其他種類的請求不受授權變更影響，一律為 `None`。
+    /// 權限提示判定當時的授權 revision（尚未確認授權時為 `None`；其他種類一律為 `None`）。只供查閱，不影響過期判定。
     pub authorization_revision: Option<i64>,
 }
 
@@ -531,13 +562,39 @@ pub enum DecisionCommand {
     Refresh,
 }
 
+/// 等待裁定時，附帶說明先前的單次批准為什麼不能用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalCheck {
+    /// 綁定不符（參數、目標、成果版本…改變）。
+    Mismatch { request_id: String, reason: Mismatch },
+    /// 同一個操作已經用掉一次批准，結果未知，要先查證。
+    UsedResultUnknown { request_id: String },
+}
+
+impl ApprovalCheck {
+    pub fn request_id(&self) -> &str {
+        match self {
+            ApprovalCheck::Mismatch { request_id, .. } | ApprovalCheck::UsedResultUnknown { request_id } => request_id,
+        }
+    }
+
+    /// 穩定的機器可讀代碼。
+    pub fn code(&self) -> &'static str {
+        match self {
+            ApprovalCheck::Mismatch { reason, .. } => reason.as_str(),
+            ApprovalCheck::UsedResultUnknown { .. } => "used_result_unknown",
+        }
+    }
+}
+
 /// 權限提示給 Worker 的結果。
 #[derive(Debug, Clone, PartialEq)]
 pub enum PermissionOutcome {
     /// 在授權範圍內：自動允許並已記錄。
     Allowed { capability: Capability, revision: i64 },
     /// 範圍外：等待裁定（Worker 應保存 checkpoint 並以 blocked 結束，或改做其他步驟）。
-    Waiting { request_id: String, message: String },
+    /// `check` 說明先前的單次批准為什麼不能用（沒有相關的批准時為 `None`）。
+    Waiting { request_id: String, message: String, check: Option<ApprovalCheck> },
     /// 使用者已裁定「允許這一次」，這次提示消耗了它。
     Approved { request_id: String },
     /// 使用者已裁定拒絕（這次提示消耗了它）。
@@ -695,6 +752,8 @@ pub struct DecisionContext<'a> {
     pub uses: &'a [ApprovalUse],
     /// 這個 Workspace 的決策權限表設定。
     pub authority: &'a AuthorityPolicy,
+    /// 各 Task 成果的最新版本（單次批准綁定的成果版本，票 23）。
+    pub artifacts: &'a [ArtifactMark],
 }
 
 impl DecisionContext<'_> {
@@ -704,6 +763,10 @@ impl DecisionContext<'_> {
 
     fn approval_used(&self, request_id: &str) -> bool {
         self.uses.iter().any(|u| u.request_id == request_id)
+    }
+
+    fn use_of(&self, request_id: &str) -> Option<&ApprovalUse> {
+        self.uses.iter().find(|u| u.request_id == request_id)
     }
 
     fn request(&self, id: &str) -> Result<&DecisionRequest, DecisionError> {
@@ -738,16 +801,6 @@ impl DecisionContext<'_> {
             return Some(format!(
                 "目標 Task「{}」的契約已從版本 {} 改為版本 {}",
                 task.title, target.contract_version, task.contract_version
-            ));
-        }
-        // 權限提示的判定依據是當時生效的授權（尚未確認授權也是一種狀態）；授權一變，請求就不再成立
-        let current = self.authorization_revision();
-        if request.kind == DecisionKind::Permission && current != target.authorization_revision {
-            let describe = |revision: Option<i64>| revision.map_or_else(|| "尚未確認".to_string(), |r| format!("revision {r}"));
-            return Some(format!(
-                "Workspace 授權已從{}改為{}",
-                describe(target.authorization_revision),
-                describe(current)
             ));
         }
         None
@@ -1001,20 +1054,47 @@ fn permission_prompt(
     };
 
     let fingerprint = permission::fingerprint(tool_name, &input);
-    let same_operation = |r: &DecisionRequest| {
-        r.kind == DecisionKind::Permission
-            && r.task_id == task.id
-            && r.permission.as_ref().is_some_and(|p| p.fingerprint == fingerprint)
+    let current = approval::bind(tool_name, &input, approval::artifact_version_of(&task.id, ctx.artifacts));
+    let is_permission_of_task = |r: &&DecisionRequest| r.kind == DecisionKind::Permission && r.task_id == task.id;
+    // 同一個操作＝要求雜湊相同（說明欄位不算）；沒有綁定的舊請求以原本的指紋比對
+    let same_operation = |r: &&DecisionRequest| {
+        is_permission_of_task(r)
+            && r.permission.as_ref().is_some_and(|p| match &p.binding {
+                Some(binding) => binding.request_hash == current.request_hash,
+                None => p.fingerprint == fingerprint,
+            })
     };
-    if let Some(pending) = ctx.requests.iter().find(|r| same_operation(r) && r.is_pending()) {
+    if let Some(pending) = ctx.requests.iter().filter(same_operation).find(|r| r.is_pending()) {
         return Ok(DecisionChange::new(DecisionOutcome::Permission(PermissionOutcome::Waiting {
             request_id: pending.id.clone(),
             message: WAITING_MESSAGE.to_string(),
+            check: None,
         })));
     }
-    // 先前已回答、還沒被消耗的單次批准：這次提示消耗它
-    if let Some((answered, decision)) = unused_answer(ctx, same_operation) {
-        let outcome = if decision.approves(OPTION_ALLOW_ONCE) {
+
+    // 已回答、還沒被使用的裁定：由新到舊，第一個適用的被這次提示消耗。
+    // 拒絕（含駁回）一律適用；「允許這一次」要在執行時逐項核對綁定，任何一項不同就不能沿用
+    let mut check: Option<ApprovalCheck> = None;
+    let unused = ctx.requests.iter().filter(same_operation).filter(|r| !ctx.approval_used(&r.id)).rev();
+    for answered in unused {
+        let Some(decision) = ctx.decision_of(&answered.id) else { continue };
+        let allows = decision.approves(OPTION_ALLOW_ONCE);
+        let usable = !allows
+            || match answered.permission.as_ref().and_then(|p| p.binding.as_ref()) {
+                Some(binding) => match approval::check(binding, &current) {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        check.get_or_insert(ApprovalCheck::Mismatch { request_id: answered.id.clone(), reason });
+                        false
+                    }
+                },
+                // 票 23 之前的批准沒有綁定可以核對：保守地不使用
+                None => false,
+            };
+        if !usable {
+            continue;
+        }
+        let outcome = if allows {
             PermissionOutcome::Approved { request_id: answered.id.clone() }
         } else {
             PermissionOutcome::Denied { request_id: answered.id.clone() }
@@ -1025,39 +1105,107 @@ fn permission_prompt(
             run,
             now,
             DecisionOutcome::Permission(outcome),
-            serde_json::json!({ "tool_name": tool_name, "summary": summary }),
+            serde_json::json!({ "tool_name": tool_name, "summary": summary, "binding": current }),
         ));
     }
 
-    let question = format!("允許 Worker 執行「{summary}」嗎？");
-    let reason_text = match capability {
+    // 參數或目標改變：同一個 Task 對同一種操作還有未使用的「允許這一次」，但要求不同
+    if check.is_none() {
+        check = ctx
+            .requests
+            .iter()
+            .filter(is_permission_of_task)
+            .filter(|r| !ctx.approval_used(&r.id))
+            .filter(|r| ctx.decision_of(&r.id).is_some_and(|d| d.approves(OPTION_ALLOW_ONCE)))
+            .rev()
+            .find_map(|r| {
+                let binding = r.permission.as_ref()?.binding.as_ref()?;
+                if binding.operation != current.operation {
+                    return None;
+                }
+                approval::check(binding, &current).err().map(|reason| ApprovalCheck::Mismatch { request_id: r.id.clone(), reason })
+            });
+    }
+    // 同一個操作已經用掉一次批准：Runtime 看不到上一次的結果，要先查證再決定
+    let prior_use = ctx
+        .requests
+        .iter()
+        .filter(same_operation)
+        .filter(|r| ctx.decision_of(&r.id).is_some_and(|d| d.approves(OPTION_ALLOW_ONCE)))
+        .filter_map(|r| ctx.use_of(&r.id))
+        .next_back()
+        .map(|u| PriorUse { request_id: u.request_id.clone(), run_id: u.run_id.clone(), used_at: u.used_at });
+    if let Some(prior) = &prior_use {
+        check.get_or_insert(ApprovalCheck::UsedResultUnknown { request_id: prior.request_id.clone() });
+    }
+
+    let mut evidence = vec![format!("工具：{tool_name}"), format!("輸入：{}", truncate(&input.to_string(), 300))];
+    if let Some(ApprovalCheck::Mismatch { request_id, reason }) = &check {
+        evidence.push(format!("先前的單次批准（{request_id}）不能沿用：{}", reason.label()));
+    }
+    let question = match &prior_use {
+        Some(_) => format!("「{summary}」先前已批准並放行過一次，結果未知。查證之後，要再允許一次嗎？"),
+        None => format!("允許 Worker 執行「{summary}」嗎？"),
+    };
+    let mut reason_text = match capability {
         Some(capability) => format!("這個操作需要「{}」，但目前的 Workspace 授權不涵蓋它：{reason}", capability.label()),
         None => format!("Runtime 無法確認這個操作在授權範圍內，所以不自動允許：{reason}"),
+    };
+    if let Some(prior) = &prior_use {
+        evidence.push(format!("前一次批准（{}）已由 Run {} 使用，Runtime 無法得知執行結果", prior.request_id, prior.run_id));
+        reason_text.push_str("。同一個操作先前已經放行過一次，Runtime 無法確認上一次是否已經生效；請先查證，避免重複執行");
+    }
+    let (allow_label, deny_label) = match &prior_use {
+        Some(_) => ("已查證，允許再執行一次", "拒絕（不要重送）"),
+        None => ("允許本次操作", "拒絕"),
+    };
+    let rejected_approval = match &check {
+        Some(ApprovalCheck::Mismatch { request_id, reason }) => {
+            Some(RejectedApproval { request_id: request_id.clone(), reason: *reason })
+        }
+        _ => None,
     };
     let mut record = new_request(ctx, request_id.clone(), run, task, task, DecisionKind::Permission, question, reason_text, now);
     record.options = vec![
         DecisionOption {
             id: OPTION_ALLOW_ONCE.to_string(),
-            label: "允許這一次".to_string(),
-            tradeoff: Some("只對同一個 Task 的這個操作有效，用過一次就失效；不會擴大 Workspace 授權".to_string()),
+            label: allow_label.to_string(),
+            tradeoff: Some(
+                "只允許這個 Task 的這一個操作（同樣的目標、參數與成果版本），用過一次就失效；不會修改 Workspace 授權"
+                    .to_string(),
+            ),
         },
         DecisionOption {
             id: OPTION_DENY.to_string(),
-            label: "拒絕".to_string(),
+            label: deny_label.to_string(),
             tradeoff: Some("Worker 會被告知這個操作不被允許，需要改用其他做法".to_string()),
         },
     ];
-    // 高風險或無法歸類的操作建議拒絕；其餘不給建議，交給使用者判斷
-    record.recommendation = (capability.is_none_or(Capability::is_high_risk)).then(|| OPTION_DENY.to_string());
-    record.evidence = vec![format!("工具：{tool_name}"), format!("輸入：{}", truncate(&input.to_string(), 300))];
-    record.permission = Some(PermissionDetail { tool_name: tool_name.to_string(), input, capability, summary, fingerprint });
-    open_request(
-        ctx,
-        record,
-        task,
-        now,
-        DecisionOutcome::Permission(PermissionOutcome::Waiting { request_id, message: WAITING_MESSAGE.to_string() }),
-    )
+    // 高風險、無法歸類或結果未知的操作建議拒絕；其餘不給建議，交給使用者判斷
+    record.recommendation =
+        (capability.is_none_or(Capability::is_high_risk) || prior_use.is_some()).then(|| OPTION_DENY.to_string());
+    record.evidence = evidence;
+    record.permission = Some(PermissionDetail {
+        tool_name: tool_name.to_string(),
+        input,
+        capability,
+        summary,
+        fingerprint,
+        binding: Some(current),
+        prior_use,
+        rejected_approval,
+    });
+    let message = match &check {
+        Some(ApprovalCheck::Mismatch { reason, .. }) => {
+            format!("先前的單次批准不能沿用（{}），已建立新的裁定請求。{WAITING_MESSAGE}", reason.label())
+        }
+        Some(ApprovalCheck::UsedResultUnknown { .. }) => format!(
+            "這個操作先前已經用掉一次批准，Runtime 無法確認上一次的結果；不要直接重送，先查證上一次是否已經生效。\
+             已建立新的裁定請求。{WAITING_MESSAGE}"
+        ),
+        None => WAITING_MESSAGE.to_string(),
+    };
+    open_request(ctx, record, task, now, DecisionOutcome::Permission(PermissionOutcome::Waiting { request_id, message, check }))
 }
 
 fn controller_action(
@@ -1539,12 +1687,21 @@ pub struct PermissionView {
     pub capability: Option<Capability>,
     pub capability_label: Option<String>,
     pub summary: String,
+    /// 「允許本次操作」綁定的邏輯操作；票 23 之前的請求沒有。
+    pub binding: Option<ApprovalBinding>,
+    /// 同一個操作先前已用掉一次批准、結果未知（要先查證）。
+    pub prior_use: Option<PriorUse>,
+    /// 先前不能沿用的單次批准與原因。
+    pub rejected_approval: Option<RejectedApproval>,
+    /// 這個請求的裁定已被某個 Run 使用（單次批准用過即失效）。
+    pub approval_use: Option<ApprovalUse>,
 }
 
 pub fn view(
     request: &DecisionRequest,
     requests: &[DecisionRequest],
     decisions: &[Decision],
+    uses: &[ApprovalUse],
     tasks: &[Task],
     now: Timestamp,
 ) -> DecisionView {
@@ -1590,6 +1747,10 @@ pub fn view(
             capability: p.capability,
             capability_label: p.capability.map(|c| c.label().to_string()),
             summary: p.summary.clone(),
+            binding: p.binding.clone(),
+            prior_use: p.prior_use.clone(),
+            rejected_approval: p.rejected_approval.clone(),
+            approval_use: uses.iter().find(|u| u.request_id == request.id).cloned(),
         }),
         authority: request.authority.as_ref().map(|a| AuthorityView {
             matter: a.matter,

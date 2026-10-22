@@ -5,9 +5,14 @@ import { formatTimestamp } from "./time";
 import {
   errorCode,
   type AnswerRequest,
+  type ApprovalBinding,
+  type ApprovalMismatchReason,
   type AuthorityLevel,
   type AuthorityTable,
+  type AuthorizationClient,
   type BatchResponse,
+  type Capability,
+  type ConfirmationSummary,
   type DecisionAction,
   type DecisionClient,
   type DecisionKind,
@@ -16,6 +21,7 @@ import {
   type DecisionRequestView,
   type DecisionStatus,
   type DecisionUrgency,
+  type Grant,
   type Workspace,
 } from "./runtimeClient";
 
@@ -25,7 +31,7 @@ type ViewState =
   | { state: "failed"; reason: string };
 
 interface Props {
-  client: DecisionClient;
+  client: DecisionClient & AuthorizationClient;
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
@@ -37,6 +43,13 @@ const KIND_LABELS: Record<DecisionKind, string> = { permission: "權限提示", 
 const URGENCY_LABELS: Record<DecisionUrgency, string> = { low: "低", normal: "一般", high: "高" };
 const STATUS_LABELS: Record<DecisionStatus, string> = { pending: "待處理", answered: "已回答", superseded: "已過期", merged: "已合併" };
 const TASK_STATUS_LABELS = new Map(COLUMNS);
+const MISMATCH_LABELS: Record<ApprovalMismatchReason, string> = {
+  operation_changed: "操作不同",
+  target_changed: "目標資源不同",
+  params_changed: "重要參數不同",
+  request_hash_changed: "要求內容不同",
+  artifact_version_changed: "成果版本已改變",
+};
 
 const ACTION_LABELS: Record<DecisionAction, string> = {
   accept: "接受方案",
@@ -311,6 +324,7 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
           <DecisionDetail
             key={selected.id}
             client={client}
+            workspace={workspace}
             decision={selected}
             all={decisions}
             timeZone={timeZone}
@@ -473,7 +487,8 @@ function BatchPanel({ client, decisions, drafts, onDraft, onCancel, onSubmitted,
 }
 
 interface DetailProps {
-  client: DecisionClient;
+  client: DecisionClient & AuthorizationClient;
+  workspace: Workspace;
   decision: DecisionRequestView;
   /** 同一 Workspace 的全部請求，用來找合併目標與可連結的請求。 */
   all: DecisionRequestView[];
@@ -486,11 +501,23 @@ interface DetailProps {
   reload: () => Promise<void>;
 }
 
-function DecisionDetail({ client, decision, all, timeZone, resumedCount, onAnswered, onMerged, onSelect, reload }: DetailProps) {
+function DecisionDetail({
+  client,
+  workspace,
+  decision,
+  all,
+  timeZone,
+  resumedCount,
+  onAnswered,
+  onMerged,
+  onSelect,
+  reload,
+}: DetailProps) {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isPending = decision.status === "pending";
+  const permission = decision.permission;
   const request = toAnswer(decision, draft);
 
   const submit = async (event: FormEvent) => {
@@ -536,6 +563,12 @@ function DecisionDetail({ client, decision, all, timeZone, resumedCount, onAnswe
       {isPending && !decision.overdue && decision.deadline_at !== null && (
         <p className="decision-deadline">期限：{formatTimestamp(decision.deadline_at, timeZone)}</p>
       )}
+      {isPending && permission?.prior_use && (
+        <p className="decision-prior-use" role="alert">
+          這個操作先前已經放行過一次（{formatTimestamp(permission.prior_use.used_at, timeZone)}，Run{" "}
+          {permission.prior_use.run_id}），結果未知。請先查證是否已經生效，再決定是否再允許一次。
+        </p>
+      )}
 
       <h4>為什麼需要你決定</h4>
       <p>{decision.reason}</p>
@@ -556,6 +589,28 @@ function DecisionDetail({ client, decision, all, timeZone, resumedCount, onAnswe
             <pre>{JSON.stringify(decision.permission.input, null, 2)}</pre>
           </details>
         </section>
+      )}
+
+      {/* 「允許本次操作」與「修改 Workspace 授權」分開：一次性批准不會變成永久擴權 */}
+      {permission && (
+        <section className="decision-approve-once" aria-label="允許本次操作">
+          <h4>允許本次操作</h4>
+          <p>只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權。</p>
+          {permission.binding ? (
+            <BindingView binding={permission.binding} />
+          ) : (
+            <p>這個請求建立於單次批准綁定之前，沒有綁定的操作，允許後也不會被沿用。</p>
+          )}
+          {permission.rejected_approval && (
+            <p className="decision-rejected-approval">
+              先前的單次批准（{permission.rejected_approval.request_id}）不能沿用：
+              {MISMATCH_LABELS[permission.rejected_approval.reason]}
+            </p>
+          )}
+        </section>
+      )}
+      {permission && isPending && (
+        <AuthorizationChange client={client} workspace={workspace} capability={permission.capability} />
       )}
 
       {decision.authority && (
@@ -632,6 +687,170 @@ function DecisionDetail({ client, decision, all, timeZone, resumedCount, onAnswe
   );
 }
 
+/** 單次批准綁定的操作；要求雜湊只顯示前 12 碼。 */
+function BindingView({ binding }: { binding: ApprovalBinding }) {
+  const params = Object.entries(binding.params);
+  return (
+    <dl>
+      <dt>操作</dt>
+      <dd>{binding.operation}</dd>
+      <dt>目標資源</dt>
+      <dd>{binding.target ?? "無"}</dd>
+      <dt>重要參數</dt>
+      <dd>
+        {params.length === 0 ? (
+          "無"
+        ) : (
+          <ul>
+            {params.map(([key, value]) => (
+              <li key={key}>
+                {key}：{JSON.stringify(value)}
+              </li>
+            ))}
+          </ul>
+        )}
+      </dd>
+      <dt>要求雜湊</dt>
+      <dd title={binding.request_hash}>{binding.request_hash.slice(0, 12)}</dd>
+      <dt>成果版本</dt>
+      <dd>{binding.artifact_version === "" ? "尚無成果" : binding.artifact_version}</dd>
+    </dl>
+  );
+}
+
+type ChangeState =
+  | { step: "idle" }
+  | { step: "blocked"; message: string }
+  | { step: "review"; templateId: string | null; grants: Grant[]; summary: ConfirmationSummary }
+  | { step: "saved"; revision: number };
+
+interface ChangeProps {
+  client: AuthorizationClient;
+  workspace: Workspace;
+  /** 這次操作對應的授權能力；null 表示無法歸類。 */
+  capability: Capability | null;
+}
+
+/**
+ * 修改 Workspace 授權：把這項能力（目標為 Workspace 目錄）加入目前授權，檢視變更與風險後確認。
+ * 這是永久擴權，與單次批准分開；修改授權不會回答這個裁定請求。
+ */
+function AuthorizationChange({ client, workspace, capability }: ChangeProps) {
+  const [state, setState] = useState<ChangeState>({ step: "idle" });
+  const [acknowledgedExpansion, setAcknowledgedExpansion] = useState(false);
+  const [acknowledgedRisk, setAcknowledgedRisk] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const start = async () => {
+    setError(null);
+    if (capability === null) {
+      setState({ step: "blocked", message: "無法歸類的操作不能透過修改授權放行，請用允許本次操作或拒絕" });
+      return;
+    }
+    setBusy(true);
+    try {
+      const { effective } = await client.getAuthorization(workspace.id);
+      if (effective === null) {
+        setState({ step: "blocked", message: "這個 Workspace 尚未確認授權，請先到授權設定頁確認授權" });
+      } else if (effective.grants.some((grant) => grant.capability === capability)) {
+        setState({ step: "blocked", message: "這個能力已授權但目標或限制不涵蓋這次操作，請到授權設定頁調整" });
+      } else {
+        const grants = [...effective.grants, { capability, targets: [workspace.path], restrictions: [] }];
+        const summary = await client.summarizeAuthorization(workspace.id, grants);
+        setState({ step: "review", templateId: effective.source.template_id, grants, summary });
+      }
+    } catch (e) {
+      setError(reasonOf(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirm = async (templateId: string | null, grants: Grant[]) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const revision = await client.confirmAuthorization(workspace.id, {
+        templateId,
+        grants,
+        acknowledgedRisk,
+        acknowledgedExpansion: true,
+      });
+      setState({ step: "saved", revision: revision.revision });
+    } catch (e) {
+      setError(reasonOf(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="decision-authorization-change" aria-label="修改 Workspace 授權">
+      <h4>修改 Workspace 授權</h4>
+      <p>把這項能力加入 Workspace 授權後，這個 Workspace 的所有 Task 都能使用，不再逐次詢問。修改授權不會回答這個請求。</p>
+      {state.step === "idle" && (
+        <button type="button" disabled={busy} onClick={() => void start()}>
+          修改 Workspace 授權
+        </button>
+      )}
+      {state.step === "blocked" && <p>{state.message}</p>}
+      {state.step === "review" && (
+        <>
+          <h5>新增的能力與目標</h5>
+          <ul>
+            {(state.summary.changes?.changes ?? [])
+              .filter((change) => change.expands)
+              .map((change) => (
+                <li key={change.capability}>
+                  {change.label}：{change.added_targets.join("、")}
+                </li>
+              ))}
+          </ul>
+          {state.summary.changes && state.summary.changes.impact.length > 0 && (
+            <>
+              <h5>影響</h5>
+              <ul>
+                {state.summary.changes.impact.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {state.summary.risks.map((risk) => (
+            <p key={risk} className="authorization-risk">
+              {risk}
+            </p>
+          ))}
+          <label>
+            <input
+              type="checkbox"
+              checked={acknowledgedExpansion}
+              onChange={(e) => setAcknowledgedExpansion(e.target.checked)}
+            />
+            我了解這會擴大 Workspace 授權
+          </label>
+          {state.summary.requires_risk_acknowledgement && (
+            <label>
+              <input type="checkbox" checked={acknowledgedRisk} onChange={(e) => setAcknowledgedRisk(e.target.checked)} />
+              我了解並接受上述風險
+            </label>
+          )}
+          <button
+            type="button"
+            disabled={busy || !acknowledgedExpansion || (state.summary.requires_risk_acknowledgement && !acknowledgedRisk)}
+            onClick={() => void confirm(state.templateId, state.grants)}
+          >
+            確認修改授權
+          </button>
+        </>
+      )}
+      {state.step === "saved" && <p role="status">授權已更新為第 {state.revision} 版；這個裁定請求仍待回答</p>}
+      {error && <p role="alert">{error}</p>}
+    </section>
+  );
+}
+
 interface OutcomeProps {
   decision: DecisionRequestView;
   all: DecisionRequestView[];
@@ -689,6 +908,12 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, onSelect }
         </>
       ) : (
         <p>已回答</p>
+      )}
+      {decision.permission?.approval_use && (
+        <p>
+          這個批准已於 {formatTimestamp(decision.permission.approval_use.used_at, timeZone)} 由 Run{" "}
+          {decision.permission.approval_use.run_id} 使用，已失效
+        </p>
       )}
       {resumedCount !== null && <p role="status">已恢復：{resumedCount} 個工作</p>}
     </section>

@@ -1,9 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { authorityTable, decisionView } from "./fixtures";
+import { authorityTable, decisionView, lifecycleStatus } from "./fixtures";
 import type { AppClient, Workspace } from "./runtimeClient";
 
 const workspace: Workspace = {
@@ -16,6 +16,9 @@ const workspace: Workspace = {
   archived_at: null,
 };
 
+/** 相當於使用者在系統匣按「完全退出」。 */
+let emitFullExit: () => void = () => {};
+
 const client = {
   getHealth: vi.fn(async () => ({ status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 })),
   getPlatform: vi.fn(async () => {
@@ -26,6 +29,14 @@ const client = {
     throw new Error("授權讀取失敗");
   }),
   getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [], verifications: [] })),
+  lifecycleStatus: vi.fn(async () => {
+    throw new Error("離線");
+  }),
+  requestFullExit: vi.fn(async () => lifecycleStatus({ phase: "stopping", stop_intent_active: true })),
+  onFullExitRequested: vi.fn((handler: () => void) => {
+    emitFullExit = handler;
+    return () => {};
+  }),
   listDecisions: vi.fn(async () => ({
     pending_count: 1,
     overview: { pending: 1, actionable: 1, deferred: 0, overdue: 0, high_urgency: 0, answered: 0, superseded: 0, merged: 0 },
@@ -35,6 +46,7 @@ const client = {
   decisionAuthority: vi.fn(async () => authorityTable()),
   pendingDecisions: vi.fn(async () => ({ pending_count: 1, by_workspace: [{ workspace_id: "ws_1", pending_count: 1 }] })),
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
+  backupStatus: vi.fn(async () => ({ backups: [], latest_drill: null })),
   listKnowledge: vi.fn(async () => ({ search_mode: "full_text", entries: [] })),
 } as unknown as AppClient;
 
@@ -56,6 +68,16 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "授權設定 筆記" }));
     expect(await screen.findByText(/授權讀取失敗/)).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "工作面板：筆記" })).not.toBeInTheDocument();
+  });
+
+  it("系統匣要求完全退出時以覆蓋層顯示停止進度", async () => {
+    render(<App />);
+    await vi.waitFor(() => expect(client.onFullExitRequested).toHaveBeenCalled());
+
+    act(() => emitFullExit());
+
+    expect(await screen.findByRole("dialog", { name: "完全退出" })).toHaveTextContent("停止中");
+    expect(client.requestFullExit).toHaveBeenCalledTimes(1);
   });
 
   it("「裁定」入口開啟裁定中心，並在狀態列與側欄顯示待裁定數", async () => {

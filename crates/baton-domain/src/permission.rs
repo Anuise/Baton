@@ -142,6 +142,14 @@ fn split_words(command: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
+/// 看得懂的單一指令拆成的字詞；含 shell 組合語法或無法斷詞時回傳 `None`（單次批准的綁定用，見 `approval`）。
+pub fn command_words(command: &str) -> Option<Vec<String>> {
+    if command.contains(SHELL_METACHARACTERS) {
+        return None;
+    }
+    split_words(command)
+}
+
 /// bash 會把 `\-\-amend` 解讀成 `--amend`：判斷是不是旗標、比對白名單之前先去掉反斜線。
 fn flag_text(word: &str) -> String {
     word.replace('\\', "")
