@@ -277,7 +277,7 @@ impl Store {
                     "SELECT {REQUEST_COLUMNS} FROM verification_request r
                      JOIN verification_profile_version p ON p.id = r.profile_version_id
                      JOIN workspace w ON w.id = r.workspace_id
-                     WHERE r.status = 'queued' AND w.status = 'active' ORDER BY r.created_at, r.id"
+                     WHERE r.status = 'queued' AND w.status = 'active' ORDER BY r.created_at, r.rowid"
                 ))?
                 .query_map([], request_row)?
                 .collect::<rusqlite::Result<_>>()?;

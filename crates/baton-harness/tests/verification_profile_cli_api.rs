@@ -625,9 +625,16 @@ async fn a_queued_verification_still_runs_after_a_runtime_restart() {
     w.publish(profile()).await;
     w.healthy();
     let request = w.request(json!({ "journeys": ["record-expense"] })).await;
+    let second = w.request(json!({ "journeys": ["report"] })).await;
     w.harness.restart().await;
     let bundle = w.bundle_of(&request).await;
     assert_eq!(bundle["verdict"], "passed", "{bundle}");
+    // 同一刻排入的要求依排入順序執行
+    assert_eq!(w.bundle_of(&second).await["verdict"], "passed");
+    let ops = w.h().verification_driver.operations();
+    let first_post = ops.iter().position(|o| o.starts_with("http POST")).unwrap();
+    let report = ops.iter().position(|o| o == "command ledger report").unwrap();
+    assert!(first_post < report, "{ops:?}");
     // 已完成的要求不會再執行一次
     let posts = operations_with(w.h(), "http POST").len();
     w.h().supervise().await;
