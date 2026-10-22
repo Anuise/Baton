@@ -1,6 +1,6 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { App } from "./App";
 import {
@@ -106,6 +106,17 @@ vi.mock("./runtimeClient", async (importOriginal) => ({
 }));
 
 describe("App", () => {
+  // App 第一次 render 會初次執行側欄與全部設定頁元件；全部前端測試平行執行時這段冷啟動實測可超過 1 秒，
+  // 會吃掉第一個測試 findBy* 的預設等待時間。先在這裡暖機一次，各測試的等待只反映畫面本身的反應。
+  beforeAll(async () => {
+    render(<App />);
+    await screen.findByRole("button", { name: "工作面板 筆記" }, { timeout: 10_000 });
+    cleanup();
+  });
+
+  // 各測試以呼叫紀錄判斷行為（例如完全退出的事件訂閱），不能沿用暖機或前一個測試留下的紀錄
+  beforeEach(() => vi.clearAllMocks());
+
   it("選到 Workspace 後可在授權設定與工作面板之間切換", async () => {
     const user = userEvent.setup();
     render(<App />);
