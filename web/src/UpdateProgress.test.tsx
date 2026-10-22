@@ -257,4 +257,55 @@ describe("更新進度", () => {
 
     expect(client.installUpdate).toHaveBeenCalledTimes(1);
   });
+
+  it("Runtime 在準備套用前就結束、連續 3 次讀不到維護時說明已無法連線，可以嘗試安裝更新", async () => {
+    const client = fakeClient(new Error("connection refused"));
+    client.installUpdate.mockRejectedValueOnce(new Error("沒有準備好的安裝程式"));
+    render(<UpdateProgress client={client} maintenance={maintenance()} />);
+    await settle(500);
+    await settle(500);
+
+    expect(screen.queryByRole("button", { name: "嘗試安裝更新" })).not.toBeInTheDocument();
+
+    await settle(500);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Runtime 已無法連線：connection refused");
+    expect(within(alert).getByRole("button", { name: "關閉 Baton" })).toBeInTheDocument();
+
+    await act(async () => {
+      within(alert).getByRole("button", { name: "嘗試安裝更新" }).click();
+    });
+
+    expect(client.installUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("無法安裝更新：沒有準備好的安裝程式");
+    expect(screen.getByRole("button", { name: "重試" })).toBeInTheDocument();
+  });
+
+  it("Runtime 已無法連線時按「關閉 Baton」結束 App，不安裝", async () => {
+    const client = fakeClient(new Error("connection refused"));
+    render(<UpdateProgress client={client} maintenance={maintenance()} />);
+    await settle(1500);
+
+    await act(async () => {
+      within(screen.getByRole("alert")).getByRole("button", { name: "關閉 Baton" }).click();
+    });
+
+    expect(client.quitApp).toHaveBeenCalledTimes(1);
+    expect(client.installUpdate).not.toHaveBeenCalled();
+  });
+
+  it("讀到一次維護就重新計算連續失敗次數", async () => {
+    const error = new Error("connection refused");
+    const client = fakeClient(error, error, [inMaintenance(), stopping()], error);
+    render(<UpdateProgress client={client} maintenance={maintenance()} />);
+    await settle(2500);
+
+    expect(client.updateStatus).toHaveBeenCalledTimes(5);
+    expect(screen.queryByRole("button", { name: "嘗試安裝更新" })).not.toBeInTheDocument();
+
+    await settle(500);
+
+    expect(screen.getByRole("button", { name: "嘗試安裝更新" })).toBeInTheDocument();
+  });
 });
