@@ -1,6 +1,6 @@
 # 31: Runtime 意外崩潰後的自動恢復
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R095-31-impl，2026-10-22 19:17）
 Blocked by: 26, 15
 
 **What to build:** 依 DR-20261021-05：Runtime 再次啟動先盤點並核對；受控停止身分已確認的舊 Controller／Worker，確認 writer 停止後以新 Run 恢復並重新檢查授權與設定；同一恢復事件最多三次嘗試（30 秒、2 分鐘退避），完成後穩定 10 分鐘才持久化成功；三次失敗後阻擋並提供「重新嘗試恢復」。嘗試序號在任何程序副作用前持久化。UI 顯示事件、次數、退避期限與受影響工作。
