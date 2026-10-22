@@ -372,7 +372,7 @@
 
 ### Worktree（工作副本）
 - **定義**：程式開發 Task 專用的獨立 Git worktree。Task 通過驗證、成果整合、無人使用且成果已保存後自動移除；Task 完成與清理狀態分開保存（已清理／待清理／清理失敗）。
-- **關係**：暫停、交接、失敗、取消與完全退出都不觸發清理；只移除平台建立並登記的目標；研究與文件 Task 改用獨立輸出目錄。
+- **關係**：暫停、交接、失敗、取消與完全退出都不觸發清理；只移除平台建立並登記的目標；研究與文件 Task 改用獨立輸出目錄。位置是 `<Workspace>\.baton\worktrees\<Task>`，簽出平台分支 `baton/<Task>`；同一個 Task 的每個 Run 都在同一個 worktree 中執行。
 - **避免使用**：checkout、workdir、sandbox（不構成安全隔離）。
 
 ### 備份（Backup）
@@ -384,3 +384,13 @@
 - **定義**：每週一次，把最新的備份還原到隔離目錄，核對資料庫完整性、外鍵關聯、成果雜湊，以及資料庫登記的成果版本與 manifest 一致；結果顯示在設定頁。
 - **關係**：只證明備份可用，不改變正式資料目錄；任一項核對沒通過就是不通過。
 - **避免使用**：restore test（泛稱）、驗證（另指 Verification Profile 的驗證）。
+
+### 輸出目錄（output directory）
+- **定義**：研究與文件 Task 專用的獨立目錄（`<Workspace>\.baton\outputs\<Task>`），Workspace 不必是 Git repo。
+- **關係**：與 Worktree 合稱 Task 的「工作目錄」：派工前由平台建立並登記，不可用時不派工並顯示原因；Worker 的程序以它為工作目錄。
+- **避免使用**：output（單獨使用時與成果混淆）。
+
+### 整合佇列（integration queue）
+- **定義**：全部 Workspace 共用的單一佇列。開發 Task 的成果通過驗證後，平台分支排入佇列，依序在整合目錄（`<Workspace>\.baton\integration`）合併並執行整合驗證，通過才把目標分支前移、Task 才完成。
+- **關係**：任何時刻最多一個項目在處理中；合併衝突、整合驗證未通過或目標分支在整合期間被更新時，Task 不完成而回到 ready，目標分支不受影響。「成果已整合」是 Worktree 自動清理的前提之一。
+- **避免使用**：merge queue（指 GitHub 的功能時）、自動合併。

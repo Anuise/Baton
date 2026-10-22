@@ -429,6 +429,8 @@ export interface VerificationView {
   automatic: boolean;
   /** 由舊到新。 */
   records: VerificationRecord[];
+  /** 這個 Task 最新的整合項目（只有開發 Task 會有）；沒有為 null。 */
+  integration: IntegrationEntry | null;
 }
 
 /** 手動接受成果：`basis` 原樣送回 Runtime 取得的值。 */
@@ -460,11 +462,15 @@ export type TaskStatus =
   | "completed"
   | "cancelled";
 
+/** Task 種類：決定 Run 在哪種工作目錄執行（開發 Task 用 worktree，研究／文件用輸出目錄）。 */
+export type TaskKind = "development" | "research" | "document";
+
 export interface TaskView {
   id: string;
   workspace_id: string;
   goal_id: string;
   title: string;
+  kind: TaskKind;
   status: TaskStatus;
   version: number;
   contract_version: number;
@@ -555,7 +561,7 @@ export type RunView = Run & {
   blocked: BlockedNote | null;
 };
 
-/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。`lifecycle` 是完全退出中或等待「繼續工作」。 */
+/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。`lifecycle` 是完全退出中或等待「繼續工作」，`workdir` 是工作目錄不可用。 */
 export type WaitCategory =
   | "capacity"
   | "quota"
@@ -564,6 +570,7 @@ export type WaitCategory =
   | "state_unknown"
   | "account"
   | "lifecycle"
+  | "workdir"
   | "guard";
 
 /** 等待原因（對應 Rust 的 WaitReason）；`code` 是穩定的機器可讀代碼。 */
@@ -608,6 +615,57 @@ export interface TaskBoard {
   verifications: VerificationRecord[];
   /** Workspace 目前生效的授權 revision；尚未確認為 null。 */
   authorization_revision: number | null;
+  /** 各 Task 在平台登記的工作目錄。 */
+  workdirs: WorkdirView[];
+  /** 這個 Workspace 的整合佇列項目，依排入順序。 */
+  integrations: IntegrationEntry[];
+}
+
+/** Task 在平台登記的工作目錄（對應 Rust 的 WorkdirView）；時間是 UTC 毫秒。 */
+export interface WorkdirView {
+  task_id: string;
+  workspace_id: string;
+  /** worktree：開發 Task 的 Git worktree；output_dir：研究／文件 Task 的輸出目錄。 */
+  kind: "worktree" | "output_dir";
+  /** 絕對路徑。 */
+  path: string;
+  /** worktree 的平台分支。 */
+  branch: string | null;
+  /** 整合目標分支。 */
+  base_branch: string | null;
+  status: "ready" | "failed";
+  /** 準備失敗的原因（給使用者看）。 */
+  failure: string | null;
+  version: number;
+  attempted_at: number;
+  ready_at: number | null;
+  /** 在這個目錄中執行過的 Run，依建立順序。 */
+  run_ids: string[];
+}
+
+export type IntegrationStatus = "queued" | "merging" | "verifying" | "advancing" | "integrated" | "failed";
+
+/** 整合佇列的一個項目（對應 Rust 的 IntegrationEntry）；時間是 UTC 毫秒。 */
+export interface IntegrationEntry {
+  id: string;
+  /** 排入順序；佇列依它處理。 */
+  seq: number;
+  workspace_id: string;
+  task_id: string;
+  run_id: string;
+  generation: number;
+  branch: string;
+  target_branch: string;
+  status: IntegrationStatus;
+  version: number;
+  merge_commit: string | null;
+  target_tip: string | null;
+  /** 整合驗證的結果。 */
+  checks: CheckResult[];
+  failure: string | null;
+  queued_at: number;
+  started_at: number | null;
+  finished_at: number | null;
 }
 
 export interface TaskDetail {
@@ -624,6 +682,8 @@ export interface AdmissionReport {
 export interface CreateTaskRequest {
   goalId: string;
   title: string;
+  /** 省略時 Runtime 預設為 research。 */
+  kind?: TaskKind;
   contract?: ContractInput;
 }
 
@@ -648,8 +708,14 @@ export interface TaskClient {
   acceptTask(workspaceId: string, taskId: string, request: AcceptTaskRequest): Promise<VerificationView>;
 }
 
-/** 裁定請求的種類：Agent 主動請求，或工具權限提示。 */
-export type DecisionKind = "agent" | "permission";
+/** 裁定請求的種類：Agent 主動請求、工具權限提示，或 Controller 想處理「必須送裁定」事項而被權限表攔下。 */
+export type DecisionKind = "agent" | "permission" | "authority";
+
+/** superseded：目標版本已變更而過期；merged：已合併到另一個請求。 */
+export type DecisionStatus = "pending" | "answered" | "superseded" | "merged";
+
+/** 處理方式：接受方案、修改條件、回答、要求調查、延後、駁回。 */
+export type DecisionAction = "accept" | "modify" | "answer" | "investigate" | "defer" | "reject";
 
 export type DecisionUrgency = "low" | "normal" | "high";
 
@@ -716,13 +782,37 @@ export interface DecisionPermission {
   approval_use: ApprovalUse | null;
 }
 
-/** 使用者已作出的裁定。 */
+/** 權限表攔截的內容：Controller 想自行處理的事項（spec D-15）。 */
+export interface DecisionAuthority {
+  matter: string;
+  matter_label: string;
+  summary: string;
+}
+
+/** 相似問題的連結或合併來源。 */
+export interface DecisionLink {
+  id: string;
+  question: string;
+  status: DecisionStatus;
+}
+
+/** 提出請求時的目標版本；版本變更後請求會被標為 superseded。 */
+export interface DecisionTarget {
+  task_id: string;
+  contract_version: number;
+  authorization_revision: number | null;
+}
+
+/** 使用者已作出的裁定（延後不算裁定，不會出現在這裡）。 */
 export interface DecisionOutcome {
-  option_id: string;
-  option_label: string;
+  action: Exclude<DecisionAction, "defer">;
+  option_id: string | null;
+  option_label: string | null;
   note: string | null;
   decided_by: string;
   decided_at: number;
+  /** 批次處理時的批次識別；每一項仍各自保存。 */
+  batch_id: string | null;
 }
 
 /** 裁定請求（對應 Rust 的 DecisionRequestView）；時間一律是 UTC 毫秒。 */
@@ -733,7 +823,9 @@ export interface DecisionRequestView {
   task_id: string;
   task_title: string;
   kind: DecisionKind;
-  status: "pending" | "answered";
+  status: DecisionStatus;
+  /** 提交時以 expected_revision 帶回，內容變更過就會被拒。 */
+  revision: number;
   question: string;
   /** 為什麼 Agent 無法自行決定。 */
   reason: string;
@@ -745,15 +837,50 @@ export interface DecisionRequestView {
   /** 期限只用來標示逾期，逾期不代表任何決定。 */
   deadline_at: number | null;
   overdue: boolean;
+  /** 延後不是同意：請求仍是 pending，工作仍在等待。 */
+  deferred_until: number | null;
+  deferred: boolean;
+  merged_into: string | null;
+  /** superseded 的原因。 */
+  status_reason: string | null;
+  links: DecisionLink[];
+  merged_from: DecisionLink[];
   blocking: DecisionBlocking[];
   permission: DecisionPermission | null;
+  authority: DecisionAuthority | null;
+  target: DecisionTarget;
+  /** pending 時可用的處理方式；已結束為空。 */
+  allowed_actions: DecisionAction[];
   created_at: number;
   decision: DecisionOutcome | null;
 }
 
+/** 裁定中心頂部的總覽數字。 */
+export interface DecisionOverview {
+  pending: number;
+  actionable: number;
+  deferred: number;
+  overdue: number;
+  high_urgency: number;
+  answered: number;
+  superseded: number;
+  merged: number;
+}
+
+/** 後端已排序：可處理的 pending、延後的 pending、已結束的。 */
 export interface DecisionList {
   pending_count: number;
+  overview: DecisionOverview;
   decisions: DecisionRequestView[];
+}
+
+/** 處理單筆裁定；accept/modify 需要 option_id，modify/answer/investigate 需要 note，defer 用 defer_minutes。 */
+export interface AnswerRequest {
+  action: DecisionAction;
+  expected_revision: number;
+  option_id?: string;
+  note?: string;
+  defer_minutes?: number;
 }
 
 export interface AnswerResponse {
@@ -762,17 +889,67 @@ export interface AnswerResponse {
   resumed_task_ids: string[];
 }
 
+/** 批次中的一項：各自指定處理方式，各自保存。 */
+export type BatchItem = AnswerRequest & { workspace_id: string; request_id: string };
+
+export type BatchResult =
+  | { workspace_id: string; request_id: string; ok: true; decision: DecisionRequestView; resumed_task_ids: string[] }
+  | { workspace_id: string; request_id: string; ok: false; error: string; message: string };
+
+export interface BatchResponse {
+  batch_id: string;
+  results: BatchResult[];
+}
+
+/** 把請求合併到同種類、pending 的另一個請求；兩邊都要帶 revision。 */
+export interface MergeRequest {
+  into: string;
+  expected_revision: number;
+  into_expected_revision: number;
+}
+
+/** 決策權限表的層級：Controller 可自主處理、必須送裁定、只能人工發起。 */
+export type AuthorityLevel = "autonomous" | "requires_decision" | "human_only";
+
+export interface AuthorityEntry {
+  matter: string;
+  label: string;
+  builtin: AuthorityLevel;
+  effective: AuthorityLevel;
+  narrowed: boolean;
+}
+
+/** 決策權限表（spec D-15）：Workspace 可收窄、不可放寬。 */
+export interface AuthorityTable {
+  revision: number;
+  entries: AuthorityEntry[];
+}
+
+/** 取代式更新：沒列出的事項回到內建值。 */
+export interface UpdateAuthorityRequest {
+  expected_revision: number;
+  entries: { matter: string; effective: AuthorityLevel }[];
+}
+
 /** 全部 Workspace 的待裁定數（頂部狀態列用）。 */
 export interface PendingDecisions {
   pending_count: number;
   by_workspace: { workspace_id: string; pending_count: number }[];
 }
 
-/** 裁定中心：列出、讀取、回答裁定請求（只有桌面憑證能用）。 */
+/** 裁定中心：列出、處理、合併與連結裁定請求，以及決策權限表（只有桌面憑證能用）。 */
 export interface DecisionClient {
   listDecisions(workspaceId: string): Promise<DecisionList>;
   getDecision(workspaceId: string, requestId: string): Promise<DecisionRequestView>;
-  answerDecision(workspaceId: string, requestId: string, optionId: string, note?: string): Promise<AnswerResponse>;
+  answerDecision(workspaceId: string, requestId: string, request: AnswerRequest): Promise<AnswerResponse>;
+  /** 每一項各自保存，部分失敗不影響其他項。 */
+  batchDecisions(items: BatchItem[]): Promise<BatchResponse>;
+  /** 回傳合併的目標。 */
+  mergeDecision(workspaceId: string, requestId: string, request: MergeRequest): Promise<{ decision: DecisionRequestView }>;
+  linkDecision(workspaceId: string, requestId: string, otherId: string): Promise<DecisionRequestView>;
+  decisionAuthority(workspaceId: string): Promise<AuthorityTable>;
+  /** 放寬會被拒（authority_widening_refused）。 */
+  updateDecisionAuthority(workspaceId: string, request: UpdateAuthorityRequest): Promise<AuthorityTable>;
   pendingDecisions(): Promise<PendingDecisions>;
 }
 
@@ -1378,6 +1555,7 @@ const WORKSPACES_PATH = "/api/v1/workspaces";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
 const PENDING_DECISIONS_PATH = "/api/v1/decisions/pending";
+const BATCH_DECISIONS_PATH = "/api/v1/decisions/batch";
 const SCHEDULING_PATH = "/api/v1/scheduling";
 const LIFECYCLE_PATH = "/api/v1/lifecycle";
 /** 桌面殼在系統匣「完全退出」時發出的事件（先顯示主視窗再發出）。 */
@@ -1489,8 +1667,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     },
     getTaskBoard: (workspaceId) => send(`${workspacePath(workspaceId)}/tasks`),
     createGoal: (workspaceId, title) => send(`${workspacePath(workspaceId)}/goals`, { method: "POST", body: { title } }),
-    createTask: (workspaceId, { goalId, title, contract }) =>
-      send(`${workspacePath(workspaceId)}/tasks`, { method: "POST", body: { goal_id: goalId, title, contract } }),
+    createTask: (workspaceId, { goalId, title, kind, contract }) =>
+      send(`${workspacePath(workspaceId)}/tasks`, { method: "POST", body: { goal_id: goalId, title, kind, contract } }),
     getTask: (workspaceId, taskId) => send(taskPath(workspaceId, taskId)),
     updateTaskContract: (workspaceId, taskId, contract, note) =>
       send(`${taskPath(workspaceId, taskId)}/contract`, { method: "PUT", body: { contract, note } }),
@@ -1539,8 +1717,16 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       send(`${taskPath(workspaceId, taskId)}/verification/accept`, { method: "POST", body: { basis, note } }),
     listDecisions: (workspaceId) => send(`${workspacePath(workspaceId)}/decisions`),
     getDecision: (workspaceId, requestId) => send(decisionPath(workspaceId, requestId)),
-    answerDecision: (workspaceId, requestId, optionId, note) =>
-      send(`${decisionPath(workspaceId, requestId)}/answer`, { method: "POST", body: { option_id: optionId, note } }),
+    answerDecision: (workspaceId, requestId, request) =>
+      send(`${decisionPath(workspaceId, requestId)}/answer`, { method: "POST", body: request }),
+    batchDecisions: (items) => send(BATCH_DECISIONS_PATH, { method: "POST", body: { items } }),
+    mergeDecision: (workspaceId, requestId, request) =>
+      send(`${decisionPath(workspaceId, requestId)}/merge`, { method: "POST", body: request }),
+    linkDecision: (workspaceId, requestId, otherId) =>
+      send(`${decisionPath(workspaceId, requestId)}/links`, { method: "POST", body: { other_id: otherId } }),
+    decisionAuthority: (workspaceId) => send(`${workspacePath(workspaceId)}/decision-authority`),
+    updateDecisionAuthority: (workspaceId, request) =>
+      send(`${workspacePath(workspaceId)}/decision-authority`, { method: "PUT", body: request }),
     pendingDecisions: () => send(PENDING_DECISIONS_PATH),
     listArtifacts: (workspaceId) => send(`${workspacePath(workspaceId)}/artifacts`),
     previewArtifact: (workspaceId, artifactId, version) =>
@@ -1605,8 +1791,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
       }),
     getTaskBoard: (workspaceId) => call<TaskBoard>("task_board", { workspaceId }),
     createGoal: (workspaceId, title) => call<Goal>("goal_create", { workspaceId, title }),
-    createTask: (workspaceId, { goalId, title, contract }) =>
-      call<TaskView>("task_create", { workspaceId, goalId, title, contract }),
+    createTask: (workspaceId, { goalId, title, kind, contract }) =>
+      call<TaskView>("task_create", { workspaceId, goalId, title, kind, contract }),
     getTask: (workspaceId, taskId) => call<TaskDetail>("task_detail", { workspaceId, taskId }),
     updateTaskContract: (workspaceId, taskId, contract, note) =>
       call<TaskView>("task_contract_update", { workspaceId, taskId, contract, note }),
@@ -1651,8 +1837,16 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
       call<VerificationView>("task_accept", { workspaceId, taskId, request: { basis, note } }),
     listDecisions: (workspaceId) => call<DecisionList>("decision_list", { workspaceId }),
     getDecision: (workspaceId, requestId) => call<DecisionRequestView>("decision_detail", { workspaceId, requestId }),
-    answerDecision: (workspaceId, requestId, optionId, note) =>
-      call<AnswerResponse>("decision_answer", { workspaceId, requestId, optionId, note }),
+    answerDecision: (workspaceId, requestId, request) =>
+      call<AnswerResponse>("decision_answer", { workspaceId, requestId, request }),
+    batchDecisions: (items) => call<BatchResponse>("decisions_batch", { request: { items } }),
+    mergeDecision: (workspaceId, requestId, request) =>
+      call<{ decision: DecisionRequestView }>("decision_merge", { workspaceId, requestId, request }),
+    linkDecision: (workspaceId, requestId, otherId) =>
+      call<DecisionRequestView>("decision_link", { workspaceId, requestId, otherId }),
+    decisionAuthority: (workspaceId) => call<AuthorityTable>("decision_authority", { workspaceId }),
+    updateDecisionAuthority: (workspaceId, request) =>
+      call<AuthorityTable>("decision_authority_update", { workspaceId, request }),
     pendingDecisions: () => call<PendingDecisions>("decisions_pending"),
     listArtifacts: (workspaceId) => call<ArtifactList>("artifact_list", { workspaceId }),
     previewArtifact: (workspaceId, artifactId, version) =>

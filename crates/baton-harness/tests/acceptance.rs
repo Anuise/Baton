@@ -182,9 +182,10 @@ async fn passing_deterministic_checks_complete_the_task_with_evidence() {
     let prompt = harness.agent_adapter.launched()[0].prompt.clone();
     assert!(prompt.contains("確定性檢查") && prompt.contains("cargo test --workspace"), "{prompt}");
 
-    // Worker 的實際成果：工作目錄裡的檔案與登記的成果
-    std::fs::create_dir_all(dir.join("out")).unwrap();
-    std::fs::write(dir.join("out").join("summary.txt"), "abc").unwrap();
+    // Worker 的實際成果：工作目錄（研究 Task 的輸出目錄，票 20）裡的檔案與登記的成果
+    let workdir = dir.join(".baton").join("outputs").join(&tid);
+    std::fs::create_dir_all(workdir.join("out")).unwrap();
+    std::fs::write(workdir.join("out").join("summary.txt"), "abc").unwrap();
     let (status, body) = harness.call_tool(&token, TOOL_REGISTER_ARTIFACT, json!({ "name": "report.md", "content": "abc" })).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     harness.command_runner.script_exit("cargo", 0, "test result: ok. 12 passed");
@@ -196,7 +197,7 @@ async fn passing_deterministic_checks_complete_the_task_with_evidence() {
     let calls = harness.command_runner.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!((calls[0].program.as_str(), calls[0].args.clone()), ("cargo", vec!["test".to_string(), "--workspace".into()]));
-    assert_eq!(calls[0].working_dir, std::path::PathBuf::from(dir.to_string_lossy().into_owned()));
+    assert_eq!(calls[0].working_dir, workdir, "檢查在 Run 的工作目錄執行");
 
     let view = verification(&harness, &ws, &tid).await;
     let record = &view["records"][0];

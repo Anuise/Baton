@@ -307,7 +307,7 @@ async fn an_expansion_alone_does_not_list_runs_as_keeping_revoked_authorization(
     let (ws, goal) = workspace(&harness, "app").await;
     confirm_template(&harness, &ws, "research_docs").await;
     let tid = ready_task(&harness, &ws, &goal, "整理文件", &["read_files"]).await;
-    let (rid, _) = start_run(&harness, &ws, &tid).await;
+    let (rid, token) = start_run(&harness, &ws, &tid).await;
 
     // 在目前的授權上只新增「建置與測試」
     let mut grants = authorization(&harness, &ws).await["effective"]["grants"].as_array().unwrap().clone();
@@ -319,6 +319,15 @@ async fn an_expansion_alone_does_not_list_runs_as_keeping_revoked_authorization(
 
     assert!(authorization(&harness, &ws).await["legacy_runs"].as_array().unwrap().is_empty());
     assert_eq!(run_view(&harness, &ws, &rid).await["authorization_revision"], 1, "已准入的 Run 也不會取得新增的範圍");
+
+    // 範圍外的提示建立的裁定請求記下判定時依據的授權：Run 准入時的 revision，不是目前的（票 24 整合，AI-245）
+    let (_, asked) = prompt(&harness, &token, "cargo test").await;
+    assert_eq!(asked["status"], "waiting_decision", "{asked}");
+    let request_id = asked["decision_request_id"].as_str().unwrap();
+    let path = format!("{WORKSPACES}/{ws}/decisions/{request_id}");
+    let (status, request) = harness.send_json(Method::GET, &path, None).await;
+    assert_eq!(status, StatusCode::OK, "{request}");
+    assert_eq!(request["target"]["authorization_revision"], 1, "{request}");
 }
 
 // ============================================================ 舊 Run／Session 不能成為新工作的權限捷徑

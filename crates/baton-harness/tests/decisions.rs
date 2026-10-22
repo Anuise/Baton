@@ -132,8 +132,12 @@ async fn decision(harness: &Harness, ws: &str, rid: &str) -> Value {
     view
 }
 
+/// 以目前看到的內容版本接受某個選項（票 35 起提交必須帶 `expected_revision`；請求不存在時隨便帶 1）。
 async fn answer(harness: &Harness, ws: &str, rid: &str, option: &str) -> (StatusCode, Value) {
-    harness.send_json(Method::POST, &answer_path(ws, rid), Some(json!({ "option_id": option }))).await
+    let (_, view) = harness.send_json(Method::GET, &format!("{}/{rid}", decisions_path(ws)), None).await;
+    let revision = view["revision"].as_i64().unwrap_or(1);
+    let body = json!({ "option_id": option, "expected_revision": revision });
+    harness.send_json(Method::POST, &answer_path(ws, rid), Some(body)).await
 }
 
 fn error_code(body: &Value) -> &str {
@@ -274,7 +278,7 @@ async fn answering_resumes_only_the_affected_task_and_appends_a_wake_item_in_the
         .send_json(
             Method::POST,
             &answer_path(&p.ws, &rid),
-            Some(json!({ "option_id": "wait", "note": "報表比較重要" })),
+            Some(json!({ "option_id": "wait", "note": "報表比較重要", "expected_revision": 1 })),
         )
         .await;
 

@@ -23,6 +23,35 @@ pub enum DirectoryState {
     NotADirectory,
 }
 
+/// 目錄的 Git 狀態（開發 Task 需要 Git Workspace，票 20）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitState {
+    /// 不是 Git repo 的頂層工作目錄（找不到 git 執行檔則是錯誤，讓上層顯示原因）。
+    NotRepository,
+    /// Git repo 的頂層工作目錄；`branch` 是目前簽出的分支，detached HEAD 時是 `None`。
+    Repository { branch: Option<String> },
+}
+
+/// 在整合目錄中合併的結果（目標分支本身沒有改變）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// 合併成功：`commit` 是整合目錄的合併結果，`target_tip` 是合併當時目標分支所在的 commit。
+    Merged { commit: String, target_tip: String },
+    /// 有衝突，已放棄合併；`detail` 是衝突的檔案與 git 輸出的摘要。
+    Conflict { detail: String },
+}
+
+/// 把目標分支前移到整合結果的結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdvanceOutcome {
+    /// 目標分支已經在整合結果上（含先前已前移過，冪等）。
+    Advanced,
+    /// 目標分支已經不在合併當時的 commit（整合期間有其他更新），沒有改變任何東西。
+    TargetMoved { actual: String },
+    /// 無法前移（例如簽出目標分支的工作目錄有未提交的變更擋住），沒有改變任何東西。
+    Blocked { detail: String },
+}
+
 /// 成果儲存內的一個檔案。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
@@ -36,7 +65,30 @@ pub trait WorkspaceFs: Send + Sync {
     async fn inspect_directory(&self, path: &Path) -> PortResult<DirectoryState>;
     /// 建立目錄（含上層）；已存在時不是錯誤。用於 Profile 專屬的設定目錄。
     async fn ensure_directory(&self, path: &Path) -> PortResult<()>;
+    /// 目錄是不是 Git repo 的頂層工作目錄，以及目前簽出的分支（票 20）。
+    async fn inspect_git(&self, path: &Path) -> PortResult<GitState>;
+    /// 在 `target` 建立 `repo` 的 worktree，並從 `repo` 目前的 HEAD 建立新分支 `branch` 簽出在其中（票 20）。
+    /// 冪等：`target` 已經是簽出 `branch` 的 worktree 時直接成功；`branch` 已存在但沒有 worktree 時沿用該分支。
     async fn create_worktree(&self, repo: &Path, branch: &str, target: &Path) -> PortResult<()>;
+    /// 在平台專用的整合目錄 `integration_dir`（可能殘留上一次的內容，會被整個重設）以 detached HEAD
+    /// 簽出 `target_branch` 目前的 commit，再以 `--no-ff` 合併 `branch`（票 20）。目標分支本身不會改變；
+    /// 衝突時放棄合併並回報 `Conflict`。
+    async fn merge_for_integration(
+        &self,
+        repo: &Path,
+        target_branch: &str,
+        branch: &str,
+        integration_dir: &Path,
+    ) -> PortResult<MergeOutcome>;
+    /// 把 `target_branch` 從 `expected_tip` 以 fast-forward 前移到 `commit`（票 20）；簽出該分支的工作目錄一併更新。
+    /// 已經在 `commit` 時回 `Advanced`（冪等）；不在 `expected_tip` 時什麼都不改，回 `TargetMoved`。
+    async fn advance_branch(
+        &self,
+        repo: &Path,
+        target_branch: &str,
+        expected_tip: &str,
+        commit: &str,
+    ) -> PortResult<AdvanceOutcome>;
     async fn remove_worktree(&self, target: &Path) -> PortResult<()>;
     async fn inspect_dirty(&self, target: &Path) -> PortResult<DirtyState>;
     /// 先寫暫存、fsync、再原子改名（spec D-17）。

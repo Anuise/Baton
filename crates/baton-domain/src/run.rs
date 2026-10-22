@@ -25,6 +25,7 @@ use crate::guard::{self, ActiveGuard, GuardViolation};
 use crate::task::{
     self, ContractContent, ContractField, ContractFieldName, MissingItem, Task, TaskContext, TaskStatus, Versioned,
 };
+use crate::workdir::{Workdir, WorkdirKind};
 use crate::workspace::{AgentRole, Workspace};
 use crate::Timestamp;
 
@@ -207,7 +208,7 @@ pub struct OutboxItem {
 pub struct LaunchPayload {
     pub task_id: String,
     pub prompt: String,
-    /// Worker 的工作目錄（目前是 Workspace 目錄；worktree 由票 20 加入）。
+    /// Worker 的工作目錄：Task 在平台登記的 worktree 或輸出目錄（票 20）。
     pub working_dir: String,
     /// 派工當下 Workspace 對 Worker 角色的模型覆寫（spec D-30）；`None` 表示沿用帳號的預設模型。
     #[serde(default)]
@@ -374,6 +375,17 @@ pub enum RunError {
     CancelNotRequested,
     #[error("完全退出的停止意圖生效中（或 Workspace 在完全退出後等待「繼續工作」），不啟動新的程序")]
     LaunchHalted,
+    #[error("Task 的{}還沒有準備好", workdir_label(*.0))]
+    WorkdirNotPrepared(WorkdirKind),
+    #[error("Task 的工作目錄不可用：{0}")]
+    WorkdirUnavailable(String),
+}
+
+fn workdir_label(kind: WorkdirKind) -> &'static str {
+    match kind {
+        WorkdirKind::Worktree => " worktree ",
+        WorkdirKind::OutputDir => "輸出目錄",
+    }
 }
 
 fn join_messages(items: &[MissingItem]) -> String {
@@ -402,6 +414,8 @@ impl RunError {
             RunError::LeaseNotExpired => "lease_not_expired",
             RunError::CancelNotRequested => "run_cancel_not_requested",
             RunError::LaunchHalted => "launch_halted",
+            RunError::WorkdirNotPrepared(_) => "workdir_not_prepared",
+            RunError::WorkdirUnavailable(_) => "workdir_unavailable",
         }
     }
 }
@@ -415,6 +429,8 @@ pub struct RunContext<'a> {
     pub leases: &'a [ExecutionLease],
     /// 這一刻准入的 Run 會固定使用的共同設定版本（沒有採用任何版本為 `None`）；只有 `BeginLaunch` 使用。
     pub settings_version: Option<i64>,
+    /// Workspace 內平台登記的工作目錄（票 20）；派工只認已可用的目錄。
+    pub workdirs: &'a [Workdir],
     /// Run 准入時要檢查的 Guard（Store 已篩出「啟用且來源教訓現在有效」者；範圍由 `guard::violations` 判定）。
     pub guards: &'a [ActiveGuard],
 }
@@ -764,10 +780,11 @@ struct Checked<'a> {
     task: &'a Task,
     contract: &'a task::TaskContract,
     admission: authorization::Admission,
+    workdir: &'a Workdir,
 }
 
 /// 派工的前置檢查（與帳號、容量無關）：Task 必須是 `ready`、沒有人持有寫入所有權、准入檢查通過（授權可能在
-/// ready 之後被撤銷，AI-61）、適用的 Guard 都沒有違反（票 38）、相依都已完成。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
+/// ready 之後被撤銷，AI-61）、適用的 Guard 都沒有違反（票 38）、相依都已完成，而且 Task 的工作目錄已經登記為可用（票 20）。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
 pub fn check_dispatch(ctx: &RunContext<'_>, task_id: &str) -> Result<(), RunError> {
     check_dispatch_inner(ctx, task_id).map(|_| ())
 }
@@ -810,7 +827,14 @@ fn check_dispatch_inner<'a>(ctx: &'a RunContext<'a>, task_id: &str) -> Result<Ch
     if !unfinished.is_empty() {
         return Err(RunError::DependenciesUnfinished(unfinished));
     }
-    Ok(Checked { task, contract, admission })
+    // 工作目錄在交易外由 Runtime 準備並登記；沒有可用的目錄就不派工
+    let kind = task.kind.workdir_kind();
+    let workdir = match ctx.workdirs.iter().find(|w| w.task_id == task.id && w.kind == kind) {
+        Some(w) if w.is_ready() => w,
+        Some(w) => return Err(RunError::WorkdirUnavailable(w.failure.clone().unwrap_or_default())),
+        None => return Err(RunError::WorkdirNotPrepared(kind)),
+    };
+    Ok(Checked { task, contract, admission, workdir })
 }
 
 fn dispatch(
@@ -821,7 +845,7 @@ fn dispatch(
     profile_id: String,
     now: Timestamp,
 ) -> Result<RunChange, RunError> {
-    let Checked { task, contract, admission } = check_dispatch_inner(ctx, &task_id)?;
+    let Checked { task, contract, admission, workdir } = check_dispatch_inner(ctx, &task_id)?;
 
     let generation = ctx.runs.iter().filter(|r| r.task_id == task.id).map(|r| r.generation).max().unwrap_or(0) + 1;
     let mut run = Run {
@@ -862,7 +886,7 @@ fn dispatch(
         payload: LaunchPayload {
             task_id: task.id.clone(),
             prompt: render_prompt(&task.title, &contract.content),
-            working_dir: workspace.path.clone(),
+            working_dir: workdir.path.clone(),
             model: workspace.model_overrides.model_for(AgentRole::Worker).map(str::to_string),
         },
         created_at: now,
@@ -878,6 +902,7 @@ fn dispatch(
             "generation": generation,
             "contract_version": task.contract_version,
             "authorization_revision": admission.authorization_revision,
+            "working_dir": workdir.path,
         }),
     );
     run = edit.run;

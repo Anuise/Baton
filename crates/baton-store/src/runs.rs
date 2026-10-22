@@ -197,8 +197,14 @@ fn decide_with(
 ) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
-    let run_ctx =
-        RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, guards: &loaded.guards, settings_version };
+    let run_ctx = RunContext {
+        task: &task_ctx,
+        runs: &loaded.runs,
+        leases: &loaded.leases,
+        workdirs: &loaded.workdirs,
+        guards: &loaded.guards,
+        settings_version,
+    };
     run::decide(&run_ctx, command, now)
 }
 

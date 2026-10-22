@@ -50,6 +50,7 @@ fn task(id: &str) -> Task {
         workspace_id: "w1".into(),
         goal_id: "goal1".into(),
         title: id.into(),
+        kind: crate::workdir::TaskKind::default(),
         status: crate::task::TaskStatus::Ready,
         version: 1,
         contract_version: 1,

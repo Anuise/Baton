@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    AcceptTaskRequest, AdmissionReport, ArtifactList, ArtifactPreview, AuthorizationView, ConfirmAuthorizationRequest,
-    BackupStatus, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview,
-    LifecycleStatus, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview,
-    SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceLifecycleView, WorkspaceList,
+    AcceptTaskRequest, AdmissionReport, AnswerRequest, ArtifactList, ArtifactPreview, AuthorizationView, BackupStatus,
+    BatchRequest, BatchResponse, ConfirmAuthorizationRequest, CreateProfileRequest, CreateTaskRequest,
+    CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus, LoginTerminalResponse, MergeRequest,
+    MergeResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus,
+    SummaryRequest, TaskBoard, TaskDetail, UpdateAuthorityRequest, WorkspaceLifecycleView, WorkspaceList,
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
@@ -21,6 +22,7 @@ use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOu
 use baton_credential::DpapiProtector;
 use baton_store::{AnswerResult, DecisionList};
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
+use baton_domain::authority::AuthorityTable;
 use baton_domain::decision::DecisionView;
 use baton_domain::guard::Recurrence;
 use baton_domain::profile::ProfileView;
@@ -32,6 +34,7 @@ use baton_domain::verification::VerificationView;
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
+use baton_domain::workdir::TaskKind;
 use baton_domain::workspace::{ModelOverrides, Workspace};
 use base64::Engine;
 use serde::Serialize;
@@ -358,13 +361,14 @@ async fn task_create(
     workspace_id: String,
     goal_id: String,
     title: String,
+    kind: Option<TaskKind>,
     contract: Option<ContractContent>,
 ) -> Result<TaskView, String> {
     if let Err(reason) = link.ensure_started().await {
         return Err(reason.clone());
     }
     link.client
-        .create_task(&workspace_id, &CreateTaskRequest { goal_id, title, contract: contract.unwrap_or_default() })
+        .create_task(&workspace_id, &CreateTaskRequest { goal_id, title, kind: kind.unwrap_or_default(), contract: contract.unwrap_or_default() })
         .await.map_err(|e| e.to_string())
 }
 
@@ -563,19 +567,77 @@ async fn decision_detail(
     link.client.decision_detail(&workspace_id, &request_id).await.map_err(|e| e.to_string())
 }
 
-/// Web UI 提交正式裁定（只有桌面角色能做）。
+/// Web UI 處理一個裁定請求（只有桌面角色能做）。
 #[tauri::command]
 async fn decision_answer(
     link: State<'_, RuntimeLink>,
     workspace_id: String,
     request_id: String,
-    option_id: String,
-    note: Option<String>,
+    request: AnswerRequest,
 ) -> Result<AnswerResult, String> {
     if let Err(reason) = link.ensure_started().await {
         return Err(reason.clone());
     }
-    link.client.decision_answer(&workspace_id, &request_id, &option_id, note).await.map_err(|e| e.to_string())
+    link.client.decision_answer(&workspace_id, &request_id, &request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 批次處理裁定請求：每一項各自保存。
+#[tauri::command]
+async fn decisions_batch(link: State<'_, RuntimeLink>, request: BatchRequest) -> Result<BatchResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decisions_batch(&request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 把一個裁定請求合併到另一個。
+#[tauri::command]
+async fn decision_merge(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request_id: String,
+    request: MergeRequest,
+) -> Result<MergeResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_merge(&workspace_id, &request_id, &request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 把兩個裁定請求互相連結。
+#[tauri::command]
+async fn decision_link(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request_id: String,
+    other_id: String,
+) -> Result<DecisionView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_link(&workspace_id, &request_id, &other_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 讀取 Workspace 的決策權限表。
+#[tauri::command]
+async fn decision_authority(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<AuthorityTable, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_authority(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 收窄 Workspace 的決策權限表。
+#[tauri::command]
+async fn decision_authority_update(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request: UpdateAuthorityRequest,
+) -> Result<AuthorityTable, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.update_decision_authority(&workspace_id, &request).await.map_err(|e| e.to_string())
 }
 
 /// 狀態列的全域待處理裁定數。
@@ -955,6 +1017,11 @@ fn main() {
             decision_list,
             decision_detail,
             decision_answer,
+            decisions_batch,
+            decision_merge,
+            decision_link,
+            decision_authority,
+            decision_authority_update,
             decisions_pending,
             artifact_list,
             artifact_preview,

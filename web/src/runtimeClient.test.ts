@@ -173,7 +173,7 @@ describe("Runtime 用戶端", () => {
 
     await client.getTaskBoard("ws_1");
     await client.createGoal("ws_1", "第一個目標");
-    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", contract });
+    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", kind: "development", contract });
     await client.createTask("ws_1", { goalId: "goal_1", title: "空契約" });
     await client.getTask("ws_1", "task_1");
     await client.updateTaskContract("ws_1", "task_1", contract, "補上目標");
@@ -195,7 +195,7 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(3, `${base}/tasks`, {
       method: "POST",
       headers: json,
-      body: JSON.stringify({ goal_id: "goal_1", title: "寫文件", contract }),
+      body: JSON.stringify({ goal_id: "goal_1", title: "寫文件", kind: "development", contract }),
     });
     expect(fetchFn).toHaveBeenNthCalledWith(4, `${base}/tasks`, {
       method: "POST",
@@ -378,7 +378,7 @@ describe("Runtime 用戶端", () => {
 
     await client.getTaskBoard("ws_1");
     await client.createGoal("ws_1", "第一個目標");
-    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", contract });
+    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", kind: "document", contract });
     await client.getTask("ws_1", "task_1");
     await client.updateTaskContract("ws_1", "task_1", contract, "補上目標");
     await client.addTaskDependency("ws_1", "task_1", "task_2");
@@ -394,6 +394,7 @@ describe("Runtime 用戶端", () => {
       workspaceId: "ws_1",
       goalId: "goal_1",
       title: "寫文件",
+      kind: "document",
       contract,
     });
     expect(invoke).toHaveBeenNthCalledWith(4, "task_detail", { workspaceId: "ws_1", taskId: "task_1" });
@@ -624,8 +625,8 @@ describe("Runtime 用戶端", () => {
 
     await client.listDecisions("ws_1");
     await client.getDecision("ws_1", "dec_1");
-    await client.answerDecision("ws_1", "dec_1", "keep", "照舊就好");
-    await client.answerDecision("ws_1", "dec_1", "keep");
+    await client.answerDecision("ws_1", "dec_1", { action: "accept", expected_revision: 2, option_id: "keep", note: "照舊就好" });
+    await client.answerDecision("ws_1", "dec_1", { action: "defer", expected_revision: 2, defer_minutes: 240 });
     await client.pendingDecisions();
 
     expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/decisions");
@@ -633,22 +634,58 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/decisions/dec_1/answer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ option_id: "keep", note: "照舊就好" }),
+      body: JSON.stringify({ action: "accept", expected_revision: 2, option_id: "keep", note: "照舊就好" }),
     });
-    // 沒有備註時 body 不含 note
+    // 延後只帶時數，不含選項與備註
     expect(fetchFn).toHaveBeenNthCalledWith(4, "/api/v1/workspaces/ws_1/decisions/dec_1/answer", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ option_id: "keep" }),
+      body: JSON.stringify({ action: "defer", expected_revision: 2, defer_minutes: 240 }),
     });
     expect(fetchFn).toHaveBeenNthCalledWith(5, "/api/v1/decisions/pending");
+  });
+
+  it("HTTP 版以契約的路徑與 body 批次、合併、連結裁定，並讀寫決策權限表", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const items = [
+      { workspace_id: "ws_1", request_id: "dec_1", action: "reject" as const, expected_revision: 1 },
+      { workspace_id: "ws_2", request_id: "dec_2", action: "answer" as const, expected_revision: 3, note: "用 A" },
+    ];
+
+    await client.batchDecisions(items);
+    await client.mergeDecision("ws_1", "dec_1", { into: "dec_2", expected_revision: 1, into_expected_revision: 4 });
+    await client.linkDecision("ws_1", "dec_1", "dec_3");
+    await client.decisionAuthority("ws_1");
+    await client.updateDecisionAuthority("ws_1", {
+      expected_revision: 2,
+      entries: [{ matter: "retry_task", effective: "requires_decision" }],
+    });
+
+    const json = (body: unknown) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/decisions/batch", json({ items }));
+    expect(fetchFn).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/workspaces/ws_1/decisions/dec_1/merge",
+      json({ into: "dec_2", expected_revision: 1, into_expected_revision: 4 }),
+    );
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/decisions/dec_1/links", json({ other_id: "dec_3" }));
+    expect(fetchFn).toHaveBeenNthCalledWith(4, "/api/v1/workspaces/ws_1/decision-authority");
+    expect(fetchFn).toHaveBeenNthCalledWith(5, "/api/v1/workspaces/ws_1/decision-authority", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ expected_revision: 2, entries: [{ matter: "retry_task", effective: "requires_decision" }] }),
+    });
   });
 
   it("HTTP 版回答裁定的回應原樣回傳", async () => {
     const answered = { decision: { id: "dec_1", status: "answered" }, resumed_task_ids: ["task_1", "task_2"] };
     const fetchFn = vi.fn(async () => new Response(JSON.stringify(answered), { status: 200 }));
 
-    const result = await createHttpClient(fetchFn as unknown as typeof fetch).answerDecision("ws_1", "dec_1", "keep");
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).answerDecision("ws_1", "dec_1", {
+      action: "reject",
+      expected_revision: 1,
+    });
 
     expect(result).toEqual(answered);
   });
@@ -657,27 +694,47 @@ describe("Runtime 用戶端", () => {
     [404, "decision_not_found", "找不到這個裁定請求"],
     [400, "decision_option_unknown", "選項不屬於這個裁定請求"],
     [409, "decision_already_answered", "這個裁定已經回答過了"],
-  ])("HTTP 版回答裁定失敗（%i %s）時，錯誤訊息是 Runtime 的說明", async (status, error, message) => {
+    [409, "decision_revision_mismatch", "裁定請求的內容已變更"],
+    [409, "decision_superseded", "目標版本已變更"],
+  ])("HTTP 版回答裁定失敗（%i %s）時，錯誤訊息是 Runtime 的說明，代碼可辨識", async (status, error, message) => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ error, message }), { status }));
 
-    await expect(
-      createHttpClient(fetchFn as unknown as typeof fetch).answerDecision("ws_1", "dec_1", "keep"),
-    ).rejects.toThrow(message);
+    const failure = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .answerDecision("ws_1", "dec_1", { action: "reject", expected_revision: 1 })
+      .catch((e) => e);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toBe(message);
+    expect(errorCode(failure)).toBe(error);
   });
 
-  it("Tauri 版以指令與參數操作裁定", async () => {
+  it("Tauri 版以指令與參數操作裁定與決策權限表", async () => {
     const invoke = vi.fn(async () => ({}));
     const client = createTauriClient(invoke as never);
+    const answer = { action: "modify" as const, expected_revision: 2, option_id: "keep", note: "只保留 docs/" };
+    const items = [{ workspace_id: "ws_1", request_id: "dec_1", action: "reject" as const, expected_revision: 1 }];
+    const merge = { into: "dec_2", expected_revision: 1, into_expected_revision: 4 };
+    const authority = { expected_revision: 2, entries: [{ matter: "retry_task", effective: "requires_decision" as const }] };
 
     await client.listDecisions("ws_1");
     await client.getDecision("ws_1", "dec_1");
-    await client.answerDecision("ws_1", "dec_1", "keep", "照舊就好");
+    await client.answerDecision("ws_1", "dec_1", answer);
+    await client.batchDecisions(items);
+    await client.mergeDecision("ws_1", "dec_1", merge);
+    await client.linkDecision("ws_1", "dec_1", "dec_3");
+    await client.decisionAuthority("ws_1");
+    await client.updateDecisionAuthority("ws_1", authority);
     await client.pendingDecisions();
 
     expect(invoke.mock.calls).toEqual([
       ["decision_list", { workspaceId: "ws_1" }],
       ["decision_detail", { workspaceId: "ws_1", requestId: "dec_1" }],
-      ["decision_answer", { workspaceId: "ws_1", requestId: "dec_1", optionId: "keep", note: "照舊就好" }],
+      ["decision_answer", { workspaceId: "ws_1", requestId: "dec_1", request: answer }],
+      ["decisions_batch", { request: { items } }],
+      ["decision_merge", { workspaceId: "ws_1", requestId: "dec_1", request: merge }],
+      ["decision_link", { workspaceId: "ws_1", requestId: "dec_1", otherId: "dec_3" }],
+      ["decision_authority", { workspaceId: "ws_1" }],
+      ["decision_authority_update", { workspaceId: "ws_1", request: authority }],
       ["decisions_pending"],
     ]);
   });

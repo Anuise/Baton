@@ -3,9 +3,9 @@
 
 use std::sync::Arc;
 
-use baton_api::{CreateTaskRequest, CreateWorkspaceRequest};
+use baton_api::{AnswerRequest, CreateTaskRequest, CreateWorkspaceRequest};
 use baton_client::{ClientError, DispatchOutcome, RuntimeClient};
-use baton_domain::decision::{DecisionKind, DecisionStatus};
+use baton_domain::decision::{DecisionAction, DecisionKind, DecisionStatus};
 use baton_domain::task::{ContractContent, ContractField};
 use baton_domain::agent::TOOL_REQUEST_DECISION;
 use baton_harness::fakes::FakeSecretProtector;
@@ -49,7 +49,7 @@ async fn started_run(harness: &Harness, client: &RuntimeClient) -> (String, Stri
     let created = client
         .create_task(
             &workspace_id,
-            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), contract: complete() },
+            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), kind: Default::default(), contract: complete() },
         )
         .await
         .unwrap();
@@ -100,6 +100,17 @@ async fn app_lists_a_pending_decision_with_its_detail() {
     assert!(detail.decision.is_none());
 }
 
+/// 以剛提出的內容版本（1）接受某個選項。
+fn accept(option_id: &str, note: Option<&str>) -> AnswerRequest {
+    AnswerRequest {
+        action: DecisionAction::Accept,
+        expected_revision: 1,
+        option_id: Some(option_id.to_string()),
+        note: note.map(str::to_string),
+        defer_minutes: None,
+    }
+}
+
 #[tokio::test]
 async fn app_answers_a_decision_and_the_pending_count_drops() {
     let harness = Harness::start().await;
@@ -108,11 +119,11 @@ async fn app_answers_a_decision_and_the_pending_count_drops() {
     let request_id = agent_asks(&harness, &token, "用哪個資料庫？").await;
 
     let answered =
-        client.decision_answer(&workspace_id, &request_id, "b", Some("團隊已有 Postgres".into())).await.unwrap();
+        client.decision_answer(&workspace_id, &request_id, &accept("b", Some("團隊已有 Postgres"))).await.unwrap();
 
     assert_eq!(answered.decision.status, DecisionStatus::Answered);
     let result = answered.decision.decision.as_ref().expect("回答後應該有裁定");
-    assert_eq!(result.option_id, "b");
+    assert_eq!(result.option_id.as_deref(), Some("b"));
     assert_eq!(result.note.as_deref(), Some("團隊已有 Postgres"));
     assert_eq!(result.decided_by, "desktop");
     let list = client.decision_list(&workspace_id).await.unwrap();
@@ -137,7 +148,7 @@ async fn pending_decisions_counts_requests_across_the_runtime() {
     assert_eq!(pending.by_workspace[0].workspace_id, workspace_id);
     assert_eq!(pending.by_workspace[0].pending_count, 2);
 
-    client.decision_answer(&workspace_id, &first, "a", None).await.unwrap();
+    client.decision_answer(&workspace_id, &first, &accept("a", None)).await.unwrap();
     assert_eq!(client.pending_decisions().await.unwrap().pending_count, 1);
 }
 
@@ -148,10 +159,10 @@ async fn app_is_told_why_a_decision_cannot_be_answered() {
     let (workspace_id, _task_id, _run_id, token) = started_run(&harness, &client).await;
     let request_id = agent_asks(&harness, &token, "用哪個資料庫？").await;
 
-    let unknown_option = client.decision_answer(&workspace_id, &request_id, "zzz", None).await.unwrap_err();
+    let unknown_option = client.decision_answer(&workspace_id, &request_id, &accept("zzz", None)).await.unwrap_err();
     let missing = client.decision_detail(&workspace_id, "decision-nope").await.unwrap_err();
-    client.decision_answer(&workspace_id, &request_id, "a", None).await.unwrap();
-    let conflicting = client.decision_answer(&workspace_id, &request_id, "b", None).await.unwrap_err();
+    client.decision_answer(&workspace_id, &request_id, &accept("a", None)).await.unwrap();
+    let conflicting = client.decision_answer(&workspace_id, &request_id, &accept("b", None)).await.unwrap_err();
 
     let code_of = |error: &ClientError| match error {
         ClientError::Rejected { code, .. } => code.clone(),
