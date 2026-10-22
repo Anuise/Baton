@@ -1,6 +1,6 @@
 # 48: 已驗證動作重播與 no_live_model
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R143-48-impl，2026-10-23 02:26）
 Blocked by: 46
 
 **What to build:** 只有後續有效斷言證明結果的動作才錄製；重播執行真實動作並重新檢查後置條件；快取身分含案例、目標、參數、persona、引擎與資料相容性，不一致時標記 stale。no_live_model 設定在 Adapter 層強制禁止所有 live 模型呼叫。正式環境副作用預設不可重播。重播與 live 用量分開呈現。
