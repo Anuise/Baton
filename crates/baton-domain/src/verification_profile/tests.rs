@@ -9,7 +9,7 @@ fn command(program: &str) -> Operation {
 }
 
 fn step(key: &str, operation: Operation, assertions: Vec<Assertion>) -> Step {
-    Step { key: key.into(), title: format!("步驟 {key}"), operation, assertions }
+    Step { key: key.into(), title: format!("步驟 {key}"), operation, assertions, external: false }
 }
 
 fn journey(key: &str, representative: bool, steps: Vec<Step>) -> Journey {
@@ -274,6 +274,7 @@ fn a_profile_version_is_proven_only_by_a_passed_representative_journey_of_that_v
         no_live_model: false,
         actions: Vec::new(),
         usage: replay::VerificationUsage::default(),
+        attempts: Vec::new(),
         started_at: Timestamp::from_millis(1),
         finished_at: Timestamp::from_millis(2),
     };
@@ -443,4 +444,24 @@ fn artifacts_that_may_contain_secrets_are_withheld() {
     assert_eq!(withhold_reason(EvidenceArtifactKind::Screenshot, b"PNG...", &secrets, false, true), Some("secret_detected"));
     assert_eq!(withhold_reason(EvidenceArtifactKind::Trace, b"zip", &secrets, false, true), Some("secret_detected"));
     assert_eq!(withhold_reason(EvidenceArtifactKind::Video, b"webm", &secrets, false, true), Some("secret_detected"));
+}
+
+#[test]
+fn only_journey_steps_may_be_marked_external() {
+    let mut ok = definition();
+    ok.journeys[0].steps[0].external = true;
+    assert_eq!(validate(&ok), Ok(()));
+    let json = serde_json::to_value(&ok.journeys[0].steps).unwrap();
+    assert_eq!((json[0]["external"].as_bool(), json[1].get("external")), (Some(true), None), "預設值不寫出");
+
+    let mut doctor = definition();
+    doctor.doctor[0].external = true;
+    let Err(ProfileError::Invalid(message)) = validate(&doctor) else { panic!("doctor 不能是外部操作") };
+    assert!(message.contains("tool"), "{message}");
+    let mut setup = definition();
+    setup.setup = vec![Step { external: true, ..step("seed", http("POST", "http://127.0.0.1:8080/seed"), vec![Assertion::Status { equals: 200 }]) }];
+    assert!(matches!(validate(&setup), Err(ProfileError::Invalid(_))));
+    let mut readiness = definition();
+    readiness.readiness.as_mut().unwrap().step.external = true;
+    assert!(matches!(validate(&readiness), Err(ProfileError::Invalid(_))));
 }

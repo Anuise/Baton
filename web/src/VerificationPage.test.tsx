@@ -6,6 +6,8 @@ import {
   CHECKED_AT,
   evidenceBundle,
   replayEvidenceBundle,
+  handoffEvidenceBundle,
+  verificationAttempt,
   verificationOverview,
   verificationProfileVersion,
   verificationRequest,
@@ -578,6 +580,93 @@ describe("驗證", () => {
     expect(within(step).getByRole("list", { name: "斷言結果" })).toHaveTextContent(
       "語意判斷（預期：畫面列出今天的訂單）：無法判定（理由：no_live_model：不呼叫模型，沒有判定）",
     );
+  });
+
+  it("交接的 Bundle 顯示每次嘗試的狀態、結束原因、judge 帳號、採用的旅程與步驟，以及承接內容與不重送的外部操作", async () => {
+    renderPage(
+      fakeClient(
+        verificationOverview({
+          profile: verificationProfileVersion({ definition: webVerificationProfileDefinition() }),
+          bundles: [handoffEvidenceBundle()],
+        }),
+      ),
+    );
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_handoff" });
+    expect(card).toHaveTextContent("判定：證據不足 external_outcome_unknown（外部操作結果未知，不重送）");
+    const attempts = within(card).getByRole("group", { name: "嘗試與交接" });
+
+    const first = within(attempts).getByRole("listitem", { name: "第 1 次嘗試" });
+    expect(first).toHaveTextContent("第 1 次嘗試：已交接・結束原因：judge_rate_limited（語意判斷的帳號限流，交接給其他帳號）");
+    expect(first).toHaveTextContent("語意判斷帳號：prof_a");
+    expect(first).toHaveTextContent("結果採用自這次的旅程：瀏覽商品");
+    expect(first).toHaveTextContent("完成的步驟：2 個");
+    expect(within(first).getByRole("list", { name: "第 1 次嘗試的步驟" })).toHaveTextContent(
+      "旅程（管理訂單）・open_orders：通過 assertions_passed",
+    );
+    expect(within(first).queryByRole("group", { name: "第 1 次嘗試的承接" })).not.toBeInTheDocument();
+
+    const second = within(attempts).getByRole("listitem", { name: "第 2 次嘗試" });
+    expect(second).toHaveTextContent("第 2 次嘗試：完成");
+    expect(second).not.toHaveTextContent("結束原因");
+    expect(second).toHaveTextContent("語意判斷帳號：prof_b");
+    expect(second).toHaveTextContent("結果採用自這次的旅程：管理訂單");
+    const takeover = within(second).getByRole("group", { name: "第 2 次嘗試的承接" });
+    expect(takeover).toHaveTextContent("承接第 1 次嘗試");
+    expect(takeover).toHaveTextContent("停止的服務：svc-1");
+    expect(takeover).toHaveTextContent("關閉的瀏覽器 Session：b2");
+    expect(takeover).toHaveTextContent("沿用的旅程：瀏覽商品");
+    expect(within(takeover).getByRole("list", { name: "無法確認已停止" })).toHaveTextContent("瀏覽器 Session b3 無法確認已關閉");
+    expect(within(takeover).getByRole("list", { name: "不重送的外部操作" })).toHaveTextContent(
+      "旅程：管理訂單／步驟：refund（第 1 次嘗試）：external_outcome_unknown（外部操作結果未知，不重送）",
+    );
+  });
+
+  it("沒有可用帳號時說明只執行不需模型的斷言", async () => {
+    const bundle = evidenceBundle({
+      attempts: [
+        verificationAttempt({ status: "interrupted", end_reason: "runtime_interrupted" }),
+        verificationAttempt({
+          attempt: 2,
+          judge_profile_id: null,
+          journeys: [],
+          steps: [],
+          takeover: {
+            from_attempt: 1,
+            stopped_services: [],
+            closed_sessions: [],
+            problems: [],
+            reused_journeys: ["smoke"],
+            not_resent: [],
+          },
+        }),
+      ],
+    });
+    renderPage(fakeClient(verificationOverview({ bundles: [bundle] })));
+
+    const attempts = within(await screen.findByRole("region", { name: "Evidence Bundle vbun_1" })).getByRole("group", {
+      name: "嘗試與交接",
+    });
+    expect(within(attempts).getByRole("listitem", { name: "第 1 次嘗試" })).toHaveTextContent(
+      "已中斷・結束原因：runtime_interrupted（Runtime 在執行途中中斷）",
+    );
+    const second = within(attempts).getByRole("listitem", { name: "第 2 次嘗試" });
+    expect(second).toHaveTextContent("語意判斷帳號：沒有可用帳號（只執行不需模型的斷言）");
+    expect(second).toHaveTextContent("結果採用自這次的旅程：無");
+    expect(second).toHaveTextContent("完成的步驟：0 個");
+    expect(second).toHaveTextContent("停止的服務：無");
+    expect(second).toHaveTextContent("沿用的旅程：冒煙測試");
+    expect(within(second).queryByRole("list", { name: "不重送的外部操作" })).not.toBeInTheDocument();
+  });
+
+  it("只有一次嘗試且沒有承接、或舊的 Bundle 沒有 attempts 時不顯示嘗試與交接", async () => {
+    const bundles = [evidenceBundle({ id: "vbun_single", attempts: [verificationAttempt()] }), evidenceBundle()];
+    renderPage(fakeClient(verificationOverview({ bundles })));
+
+    const single = await screen.findByRole("region", { name: "Evidence Bundle vbun_single" });
+    expect(within(single).queryByRole("group", { name: "嘗試與交接" })).not.toBeInTheDocument();
+    expect(single).not.toHaveTextContent("嘗試與交接");
+    expect(within(region("Evidence Bundle vbun_1")).queryByRole("group", { name: "嘗試與交接" })).not.toBeInTheDocument();
   });
 
   it("讀取失敗時顯示原因", async () => {

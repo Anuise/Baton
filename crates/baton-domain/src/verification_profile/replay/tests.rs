@@ -18,7 +18,7 @@ fn act(goal: &str) -> Operation {
 }
 
 fn step(key: &str, operation: Operation, assertions: Vec<Assertion>) -> Step {
-    Step { key: key.into(), title: format!("步驟 {key}"), operation, assertions }
+    Step { key: key.into(), title: format!("步驟 {key}"), operation, assertions, external: false }
 }
 
 fn goto(url: &str) -> Operation {

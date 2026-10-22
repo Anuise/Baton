@@ -11,6 +11,9 @@
 //! - no_live_model 下任何模型呼叫都被阻擋：`no_live_model_blocks_every_model_call_at_the_adapter`
 //! - 正式環境副作用預設不可重播：`production_side_effects_are_not_replayed_by_default`
 //! - 重播與 live 用量分開呈現：`replay_and_live_usage_are_reported_separately`
+//!
+//! 與票 49 整合：動作規劃限流時同樣交接給另一個帳號：
+//! `a_rate_limited_planner_hands_off_and_the_successor_plans_and_records_the_action`
 
 use baton_domain::Timestamp;
 use baton_harness::fakes::FakePage;
@@ -452,4 +455,30 @@ async fn replay_and_live_usage_are_reported_separately() {
     assert_eq!(w.model_calls(), calls);
     assert_eq!(bundle["usage"], json!({ "live_model_calls": 0, "live_actions": 0, "replayed_actions": 2, "blocked_model_calls": 1 }));
     assert_eq!(verdict_of(step_in(&bundle, "checkout")), ("inconclusive", "live_model_disabled"));
+}
+
+// --- 與票 49 整合：動作規劃與語意 judge 共用限流狀態，也共用交接 ---
+
+#[tokio::test]
+async fn a_rate_limited_planner_hands_off_and_the_successor_plans_and_records_the_action() {
+    let w = world().await;
+    let b = w.h().add_account("帳號 B", "account1@example.com").await;
+    w.publish(shop_profile()).await;
+    w.healthy();
+    // 帳號 A 規劃到一半限流；另一個帳號可以接手
+    w.h().semantic_judge.script_plan(ADD_GOAL, vec![ActionPlan::RateLimited { reset_at_millis: None }, click(ADD_BUTTON)]);
+
+    let bundle = w.live().await;
+    assert_eq!(bundle["verdict"], "passed", "{bundle}");
+    let accounts: Vec<String> = w.h().semantic_judge.plan_requests().iter().map(|r| r.account.profile_id.clone()).collect();
+    assert_eq!(accounts.len(), 2, "{accounts:?}");
+    assert_eq!(accounts[1], b, "限流之後由另一個帳號規劃");
+    let attempts = bundle["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 2, "{bundle}");
+    assert_eq!((attempts[0]["status"].as_str(), attempts[0]["end_reason"].as_str()), (Some("handed_off"), Some("judge_rate_limited")));
+    // 承接的嘗試重新規劃，被後置條件證明的動作照常錄製
+    let add = action_in(&bundle, "add");
+    assert_eq!(add["source"], "live");
+    assert!(add["recorded"].is_object(), "{bundle}");
+    assert_eq!(verdict_of(step_in(&bundle, "add")), ("passed", "assertions_passed"));
 }

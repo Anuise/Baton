@@ -46,6 +46,8 @@ pub struct LocalBrowserDriver {
     /// 各 Session 實際使用的引擎（Runner 開啟時回報；票 48）。
     engines: Mutex<HashMap<String, String>>,
     next_session: AtomicU64,
+    /// Session 識別的前綴：每個 Runtime 實例不同，承接者才能分辨一個 Session 是不是目前的 Runtime 開啟的（票 49）。
+    prefix: String,
 }
 
 impl Default for LocalBrowserDriver {
@@ -55,6 +57,7 @@ impl Default for LocalBrowserDriver {
             sessions: Mutex::default(),
             engines: Mutex::default(),
             next_session: AtomicU64::new(1),
+            prefix: format!("browser-{}-", crate::verification_driver::instance_tag()),
         }
     }
 }
@@ -138,7 +141,7 @@ impl LocalBrowserDriver {
 #[async_trait]
 impl BrowserDriver for LocalBrowserDriver {
     async fn open(&self, request: BrowserSessionRequest) -> PortResult<BrowserSession> {
-        let id = format!("browser-{}-{}", std::process::id(), self.next_session.fetch_add(1, Ordering::Relaxed));
+        let id = format!("{}{}", self.prefix, self.next_session.fetch_add(1, Ordering::Relaxed));
         // Runner 的工作目錄是受驗目錄，所以交給它的路徑一律是絕對路徑
         let dir = std::path::absolute(request.scratch_dir.join(&id)).map_err(|e| failed(format!("無法解析暫存目錄：{e}")))?;
         let mut runner = self.spawn(&request, &dir).await?;
@@ -188,7 +191,14 @@ impl BrowserDriver for LocalBrowserDriver {
     async fn close(&self, session: &BrowserSession) -> PortResult<Vec<BrowserFile>> {
         let runner = self.sessions.lock().expect("Session 表不會中毒").remove(&session.0);
         self.engines.lock().expect("引擎表不會中毒").remove(&session.0);
-        let Some(runner) = runner else { return Ok(Vec::new()) };
+        let Some(runner) = runner else {
+            // 這個 Runtime 開啟、已經關閉的 Session：重複關閉無害。其他 Runtime 開啟的 Session 無法確認已關閉
+            return if session.0.starts_with(&self.prefix) {
+                Ok(Vec::new())
+            } else {
+                Err(failed(format!("瀏覽器 Session「{}」不是目前的 Runtime 開啟的，無法確認已關閉", session.0)))
+            };
+        };
         let mut runner = runner.lock().await;
         let response = runner.request(json!({ "op": "close" }), CLOSE_TIMEOUT).await;
         // 不論關閉是否成功，Runner 程序一定結束

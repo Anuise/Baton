@@ -11,6 +11,7 @@ import {
   type RunVerificationRequest,
   type UncoveredItem,
   type VerificationAssertion,
+  type VerificationAttempt,
   type VerificationOverview,
   type VerificationPhase,
   type VerificationProfileClient,
@@ -54,7 +55,7 @@ const PHASE_LABELS: Record<VerificationPhase, string> = {
   teardown: "清理",
 };
 
-/** 票 46 新增的 reason_code 的中文說明；其他代碼只顯示代碼本身。 */
+/** 票 46、49 新增的 reason_code 的中文說明；其他代碼只顯示代碼本身。 */
 const REASON_LABELS: Record<string, string> = {
   judge_rate_limited: "模型限流，無法判定，不是產品缺陷",
   judge_unavailable: "語意判斷無法使用，無法判定，不是產品缺陷",
@@ -73,6 +74,23 @@ const REASON_LABELS: Record<string, string> = {
   act_not_achievable: "模型判斷在目前畫面無法達成目標，無法判定",
   act_postcondition_failed: "模型決定的動作沒有通過後置條件，證據不足，不是產品缺陷",
   replay_postcondition_failed: "重播的動作沒有通過後置條件，錄製已標為 stale，證據不足",
+  external_outcome_unknown: "外部操作結果未知，不重送",
+  external_already_sent: "外部操作已送出、旅程沒完成，不重跑",
+  journal_unavailable: "無法先記下外部操作，所以沒有送出",
+  previous_session_unconfirmed: "前一次嘗試的測試程序無法確認已停止，這次不執行",
+};
+
+const ATTEMPT_STATUS_LABELS: Record<VerificationAttempt["status"], string> = {
+  running: "執行中",
+  handed_off: "已交接",
+  interrupted: "已中斷",
+  completed: "完成",
+};
+
+/** 嘗試結束原因的中文說明。 */
+const END_REASON_LABELS: Record<string, string> = {
+  judge_rate_limited: "語意判斷的帳號限流，交接給其他帳號",
+  runtime_interrupted: "Runtime 在執行途中中斷",
 };
 
 /** 語意判斷沒有做出判定時步驟的 reason_code；這時 judge 斷言未通過不代表不符合。 */
@@ -543,6 +561,9 @@ function BundleCard({
   const headingId = `bundle-${bundle.id}`;
   const featureTitle = (key: string) => profile?.definition.feature_map.find((f) => f.key === key)?.title ?? key;
   const { cleanup } = bundle;
+  // 舊的 Bundle 沒有 attempts；只有一次嘗試且沒有承接時不顯示交接區塊
+  const attempts = bundle.attempts ?? [];
+  const handedOver = attempts.length > 1 || attempts.some((attempt) => attempt.takeover !== null);
   return (
     <section className={`verification-bundle bundle-${bundle.verdict}`} aria-labelledby={headingId}>
       <h4 id={headingId}>Evidence Bundle {bundle.id}</h4>
@@ -611,6 +632,7 @@ function BundleCard({
       {bundle.actions !== undefined && bundle.actions.length > 0 && (
         <ActionsView actions={bundle.actions} bundle={bundle} profile={profile} />
       )}
+      {handedOver && <AttemptsView attempts={attempts} journeyTitle={(key) => journeyTitle(profile, key)} />}
       {bundle.artifacts.length > 0 && (
         <div className="verification-artifacts">
           <strong>證據檔案</strong>
@@ -713,6 +735,74 @@ function ActionsView({
 function stepTitle(bundle: EvidenceBundle, journey: string, key: string): string {
   const step = bundle.steps.find((s) => s.journey === journey && s.key === key);
   return step === undefined || step.title === "" ? key : step.title;
+}
+
+/** 嘗試與交接（票 49）：每次嘗試的狀態、judge 帳號、採用的旅程與步驟，以及承接時停止的程序與不重送的外部操作。 */
+function AttemptsView({ attempts, journeyTitle }: { attempts: VerificationAttempt[]; journeyTitle: (key: string) => string }) {
+  const titles = (keys: string[]) => (keys.length === 0 ? "無" : keys.map(journeyTitle).join("、"));
+  const ids = (values: string[]) => (values.length === 0 ? "無" : values.join("、"));
+  return (
+    <div className="verification-attempts" role="group" aria-label="嘗試與交接">
+      <strong>嘗試與交接</strong>
+      <ol>
+        {attempts.map((attempt) => {
+          const { takeover } = attempt;
+          return (
+            <li key={attempt.attempt} aria-label={`第 ${attempt.attempt} 次嘗試`}>
+              <span>
+                第 {attempt.attempt} 次嘗試：{ATTEMPT_STATUS_LABELS[attempt.status]}
+                {attempt.end_reason !== null && (
+                  <>
+                    ・結束原因：<code>{attempt.end_reason}</code>
+                    {END_REASON_LABELS[attempt.end_reason] !== undefined && `（${END_REASON_LABELS[attempt.end_reason]}）`}
+                  </>
+                )}
+              </span>
+              <span>語意判斷帳號：{attempt.judge_profile_id ?? "沒有可用帳號（只執行不需模型的斷言）"}</span>
+              <span>結果採用自這次的旅程：{titles(attempt.journeys)}</span>
+              <span>完成的步驟：{attempt.steps.length} 個</span>
+              {attempt.steps.length > 0 && (
+                <ul aria-label={`第 ${attempt.attempt} 次嘗試的步驟`}>
+                  {attempt.steps.map((step, index) => (
+                    <li key={index}>
+                      {PHASE_LABELS[step.phase]}
+                      {step.journey !== undefined && `（${journeyTitle(step.journey)}）`}・{step.key}：
+                      <VerdictBadge verdict={step.verdict} /> <ReasonCode code={step.reason_code} />
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {takeover !== null && (
+                <div className="verification-takeover" role="group" aria-label={`第 ${attempt.attempt} 次嘗試的承接`}>
+                  <span>承接第 {takeover.from_attempt} 次嘗試</span>
+                  <span>停止的服務：{ids(takeover.stopped_services)}</span>
+                  <span>關閉的瀏覽器 Session：{ids(takeover.closed_sessions)}</span>
+                  <span>沿用的旅程：{titles(takeover.reused_journeys)}</span>
+                  {takeover.problems.length > 0 && (
+                    <ul aria-label="無法確認已停止">
+                      {takeover.problems.map((problem, index) => (
+                        <li key={index}>{problem}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {takeover.not_resent.length > 0 && (
+                    <ul aria-label="不重送的外部操作">
+                      {takeover.not_resent.map((item, index) => (
+                        <li key={index}>
+                          旅程：{journeyTitle(item.journey)}／步驟：{item.step}（第 {item.attempt} 次嘗試）：
+                          <ReasonCode code={item.reason} />
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
 }
 
 /** Artifact 所屬的旅程與步驟（找得到時用標題）。 */

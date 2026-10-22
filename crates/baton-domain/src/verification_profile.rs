@@ -285,6 +285,10 @@ pub struct Step {
     pub operation: Operation,
     #[serde(default)]
     pub assertions: Vec<Assertion>,
+    /// 操作的副作用在本次驗證的隔離狀態之外（例如寄信、呼叫第三方付款）；只能用在旅程步驟（票 49）。
+    /// 送出前先記入驗證日誌，結果未知或已送出而旅程沒有完成時，承接的嘗試不重送。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
 }
 
 /// 長駐的受驗服務（例如 API 伺服器）：驗證開始時啟動，teardown 時停止。
@@ -831,7 +835,21 @@ pub fn validate(definition: &ProfileDefinition) -> Result<(), ProfileError> {
         check_text(&area.area, "未覆蓋範圍", true)?;
         check_text(&area.reason, &format!("未覆蓋範圍「{}」的原因", area.area), true)?;
     }
+    check_external_only_in_journeys(definition)?;
     check_secrets_personas_identities(definition)
+}
+
+/// `external` 只能用在旅程步驟（票 49）：前置步驟與登入在每次嘗試都重新執行，外部副作用會被重送。
+fn check_external_only_in_journeys(definition: &ProfileDefinition) -> Result<(), ProfileError> {
+    let prerequisite = definition.doctor.iter().chain(definition.readiness.iter().map(|r| &r.step)).chain(&definition.setup);
+    let login = definition.identities.iter().flat_map(|i| i.login.iter().chain(std::iter::once(&i.check)));
+    match prerequisite.chain(login).find(|s| s.external) {
+        Some(step) => Err(invalid(format!(
+            "步驟「{}」不是旅程步驟，不能標示 external；前置步驟與登入在承接時會重新執行",
+            step.key
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// 秘密參照的格式：`env:NAME`（Runtime 的環境變數）。
@@ -1690,6 +1708,9 @@ pub struct EvidenceBundle {
     /// 即時模型與重播分開計算的用量（票 48）。
     #[serde(default)]
     pub usage: replay::VerificationUsage,
+    /// 每次嘗試的摘要（票 49）：帳號交接或 Runtime 中斷後由新的嘗試接手；每條旅程的結果只來自一次嘗試。
+    #[serde(default)]
+    pub attempts: Vec<crate::verification_attempt::AttemptSummary>,
     pub started_at: Timestamp,
     pub finished_at: Timestamp,
 }

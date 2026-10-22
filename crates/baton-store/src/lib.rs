@@ -54,6 +54,7 @@ mod tasks;
 mod timeline;
 mod understanding;
 mod verification;
+mod verification_attempts;
 mod verification_profiles;
 mod workdirs;
 mod workflows;
@@ -1654,7 +1655,39 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'stage_attempt 是追加式資料表，不可刪除'); END;
         ALTER TABLE workflow_instance ADD COLUMN resume_stage TEXT;",
     },
-    // 已驗證動作重播（票 48，第 43 個 migration）：驗證要求記下是否禁止即時模型呼叫；目標導向動作的錄製每個 Workspace、
+    // 驗證中的額度交接（票 49，第 43 個 migration）：同一個驗證要求的每次嘗試（帳號交接或 Runtime 中斷後由新的嘗試接手）
+    // 與每次嘗試的日誌。一個要求同時最多一個執行中的嘗試；日誌只追加（build、測試程序的安全參照、外部操作送出前的標記、
+    // 完成的步驟與判定、證據檔案、完成的旅程、承接紀錄），承接者依它決定沿用、重跑或不重送。
+    Migration {
+        name: "verification_attempts",
+        sql: "CREATE TABLE verification_attempt (
+            request_id TEXT NOT NULL REFERENCES verification_request (id),
+            attempt INTEGER NOT NULL CHECK (attempt >= 1),
+            status TEXT NOT NULL CHECK (status IN ('running', 'handed_off', 'interrupted', 'completed')),
+            judge_profile_id TEXT,
+            end_reason TEXT,
+            started_at INTEGER NOT NULL,
+            ended_at INTEGER,
+            CHECK ((status = 'running') = (ended_at IS NULL)),
+            PRIMARY KEY (request_id, attempt)
+        );
+        CREATE UNIQUE INDEX verification_attempt_one_running ON verification_attempt (request_id) WHERE status = 'running';
+        CREATE TABLE verification_journal (
+            request_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            seq INTEGER NOT NULL CHECK (seq >= 1),
+            kind TEXT NOT NULL,
+            entry TEXT NOT NULL CHECK (json_valid(entry)),
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (request_id, attempt, seq),
+            FOREIGN KEY (request_id, attempt) REFERENCES verification_attempt (request_id, attempt)
+        );
+        CREATE TRIGGER verification_journal_no_update BEFORE UPDATE ON verification_journal
+        BEGIN SELECT RAISE(ABORT, 'verification_journal 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER verification_journal_no_delete BEFORE DELETE ON verification_journal
+        BEGIN SELECT RAISE(ABORT, 'verification_journal 是追加式資料表，不可刪除'); END;",
+    },
+    // 已驗證動作重播（票 48，第 44 個 migration）：驗證要求記下是否禁止即時模型呼叫；目標導向動作的錄製每個 Workspace、
     // 每個案例（旅程/步驟）一筆，只保存被後續有效斷言證明的動作，附上錄製身分；不一致或重播被推翻時標為 stale（附原因）。
     Migration {
         name: "verified_action_replay",

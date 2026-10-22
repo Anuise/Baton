@@ -2486,6 +2486,8 @@ export interface VerificationStep {
   title: string;
   operation: VerificationOperation;
   assertions: VerificationAssertion[];
+  /** 只用於旅程步驟：操作的副作用在本次驗證的隔離狀態之外，結果未知時不重送。 */
+  external?: boolean;
 }
 
 export interface VerificationJourney {
@@ -2682,6 +2684,55 @@ export interface EvidenceBundle {
   usage?: VerificationUsage;
   started_at: number;
   finished_at: number;
+  /** 同一個驗證要求的每次嘗試（帳號交接或 Runtime 中斷後由新的嘗試接手）；舊的 Bundle 沒有這個欄位。 */
+  attempts?: VerificationAttempt[];
+}
+
+/** 一次嘗試完成的步驟與判定（對應 Rust 的 RecordedStep）。 */
+export interface VerificationAttemptStep {
+  phase: VerificationPhase;
+  journey?: string;
+  key: string;
+  verdict: VerificationVerdict;
+  reason_code: string;
+}
+
+/** 沒有重送的外部操作（對應 Rust 的 NotResent）；reason 是 external_outcome_unknown 或 external_already_sent。 */
+export interface VerificationNotResent {
+  journey: string;
+  step: string;
+  reason: string;
+  /** 送出這個操作的嘗試。 */
+  attempt: number;
+}
+
+/** 承接（對應 Rust 的 Takeover）：以安全的參照查驗並停止前一次嘗試留下的測試程序。 */
+export interface VerificationTakeover {
+  from_attempt: number;
+  stopped_services: string[];
+  closed_sessions: string[];
+  /** 無法確認已停止的原因。 */
+  problems: string[];
+  /** 沿用先前嘗試已完成的旅程。 */
+  reused_journeys: string[];
+  not_resent: VerificationNotResent[];
+}
+
+/** 驗證要求的一次嘗試（對應 Rust 的 AttemptSummary）；running 時 ended_at 為 null。 */
+export interface VerificationAttempt {
+  attempt: number;
+  status: "running" | "handed_off" | "interrupted" | "completed";
+  /** 語意 judge 使用的帳號；null 表示沒有可用帳號，只執行不需模型的斷言。 */
+  judge_profile_id: string | null;
+  /** judge_rate_limited、runtime_interrupted 或 null。 */
+  end_reason: string | null;
+  /** Bundle 中結果採用自這次嘗試的旅程。 */
+  journeys: string[];
+  /** 這次完成的步驟（含交接前沒完成的旅程的步驟，這些不會拼進最後結果）。 */
+  steps: VerificationAttemptStep[];
+  takeover: VerificationTakeover | null;
+  started_at: number;
+  ended_at: number | null;
 }
 
 /** 錄製身分（對應 Rust 的 ReplayIdentity）：案例、目標、參數、persona、引擎與資料相容性。 */
