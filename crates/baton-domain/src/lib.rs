@@ -10,6 +10,7 @@ pub mod authority;
 pub mod claude_code;
 pub mod authorization;
 pub mod backup;
+pub mod budget;
 pub mod config;
 pub mod decision;
 pub mod event;
