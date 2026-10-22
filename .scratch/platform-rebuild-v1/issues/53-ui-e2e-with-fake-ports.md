@@ -1,6 +1,6 @@
 # 53: 以 fake Port 組態補齊 UI E2E 旅程
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R164-53-impl，2026-10-23 06:06）
 Blocked by: 46, 47, 48, 49, 50
 
 **What to build:** spec「Testing Decisions」第 3 點要求以 Playwright 做少量 UI E2E，涵蓋首次精靈、派工到完成、裁定中心批次處理、完全退出等旅程。最終 code-review（R153 第 8 項）發現其中「派工到完成」「裁定中心批次處理」兩條沒有涵蓋，原因是真實 Runtime 沒有 fake Adapter，裁定請求又只能由 Agent 憑證建立，無法在不啟動真實 Worker／Controller 的情況下走完旅程（見 AI-455）。本票設計一個只供測試使用的 Runtime 組態：以 harness 的 fake Port（scripted fake AgentAdapter、fake ProcessControl、fake QuotaObserver、fake Clock）啟動真實 Runtime 與真實 API，讓 Web UI（瀏覽器或桌面殼）透過真實 HTTP 操作，補上這兩條 E2E 旅程。這個組態不得出現在正式建置或安裝程式中。

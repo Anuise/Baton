@@ -100,19 +100,33 @@ export function App() {
           {client && <SharedSettingsPage client={client} />}
           {client && <BackupSettings client={client} />}
           {client && <RecoveryPanel client={client} />}
-          {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
-          {client && opened?.view === "authorization" && <ModelOverridesPanel client={client} workspace={opened.workspace} />}
-          {client && opened?.view === "conversation" && <ConversationPage client={client} workspace={opened.workspace} />}
-          {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
+          {/* 換 Workspace 時重新掛載，上一個 Workspace 較晚回來的讀取結果不會蓋掉目前畫面與草稿 */}
+          {client && opened?.view === "authorization" && (
+            <AuthorizationPanel key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {client && opened?.view === "authorization" && (
+            <ModelOverridesPanel key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {client && opened?.view === "conversation" && (
+            <ConversationPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {client && opened?.view === "tasks" && (
+            <TaskBoard key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
           {client && opened?.view === "decisions" && (
             <DecisionCenter
+              key={opened.workspace.id}
               client={client}
               workspace={opened.workspace}
               onChange={() => setPendingVersion((version) => version + 1)}
             />
           )}
-          {client && opened?.view === "artifacts" && <ArtifactsPage client={client} workspace={opened.workspace} />}
-          {client && opened?.view === "knowledge" && <KnowledgePage client={client} workspace={opened.workspace} />}
+          {client && opened?.view === "artifacts" && (
+            <ArtifactsPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {client && opened?.view === "knowledge" && (
+            <KnowledgePage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
           {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 的 Task 過濾 */}
           {client && opened?.view === "timeline" && (
             <TimelinePage key={opened.workspace.id} client={client} workspace={opened.workspace} />

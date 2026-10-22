@@ -70,6 +70,8 @@ pub enum FakeStop {
 pub struct FakeProcessControl {
     next_pid: AtomicU32,
     state: Mutex<ProcessState>,
+    /// 收到 `stop` 或 `spawn` 走到停住點時喚醒等待中的測試（測試等可觀察的條件，不睡固定時間）
+    activity: tokio::sync::Notify,
 }
 
 struct ProcessState {
@@ -118,6 +120,7 @@ impl Default for FakeProcessControl {
                 hang_find: false,
                 on_next_spawn: None,
             }),
+            activity: tokio::sync::Notify::new(),
         }
     }
 }
@@ -209,10 +212,34 @@ impl FakeProcessControl {
         lock(&self.state).by_command.get(command_id).cloned()
     }
 
+    /// 等到 `identity` 被要求停止。
+    pub async fn wait_for_stop_call(&self, identity: &ProcessIdentity) {
+        self.wait_until(|state| state.stop_calls.contains(identity)).await;
+    }
+
+    /// 等到 `hang_next_spawn_at` 設定的停住點已被某次 `spawn` 走到（之後那次 `spawn` 永遠不回來）。
+    pub async fn wait_for_spawn_hang(&self) {
+        self.wait_until(|state| state.hang.is_none()).await;
+    }
+
+    /// 等到 `done` 成立；每次狀態改變（`stop`、走到停住點）都重新檢查，不會漏掉檢查與等待之間的通知。
+    async fn wait_until(&self, done: impl Fn(&ProcessState) -> bool) {
+        loop {
+            let mut changed = std::pin::pin!(self.activity.notified());
+            changed.as_mut().enable();
+            if done(&lock(&self.state)) {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     fn take_hang(&self, point: HangPoint) -> bool {
         let mut state = lock(&self.state);
         if state.hang == Some(point) {
             state.hang = None;
+            drop(state);
+            self.activity.notify_waiters();
             return true;
         }
         false
@@ -279,6 +306,7 @@ impl ProcessControl for FakeProcessControl {
             state.stop_graces.push(grace);
             state.stop_scripts.get(identity).cloned().unwrap_or(FakeStop::Result(state.stop_result))
         };
+        self.activity.notify_waiters();
         match behavior {
             FakeStop::Hang => std::future::pending().await,
             FakeStop::HangAfterStop => {
@@ -507,6 +535,8 @@ pub struct FakeWorkspaceFs {
     unsaved: Mutex<HashMap<PathBuf, Vec<String>>>,
     artifact_hang: Mutex<Option<ArtifactWritePoint>>,
     git: Mutex<FakeGit>,
+    /// `hold_next_merge` 設定的合併走到閘門時通知（保留一次通知，先到先等都不會漏）
+    merge_held: tokio::sync::Notify,
 }
 
 /// 腳本化的 Git 狀態。
@@ -600,6 +630,11 @@ impl FakeWorkspaceFs {
         let gate = Arc::new(tokio::sync::Notify::new());
         lock(&self.git).merge_hold = Some(gate.clone());
         gate
+    }
+
+    /// 等到 `hold_next_merge` 設定的合併走到閘門、停住等待放行。
+    pub async fn wait_for_held_merge(&self) {
+        self.merge_held.notified().await;
     }
 
     /// 至今的全部整合合併，依順序。
@@ -710,6 +745,7 @@ impl WorkspaceFs for FakeWorkspaceFs {
     ) -> PortResult<MergeOutcome> {
         let gate = lock(&self.git).merge_hold.take();
         if let Some(gate) = gate {
+            self.merge_held.notify_one();
             gate.notified().await;
         }
         tokio::fs::create_dir_all(integration_dir).await.map_err(|e| PortError::Failed(e.to_string()))?;

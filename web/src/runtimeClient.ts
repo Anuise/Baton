@@ -1618,6 +1618,8 @@ export interface LifecycleClient {
   updateLoginStartup(enabled: boolean): Promise<LoginStartupView>;
   /** 結束桌面 App 程序。 */
   quitApp(): Promise<void>;
+  /** 取消殼在完全退出時啟動的 60 秒後備強制關閉；Runtime 已接手停止或使用者選擇留在 App 時呼叫。 */
+  cancelFullExitFallback(): Promise<void>;
   /** 使用者在系統匣按「完全退出」時呼叫 handler；回傳取消訂閱的函式。 */
   onFullExitRequested(handler: () => void): () => void;
 }
@@ -3182,6 +3184,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     updateLoginStartup: (enabled) => send(`${LIFECYCLE_PATH}/login-startup`, { method: "PUT", body: { enabled } }),
     // 瀏覽器開發模式沒有桌面程序可結束；window.close() 對使用者自己開的分頁無效，所以不做事
     quitApp: async () => {},
+    // 後備強制關閉計時器只存在於桌面殼
+    cancelFullExitFallback: async () => {},
     // 系統匣只存在於桌面殼，瀏覽器裡不會收到完全退出事件
     onFullExitRequested: () => () => {},
     updateStatus: () => send(UPDATES_PATH),
@@ -3334,6 +3338,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
       call<WorkspaceLifecycleView>("workspace_login_resume_update", { workspaceId, autoResumeAcrossLogin }),
     updateLoginStartup: (enabled) => call<LoginStartupView>("lifecycle_login_startup_update", { enabled }),
     quitApp: () => call<void>("app_quit"),
+    cancelFullExitFallback: () => call<void>("full_exit_cancel_fallback"),
     onFullExitRequested: (handler) => {
       const registered = listen(FULL_EXIT_EVENT, () => handler());
       // 註冊是非同步的；取消訂閱時等註冊完成再解除

@@ -4796,6 +4796,7 @@
 - 理由：已合併的條目編號不能改，只能移動本 run 的內容。
 - 替代方案：無。
 - 影響：無行為差異。
+
 ### AI-491：新增票 54 補齊 Controller 共同工具
 - 重要度：中
 - 時間／階段：2026-10-23，最終 code-review
@@ -4864,6 +4865,123 @@
   - `task_id` 可省略、只允許 Workspace 範圍：收窄為必須送裁定時沒有可掛的 Task。
   - 不經權限表判定：Workspace 的收窄會失效。
 - 影響：Controller 不能提交沒有來源 Task 的 Workspace 層級教訓。
+### AI-492：狀態列的「可用帳號數」取自 Profile 清單的 `dispatchable`
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 7 項）
+- 決策：spec D-21 要求頂部狀態列固定顯示可用帳號數。`StatusBar` 每次輪詢時呼叫 `listProfiles()`，顯示 `dispatchable` 為 true 的數量（「可用帳號：N」）；讀取失敗時不顯示，不影響 Runtime 狀態。
+- 理由：這個數字與 Runtime 排程的 `capacity.usable_accounts`（active 且沒有阻擋原因）相同，也就是 spec D-14 用語中的可用帳號。`listProfiles` 是唯讀查詢；`schedulingOverview` 每次呼叫都會觸發額度輪詢與額度門檻寫入，不適合每 5 秒輪詢。
+- 替代方案：改用 `schedulingOverview().capacity.usable_accounts`（數字相同，輪詢成本高）；再排除額度門檻為 paused／draining 的帳號（更接近「此刻派得出去」，但要在 UI 複製停止派工門檻，也與 D-14 的用語不一致）。
+- 影響：已用到停止派工門檻的帳號仍算在可用帳號內；若要改成「此刻可派」，需要 Runtime 提供輕量的查詢。
+- 審閱：未審
+
+### AI-493：更新進度只以「看到準備套用之後」讀到的停止結果判斷自動安裝；Runtime 連續 3 次讀不到時交給使用者
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 4、5 項）
+- 決策：
+  - `UpdateProgress` 另外保存「在某次 `updateStatus` 看到 ready 之後（含同一次輪詢）讀到的 lifecycle」，自動安裝、「無法確認」與 ready 階段的停止異常清單都只看這份；初始的維護已經是 ready 時，之後讀到的都算。ready 但還沒有這份結果就繼續輪詢。
+  - `updateStatus` 連續失敗 3 次，就顯示「Runtime 已無法連線」與「嘗試安裝更新」「關閉 Baton」兩個按鈕；成功一次就歸零。「嘗試安裝更新」直接呼叫殼的 `update_install`，殼沒有記得 ready 的安裝程式時回錯誤，走既有的安裝失敗畫面（有重試與關閉 Baton）。此時隱藏「暫時無法取得」與「無法確認」兩個提示，之後仍繼續輪詢。
+- 理由：審查建議「向殼查詢是否記得 `ready_package`」，但殼只在 Web UI 呼叫 `update_status` 時才記下安裝程式，殼記得的情況 UI 一定也看過 ready；新增查詢指令並不能多救回任何情況。直接讓使用者嘗試安裝，殼端已有的錯誤處理就足夠，不需要新指令。
+- 替代方案：新增殼指令查詢 `ready_package`，有才顯示按鈕（多一個指令，效果相同）；殼自行在資料目錄尋找下載的安裝程式（等於信任未經 Runtime 驗證的檔案，不採用）。
+- 影響：Runtime 在 UI 看到 ready 之前就結束、殼也沒看過 ready 時，「嘗試安裝更新」會失敗，使用者只能關閉 Baton 後重開；重開時 Runtime 會依維護狀態處理。
+- 審閱：未審
+
+### AI-494：完全退出的後備計時器在 Runtime 接手或使用者放棄時取消；輪詢連續 3 次失敗才視為 Runtime 已結束
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 2、6 項）
+- 決策：
+  - 殼的 60 秒後備計時器存成可取消的 handle（`src-tauri/src/fallback_timer.rs`），已有等待中的計時器時不另起。新增 Tauri 指令 `full_exit_cancel_fallback`。
+  - Web UI 在 `requestFullExit` 成功時與失敗畫面按「返回」時取消計時器；取消失敗忽略。
+  - `ExitProgress` 輪詢 `lifecycleStatus` 連續失敗 3 次才判定 Runtime 已結束並關閉 App；成功一次就歸零。
+- 理由：Runtime 接手後，何時結束 App 應由畫面決定（可能停在停止異常清單等使用者按「關閉 Baton」），殼 60 秒後強制關閉會讓使用者看不到異常；按「返回」是使用者明確放棄退出。後備只用在 Web UI 完全沒反應的情況。連續失敗的門檻讓單次逾時或 5xx 不會略過之後才出現的停止異常（spec D-11）。
+- 替代方案：只在「返回」時取消、Runtime 接手後保留計時器（停止異常畫面可能被強制關閉）；以錯誤種類判斷「連線被拒」才算結束（Tauri 指令只回字串，要解析訊息，較脆弱）。
+- 影響：Runtime 真的結束時，關閉 App 會多等約 2 個輪詢間隔（預設 1 秒）。Web UI 接手後若再卡住，不會有殼端後備，需使用者自行關閉。
+- 審閱：未審
+
+### AI-495：桌面殼只快取成功的 Runtime 啟動；並行等待中的呼叫共享同一次失敗
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 3 項）
+- 決策：`ensure_started` 改用 `StartupCell`（`src-tauri/src/startup_cell.rs`）：成功的連線保留，之後不再執行啟動流程；失敗不保留，下一次呼叫重試。啟動期間持有 `tokio::sync::Mutex`，並行呼叫者等待同一次啟動；等待期間那次啟動失敗，就直接回傳該次的失敗，不各自再啟動一次。
+- 理由：舊做法連失敗也永久快取，Runtime 之後正常監聽也必須重開 App。只做「失敗不快取」時，App 啟動時幾乎同時到達的 setup、系統匣迴圈與 Web UI 呼叫會一個接一個重跑，每次可能等滿 20 秒的 `START_WAIT`，UI 要等很久才看到錯誤。
+- 替代方案：`tokio::sync::OnceCell::get_or_try_init`（較簡單，但會有上述的連續重試）。
+- 影響：Runtime 持續啟動失敗時，每次新的呼叫（例如狀態列輪詢）都會再嘗試啟動一次。
+- 審閱：未審
+
+### AI-496：harness 以可觀察的訊號取代真實 sleep
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 11 項）
+- 決策：`FakeProcessControl` 新增 `wait_for_stop_call`、`wait_for_spawn_hang`，`FakeWorkspaceFs` 新增 `wait_for_held_merge`（以 `Notify` 喚醒、醒來重新檢查狀態）；`claude_adapter.rs` 以測試內的 `Observed` 外層包住正式 Adapter，每轉送一個事件就通知測試，測試等「下一個事件送達」。所有等待都設 10 秒上限，逾時即失敗。
+- 理由：spec 要求 harness 不用真實 sleep。正式 Adapter 在背景以真實時間輪詢檔案是產品行為不能改，測試只能等它的輸出，所以用事件驅動的等待取代固定毫秒數。
+- 替代方案：`yield_now` 忙等加時間上限（不夠確定，也浪費 CPU）。
+- 影響：五處 sleep 原本都是在等某件事發生，沒有在證明「某事不會發生」，改寫後語意不變。
+- 審閱：未審
+
+### AI-497：設定 `BATON_PLAYWRIGHT_DIR` 時，真實瀏覽器的 harness 測試不可略過
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 10 項）
+- 決策：`web_verification_real_browser.rs` 在設定了非空的 `BATON_PLAYWRIGHT_DIR` 時，Playwright 不可用就失敗；沒設定（或為空字串）時維持略過，訊息寫明「這次通過不代表實測過」。`docs/development.md` 註明略過條件。
+- 理由：沒有 Playwright 的開發機與 CI 仍能跑 `pnpm test`；使用者明確指定 Playwright 位置時，就代表要實測，此時略過會掩蓋問題。改成 `#[ignore]` 的話，有 Playwright 的機器也不會預設執行。
+- 替代方案：比照 adapter_contract 改為 `#[ignore]` 加環境變數啟用。
+- 影響：CI 綠燈仍不代表 web 驗證 Adapter 實測過，要實測需設定該變數。`crates/baton-runtime/tests/browser_driver.rs` 有相同的略過寫法，不在本 run 範圍，未處理。
+- 審閱：未審
+
+### AI-498：UI E2E 只把「完全退出進度」「恢復事件顯示」加進冒煙腳本，「派工到完成」「裁定中心批次處理」不做
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 8 項；部分未修）
+- 決策：
+  - `scripts/smoke-desktop.mjs` 以真實的 App 與 Runtime 新增兩條旅程：強制結束 Runtime（保留監護）→ 監護重新拉起 → 恢復面板與狀態列顯示恢復事件；在頁面內經 Tauri IPC 發出系統匣送出的同一個 `baton://full-exit-requested` 事件 → 畫面顯示完全退出與停止進度 → App、Runtime、監護都結束。首次精靈原本就涵蓋。
+  - 「派工到完成」與「裁定中心批次處理」不做：真實 Runtime 沒有 fake Adapter，裁定請求只能由 Agent 憑證（只發給 Run）建立，桌面 API 沒有建立裁定請求的路由；兩者都需要真的 Worker／Controller 執行，會消耗額度且結果不確定。這兩條旅程目前由 harness 情境測試（例如 `decision_center_full.rs`）與 Web UI 元件測試涵蓋，沒有瀏覽器層的端到端驗證。
+  - 用頁面內事件觸發完全退出：系統匣選單無法自動化點擊；改發事件後，Web UI 接手、停止進度、`app_quit` 都走真實路徑。
+- 理由：spec Testing Decisions 3 要的是「連到使用 fake Port 的 Runtime」，目前沒有能在桌面 App 內使用 fake Port 的 Runtime 執行檔；為此新增測試專用的 Runtime 組態是新功能，超出最終修正的範圍。能以真實 Runtime 確定性重現的旅程先補上。
+- 替代方案：新增一個 harness 測試，在程序內以 fake Port 啟動 Runtime、提供 `web/dist` 並以 Playwright 驅動（需要繞過只認桌面憑證的 API 保護與 Tauri IPC，工程量大）；以 UI Automation 點系統匣（脆弱）。
+- 影響：系統匣選單本身、殼端 60 秒後備流程、「派工到完成」「裁定中心批次處理」在 UI 層沒有 E2E；建議另開票設計 fake Port 的 E2E 組態。
+- 審閱：未審
+
+### AI-499：App 元件測試偶發逾時的根因是首次 render 的冷啟動成本
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，review-notes #2 的 `App.test.tsx`）
+- 決策：`App.test.tsx` 在 `beforeAll` 先 render 一次整個 App 並 `cleanup()`（暖機用的等待設 10 秒，只承擔一次性的冷啟動成本），並以 `beforeEach(vi.clearAllMocks)` 清掉測試間共用 mock 的呼叫紀錄。所有斷言的等待時間不變。
+- 理由：在全部前端測試平行執行時量測，第一個測試從 render 到出現按鈕要 250～1158ms，其中整棵樹首次 render 與 commit 佔 225～478ms；暖機後同一段只要 18～49ms。DOM 只有約 92 個節點，單次 `getByRole` 約 5ms，所以「大 DOM 讓查詢變慢」的假設不成立。清除呼叫紀錄是因為「系統匣完全退出」測試的 `waitFor(onFullExitRequested 已被呼叫)` 原本會被前一個測試的紀錄直接滿足。
+- 替代方案：以 `within(側欄)` 縮小查詢範圍（實測沒有效果）；拉長第一個斷言的逾時（被規則禁止，也只是掩蓋）。
+- 影響：修正後在平行負載下量 6 次，第一步降到 63～199ms。
+- 審閱：未審
+
+### AI-500：harness 資料目錄改為背景重試刪除、程序結束時同步刪除；被終止的程序留下的以鎖檔判斷由之後的 harness 清理
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，review-notes #28；R159-final-fix-c2 依驗證 R158 補上程序結束時的刪除與其他測試的檢查）
+- 決策：
+  - 根因：`Harness` 的 `TempDir` 在 Harness 被丟棄的當下刪除，但 Runtime 的背景工作（持有 Store 與日誌）要等測試的 tokio runtime 結束才會被丟棄。Windows 上開著的檔案不能刪除，`TempDir` 又忽略刪除錯誤，所以每個 harness 都留下含 `control.sqlite`、`logs`、`guardian` 的目錄。
+  - 修法（`crates/baton-harness/src/data_dir.rs`）：資料目錄改建在暫存區的 `baton-harness\h<亂數>`，旁邊放一個以不共用方式開啟的鎖檔。Harness 丟棄時先試著刪除，刪不掉就記到程序內的待刪清單，由背景執行緒以退避重試（上限 10 分鐘），測試的 runtime 結束、檔案關閉後即刪除，再放掉並刪除鎖檔。程序結束時（第一次有目錄進入待刪清單時以 `libc::atexit` 註冊）同步重試刪除清單中剩下的目錄，上限 10 秒：這時各測試的 runtime 都已結束，最後一個測試的目錄也刪得掉。程序被終止、`atexit` 沒有執行時，鎖檔隨程序釋放，之後任何一個 harness 啟動時清掉鎖檔沒人持有的目錄；持有中的不碰。非 Windows 平台開著的檔案本來就刪得掉，不做清理掃描。
+  - 測試：`crates/baton-harness/tests/harness_cleanup.rs`。以手動建立的 runtime 模擬 `#[tokio::test]` 的生命週期（單執行緒與多執行緒），斷言 runtime 結束後目錄被刪除；斷言重建 Runtime 時保留；斷言之後的 harness 會清掉被遺棄的目錄，但不碰持有中的目錄；以子程序（指定專用的 TEMP）執行一個持有 harness 到測試結束的測試，斷言子程序結束後 `baton-harness` 之下沒有任何目錄或鎖檔。以專用的 TEMP 跑完整個 `baton-harness` 與整個 `pnpm test`，結束後 `baton-harness` 是空的，也沒有 `.tmp*`。
+- 理由：Harness 的 `Drop` 無法 await Runtime 停止（單執行緒 runtime 在 Drop 期間無法推進背景工作）；要求每個測試結尾明確關閉 harness 要改約 600 個測試。跨程序清理若不判斷「有沒有人在用」，會刪到並行測試程序正在使用的目錄（Windows 只會刪掉沒被鎖住的檔案，例如桌面憑證），造成偶發失敗，所以用鎖檔判斷。
+- 替代方案：只在程序結束時清理（測試程序執行期間目錄會累積到數百個）；以 `ctor` 的 `#[dtor]` 取代 `atexit`（多一個依賴，效果相同）；每個測試結尾呼叫 `harness.shutdown().await`（改動大，漏寫就會再留下目錄）；修改 `baton-runtime` 讓 `RunningRuntime` 提供同步關閉（屬其他範圍，且 tokio 的 abort 本身也不是同步丟棄）。
+- 影響：同一個 harness 測試程序中，被丟棄但 runtime 還沒結束的 harness 會由背景執行緒持續重試，最多 10 分鐘。修正前已留在暫存區根目錄的 `.tmp*` 不會自動清除（無法和其他工具的暫存目錄區分），需在沒有測試執行時手動刪除。空的 `baton-harness` 目錄本身保留：程序結束時刪掉它，會和並行程序在其中建立目錄的動作競爭。其他 crate 的測試留下的暫存目錄見 AI-501。
+- 審閱：未審
+
+### AI-501：`baton-runtime` 的程序測試在結尾確認暫存目錄刪得掉，不修改產品的終止流程
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R159-final-fix-c2，驗證 R158 第 2 項，review-notes #28「檢查其他測試」）
+- 決策：
+  - 根因：`tests/command_runner.rs` 的逾時測試、`tests/browser_driver.rs` 開啟失敗（沒有 Playwright）的路徑，產品程式以 `kill_on_drop` 終止子程序但不等它結束；`tests/supervisor_process_tree.rs` 取消 Run 後，被終止的程序樹與 Runtime 的背景工作還沒放掉 Workspace 的 `.baton`。測試結束時子程序仍佔著工作目錄，`TempDir` 刪除失敗又靜默略過，在 TEMP 留下 `.tmp*`。
+  - 修法：新增 `crates/baton-runtime/tests/support/mod.rs` 的 `remove_temp_dir`，在測試結尾有上限（10 秒）地重試刪除並斷言刪掉；三個測試（含略過的路徑）都改用它。逾時代表子程序沒有真的結束，測試會失敗，等於多驗證了「被終止的程序確實結束」。
+  - 其他測試：全 repo 沒有 `TempDir::into_path`／`keep` 的其他用法；以專用的 TEMP 逐一重跑 `baton-runtime` 的每個整合測試 3～4 次、再跑完整 `pnpm test`（設定 `BATON_PLAYWRIGHT_DIR`），結束後 TEMP 沒有 `.tmp*`，只剩空的 `baton-harness`。
+- 理由：本次只允許修改測試檔；在產品端讓 `LocalCommandRunner`／`LocalBrowserDriver` 終止後等待子程序結束屬其他範圍，而且目前沒有已知的產品後果（受驗目錄不會在命令逾時後立即刪除）。
+- 替代方案：修改產品，逾時或開啟失敗時 `kill().await` 等子程序結束（跨範圍）；測試改用不刪除的固定目錄（會累積）。
+- 影響：產品端的這兩條路徑在回傳後仍可能有短暫存活的子程序；若之後有「逾時後立刻刪除工作目錄」的流程，需要在產品端等待子程序結束。
+- 審閱：未審
+
+### AI-502：票 final-c 整合 rebuild/v1（修正 B）：決策編號順延為 AI-492～AI-501；共用的程序測試兩邊的修正都保留
+- 重要度：低
+- 時間／階段：2026-10-23，票 final-c 整合（R162-final-integrate-c）
+- 決策：
+  - 修正 B 先合併進整合分支，佔用了 AI-475～AI-491。本分支的 AI-475～AI-484 依序加 17，改編為 AI-492～AI-501，移到 AI-491 之後；`docs/development.md` 中本分支寫的兩處引用（AI-481、AI-484）同步改為 AI-498、AI-501。本分支先前 commit 訊息與 `.orchestration/` 的 run 紀錄中的「AI-475～AI-484」都指改號前的條目，run 紀錄是歷史紀錄，不改。
+  - 整合分支 AI-474 的理由寫「（AI-455）」，指的是本分支最初的 AI-455，也就是現在的 AI-498；既有條目不能改，記在這裡。
+  - 原 AI-484（現 AI-501）合併前少了 `- 審閱：` 行，順延時補上 `- 審閱：未審`。
+  - `crates/baton-runtime/tests/command_runner.rs`、`supervisor_process_tree.rs`、`browser_driver.rs` 與 `docs/development.md` 自動合併、沒有文字衝突：本分支結尾的 `support::remove_temp_dir` 與修正 B 新增的測試（Job 內子孫程序被終止、Worker 結束時 Job 內不留程序、輸入欄位秘密偵測）都保留，沒有刪改任何斷言。修正 B 新增的測試沒有另外加上 `remove_temp_dir`：在專用 TEMP 跑這三個測試檔與完整 `pnpm test` 後都沒有留下 `.tmp*`。
+  - 修正 B（AI-478）讓 `LocalCommandRunner` 改把命令放進 KILL_ON_JOB_CLOSE 的 Job，逾時時終止整個 Job，不再靠 `kill_on_drop`；但終止後仍不等程序真的結束，所以 AI-501 的「產品端不等子程序結束」與其影響說明仍成立，只是根因中「以 `kill_on_drop` 終止」對驗證命令已不精確。`LocalBrowserDriver` 不變。
+  - 本分支沒有新增 Store migration，不需要順延。
+- 理由：已合併的條目編號不能改，只能移動本分支的內容；測試碼兩邊的修改互不重疊，合併後兩邊的行為都在。
+- 替代方案：直接改寫 AI-501 的根因描述（修改已驗證的條目內容，改以本條補充）。
+- 影響：無行為差異。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

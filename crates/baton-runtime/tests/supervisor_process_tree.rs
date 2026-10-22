@@ -5,6 +5,8 @@
 //! 派工、Supervisor 啟動、程序身分回執與取消都走正式路徑。
 #![cfg(windows)]
 
+mod support;
+
 use std::ffi::c_void;
 use std::path::Path;
 use std::sync::Arc;
@@ -338,6 +340,8 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
     assert_eq!(board.tasks[0].task.status, TaskStatus::Ready);
     assert_eq!(job_process_count(&command_id), 0, "整個程序樹（含孫程序）都已被終止");
     runtime.shutdown().await;
+    // 被終止的程序樹與 Runtime 的背景工作都放掉檔案之後，資料目錄（含 Workspace 的 `.baton`）才刪得掉
+    support::remove_temp_dir(data_dir).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

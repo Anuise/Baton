@@ -9,6 +9,7 @@
 //! `get_json` 與桌面 App 一樣：每次從憑證檔讀取目前的桌面憑證再帶上標頭，
 //! 所以重啟後會自動使用新憑證；要測試拒絕情境時改用 `request` 自行組裝請求。
 
+mod data_dir;
 pub mod fakes;
 
 use std::ops::Deref;
@@ -29,7 +30,8 @@ use baton_guardian::launcher::{self, LoginLaunch};
 use baton_guardian::{Guardian, GuardianStep, RuntimeHost};
 use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeOptions};
 use serde::de::DeserializeOwned;
-use tempfile::TempDir;
+
+use crate::data_dir::DataDir;
 
 pub use fakes::FakePorts;
 
@@ -112,7 +114,7 @@ impl HarnessBuilder {
 
     /// 啟動；Runtime 拒絕啟動時回傳錯誤（測試「啟動被拒絕」的情境用）。
     pub async fn try_start(self) -> Result<Harness, RuntimeError> {
-        let data_dir = tempfile::tempdir().expect("無法建立暫存資料目錄");
+        let data_dir = DataDir::create().expect("無法建立暫存資料目錄");
         if let Some(prepare) = self.prepare {
             prepare(data_dir.path());
         }
@@ -140,7 +142,8 @@ impl HarnessBuilder {
 }
 
 pub struct Harness {
-    data_dir: TempDir,
+    /// 整個 Harness 結束時刪除（重建 Runtime 時保留）。
+    data_dir: DataDir,
     fakes: FakePorts,
     /// 取代 fake 的 Agent Adapter；`None` 時用 `fakes.agent_adapter`。
     adapter: Option<Arc<dyn AgentAdapter>>,

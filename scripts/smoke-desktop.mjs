@@ -9,6 +9,12 @@
 //   5. 不帶憑證的請求被 Runtime 拒絕（桌面憑證由 App 自動讀取 DPAPI 保護檔，不需人工複製）
 //   6. 首次設定精靈以本機真實的 claude 與 git 檢查；帳號頁新增 Profile 並以真實的 claude auth status 核對，
 //      第 9 個 Profile 被拒絕（不會開啟登入終端機，避免在測試中彈出視窗）
+//   7. 強制結束 Runtime（不結束監護）：監護重新拉起 Runtime，恢復面板與狀態列顯示恢復事件
+//   8. 完全退出（最後一步，會停掉 Runtime）：系統匣選單無法由腳本點擊，改在頁面內以 Tauri IPC 發出
+//      系統匣送出的同一個事件；畫面顯示「完全退出」與停止進度、Runtime 進入 stopped，
+//      最後 App、Runtime 與監護都結束
+//   「派工到完成」與「裁定中心批次處理」需要 Worker／Controller 實際執行（只有 Agent 憑證能建立裁定請求），
+//   不在本腳本範圍內，由 harness 情境測試涵蓋
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -49,8 +55,8 @@ async function waitFor(description, probe, timeoutMs = 40_000) {
   throw new Error(`等待逾時：${description}${last ? `（${last.message}）` : ""}`);
 }
 
-/** 以 CDP 在第一個頁面執行運算式並回傳結果。 */
-async function evaluate(debugPort, expression) {
+/** 以 CDP 在第一個頁面執行運算式並回傳結果；`awaitPromise` 時等運算式的 Promise 完成。 */
+async function evaluate(debugPort, expression, awaitPromise = false) {
   const targets = await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json();
   const page = targets.find((t) => t.type === "page");
   if (!page) throw new Error("尚無頁面");
@@ -59,9 +65,13 @@ async function evaluate(debugPort, expression) {
     socket.onopen = ok;
     socket.onerror = () => fail(new Error("CDP 連線失敗"));
   });
-  const result = await new Promise((ok) => {
+  const result = await new Promise((ok, fail) => {
     socket.onmessage = (event) => ok(JSON.parse(event.data));
-    socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true } }));
+    // 頁面在回應前關閉（例如 App 結束）時不要永遠等下去
+    socket.onclose = () => fail(new Error("CDP 連線在回應前關閉"));
+    socket.send(
+      JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true, awaitPromise } }),
+    );
   });
   socket.close();
   return result.result?.result?.value;
@@ -87,7 +97,10 @@ const ui = {
   text: (selector) => `document.querySelector(${JSON.stringify(selector)})?.innerText ?? ''`,
 };
 
-const runtimeUrl = (port) => `http://127.0.0.1:${port}/api/v1/health`;
+/** 系統匣「完全退出」送給主視窗的事件（src-tauri 的 FULL_EXIT_EVENT）。 */
+const FULL_EXIT_EVENT = "baton://full-exit-requested";
+
+const runtimeUrl = (port) =>`http://127.0.0.1:${port}/api/v1/health`;
 
 /** 帶桌面憑證呼叫 Runtime API，回傳狀態碼與 JSON。 */
 async function callApi(port, path, method = "GET", body) {
@@ -135,13 +148,26 @@ function killProcess(pid) {
   spawn("taskkill", ["/PID", String(pid), "/F"], { stdio: "ignore" });
 }
 
-/** App 拉起的監護程序（baton-guardian.exe）記在資料目錄裡的程序識別碼；沒有監護時為 undefined。 */
-function guardianPid(dir) {
+/** 監護與 Runtime 記在資料目錄 guardian\ 下的程序識別碼（guardian.json、runtime.json）；沒有記錄時為 undefined。 */
+function recordedPid(dir, file) {
   try {
-    return JSON.parse(readFileSync(join(dir, "guardian", "guardian.json"), "utf8")).pid;
+    return JSON.parse(readFileSync(join(dir, "guardian", file), "utf8")).pid;
   } catch {
     return undefined;
   }
+}
+
+/** 強制結束指定程序並等待 taskkill 完成。加上映像名稱篩選：記錄檔裡的 PID 若已被其他程序重用，不會誤殺。 */
+function killImage(pid, image) {
+  spawnSync("taskkill", ["/PID", String(pid), "/FI", `IMAGENAME eq ${image}`, "/F"], { stdio: "ignore" });
+}
+
+/** 指定 PID 的程序是否還在，且映像名稱相符。 */
+function isRunning(pid, image) {
+  const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FI", `IMAGENAME eq ${image}`, "/NH"], {
+    encoding: "utf8",
+  });
+  return result.stdout.toLowerCase().includes(image);
 }
 
 /** 清掉使用指定 WebView2 資料夾的殘留程序（msedgewebview2），否則資料夾無法刪除。 */
@@ -155,6 +181,9 @@ const projectDir = mkdtempSync(join(tmpdir(), "baton-smoke-project-"));
 const webviewDir = mkdtempSync(join(tmpdir(), "baton-smoke-webview-"));
 const runtimePort = await freePort();
 let runtimePid;
+// 在 try 外宣告：中途失敗時 finally 也要結束它們
+let app1;
+let app2;
 
 try {
   const launchEnv = (debugPort) => ({
@@ -166,7 +195,7 @@ try {
 
   // 1. 第一次開啟：App 啟動 Runtime，狀態列顯示運作中
   const debug1 = await freePort();
-  const app1 = launchApp(launchEnv(debug1));
+  app1 = launchApp(launchEnv(debug1));
   const bar = await waitFor("狀態列顯示 Runtime 運作中", async () => {
     const text = await evaluate(debug1, "document.querySelector('.status-bar')?.innerText ?? ''");
     return text.includes("Runtime 運作中") ? text : null;
@@ -232,7 +261,7 @@ try {
 
   // 3. 再次開啟：連回同一個 Runtime
   const debug2 = await freePort();
-  const app2 = launchApp(launchEnv(debug2));
+  app2 = launchApp(launchEnv(debug2));
   await waitFor("再次開啟後狀態列顯示 Runtime 運作中", async () => {
     const text = await evaluate(debug2, "document.querySelector('.status-bar')?.innerText ?? ''");
     return text.includes("Runtime 運作中");
@@ -289,19 +318,100 @@ try {
     throw new Error(`未帶憑證的請求應被拒絕，實際回應 ${anonymous.status}`);
   }
   console.log(`✔ 未帶憑證的請求被拒絕（${anonymous.status}）`);
-  killProcess(app2.pid);
+
+  // 7. 強制結束 Runtime、監護還在：監護確認終止後重新拉起 Runtime，新的 Runtime 判定崩潰並建立恢復事件
+  await waitFor("監護運作中", async () => (await health(runtimePort)).guardian?.state === "active");
+  killProcess(runtimePid);
+  const restarted = await waitFor("監護重新拉起 Runtime", async () => {
+    const now = await health(runtimePort);
+    return now.pid !== first.pid && now.boot_count > first.boot_count ? now : null;
+  });
+  runtimePid = restarted.pid;
+  const recovery = await waitFor("Runtime 接續監護的恢復嘗試", async () => {
+    const { body } = await callApi(runtimePort, "/api/v1/recovery");
+    return ["attempting", "observing"].includes(body.event?.status) ? body : null;
+  });
+  if (recovery.event.round !== 1 || recovery.event.attempts_used !== 1) {
+    throw new Error(`恢復事件應是第 1 輪第 1 次嘗試（監護拉起的那次）：${JSON.stringify(recovery.event)}`);
+  }
+  console.log(
+    `✔ 強制結束 Runtime 後由監護重新拉起（pid ${restarted.pid}，boot_count ${restarted.boot_count}），恢復事件 ${recovery.event.status}`,
+  );
+  const recoveryPanel = await waitFor("恢復面板顯示恢復事件", async () => {
+    const text = await evaluate(debug2, ui.text(".recovery-panel"));
+    return text.includes("偵測到崩潰") && text.includes("第 1 輪") ? text : null;
+  });
+  const recoveryBar = await waitFor("狀態列顯示恢復事件狀態", async () => {
+    const text = await evaluate(debug2, ui.text(".status-recovery"));
+    return text.includes("恢復中") ? text : null;
+  });
+  console.log(`✔ 狀態列「${recoveryBar.trim()}」；恢復面板：${recoveryPanel.replace(/\s+/g, " ").trim().slice(0, 160)}`);
+
+  // 8. 完全退出（最後一步）：在頁面內發出系統匣「完全退出」送出的同一個 Tauri 事件，由 Web UI 接手停止並顯示進度
+  const guardian = recordedPid(dataDir, "guardian.json");
+  const token = readDesktopCredential(dataDir);
+  const phases = new Set();
+  // Runtime 進入 stopped 後只再提供 API 5 秒，所以與畫面同時輪詢
+  const lifecycleStopped = waitFor("Runtime 的 lifecycle 進入 stopped", async () => {
+    const response = await fetch(`http://127.0.0.1:${runtimePort}/api/v1/lifecycle`, {
+      headers: { Authorization: `Bearer ${token}`, "X-Baton-Client": "baton-desktop" },
+    });
+    const status = await response.json();
+    phases.add(status.phase);
+    return status.phase === "stopped" ? status : null;
+  });
+  // 記下停止進度畫面的每個樣子；看到「正在關閉 Baton」就回傳（App 約 1 秒後結束，頁面也隨之消失）
+  const exitScreens = evaluate(
+    debug2,
+    `new Promise((resolve) => {
+      const screens = [];
+      const finish = () => { observer.disconnect(); resolve(screens); };
+      const observer = new MutationObserver(() => {
+        const text = document.querySelector('.exit-progress')?.innerText;
+        if (!text) return;
+        if (screens.at(-1) !== text) screens.push(text);
+        if (text.includes('正在關閉 Baton')) finish();
+      });
+      observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+      setTimeout(finish, 30000);
+      window.__TAURI_INTERNALS__
+        .invoke('plugin:event|emit', { event: ${JSON.stringify(FULL_EXIT_EVENT)}, payload: null })
+        .catch((error) => { screens.push('發出事件失敗：' + error); finish(); });
+    })`,
+    true,
+  );
+  const [screens, stopped] = await Promise.all([exitScreens, lifecycleStopped]);
+  const joined = screens.join("\n");
+  if (!joined.includes("完全退出") || !/停止中|已停止/.test(joined) || !screens.at(-1)?.includes("正在關閉 Baton")) {
+    throw new Error(`完全退出畫面沒有顯示停止進度：${JSON.stringify(screens)}`);
+  }
+  if (!stopped.stop_intent_active || !existsSync(join(dataDir, "lifecycle.json"))) {
+    throw new Error(`完全退出後停止意圖應生效並鏡像到 lifecycle.json：${JSON.stringify(stopped)}`);
+  }
+  console.log(
+    `✔ 完全退出畫面：${screens.at(-1).replace(/\s+/g, " ").trim()}；Runtime lifecycle：${[...phases].join(" → ")}`,
+  );
+  await waitFor("App 自行結束", () => app2.exitCode !== null, 20_000);
+  await waitFor("Runtime 結束", () => !isRunning(runtimePid, "baton-runtime.exe"), 20_000);
+  // 監護看到停止意圖就不重啟 Runtime，自己結束
+  if (guardian) await waitFor("監護結束", () => !isRunning(guardian, "baton-guardian.exe"), 20_000);
+  console.log("✔ 完全退出後 App、Runtime 與監護都已結束");
   console.log("冒煙測試通過");
 } catch (error) {
   console.error(`冒煙測試失敗：${error.message}`);
   process.exitCode = 1;
 } finally {
-  // 先結束監護再結束 Runtime：否則監護會把被強制結束的 Runtime 當成意外終止而重啟它
-  const guardian = guardianPid(dataDir);
-  if (guardian) {
-    // 加上映像名稱篩選：記錄檔裡的 PID 若已被其他程序重用，不會誤殺
-    spawnSync("taskkill", ["/PID", String(guardian), "/FI", "IMAGENAME eq baton-guardian.exe", "/F"], { stdio: "ignore" });
+  // 中途失敗時 App 可能還在
+  for (const app of [app1, app2]) {
+    if (app && app.exitCode === null) killImage(app.pid, "baton-desktop.exe");
   }
-  if (runtimePid) killProcess(runtimePid);
+  // 先結束監護再結束 Runtime：否則監護會把被強制結束的 Runtime 當成意外終止而重啟它
+  const guardian = recordedPid(dataDir, "guardian.json");
+  if (guardian) killImage(guardian, "baton-guardian.exe");
+  // 取得 runtimePid 之前就失敗時，改用 Runtime 在資料目錄記下的程序識別碼；監護重啟過時兩者可能不同
+  for (const pid of new Set([runtimePid, recordedPid(dataDir, "runtime.json")])) {
+    if (pid) killImage(pid, "baton-runtime.exe");
+  }
   killWebviewProcesses(webviewDir);
   await sleep(1000);
   for (const dir of [dataDir, webviewDir, projectDir]) rmSync(dir, { recursive: true, force: true });
