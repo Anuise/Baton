@@ -314,8 +314,11 @@ pub struct PendingCheck {
 }
 
 /// 這個 Task 是否需要 Runtime 執行檢查：`verifying`、有受驗 Run，而且契約宣告了檢查，或契約版本已與 Run 不同。
-/// 沒有宣告任何檢查時回傳 `None`：只能由使用者手動接受。
+/// 沒有宣告任何檢查時回傳 `None`：只能由使用者手動接受。Workspace 已封存時也是 `None`：提交一定被拒絕。
 pub fn pending_check(ctx: &TaskContext<'_>, runs: &[Run], artifacts: &[Artifact], task: &Task) -> Option<PendingCheck> {
+    if ctx.workspace.is_none_or(|w| w.status == WorkspaceStatus::Archived) {
+        return None;
+    }
     let basis = current_basis(task, runs, artifacts)?;
     let run = subject_run(runs, &task.id)?;
     let contract = ctx.contract_of(task)?;

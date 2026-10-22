@@ -343,7 +343,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 | 契約版本與檢視時相同，且等於 Run 派工時的契約版本 | 409 `acceptance_contract_stale` |
 | 成果 manifest（每個成果的最新版本）與檢視時相同 | 409 `acceptance_manifest_stale` |
 
-契約在 Run 派工後被改版時，Supervisor 不執行檢查，直接記錄一筆「未通過」（原因寫在 `note`），Task 回到 `ready` 重新執行；這個 Run 的成果不能在新契約下被接受，手動接受也會被拒絕。過期 Run 的回報（登記成果、結束事件）本來就因不是目前寫入所有者而被拒絕（`run_report_stale`），所以不能推進 Task。
+契約在 Run 派工後被改版時，Supervisor 不執行檢查，直接記錄一筆「未通過」（原因寫在 `note`），Task 回到 `ready` 重新執行；這個 Run 的成果不能在新契約下被接受，手動接受也會被拒絕。過期 Run 的回報（登記成果、結束事件）本來就因不是目前寫入所有者而被拒絕（`run_report_stale`），所以不能推進 Task。Workspace 封存後，其中 `verifying` 的 Task 不再自動檢查（`automatic` 為 `false`），成果接受（含手動接受）一律 409 `workspace_archived`，Task 停在 `verifying`。
 
 **驗證紀錄**：追加式資料表 `task_verification`（migration 15，觸發器禁止更新與刪除；`run_id` 唯一：一個 Run 最多一筆；部分唯一索引：一個 Task 最多一筆 `passed`）。每筆含方式（`checks`／`manual`）、結果（`passed`／`failed`）、受驗 Run 與世代、契約版本、每項檢查的結果與證據、驗證時的成果 manifest、手動接受者（桌面憑證雜湊的前 16 字元，**不是**憑證本身）與附註。同一個交易追加 Task 事件 `task_verification_recorded`（payload 含上述摘要與未通過的檢查）與 `task_status_changed`（`reason` 為 `verification_passed`／`verification_failed`）。
 

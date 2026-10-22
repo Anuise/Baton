@@ -417,6 +417,16 @@ fn manual_acceptance_records_who_accepted_and_completes_the_task() {
 }
 
 #[test]
+fn a_verifying_task_in_an_archived_workspace_is_not_pending_for_checks() {
+    let mut world = World::verifying(vec![command("cargo", 0)]);
+    world.workspace.status = WorkspaceStatus::Archived;
+
+    let pending = pending_check(&world.task_ctx(), &world.runs, &world.artifacts, &world.tasks[0]);
+    assert_eq!(pending, None, "封存後提交一定被拒絕，執行檢查只會白跑命令");
+    assert!(!view(&world.task_ctx(), &world.runs, &world.artifacts, &[], &world.tasks[0]).automatic);
+}
+
+#[test]
 fn manual_acceptance_note_is_limited_and_archived_workspaces_refuse() {
     let mut world = World::verifying(vec![]);
     let long = AcceptanceCommand::AcceptManually {

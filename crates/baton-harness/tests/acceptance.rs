@@ -323,6 +323,30 @@ async fn a_runtime_crash_while_checks_run_reruns_them_after_restart_instead_of_g
     assert_eq!(verification(&harness, &ws, &tid).await["records"].as_array().unwrap().len(), 1);
 }
 
+#[tokio::test]
+async fn checks_are_not_run_for_a_verifying_task_in_an_archived_workspace() {
+    let harness = harness().await;
+    let (ws, _, goal) = setup(&harness).await;
+    let tid = ready_task(&harness, &ws, &goal, json!([command_check("cargo", &["test"])])).await;
+    let (rid, _) = start_run(&harness, &ws, &tid).await;
+    harness.command_runner.script_exit("cargo", 0, "ok");
+    harness.agent_adapter.emit(&rid, AdapterEvent::Exited { success: true });
+
+    // Supervisor 處理結束事件之前，使用者就封存了 Workspace
+    let (status, archived) = harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/archive"), None).await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    for _ in 0..3 {
+        harness.supervise().await;
+    }
+
+    assert_eq!(task_status(&harness, &ws, &tid).await, "verifying");
+    assert!(harness.command_runner.calls().is_empty(), "封存的 Workspace 不再執行驗證命令");
+    let view = verification(&harness, &ws, &tid).await;
+    assert_eq!(view["automatic"], false, "{view}");
+    assert_eq!(view["records"], json!([]));
+    assert!(verification_events(&harness, &tid).is_empty());
+}
+
 // ============================================================ 過期 Run
 
 #[tokio::test]
