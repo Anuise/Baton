@@ -487,6 +487,16 @@ async fn tools_list_has_the_thirty_nine_tools_with_their_required_fields() {
     for text in ["代表旅程", "product_failure", "confirmed", "unverified_risk", "fixed", "regressed", "診斷", "get_exploration"] {
         assert!(reproduce_description.contains(text), "{text}");
     }
+    // 案例不能超出使用者發布的 Profile（AI-450）：命令與含秘密的操作要完全相同、網址來源要出現過
+    for text in [
+        "命令步驟必須與 Profile 中某個操作",
+        "{{secret:…}} 的操作也必須與 Profile 中某個操作完全相同",
+        "來源（scheme、主機與埠）必須在 Profile 的網址中出現過",
+        "使用者資訊或佔位字",
+        "exploration_invalid",
+    ] {
+        assert!(reproduce_description.contains(text), "{text}");
+    }
 
     assert_eq!(schema(TOOL_GET_EXPLORATION), json!({"type":"object","properties":{}}));
     let overview_description = description(TOOL_GET_EXPLORATION);
