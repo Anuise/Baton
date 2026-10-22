@@ -1,20 +1,21 @@
 //! 端到端（Windows）：真實 Runtime + 真實 WindowsProcessControl + 真實 HTTP，取消 Run 會終止整個程序樹。
 //!
-//! 只有 AgentAdapter 是測試用的（它把「Worker」換成一棵長時間存活的 cmd → cmd → ping 程序樹）；
+//! 只有 AgentAdapter（它把「Worker」換成一棵長時間存活的 cmd → cmd → ping 程序樹）與 ClaudeEnvironment
+//! （不呼叫真的 `claude`，讓帳號 Profile 能被核對為可派工）是測試用的；
 //! 派工、Supervisor 啟動、程序身分回執與取消都走正式路徑。
 #![cfg(windows)]
 
 use std::ffi::c_void;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use baton_api::{CreateTaskRequest, CreateWorkspaceRequest};
-use baton_client::RuntimeClient;
+use baton_api::{CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest};
+use baton_client::{DispatchOutcome, RuntimeClient};
 use baton_domain::run::RunStatus;
 use baton_domain::task::{ContractContent, ContractField, TaskStatus};
 use baton_ports::*;
-use baton_runtime::claude_cli::ClaudeCli;
 use baton_runtime::production_ports::{LocalWorkspaceFs, SystemClock};
 use baton_runtime::windows_platform::WindowsPlatformInfo;
 use baton_runtime::windows_process::WindowsProcessControl;
@@ -54,6 +55,35 @@ impl AgentAdapter for TreeAdapter {
 
     async fn resume_capability(&self, _session: &SessionRef) -> PortResult<Capability> {
         Ok(Capability::Unknown)
+    }
+}
+
+/// 測試用的 Claude 環境：任何設定目錄都回報原生登入，帳號以目錄名稱區分（不會呼叫真的 `claude`）。
+struct NativeLoginEnv;
+
+#[async_trait]
+impl ClaudeEnvironment for NativeLoginEnv {
+    async fn probe_claude(&self) -> PortResult<ToolProbe> {
+        Ok(ToolProbe::Found { version_output: Some("2.1.307 (Claude Code)".into()) })
+    }
+
+    async fn probe_git(&self) -> PortResult<ToolProbe> {
+        Ok(ToolProbe::Found { version_output: Some("git version 2.54.0.windows.1".into()) })
+    }
+
+    async fn auth_status(&self, config_dir: &Path) -> PortResult<AuthReport> {
+        let name = config_dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        Ok(AuthReport {
+            logged_in: true,
+            source: AuthSource::NativeLogin,
+            source_detail: None,
+            account: Some(format!("{name}@example.com")),
+            config_dir: Some(config_dir.to_string_lossy().into_owned()),
+        })
+    }
+
+    async fn open_login_terminal(&self, _config_dir: &Path) -> PortResult<()> {
+        Ok(())
     }
 }
 
@@ -150,7 +180,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         workspace_fs: Arc::new(LocalWorkspaceFs),
         platform_info: Arc::new(WindowsPlatformInfo),
         secret_protector: protector.clone(),
-        claude_env: Arc::new(ClaudeCli),
+        claude_env: Arc::new(NativeLoginEnv),
     };
     let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
     let runtime = Runtime::start_with(
@@ -161,6 +191,11 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
     .await
     .unwrap();
     let client = RuntimeClient::new(runtime.local_addr(), data_dir.path().to_path_buf(), protector);
+
+    // 派工需要可派工的帳號：經由 HTTP 建立 Profile 並核對（測試用的 Claude 環境回報原生登入）
+    let profile = client.create_profile(&CreateProfileRequest { name: "測試帳號".into(), expected_account: None }).await.unwrap();
+    let verified = client.verify_profile(&profile.profile.id).await.unwrap();
+    assert!(verified.dispatchable, "{verified:?}");
 
     let workspace = client
         .create_workspace(&CreateWorkspaceRequest { path: workspace_dir.to_string_lossy().into_owned(), name: None })
@@ -176,7 +211,9 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         .unwrap();
     client.mark_task_ready(&workspace.id, &task.task.id).await.unwrap();
 
-    let queued = client.dispatch_task(&workspace.id, &task.task.id).await.unwrap();
+    let DispatchOutcome::Started(queued) = client.dispatch_task(&workspace.id, &task.task.id).await.unwrap() else {
+        panic!("有可派工的帳號與名額，應該直接建立 Run");
+    };
     runtime.supervisor().tick().await;
     let running = client.task_board(&workspace.id).await.unwrap().runs.remove(0);
     let command_id = running.run.command_id.clone().expect("launch intent 已持久化");

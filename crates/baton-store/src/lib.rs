@@ -27,10 +27,14 @@ use tokio::sync::oneshot;
 mod agent;
 mod profiles;
 mod runs;
+mod scheduling;
 mod tasks;
 pub use agent::AgentContext;
 pub use profiles::ProfileApplyError;
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
+pub use scheduling::{
+    QueuedRequest, ScheduleOutcome, ScheduleRequest, SchedulingSnapshot, StartedRun, WaitingTask,
+};
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 
 /// 控制資料庫檔名，位於資料目錄之下。
@@ -296,6 +300,26 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'agent_report 是追加式資料表，不可更新'); END;
         CREATE TRIGGER agent_report_no_delete BEFORE DELETE ON agent_report
         BEGIN SELECT RAISE(ABORT, 'agent_report 是追加式資料表，不可刪除'); END;",
+    },
+    // 多帳號並行排程（票 19）：Run 記下使用的帳號；派工請求佇列（ready 的 Task 等名額）；容量預設只有一列。
+    // 佇列只存「誰在排隊」，等待原因每次由目前狀態重新判定，不落地
+    Migration {
+        name: "scheduling",
+        sql: "ALTER TABLE run ADD COLUMN profile_id TEXT;
+        CREATE INDEX run_profile ON run (profile_id);
+        CREATE TABLE dispatch_request (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL UNIQUE REFERENCES task (id),
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            priority INTEGER NOT NULL DEFAULT 0,
+            requested_at INTEGER NOT NULL
+        );
+        CREATE TABLE scheduler_setting (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            mode TEXT NOT NULL CHECK (mode IN ('reserve_handoff', 'higher_concurrency')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );",
     },
 ];
 

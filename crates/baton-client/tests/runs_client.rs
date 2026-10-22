@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use baton_api::{CreateTaskRequest, CreateWorkspaceRequest};
-use baton_client::{ClientError, RuntimeClient};
-use baton_domain::run::RunStatus;
+use baton_client::{ClientError, DispatchOutcome, RuntimeClient};
+use baton_domain::run::{RunStatus, RunView};
 use baton_domain::task::{ContractContent, ContractField, TaskStatus};
 use baton_harness::fakes::FakeSecretProtector;
 use baton_harness::Harness;
@@ -39,6 +39,14 @@ async fn new_workspace(harness: &Harness, client: &RuntimeClient) -> String {
         .id
 }
 
+/// 派工結果必須是已建立的 Run；排隊中代表測試的前提（帳號、名額）不對。
+fn started(outcome: DispatchOutcome) -> RunView {
+    match outcome {
+        DispatchOutcome::Started(view) => *view,
+        DispatchOutcome::Queued(queued) => panic!("應該直接派出，卻排隊中：{queued:?}"),
+    }
+}
+
 /// 建立一個 Task 並標為 ready；回傳 task id。
 async fn ready_task(client: &RuntimeClient, workspace_id: &str) -> String {
     let goal = client.create_goal(workspace_id, "研究競品").await.unwrap();
@@ -56,13 +64,15 @@ async fn ready_task(client: &RuntimeClient, workspace_id: &str) -> String {
 #[tokio::test]
 async fn app_dispatches_a_ready_task_and_gets_a_queued_run() {
     let harness = Harness::start().await;
+    let profile_id = harness.add_account("主要帳號", "main@example.com").await;
     let client = app_client(&harness);
     let workspace_id = new_workspace(&harness, &client).await;
     let task_id = ready_task(&client, &workspace_id).await;
 
-    let view = client.dispatch_task(&workspace_id, &task_id).await.unwrap();
+    let view = started(client.dispatch_task(&workspace_id, &task_id).await.unwrap());
 
     assert_eq!(view.run.status, RunStatus::Queued);
+    assert_eq!(view.run.profile_id, profile_id);
     assert_eq!(view.run.task_id, task_id);
     assert!(view.lease.is_some());
     let board = client.task_board(&workspace_id).await.unwrap();
@@ -74,10 +84,11 @@ async fn app_dispatches_a_ready_task_and_gets_a_queued_run() {
 #[tokio::test]
 async fn app_cancels_a_run_that_has_not_started_and_the_task_returns_to_ready() {
     let harness = Harness::start().await;
+    harness.add_account("主要帳號", "main@example.com").await;
     let client = app_client(&harness);
     let workspace_id = new_workspace(&harness, &client).await;
     let task_id = ready_task(&client, &workspace_id).await;
-    let dispatched = client.dispatch_task(&workspace_id, &task_id).await.unwrap();
+    let dispatched = started(client.dispatch_task(&workspace_id, &task_id).await.unwrap());
 
     let cancelled = client.cancel_run(&workspace_id, &dispatched.run.id).await.unwrap();
     let again = client.cancel_run(&workspace_id, &dispatched.run.id).await.unwrap();
