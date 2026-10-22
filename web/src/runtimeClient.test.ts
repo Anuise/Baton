@@ -280,4 +280,72 @@ describe("Runtime 用戶端", () => {
     expect(invoke).toHaveBeenNthCalledWith(10, "task_dispatch", { workspaceId: "ws_1", taskId: "task_1" });
     expect(invoke).toHaveBeenNthCalledWith(11, "run_cancel", { workspaceId: "ws_1", runId: "run_1" });
   });
+
+  it("HTTP 版管理帳號 Profile：新增送出 expected_account，其餘為 POST 並解析 Runtime 的回應", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ profiles: [], limit: 8 }), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.listProfiles();
+    await client.createProfile({ name: "主要帳號", expectedAccount: "me@example.com" });
+    await client.verifyProfile("prof_1");
+    await client.openLoginTerminal("prof_1");
+    await client.archiveProfile("prof_1");
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/profiles");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "主要帳號", expected_account: "me@example.com" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/profiles/prof_1/verify", { method: "POST" });
+    expect(fetchFn).toHaveBeenNthCalledWith(4, "/api/v1/profiles/prof_1/login-terminal", { method: "POST" });
+    expect(fetchFn).toHaveBeenNthCalledWith(5, "/api/v1/profiles/prof_1/archive", { method: "POST" });
+  });
+
+  it("HTTP 版新增第 9 個 Profile 被拒絕時，錯誤訊息是 Runtime 說明的上限", async () => {
+    const body = { error: "profile_limit_reached", message: "最多只能有 8 個帳號 Profile" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    await expect(
+      createHttpClient(fetchFn as unknown as typeof fetch).createProfile({ name: "第 9 個" }),
+    ).rejects.toThrow("最多只能有 8 個帳號 Profile");
+  });
+
+  it("HTTP 版取得精靈狀態、重新檢查與確認背景行為告知", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.getSetup();
+    await client.recheckSetup();
+    await client.acknowledgeBackgroundNotice();
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/setup");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/setup/recheck", { method: "POST" });
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/setup/background-notice/acknowledge", { method: "POST" });
+  });
+
+  it("Tauri 版以指令與參數管理帳號 Profile 與精靈", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.listProfiles();
+    await client.createProfile({ name: "主要帳號", expectedAccount: "me@example.com" });
+    await client.verifyProfile("prof_1");
+    await client.openLoginTerminal("prof_1");
+    await client.archiveProfile("prof_1");
+    await client.getSetup();
+    await client.recheckSetup();
+    await client.acknowledgeBackgroundNotice();
+
+    expect(invoke.mock.calls).toEqual([
+      ["profile_list"],
+      ["profile_create", { name: "主要帳號", expectedAccount: "me@example.com" }],
+      ["profile_verify", { id: "prof_1" }],
+      ["profile_login_terminal", { id: "prof_1" }],
+      ["profile_archive", { id: "prof_1" }],
+      ["setup_status"],
+      ["setup_recheck"],
+      ["setup_acknowledge_notice"],
+    ]);
+  });
 });

@@ -1,6 +1,6 @@
 # 08: 共同設定匯入與版本化快照（S3）
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R024-08-impl，2026-10-22 15:55）
 Blocked by: 07
 
 **What to build:** 從使用者既有 Claude Code 設定匯入共同基準（偏好、指示、hooks、MCP、plugins），顯示來源與差異，使用者採用後建立不可變設定版本；不改寫使用者平常手動使用的設定，不複製任何登入資料。為 Run 准入提供「取得某版本快照並寫成 Run 專屬唯讀設定目錄」的能力（spec D-09）。

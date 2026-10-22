@@ -14,6 +14,7 @@ use baton_client::RuntimeClient;
 use baton_domain::run::RunStatus;
 use baton_domain::task::{ContractContent, ContractField, TaskStatus};
 use baton_ports::*;
+use baton_runtime::claude_cli::ClaudeCli;
 use baton_runtime::production_ports::{LocalWorkspaceFs, SystemClock};
 use baton_runtime::windows_platform::WindowsPlatformInfo;
 use baton_runtime::windows_process::WindowsProcessControl;
@@ -149,6 +150,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         workspace_fs: Arc::new(LocalWorkspaceFs),
         platform_info: Arc::new(WindowsPlatformInfo),
         secret_protector: protector.clone(),
+        claude_env: Arc::new(ClaudeCli),
     };
     let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
     let runtime = Runtime::start_with(

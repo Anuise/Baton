@@ -1,17 +1,20 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、帳號 Profile 管理與首次啟動精靈端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
 mod agent;
 mod authorization;
 mod guard;
+mod profiles;
+mod setup;
 mod runs;
 mod tasks;
 mod workspaces;
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -21,7 +24,7 @@ use axum::{middleware, Json, Router};
 use baton_domain::agent::{TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
-use baton_ports::{Clock, PlatformInfo, WorkspaceFs};
+use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, WorkspaceFs};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,8 @@ pub use tasks::{
     TaskDetail, UpdateContractRequest,
 };
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
+pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
+pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
 pub use runs::{run_cancel_path, run_path, runs_path, task_dispatch_path, RunList};
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
@@ -92,9 +97,12 @@ pub struct ApiState {
     /// Runtime 實際監聽的埠；Host 標頭必須帶這個埠。
     pub allowed_port: u16,
     pub store: Store,
+    /// Runtime 的資料目錄；Profile 的原生設定目錄建立在其下。
+    pub data_dir: PathBuf,
     pub clock: Arc<dyn Clock>,
     pub platform_info: Arc<dyn PlatformInfo>,
     pub workspace_fs: Arc<dyn WorkspaceFs>,
+    pub claude_env: Arc<dyn ClaudeEnvironment>,
     pub log: LogSink,
     /// 派工或要求取消之後通知 Supervisor 儘快處理（背景迴圈等待它；沒有背景迴圈時沒有作用）。
     pub supervisor_wake: Arc<Notify>,
@@ -121,6 +129,13 @@ pub fn router(state: ApiState) -> Router {
         .route(tasks::ADMISSION_ROUTE, post(tasks::admission_check))
         .route(tasks::READY_ROUTE, post(tasks::mark_ready))
         .route(tasks::CANCEL_ROUTE, post(tasks::cancel))
+        .route(PROFILES_PATH, get(profiles::list).post(profiles::create))
+        .route(profiles::VERIFY_ROUTE, post(profiles::verify))
+        .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))
+        .route(profiles::ARCHIVE_ROUTE, post(profiles::archive))
+        .route(SETUP_PATH, get(setup::status))
+        .route(SETUP_RECHECK_PATH, post(setup::recheck))
+        .route(SETUP_ACK_PATH, post(setup::acknowledge_background_notice))
         .route(runs::DISPATCH_ROUTE, post(runs::dispatch))
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))

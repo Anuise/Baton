@@ -693,16 +693,125 @@
 - 影響：Run 與事件目前只增不減，沒有清理；面板的 Run 資料隨 Workspace 增長（歷史多了以後要分頁，屬後續票）。
 - 審閱：未審
 
-### AI-75：Agent 憑證的簽發時機、交付方式與有效性
+### AI-75：平行票合併衝突以整合 run 處理
+- 重要度：中
+- 時間／階段：2026-10-22，票 07、10 合併
+- 決策：兩張平行開發的票改到同一批檔案時，先通過驗證的票先合併；另一張停止進行中的驗證，改派一個整合 run（`.orchestration/integrate.template.md`）合併最新的 `rebuild/v1`、解衝突、順延 migration 與 AI 編號，再重新驗證。整合 run 不計入修正次數。
+- 理由：票 07 與票 10 同時改了 Store、Ports、API、Tauri 指令與前端用戶端共 15 個檔案，兩邊都新增 migration 6 與 AI-66 起的條目。在舊基底上驗證通過的結果，合併後不再成立。
+- 替代方案：由主控自己解衝突（會用到主帳號額度，且衝突涉及程式邏輯）；或讓平行票改為循序（降低並行度）。
+- 影響：每遇到一次衝突多一個整合 run 與一個驗證 run。被停止的驗證 run 在 runs.md 記為「中止」。
+- 審閱：未審
+
+### AI-76：Profile 的「預期身分」怎麼決定，以及不符時怎麼處理
+- 重要度：高
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：票面要求「實際認證身分與 Profile 預期不符時標示並阻擋」，但沒有說預期身分從哪來。採兩條路：(1) 建立 Profile 時可選填 `expected_account`（電子郵件），第一次核對起就比對；(2) 沒填時，第一次在該 Profile 自己的原生登入（`authMethod=claude.ai`）且設定目錄相符時核對到的帳號，固定為預期身分（追加 `account_profile_identity_pinned` 事件）。之後核對到不同帳號（不分大小寫）就標 `identity_mismatch` 並阻擋，不會悄悄改寫預期身分。認證來源被覆蓋時回報的帳號一律不採用、也不固定。另外，同一個帳號被兩個使用中的 Profile 認到時，較晚建立的標 `duplicate_identity` 並阻擋。登入了但取不到帳號（`email` 缺漏）標 `identity_unconfirmed` 並阻擋。
+- 理由：沒有預期身分就沒有「不符」可言；讓使用者必填會增加首次啟動負擔，所以預設用「第一次原生登入的帳號」固定。同帳號綁兩個 Profile 會讓額度與並行判斷失真，且正是「以為在用 A、實際在用 B」的常見成因（兩個目錄都登入同一人）。
+- 替代方案：預期帳號必填（較嚴但多一個欄位）；不固定、只比對覆蓋來源（抓不到「在終端機改登入別的帳號」）；允許同帳號多個 Profile（額度重複計算）。
+- 影響：使用者在 Profile 的終端機改登入另一個帳號後，該 Profile 會被阻擋且目前沒有「接受新身分」的操作，需封存後重建（會是新的設定目錄與新的登入）。若需要「接受新身分」，在帳號頁加一個明確動作與命令即可。
+- 審閱：未審
+
+### AI-77：「阻擋派工」以 `dispatchable=false` 加 `blockers` 表示
+- 重要度：高
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：Scheduler 與派工尚未存在，所以無法測「實際不被派工」。Domain 的 `profile::blockers`／`views` 判定每個 Profile 是否可派工，`GET /api/v1/profiles` 與精靈都回傳 `dispatchable` 與逐項 `blockers`（穩定代碼：`profile_unverified`、`profile_not_logged_in`、`auth_source_overridden`、`config_dir_mismatch`、`identity_unconfirmed`、`identity_mismatch`、`duplicate_identity`、`profile_archived`）。尚未核對過的 Profile 也不可派工。
+- 理由：與 AI-35 相同的處理方式：現在能被外部觀察的只有 API 回應；判定集中在 Domain，後續票不必自行比對。
+- 替代方案：先做一個假的派工端點來測（超出本票範圍）。
+- 影響：Scheduler／Run 准入的票必須只選 `dispatchable` 的 Profile，並補上「被阻擋的 Profile 沒有被派工」的情境測試。核對結果沒有時效：目前不會因為太久沒核對而失效，是否需要定期重新核對由額度觀測或准入的票決定。
+- 審閱：未審
+
+### AI-78：認證來源的判定依據（實測 Claude Code 2.1.307）與環境變數處理
+- 重要度：高
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：以 `claude auth status --json`（`CLAUDE_CONFIG_DIR` 設為該 Profile 目錄）判定。本機實測輸出：原生登入 `authMethod: "claude.ai"`（含 `email`、`configDirectory`）；環境變數 `ANTHROPIC_API_KEY` → `"api_key"` 加 `apiKeySource: "ANTHROPIC_API_KEY"`（沒有 `email`）；`ANTHROPIC_AUTH_TOKEN` 或 `CLAUDE_CODE_OAUTH_TOKEN` → `"oauth_token"`；未登入 → `loggedIn: false`、結束碼 1 但仍輸出 JSON。判定規則：只有 `claude.ai` 且 `apiProvider` 是 `firstParty` 才算 `NativeLogin`；`api_key`、`oauth_token`、非 firstParty 供應商與不認識的方式全部視為覆蓋並阻擋。另外比對 CLI 回報的 `configDirectory` 與 Profile 目錄（不分大小寫、斜線、`\\?\` 前綴）。核對**沿用 Runtime 的環境變數**，只覆寫 `CLAUDE_CONFIG_DIR`，不像 AI-02 那樣清除。
+- 理由：核對的目的就是看出覆蓋；清除環境變數會讓覆蓋看不見。這樣得到的是「以 Runtime 目前環境啟動 Claude Code 時實際會用什麼」，之後 Adapter 若啟動前清除環境，只會更嚴格、不會更寬鬆。`apiKeySource` 的 `apiKeyHelper` 值只是依字面推測，沒有實測（本機沒有設定 helper）。
+- 替代方案：只看電子郵件有沒有變（抓不到沒有 email 的 API key 覆蓋）；讀取 `.credentials.json` 判定（要碰登入資料，違反驗收條件）。
+- 影響：使用 `claude auth login --console`（Console／API 計費）登入的 Profile，若 CLI 回報的 `authMethod` 不是 `claude.ai` 會被視為覆蓋而阻擋，需要實測確認；CLI 改版改了 `auth status` 的輸出格式時，核對會回報 `profile_check_failed`。正式實作已用本機真實的 `claude`（空目錄、已登入的 `.claude-Work-3`）以 `--ignored` 的 live 測試與桌面冒煙測試驗證。
+- 審閱：未審
+
+### AI-79：新增 ClaudeEnvironment Port，並為 WorkspaceFs 加 `ensure_directory`
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：新增 `ClaudeEnvironment` Port（`probe_claude`、`probe_git`、`auth_status`、`open_login_terminal`）。`Ports` 結構多一個 `claude_env` 欄位；harness 提供 `FakeClaudeEnvironment`（可腳本化工具存在與版本、各設定目錄的原生登入、環境變數覆蓋、登入終端機，並像真實 Claude Code 一樣把登入資料寫進該 Profile 目錄）。Port 沒有任何下載或安裝動作。`WorkspaceFs` 新增 `ensure_directory`，用於建立 Profile 的設定目錄。
+- 理由：spec 的 Port 草圖沒有涵蓋「執行 claude／git 探測」與「開終端機」，這些都是外部副作用，依 D-04 必須是 Port。「不執行任何下載腳本」因此可以用「Port 上沒有這個能力」加上測試斷言「沒有 spawn」來證明。
+- 替代方案：用既有的 `ProcessControl.spawn`（它沒有環境變數與輸出擷取，語意也是 Run 的程序）。
+- 影響：後續建立 `Ports` 的程式要補上 `claude_env`。真實 Claude Code Adapter（票之後）可以共用 `ClaudeCli` 的探測。
+- 審閱：未審
+
+### AI-80：Profile 設定目錄的位置、封存與資料表
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：設定目錄固定在 `<資料目錄>\profiles\<profile id>`（id 為 `prof_` 加 96 位元隨機值），由 Runtime 建立，不讓使用者自選；Domain 另外保證任兩個 Profile（含已封存者）的目錄不相同也不互相包含。新增 `POST /api/v1/profiles/{id}/archive`（票面沒有明列）：D-32 的 8 個上限若沒有釋出名額的方式，使用者只能永久佔滿；封存不刪除目錄（登入資料仍在那裡，刪除是不可逆動作）。Profile 名稱必填、使用中不可重複（不分大小寫）、50 字元以內。新增 migration 7（接在票 06、09、10 的 migration 之後）：`account_profile`（核對結果存成 JSON 欄位）與 `setup_state`；所有變更與事件在同一個交易追加。
+- 理由：D-17 規定 Profile 原生設定目錄放在資料目錄之下；封存與刪除目錄分開處理比較安全。
+- 替代方案：讓使用者選任意目錄（可能共用或指到自己平常的 `~/.claude`，違反「互不共用」）；不做封存（8 個上限變成陷阱）。
+- 影響：被封存 Profile 的資料夾會留在磁碟上，清理（含登出）需要另一個明確的功能。使用者原本想沿用的現有 `.claude-Work-n` 目錄不能直接匯入，要在新的 Profile 目錄重新登入。
+- 審閱：未審
+
+### AI-81：登入終端機的開啟方式
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：App 呼叫 Runtime 的 `POST /api/v1/profiles/{id}/login-terminal`，由 Runtime 執行 `cmd /d /c start "Baton - Claude login" cmd.exe /k claude auth login`，環境變數 `CLAUDE_CONFIG_DIR` 設為該 Profile 目錄，視窗以 `/k` 保持開啟。Runtime 的標準輸入輸出是空的，直接用 `CREATE_NEW_CONSOLE` 會讓新視窗的 `cmd` 讀到 EOF 立刻結束，所以透過 `start` 讓新視窗取得自己的主控台。登入完成後由使用者按「重新核對」，Runtime 不輪詢登入結果。
+- 理由：票面要求「可在 App 開啟的終端機中以該 Profile 執行原生登入」。只執行 `claude auth login`，不碰登入資料，也不下載任何東西。
+- 替代方案：Tauri 殼自己開終端機（登入動作會從 Runtime 搬到殼，harness 無法測）；內嵌終端機元件（超出範圍）。
+- 影響：自動化測試只驗證「為選定 Profile 呼叫 Port、使用它自己的設定目錄」與命令列內容（`login_terminal_command` 的單元測試）；真實視窗是否出現、`claude auth login` 是否在其中正常完成沒有自動化覆蓋，屬 **Validation Required**，已寫入 `docs/development.md`，列入票 51 的平台驗收較妥。`start` 的視窗標題刻意用 ASCII，避免主控台字碼頁亂碼。
+- 審閱：未審
+
+### AI-82：Claude Code 最低版本與 Git 的檢查標準
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：最低 Claude Code 版本暫定 2.1.0（`MIN_CLAUDE_CODE_VERSION`）；低於它標為 `too_old`，並提示 `claude update`。版本取不到或探測失敗標為 `unknown`（不當作可用）。Git for Windows 只檢查在 PATH 上（`where git`），不設版本下限，也不判斷是不是 Git for Windows 發行版。
+- 理由：spec D-20 說最低版本在 Adapter 驗證時固定；目前實測過的是 2.1.x 系列，且 `claude auth status` 存在於這個系列。官方文件把 Git for Windows 列為建議而非必要（沒有它 Claude Code 改用 PowerShell 工具），但 D-20 與 worktree 管理需要 git，所以仍檢查並提示。
+- 替代方案：不設最低版本（無法呈現「版本過舊」）；把缺少 Git 視為阻擋（官方並不要求）。
+- 影響：Adapter 驗證票確認實際需要的最低版本後，改 `baton-domain/src/setup.rs` 的常數與測試。Git 缺少目前只是提示，不阻擋建立 Profile 或派工。
+- 審閱：未審
+
+### AI-83：精靈顯示的官方指令與其核對狀況
+- 重要度：低
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：Claude Code 缺項顯示 `irm https://claude.ai/install.ps1 | iex` 與 `winget install Anthropic.ClaudeCode`；過舊顯示 `claude update`；Git 缺項顯示 `winget install --id Git.Git -e --source winget`，並附說明頁網址（Claude Code：code.claude.com/docs/en/setup；Git：git-scm.com/download/win）。Claude Code 的三條指令已對照官方安裝文件（2026-10-22 查閱）；Git 的 winget 指令沿用 Git for Windows 官方下載頁慣用的 `Git.Git` 套件識別，沒有逐字核對官網。指令只是文字，UI 沒有執行按鈕，說明頁網址以純文字顯示（不做成連結，避免 WebView 被導走）。
+- 理由：D-20 規定缺項只引導、不代為安裝。
+- 替代方案：顯示可點的連結（需要 Tauri 的 opener 外掛與權限）。
+- 影響：官方指令改版時需更新 `setup.rs`。
+- 審閱：未審
+
+### AI-84：核對失敗與「重新檢查」的語意
+- 重要度：低
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：單一 Profile 核對本身失敗（claude 沒回應、輸出不是預期的 JSON）時回 502 `profile_check_failed`，不改寫該 Profile 已記錄的結果。精靈的 `GET /api/v1/setup` 每次都重新探測 Claude Code 與 Git、讀取已記錄的 Profile 結果；`POST /api/v1/setup/recheck`（「重新檢查」）另外並行重新核對每個使用中的 Profile，個別失敗者略過、保留先前結果。工具探測失敗回報 `unknown` 與原因，不讓精靈整體失敗。RuntimeClient 對這幾個會執行 `claude`／`git` 的請求等待上限放寬為 60 秒（一般請求維持 2 秒）。
+- 理由：核對失敗不該被誤記成「未登入」而覆蓋掉先前可信的結果；也不該因一個 Profile 卡住而讓整個精靈沒有回應。
+- 替代方案：失敗時把結果記為「未知」並阻擋（較保守，但暫時性的 CLI 逾時會讓所有帳號被阻擋）。
+- 影響：Claude Code 長時間不可用時，舊的「可派工」結果會一直保留；派工前的准入應自行重新核對（見 AI-77）。
+- 審閱：未審
+
+### AI-85：精靈狀態、背景行為告知的保存與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-22，票 07 實作
+- 決策：`ready` 的定義是 Claude Code 與 Git 都 `ok`，且至少有一個可派工的 Profile；背景行為告知是否確認另外以 `setup_state` 表保存（首次確認追加 `background_notice_acknowledged` 事件，之後重複確認不改變時間也不追加事件）。UI 在 App 主區依序放首次設定精靈、帳號頁、平台狀態頁（導覽尚未存在，與 AI-37 相同）；全部完成且已確認告知時精靈縮成一行「首次設定已完成」加「重新檢查」。已有 8 個 Profile 時，新增按鈕停用並說明上限（Runtime 端仍會拒絕第 9 個）。精靈步驟中的「匯入共同設定」與「建立第一個 Workspace（授權範本確認）」不在本票範圍，由後續的票加入。
+- 理由：票面只要求精靈檢查三項環境與告知背景行為。
+- 替代方案：把告知確認存在 WebView 的 localStorage（重建 Runtime 或換視窗資料夾後會重複顯示，也不在事件紀錄中）。
+- 影響：加入導覽的票只需移動這兩個元件的掛載位置。
+- 審閱：未審
+
+### AI-86：票 07 整合 rebuild/v1：migration 順序、AI 編號與文件段落
+- 重要度：中
+- 時間／階段：2026-10-22，票 07 整合（R021-07-integrate）
+- 決策：(1) `MIGRATIONS` 依索引計版本，整合分支已有 `run_lease_outbox`（第 6 版），本票的 `account_profile_and_setup_state` 順延為第 7 版；兩個 migration 都完整保留，兩邊的資料表都會建立（AI-80 的 migration 編號已同步改為 7）。(2) 本票原本的 AI-66～AI-75 與整合分支的票 10 條目重號，順延為 AI-76～AI-85；整合分支的條目沒有改動，程式碼與其他文件沒有引用這些編號，只有 AI-84 內文的交互引用同步改成 AI-77。(3) `ApiState`、`Ports`、前端 `AppClient` 兩邊的新欄位與方法全部保留（`claude_env`、`supervisor_wake`；`AccountClient` 與 `TaskClient.dispatchTask`／`cancelRun`），票 10 的 Runtime 整合測試 `supervisor_process_tree.rs` 補上 `claude_env: ClaudeCli`；`docs/development.md` 兩邊新增的段落與表格列都保留。
+- 理由：兩邊的 migration 彼此獨立（沒有共用資料表），順序只影響版本號；已發布的 migration 不可修改，所以順延尚未發布的本票版本。
+- 替代方案：把本票的 migration 插在票 10 之前（會改動整合分支已有的版本號，不可行）。
+- 影響：開發中的本機資料庫若已套用過舊版本號的 migration，需要重建；尚未有任何發布版本。
+- 審閱：未審
+
+
+### AI-87：Agent 憑證的簽發時機、交付方式與有效性
 - 重要度：高
 - 時間／階段：2026-10-22，票 11 實作
-- 決策：(1) **准入 = Supervisor 的啟動步驟**：`BeginLaunch` 持久化成功之後、`spawn` 之前，為該 Run 簽發 Agent 憑證（`CredentialIssuer::issue_agent`），綁 Workspace、Run 與世代（`credential` 表以 migration 7 加三欄，`run_id` 有唯一索引：每個 Run 最多一個憑證）。簽發失敗就不啟動，下一次 tick 由既有的「找不到程序就中斷」收尾。(2) 憑證**只經 `SpawnSpec.env`** 的環境變數 `BATON_AGENT_TOKEN`（連同 `BATON_RUNTIME_URL`，值是 `http://127.0.0.1:<實際埠>`）交給程序；Adapter 的 `spawn_spec` 仍是純函式、拿不到憑證，由 Supervisor 在 Adapter 的結果上附加環境變數。`SpawnSpec` 的 `Debug` 只印環境變數名稱，環境變數不納入 `command_hash`（所以 Runtime 重建後以 command_id 找回原程序不需要憑證）。真實 `WindowsProcessControl` 以 Unicode 環境區塊傳入（Runtime 自己的環境加上 `env`，同名以 `env` 為準），已用真實程序測試。(3) **沒有時間上限**（`expires_at = NULL`）：有效與否取決於「Run 仍是寫入所有者」（見 AI-77），Run 可能跑好幾小時，固定 TTL 會讓長 Run 中途失效；Runtime 重啟不輪替 Agent 憑證（Worker 程序在 Runtime 崩潰時仍活著，AI-72），只輪替桌面憑證。(4) MCP 設定檔由 `baton_domain::agent::mcp_config_json` 產生，只含 shim 指令與 `${BATON_AGENT_TOKEN}`／`${BATON_RUNTIME_URL}` 參照，真實 Adapter（票 14）直接使用。
+- 決策：(1) **准入 = Supervisor 的啟動步驟**：`BeginLaunch` 持久化成功之後、`spawn` 之前，為該 Run 簽發 Agent 憑證（`CredentialIssuer::issue_agent`），綁 Workspace、Run 與世代（`credential` 表以第 8 個 migration 加三欄（`agent_report` 是第 9 個；第 7 個已由票 07 的 account_profile 使用），`run_id` 有唯一索引：每個 Run 最多一個憑證）。簽發失敗就不啟動，下一次 tick 由既有的「找不到程序就中斷」收尾。(2) 憑證**只經 `SpawnSpec.env`** 的環境變數 `BATON_AGENT_TOKEN`（連同 `BATON_RUNTIME_URL`，值是 `http://127.0.0.1:<實際埠>`）交給程序；Adapter 的 `spawn_spec` 仍是純函式、拿不到憑證，由 Supervisor 在 Adapter 的結果上附加環境變數。`SpawnSpec` 的 `Debug` 只印環境變數名稱，環境變數不納入 `command_hash`（所以 Runtime 重建後以 command_id 找回原程序不需要憑證）。真實 `WindowsProcessControl` 以 Unicode 環境區塊傳入（Runtime 自己的環境加上 `env`，同名以 `env` 為準），已用真實程序測試。(3) **沒有時間上限**（`expires_at = NULL`）：有效與否取決於「Run 仍是寫入所有者」（見 AI-89），Run 可能跑好幾小時，固定 TTL 會讓長 Run 中途失效；Runtime 重啟不輪替 Agent 憑證（Worker 程序在 Runtime 崩潰時仍活著，AI-72），只輪替桌面憑證。(4) MCP 設定檔由 `baton_domain::agent::mcp_config_json` 產生，只含 shim 指令與 `${BATON_AGENT_TOKEN}`／`${BATON_RUNTIME_URL}` 參照，真實 Adapter（票 14）直接使用。
 - 理由：D-22 要求「Run 准入時簽發、只經環境變數交給 MCP shim」。准入的外部可觀察點就是 Run 被啟動的那一刻；放在 spawn 之前才能保證程序一出生就有憑證。把憑證放進 `SpawnSpec.env` 讓 fake ProcessControl 能記錄它，harness 因此能取得與真實 Worker 相同的憑證做測試。
 - 替代方案：派工（`Dispatch`）時簽發（Run 還在 `queued`，Runtime 重啟後明文已遺失，必須重簽）；憑證放進 MCP 設定檔的 `env`（違反「設定檔不含憑證」）；用 TTL（長 Run 失效）。
 - 影響：**Validation Required（票 14 以真實 Claude Code 驗證）**：(a) Claude Code 是否對 MCP 設定中 `env` 值展開 `${VAR}`，以及 stdio MCP server 是否繼承 `claude` 程序的環境（若不繼承或不展開，改由設定檔以外的管道交付，但仍不得寫入設定檔）；(b) Worker 的 Bash 工具子程序也會繼承 `BATON_AGENT_TOKEN`，模型若執行 `echo` 會讓憑證進入 transcript。這個憑證只能碰自己的 Run、Run 結束即失效，影響有界，但 transcript 匯入時的秘密遮蔽（D-22 最後一句）需要涵蓋它。shim 執行檔的位置與打包（sidecar）不在本票，屬票 14、34。
 - 審閱：未審
 
-### AI-76：Agent API 的形狀、角色分流與「不信任請求內的 Workspace／Run」
+### AI-88：Agent API 的形狀、角色分流與「不信任請求內的 Workspace／Run」
 - 重要度：高
 - 時間／階段：2026-10-22，票 11 實作
 - 決策：(1) 每個工具一個 `POST /agent/v1/tools/{tool}`（`get_task_contract`、`report_progress`、`save_checkpoint`、`report_blocked`），一律 POST＋JSON，路徑不含任何 Workspace 或 Run 識別；shim 只需「工具名稱 → 路徑、`arguments` → body」。(2) `guard` 依路徑前綴 `/agent/v1/` 決定所需角色：該前綴之下只接受 Agent 憑證，其餘（含未知路徑）只接受桌面憑證；角色不符一律 403 `role_not_allowed`，Agent 憑證沒有範圍則 401 `credential_invalid`。通過驗證的憑證記錄放進請求的 extensions，處理函式不必再查一次。(3) 身分與歸屬**完全取自憑證**（Workspace、Run、世代）。請求可以（但不需要）在 body 帶 `workspace_id`／`run_id`，只要和憑證的範圍不一致就 403 `agent_scope_mismatch`，不會改用請求裡的值，也不會碰到對方的資料；順序是先比對歸屬、再驗證內容、最後才讀寫。(4) shim 的請求沿用 `X-Baton-Client: baton-desktop` 這個固定標頭值（它的用途是讓瀏覽器的跨站請求觸發預檢而被拒絕，與呼叫者角色無關）。
@@ -711,7 +820,7 @@
 - 影響：之後新增的 Agent 工具（`register_artifact`、`request_decision`、`send_message`…）都放在同一個前綴下並沿用同一套範圍與歸屬檢查；Controller 專屬工具的憑證角色（目前只有 `desktop`／`agent` 兩種）由票 16、17 決定。越權嘗試目前只在日誌留下一行「方法、路由樣板、狀態碼」，沒有寫入稽核表。
 - 審閱：未審
 
-### AI-77：Run 結束或被接替後的憑證：讀取被拒、回報被拒但留稽核
+### AI-89：Run 結束或被接替後的憑證：讀取被拒、回報被拒但留稽核
 - 重要度：高
 - 時間／階段：2026-10-22，票 11 實作
 - 決策：憑證列**不刪除**，有效性每次請求即時判定：Run 尚未結束、仍持有 execution lease、且憑證的世代等於 Run 與 lease 的世代，才是目前的寫入所有者（`baton_domain::run::is_current_writer`，Domain 的過期世代檢查與 API 共用這一個判定）。不是目前寫入所有者時：`get_task_contract` 回 401 `credential_revoked`；三個回報工具回 409 `run_report_stale`，Domain 不改變任何狀態，但同一個交易會把回報內容追加到 `agent_report`（`accepted = 0`，追加式，觸發器禁止更新與刪除）。面板上的最新進度／checkpoint／受阻只取 `accepted = 1` 的最後一筆，所以過期回報不會覆蓋它。
@@ -720,7 +829,7 @@
 - 影響：稽核內容可能含有 Worker 自行填寫的任何文字（包括它自己的憑證，如果它把環境變數印出來並放進回報）：目前沒有秘密遮蔽，屬 D-22「已知秘密樣式遮蔽」尚未實作的範圍。`agent_report` 沒有清理機制（與事件表相同），備份與還原（票 40）需涵蓋它。Run 被取消時舊程序若停不掉（`StillAlive`），該 Run 仍持有 lease，它的憑證仍是目前寫入所有者，這與「寫入所有權要等確認停止才釋放」一致。
 - 審閱：未審
 
-### AI-78：`report_blocked` 讓 Task 進入 `blocked`，Run 不結束
+### AI-90：`report_blocked` 讓 Task 進入 `blocked`，Run 不結束
 - 重要度：中
 - 時間／階段：2026-10-22，票 11 實作
 - 決策：被接受的 `report_blocked` 讓 Task 從 `running` 進入 `blocked`（只在 Task 當下確實是 `running`；已被使用者取消或已離開 `running` 的 Task 不動），並在 Run 上記錄受阻原因。**Run 本身不因此結束**：它仍是 `running`、持有 lease，直到 Worker 程序結束；之後 Run 的結束只在 Task 還是 `running` 時才轉換 Task，所以受阻的 Task 不會被 `succeeded` 拉到 `verifying`，也不會被 `failed` 退回 `ready`。
@@ -729,7 +838,7 @@
 - 影響：目前 `blocked` 的 Task 沒有 UI 出口（只能取消）；解除阻擋、建立裁定請求與重派屬票 22、36。`blocked` 欄位已存在於工作面板的狀態分欄。
 - 審閱：未審
 
-### AI-79：Worker 回報的資料模型、限制與 lease 續約
+### AI-91：Worker 回報的資料模型、限制與 lease 續約
 - 重要度：中
 - 時間／階段：2026-10-22，票 11 實作
 - 決策：(1) 三種回報（進度、checkpoint、受阻）共用一個 Domain 命令 `RunCommand::Report`，只有一個資料表 `agent_report`（`seq`、Workspace、Run、世代、種類、是否被接受、JSON 內容、UTC 毫秒）；被接受的回報同時追加 Run 事件（`run_progress_reported`、`run_checkpoint_saved`、`run_blocked_reported`），**checkpoint 的事件只記摘要，細節只存在 `agent_report`**。(2) 限制：摘要 1–500 字元、受阻原因 1–1000 字元、checkpoint 細節最多 16 KiB（位元組）；前後空白去除（細節保持原樣）；超過或空白回 400 `report_invalid`，不寫入任何東西。(3) 三種回報都**續約 lease**（等同 heartbeat），Starting 或 Running 才接受（Queued 拒絕）。AI-69 預告 `report_progress` 要呼叫 `Heartbeat`：這裡讓回報本身就是存活訊號，不另設獨立的 heartbeat 工具。(4) `RunView` 新增 `latest_progress`、`latest_checkpoint`（含 `details`）、`blocked`（沒有時為 null），所有回傳 Run 的端點與工作面板共用；面板顯示最新 Run 的三者，checkpoint 細節預設收合。
@@ -738,7 +847,7 @@
 - 影響：`GET …/runs`、`…/tasks` 會把每個 Run 的最新 checkpoint 細節一起回傳（最多 16 KiB × Run 數）；Run 很多以後需要把細節拆成單獨端點（屬分頁／清理的後續票）。`save_checkpoint` 目前只是被保存與顯示，接手者如何讀取（Context Builder 載入檢查點）屬票 15、28、39。進度回報頻率沒有限流。
 - 審閱：未審
 
-### AI-80：`get_task_contract` 回傳派工當下固定的契約版本
+### AI-92：`get_task_contract` 回傳派工當下固定的契約版本
 - 重要度：中
 - 時間／階段：2026-10-22，票 11 實作
 - 決策：`get_task_contract` 回傳 Run 的 `contract_version` 指到的那一版契約內容（Run 派工當下固定），加上 Task 識別與標題、Run 識別、世代與版本，不回傳授權內容或其他 Task 的資料。派工之後契約被改版（Task 非 `ready` 時允許），Worker 仍拿到原本那一版。
@@ -747,7 +856,7 @@
 - 影響：本票只實作共同工具中的四個（`get_task_contract`、`report_progress`、`save_checkpoint`、`report_blocked`）；`register_artifact`、`request_decision`、`send_message`、`read_inbox`、`search_knowledge` 與 Controller 專屬工具由後續票加入。
 - 審閱：未審
 
-### AI-81：MCP shim 的結構與協定處理
+### AI-93：MCP shim 的結構與協定處理
 - 重要度：低
 - 時間／階段：2026-10-22，票 11 實作
 - 決策：新增 crate `baton-mcp-shim`（lib＋bin），手寫逐行 JSON-RPC 2.0（`initialize`、`notifications/*`、`ping`、`tools/list`、`tools/call`），不依賴任何 MCP SDK；只依賴 `baton-domain`（取環境變數名稱與工具常數）、`tokio`、`reqwest`（關閉預設功能，不走 proxy）。協定版本：用戶端要求的版本在 `2024-11-05`、`2025-03-26`、`2025-06-18`、`2025-11-25` 內就回同一個，否則回 `2025-06-18`。Runtime 拒絕時回 MCP 工具錯誤（`isError: true`，文字是 `<代碼>：<說明>`），不是協定錯誤；連線失敗與逾時只回固定文字，不帶 reqwest 的錯誤內容。`serve`／`ShimConfig` 為 `pub`，harness 以 `tokio::io::duplex` 在程序內跑真正的 shim；另有真實 stdio 程序測試（缺少環境變數 exit code 2、輸出不含憑證）。`X-Baton-Client` 的標頭名稱與值在 shim 內各寫成一個常數（不依賴 `baton-api` 以免帶進整個 Axum 與 Store）。

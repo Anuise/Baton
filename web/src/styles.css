@@ -330,3 +330,107 @@ body {
 .task-form textarea {
   min-height: 48px;
 }
+
+.setup-wizard,
+.accounts-page {
+  margin-bottom: 24px;
+}
+
+.setup-done {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+  background: #dafbe1;
+  border: 1px solid #4ac26b;
+  border-radius: 6px;
+}
+
+.setup-tool-missing,
+.setup-tool-too_old,
+.setup-tool-unknown {
+  padding: 8px 12px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  border-radius: 6px;
+}
+
+.setup-guidance {
+  padding-left: 16px;
+}
+
+.setup-guidance li {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 8px;
+}
+
+.setup-guidance code {
+  padding: 4px 8px;
+  background: #eaeef2;
+  border-radius: 4px;
+  user-select: all;
+}
+
+.setup-docs {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.profile-list {
+  padding: 0;
+  list-style: none;
+}
+
+.profile-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.profile-blocked {
+  border-color: #cf222e;
+}
+
+.profile-name {
+  font-weight: 600;
+}
+
+.profile-ok .profile-state {
+  color: #1a7f37;
+}
+
+.profile-blocked .profile-state {
+  color: #cf222e;
+}
+
+.profile-source,
+.profile-expected {
+  color: #656d76;
+  font-size: 13px;
+}
+
+.profile-blocker {
+  margin: 0;
+  padding: 6px 10px;
+  background: #ffebe9;
+  border: 1px solid #ff818266;
+  border-radius: 6px;
+}
+
+.profile-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+}
