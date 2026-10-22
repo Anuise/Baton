@@ -357,11 +357,25 @@ impl Harness {
         self.full_text_search = enabled;
     }
 
-    /// 模擬重啟：丟棄目前的 Runtime，保留資料目錄與 fake，重新建立。
+    /// 模擬重啟：有秩序地停止目前的 Runtime（記下正常結束），保留資料目錄與 fake，重新建立。
     pub async fn restart(&mut self) {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown().await;
         }
+        self.start_again().await;
+    }
+
+    /// 模擬 Runtime 意外終止後再次啟動（票 31）：丟棄目前的 Runtime 而不記下正常結束，保留資料目錄與 fake，重新建立。
+    /// 新的 Runtime 會判定上次意外終止並開始崩潰恢復。要在某個邊界「當掉」，先讓那一步永遠不回來
+    /// （例如 `FakeStop::Hang`），以逾時丟棄進行中的 `supervise`，再呼叫這個方法。
+    pub async fn crash_restart(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.kill().await;
+        }
+        self.start_again().await;
+    }
+
+    async fn start_again(&mut self) {
         let runtime =
             try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search).await;
         self.runtime = Some(runtime.unwrap_or_else(|e| panic!("Runtime 重啟失敗：{e}")));

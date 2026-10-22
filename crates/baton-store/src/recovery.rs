@@ -31,11 +31,12 @@ impl From<rusqlite::Error> for RecoveryApplyError {
 }
 
 impl Store {
-    /// 上一次啟動是否正常結束；從未啟動過為 `None`。必須在 `record_boot` 之前呼叫。
-    pub async fn last_boot_ended_cleanly(&self) -> StoreResult<Option<bool>> {
+    /// 這一次之前的那一次啟動是否正常結束；之前沒有啟動過為 `None`。在 `record_boot` 記下這一次啟動之後呼叫
+    /// （`record_boot` 先核對 schema 版本，不相容的資料庫在那裡就被拒絕）。
+    pub async fn previous_boot_ended_cleanly(&self) -> StoreResult<Option<bool>> {
         self.read(|conn| {
             let row = conn.query_row(
-                "SELECT ended_cleanly_at IS NOT NULL FROM runtime_boot ORDER BY id DESC LIMIT 1",
+                "SELECT ended_cleanly_at IS NOT NULL FROM runtime_boot ORDER BY id DESC LIMIT 1 OFFSET 1",
                 [],
                 |r| r.get::<_, bool>(0),
             );

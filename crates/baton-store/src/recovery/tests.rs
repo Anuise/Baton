@@ -14,13 +14,15 @@ async fn open(dir: &Path) -> Store {
 async fn unclean_previous_boot_is_detected_and_clean_shutdown_is_not() {
     let dir = tempfile::tempdir().unwrap();
     let store = open(dir.path()).await;
-    assert_eq!(store.last_boot_ended_cleanly().await.unwrap(), None, "從未啟動過");
     store.record_boot(T0).await.unwrap();
-    assert_eq!(store.last_boot_ended_cleanly().await.unwrap(), Some(false));
+    assert_eq!(store.previous_boot_ended_cleanly().await.unwrap(), None, "之前沒有啟動過");
+    store.record_boot(T0).await.unwrap();
+    assert_eq!(store.previous_boot_ended_cleanly().await.unwrap(), Some(false), "第一次啟動沒有正常結束");
     store.mark_clean_shutdown(T0).await.unwrap();
-    assert_eq!(store.last_boot_ended_cleanly().await.unwrap(), Some(true));
     store.record_boot(T0).await.unwrap();
-    assert_eq!(store.last_boot_ended_cleanly().await.unwrap(), Some(false), "只看最近一次啟動");
+    assert_eq!(store.previous_boot_ended_cleanly().await.unwrap(), Some(true), "第二次啟動正常結束");
+    store.record_boot(T0).await.unwrap();
+    assert_eq!(store.previous_boot_ended_cleanly().await.unwrap(), Some(false), "只看前一次啟動");
 }
 
 #[tokio::test]
