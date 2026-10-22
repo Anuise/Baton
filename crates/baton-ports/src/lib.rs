@@ -11,6 +11,7 @@ mod platform;
 mod process;
 mod quota;
 mod secret;
+mod user_settings;
 mod workspace_fs;
 
 use std::sync::Arc;
@@ -21,10 +22,12 @@ pub use clock::Clock;
 pub use command::{CommandOutput, CommandRequest, CommandRunner};
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
-pub use quota::{observe_quota, Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
+pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
 pub use secret::SecretProtector;
+pub use user_settings::{DirUserSettingsSource, SourceFile, SourceFiles, UserSettingsSource};
 pub use workspace_fs::{
-    directory_state, list_files_recursive, partial_path, read_file_if_exists, write_file_atomic, DirectoryState, DirtyState,
+    directory_state, list_files_recursive, partial_path, read_file_if_exists, write_file_atomic, write_readonly_tree,
+    DirectoryState, DirtyState,
     FileEntry, WorkspaceFs,
 };
 
@@ -53,4 +56,5 @@ pub struct Ports {
     pub claude_env: Arc<dyn ClaudeEnvironment>,
     /// 執行契約宣告的驗證命令（票 13）。
     pub command_runner: Arc<dyn CommandRunner>,
+    pub user_settings: Arc<dyn UserSettingsSource>,
 }

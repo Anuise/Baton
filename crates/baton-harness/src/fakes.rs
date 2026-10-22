@@ -312,21 +312,28 @@ impl AgentAdapter for FakeAgentAdapter {
     }
 }
 
-/// 以 profile 為鍵、樣本腳本化的額度觀測器；沒有腳本的 profile 回傳錯誤。
+/// 以 profile 為鍵、樣本腳本化的額度觀測器；沒有腳本的 profile 回傳錯誤。記錄每個 profile 被輪詢的次數。
 #[derive(Default)]
 pub struct FakeQuotaObserver {
     samples: Mutex<HashMap<String, QuotaSample>>,
+    calls: Mutex<HashMap<String, usize>>,
 }
 
 impl FakeQuotaObserver {
     pub fn set_sample(&self, profile: &str, sample: QuotaSample) {
         lock(&self.samples).insert(profile.to_string(), sample);
     }
+
+    /// 某個 profile 被 `observe` 的次數。
+    pub fn observe_count(&self, profile: &str) -> usize {
+        lock(&self.calls).get(profile).copied().unwrap_or(0)
+    }
 }
 
 #[async_trait]
 impl QuotaObserver for FakeQuotaObserver {
     async fn observe(&self, profile: &ProfileRef) -> PortResult<QuotaSample> {
+        *lock(&self.calls).entry(profile.0.clone()).or_default() += 1;
         lock(&self.samples)
             .get(&profile.0)
             .cloned()
@@ -442,6 +449,77 @@ impl WorkspaceFs for FakeWorkspaceFs {
 
     async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
         baton_ports::list_files_recursive(dir)
+    }
+
+    async fn write_readonly_files(&self, dir: &Path, files: &[(String, Vec<u8>)]) -> PortResult<()> {
+        baton_ports::write_readonly_tree(dir, files)
+    }
+}
+
+/// 使用者平常使用的 Claude Code 設定：一個暫存的「家目錄」，內含 `.claude\` 與 `.claude.json`。
+///
+/// 讀取走與正式版相同的 `DirUserSettingsSource`（真實讀檔），所以「原始設定檔位元組不變」可以直接比對檔案。
+/// 測試可以在其中放置登入資料（`.credentials.json`）來證明它永遠不會被讀取。
+pub struct FakeUserSettings {
+    home: tempfile::TempDir,
+    source: DirUserSettingsSource,
+}
+
+impl Default for FakeUserSettings {
+    fn default() -> Self {
+        let home = tempfile::tempdir().expect("無法建立暫存的使用者家目錄");
+        let source = DirUserSettingsSource::new(home.path().join(".claude"), home.path().join(".claude.json"));
+        std::fs::create_dir_all(home.path().join(".claude")).expect("無法建立 .claude");
+        Self { home, source }
+    }
+}
+
+impl FakeUserSettings {
+    pub fn home(&self) -> &Path {
+        self.home.path()
+    }
+
+    /// 寫入 `.claude\` 之下的檔案（模擬使用者自己編輯設定）。
+    pub fn write_in_config_dir(&self, name: &str, content: &str) {
+        std::fs::write(self.home.path().join(".claude").join(name), content).expect("無法寫入設定檔");
+    }
+
+    pub fn write_settings(&self, json: &str) {
+        self.write_in_config_dir("settings.json", json);
+    }
+
+    pub fn write_instructions(&self, text: &str) {
+        self.write_in_config_dir("CLAUDE.md", text);
+    }
+
+    /// `.claude.json`（在家目錄，與 `.claude\` 同層）。
+    pub fn write_user_state(&self, json: &str) {
+        std::fs::write(self.home.path().join(".claude.json"), json).expect("無法寫入 .claude.json");
+    }
+
+    /// 家目錄下全部檔案的相對路徑與位元組；用來證明匯入前後原始設定檔沒有任何變化（也沒有多出檔案）。
+    pub fn files(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+            for entry in std::fs::read_dir(dir).expect("無法列出目錄") {
+                let path = entry.expect("目錄項目").path();
+                if path.is_dir() {
+                    walk(root, &path, out);
+                } else {
+                    let relative = path.strip_prefix(root).expect("在根目錄之下").to_string_lossy().replace('\\', "/");
+                    out.insert(relative, std::fs::read(&path).expect("無法讀取檔案"));
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(self.home.path(), self.home.path(), &mut out);
+        out
+    }
+}
+
+#[async_trait]
+impl UserSettingsSource for FakeUserSettings {
+    async fn read(&self) -> PortResult<SourceFiles> {
+        self.source.read().await
     }
 }
 
@@ -738,6 +816,7 @@ pub struct FakePorts {
     pub secret_protector: Arc<FakeSecretProtector>,
     pub claude_env: Arc<FakeClaudeEnvironment>,
     pub command_runner: Arc<FakeCommandRunner>,
+    pub user_settings: Arc<FakeUserSettings>,
 }
 
 impl FakePorts {
@@ -752,6 +831,7 @@ impl FakePorts {
             secret_protector: Arc::default(),
             claude_env: Arc::default(),
             command_runner: Arc::default(),
+            user_settings: Arc::default(),
         }
     }
 
@@ -767,6 +847,7 @@ impl FakePorts {
             secret_protector: self.secret_protector.clone(),
             claude_env: self.claude_env.clone(),
             command_runner: self.command_runner.clone(),
+            user_settings: self.user_settings.clone(),
         }
     }
 }

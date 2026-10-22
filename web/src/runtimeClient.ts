@@ -615,13 +615,81 @@ export interface AccountRun {
   cancel_requested: boolean;
 }
 
+/** 用量視窗：滾動五小時與七日。 */
+export type QuotaWindow = "five_hour" | "seven_day";
+
+/** 額度資料來源（spec D-12）：CLI 回報的「已觀測」，或依本機 Run 用量的「推估」。 */
+export type QuotaSource = "observed" | "estimated";
+
+/** 可信度；觀測不到時為 unknown，不填零。 */
+export type QuotaConfidence = "observed" | "estimated" | "unknown";
+
+/** CLI 回報的限流狀態。 */
+export type LimitStatus = "allowed" | "warning" | "exhausted";
+
+/** 一筆觀測的原始資料從哪裡來：Adapter 解析 CLI、Runtime 推估、外部觀測器輪詢。 */
+export type ObservationOrigin = "adapter" | "estimate" | "observer";
+
+/** 一筆額度觀測（對應 Rust 的 QuotaObservation）；觀測不到的欄位為 null，時間是 UTC 毫秒。 */
+export interface QuotaObservation {
+  profile_id: string;
+  origin: ObservationOrigin;
+  source: QuotaSource;
+  window: QuotaWindow | null;
+  status: LimitStatus | null;
+  /** 已用比例（1 = 達到上限，推估可能超過 1）；null 是未知。 */
+  used: number | null;
+  /** 推估：視窗內本機 Run 累計的 token 數。 */
+  tokens: number | null;
+  /** 推估：計算時使用的方案上限（token）；沒有設定為 null。 */
+  limit_tokens: number | null;
+  reset_at: number | null;
+  observed_at: number;
+  confidence: QuotaConfidence;
+  /** 原始資料參照，例如 `run:<run_id>`。 */
+  raw_ref: string;
+}
+
+/** 一個視窗的判斷：兩個來源各自的最新觀測，與取較保守者後的結果。 */
+export interface WindowQuota {
+  window: QuotaWindow;
+  label: string;
+  effective: QuotaObservation | null;
+  observed: QuotaObservation | null;
+  estimated: QuotaObservation | null;
+}
+
+/** 一個帳號的額度判斷（對應 Rust 的 QuotaAssessment）。 */
+export interface QuotaAssessment {
+  /** 以較保守者判斷的用量比例；null 是未知（顯示「未知」，不是 0）。 */
+  used: number | null;
+  source: QuotaSource | null;
+  confidence: QuotaConfidence;
+  reset_at: number | null;
+  observed_at: number | null;
+  /** 是否看得到帳號的完整用量（含其他裝置）。 */
+  complete: boolean;
+  incomplete_reason: string | null;
+  /** 固定兩個：five_hour、seven_day。 */
+  windows: WindowQuota[];
+  external: QuotaObservation | null;
+}
+
+/** 使用者為 Profile 設定的方案上限（推估的分母），單位為 token；未設定為 null。 */
+export interface PlanLimits {
+  five_hour_tokens: number | null;
+  seven_day_tokens: number | null;
+}
+
 export interface AccountScheduling {
   profile_id: string;
   name: string;
   dispatchable: boolean;
   blockers: ProfileBlocker[];
-  /** 已知的用量比例（0 到 1）；`null` 是尚未觀測，不是 0。 */
+  /** 已知的用量比例（0 到 1）；`null` 是尚未觀測，不是 0。與 `quota.used` 相同。 */
   quota_used: number | null;
+  quota: QuotaAssessment;
+  plan_limits: PlanLimits;
   running: number;
   limit: number;
   runs: AccountRun[];
@@ -646,10 +714,12 @@ export interface SchedulingOverview {
   queue: QueueEntry[];
 }
 
-/** 排程：總覽（容量、各帳號進行中的 Run、佇列）與容量預設切換。 */
+/** 排程：總覽（容量、各帳號進行中的 Run 與額度、佇列）、容量預設切換與方案上限設定。 */
 export interface SchedulingClient {
   schedulingOverview(): Promise<SchedulingOverview>;
   setSchedulingMode(mode: SchedulingMode): Promise<SchedulingOverview>;
+  /** 設定 Profile 的方案上限（推估的分母）；回傳更新後的排程總覽。 */
+  setQuotaLimits(profileId: string, limits: PlanLimits): Promise<SchedulingOverview>;
 }
 
 /** 帳號 Profile 與首次啟動精靈；與其他用戶端分開，讓只關心帳號的畫面不必知道它們。 */
@@ -666,13 +736,111 @@ export interface AccountClient {
   acknowledgeBackgroundNotice(): Promise<SetupStatus>;
 }
 
+/** 共同設定的來源種類（對應 Rust 的 SourceKind）。 */
+export type SettingsSourceKind = "settings" | "instructions" | "user_state";
+
+/** 一個來源檔的讀取結果；只有路徑與雜湊，不含內容。 */
+export interface SourceReport {
+  kind: SettingsSourceKind;
+  path: string;
+  found: boolean;
+  sha256: string | null;
+}
+
+/** 沒有被匯入的項目與原因；永遠不含值。 */
+export interface SettingsExclusion {
+  source: SettingsSourceKind;
+  item: string;
+  reason: "login_related" | "secret_key" | "secret_value";
+}
+
+export type SettingsCategory = "preferences" | "instructions" | "hooks" | "mcp" | "plugins";
+
+export interface SettingsDiffEntry {
+  category: SettingsCategory;
+  key: string;
+  change: "added" | "removed" | "changed";
+  before: unknown;
+  after: unknown;
+}
+
+/** 一個共同設定版本的內容。 */
+export interface SettingsBundle {
+  preferences: Record<string, unknown>;
+  instructions: string | null;
+  hooks: Record<string, unknown>;
+  mcp_servers: Record<string, unknown>;
+  plugins: Record<string, unknown>;
+  marketplaces: Record<string, unknown>;
+}
+
+export interface SettingsBundleCounts {
+  preferences: number;
+  instructions: number;
+  hooks: number;
+  mcp_servers: number;
+  plugins: number;
+}
+
+export interface SettingsVersionSummary {
+  version: number;
+  content_hash: string;
+  adopted_at: number;
+  counts: SettingsBundleCounts;
+  exclusion_count: number;
+}
+
+/** 已採用的共同設定版本（不可變）；`versions` 由舊到新。 */
+export interface SharedSettingsStatus {
+  current: SettingsVersionSummary | null;
+  versions: SettingsVersionSummary[];
+}
+
+/** 預覽匯入：不保存任何東西；採用時要帶回 `candidate_hash`。 */
+export interface ImportPreview {
+  candidate_hash: string;
+  sources: SourceReport[];
+  exclusions: SettingsExclusion[];
+  bundle: SettingsBundle;
+  base_version: number | null;
+  diff: SettingsDiffEntry[];
+  changed: boolean;
+}
+
+export interface SettingsVersion {
+  version: number;
+  content_hash: string;
+  bundle: SettingsBundle;
+  sources: SourceReport[];
+  exclusions: SettingsExclusion[];
+  adopted_at: number;
+}
+
+/** 共同設定：唯讀匯入使用者平常的 Claude Code 設定，採用後建立不可變版本。 */
+export interface SharedSettingsClient {
+  getSharedSettingsStatus(): Promise<SharedSettingsStatus>;
+  previewSharedSettings(): Promise<ImportPreview>;
+  /** 採用預覽的內容；來源在預覽後改變時以 `settings_source_changed` 拒絕。 */
+  adoptSharedSettings(expectedHash: string): Promise<SettingsVersion>;
+  getSharedSettingsVersion(version: number): Promise<SettingsVersion>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
   TaskClient &
   AccountClient &
   SchedulingClient &
-  ArtifactClient;
+  ArtifactClient &
+  SharedSettingsClient;
+
+/** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
+export function errorCode(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === "string") return code;
+  const message = error instanceof Error ? error.message : String(error);
+  return /^Runtime 拒絕連線（([a-z0-9_]+)）/.exec(message)?.[1] ?? null;
+}
 
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
@@ -680,6 +848,7 @@ const WORKSPACES_PATH = "/api/v1/workspaces";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
 const SCHEDULING_PATH = "/api/v1/scheduling";
+const SHARED_SETTINGS_PATH = "/api/v1/shared-settings";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
@@ -690,8 +859,9 @@ const artifactVersionPath = (workspaceId: string, artifactId: string, version: n
 export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
   /** 非 2xx 時優先採用 Runtime 回報的說明（`{ error, message }`），沒有才退回狀態碼。 */
   const failure = async (response: Response) => {
-    const body = (await response.json().catch(() => null)) as { message?: string } | null;
-    return new Error(body?.message ?? `Runtime 回應 ${response.status}`);
+    const body = (await response.json().catch(() => null)) as { error?: string; message?: string } | null;
+    // 穩定代碼掛在 `code`，讓畫面能辨識特定情況（例如 settings_source_changed）
+    return Object.assign(new Error(body?.message ?? `Runtime 回應 ${response.status}`), { code: body?.error });
   };
   /** Task 相關端點共用：有 body 時以 JSON 送出（`undefined` 欄位不會出現在 JSON 裡）。 */
   const send = async <T>(path: string, request?: { method: string; body?: unknown }): Promise<T> => {
@@ -781,10 +951,17 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     getSetup: () => send(SETUP_PATH),
     recheckSetup: () => send(`${SETUP_PATH}/recheck`, { method: "POST" }),
     acknowledgeBackgroundNotice: () => send(`${SETUP_PATH}/background-notice/acknowledge`, { method: "POST" }),
+    getSharedSettingsStatus: () => send(SHARED_SETTINGS_PATH),
+    previewSharedSettings: () => send(`${SHARED_SETTINGS_PATH}/import-preview`, { method: "POST" }),
+    adoptSharedSettings: (expectedHash) =>
+      send(`${SHARED_SETTINGS_PATH}/adopt`, { method: "POST", body: { expected_hash: expectedHash } }),
+    getSharedSettingsVersion: (version) => send(`${SHARED_SETTINGS_PATH}/versions/${version}`),
     dispatchTask: async (workspaceId, taskId) =>
       toDispatchResult(await send<RunView | QueuedDispatch>(`${taskPath(workspaceId, taskId)}/dispatch`, { method: "POST" })),
     schedulingOverview: () => send(SCHEDULING_PATH),
     setSchedulingMode: (mode) => send(`${SCHEDULING_PATH}/settings`, { method: "PUT", body: { mode } }),
+    setQuotaLimits: (profileId, limits) =>
+      send(`${PROFILES_PATH}/${encodeURIComponent(profileId)}/quota-limits`, { method: "PUT", body: limits }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
     taskVerification: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/verification`),
@@ -844,10 +1021,15 @@ export function createTauriClient(invoke: Invoke): AppClient {
     getSetup: () => call<SetupStatus>("setup_status"),
     recheckSetup: () => call<SetupStatus>("setup_recheck"),
     acknowledgeBackgroundNotice: () => call<SetupStatus>("setup_acknowledge_notice"),
+    getSharedSettingsStatus: () => call<SharedSettingsStatus>("shared_settings_status"),
+    previewSharedSettings: () => call<ImportPreview>("shared_settings_preview"),
+    adoptSharedSettings: (expectedHash) => call<SettingsVersion>("shared_settings_adopt", { expectedHash }),
+    getSharedSettingsVersion: (version) => call<SettingsVersion>("shared_settings_version", { version }),
     dispatchTask: async (workspaceId, taskId) =>
       toDispatchResult(await call<RunView | QueuedDispatch>("task_dispatch", { workspaceId, taskId })),
     schedulingOverview: () => call<SchedulingOverview>("scheduling_overview"),
     setSchedulingMode: (mode) => call<SchedulingOverview>("scheduling_set_mode", { mode }),
+    setQuotaLimits: (id, limits) => call<SchedulingOverview>("profile_set_quota_limits", { id, limits }),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
     taskVerification: (workspaceId, taskId) => call<VerificationView>("task_verification", { workspaceId, taskId }),
     acceptTask: (workspaceId, taskId, { basis, note }) =>

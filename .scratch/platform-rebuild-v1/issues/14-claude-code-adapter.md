@@ -1,6 +1,6 @@
 # 14: 真實 Claude Code Adapter 與 Adapter 契約測試
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R045-14-impl，2026-10-22 16:44）
 Blocked by: 10, 08
 
 **What to build:** 實作 Windows 原生 Claude Code 的 AgentAdapter：以 `claude -p` 搭配 stream-json 啟動 Worker、注入 Run 專屬設定快照（D-09）、MCP 設定（D-05）、Profile 的 CLAUDE_CONFIG_DIR、清除會改變認證來源的繼承環境變數；解析原生 Session 識別、結果、錯誤與限流訊號；以版本探測決定能力，不支援時阻擋並說明。建立一套同時跑在 fake 與真實 Adapter 上的契約測試；真實版只在已登入的 Windows 環境以手動或夜間方式執行，結果記錄 CLI 版本。模型依 Workspace 角色覆寫設定（spec D-30）。

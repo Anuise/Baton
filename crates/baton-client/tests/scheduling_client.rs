@@ -1,9 +1,11 @@
-//! 桌面殼經由 RuntimeClient 讀取排程總覽、切換容量預設，並在沒有名額時得到「排隊中」（票 19）。
+//! 桌面殼經由 RuntimeClient 讀取排程總覽、切換容量預設，並在沒有名額時得到「排隊中」（票 19）；
+//! 設定方案上限並讀到額度判斷（票 27）。
 
 use std::sync::Arc;
 
 use baton_api::{CreateTaskRequest, CreateWorkspaceRequest};
-use baton_client::{DispatchOutcome, RuntimeClient};
+use baton_client::{ClientError, DispatchOutcome, RuntimeClient};
+use baton_domain::quota::{Confidence, PlanLimits};
 use baton_domain::scheduler::{CapacityMode, WaitCategory};
 use baton_domain::task::{ContractContent, ContractField};
 use baton_harness::fakes::FakeSecretProtector;
@@ -122,4 +124,30 @@ async fn app_gets_a_queued_outcome_with_reasons_when_there_is_no_capacity() {
     assert_eq!(overview.queue.len(), 1);
     assert_eq!(overview.queue[0].task_id, waiting_id);
     assert_eq!(overview.queue[0].position, 1);
+}
+
+#[tokio::test]
+async fn app_sets_plan_limits_and_reads_the_quota_assessment() {
+    let harness = Harness::start().await;
+    let profile_id = harness.add_account("主要帳號", "main@example.com").await;
+    let client = app_client(&harness);
+
+    let before = client.scheduling().await.unwrap();
+    assert_eq!(before.accounts[0].quota.used, None, "還沒有任何觀測：未知");
+    assert_eq!(before.accounts[0].quota.confidence, Confidence::Unknown);
+    assert!(!before.accounts[0].quota.complete);
+
+    let limits = PlanLimits { five_hour_tokens: Some(100_000), seven_day_tokens: None };
+    let after = client.set_quota_limits(&profile_id, &limits).await.unwrap();
+    assert_eq!(after.accounts[0].plan_limits, limits);
+    assert_eq!(after.accounts[0].quota.used, None, "有方案上限但本機沒有用量：仍是未知，不是 0");
+    let estimate = after.accounts[0].quota.windows[0].estimated.clone().unwrap();
+    assert_eq!((estimate.tokens, estimate.limit_tokens), (Some(0), Some(100_000)));
+    assert!(!after.accounts[0].quota.complete);
+
+    let invalid = PlanLimits { five_hour_tokens: Some(0), seven_day_tokens: None };
+    match client.set_quota_limits(&profile_id, &invalid).await {
+        Err(ClientError::Rejected { code, .. }) => assert_eq!(code, "plan_limit_invalid"),
+        other => panic!("應該被拒絕：{other:?}"),
+    }
 }

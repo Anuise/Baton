@@ -11,11 +11,11 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use baton_domain::profile::{self, BlockerInfo, ProfileStatus};
+use baton_domain::quota::{PlanLimits, QuotaAssessment};
 use baton_domain::run::RunStatus;
 use baton_domain::scheduler::{self, CapacityMode, SchedulerSettings, WaitReason};
 use baton_domain::Timestamp;
-use baton_ports::observe_quota;
-use baton_store::{ScheduleOutcome, ScheduleRequest};
+use baton_store::{AccountQuota, ScheduleOutcome, ScheduleRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::tasks::TaskApiError;
@@ -79,8 +79,12 @@ pub struct AccountScheduling {
     pub name: String,
     pub dispatchable: bool,
     pub blockers: Vec<BlockerInfo>,
-    /// 已知的用量比例（0.0–1.0）；未觀測為 `null`，不當作 0。
+    /// 以較保守者判斷的用量比例（同 `quota.used`）；未觀測為 `null`，不當作 0。
     pub quota_used: Option<f64>,
+    /// 額度判斷：兩個視窗各自的已觀測與推估、可信度、重置與觀測時間、是否觀測不完整（票 27）。
+    pub quota: QuotaAssessment,
+    /// 使用者設定的方案上限（推估的分母）。
+    pub plan_limits: PlanLimits,
     pub running: usize,
     pub limit: usize,
     pub runs: Vec<AccountRun>,
@@ -135,12 +139,10 @@ fn settings_view(settings: &SchedulerSettings) -> SchedulingSettingsView {
     }
 }
 
-/// 觀測使用中帳號目前已知的用量（排程用）。
+/// 輪詢到期的帳號後，取得使用中帳號目前已知的用量（排程用）。
 pub(crate) async fn known_quota(state: &ApiState) -> Result<HashMap<String, f64>, TaskApiError> {
-    let profiles = state.store.list_profiles().await.map_err(ApiError::from)?;
-    let ids: Vec<String> =
-        profiles.iter().filter(|p| p.status == ProfileStatus::Active).map(|p| p.id.clone()).collect();
-    Ok(observe_quota(&*state.quota_observer, &ids).await)
+    let status = crate::quota::current(&state.store, &*state.quota_observer, state.clock.now()).await.map_err(ApiError::from)?;
+    Ok(crate::quota::known_used(&status))
 }
 
 /// 現在排程一次（可帶一個新的派工要求）。
@@ -159,8 +161,10 @@ pub(crate) async fn schedule_now(
     Ok(outcome)
 }
 
-async fn overview(state: &ApiState) -> Result<SchedulingOverview, TaskApiError> {
-    let quota = known_quota(state).await?;
+pub(crate) async fn overview(state: &ApiState) -> Result<SchedulingOverview, TaskApiError> {
+    let mut status =
+        crate::quota::current(&state.store, &*state.quota_observer, state.clock.now()).await.map_err(ApiError::from)?;
+    let quota = crate::quota::known_used(&status);
     let snapshot = state.store.scheduling_snapshot(quota.clone()).await.map_err(ApiError::from)?;
     let limits = snapshot.settings.mode.limits();
     let usable = scheduler::usable_profiles(&snapshot.profiles).len();
@@ -171,6 +175,10 @@ async fn overview(state: &ApiState) -> Result<SchedulingOverview, TaskApiError> 
         .filter(|p| p.status == ProfileStatus::Active)
         .map(|p| {
             let blockers = profile::blockers(p, &snapshot.profiles);
+            let account_quota = status.remove(&p.id).unwrap_or_else(|| AccountQuota {
+                assessment: baton_domain::quota::assess(&[], state.clock.now()),
+                plan_limits: PlanLimits::default(),
+            });
             let runs: Vec<AccountRun> = snapshot
                 .active_runs
                 .iter()
@@ -194,6 +202,8 @@ async fn overview(state: &ApiState) -> Result<SchedulingOverview, TaskApiError> 
                     .map(|b| BlockerInfo { code: b.code().to_string(), message: b.message() })
                     .collect(),
                 quota_used: quota.get(&p.id).copied(),
+                quota: account_quota.assessment,
+                plan_limits: account_quota.plan_limits,
                 running: runs.len(),
                 limit: limits.per_account,
                 runs,

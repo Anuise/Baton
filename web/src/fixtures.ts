@@ -2,9 +2,13 @@ import type {
   AccountProfile,
   AccountRun,
   AccountScheduling,
+  ImportPreview,
   PlatformResponse,
+  QuotaAssessment,
+  QuotaObservation,
   RunView,
   SchedulingOverview,
+  SettingsVersionSummary,
   SetupStatus,
   ToolCheck,
   VerificationRecord,
@@ -109,6 +113,18 @@ export function setupStatus(overrides: Partial<SetupStatus> = {}): SetupStatus {
   };
 }
 
+/** 測試用的已採用共同設定版本摘要。 */
+export function settingsVersionSummary(overrides: Partial<SettingsVersionSummary> = {}): SettingsVersionSummary {
+  return {
+    version: 1,
+    content_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    adopted_at: CHECKED_AT,
+    counts: { preferences: 3, instructions: 1, hooks: 2, mcp_servers: 1, plugins: 4 },
+    exclusion_count: 2,
+    ...overrides,
+  };
+}
+
 /** 測試用的 Run（使用 prof_1）；預設是 running。 */
 export function runView(overrides: Partial<RunView> = {}): RunView {
   return {
@@ -137,6 +153,38 @@ export function runView(overrides: Partial<RunView> = {}): RunView {
   };
 }
 
+/** 測試用的匯入預覽：找到設定檔與指示檔、排除兩項、有一筆新增與一筆變更。 */
+export function importPreview(overrides: Partial<ImportPreview> = {}): ImportPreview {
+  return {
+    candidate_hash: "f0e1d2c3b4a5968778695a4b3c2d1e0f",
+    sources: [
+      { kind: "settings", path: "C:\\Users\\me\\.claude\\settings.json", found: true, sha256: "aa11" },
+      { kind: "instructions", path: "C:\\Users\\me\\.claude\\CLAUDE.md", found: false, sha256: null },
+      { kind: "user_state", path: "C:\\Users\\me\\.claude.json", found: true, sha256: "bb22" },
+    ],
+    exclusions: [
+      { source: "user_state", item: "oauthAccount", reason: "login_related" },
+      { source: "settings", item: "env.MY_API_KEY", reason: "secret_key" },
+    ],
+    bundle: {
+      preferences: { model: "opus", theme: "dark" },
+      instructions: null,
+      hooks: {},
+      mcp_servers: {},
+      plugins: {},
+      marketplaces: {},
+    },
+    base_version: 1,
+    diff: [
+      { category: "preferences", key: "theme", change: "added", before: null, after: "dark" },
+      { category: "preferences", key: "model", change: "changed", before: "sonnet", after: "opus" },
+      { category: "mcp", key: "docs", change: "removed", before: { command: "docs-server" }, after: null },
+    ],
+    changed: true,
+    ...overrides,
+  };
+}
+
 /** 排程總覽裡帳號 prof_1 的進行中 Run。 */
 export function accountRun(overrides: Partial<AccountRun> = {}): AccountRun {
   return {
@@ -151,7 +199,46 @@ export function accountRun(overrides: Partial<AccountRun> = {}): AccountRun {
   };
 }
 
-/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、每帳號上限 2。 */
+/** 測試用的額度觀測：預設是 prof_1 五小時視窗、CLI 回報的已觀測用量 30%。 */
+export function quotaObservation(overrides: Partial<QuotaObservation> = {}): QuotaObservation {
+  return {
+    profile_id: "prof_1",
+    origin: "adapter",
+    source: "observed",
+    window: "five_hour",
+    status: "allowed",
+    used: 0.3,
+    tokens: null,
+    limit_tokens: null,
+    reset_at: null,
+    observed_at: CHECKED_AT,
+    confidence: "observed",
+    raw_ref: "run:run_1",
+    ...overrides,
+  };
+}
+
+/** 測試用的額度判斷：預設完全未知（兩個視窗都沒有觀測、觀測不完整）。 */
+export function quotaAssessment(overrides: Partial<QuotaAssessment> = {}): QuotaAssessment {
+  return {
+    used: null,
+    source: null,
+    confidence: "unknown",
+    reset_at: null,
+    observed_at: null,
+    complete: false,
+    incomplete_reason:
+      "觀測不完整：五小時、七日視窗沒有來自 Claude Code 的已觀測用量；推估只計入這台電腦上 Baton 派出的 Run，其他裝置與互動式使用的用量看不到",
+    windows: [
+      { window: "five_hour", label: "五小時", effective: null, observed: null, estimated: null },
+      { window: "seven_day", label: "七日", effective: null, observed: null, estimated: null },
+    ],
+    external: null,
+    ...overrides,
+  };
+}
+
+/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、沒有設定方案上限、每帳號上限 2。 */
 export function accountScheduling(overrides: Partial<AccountScheduling> = {}): AccountScheduling {
   return {
     profile_id: "prof_1",
@@ -159,6 +246,8 @@ export function accountScheduling(overrides: Partial<AccountScheduling> = {}): A
     dispatchable: true,
     blockers: [],
     quota_used: null,
+    quota: quotaAssessment(),
+    plan_limits: { five_hour_tokens: null, seven_day_tokens: null },
     running: 0,
     limit: 2,
     runs: [],
