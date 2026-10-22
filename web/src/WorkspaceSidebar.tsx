@@ -34,6 +34,8 @@ interface Props {
   onOpenReviews?: (workspace: Workspace) => void;
   /** 使用者要開啟某個 Workspace 的驗證（Verification Profile、Feature Map 與 Evidence Bundle）。 */
   onOpenVerification?: (workspace: Workspace) => void;
+  /** 使用者要開啟某個 Workspace 的探索（章程、疑點、已確認缺陷與未驗風險）。 */
+  onOpenExploration?: (workspace: Workspace) => void;
 }
 
 function reasonOf(error: unknown): string {
@@ -63,6 +65,7 @@ export function WorkspaceSidebar({
   onOpenWorkflows,
   onOpenReviews,
   onOpenVerification,
+  onOpenExploration,
 }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
@@ -245,6 +248,9 @@ export function WorkspaceSidebar({
                 </button>
                 <button type="button" aria-label={`驗證 ${workspace.name}`} onClick={() => onOpenVerification?.(workspace)}>
                   驗證
+                </button>
+                <button type="button" aria-label={`探索 ${workspace.name}`} onClick={() => onOpenExploration?.(workspace)}>
+                  探索
                 </button>
                 <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
                   封存

@@ -8,6 +8,7 @@ import { ConversationPage } from "./ConversationPage";
 import { ModelOverridesPanel } from "./ModelOverridesPanel";
 import { DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
+import { ExplorationPage } from "./ExplorationPage";
 import { KnowledgePage } from "./KnowledgePage";
 import { LoginStartupSettings } from "./LoginStartupSettings";
 import { PlatformPage } from "./PlatformPage";
@@ -27,7 +28,7 @@ import { VerificationPage } from "./VerificationPage";
 import { WorkflowPage } from "./WorkflowPage";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線、專案理解、流程、審查或驗證。 */
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線、專案理解、流程、審查、驗證或探索。 */
 type Opened = {
   view:
     | "authorization"
@@ -40,7 +41,8 @@ type Opened = {
     | "understanding"
     | "workflows"
     | "reviews"
-    | "verification";
+    | "verification"
+    | "exploration";
   workspace: Workspace;
 };
 
@@ -82,6 +84,7 @@ export function App() {
             onOpenWorkflows={(workspace) => setOpened({ view: "workflows", workspace })}
             onOpenReviews={(workspace) => setOpened({ view: "reviews", workspace })}
             onOpenVerification={(workspace) => setOpened({ view: "verification", workspace })}
+            onOpenExploration={(workspace) => setOpened({ view: "exploration", workspace })}
           />
         )}
         <main className="main">
@@ -128,6 +131,9 @@ export function App() {
           {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 正在編輯的 Profile 與訊息 */}
           {client && opened?.view === "verification" && (
             <VerificationPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {client && opened?.view === "exploration" && (
+            <ExplorationPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
           )}
           {client && <PlatformPage client={client} />}
         </main>

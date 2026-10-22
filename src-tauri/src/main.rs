@@ -22,6 +22,7 @@ use baton_api::{
     SkipStageRequest, WorkflowList, WorkflowView,
     ReviewList,
     EvidenceArtifactContent, PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
+    ExplorationOverview,
 };
 use baton_client::{
     ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, ClientError, Connection,
@@ -1243,6 +1244,15 @@ async fn workspace_verification(
     link.client.verification_overview(&workspace_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 的探索分頁：各探索 Task 的章程，以及疑點、已確認缺陷、未驗風險與重現紀錄（唯讀）。
+#[tauri::command]
+async fn workspace_exploration(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<ExplorationOverview, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.exploration_overview(&workspace_id).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 的驗證分頁：使用者發布 Verification Profile 的新版本（只有使用者能從桌面發布）。
 #[tauri::command]
 async fn verification_publish_profile(
@@ -1404,7 +1414,8 @@ fn main() {
             verification_publish_profile,
             verification_run,
             verification_bundle,
-            verification_artifact
+            verification_artifact,
+            workspace_exploration
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {
