@@ -447,6 +447,33 @@ async fn an_answer_that_overturns_an_assumption_revokes_stale_requests_and_block
     assert_eq!(passed["current_stage"], "sign_off");
 }
 
+#[tokio::test]
+async fn an_overturned_assumption_does_not_strand_the_workflow_of_a_task_that_already_ended() {
+    let w = world().await;
+    let controller = w.controller_turn("規劃 API").await;
+    let approval = w.answered_decision(&controller, "要開始做嗎？").await;
+    let integration = w.task("最終整合").await;
+    let protocol = w.ask(&controller, "API 用哪種協定？", "rest", &[&integration]).await;
+    let built_on = json!({
+        "status": "filled",
+        "text": "照建議先用 REST",
+        "references": [{ "kind": "decision", "target": protocol, "version": 1 }],
+    });
+    let api = w.task_with("記帳 API（假設用 REST）", Some(built_on)).await;
+    let flow = w.to_sign_off(&controller, &api, &approval).await;
+    // Task 已經結束（以取消代表；完成也一樣不能再改契約）
+    let (status, body) = w.h().send_json(Method::POST, &w.ws_path(&format!("/tasks/{api}/cancel")), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // 之後假設才被推翻：已結束的 Task 不能「先更新契約」，Workflow 不能因此退回並卡住（R151 第 12 項）
+    w.answer(&protocol, "grpc").await;
+    w.h().supervise().await;
+    let now = w.workflow(&flow["id"]).await;
+    assert_eq!((now["current_stage"].as_str(), now["revision"].as_i64()), (Some("sign_off"), flow["revision"].as_i64()), "{now}");
+    let signed = w.pass(&controller, &now, json!({ "decision_request_id": approval })).await;
+    assert_eq!(signed["status"], "completed", "{signed}");
+}
+
 // --- 驗收條件：完成條件不能被 Agent 改寫以讓舊成果通過 ---
 
 #[tokio::test]

@@ -277,10 +277,14 @@ fn subject_dir(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -> 
     conn.query_row("SELECT path FROM workspace WHERE id = ?1", [workspace_id], |r| r.get(0))
 }
 
-/// Workflow 的 Task 依據的假設已被推翻時的說明（票 50）。
+/// Workflow 的 Task 依據的假設已被推翻時的說明（票 50）。已完成或取消的 Task 不算：它不能再改契約，
+/// 「先更新契約」永遠做不到，Workflow 會退回後卡住（R151 第 12 項）。
 fn basis_overturned(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -> rusqlite::Result<Option<String>> {
     let Some(task_id) = task_id else { return Ok(None) };
     let loaded = super::tasks::load(conn, workspace_id)?;
+    if loaded.tasks.iter().any(|t| t.id == task_id && t.status.is_terminal()) {
+        return Ok(None);
+    }
     Ok(loaded.ctx(workspace_id).overturned_basis(task_id))
 }
 
