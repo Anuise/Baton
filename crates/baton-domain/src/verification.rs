@@ -156,6 +156,8 @@ pub enum Observation {
     Command(CommandObservation),
     /// 檔案內容；`Ok(None)` 是不存在，`Err` 是讀不到的原因。
     File(Result<Option<Vec<u8>>, String>),
+    /// 檔案路徑經由符號連結或 junction 指向工作目錄外（`resolved` 是實際指向的路徑）；內容不讀取。
+    FileOutsideWorkdir { resolved: String },
     /// 成果：manifest 中這個名稱的最新版本（沒有則 `None`）與它的檔案內容。
     Artifact { latest: Option<ManifestEntry>, content: Result<Option<Vec<u8>>, String> },
 }
@@ -192,6 +194,9 @@ pub fn judge(check: &VerificationCheck, observation: Observation) -> CheckResult
             Ok(None) => (CheckStatus::Failed, "檔案不存在".into()),
             Ok(Some(bytes)) => compare_hash(sha256.as_deref(), &artifact::sha256_hex(&bytes), bytes.len()),
         },
+        (VerificationCheck::File { .. }, Observation::FileOutsideWorkdir { resolved }) => {
+            (CheckStatus::Failed, format!("路徑經由符號連結或 junction 指向工作目錄外（{resolved}），不讀取內容"))
+        }
         (VerificationCheck::Artifact { sha256, .. }, Observation::Artifact { latest, content }) => match latest {
             None => (CheckStatus::Failed, "這個 Task 沒有登記這個名稱的成果".into()),
             Some(entry) => {

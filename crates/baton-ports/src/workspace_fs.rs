@@ -114,6 +114,8 @@ pub trait WorkspaceFs: Send + Sync {
     async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>>;
     /// 讀取工作目錄內的檔案（驗證的檔案檢查用，票 13）；不存在回 `None`，不是檔案（例如目錄）是錯誤。
     async fn read_workspace_file(&self, path: &Path) -> PortResult<Option<Vec<u8>>>;
+    /// 讀取 `root` 之下的相對路徑 `relative`（驗證的檔案檢查用，票 13），規則見 [`read_file_within`]。
+    async fn read_file_within(&self, root: &Path, relative: &Path) -> PortResult<ContainedFile>;
     /// 遞迴列出目錄下的全部檔案（含暫存檔）；目錄不存在回空清單。
     async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>>;
 }
@@ -146,6 +148,37 @@ pub fn read_file_if_exists(path: &Path) -> PortResult<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(PortError::Failed(format!("無法讀取 {}：{e}", path.display()))),
     }
+}
+
+/// [`read_file_within`] 的結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainedFile {
+    Missing,
+    Found(Vec<u8>),
+    /// 正規化（解開符號連結與 junction）後不在 `root` 之內；附上實際指向的路徑，內容不讀取。
+    OutsideRoot(PathBuf),
+}
+
+/// 讀取 `root` 之下的相對路徑 `relative`；正式版與測試用的 fake 共用（審查 R152）。
+///
+/// 路徑先正規化再確認仍在正規化後的 `root` 之內，經由符號連結或 junction 指向外部的回 `OutsideRoot`；
+/// 指向 `root` 之內的連結照常讀取。不存在（含指向不存在目標的連結）回 `Missing`；不是檔案（例如目錄）是錯誤。
+pub fn read_file_within(root: &Path, relative: &Path) -> PortResult<ContainedFile> {
+    let path = root.join(relative);
+    let resolved = match std::fs::canonicalize(&path) {
+        Ok(resolved) => resolved,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ContainedFile::Missing),
+        Err(e) => return Err(PortError::Failed(format!("無法解析 {}：{e}", path.display()))),
+    };
+    let root = std::fs::canonicalize(root)
+        .map_err(|e| PortError::Failed(format!("無法解析工作目錄 {}：{e}", root.display())))?;
+    if !resolved.starts_with(&root) {
+        return Ok(ContainedFile::OutsideRoot(resolved));
+    }
+    Ok(match read_file_if_exists(&resolved)? {
+        Some(bytes) => ContainedFile::Found(bytes),
+        None => ContainedFile::Missing,
+    })
 }
 
 /// 遞迴列出目錄下的全部檔案（依路徑排序）；目錄不存在回空清單。
@@ -262,5 +295,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(read_file_if_exists(&dir.path().join("nope")).unwrap(), None);
         assert!(list_files_recursive(&dir.path().join("nope")).unwrap().is_empty());
+    }
+
+    /// 建立目錄 junction（不需要系統管理員權限）。
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        let output = std::process::Command::new("cmd").args(["/d", "/c", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
+        assert!(output.status.success(), "mklink 失敗：{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_reached_through_a_junction_pointing_outside_the_root_is_not_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("work");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(root.join("inner")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "s").unwrap();
+        std::fs::write(root.join("inner").join("ok.txt"), "ok").unwrap();
+        junction(&root.join("escape"), &outside);
+        junction(&root.join("alias"), &root.join("inner"));
+        junction(&temp.path().join("work-link"), &root);
+        let found = ContainedFile::Found(b"ok".to_vec());
+
+        assert_eq!(read_file_within(&root, Path::new("inner/ok.txt")).unwrap(), found);
+        assert_eq!(read_file_within(&root, Path::new("alias/ok.txt")).unwrap(), found, "指向工作目錄內的連結照常讀取");
+        assert_eq!(read_file_within(&temp.path().join("work-link"), Path::new("inner/ok.txt")).unwrap(), found, "工作目錄本身經由連結也可以");
+        assert_eq!(read_file_within(&root, Path::new("inner/missing.txt")).unwrap(), ContainedFile::Missing);
+        let escaped = read_file_within(&root, Path::new("escape/secret.txt")).unwrap();
+        let ContainedFile::OutsideRoot(resolved) = escaped else { panic!("{escaped:?}") };
+        assert!(resolved.ends_with(Path::new("outside").join("secret.txt")), "{}", resolved.display());
     }
 }

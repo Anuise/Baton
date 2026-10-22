@@ -114,3 +114,50 @@ async fn an_unwritable_journal_means_no_restart() {
     assert!(host.started.is_empty(), "無法保存就不自動啟動");
     assert!(matches!(guardian.finished(), Some(GuardianEnd::JournalUnavailable(_))));
 }
+
+/// 最後核對時，App 拉起的 Runtime 剛好在匯入監護日誌（review-notes #15）：在另一條執行緒以 Runtime 匯入的方式讀日誌，
+/// 最多等它一下再回報「已有 Runtime」。
+struct ImportDuringFinalProbe {
+    dir: std::path::PathBuf,
+    probes: usize,
+    import: Option<std::thread::JoinHandle<Vec<JournalRecord>>>,
+}
+
+#[async_trait]
+impl RuntimeHost for ImportDuringFinalProbe {
+    async fn runtime_running(&mut self) -> bool {
+        self.probes += 1;
+        if self.probes == 1 {
+            return false; // 確認 Runtime 已經結束
+        }
+        let dir = self.dir.clone();
+        let import = std::thread::spawn(move || files::read_journal_for_import(&dir).unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while !import.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        self.import = Some(import);
+        true
+    }
+
+    async fn start_runtime(&mut self, _attempt_id: &str) -> Result<(), String> {
+        panic!("已有 Runtime 時不應啟動");
+    }
+
+    async fn start_runtime_at_login(&mut self) -> Result<(), String> {
+        panic!("不使用");
+    }
+}
+
+#[tokio::test]
+async fn a_runtime_importing_during_the_final_check_never_sees_an_attempt_without_its_withdrawal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut guardian, _clock) = guardian(dir.path());
+    let mut host = ImportDuringFinalProbe { dir: dir.path().to_path_buf(), probes: 0, import: None };
+    assert_eq!(guardian.step(&mut host).await, GuardianStep::RuntimeExited);
+    let GuardianStep::Withdrawn { attempt_id } = guardian.step(&mut host).await else { panic!("應撤回") };
+    let imported = host.import.take().unwrap().join().unwrap();
+    let saw_attempt = imported.iter().any(|r| matches!(r, JournalRecord::Attempt(a) if a.attempt_id == attempt_id));
+    let saw_withdrawal = imported.iter().any(|r| matches!(r, JournalRecord::Withdrawn { attempt_id: id, .. } if *id == attempt_id));
+    assert!(!saw_attempt || saw_withdrawal, "Runtime 讀到了還沒有結論的嘗試，會把撤回的嘗試計次：{imported:?}");
+}

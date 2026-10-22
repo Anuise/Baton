@@ -12,7 +12,9 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_BASIC_PROCESS_ID_LIST,
 };
 use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
-use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 const JOB_OBJECT_TERMINATE: u32 = 0x0008;
 const JOB_OBJECT_QUERY: u32 = 0x0004;
@@ -141,6 +143,40 @@ async fn wait_for_job(command_id: &str, what: &str, condition: impl Fn(usize) ->
     }
 }
 
+/// Job 內存活程序的執行檔名稱（不含路徑）。
+fn job_images(command_id: &str) -> Vec<String> {
+    job_pids(command_id)
+        .into_iter()
+        .filter_map(|pid| {
+            // SAFETY：OpenProcess 失敗回傳 NULL（程序剛好結束），略過即可。
+            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if handle.is_null() {
+                return None;
+            }
+            let mut buffer = [0u16; 1024];
+            let mut len = buffer.len() as u32;
+            // SAFETY：handle 有效，buffer 與 len 指向本地變數。
+            let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut len) };
+            // SAFETY：handle 由 OpenProcess 取得且只關閉一次。
+            unsafe {
+                CloseHandle(handle);
+            }
+            let path = String::from_utf16_lossy(&buffer[..len as usize]);
+            (ok != 0).then(|| path.rsplit(['\\', '/']).next().unwrap_or_default().to_string())
+        })
+        .collect()
+}
+
+/// 等 `tree_spec` 的整棵樹都啟動：最末端的 ping 已在 Job 內。
+/// 不能只等「至少 3 個程序」：主控台程序（conhost.exe）也在 Job 內，cmd、conhost、cmd 就湊滿 3 個，ping 之後才出現。
+async fn wait_for_tree(command_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !job_images(command_id).iter().any(|image| image.eq_ignore_ascii_case("ping.exe")) {
+        assert!(Instant::now() < deadline, "程序樹沒有在 10 秒內啟動到 ping");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn assert_all_exited(processes: &[Watched]) {
     for p in processes {
         assert!(p.exited_within(Duration::from_secs(5)), "pid {} 在 stop 之後仍存活", p.pid);
@@ -159,7 +195,7 @@ async fn stop_terminates_the_whole_process_tree() {
     assert_eq!(control.inspect(&receipt.identity).await.unwrap(), Liveness::Alive);
 
     // 等到孫程序（ping）也已啟動，再記下整棵樹
-    wait_for_job(&id, "程序樹至少 3 個程序", |n| n >= 3).await;
+    wait_for_tree(&id).await;
     let tree = watch_job_processes(&id);
     assert!(tree.len() >= 3, "程序樹只有 {} 個程序", tree.len());
     assert!(tree.iter().any(|p| p.pid == receipt.identity.pid), "根程序不在 Job 內");
@@ -208,6 +244,69 @@ async fn stop_kills_descendants_left_behind_by_a_dead_root() {
     assert_all_exited(&leftovers);
 }
 
+/// 根程序啟動背景的 ping 後立刻結束，ping（與主控台程序）留在 Job 內。
+fn orphan_spec(command_id: &str) -> SpawnSpec {
+    cmd_spec(command_id, &["/c", "start", "/b", "ping", "-n", "60", "127.0.0.1"])
+}
+
+/// 等根程序結束、殘留的子孫程序仍在 Job 內，回傳殘留的程序。
+async fn wait_for_orphans(control: &WindowsProcessControl, id: &str, identity: &baton_ports::ProcessIdentity) -> Vec<Watched> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.inspect(identity).await.unwrap() != Liveness::Dead {
+        assert!(Instant::now() < deadline, "根程序沒有結束");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    wait_for_job(id, "遺留的 ping 仍在 Job 內", |n| n >= 1).await;
+    let leftovers = watch_job_processes(id);
+    assert!(!leftovers.is_empty());
+    leftovers
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn after_a_restart_the_leftovers_of_a_dead_root_are_still_stopped_by_the_recorded_identity() {
+    let id = unique_id("orphan-find");
+    let _guard = JobGuard(id.clone());
+    let spec = orphan_spec(&id);
+    let first = WindowsProcessControl::new();
+    let receipt = first.spawn(spec.clone()).await.unwrap();
+    let leftovers = wait_for_orphans(&first, &id, &receipt.identity).await;
+
+    // Runtime 重建：新的實例以 command_id 找回 Job，之後用資料庫記下的（根程序的）身分停止
+    drop(first);
+    let second = WindowsProcessControl::new();
+    assert!(second.find(&spec).await.unwrap().is_some(), "Job 內仍有程序");
+    assert_eq!(second.inspect(&receipt.identity).await.unwrap(), Liveness::Dead, "根程序已經結束");
+    assert_eq!(second.stop(&receipt.identity, SHORT_GRACE).await.unwrap(), StopResult::ForceKilled);
+    assert_all_exited(&leftovers);
+    assert!(job_pids(&id).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn release_terminates_what_a_finished_root_left_in_its_job() {
+    let id = unique_id("orphan-release");
+    let _guard = JobGuard(id.clone());
+    let control = WindowsProcessControl::new();
+    let receipt = control.spawn(orphan_spec(&id)).await.unwrap();
+    let leftovers = wait_for_orphans(&control, &id, &receipt.identity).await;
+
+    assert_eq!(control.release(&receipt.identity, SHORT_GRACE).await.unwrap(), StopResult::ForceKilled);
+    assert_all_exited(&leftovers);
+    assert!(job_pids(&id).is_empty());
+    // 收尾之後不再管理這個身分；再收尾一次仍回報已結束
+    assert_eq!(control.release(&receipt.identity, SHORT_GRACE).await.unwrap(), StopResult::StoppedGracefully);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn release_of_a_tree_that_finishes_by_itself_is_graceful() {
+    let id = unique_id("release-exit");
+    let _guard = JobGuard(id.clone());
+    let control = WindowsProcessControl::new();
+    let receipt = control.spawn(cmd_spec(&id, &["/c", "exit", "0"])).await.unwrap();
+
+    assert_eq!(control.release(&receipt.identity, Duration::from_secs(10)).await.unwrap(), StopResult::StoppedGracefully);
+    assert_eq!(control.inspect(&receipt.identity).await.unwrap(), Liveness::Dead);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn find_resumes_control_from_another_instance() {
     let id = unique_id("find");
@@ -216,7 +315,7 @@ async fn find_resumes_control_from_another_instance() {
 
     let first = WindowsProcessControl::new();
     let receipt = first.spawn(spec.clone()).await.unwrap();
-    wait_for_job(&id, "程序樹至少 3 個程序", |n| n >= 3).await;
+    wait_for_tree(&id).await;
     let tree = watch_job_processes(&id);
 
     // 第二個實例模擬 Runtime 重建：不知道任何 handle，只能靠 command_id 找回
@@ -272,7 +371,7 @@ async fn duplicate_command_id_is_rejected() {
     let spec = tree_spec(&id);
 
     let receipt = control.spawn(spec.clone()).await.unwrap();
-    wait_for_job(&id, "程序樹至少 3 個程序", |n| n >= 3).await;
+    wait_for_tree(&id).await;
     let before = job_pids(&id).len();
 
     // 同一個實例與另一個實例（模擬 Runtime 重建後忘了 find）都必須被拒絕
@@ -452,4 +551,25 @@ async fn spawn_with_missing_stdin_file_fails_without_leftovers() {
     assert!(error.to_string().contains(&missing), "錯誤訊息應包含路徑：{error}");
     assert!(open_job(&id).is_none(), "失敗的 spawn 不應留下 Job");
     assert_eq!(control.find(&spec).await.unwrap(), None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn find_resumes_control_after_the_spawning_instance_is_gone() {
+    let id = unique_id("find-crash");
+    let _guard = JobGuard(id.clone());
+    let spec = tree_spec(&id);
+    let first = WindowsProcessControl::new();
+    let receipt = first.spawn(spec.clone()).await.unwrap();
+    wait_for_tree(&id).await;
+    let tree = watch_job_processes(&id);
+
+    // Runtime 崩潰：啟動它的實例連同所有 handle 都不在了，Job 仍能以 command_id 找回
+    drop(first);
+    let second = WindowsProcessControl::new();
+    let found = second.find(&spec).await.unwrap().expect("Worker 仍在執行，應找回");
+    assert_eq!(found.identity, receipt.identity);
+    assert_eq!(second.stop(&receipt.identity, SHORT_GRACE).await.unwrap(), StopResult::ForceKilled);
+    assert_all_exited(&tree);
+    // 重建後同一個 command_id 仍被拒絕重複啟動（Worker 還在時）已由 find 涵蓋；全部結束後找不到
+    assert_eq!(WindowsProcessControl::new().find(&spec).await.unwrap(), None);
 }

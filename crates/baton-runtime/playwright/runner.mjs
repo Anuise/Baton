@@ -118,6 +118,20 @@ async function observe(page, visible, mask) {
     try {
       const title = await page.title();
       const text = await page.evaluate(() => (document.body ? document.body.innerText : ''));
+      // 輸入欄位的值不在 innerText 中，另外讀取（含開放的 shadow DOM），供 Runtime 偵測畫面上的秘密；
+      // 密碼與隱藏欄位畫面上不顯示值，不列入
+      const fields = await page.evaluate(() => {
+        const values = [];
+        const visit = (root) => {
+          for (const element of root.querySelectorAll('input, textarea')) {
+            if (element.tagName === 'INPUT' && ['password', 'hidden'].includes(element.type)) continue;
+            if (element.value) values.push(element.value);
+          }
+          for (const element of root.querySelectorAll('*')) if (element.shadowRoot) visit(element.shadowRoot);
+        };
+        visit(document);
+        return values;
+      });
       const shown = [];
       for (const selector of visible) shown.push(await page.locator(selector).isVisible());
       let screenshot = null;
@@ -125,7 +139,7 @@ async function observe(page, visible, mask) {
         const png = await page.screenshot({ mask: mask.map((s) => page.locator(s)), timeout: SNAPSHOT_TIMEOUT_MS });
         screenshot = png.toString('base64');
       }
-      return { url: page.url(), title, status: session.status, text, visible: shown, screenshot };
+      return { url: page.url(), title, status: session.status, text, fields, visible: shown, screenshot };
     } catch (error) {
       if (attempt >= 3 || !isNavigationRace(error)) throw error;
     }
@@ -159,7 +173,7 @@ async function close() {
   const files = [];
   if (tracePath) {
     await context.tracing.stop({ path: tracePath });
-    // 去不掉秘密的 trace 不交出去
+    // 去不掉秘密（或無法改寫成不壓縮）的 trace 不交出去
     if (redactZip(tracePath)) files.push({ kind: 'trace', path: tracePath });
     else fs.rmSync(tracePath, { force: true });
   }
@@ -174,8 +188,10 @@ async function close() {
 
 // ---- trace（zip）中的秘密 ----
 // trace 的 DOM 快照會記下輸入欄位的值、操作紀錄會記下 fill 的文字、網路紀錄會記下送出的表單，
-// 所以關閉時把每個項目解開、換掉輸入過的文字（含 JSON、URL 與表單編碼的形式）再重新壓縮。
-// 畫面截圖與錄影是影像，無法以文字去除。
+// 所以關閉時把每個項目解開、換掉輸入過的文字（含 JSON、URL 與表單編碼的形式），再以不壓縮（stored）的方式重寫：
+// 步驟之間一閃而過的中間畫面不在 Runtime 觀察到的畫面中，但會留在 trace 的 DOM 快照與網路紀錄裡；
+// 不壓縮時 Runtime 能直接在檔案位元組中找到要遮蔽的值而不保存這份 trace（最終 review #24）。
+// 畫面截圖與錄影是影像，無法以文字去除，也無法以位元組偵測。
 
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n;
@@ -214,10 +230,9 @@ function replaceAll(buffer, needle, replacement) {
   return Buffer.concat(parts);
 }
 
-/** 讀 zip 的中央目錄，換掉秘密後重寫整個檔案；格式超出預期（例如 zip64）時回傳 false。 */
+/** 讀 zip 的中央目錄，換掉秘密後以不壓縮的方式重寫整個檔案；格式超出預期（例如 zip64）時回傳 false。 */
 function redactZip(file) {
   const forms = [...secrets].filter((s) => [...s].length >= TRACE_REDACT_MIN_CHARS).flatMap(secretForms);
-  if (forms.length === 0) return true;
   try {
     const zip = fs.readFileSync(file);
     let end = zip.length - 22;
@@ -247,17 +262,16 @@ function redactZip(file) {
       const raw = zip.subarray(dataAt, dataAt + compressedSize);
       let data = method === 8 ? zlib.inflateRawSync(raw) : raw;
       for (const form of forms) data = replaceAll(data, form, replacement);
-      const compressed = zlib.deflateRawSync(data);
       const crc = crc32(data);
       const local = Buffer.alloc(30);
       local.writeUInt32LE(0x04034b50, 0);
       local.writeUInt16LE(20, 4);
       local.writeUInt16LE(0x0800, 6);
-      local.writeUInt16LE(8, 8);
+      local.writeUInt16LE(0, 8);
       local.writeUInt16LE(time, 10);
       local.writeUInt16LE(date, 12);
       local.writeUInt32LE(crc, 14);
-      local.writeUInt32LE(compressed.length, 18);
+      local.writeUInt32LE(data.length, 18);
       local.writeUInt32LE(data.length, 22);
       local.writeUInt16LE(name.length, 26);
       const central = Buffer.alloc(46);
@@ -265,17 +279,17 @@ function redactZip(file) {
       central.writeUInt16LE(20, 4);
       central.writeUInt16LE(20, 6);
       central.writeUInt16LE(0x0800, 8);
-      central.writeUInt16LE(8, 10);
+      central.writeUInt16LE(0, 10);
       central.writeUInt16LE(time, 12);
       central.writeUInt16LE(date, 14);
       central.writeUInt32LE(crc, 16);
-      central.writeUInt32LE(compressed.length, 20);
+      central.writeUInt32LE(data.length, 20);
       central.writeUInt32LE(data.length, 24);
       central.writeUInt16LE(name.length, 28);
       central.writeUInt32LE(offset, 42);
-      locals.push(local, name, compressed);
+      locals.push(local, name, data);
       centrals.push(central, name);
-      offset += 30 + name.length + compressed.length;
+      offset += 30 + name.length + data.length;
     }
     const directory = Buffer.concat(centrals);
     const eocd = Buffer.alloc(22);

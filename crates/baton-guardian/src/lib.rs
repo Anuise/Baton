@@ -6,6 +6,7 @@
 //! - 以監護日誌與 Runtime 寫的恢復狀態鏡像算出已用次數與退避期限（不讀 SQLite）；用盡就不再啟動。
 //! - 先把這次嘗試 append 到監護日誌並 fsync，再做最後核對（已有 Runtime 或剛出現抑制就撤回），最後才啟動 Runtime；
 //!   寫不進日誌就不啟動。Runtime 啟動後會匯入這筆紀錄並接續同一次嘗試。
+//!   寫下嘗試到撤回之間持有監護日誌的鎖，Runtime 在鎖之內讀日誌，不會把撤回的嘗試計次。
 //!
 //! 監護不派工、不裁定、不寫控制資料庫。何時動作由呼叫端決定：正式執行檔每秒 `step` 一次，測試 harness 由測試逐步驅動。
 
@@ -152,8 +153,13 @@ impl Guardian {
         }
     }
 
-    /// 先寫下嘗試（fsync），再做最後核對，最後才啟動。
+    /// 先寫下嘗試（fsync），再做最後核對，最後才啟動。寫下嘗試到撤回之間持有監護日誌的鎖，
+    /// Runtime 匯入日誌時不會讀到還沒有結論的嘗試。
     async fn start(&mut self, host: &mut dyn RuntimeHost, attempt: GuardianAttempt) -> GuardianStep {
+        let lock = match files::lock_journal(&self.data_dir) {
+            Ok(lock) => lock,
+            Err(error) => return self.finish(GuardianEnd::JournalUnavailable(format!("無法鎖定監護日誌：{error}"))),
+        };
         if let Err(error) = files::append_journal(&self.data_dir, &JournalRecord::Attempt(attempt.clone())) {
             return self.finish(GuardianEnd::JournalUnavailable(format!("無法寫入監護日誌：{error}")));
         }
@@ -168,6 +174,7 @@ impl Guardian {
                 // 撤回寫不進去：這次嘗試會被計次（偏保守），照樣不啟動
                 self.note(self.clock.now(), &format!("無法寫入撤回紀錄：{error}"));
             }
+            drop(lock);
             return match suppression {
                 Some(suppression) => self.finish(GuardianEnd::Suppressed(suppression)),
                 None => {
@@ -176,6 +183,8 @@ impl Guardian {
                 }
             };
         }
+        // 決定啟動：日誌中的嘗試已經有結論（啟動即計次），之後 Runtime 才能讀
+        drop(lock);
         self.note(
             self.clock.now(),
             &format!("啟動 Runtime：事件 {} 第 {} 輪第 {} 次（{}）", attempt.event_id, attempt.round, attempt.seq, attempt.attempt_id),

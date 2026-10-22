@@ -15,6 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::agent::{CONTROLLER_TOOLS, TOOL_PERMISSION_PROMPT};
 use baton_domain::auth::{hash_token, CredentialRecord, Role};
+use baton_domain::knowledge::TOOL_SEARCH_KNOWLEDGE;
 
 use crate::{ApiState, ErrorBody};
 
@@ -26,6 +27,9 @@ pub const CLIENT_HEADER_VALUE: &str = "baton-desktop";
 const AGENT_API_PREFIX: &str = "/agent/v1/";
 /// Agent 工具的路徑前綴（後面接工具名稱）。
 const AGENT_TOOLS_PATH: &str = "/agent/v1/tools/";
+
+/// Controller 憑證除了 Controller 專屬工具之外還能使用的共同工具（spec D-05）；處理函式依憑證的角色決定範圍。
+const CONTROLLER_SHARED_TOOLS: [&str; 2] = [TOOL_PERMISSION_PROMPT, TOOL_SEARCH_KNOWLEDGE];
 
 /// Tauri WebView 的 origin（Windows 預設為 http，啟用 https 方案時為 https；其他平台為 tauri 方案）。
 const APP_ORIGINS: [&str; 3] = ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"];
@@ -175,10 +179,10 @@ async fn check(
     if record.role == Role::Agent && record.scope.is_none() && record.controller.is_none() {
         return Err(Denial::CredentialInvalid);
     }
-    // Worker 與 Controller 各自只能用自己的工具（票 17）；Controller 的權限提示由處理函式一律拒絕
+    // Worker 與 Controller 各自只能用自己的工具（票 17）；共同工具中 Controller 的權限提示由處理函式一律拒絕
     if let Some(tool) = path.strip_prefix(AGENT_TOOLS_PATH) {
         let controller_tool = CONTROLLER_TOOLS.contains(&tool);
-        if record.controller.is_some() && !controller_tool && tool != TOOL_PERMISSION_PROMPT {
+        if record.controller.is_some() && !controller_tool && !CONTROLLER_SHARED_TOOLS.contains(&tool) {
             return Err(Denial::WorkerOnly);
         }
         if record.scope.is_some() && controller_tool {

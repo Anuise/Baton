@@ -82,6 +82,9 @@ struct ProcessState {
     stop_scripts: HashMap<ProcessIdentity, FakeStop>,
     stop_calls: Vec<ProcessIdentity>,
     stop_graces: Vec<Duration>,
+    /// `release` 的結果（預設確認整個程序樹已結束）與收到的身分，依呼叫順序。
+    release_result: StopResult,
+    release_calls: Vec<ProcessIdentity>,
     inspect_count: usize,
     hang: Option<HangPoint>,
     fail_spawn: Option<String>,
@@ -89,6 +92,8 @@ struct ProcessState {
     fail_spawn_after_start: Option<String>,
     /// 設定時每次 `find` 都失敗（無法查證程序在不在）。
     fail_find: Option<String>,
+    /// 設定時每次 `find` 都永遠不回來。
+    hang_find: bool,
     /// 下一次 `spawn` 啟動並登記程序之後、回傳之前執行（在這個邊界注入別的故障）。
     on_next_spawn: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -105,11 +110,14 @@ impl Default for FakeProcessControl {
                 stop_scripts: HashMap::new(),
                 stop_calls: Vec::new(),
                 stop_graces: Vec::new(),
+                release_result: StopResult::StoppedGracefully,
+                release_calls: Vec::new(),
                 inspect_count: 0,
                 hang: None,
                 fail_spawn: None,
                 fail_spawn_after_start: None,
                 fail_find: None,
+                hang_find: false,
                 on_next_spawn: None,
             }),
             activity: tokio::sync::Notify::new(),
@@ -156,6 +164,11 @@ impl FakeProcessControl {
         lock(&self.state).fail_find = reason.map(str::to_string);
     }
 
+    /// `true` 之後每次 `find` 都永遠不回來（模擬卡住的查證），`false` 恢復。
+    pub fn hang_finds(&self, hang: bool) {
+        lock(&self.state).hang_find = hang;
+    }
+
     /// 下一次 `spawn` 啟動並登記程序之後、回傳回執之前執行 `action`，只生效一次。
     pub fn run_on_next_spawn(&self, action: impl FnOnce() + Send + 'static) {
         lock(&self.state).on_next_spawn = Some(Box::new(action));
@@ -172,6 +185,16 @@ impl FakeProcessControl {
     /// 被要求停止的程序身分，依呼叫順序。
     pub fn stop_calls(&self) -> Vec<ProcessIdentity> {
         lock(&self.state).stop_calls.clone()
+    }
+
+    /// 之後每次 `release` 的結果（例如 `StillAlive`：程序樹裡還有清不掉的程序）。
+    pub fn set_release_result(&self, result: StopResult) {
+        lock(&self.state).release_result = result;
+    }
+
+    /// Run 結束前被要求收尾的程序身分，依呼叫順序。
+    pub fn release_calls(&self) -> Vec<ProcessIdentity> {
+        lock(&self.state).release_calls.clone()
     }
 
     /// 目前仍存活（含無法判定）的程序身分；用來斷言同一時間沒有第二個 writer。
@@ -256,6 +279,9 @@ impl ProcessControl for FakeProcessControl {
 
     /// 與正式版一致：程序已經全部結束就找不到。
     async fn find(&self, spec: &SpawnSpec) -> PortResult<Option<Receipt>> {
+        if lock(&self.state).hang_find {
+            std::future::pending::<()>().await;
+        }
         let state = lock(&self.state);
         if let Some(reason) = &state.fail_find {
             return Err(PortError::Failed(reason.clone()));
@@ -295,6 +321,16 @@ impl ProcessControl for FakeProcessControl {
                 Ok(result)
             }
         }
+    }
+
+    async fn release(&self, identity: &ProcessIdentity, _grace: Duration) -> PortResult<StopResult> {
+        let mut state = lock(&self.state);
+        state.release_calls.push(identity.clone());
+        let result = state.release_result;
+        if result != StopResult::StillAlive {
+            state.liveness.insert(identity.clone(), Liveness::Dead);
+        }
+        Ok(result)
     }
 }
 
@@ -344,6 +380,11 @@ impl Default for FakeAgentAdapter {
 impl FakeAgentAdapter {
     fn channel(&self, run_id: &str) -> SharedChannel {
         lock(&self.state).channels.entry(run_id.to_string()).or_default().clone()
+    }
+
+    /// 某個 Run 目前還沒被丟棄的事件串流數（Supervisor 不再需要時應該丟棄）。
+    pub fn live_streams(&self, run_id: &str) -> usize {
+        lock(&self.state).channels.get(run_id).map_or(0, |channel| Arc::strong_count(channel) - 1)
     }
 
     /// 事先放入某個 run 的事件（run_id 已知時使用）。
@@ -849,6 +890,10 @@ impl WorkspaceFs for FakeWorkspaceFs {
         baton_ports::read_file_if_exists(path)
     }
 
+    async fn read_file_within(&self, root: &Path, relative: &Path) -> PortResult<baton_ports::ContainedFile> {
+        baton_ports::read_file_within(root, relative)
+    }
+
     async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
         baton_ports::list_files_recursive(dir)
     }
@@ -1274,6 +1319,8 @@ impl LoginSession for FakeLoginSession {
 #[derive(Debug, Default)]
 pub struct FakeStartupRegistration {
     registered: std::sync::atomic::AtomicBool,
+    /// 同名但命令列不同的舊登記（例如舊安裝位置留下的）。
+    stale: std::sync::atomic::AtomicBool,
     fail_next: std::sync::Mutex<Option<String>>,
     changes: std::sync::Mutex<Vec<bool>>,
 }
@@ -1286,6 +1333,17 @@ impl FakeStartupRegistration {
     /// 不經 Runtime 直接改變登記（例如使用者手動刪掉登錄值）。
     pub fn force(&self, registered: bool) {
         self.registered.store(registered, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 不經 Runtime 留下一筆同名、但命令列是舊安裝位置的登記（不算已登記）。
+    pub fn leave_stale(&self) {
+        self.force(false);
+        self.stale.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 是否還留著舊安裝位置的登記。
+    pub fn stale(&self) -> bool {
+        self.stale.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// 下一次 `set_registered` 以這個原因失敗。
@@ -1304,10 +1362,16 @@ impl StartupRegistration for FakeStartupRegistration {
         Ok(self.registered())
     }
 
+    fn has_registration(&self) -> PortResult<bool> {
+        Ok(self.registered() || self.stale())
+    }
+
     fn set_registered(&self, enabled: bool) -> PortResult<()> {
         if let Some(reason) = self.fail_next.lock().unwrap().take() {
             return Err(PortError::Failed(reason));
         }
+        // 同名的值只有一個：登記時覆寫、移除時刪掉
+        self.stale.store(false, std::sync::atomic::Ordering::SeqCst);
         self.force(enabled);
         self.changes.lock().unwrap().push(enabled);
         Ok(())
@@ -1847,6 +1911,7 @@ impl BrowserDriver for FakeBrowserDriver {
             title: page.title.clone(),
             status: state.status,
             text: page.text.clone(),
+            fields: Vec::new(),
             visible: step.visible.iter().map(|s| page.visible.contains(s)).collect(),
             screenshot,
         };

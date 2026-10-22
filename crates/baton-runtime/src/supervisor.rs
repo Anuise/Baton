@@ -97,6 +97,9 @@ pub const TRANSCRIPTS_DIR: &str = "transcripts";
 /// 受控停止的預設寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
 
+/// Worker 回報結束後，等它的程序樹自行結束的上限；之後終止 Job 內殘留的程序（例如放到背景的子程序）。
+const EXIT_RELEASE_GRACE: Duration = Duration::from_secs(5);
+
 /// 背景迴圈沒有被喚醒時，最久多久檢查一次。
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -380,7 +383,12 @@ impl Supervisor {
             return self.finish_exit(report, total).await;
         };
         for item in targets {
-            match self.process_of(&item).await {
+            // 找回程序（ProcessControl 的 find）同樣受總上限約束：到期限仍找不到，這個與之後的 Run 都在收尾記為無法確認
+            let Ok(found) = tokio::time::timeout_at(deadline, self.process_of(&item)).await else {
+                report.notes.push("到上限仍無法以 command_id 找回程序，其餘的 Run 沒有要求停止".to_string());
+                break;
+            };
+            match found {
                 Ok(Some(identity)) => {
                     let process_control = self.ports.process_control.clone();
                     stopping.push(async move {
@@ -558,14 +566,16 @@ impl Supervisor {
         }
     }
 
-    /// 把恢復事件鏡像給監護（票 32）；這個版本已經寫過就略過。
+    /// 把恢復事件鏡像給監護（票 32）；這個版本已經寫成功過就略過，寫入失敗下一次再寫。
     async fn mirror_recovery(&self, event: &RecoveryEvent) {
         let key = (event.id.clone(), event.version);
         let mut mirrored = self.mirrored.lock().await;
         if mirrored.as_ref() == Some(&key) {
             return;
         }
-        crate::write_recovery_mirror(&self.store, &self.data_dir, &self.ports, &self.log).await;
+        if !crate::write_recovery_mirror(&self.store, &self.data_dir, &self.ports, &self.log).await {
+            return;
+        }
         *mirrored = Some(key);
     }
 
@@ -996,6 +1006,23 @@ impl Supervisor {
     async fn run_spec(&self, run: &Run, payload: &LaunchPayload, command_id: &str) -> Result<RunSpec, String> {
         let config_dir = self.config_dir_of(&run.profile_id).await?;
         let pin = self.store.run_settings_pin(&run.id).await.map_err(|e| format!("無法讀取設定快照的綁定：{e}"))?;
+        // 快照中有哪些設定檔由綁定的版本決定（不讀檔案系統），重建後組出相同的啟動指令
+        let settings_files = match &pin {
+            Some(pin) => {
+                let version = self
+                    .store
+                    .settings_version(pin.version)
+                    .await
+                    .map_err(|e| format!("無法讀取共同設定版本 {}：{e}", pin.version))?
+                    .ok_or_else(|| format!("找不到 Run 綁定的共同設定版本 {}", pin.version))?;
+                baton_domain::shared_settings::snapshot_files(&version)
+                    .into_iter()
+                    .map(|file| file.name)
+                    .filter(|name| name != baton_domain::shared_settings::MANIFEST_FILE)
+                    .collect()
+            }
+            None => Vec::new(),
+        };
         Ok(RunSpec {
             run_id: run.id.clone(),
             task_id: payload.task_id.clone(),
@@ -1004,6 +1031,7 @@ impl Supervisor {
             working_dir: Some(payload.working_dir.clone()),
             config_dir: Some(config_dir),
             settings_dir: pin.map(|p| p.directory),
+            settings_files,
             model: payload.model.clone(),
             resume_native_session_id: run.resume_native_session_id.clone(),
         })
@@ -1175,6 +1203,12 @@ impl Supervisor {
                 return false;
             }
         };
+        // 已經結束的 Run（例如經 lease 核對或取消結束）不再需要事件串流與暫存的錯誤、限流訊號；
+        // 留著的串流會讓 Adapter 的背景讀取一直進行
+        let active: HashSet<String> = executing.iter().map(|e| e.view.run.id.clone()).collect();
+        self.streams.lock().await.retain(|run_id, _| active.contains(run_id));
+        self.last_errors.lock().await.retain(|run_id, _| active.contains(run_id));
+        self.quota_limited.lock().await.retain(|run_id| active.contains(run_id));
         for item in executing.into_iter().filter(|e| e.view.run.status == RunStatus::Running) {
             let run_id = item.view.run.id.clone();
             let existing = self.streams.lock().await.remove(&run_id);
@@ -1212,6 +1246,12 @@ impl Supervisor {
                         self.last_errors.lock().await.insert(run_id.clone(), message);
                     }
                     AdapterEvent::Exited { success } => {
+                        // 結束（或交接轉移）之前先確認整個程序樹都已結束：Worker 留在背景的子孫程序會繼續寫同一個
+                        // worktree（D-10）。確認不了就把結束事件放回串流，下一次處理再試，這段期間仍是寫入所有者
+                        if !self.release_process_tree(&item, EXIT_RELEASE_GRACE).await {
+                            stream = Box::pin(futures::stream::iter([AdapterEvent::Exited { success }]).chain(stream));
+                            break;
+                        }
                         // 交接中的 Worker 結束（多半是收到 stop_requested 後保存 checkpoint 並結束）：程序已經不在，
                         // 視同舊程序確認停止，轉移給 successor；不論結束碼都不算失敗（票 28）
                         match self.store.in_flight_handoff_of_run(&run_id).await {
@@ -1461,6 +1501,7 @@ impl Supervisor {
             working_dir: Some(run.working_dir.clone()),
             config_dir: Some(self.config_dir_of(&run.profile_id).await?),
             settings_dir: None,
+            settings_files: Vec::new(),
             model: run.model.clone(),
             resume_native_session_id: run.resume_native_session_id.clone(),
         })
@@ -2106,23 +2147,34 @@ impl Supervisor {
             Ok(executing) => executing,
             Err(error) => return self.note(&format!("無法讀取執行中的 Run：{error}")),
         };
+        // 所有被取消的 Run 同時停止（各自有寬限期）：一個停得慢的 Run 不會讓其他取消排在後面等
+        let mut stopping = FuturesUnordered::new();
         for item in executing {
-            let run = &item.view.run;
+            let run = item.view.run.clone();
             let (true, Some(process)) = (run.cancel_requested_at.is_some(), run.process.as_ref()) else { continue };
             self.ensure_managed(&item).await;
             let identity = identity_of(process);
-            // 停止最長要等寬限期加確認上限；完全退出開始時就不再等，讓出 tick 鎖，這個 Run 改由停止流程處理
-            let mut exiting = self.exiting.subscribe();
-            let result = tokio::select! {
-                result = self.ports.process_control.stop(&identity, self.stop_grace) => result,
+            let process_control = self.ports.process_control.clone();
+            let grace = self.stop_grace;
+            stopping.push(async move {
+                let result = process_control.stop(&identity, grace).await;
+                (run, result)
+            });
+        }
+        // 最長要等寬限期加確認上限；完全退出開始時就不再等，讓出 tick 鎖，還沒停止的 Run 改由停止流程處理
+        let mut exiting = self.exiting.subscribe();
+        loop {
+            let next = tokio::select! {
+                next = stopping.next() => next,
                 _ = exiting.wait_for(|exiting| *exiting) => {
-                    return self.note(&format!("完全退出開始：Run {} 的取消改由停止流程處理", run.id));
+                    return self.note(&format!("完全退出開始：{} 個 Run 的取消改由停止流程處理", stopping.len()));
                 }
             };
+            let Some((run, result)) = next else { return };
             match result {
                 Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
                     self.streams.lock().await.remove(&run.id);
-                    self.apply(run, RunCommand::ConfirmCancelled { run_id: run.id.clone() }).await;
+                    self.apply(&run, RunCommand::ConfirmCancelled { run_id: run.id.clone() }).await;
                 }
                 // 程序還在：保留寫入所有權，下一次 tick 再試；這段期間不會有第二個 writer
                 Ok(StopResult::StillAlive) => self.note(&format!("Run {} 的程序沒有停止，保留寫入所有權並稍後重試", run.id)),
@@ -2153,7 +2205,33 @@ impl Supervisor {
                     ProcessObservation::Unknown
                 }
             };
+            // 根程序不在不代表整個程序樹都結束了：殘留的子孫程序清掉之前不下結論，避免交出寫入所有權後出現第二個 writer
+            let observed = match observed {
+                ProcessObservation::Dead if !self.release_process_tree(&item, Duration::ZERO).await => {
+                    ProcessObservation::Unknown
+                }
+                other => other,
+            };
             self.apply(&item.view.run, RunCommand::ReconcileLease { run_id: item.view.run.id.clone(), observed }).await;
+        }
+    }
+
+    /// Run 結束前收尾它的程序樹（D-10）：等 `grace` 內自行結束，否則終止 Job 內殘留的程序。
+    /// 回傳 false 表示無法確認整個程序樹都已結束，呼叫端不能結束 Run。
+    async fn release_process_tree(&self, item: &ExecutingRun, grace: Duration) -> bool {
+        let run = &item.view.run;
+        let Some(process) = run.process.as_ref() else { return true };
+        self.ensure_managed(item).await;
+        match self.ports.process_control.release(&identity_of(process), grace).await {
+            Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => true,
+            Ok(StopResult::StillAlive) => {
+                self.note(&format!("Run {} 的程序樹裡還有程序沒有結束，保留寫入所有權並稍後重試", run.id));
+                false
+            }
+            Err(error) => {
+                self.note(&format!("Run {} 無法確認程序樹已結束，保留寫入所有權並稍後重試：{error}", run.id));
+                false
+            }
         }
     }
 

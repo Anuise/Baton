@@ -138,7 +138,8 @@ impl WorkspaceFs for LocalWorkspaceFs {
         blocking(move || write_file_atomic(&path, &bytes)).await
     }
     async fn write_readonly_files(&self, dir: &Path, files: &[(String, Vec<u8>)]) -> PortResult<()> {
-        baton_ports::write_readonly_tree(dir, files)
+        let (dir, files) = (dir.to_path_buf(), files.to_vec());
+        blocking(move || baton_ports::write_readonly_tree(&dir, &files)).await
     }
     async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>> {
         let path = path.to_path_buf();
@@ -148,48 +149,119 @@ impl WorkspaceFs for LocalWorkspaceFs {
         let path = path.to_path_buf();
         blocking(move || read_file_if_exists(&path)).await
     }
+    async fn read_file_within(&self, root: &Path, relative: &Path) -> PortResult<ContainedFile> {
+        let (root, relative) = (root.to_path_buf(), relative.to_path_buf());
+        blocking(move || baton_ports::read_file_within(&root, &relative)).await
+    }
     async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
         let dir = dir.to_path_buf();
         blocking(move || list_files_recursive(&dir)).await
     }
 }
 
-/// 以子程序執行驗證命令（不經過 shell）；逾時時丟棄等待，子程序隨之被終止（`kill_on_drop`）。
-/// 只終止直接啟動的程序，命令自己再開的子孫程序不受控（驗證命令不放進 Job Object，AI 決策記錄於票 13）。
+/// 以子程序執行驗證命令（不經過 shell）。
+///
+/// Windows 上命令以暫停狀態建立、放進專屬的 Job Object 後才開始執行；命令結束或逾時都終止整個 Job，
+/// 命令自己再開的子孫程序不會殘留，Runtime 結束時 Job 也隨之關閉並終止整棵樹（審查 R152）。
+/// 等的是命令本身結束（不是輸出管道關閉），輸出由背景執行緒分開讀取，逾時時保留已讀到的部分。
 pub struct LocalCommandRunner;
 
 /// 保留的輸出結尾長度（位元組）；證據只需要結尾的失敗原因。
 const OUTPUT_TAIL_BYTES: usize = 16 * 1024;
+/// 等待命令結束的輪詢間隔。
+const EXIT_POLL: Duration = Duration::from_millis(25);
+/// 命令結束（並終止 Job）之後，等讀取執行緒讀完剩餘輸出的上限。
+const OUTPUT_DRAIN: Duration = Duration::from_secs(2);
 
 #[async_trait]
 impl CommandRunner for LocalCommandRunner {
     async fn run(&self, request: CommandRequest) -> PortResult<CommandOutput> {
-        let mut command = tokio::process::Command::new(&request.program);
+        let mut command = std::process::Command::new(&request.program);
         command
             .args(&request.args)
             .current_dir(&request.working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        // 背景的 Runtime 執行主控台程式時不要彈出視窗
+            .stderr(std::process::Stdio::piped());
+        // 背景的 Runtime 執行主控台程式時不要彈出視窗；以暫停狀態建立，放進 Job 之後才執行
         #[cfg(windows)]
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        let child = command.spawn().map_err(|e| PortError::Failed(format!("無法啟動「{}」：{e}", request.program)))?;
-        match tokio::time::timeout(request.timeout, child.wait_with_output()).await {
-            Err(_) => Ok(CommandOutput::TimedOut { output: String::new() }),
-            Ok(Err(e)) => Err(PortError::Failed(format!("等待「{}」結束時失敗：{e}", request.program))),
-            Ok(Ok(output)) => {
-                let mut bytes = output.stdout;
-                bytes.extend_from_slice(&output.stderr);
-                let tail = &bytes[bytes.len().saturating_sub(OUTPUT_TAIL_BYTES)..];
-                let text = String::from_utf8_lossy(tail).into_owned();
-                Ok(match output.status.code() {
-                    Some(code) => CommandOutput::Exited { code, output: text },
-                    None => CommandOutput::Terminated { output: text },
-                })
-            }
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000 | 0x0000_0004); // CREATE_NO_WINDOW | CREATE_SUSPENDED
         }
+        let mut child = command.spawn().map_err(|e| PortError::Failed(format!("無法啟動「{}」：{e}", request.program)))?;
+        #[cfg(windows)]
+        let job = match crate::windows_process::KillOnCloseJob::new().and_then(|job| job.adopt_suspended(&child).map(|()| job)) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill();
+                return Err(PortError::Failed(format!("無法把「{}」放進 Job Object：{error}", request.program)));
+            }
+        };
+        let stdout = TailReader::spawn(child.stdout.take());
+        let stderr = TailReader::spawn(child.stderr.take());
+
+        let deadline = tokio::time::Instant::now() + request.timeout;
+        let waited = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(Some(status)),
+                Ok(None) if tokio::time::Instant::now() >= deadline => break Ok(None),
+                Ok(None) => tokio::time::sleep(EXIT_POLL).await,
+                Err(e) => break Err(PortError::Failed(format!("等待「{}」結束時失敗：{e}", request.program))),
+            }
+        };
+        // 命令結束或逾時：終止整個 Job，仍在執行的子孫程序一併結束，它們持有的輸出管道隨之關閉
+        #[cfg(windows)]
+        job.terminate();
+        if !matches!(waited, Ok(Some(_))) {
+            let _ = child.kill();
+        }
+        let status = waited?;
+        let output = TailReader::collect(stdout, stderr).await;
+        Ok(match status {
+            None => CommandOutput::TimedOut { output },
+            Some(status) => match status.code() {
+                Some(code) => CommandOutput::Exited { code, output },
+                None => CommandOutput::Terminated { output },
+            },
+        })
+    }
+}
+
+/// 在背景執行緒把一條輸出管道讀到關閉，只保留結尾；讀到的部分隨時可以取用。
+struct TailReader {
+    buffer: Arc<std::sync::Mutex<Vec<u8>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TailReader {
+    fn spawn(pipe: Option<impl std::io::Read + Send + 'static>) -> Self {
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let thread = pipe.map(|mut pipe| {
+            let buffer = buffer.clone();
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                while let Ok(read @ 1..) = pipe.read(&mut chunk) {
+                    let mut kept = buffer.lock().unwrap_or_else(|e| e.into_inner());
+                    kept.extend_from_slice(&chunk[..read]);
+                    if kept.len() > 2 * OUTPUT_TAIL_BYTES {
+                        let excess = kept.len() - OUTPUT_TAIL_BYTES;
+                        kept.drain(..excess);
+                    }
+                }
+            })
+        });
+        Self { buffer, thread }
+    }
+
+    /// 等兩個讀取執行緒讀完（最多 `OUTPUT_DRAIN`），回傳標準輸出接著標準錯誤的結尾。
+    async fn collect(stdout: Self, stderr: Self) -> String {
+        let handles: Vec<_> = [stdout.thread, stderr.thread].into_iter().flatten().collect();
+        let joined = tokio::task::spawn_blocking(move || handles.into_iter().for_each(|h| drop(h.join())));
+        let _ = tokio::time::timeout(OUTPUT_DRAIN, joined).await;
+        let mut bytes = stdout.buffer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        bytes.extend_from_slice(&stderr.buffer.lock().unwrap_or_else(|e| e.into_inner()));
+        String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(OUTPUT_TAIL_BYTES)..]).into_owned()
     }
 }
 

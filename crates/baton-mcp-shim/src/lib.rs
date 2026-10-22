@@ -361,7 +361,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_RECORD_LESSON_CANDIDATE,
-            "description": "提交一則候選教訓（踩過的坑、根因與解法）。提交後只是「候選」，不會被當作已驗證的知識，                需使用者在知識分頁確認後才會生效；適用範圍由這個 Run 的 Task 決定。",
+            "description": "提交一則候選教訓（踩過的坑、根因與解法）。提交後只是「候選」，不會被當作已驗證的知識，需使用者在知識分頁確認後才會生效；適用範圍由這個 Run 的 Task 決定。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -406,7 +406,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_SEARCH_KNOWLEDGE,
-            "description": "搜尋這個 Run 適用範圍內「已驗證且有效」的決策、教訓與知識（候選、已撤銷或過期的不會出現）。",
+            "description": "搜尋這個 Run 適用範圍內「已驗證且有效」的決策、教訓與知識（候選、已撤銷或過期的不會出現）。Controller 呼叫時範圍是全域加上整個 Workspace。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -884,7 +884,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_REPRODUCE_EXPLORATION_FINDING,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：要求 Runtime 重現一個探索疑點，或驗證已確認缺陷的修復；結果以 get_exploration 查看。疑點（suspected）或未驗風險（unverified_risk）必須提供 journey：對應原症狀、以產品行為斷言預期行為的重現案例。Runtime 在目前 Verification Profile 的環境中執行它，並同時執行代表旅程當對照；對照全部通過、而且案例以產品行為斷言失敗（product_failure）才升為 confirmed。環境、授權、證據不足、預算用盡都不算缺陷，疑點維持原狀；案例通過（無法重現）則保留為 unverified_risk。已確認的缺陷（confirmed、regressed）只能以確認時的案例驗證修復，不要提供不同的 journey（會回 exploration_defect_locked）；通過後成為 fixed 並納入正常回歸：之後每次驗證都會執行這個案例，失敗會變成 regressed。已排除的疑點要先 reopen；同一個疑點已有排隊中的重現時回 exploration_reproduction_pending。重現的 Evidence Bundle 只用於診斷，不能當作 Stage 的 verification 證據。回應含 request（排入的驗證要求）與這次的重現紀錄。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：要求 Runtime 重現一個探索疑點，或驗證已確認缺陷的修復；結果以 get_exploration 查看。疑點（suspected）或未驗風險（unverified_risk）必須提供 journey：對應原症狀、以產品行為斷言預期行為的重現案例。案例只能重用使用者發布的 Profile 已授權的內容：命令步驟必須與 Profile 中某個操作（doctor、readiness、setup、旅程步驟、teardown）完全相同；引用 {{secret:…}} 的操作也必須與 Profile 中某個操作完全相同；HTTP 與瀏覽器前往的網址，來源（scheme、主機與埠）必須在 Profile 的網址中出現過（網址帶使用者資訊或佔位字時只能使用完全相同的操作）；不符時回 exploration_invalid 並說明原因。Runtime 在目前 Verification Profile 的環境中執行它，並同時執行代表旅程當對照；對照全部通過、而且案例以產品行為斷言失敗（product_failure）才升為 confirmed。環境、授權、證據不足、預算用盡都不算缺陷，疑點維持原狀；案例通過（無法重現）則保留為 unverified_risk。已確認的缺陷（confirmed、regressed）只能以確認時的案例驗證修復，不要提供不同的 journey（會回 exploration_defect_locked）；通過後成為 fixed 並納入正常回歸：之後每次驗證都會執行這個案例，失敗會變成 regressed。已排除的疑點要先 reopen；同一個疑點已有排隊中的重現時回 exploration_reproduction_pending。重現的 Evidence Bundle 只用於診斷，不能當作 Stage 的 verification 證據。回應含 request（排入的驗證要求）與這次的重現紀錄。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -4640,7 +4640,172 @@
 - 影響：多一張自動化票與其驗證；需要確保測試用組態不會進入正式建置。
 - 審閱：未審
 
-### AI-475：狀態列的「可用帳號數」取自 Profile 清單的 `dispatchable`
+### AI-475：Run 結束前收尾整個程序樹；根程序繼承唯讀 Job handle，Runtime 重建後仍能找回 Job
+- 重要度：高
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 1、4 項、review-notes #14）
+- 決策：
+  - 修正時實測發現：具名 Job 在最後一個 handle 關閉時就失去名稱，即使 Job 內仍有程序。Runtime 崩潰或重啟後 `OpenJobObjectW` 一律找不到，`find` 回傳 `None`，之後的 `stop` 只能以根 PID 推論。審查指出的「根程序已結束時 `find` 登記錯身分」只是其中一個症狀。
+  - `WindowsProcessControl` 啟動時把 Job handle 複製成只有 `JOB_OBJECT_QUERY` 權限、可繼承的 handle 交給根程序，並以 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 限定子程序只繼承標準輸入輸出與這個 handle（同時啟動的程序不再互相繼承到對方的 handle）。只要 Worker 的程序（或繼承了 handle 的子孫）還在，Job 就找得回。
+  - `find` 在根程序已結束時登記的是 Job 內最早的子孫；查詢時沒有完全相同的身分，就以「由 `find` 找回、同一啟動指令雜湊、在根程序之後建立」的登記對應（雜湊含 Run 專屬的檔案路徑，正式環境每個 Run 不同；對應到不只一個時不猜）。`stop` 以 Job 判斷整棵樹。
+  - `ProcessControl` 新增 `release(identity, grace)`（預設視為已結束；harness 的 fake 可腳本化）：等程序樹在 grace 內結束，否則終止 Job 內殘留的程序，確認後關閉 handle、不再管理。Supervisor 在 Worker 回報結束（含交接轉移，review-notes #14）時以 5 秒 grace、lease 核對確認根程序不在時以 0 秒 grace 呼叫；無法確認就不結束 Run（結束事件放回串流、lease 核對改記為 Unknown），保留寫入所有權，下一次處理再試。
+  - 已結束的 Run 在下一次 `pump_events` 時一併清掉事件串流、最近錯誤與限流訊號（R152 第 4 項）。
+- 理由：殘留程序（Worker 放到背景的子程序）在 Run 結束、Task 重新派工後仍會寫同一個 worktree，形成第二個 writer（D-10、user story 43）。只看根程序無法排除這種情況。只給查詢權限，Worker 不能藉繼承的 handle 改 Job 的限制（例如允許 breakaway）。
+- 替代方案：在 Supervisor 結束 Run 前呼叫既有的 `stop`（會改變 harness 中大量既有測試觀察到的 stop 呼叫，等於改寫既有測試，未採用）；讓 `inspect` 在根程序已死但 Job 非空時回 Alive（Run 會一直掛著直到殘留程序自行結束）；另開常駐的「保管程序」持有所有 Job handle（多一個要監護的程序）。
+- 影響：Worker 正常結束時最多多等 5 秒（通常數十毫秒），殘留的背景程序會被終止。Worker 的子孫若以不繼承 handle 的方式建立，根程序結束且 Runtime 重建後仍可能找不回 Job（此時退回以 PID 判斷）。測試：`run_process_release.rs`、`process_tree.rs` 的 `find_resumes_control_after_the_spawning_instance_is_gone` 等、`supervisor_process_tree.rs::a_finished_worker_leaves_nothing_running_in_its_job`。
+- 審閱：未審
+
+### AI-476：取消 Run 時 Worker 的回報回應帶 `stop_requested`；多個取消同時停止
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 2 項）
+- 決策：Agent 回報的回應在 Run 已要求取消（`cancel_requested_at` 有值）時也帶 `stop_requested: true`；`process_cancellations` 改為所有被取消的 Run 同時呼叫 `stop`（同 `stop_old_writers`），完全退出開始時仍立即讓出 tick 鎖。
+- 理由：AI-172「取消時握住 tick 鎖」的前提是 Worker 會自行保存並結束，但原本 Worker 不會被告知取消；依序停止時 N 個取消要等 N 個寬限期。
+- 替代方案：取消不握 tick 鎖、改在背景停止（要另外處理同一個 Run 被重複停止與 tick 之間的交錯）。
+- 影響：tick 鎖最多握一個寬限期加確認上限；Worker 下一次回報就會知道要停。
+- 審閱：未審
+
+### AI-477：支援 npm 安裝的 `claude.cmd`：經 `cmd.exe /d /v:off /c call` 啟動並拒絕會被 cmd 重新解讀的引數
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 3 項）
+- 決策：新增 `claude_cli::claude_program()`：PATH 上任一處有 `claude.exe` 就維持以 `claude` 啟動（雜湊不變）；只有批次檔時用第一個 `claude.cmd`／`claude.bat` 的完整路徑，Worker、Controller 經 `%SystemRoot%\System32\cmd.exe /d /v:off /c call <路徑> <引數>` 啟動，`prepare` 拒絕含 `" % ! ^ & | < > ( )` 或控制字元的引數（結果是 LaunchFailed 並附原因）。語意 judge、`--version` 探測與 `auth status` 用同一個程式。AI-196 中「目前不支援 claude.cmd」的說法以本條為準。
+- 理由：環境探測刻意接受 npm 安裝，啟動卻只認 `.exe`，使用者通過精靈與 Profile 核對後每個 Run 都會失敗。
+- 替代方案：精靈把只有 `.cmd` 的環境判為不支援（npm 使用者完全不能用，也要改 Domain 的探測型別）；靠 CreateProcessW 隱含執行 `.cmd`（未記載的行為，會跑 AutoRun 而可能混入額外輸出）。
+- 影響：只有 `.cmd` 的環境，啟動指令雜湊含完整路徑；Runtime 重建期間若重新安裝到別處，雜湊會不一致。
+- 審閱：未審
+
+### AI-478：驗證命令放進匿名、KILL_ON_JOB_CLOSE 的 Job；路徑經連結指向工作目錄外判為不通過
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 7、8 項、review-notes #3）
+- 決策：驗證命令以暫停狀態建立、放進匿名且設 KILL_ON_JOB_CLOSE 的 Job 後才執行；等命令本身結束（不等輸出管道關閉），輸出由背景執行緒分開讀，逾時保留已讀到的部分；命令結束或逾時都終止整個 Job。檔案檢查以 `WorkspaceFs::read_file_within` 正規化路徑，指向工作目錄外的連結不讀內容，Domain 新增 `Observation::FileOutsideWorkdir` 判為 Failed。`write_readonly_files` 改在阻塞執行緒執行。
+- 理由：子孫程序繼承管道時原本會等到逾時並遺失輸出；逾時後殘留的子孫程序會繼續動到工作目錄。連結指向外部的結果是確定的，重驗沒有用，所以判 Failed 而不是 Inconclusive。
+- 替代方案：沿用票 10 的具名 Job（驗證命令不需要跨 Runtime 重建找回，匿名即可）。
+- 影響：命令刻意留在背景的子程序會在命令結束時被終止。標準函式庫的 `main_thread_handle` 尚未穩定，主執行緒以 ToolHelp 執行緒快照找出。跨範圍修改 baton-domain（新增 Observation 變體）。
+- 審閱：未審
+
+### AI-479：快照檔參數由 RunSpec 的 `settings_files` 決定；不在每次啟動前比對 CLI 版本
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #6）
+- 決策：`RunSpec` 新增 `settings_files`，由 Supervisor 從綁定的快照版本渲染出快照裡有的檔名，Adapter 只依它決定傳哪些參數，不再以 `is_file()` 判斷，`command_hash` 不再依賴檔案系統狀態。不在每次啟動前比對 CLI 版本（不修）。
+- 理由：每次啟動多開一個 `claude --version` 程序（npm 版約 0.5–1 秒），Adapter 測試也要另外注入版本探測；降版是少見的手動操作，下次核對 Profile 就會擋下。
+- 替代方案：快照固定寫出三個檔（會改變渲染結果，讓已綁定的快照核對失敗）；解析 init 事件的 `claude_code_version`，低於最低版本就中止（不必多開程序，但程序已經啟動）。
+- 影響：降版之後到下次核對前啟動的 Run 仍以舊版執行。
+- 審閱：未審
+
+### AI-480：監護寫下 Attempt 到撤回之間鎖住日誌；OpenProcess 失敗只有程序不存在才算已結束
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #15、R152 第 11 項）
+- 決策：新增 `guardian/journal.lock`。監護從寫下 Attempt、最後核對到寫入 Withdrawn 都持有這把鎖，決定要啟動時才放開；Runtime 匯入日誌改呼叫 `read_journal_for_import`，在同一把鎖內讀。日誌格式與 store 都不變。`OpenProcess` 失敗時只有 `ERROR_INVALID_PARAMETER`（程序不存在）才算已結束，存取被拒等其他錯誤一律視為仍在，開啟權限降為 `PROCESS_QUERY_LIMITED_INFORMATION`。
+- 理由：原本 Runtime 可能在兩次寫入之間匯入，撤回的嘗試被多算一次；把權限不足當成已結束與「只認確認過的終止」不一致。
+- 替代方案：監護先核對再寫入（仍有空檔）；匯入時延後計算還沒有結論的 Attempt（與鏡像的匯入游標規則衝突）。
+- 影響：仍有更窄的空檔：監護核對時 App 拉起的 Runtime 還沒記下程序身分，監護決定啟動、它拉起的 Runtime 再因單實例鎖自行結束，這次嘗試仍被計次（單實例模型本身的限制）。存取被拒時安裝程式的維護準備會等到逾時；結束碼剛好是 259（STILL_ACTIVE）的已結束程序會被當成仍在。
+- 審閱：未審
+
+### AI-481：重犯回報只帶 `workspace_id` 時保存 Workspace，不回 400
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #7）
+- 決策：Domain 的 `guard::report` 多一個 `workspace_id` 參數；Store 的 `report_recurrence` 改收 `(workspace_id, 選填的 task_id)` 並核對 Workspace 存在，不存在回 400 `guard_invalid`。
+- 理由：前端重犯表單沒填 Task 時一定會送 `workspace_id`（既有 web 測試「沒填 Task 時不送 task_id」就是這樣斷言），回 400 會讓主要路徑不能用；資料表本來就有可為空的 `workspace_id` 欄位。
+- 替代方案：回 400 並改前端與它的既有測試（等於弱化測試，也會遺失 Workspace 資訊）。
+- 影響：跨範圍修改 baton-domain `guard.rs` 與 baton-store `guards.rs` 的函式簽名；重犯事件的 payload 沒有加 `workspace_id`。
+- 審閱：未審
+
+### AI-482：主控台 Ctrl-C 與完全退出後服務自行結束都走正常結束（補充 AI-280）
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #13、#5 第二點）
+- 決策：`RunningRuntime::wait` 換成 `serve_until(interrupt)`：收到主控台 Ctrl-C 或服務自行結束時呼叫 `shutdown()`，記下正常結束；無法接收 Ctrl-C 時只等服務自行結束。程序被終止、登出、重開機仍判為崩潰。`baton-runtime restore` 失敗的訊息改以「還原失敗：」開頭。
+- 理由：Ctrl-C 是使用者有意的停止，不該用掉崩潰恢復的 3 次額度並重派工作。App 拉起的 Runtime 沒有主控台，不會收到 Ctrl-C。
+- 替代方案：維持 AI-280 原樣（主控台 Ctrl-C 也觸發崩潰恢復）。
+- 影響：Ctrl-C 之後再啟動，仍在執行的 Worker 照一般重啟的方式找回並核對。票 33 只以「跨登入暫停 Workspace」處理跨登入（AI-355／356），重開機後自啟動仍會建立恢復事件，本條沒有改變這點。
+- 審閱：未審
+
+### AI-483：兩個偶發失敗測試的根因：派工請求套用 2 秒上限、Job 內的 conhost.exe
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #2、R152 第 10 項）
+- 決策：
+  - `artifacts_client` 的偶發失敗：Runtime 回應派工前會同步準備工作目錄（`git worktree add`、寫入並 fsync `.baton/.gitignore`），用戶端卻套用一般請求的 2 秒上限；負載高時回報 `Unreachable`，Runtime 那邊其實派工成功。派工改用既有的 60 秒 `PROBE_TIMEOUT`（「需要在本機執行 git、claude 的請求」）。同時跑 400 份比較：修前 111／400 與 43／400 失敗（全在派工那一行），修後兩輪 0／400。
+  - `process_tree::duplicate_command_id_is_rejected` 的偶發失敗：主控台程序 `conhost.exe` 也在 Job 內，完整的樹是 4 個程序；「至少 3 個」可能在 ping 啟動前成立（cmd、conhost、cmd），之後 ping 出現，數量 3→4。改為等 ping 出現在 Job 內再記錄，連跑 40 次 0 失敗。
+  - `RuntimeClient` 建立一次 `reqwest::Client` 後共用。
+- 理由：兩者都是等待條件錯誤，不是逾時太短；派工本來就屬於需要執行 git 的請求類別。
+- 替代方案：把準備工作目錄改成非同步（改動太大）。
+- 影響：派工遇到大 repo 時 App 最多等 60 秒。`web/src/App.test.tsx` 的偶發失敗不在本範圍。
+- 審閱：未審
+
+### AI-484：登入啟動登記依值名稱判定歸屬
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #19）
+- 決策：`StartupRegistration` 新增有預設實作的 `has_registration`（預設等同 `is_registered`）；Windows 版只要名為 `Baton` 的值存在就算。偏好為關閉時 `sync_login_startup` 以它判斷要不要移除。
+- 理由：不改 `is_registered` 的語意，設定頁顯示的「已登記」不受影響；舊安裝位置留下的值也會被移除。
+- 替代方案：偏好關閉時每次啟動都刪一次（會讓 fake 的變更紀錄多一筆，改變既有測試觀察到的行為）。
+- 影響：使用者若手動以 `Baton` 為名登記了別的程式，偏好關閉時也會被移除。
+- 審閱：未審
+
+### AI-485：驗證承接者無法確認舊程序已停止時，完全不碰狀態目錄也不 teardown
+- 重要度：高
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #25 第二點）
+- 決策：承接受阻（blocked）時不準備狀態目錄、不執行 teardown、不移除狀態目錄；Bundle 的 `cleanup.state_dir_removed` 記為 false 並寫明原因。讀取 Git revision 是唯讀，保留。行為與 AI-429「不執行任何操作」一致。
+- 理由：舊程序可能仍在使用同一個狀態目錄，照常清理會破壞仍在執行的舊服務。
+- 替代方案：照常清理。
+- 影響：狀態目錄會留下，等使用者確認舊服務已結束後再處理。情境測試 `verification_takeover_blocked.rs`（harness 新檔；driver 層的測試跑不到 Adapter 的 `execute`）。
+- 審閱：未審
+
+### AI-486：畫面秘密偵測一併讀取輸入欄位的值；trace 改寫為不壓縮，讓既有的內容檢查涵蓋中間畫面
+- 重要度：高
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #24）
+- 決策：Runner 觀察畫面時另外讀取所有 input／textarea 的值（含開放的 shadow DOM；密碼與隱藏欄位不列入），經 `PageSnapshot.fields` 交回 Runtime，只用來判斷畫面是否顯示秘密，不交給斷言或 judge。Runner 關閉時把 trace 改寫成不壓縮的 zip，一閃而過的中間畫面留在 trace 的 DOM 快照與網路紀錄裡，Runtime 既有的「檔案內容含秘密就不保存」檢查就能找到並扣下。
+- 理由：登入頁幾乎都有輸入欄位，「一律不保存含輸入欄位頁面的證據」會丟掉大部分登入截圖；讀到欄位值後只有真的含秘密的畫面才被扣下。
+- 替代方案：一律不保存含輸入欄位頁面的證據；把要遮蔽的值交給 Runner 掃描 trace（擴大秘密的暴露範圍）。
+- 影響：trace 檔變大（上限仍是 50MB），改寫失敗（例如 zip64）時不交出 trace。仍有限制：錄影與 trace 內的截圖是影像，無法偵測；秘密在 JSON 中被跳脫的形式不會被找到；不檢查 iframe 與封閉的 shadow DOM。
+- 審閱：未審
+
+### AI-487：動作規劃限流也交接維持不變；Bundle 的用量與動作只計最後一次嘗試，不修
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #27）
+- 決策：確認 AI-438 整合時加入的「規劃收到 RateLimited 也走 `hand_off_if_possible`」合理（規劃與 judge 共用帳號與限流狀態；那一步記為 `planner_rate_limited`，不執行任何動作，旅程不記為完成，承接者整條重跑），不改程式。Bundle 的 `usage` 與 `actions` 只計最後一次嘗試的問題不修。
+- 理由：帳號的推估用量依 Run 的結果訊息累計（spec 第 287 行），門檻與交接看的是額度觀測；Bundle 的 `usage` 只是票 48 的報告，少算不會讓額度判斷出錯。要跨嘗試累計，得把用量與動作寫進驗證日誌（baton-domain 新增日誌項目、Store 支援），或讓 Supervisor 在嘗試之間傳遞（Runtime 崩潰時會遺失）。
+- 替代方案：在驗證日誌記錄每次嘗試的用量與動作並在 Bundle 合計。
+- 影響：交接過的驗證，報告上的用量與動作紀錄偏少；沿用舊嘗試的旅程中被證明的動作不錄製、被推翻的重播不標 stale。
+- 審閱：未審
+
+### AI-488：Controller 可用 `search_knowledge`（全域加整個 Workspace）；其餘共同工具與 `accept_artifact`、Controller 版 `record_lesson_candidate` 留待後續
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #16）
+- 決策：入口防護新增 Controller 可用的共同工具清單，開放 `search_knowledge`：以既有的 Controller 範圍檢查（這一輪仍在進行、聲稱的 Workspace 一致）查全域加上這個 Workspace 內所有範圍的有效條目。`send_message`、`read_inbox`、`accept_artifact` 與 Controller 版 `record_lesson_candidate` 不實作（不修）。
+- 理由：Controller 規劃整個 Workspace 的工作，需要看到 Goal／Task 範圍的知識。訊息以 Run 對應的 Task 收發，Controller 沒有 Task 也沒有收件匣，需要新的寄件與收件模型；Domain 只有使用者的「手動接受」，讓 Controller 用它會繞過驗證 Gate，受 Gate 約束的接受需要新的命令與決策權限判斷；候選教訓的提交需要 Worker 的 Run 與 Task，Controller 版需要新的來源模型。`issues/` 沒有後續票涵蓋這些缺口。
+- 替代方案：`search_knowledge` 只看全域與 Workspace 範圍；為其餘工具新增 Domain／Store 模型。
+- 影響：spec D-05 列為共同工具的 `send_message`、`read_inbox` 對 Controller 仍回 `worker_only`，`accept_artifact` 與 Controller 版 `record_lesson_candidate` 仍不存在，需要另開票。
+- 審閱：未審
+
+### AI-489：Controller 交接的承接判斷不計 Worker 並行量、驗證與整合共用 `verify_lock`，都維持不變
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #18 第一點、#21 第二點）
+- 決策：
+- 審閱：未審
+  - `stop_controllers_for_handoff` 找承接帳號時傳 `active_runs: &[]`，不修：依 AI-305，Controller 不佔 Worker 的並行名額，實際喚起下一輪也以同樣的輸入選帳號，所以不會發生「停掉舊輪後才發現承接帳號放不下」。補上情境測試 `controller_handoff_single_account.rs`：唯一帳號 draining 時等滿 2 分鐘不停止進行中的一輪、留在原帳號做完（M7）。
+  - 驗證要求與整合佇列共用 `verify_lock` 依序執行，不修：兩者都會在同一個 repo 與 worktree 執行 git 與命令，平行時要另外處理 git 的 index.lock 與同一工作目錄的交錯；整合不是延遲敏感的工作。
+- 理由：見上。
+- 替代方案：交接判斷計入 Worker 並行量（與 AI-305 矛盾）；依 repo 分鎖讓驗證與整合平行。
+- 影響：長時間的驗證會延後整合。
+
+### AI-490：R155-fix-b 合併整合分支：決策編號順延為 AI-475～AI-489；review-notes #22 在 Ports 改用 `git diff -z`
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b 結束前合併 rebuild/v1）
+- 決策：
+- 審閱：未審
+  - 修正 A（R154）先合併進整合分支，佔用了 AI-449～AI-473。本 run 原寫的 AI-449～AI-463 依序加 25，又因主控新增 AI-474（票 53）再加 1，改編為 AI-475～AI-489，移到這些條目之後；本 run 先前 commit 訊息中的「AI-449～AI-463」與合併 commit 中的「AI-474～AI-488」都指改號前的條目。
+  - review-notes #22 兩個 run 各修一層：修正 A 在 Domain 比對前還原 git 的引號路徑、無法還原就視為受影響（AI-470）；本 run 在 `crates/baton-ports/src/git.rs` 改以 `git diff -z` 取得 NUL 分隔、不加引號的路徑。兩者並存：正式版不再收到加引號的路徑，Domain 的還原只在其他來源仍帶引號時生效。
+  - `crates/baton-domain/src/guard.rs` 的衝突：修正 A 為 `report` 加上教訓範圍檢查、本 run 加上 `workspace_id` 參數（AI-481），兩者都保留，說明文字合併。
+- 理由：已合併的條目編號不能改，只能移動本 run 的內容。
+- 替代方案：無。
+- 影響：無行為差異。
+### AI-491：新增票 54 補齊 Controller 共同工具
+- 重要度：中
+- 時間／階段：2026-10-23，最終 code-review
+- 決策：新增票 54「Controller 的共同工具」，補上 spec D-05 列為共同工具、但 Controller 目前不能用的 `search_knowledge`、`send_message`、`read_inbox`、成果接受與 Controller 版 `record_lesson_candidate`；票 51 的相依加入 54。等最終 review 的修正分支全部合併後再派工。
+- 理由：最終 review 修正 run R155 判斷需要新的 Domain／Store 模型，不適合在修正 run 中做（AI-488）；驗證 R160 建議由主控開票或在 spec 註記。這是 spec 明文要求，選擇補做而不是降級 spec。
+- 替代方案：在 spec D-05 註記 v1 不提供 Controller 共同工具。
+- 影響：多一張自動化票；Controller 的能力範圍擴大，需要維持 Workspace 範圍的隔離保證。
+- 審閱：未審
+
+### AI-492：狀態列的「可用帳號數」取自 Profile 清單的 `dispatchable`
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 7 項）
 - 決策：spec D-21 要求頂部狀態列固定顯示可用帳號數。`StatusBar` 每次輪詢時呼叫 `listProfiles()`，顯示 `dispatchable` 為 true 的數量（「可用帳號：N」）；讀取失敗時不顯示，不影響 Runtime 狀態。
@@ -4649,7 +4814,7 @@
 - 影響：已用到停止派工門檻的帳號仍算在可用帳號內；若要改成「此刻可派」，需要 Runtime 提供輕量的查詢。
 - 審閱：未審
 
-### AI-476：更新進度只以「看到準備套用之後」讀到的停止結果判斷自動安裝；Runtime 連續 3 次讀不到時交給使用者
+### AI-493：更新進度只以「看到準備套用之後」讀到的停止結果判斷自動安裝；Runtime 連續 3 次讀不到時交給使用者
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 4、5 項）
 - 決策：
@@ -4660,7 +4825,7 @@
 - 影響：Runtime 在 UI 看到 ready 之前就結束、殼也沒看過 ready 時，「嘗試安裝更新」會失敗，使用者只能關閉 Baton 後重開；重開時 Runtime 會依維護狀態處理。
 - 審閱：未審
 
-### AI-477：完全退出的後備計時器在 Runtime 接手或使用者放棄時取消；輪詢連續 3 次失敗才視為 Runtime 已結束
+### AI-494：完全退出的後備計時器在 Runtime 接手或使用者放棄時取消；輪詢連續 3 次失敗才視為 Runtime 已結束
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 2、6 項）
 - 決策：
@@ -4672,7 +4837,7 @@
 - 影響：Runtime 真的結束時，關閉 App 會多等約 2 個輪詢間隔（預設 1 秒）。Web UI 接手後若再卡住，不會有殼端後備，需使用者自行關閉。
 - 審閱：未審
 
-### AI-478：桌面殼只快取成功的 Runtime 啟動；並行等待中的呼叫共享同一次失敗
+### AI-495：桌面殼只快取成功的 Runtime 啟動；並行等待中的呼叫共享同一次失敗
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 3 項）
 - 決策：`ensure_started` 改用 `StartupCell`（`src-tauri/src/startup_cell.rs`）：成功的連線保留，之後不再執行啟動流程；失敗不保留，下一次呼叫重試。啟動期間持有 `tokio::sync::Mutex`，並行呼叫者等待同一次啟動；等待期間那次啟動失敗，就直接回傳該次的失敗，不各自再啟動一次。
@@ -4681,7 +4846,7 @@
 - 影響：Runtime 持續啟動失敗時，每次新的呼叫（例如狀態列輪詢）都會再嘗試啟動一次。
 - 審閱：未審
 
-### AI-479：harness 以可觀察的訊號取代真實 sleep
+### AI-496：harness 以可觀察的訊號取代真實 sleep
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 11 項）
 - 決策：`FakeProcessControl` 新增 `wait_for_stop_call`、`wait_for_spawn_hang`，`FakeWorkspaceFs` 新增 `wait_for_held_merge`（以 `Notify` 喚醒、醒來重新檢查狀態）；`claude_adapter.rs` 以測試內的 `Observed` 外層包住正式 Adapter，每轉送一個事件就通知測試，測試等「下一個事件送達」。所有等待都設 10 秒上限，逾時即失敗。
@@ -4690,7 +4855,7 @@
 - 影響：五處 sleep 原本都是在等某件事發生，沒有在證明「某事不會發生」，改寫後語意不變。
 - 審閱：未審
 
-### AI-480：設定 `BATON_PLAYWRIGHT_DIR` 時，真實瀏覽器的 harness 測試不可略過
+### AI-497：設定 `BATON_PLAYWRIGHT_DIR` 時，真實瀏覽器的 harness 測試不可略過
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 10 項）
 - 決策：`web_verification_real_browser.rs` 在設定了非空的 `BATON_PLAYWRIGHT_DIR` 時，Playwright 不可用就失敗；沒設定（或為空字串）時維持略過，訊息寫明「這次通過不代表實測過」。`docs/development.md` 註明略過條件。
@@ -4699,7 +4864,7 @@
 - 影響：CI 綠燈仍不代表 web 驗證 Adapter 實測過，要實測需設定該變數。`crates/baton-runtime/tests/browser_driver.rs` 有相同的略過寫法，不在本 run 範圍，未處理。
 - 審閱：未審
 
-### AI-481：UI E2E 只把「完全退出進度」「恢復事件顯示」加進冒煙腳本，「派工到完成」「裁定中心批次處理」不做
+### AI-498：UI E2E 只把「完全退出進度」「恢復事件顯示」加進冒煙腳本，「派工到完成」「裁定中心批次處理」不做
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，R153 第 8 項；部分未修）
 - 決策：
@@ -4711,7 +4876,7 @@
 - 影響：系統匣選單本身、殼端 60 秒後備流程、「派工到完成」「裁定中心批次處理」在 UI 層沒有 E2E；建議另開票設計 fake Port 的 E2E 組態。
 - 審閱：未審
 
-### AI-482：App 元件測試偶發逾時的根因是首次 render 的冷啟動成本
+### AI-499：App 元件測試偶發逾時的根因是首次 render 的冷啟動成本
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，review-notes #2 的 `App.test.tsx`）
 - 決策：`App.test.tsx` 在 `beforeAll` 先 render 一次整個 App 並 `cleanup()`（暖機用的等待設 10 秒，只承擔一次性的冷啟動成本），並以 `beforeEach(vi.clearAllMocks)` 清掉測試間共用 mock 的呼叫紀錄。所有斷言的等待時間不變。
@@ -4720,7 +4885,7 @@
 - 影響：修正後在平行負載下量 6 次，第一步降到 63～199ms。
 - 審閱：未審
 
-### AI-483：harness 資料目錄改為背景重試刪除、程序結束時同步刪除；被終止的程序留下的以鎖檔判斷由之後的 harness 清理
+### AI-500：harness 資料目錄改為背景重試刪除、程序結束時同步刪除；被終止的程序留下的以鎖檔判斷由之後的 harness 清理
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，review-notes #28；R159-final-fix-c2 依驗證 R158 補上程序結束時的刪除與其他測試的檢查）
 - 決策：
@@ -4729,10 +4894,10 @@
   - 測試：`crates/baton-harness/tests/harness_cleanup.rs`。以手動建立的 runtime 模擬 `#[tokio::test]` 的生命週期（單執行緒與多執行緒），斷言 runtime 結束後目錄被刪除；斷言重建 Runtime 時保留；斷言之後的 harness 會清掉被遺棄的目錄，但不碰持有中的目錄；以子程序（指定專用的 TEMP）執行一個持有 harness 到測試結束的測試，斷言子程序結束後 `baton-harness` 之下沒有任何目錄或鎖檔。以專用的 TEMP 跑完整個 `baton-harness` 與整個 `pnpm test`，結束後 `baton-harness` 是空的，也沒有 `.tmp*`。
 - 理由：Harness 的 `Drop` 無法 await Runtime 停止（單執行緒 runtime 在 Drop 期間無法推進背景工作）；要求每個測試結尾明確關閉 harness 要改約 600 個測試。跨程序清理若不判斷「有沒有人在用」，會刪到並行測試程序正在使用的目錄（Windows 只會刪掉沒被鎖住的檔案，例如桌面憑證），造成偶發失敗，所以用鎖檔判斷。
 - 替代方案：只在程序結束時清理（測試程序執行期間目錄會累積到數百個）；以 `ctor` 的 `#[dtor]` 取代 `atexit`（多一個依賴，效果相同）；每個測試結尾呼叫 `harness.shutdown().await`（改動大，漏寫就會再留下目錄）；修改 `baton-runtime` 讓 `RunningRuntime` 提供同步關閉（屬其他範圍，且 tokio 的 abort 本身也不是同步丟棄）。
-- 影響：同一個 harness 測試程序中，被丟棄但 runtime 還沒結束的 harness 會由背景執行緒持續重試，最多 10 分鐘。修正前已留在暫存區根目錄的 `.tmp*` 不會自動清除（無法和其他工具的暫存目錄區分），需在沒有測試執行時手動刪除。空的 `baton-harness` 目錄本身保留：程序結束時刪掉它，會和並行程序在其中建立目錄的動作競爭。其他 crate 的測試留下的暫存目錄見 AI-484。
+- 影響：同一個 harness 測試程序中，被丟棄但 runtime 還沒結束的 harness 會由背景執行緒持續重試，最多 10 分鐘。修正前已留在暫存區根目錄的 `.tmp*` 不會自動清除（無法和其他工具的暫存目錄區分），需在沒有測試執行時手動刪除。空的 `baton-harness` 目錄本身保留：程序結束時刪掉它，會和並行程序在其中建立目錄的動作競爭。其他 crate 的測試留下的暫存目錄見 AI-501。
 - 審閱：未審
 
-### AI-484：`baton-runtime` 的程序測試在結尾確認暫存目錄刪得掉，不修改產品的終止流程
+### AI-501：`baton-runtime` 的程序測試在結尾確認暫存目錄刪得掉，不修改產品的終止流程
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R159-final-fix-c2，驗證 R158 第 2 項，review-notes #28「檢查其他測試」）
 - 決策：
@@ -4742,6 +4907,21 @@
 - 理由：本次只允許修改測試檔；在產品端讓 `LocalCommandRunner`／`LocalBrowserDriver` 終止後等待子程序結束屬其他範圍，而且目前沒有已知的產品後果（受驗目錄不會在命令逾時後立即刪除）。
 - 替代方案：修改產品，逾時或開啟失敗時 `kill().await` 等子程序結束（跨範圍）；測試改用不刪除的固定目錄（會累積）。
 - 影響：產品端的這兩條路徑在回傳後仍可能有短暫存活的子程序；若之後有「逾時後立刻刪除工作目錄」的流程，需要在產品端等待子程序結束。
+- 審閱：未審
+
+### AI-502：票 final-c 整合 rebuild/v1（修正 B）：決策編號順延為 AI-492～AI-501；共用的程序測試兩邊的修正都保留
+- 重要度：低
+- 時間／階段：2026-10-23，票 final-c 整合（R162-final-integrate-c）
+- 決策：
+  - 修正 B 先合併進整合分支，佔用了 AI-475～AI-491。本分支的 AI-475～AI-484 依序加 17，改編為 AI-492～AI-501，移到 AI-491 之後；`docs/development.md` 中本分支寫的兩處引用（AI-481、AI-484）同步改為 AI-498、AI-501。本分支先前 commit 訊息與 `.orchestration/` 的 run 紀錄中的「AI-475～AI-484」都指改號前的條目，run 紀錄是歷史紀錄，不改。
+  - 整合分支 AI-474 的理由寫「（AI-455）」，指的是本分支最初的 AI-455，也就是現在的 AI-498；既有條目不能改，記在這裡。
+  - 原 AI-484（現 AI-501）合併前少了 `- 審閱：` 行，順延時補上 `- 審閱：未審`。
+  - `crates/baton-runtime/tests/command_runner.rs`、`supervisor_process_tree.rs`、`browser_driver.rs` 與 `docs/development.md` 自動合併、沒有文字衝突：本分支結尾的 `support::remove_temp_dir` 與修正 B 新增的測試（Job 內子孫程序被終止、Worker 結束時 Job 內不留程序、輸入欄位秘密偵測）都保留，沒有刪改任何斷言。修正 B 新增的測試沒有另外加上 `remove_temp_dir`：在專用 TEMP 跑這三個測試檔與完整 `pnpm test` 後都沒有留下 `.tmp*`。
+  - 修正 B（AI-478）讓 `LocalCommandRunner` 改把命令放進 KILL_ON_JOB_CLOSE 的 Job，逾時時終止整個 Job，不再靠 `kill_on_drop`；但終止後仍不等程序真的結束，所以 AI-501 的「產品端不等子程序結束」與其影響說明仍成立，只是根因中「以 `kill_on_drop` 終止」對驗證命令已不精確。`LocalBrowserDriver` 不變。
+  - 本分支沒有新增 Store migration，不需要順延。
+- 理由：已合併的條目編號不能改，只能移動本分支的內容；測試碼兩邊的修改互不重疊，合併後兩邊的行為都在。
+- 替代方案：直接改寫 AI-501 的根因描述（修改已驗證的條目內容，改以本條補充）。
+- 影響：無行為差異。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

@@ -321,8 +321,15 @@ pub fn git_changed_paths(repo: &Path, from: &str, to: &str) -> PortResult<Vec<St
             return Err(PortError::Failed(format!("{} 中找不到 revision {rev}", repo.display())));
         }
     }
-    let listed = checked(git(repo).args(["diff", "--name-only", "--no-renames", "--end-of-options", from, to]))?;
-    Ok(listed.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+    // `-z`：路徑以 NUL 分隔且不加引號；含 `"`、`\` 或控制字元的檔名即使設了 core.quotepath=false 也會被加引號。
+    // 不經過 `checked`（它會去掉頭尾空白，開頭是空白的檔名會被改掉）
+    let mut command = git(repo);
+    command.args(["diff", "--name-only", "-z", "--no-renames", "--end-of-options", from, to]);
+    let result = output(&mut command)?;
+    if !result.success {
+        return Err(failure(&command, &result));
+    }
+    Ok(result.stdout.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect())
 }
 
 /// 分支目前的完整 sha；分支不存在是錯誤。
@@ -881,5 +888,41 @@ mod tests {
         assert!(git_changed_paths(&repo, &last, &last).unwrap().is_empty());
         assert!(git_changed_paths(&repo, &first, "no-such-revision").is_err());
         assert!(git_changed_paths(&repo, "--output=x", &last).is_err(), "不能被當成選項");
+    }
+
+    /// 檔名含 `"`、tab、開頭空白與非 ASCII 字元時，git 即使設 `core.quotepath=false` 仍會替前兩者加引號；
+    /// 路徑必須原樣取回，否則 `touches` 比對會漏判（review-notes #22）。
+    /// Windows 檔名不能含 `"` 與控制字元（這類路徑來自其他平台建立的 commit），所以直接寫進 index
+    /// （不經過檔案系統，並關閉 `core.protectNTFS` 的檢查）建立這些 commit。
+    #[test]
+    fn changed_paths_returns_names_with_quotes_tabs_and_non_ascii_characters_verbatim() {
+        let (_temp, repo) = init_repo();
+        let first = sh(&repo, &["rev-parse", "HEAD"]);
+        let blob = {
+            let mut child = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["hash-object", "-w", "--stdin"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"x\n").unwrap();
+            let output = child.wait_with_output().unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let names = ["docs/say \"hi\".md", "src/tab\tname.rs", " leading.txt", "文件/說明.md"];
+        for name in names {
+            let entry = format!("100644,{blob},{name}");
+            sh(&repo, &["-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", &entry]);
+        }
+        sh(&repo, &["commit", "-q", "-m", "special names"]);
+        let last = sh(&repo, &["rev-parse", "HEAD"]);
+
+        let mut changed = git_changed_paths(&repo, &first, &last).unwrap();
+        changed.sort();
+        let mut expected = names.map(str::to_string).to_vec();
+        expected.sort();
+        assert_eq!(changed, expected);
     }
 }

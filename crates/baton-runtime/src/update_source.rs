@@ -62,6 +62,10 @@ struct PlatformEntry {
 pub fn parse_manifest(body: &[u8]) -> PortResult<ReleaseInfo> {
     let manifest: Manifest =
         serde_json::from_slice(body).map_err(|e| PortError::Failed(format!("更新清單的格式不正確：{e}")))?;
+    // 清單本身沒有簽章，版本又會拿來組下載目錄：只接受 semver 會用到的字元，擋掉路徑分隔與 `..`
+    if !is_safe_version(&manifest.version) {
+        return Err(PortError::Failed(format!("更新清單的版本不正確：{:?}", manifest.version)));
+    }
     let entry = PLATFORM_KEYS
         .iter()
         .find_map(|key| manifest.platforms.get(*key))
@@ -73,6 +77,13 @@ pub fn parse_manifest(body: &[u8]) -> PortResult<ReleaseInfo> {
         url: entry.url.clone(),
         signature: entry.signature.clone(),
     })
+}
+
+/// 版本只能由 `[0-9A-Za-z.+-]` 組成、不能為空、不能含 `..`（用作 `updates\<版本>` 目錄名稱時不會跳出資料目錄）。
+fn is_safe_version(version: &str) -> bool {
+    !version.is_empty()
+        && !version.contains("..")
+        && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
 }
 
 /// 以 base64 編碼的 minisign 公鑰驗證 base64 編碼的簽章（與 Tauri 更新程式相同的格式）。
@@ -221,6 +232,23 @@ mod tests {
         assert_eq!(release.notes.as_deref(), Some("修正"));
         assert!(parse_manifest(br#"{ "version": "0.2.0", "platforms": {} }"#).is_err(), "沒有 Windows 安裝程式");
         assert!(parse_manifest(b"not json").is_err());
+    }
+
+    #[test]
+    fn a_version_that_could_escape_the_download_directory_is_rejected() {
+        let manifest = |version: &str| {
+            serde_json::json!({
+                "version": version,
+                "platforms": { "windows-x86_64": { "url": "https://x/Baton-setup.exe", "signature": "w" } }
+            })
+            .to_string()
+        };
+        for version in ["..", "../../evil", "0.2.0/../..", r"C:\evil", "/evil", "0..2", "", "0.2.0 beta", r"0.2.0\x"] {
+            assert!(parse_manifest(manifest(version).as_bytes()).is_err(), "應拒絕版本 {version:?}");
+        }
+        for version in ["0.2.0", "1.0.0-rc.1", "1.0.0+build.5"] {
+            assert_eq!(parse_manifest(manifest(version).as_bytes()).unwrap().version, version);
+        }
     }
 
     #[test]

@@ -173,7 +173,7 @@ Run 的規則在 `baton_domain::run`（純邏輯：命令 + 目前狀態 → 新
 
 正式執行時由背景迴圈每秒（或派工／取消時被喚醒）呼叫 `tick`；`RuntimeOptions { background_supervisor: false }`（harness 使用）不啟動背景迴圈，由測試呼叫 `harness.supervise()`。`RuntimeOptions::stop_grace` 預設 30 秒（spec D-11）。
 
-**真實 ProcessControl**（`WindowsProcessControl`，只在 Windows 編譯）：每個 Run 一個具名 Job Object `Local\Baton-Run-{command_id}`（不設 KILL_ON_JOB_CLOSE，Runtime 崩潰不會殺掉程序）；`stop` 先在寬限期內等程序自行結束，逾時 `TerminateJobObject` 終止整棵樹。整合測試：`crates/baton-runtime/tests/process_tree.rs`（直接測 Port）、`crates/baton-runtime/tests/supervisor_process_tree.rs`（真實 Runtime + HTTP 取消）。正式執行檔的 AgentAdapter 是 Claude Code Adapter（見「Claude Code Adapter」）。
+**真實 ProcessControl**（`WindowsProcessControl`，只在 Windows 編譯）：每個 Run 一個具名 Job Object `Local\Baton-Run-{command_id}`（不設 KILL_ON_JOB_CLOSE，Runtime 崩潰不會殺掉程序）；根程序繼承一個只能查詢的 Job handle（以 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 限定只繼承標準輸入輸出與它），具名 Job 在 Runtime 關閉自己的 handle（含崩潰）後仍能以 `find` 找回。`stop` 先在寬限期內等程序自行結束，逾時 `TerminateJobObject` 終止整棵樹；`stop`／`release` 一律以 Job 判斷整棵樹，不以根程序推論。Worker 回報結束與 lease 核對確認根程序不在時，Supervisor 先 `release`（等程序樹結束、否則終止殘留的子孫）才結束 Run。整合測試：`crates/baton-runtime/tests/process_tree.rs`（直接測 Port）、`crates/baton-runtime/tests/supervisor_process_tree.rs`（真實 Runtime + HTTP 取消）。正式執行檔的 AgentAdapter 是 Claude Code Adapter（見「Claude Code Adapter」）。
 
 桌面憑證專用的端點（Agent 憑證得到 403），在 `/api/v1/workspaces/{id}/` 之下：
 
@@ -497,8 +497,8 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 **已知限制**：
 
-- 驗證命令以 Runtime 的使用者身分執行，只終止直接啟動的程序（沒有放進 Job Object），命令自己再開的子孫程序在逾時後可能殘留。
-- 檔案檢查只擋住路徑字面上的逃逸（`..`、絕對路徑），不處理工作目錄內指向外部的符號連結或 junction。
+- 驗證命令以 Runtime 的使用者身分執行，放進專屬的 Job Object：命令結束或逾時都終止整棵程序樹；等的是命令本身結束（不等輸出管道關閉），逾時時保留已讀到的輸出。
+- 檔案檢查的路徑正規化後必須仍在工作目錄內；經符號連結或 junction 指向工作目錄外的檔案判為不通過。
 - 命令輸出以 UTF-8 解讀，非 UTF-8 的主控台輸出（例如 `cmd` 的 Big5）在證據中會變成替代字元。
 - 沒有「手動駁回」：沒有宣告檢查而成果不理想時，目前只能取消 Task 或修改契約讓它重新執行。
 
@@ -638,7 +638,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 依 ADR-0005（DR-20261021-05）。規則在 `baton_domain::recovery`，持久化在 `baton_store` 的 `recovery.rs`，執行在 Supervisor。
 
-**判定崩潰**：`RunningRuntime::shutdown()` 是有秩序的停止，會在 `runtime_boot` 記下 `ended_cleanly_at`；`RunningRuntime::kill()`、程序被終止或當掉都不會。Runtime 啟動時（停止意圖已核對之後、任何程序副作用之前）若前一次啟動沒有正常結束、也沒有停止意圖，就是意外終止：沒有未結束的恢復事件時建立一個（第 1 輪、尚未嘗試），有的話沿用。完全退出的停止意圖優先，那種情況走「重新開啟」，不是崩潰恢復。
+**判定崩潰**：`RunningRuntime::shutdown()` 是有秩序的停止，會在 `runtime_boot` 記下 `ended_cleanly_at`；`RunningRuntime::kill()`、程序被終止或當掉都不會。正式執行檔以 `serve_until` 提供服務：主控台 Ctrl-C 或服務自行結束（完全退出後）都走 `shutdown()`，所以不算意外終止；程序被終止、登出或重開機仍算。Runtime 啟動時（停止意圖已核對之後、任何程序副作用之前）若前一次啟動沒有正常結束、也沒有停止意圖，就是意外終止：沒有未結束的恢復事件時建立一個（第 1 輪、尚未嘗試），有的話沿用。完全退出的停止意圖優先，那種情況走「重新開啟」，不是崩潰恢復。
 
 **一次嘗試**（Supervisor 的 `tick` 在任何啟動之前處理）：
 1. 先持久化嘗試（輪次、序號 1～3、嘗試識別）；寫不進去就不開始，不碰任何程序。資料表以 `CHECK (seq BETWEEN 1 AND 3)` 與 `UNIQUE (event_id, round, seq)` 保證同一輪不可能有第四次。
@@ -859,7 +859,7 @@ Web UI 的「知識」分頁（`web/src/KnowledgePage.tsx`，從左側 Workspace
 | `POST /api/v1/guards` | `{ lesson_id, rule }`，回 201（啟用）。400 `guard_invalid`、404 `knowledge_not_found`、409 `lesson_ineligible` |
 | `POST /api/v1/guards/{id}/enable`、`…/disable` | `{ expected_revision }`；已是目標狀態時不變更。404 `guard_not_found`、409 `guard_revision_conflict`、409 `lesson_ineligible`（啟用時教訓已不有效） |
 | `GET /api/v1/knowledge/{id}/recurrences` | `{ recurrences }`，新到舊 |
-| `POST /api/v1/knowledge/{id}/recurrences` | `{ note, workspace_id?, task_id? }` 回報沒被攔下的重犯，回 201。教訓必須是已驗證的教訓（過期也可以），否則 409 `lesson_ineligible`；說明空白或 Task 不存在 400 `guard_invalid` |
+| `POST /api/v1/knowledge/{id}/recurrences` | `{ note, workspace_id?, task_id? }` 回報沒被攔下的重犯，回 201。教訓必須是已驗證的教訓（過期也可以），否則 409 `lesson_ineligible`；只帶 `workspace_id` 時記下該 Workspace；說明空白、Workspace 或 Task 不存在、只帶 `task_id` 400 `guard_invalid` |
 
 資料表（migration 20 `guard`）：`guard`（觸發器禁止刪除）、`lesson_recurrence`（追加式，觸發器禁止更新與刪除；`prevented` 必定有 `guard_id`）。Guard 的事件：`guard_created`、`guard_enabled`、`guard_disabled`（`aggregate_type = 'guard'`，聚合版本 = `revision`）。桌面殼的 Tauri 指令：`guard_list`、`guard_create`、`guard_enable`、`guard_disable`、`knowledge_recurrences`、`knowledge_report_recurrence`。
 
@@ -1217,7 +1217,7 @@ Review 分 Standards（規範）與 Spec（需求）兩軸保存，Gate 只接�
 - **作者不是 reviewer**：作者是被審的 Task（它的每一個 Run 與用過的平台／原生 Session）；被審 Task 的 Run、或沿用作者 Session 的 Run 提交回 403 `reviewer_is_author`，資料表另有 CHECK。Controller 不能提交審查（`worker_only`）。
 - **Gate**：exit check 的證據種類 `review`（`{ check, review_id }`），可選 `reviewers`（每一軸需要幾位不同的 reviewer，預設 1，上限 5）。Runtime 查驗：審的是 Workflow 的 Task（否則 `other_subject`）、對照目前的契約版本且是這個 Task 最新 candidate 的審查（否則 `stale`）、兩軸都通過（否則 `not_passed`）。reviewer 人數依**每一軸實際審查的人**計算（沿用的軸算原本的 reviewer）。沒有任何待處理的審查、只是 reviewer 不夠時記 `blocked`（「缺少非作者 reviewer」），Gate 保持關閉。內建的功能開發 Playbook 的「獨立審查」改為要求 `review`。
 - **finding 分類**（`classify_review_finding`，Controller 工具）：`fix` 依決策權限表 `classify_finding_as_fix`（預設自主）；`dismiss` 與 `needs_decision` 依 `dismiss_review_finding` 送裁定：回 409 `requires_decision`、finding 標 `awaiting_decision`；使用者回答後 Controller 以相同內容再呼叫一次套用（核准 → `dismissed`，記 `decision_request_id` 與 `decided_by`；不核准 → `fix`）。核准以 `ActionContent::with_subject` 綁在這一項 finding 上，不會被同一個 Task 的其他 finding 用掉。`dismissed` 是終態。
-- **沿用審查**：某一軸指定 `reuse_from` 時，Runtime 只在可證明不受影響時接受：同一個 Task、那一軸已通過、規格版本（Spec）或規範來源（Standards）相同、有記錄 `paths`，而且 `WorkspaceFs::changed_paths`（正式版 `git diff --name-only --no-renames`）算出的兩個 candidate 之間的變更檔案都不在 `paths` 內（不分大小寫、目錄含其下所有檔案、`.` 是整個 repo）。算不出變更（不是 Git repo、revision 不存在）就拒絕（409 `review_reuse_rejected`）。
+- **沿用審查**：某一軸指定 `reuse_from` 時，Runtime 只在可證明不受影響時接受：同一個 Task、那一軸已通過、規格版本（Spec）或規範來源（Standards）相同、有記錄 `paths`，而且 `WorkspaceFs::changed_paths`（正式版 `git diff --name-only --no-renames -z`）算出的兩個 candidate 之間的變更檔案都不在 `paths` 內（不分大小寫、目錄含其下所有檔案、`.` 是整個 repo）。算不出變更（不是 Git repo、revision 不存在）就拒絕（409 `review_reuse_rejected`）。
 - **設計偏離**：Worker 以 `report_design_deviation` 回報（`design_artifact_id` 必須是已登記的成果，`design_version` 必須是它目前的最新版本，否則 409 `design_outdated`），保存偏離、原因、受影響契約與 `proposed_design`。Controller 以 `resolve_design_deviation` 處理：`reject` 自主；`accept` 依 `accept_design_deviation` 送裁定，使用者核准後再呼叫一次，Runtime 把 `proposed_design` 寫成新檔案，並在同一個交易中替設計成果追加新版本、記下接受者（`accepted_by: desktop`）與 `accepted_design_version`。之後派出的 Worker 在 Context 的證據索引看到新版本。
 
 | 端點（桌面） | 說明 |
@@ -1366,7 +1366,7 @@ pnpm --filter web test
 
 桌面殼 `baton-desktop` 編譯時需要已建置的 `web/dist`，所以不在預設的 `cargo test` 範圍內；`pnpm build` 會編譯它。殼本身的單元測試（只快取成功的啟動、可取消的完全退出後備計時器）在 `pnpm --filter web build` 之後以 `cargo test -p baton-desktop`（經 `with-msvc.ps1`）執行。
 
-Runtime harness 的資料目錄建在暫存區的 `baton-harness\` 之下（`h<亂數>`，旁邊有同名的 `.lock` 鎖檔），整個 `Harness` 結束時刪除，重建 Runtime 時保留。Windows 上 Runtime 的背景工作要等測試的 tokio runtime 結束才會關閉控制資料庫與日誌，所以刪除交給背景執行緒重試，程序結束時再同步刪除剩下的（例如最後一個測試的）；程序被終止而沒刪完時，鎖檔不再有人持有，之後任何一個 harness 啟動時會清掉（`crates/baton-harness/src/data_dir.rs`，測試 `crates/baton-harness/tests/harness_cleanup.rs`）。暫存區根目錄的 `.tmp*` 是修正前留下的，可以在沒有測試執行時手動刪除。`baton-runtime` 啟動真實子程序的整合測試在結尾以 `tests/support` 的 `remove_temp_dir` 確認暫存目錄刪得掉（AI-484）。
+Runtime harness 的資料目錄建在暫存區的 `baton-harness\` 之下（`h<亂數>`，旁邊有同名的 `.lock` 鎖檔），整個 `Harness` 結束時刪除，重建 Runtime 時保留。Windows 上 Runtime 的背景工作要等測試的 tokio runtime 結束才會關閉控制資料庫與日誌，所以刪除交給背景執行緒重試，程序結束時再同步刪除剩下的（例如最後一個測試的）；程序被終止而沒刪完時，鎖檔不再有人持有，之後任何一個 harness 啟動時會清掉（`crates/baton-harness/src/data_dir.rs`，測試 `crates/baton-harness/tests/harness_cleanup.rs`）。暫存區根目錄的 `.tmp*` 是修正前留下的，可以在沒有測試執行時手動刪除。`baton-runtime` 啟動真實子程序的整合測試在結尾以 `tests/support` 的 `remove_temp_dir` 確認暫存目錄刪得掉（AI-501）。
 
 ### 桌面 App 冒煙測試
 
@@ -1376,7 +1376,7 @@ Runtime harness 的資料目錄建在暫存區的 `baton-harness\` 之下（`h<�
 node scripts/smoke-desktop.mjs
 ```
 
-它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕、強制結束 Runtime（不結束監護）後監護重新拉起它且恢復面板與狀態列顯示恢復事件、以頁面內的 Tauri 事件（與系統匣送出的 `baton://full-exit-requested` 相同）觸發完全退出後顯示停止進度，最後 App、Runtime 與監護都結束。系統匣選單本身與殼端 60 秒的後備流程沒有涵蓋。spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」需要真實的 Worker／Controller 執行（裁定請求只能由 Agent 憑證建立），不在冒煙測試範圍，由 harness 情境測試涵蓋（見 ai-decisions AI-481）。這個測試會開啟視窗，所以不納入 `pnpm test`。
+它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕、強制結束 Runtime（不結束監護）後監護重新拉起它且恢復面板與狀態列顯示恢復事件、以頁面內的 Tauri 事件（與系統匣送出的 `baton://full-exit-requested` 相同）觸發完全退出後顯示停止進度，最後 App、Runtime 與監護都結束。系統匣選單本身與殼端 60 秒的後備流程沒有涵蓋。spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」需要真實的 Worker／Controller 執行（裁定請求只能由 Agent 憑證建立），不在冒煙測試範圍，由 harness 情境測試涵蓋（見 ai-decisions AI-498）。這個測試會開啟視窗，所以不納入 `pnpm test`。
 
 ### 安裝程式冒煙測試
 

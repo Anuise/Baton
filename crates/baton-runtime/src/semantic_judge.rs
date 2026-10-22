@@ -28,7 +28,8 @@ const JUDGE_LABEL: &str = "語意 judge ";
 const PLAN_LABEL: &str = "動作規劃";
 
 pub struct ClaudeSemanticJudge {
-    /// `claude` 的執行檔（CreateProcessW 依 PATH 尋找）。
+    /// `claude` 的執行檔（依 PATH 尋找 `claude.exe`），或 npm 安裝的批次檔完整路徑
+    /// （標準函式庫會經 cmd.exe 執行並跳脫引數；見 `claude_cli::claude_program`）。
     program: String,
     /// Runtime 啟動時繼承的環境變數名稱；啟動前移除其中會改變認證來源的。
     inherited_env: Vec<String>,
@@ -36,10 +37,10 @@ pub struct ClaudeSemanticJudge {
 }
 
 impl Default for ClaudeSemanticJudge {
-    /// 正式執行：`claude` 與目前程序的環境變數。
+    /// 正式執行：與 Worker 相同的 `claude` 程式與目前程序的環境變數。
     fn default() -> Self {
         let inherited = std::env::vars_os().map(|(name, _)| name.to_string_lossy().into_owned()).collect();
-        Self { program: "claude".to_string(), inherited_env: inherited, timeout: JUDGE_TIMEOUT }
+        Self { program: crate::claude_cli::claude_program(), inherited_env: inherited, timeout: JUDGE_TIMEOUT }
     }
 }
 
@@ -525,5 +526,34 @@ mod tests {
         let not_logged_in = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
         let ActionPlan::Unavailable { reason } = parse_plan_output(not_logged_in) else { panic!() };
         assert!(reason.contains("動作規劃執行失敗") && reason.contains("Not logged in"), "{reason}");
+    }
+
+    #[test]
+    fn the_production_judge_uses_the_same_claude_program_as_the_workers() {
+        assert_eq!(ClaudeSemanticJudge::default().program, crate::claude_cli::claude_program());
+    }
+
+    /// npm 安裝的 `claude.cmd`（路徑含空白）也能執行判斷：批次檔由標準函式庫經 cmd.exe 執行（審查 R152）。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_judge_backed_by_an_npm_claude_cmd_decides() {
+        let temp = tempfile::tempdir().unwrap();
+        let npm = temp.path().join("npm dir");
+        std::fs::create_dir_all(&npm).unwrap();
+        let answer = assistant(r#"{"satisfied": true, "rationale": "r"}"#);
+        std::fs::write(npm.join("out.jsonl"), format!("{INIT}\n{answer}\n{RESULT_OK}\n")).unwrap();
+        let shim = npm.join("claude.cmd");
+        std::fs::write(&shim, "@echo off\r\n> \"%~dp0args.txt\" echo(%*\r\ntype \"%~dp0out.jsonl\"\r\n").unwrap();
+        let judge = ClaudeSemanticJudge {
+            program: shim.to_string_lossy().into_owned(),
+            inherited_env: Vec::new(),
+            timeout: Duration::from_secs(30),
+        };
+
+        let outcome = judge.judge(request(None)).await.unwrap();
+
+        assert_eq!(outcome, JudgeOutcome::Decided { satisfied: true, rationale: "r".into() });
+        let received = std::fs::read_to_string(npm.join("args.txt")).unwrap();
+        assert!(received.contains("--setting-sources") && received.contains("--no-session-persistence"), "{received}");
     }
 }
