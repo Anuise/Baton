@@ -1,6 +1,6 @@
 //! Supervisor：launch intent → 啟動 → 回執 → 就緒 → 停止；程序身分核對（spec 「程序與模組架構」）。
 //!
-//! 每次 `tick` 依序做六件事，而且每一件都是冪等的、只信任資料庫中持久化的狀態：
+//! 每次 `tick` 依序做七件事，而且每一件都是冪等的、只信任資料庫中持久化的狀態：
 //! 1. **啟動**派工 Outbox 裡的 Run：先在交易中持久化 launch intent 與 command_id，才在交易外 spawn，
 //!    再把回執寫回。Runtime 在中間任何一點當掉，下一次 tick 都用 command_id 找回原程序，**絕不重新啟動**；
 //!    找不到程序時把 Run 標為 interrupted，交給使用者重新派工，而不是猜測「應該沒啟動」。
@@ -11,11 +11,16 @@
 //! 5. **額度**：輪詢到期（每個帳號每 5 分鐘）的外部額度觀測器並重新推估（票 27）。
 //! 6. **排程**：前面幾步可能釋放了帳號與全域名額，於是讓佇列中等待的 Task 依優先序逐一嘗試派出（票 19）；
 //!    派出的 Run 在同一次 `tick` 就啟動。
+//! 7. **驗證**（票 13）：對 `verifying` 且契約宣告了確定性檢查的 Task 執行檢查，以成果接受交易提交結果；
+//!    交易會校驗 Run 世代、契約版本與成果 manifest，觀察之後狀態已經改變（例如使用者先手動接受）就被拒絕。
+//!    檢查可能很久（命令最多 10 分鐘），所以背景迴圈把這一步放在另一個工作裡執行，不擋住前六步；
+//!    測試呼叫的 `tick` 則等它做完。
 //!
 //! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
 //! 由測試在想要的時刻呼叫 `tick`，搭配 fake Clock 就能完全決定性地重現任何時序。
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +29,7 @@ use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::AgentScope;
 use baton_domain::quota::RateLimitSignal;
 use baton_domain::run::{ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus};
+use baton_domain::verification::AcceptanceCommand;
 use baton_domain::Timestamp;
 use baton_ports::{
     AdapterEvent, AgentHandle, Liveness, Ports, ProcessIdentity, RunSpec, SpawnSpec, StopResult,
@@ -54,6 +60,10 @@ pub struct Supervisor {
     stop_grace: Duration,
     /// 同一時間只有一個 tick 在進行（背景迴圈與測試呼叫不會交錯）。
     tick_lock: Mutex<()>,
+    /// 同一時間只有一輪驗證在進行。
+    verify_lock: Arc<Mutex<()>>,
+    /// 成果儲存的根目錄（成果檢查從這裡讀取檔案）。
+    artifacts_root: PathBuf,
     /// 已接上的事件串流；Runtime 重建後是空的，下一次 tick 會重新接上。
     streams: Mutex<HashMap<String, BoxStream<'static, AdapterEvent>>>,
     /// 這個 Runtime 實例已經向 ProcessControl 「找回」過（取得管理權）的 Run。
@@ -68,6 +78,7 @@ impl Supervisor {
         credentials: CredentialIssuer,
         runtime_url: String,
         stop_grace: Duration,
+        artifacts_root: PathBuf,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -77,6 +88,8 @@ impl Supervisor {
             runtime_url,
             stop_grace,
             tick_lock: Mutex::new(()),
+            verify_lock: Arc::new(Mutex::new(())),
+            artifacts_root,
             streams: Mutex::new(HashMap::new()),
             adopted: Mutex::new(HashSet::new()),
         })
@@ -92,13 +105,28 @@ impl Supervisor {
                     _ = wake.notified() => {}
                     _ = tokio::time::sleep(BACKGROUND_INTERVAL) => {}
                 }
-                supervisor.tick().await;
+                supervisor.supervise_once().await;
+                // 驗證在另一個工作裡進行；上一輪還沒做完就不再開新的一輪
+                if let Ok(guard) = supervisor.verify_lock.clone().try_lock_owned() {
+                    let verifier = supervisor.clone();
+                    tokio::spawn(async move {
+                        verifier.verify_pending().await;
+                        drop(guard);
+                    });
+                }
             }
         })
     }
 
-    /// 處理目前所有待辦；每個步驟的失敗只記日誌，下一次 tick 會自然重試。
+    /// 處理目前所有待辦（含驗證）；每個步驟的失敗只記日誌，下一次 tick 會自然重試。
     pub async fn tick(&self) {
+        self.supervise_once().await;
+        let _serial = self.verify_lock.lock().await;
+        self.verify_pending().await;
+    }
+
+    /// 驗證以外的六個步驟。
+    async fn supervise_once(&self) {
         let _serial = self.tick_lock.lock().await;
         self.launch_pending().await;
         self.pump_events().await;
@@ -333,6 +361,35 @@ impl Supervisor {
             Err(error) => {
                 self.note(&format!("Run {} 無法接上事件串流：{error}", run.id));
                 None
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 驗證
+
+    /// 對等待檢查的 Task 執行確定性檢查並提交結果；呼叫端負責持有 `verify_lock`。
+    /// Runtime 在檢查途中當掉時沒有任何紀錄，下一次會重新執行檢查（不猜測結果）。
+    async fn verify_pending(&self) {
+        let pending = match self.store.pending_verifications().await {
+            Ok(pending) => pending,
+            Err(error) => return self.note(&format!("無法讀取等待驗證的 Task：{error}")),
+        };
+        for item in pending {
+            let task_id = item.pending.task_id.clone();
+            let results = crate::verifier::run_checks(&self.ports, &self.artifacts_root, &item).await;
+            let Some(record_id) = new_prefixed_id("ver") else {
+                self.note("無法取得系統亂數，驗證結果稍後重試");
+                continue;
+            };
+            let command = AcceptanceCommand::RecordChecks { task_id: task_id.clone(), basis: item.pending.basis, results };
+            match self.store.apply_acceptance(item.workspace_id, command, record_id, self.ports.clock.now()).await {
+                Ok(change) => self.note(&format!(
+                    "Task {task_id} 的確定性檢查結果：{}，Task 進入 {}",
+                    change.record.outcome.as_str(),
+                    change.task.status.as_str()
+                )),
+                // 觀察之後狀態已經改變（例如使用者先手動接受）：這份結果已過期，不套用
+                Err(error) => self.note(&format!("Task {task_id} 的檢查結果沒有套用：{error}")),
             }
         }
     }

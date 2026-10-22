@@ -12,6 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::authorization::Capability;
 use baton_domain::run::RunView;
+use baton_domain::verification::VerificationRecord;
 use baton_domain::task::{ContractContent, Goal, MissingItem, TaskCommand, TaskContract, TaskError, TaskView};
 use baton_store::TaskApplyError;
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,8 @@ pub struct TaskBoard {
     pub tasks: Vec<TaskView>,
     /// Workspace 的全部 Run（含已結束），依建立順序；卡片上的執行狀態由它組出。
     pub runs: Vec<RunView>,
+    /// Workspace 的全部驗證紀錄，由舊到新；卡片上的驗證結果與證據由它組出（票 13）。
+    pub verifications: Vec<VerificationRecord>,
     /// 契約「所需能力」可選的清單。
     pub capabilities: Vec<CapabilityInfo>,
 }
@@ -211,6 +214,7 @@ pub(crate) async fn board(
         goals: data.goals,
         tasks: data.tasks,
         runs: data.runs,
+        verifications: data.verifications,
         capabilities: Capability::ALL
             .into_iter()
             .map(|c| CapabilityInfo { capability: c, label: c.label().to_string(), high_risk: c.is_high_risk() })

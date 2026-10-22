@@ -66,3 +66,7 @@ run 紀錄放在 `.scratch/platform-rebuild-v1/.orchestration/` 底下：每個 
 ## 決策紀錄
 
 過程中遇到問題，一律先自己決定、繼續做，再依 [ai-decisions.md](ai-decisions.md) 的格式追加紀錄，標上重要度（高／中／低）。〔使用者指定〕Worker 也遵守這條規則，但只能追加新條目，不能修改既有條目。
+
+## 維護注意
+
+- **不要在有 run 執行中時修改 `.orchestration/dispatch.sh`。** bash 邊讀邊執行腳本，檔案內容位移後，執行中的 run 在 claude 結束時會讀到錯位的指令（2026-10-22 R049 的紀錄檔因此被截斷）。需要修改時，先等所有由舊版啟動的 run 結束，或結束那些 run 的外層 bash（保留 claude 程序）再改，並用 `wait.sh` 等待結果。

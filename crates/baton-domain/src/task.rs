@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authorization::{self, AdmissionDenied, AuthorizationRevision, Capability};
 use crate::event::DomainEvent;
+use crate::verification::VerificationCheck;
 use crate::workspace::{Workspace, WorkspaceStatus};
 use crate::Timestamp;
 
@@ -223,6 +224,9 @@ pub struct ContractContent {
     /// 准入檢查時與 Workspace 目前生效的授權比對。
     #[serde(default)]
     pub required_capabilities: Vec<Capability>,
+    /// 「完成與驗證條件」中可由 Runtime 機械判定的部分（票 13）；沒有宣告時只能由使用者手動接受。
+    #[serde(default)]
+    pub verification_checks: Vec<VerificationCheck>,
 }
 
 impl ContractContent {
@@ -288,6 +292,8 @@ impl ContractContent {
         }
         self.required_capabilities.sort();
         self.required_capabilities.dedup();
+        self.verification_checks = crate::verification::normalize_checks(std::mem::take(&mut self.verification_checks))
+            .map_err(|why| TaskError::ContractInvalid(format!("「{}」的確定性檢查：{why}", ContractFieldName::DoneCriteria.label())))?;
         Ok(self)
     }
 }
@@ -912,6 +918,7 @@ mod tests {
             done_criteria: filled("至少比較五個產品"),
             blocker_handling: filled("缺資料就回報，不自行猜測"),
             required_capabilities: vec![],
+            verification_checks: vec![],
         }
     }
 

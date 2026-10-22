@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { accountScheduling, schedulingOverview } from "./fixtures";
+import { accountScheduling, REPORT_SHA256, schedulingOverview, verificationRecord, verificationView } from "./fixtures";
 import { TaskBoard, type TaskBoardClient } from "./TaskBoard";
 import {
   CONTRACT_FIELDS,
@@ -17,6 +17,8 @@ import {
   type TaskBoard as TaskBoardData,
   type TaskContract,
   type TaskView,
+  type VerificationRecord,
+  type VerificationView,
   type WaitReason,
   type Workspace,
 } from "./runtimeClient";
@@ -53,7 +55,16 @@ const goal = (id: string, title: string): Goal => ({ id, workspace_id: workspace
 
 function contract(taskId: string, overrides: Partial<TaskContract> = {}): TaskContract {
   const empty = Object.fromEntries(CONTRACT_FIELDS.map((name) => [name, null]));
-  return { ...empty, task_id: taskId, version: 1, required_capabilities: [], note: null, created_at: T0, ...overrides } as TaskContract;
+  return {
+    ...empty,
+    task_id: taskId,
+    version: 1,
+    required_capabilities: [],
+    verification_checks: [],
+    note: null,
+    created_at: T0,
+    ...overrides,
+  } as TaskContract;
 }
 
 /** 與 Runtime 一致的缺項判定（只看契約欄位）：未提供是 field_missing，未知是 field_unknown。 */
@@ -131,13 +142,17 @@ function fakeClient(
     queue?: QueueEntry[];
     /** 設定後，派工一律回「排隊中」並加入佇列（沒有名額）。 */
     queueOnDispatch?: WaitReason[];
+    verifications?: VerificationRecord[];
+    /** `taskVerification` 回傳的驗證資料。 */
+    verification?: VerificationView;
   } = {},
 ) {
   let goals = initial.goals ?? [goal("goal_1", "整理文件")];
   let tasks = initial.tasks ?? [];
   let runs = initial.runs ?? [];
   let queue = initial.queue ?? [];
-  const board = (): TaskBoardData => ({ workspace_id: workspace.id, goals, tasks, runs, capabilities: CAPABILITIES });
+  let verifications = initial.verifications ?? [];
+  const board = (): TaskBoardData => ({ workspace_id: workspace.id, goals, tasks, runs, capabilities: CAPABILITIES, verifications });
   const replace = (id: string, patch: Partial<TaskView>) => {
     tasks = tasks.map((t) => (t.id === id ? { ...t, ...patch } : t));
     return tasks.find((t) => t.id === id)!;
@@ -213,6 +228,28 @@ function fakeClient(
       runs = runs.map((r) => (r.id === runId ? next : r));
       if (next.status === "cancelled") replace(current.task_id, { status: "ready" });
       return next;
+    }),
+    taskVerification: vi.fn(async (_ws: string, id: string) => ({
+      ...(initial.verification ?? verificationView()),
+      task_id: id,
+      status: tasks.find((t) => t.id === id)!.status,
+      records: verifications.filter((r) => r.task_id === id),
+    })),
+    acceptTask: vi.fn(async (_ws: string, id: string, { basis, note }) => {
+      const record = verificationRecord({
+        id: `ver_${verifications.length + 1}`,
+        task_id: id,
+        run_id: basis.run_id,
+        generation: basis.generation,
+        contract_version: basis.contract_version,
+        method: "manual",
+        accepted_by: "desktop",
+        note: note ?? null,
+        decided_at: T0 + 3_600_000,
+      });
+      verifications = [...verifications, record];
+      replace(id, { status: "completed" });
+      return { ...verificationView(), task_id: id, status: "completed" as const, basis: null, records: [record] };
     }),
   };
   return client;
@@ -980,5 +1017,247 @@ describe("編輯契約", () => {
 
     expect(within(card("舊的")).queryByRole("button", { name: "編輯契約" })).not.toBeInTheDocument();
     expect(within(card("舊的")).queryByRole("button", { name: "新增相依" })).not.toBeInTheDocument();
+  });
+});
+
+describe("成果驗證", () => {
+  const verifyingTask = () => task("task_1", "部署", { status: "verifying", contract: filledContract("task_1") });
+  const panel = (title: string) => within(card(title)).getByRole("group", { name: "成果驗證" });
+
+  it("verifying 卡片顯示「驗證中」而非已完成；檢視驗證後列出檢查、成果 manifest 與自動檢查說明", async () => {
+    const client = fakeClient({ tasks: [verifyingTask()], runs: [run("run_1", "task_1", "succeeded")] });
+    const user = await renderBoard(client);
+
+    expect(panel("部署")).toHaveTextContent("驗證中");
+    expect(card("部署")).not.toHaveTextContent("已完成");
+    expect(client.taskVerification).not.toHaveBeenCalled();
+
+    await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
+
+    expect(await within(panel("部署")).findByText("Runtime 正在執行 2 項確定性檢查，全部通過後自動完成")).toBeInTheDocument();
+    expect(client.taskVerification).toHaveBeenCalledWith("ws_1", "task_1");
+    expect(panel("部署")).toHaveTextContent("指令 cargo test（預期結束碼 0）");
+    expect(panel("部署")).toHaveTextContent("成果 report.md（存在即可）");
+    expect(panel("部署")).toHaveTextContent(`report.md v1，SHA-256 ${REPORT_SHA256.slice(0, 12)}…`);
+    expect(panel("部署")).not.toHaveTextContent(REPORT_SHA256);
+    expect(within(panel("部署")).getByRole("button", { name: "接受成果" })).toBeEnabled();
+  });
+
+  it("automatic 為 false 時說明只能手動接受，仍可接受成果", async () => {
+    const user = await renderBoard(
+      fakeClient({ tasks: [verifyingTask()], verification: verificationView({ automatic: false, checks: [] }) }),
+    );
+
+    await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
+
+    expect(await within(panel("部署")).findByText("Runtime 不會自動判定，需要手動接受成果")).toBeInTheDocument();
+    expect(within(panel("部署")).queryByText("宣告的檢查")).not.toBeInTheDocument();
+    expect(within(panel("部署")).getByRole("button", { name: "接受成果" })).toBeEnabled();
+  });
+
+  it("接受成果時把 view 的 basis 原樣送回並附上附註；成功後移到「已完成」並顯示已通過驗證（手動接受）", async () => {
+    const client = fakeClient({ tasks: [verifyingTask()] });
+    const user = await renderBoard(client);
+
+    await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
+    await user.type(await within(panel("部署")).findByLabelText("附註（選填）"), "已人工確認報告");
+    await user.click(within(panel("部署")).getByRole("button", { name: "接受成果" }));
+
+    expect(client.acceptTask).toHaveBeenCalledWith("ws_1", "task_1", { basis: verificationView().basis, note: "已人工確認報告" });
+    const completed = await within(column("已完成（1）")).findByRole("article", { name: "部署" });
+    expect(within(completed).getByRole("group", { name: "驗證紀錄" })).toHaveTextContent("已通過驗證（手動接受）");
+    expect(within(completed).queryByRole("group", { name: "成果驗證" })).not.toBeInTheDocument();
+  });
+
+  it("沒有附註時送出 null", async () => {
+    const client = fakeClient({ tasks: [verifyingTask()] });
+    const user = await renderBoard(client);
+
+    await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
+    await user.click(await within(panel("部署")).findByRole("button", { name: "接受成果" }));
+
+    expect(client.acceptTask).toHaveBeenCalledWith("ws_1", "task_1", { basis: verificationView().basis, note: null });
+  });
+
+  it("接受被拒（409，依據過期）時顯示 Runtime 的說明並重新載入驗證資料", async () => {
+    const client = fakeClient({ tasks: [verifyingTask()] });
+    vi.mocked(client.acceptTask).mockRejectedValueOnce(new Error("Run 世代已變更，請重新檢視驗證後再接受"));
+    const newer = verificationView({
+      basis: { run_id: "run_2", generation: 2, contract_version: 1, artifacts: [{ artifact_id: "art_1", version: 2 }] },
+      artifacts: [{ artifact_id: "art_1", name: "report.md", version: 2, sha256: "f".repeat(64) }],
+    });
+    vi.mocked(client.taskVerification).mockResolvedValueOnce(verificationView()).mockResolvedValueOnce(newer);
+    const user = await renderBoard(client);
+
+    await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
+    await user.click(await within(panel("部署")).findByRole("button", { name: "接受成果" }));
+
+    expect(await within(panel("部署")).findByRole("alert")).toHaveTextContent("Run 世代已變更，請重新檢視驗證後再接受");
+    expect(await within(panel("部署")).findByText(/report\.md v2/)).toBeInTheDocument();
+    expect(client.taskVerification).toHaveBeenCalledTimes(2);
+    expect(column("驗證中（1）")).toBeInTheDocument();
+
+    // 重新載入後再接受，送出的是新的依據
+    await user.click(within(panel("部署")).getByRole("button", { name: "接受成果" }));
+    expect(client.acceptTask).toHaveBeenLastCalledWith("ws_1", "task_1", { basis: newer.basis, note: null });
+  });
+
+  it("Task 已不在驗證中時，說明目前狀態且不能接受", async () => {
+    const client = fakeClient({ tasks: [verifyingTask()] });
+    vi.mocked(client.taskVerification).mockResolvedValueOnce(verificationView({ status: "completed", basis: null }));
+    const user = await renderBoard(client);
+
+    await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
+
+    expect(await within(panel("部署")).findByText("Task 目前是「已完成」，不能接受成果")).toBeInTheDocument();
+    expect(within(panel("部署")).getByRole("button", { name: "接受成果" })).toBeDisabled();
+  });
+
+  it("讀不到驗證資料時顯示原因", async () => {
+    const client = fakeClient({ tasks: [verifyingTask()] });
+    vi.mocked(client.taskVerification).mockRejectedValueOnce(new Error("Task 不存在"));
+    const user = await renderBoard(client);
+
+    await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
+
+    expect(await within(panel("部署")).findByRole("alert")).toHaveTextContent("無法取得驗證資料：Task 不存在");
+  });
+
+  it("上次驗證未通過：ready 卡片列出未通過的檢查與證據，預設收合", async () => {
+    const user = await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "ready", contract: filledContract("task_1") })],
+        verifications: [
+          verificationRecord({
+            outcome: "failed",
+            decided_at: T0 + 3_600_000,
+            checks: [
+              {
+                check: { kind: "command", program: "cargo", args: ["test"], expected_exit_code: 0 },
+                status: "failed",
+                detail: "結束碼 101：2 個測試失敗",
+              },
+              { check: { kind: "file", path: "out/report.md", sha256: null }, status: "passed", detail: "檔案存在" },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    const record = within(card("部署")).getByRole("group", { name: "驗證紀錄" });
+    expect(record).toHaveTextContent("上次驗證未通過（第 1 次 Run，2023/11/14 23:13）");
+    const details = record.querySelector("details")!;
+    expect(details).not.toHaveAttribute("open");
+    await user.click(within(details).getByText("未通過的檢查（1）"));
+    expect(details).toHaveAttribute("open");
+    expect(details).toHaveTextContent("指令 cargo test（預期結束碼 0）：結束碼 101：2 個測試失敗");
+    expect(details).not.toHaveTextContent("out/report.md");
+  });
+
+  it("只看該 Task 最新的驗證紀錄：先未通過、後自動檢查通過時顯示已通過驗證（自動檢查）", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "completed" }), task("task_2", "其他", { status: "ready" })],
+        verifications: [verificationRecord({ id: "ver_1", outcome: "failed" }), verificationRecord({ id: "ver_2", generation: 2 })],
+      }),
+    );
+
+    const record = within(card("部署")).getByRole("group", { name: "驗證紀錄" });
+    expect(record).toHaveTextContent("已通過驗證（自動檢查）");
+    expect(record).not.toHaveTextContent("未通過");
+    expect(within(card("其他")).queryByRole("group", { name: "驗證紀錄" })).not.toBeInTheDocument();
+  });
+});
+
+describe("確定性檢查編輯", () => {
+  const UPPER_HASH = "ABCDEF0123456789".repeat(4);
+
+  async function openCreate(client: TaskBoardClient) {
+    const user = await renderBoard(client);
+    await user.click(screen.getByRole("button", { name: "建立 Task" }));
+    const form = screen.getByRole("region", { name: "建立 Task" });
+    await user.type(within(form).getByLabelText("Task 標題"), "寫文件");
+    return { user, form };
+  }
+
+  it("三種檢查與自訂結束碼都解析進契約；雜湊轉成小寫", async () => {
+    const client = fakeClient();
+    const { user, form } = await openCreate(client);
+
+    await user.click(within(form).getByLabelText("確定性檢查（每行一項）"));
+    await user.paste(
+      [
+        "command: cargo test --all",
+        "command[3]: pwsh -File check.ps1",
+        "",
+        "file: out/report.md",
+        `file: out/data.csv ${UPPER_HASH}`,
+        `artifact: report.md ${REPORT_SHA256}`,
+      ].join("\n"),
+    );
+    await user.click(within(form).getByRole("button", { name: "建立" }));
+
+    await waitFor(() => expect(client.createTask).toHaveBeenCalled());
+    expect(vi.mocked(client.createTask).mock.calls[0][1].contract?.verification_checks).toEqual([
+      { kind: "command", program: "cargo", args: ["test", "--all"], expected_exit_code: 0 },
+      { kind: "command", program: "pwsh", args: ["-File", "check.ps1"], expected_exit_code: 3 },
+      { kind: "file", path: "out/report.md", sha256: null },
+      { kind: "file", path: "out/data.csv", sha256: UPPER_HASH.toLowerCase() },
+      { kind: "artifact", name: "report.md", sha256: REPORT_SHA256 },
+    ]);
+  });
+
+  it("格式錯誤時逐行列出並且不送出", async () => {
+    const client = fakeClient();
+    const { user, form } = await openCreate(client);
+
+    await user.click(within(form).getByLabelText("確定性檢查（每行一項）"));
+    await user.paste(
+      ["cmd: cargo test", "command:", "file: a b c", "artifact: report.md xyz", "file[2]: out/a", "command: cargo build"].join("\n"),
+    );
+    await user.click(within(form).getByRole("button", { name: "建立" }));
+
+    const alert = within(form).getByRole("alert");
+    expect(alert).toHaveTextContent("確定性檢查：格式錯誤「cmd: cargo test」");
+    expect(alert).toHaveTextContent("確定性檢查：「command:」缺少要執行的程式");
+    expect(alert).toHaveTextContent("確定性檢查：「file: a b c」應為 file: 相對路徑 [sha256]");
+    expect(alert).toHaveTextContent("確定性檢查：「artifact: report.md xyz」的 sha256 應為 64 位十六進位");
+    expect(alert).toHaveTextContent("確定性檢查：「file[2]: out/a」只有 command 可以指定結束碼");
+    expect(alert).not.toHaveTextContent("cargo build");
+    expect(client.createTask).not.toHaveBeenCalled();
+  });
+
+  it("編輯契約時載入既有的檢查，原樣送回", async () => {
+    const checks: TaskContract["verification_checks"] = [
+      { kind: "command", program: "cargo", args: ["test"], expected_exit_code: 0 },
+      { kind: "command", program: "pwsh", args: ["-File", "check.ps1"], expected_exit_code: 3 },
+      { kind: "artifact", name: "report.md", sha256: REPORT_SHA256 },
+    ];
+    const client = fakeClient({ tasks: [task("task_1", "寫文件", { contract: contract("task_1", { verification_checks: checks }) })] });
+    const user = await renderBoard(client);
+
+    await user.click(within(card("寫文件")).getByRole("button", { name: "編輯契約" }));
+    const form = screen.getByRole("region", { name: "編輯契約：寫文件" });
+    expect(within(form).getByLabelText("確定性檢查（每行一項）")).toHaveValue(
+      ["command: cargo test", "command[3]: pwsh -File check.ps1", `artifact: report.md ${REPORT_SHA256}`].join("\n"),
+    );
+    await user.click(within(form).getByRole("button", { name: "儲存契約" }));
+
+    await waitFor(() => expect(client.updateTaskContract).toHaveBeenCalled());
+    expect(vi.mocked(client.updateTaskContract).mock.calls[0][2].verification_checks).toEqual(checks);
+  });
+
+  it("清空檢查後不送這個欄位（Runtime 視為空陣列）", async () => {
+    const checks: TaskContract["verification_checks"] = [{ kind: "file", path: "out/report.md", sha256: null }];
+    const client = fakeClient({ tasks: [task("task_1", "寫文件", { contract: contract("task_1", { verification_checks: checks }) })] });
+    const user = await renderBoard(client);
+
+    await user.click(within(card("寫文件")).getByRole("button", { name: "編輯契約" }));
+    const form = screen.getByRole("region", { name: "編輯契約：寫文件" });
+    await user.clear(within(form).getByLabelText("確定性檢查（每行一項）"));
+    await user.click(within(form).getByRole("button", { name: "儲存契約" }));
+
+    await waitFor(() => expect(client.updateTaskContract).toHaveBeenCalled());
+    expect(vi.mocked(client.updateTaskContract).mock.calls[0][2]).not.toHaveProperty("verification_checks");
   });
 });
