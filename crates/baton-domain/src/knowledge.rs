@@ -227,6 +227,24 @@ impl KnowledgeEntry {
     }
 }
 
+/// 搜尋方式（spec D-26）：FTS5 + trigram 全文檢索；FTS5 不可用時退回逐筆 LIKE 比對（降級，結果相同但較慢）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    FullText,
+    LikeFallback,
+}
+
+/// 條目歷史中的一筆變更（取自追加式事件）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnowledgeEvent {
+    /// 這次變更之後的聚合版本。
+    pub revision: i64,
+    pub event_type: String,
+    pub occurred_at: Timestamp,
+    pub payload: serde_json::Value,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KnowledgeError {
     #[error("內容不正確：{0}")]

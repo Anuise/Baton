@@ -186,7 +186,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
     let runtime = Runtime::start_with(
         config,
         ports,
-        RuntimeOptions { background_supervisor: false, stop_grace: Duration::from_millis(200) },
+        RuntimeOptions { background_supervisor: false, stop_grace: Duration::from_millis(200), ..RuntimeOptions::default() },
     )
     .await
     .unwrap();
