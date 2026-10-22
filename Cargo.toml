@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/baton-domain",
     "crates/baton-ports",
+    "crates/baton-credential",
     "crates/baton-store",
     "crates/baton-api",
     "crates/baton-runtime",
@@ -14,6 +15,7 @@ members = [
 default-members = [
     "crates/baton-domain",
     "crates/baton-ports",
+    "crates/baton-credential",
     "crates/baton-store",
     "crates/baton-api",
     "crates/baton-runtime",

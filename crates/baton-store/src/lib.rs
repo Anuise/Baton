@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use baton_domain::auth::{CredentialRecord, Role};
 use baton_domain::Timestamp;
 use rusqlite::Connection;
 
@@ -31,6 +32,13 @@ const MIGRATIONS: &[&str] = &[
     "CREATE TABLE runtime_boot (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         started_at INTEGER NOT NULL
+    );",
+    // 只存 token 的雜湊；role 預留 Agent 憑證（spec D-22）
+    "CREATE TABLE credential (
+        token_hash TEXT PRIMARY KEY,
+        role TEXT NOT NULL CHECK (role IN ('desktop', 'agent')),
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER
     );",
 ];
 
@@ -76,6 +84,70 @@ impl Store {
         .await
         .map_err(|_| StoreError::Join)?
     }
+
+    /// 簽發憑證，不影響既有的憑證。
+    pub async fn issue_credential(&self, record: CredentialRecord) -> StoreResult<()> {
+        self.write_credential(record, false).await
+    }
+
+    /// 輪替：撤銷同角色的全部既有憑證，只留下新的。
+    pub async fn rotate_credential(&self, record: CredentialRecord) -> StoreResult<()> {
+        self.write_credential(record, true).await
+    }
+
+    async fn write_credential(&self, record: CredentialRecord, revoke_same_role: bool) -> StoreResult<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let tx = conn.transaction()?;
+            if revoke_same_role {
+                tx.execute("DELETE FROM credential WHERE role = ?1", [record.role.as_str()])?;
+            }
+            tx.execute(
+                "INSERT INTO credential (token_hash, role, issued_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    record.token_hash,
+                    record.role.as_str(),
+                    record.issued_at.as_millis(),
+                    record.expires_at.map(|t| t.as_millis()),
+                ],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|_| StoreError::Join)?
+    }
+
+    /// 以 token 雜湊查詢憑證。
+    pub async fn find_credential(&self, token_hash: &str) -> StoreResult<Option<CredentialRecord>> {
+        let conn = self.conn.clone();
+        let token_hash = token_hash.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let row = conn
+                .query_row(
+                    "SELECT role, issued_at, expires_at FROM credential WHERE token_hash = ?1",
+                    [&token_hash],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?)),
+                )
+                .map(Some)
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                    other => Err(other),
+                })?;
+            Ok(row.and_then(|(role, issued_at, expires_at)| {
+                Some(CredentialRecord {
+                    token_hash,
+                    role: Role::parse(&role)?,
+                    issued_at: Timestamp::from_millis(issued_at),
+                    expires_at: expires_at.map(Timestamp::from_millis),
+                })
+            }))
+        })
+        .await
+        .map_err(|_| StoreError::Join)?
+    }
 }
 
 fn migrate(conn: &Connection) -> StoreResult<()> {
@@ -112,6 +184,53 @@ mod tests {
         store_a.record_boot(Timestamp::from_millis(1)).await.unwrap();
         let store_b = Store::open(b.path()).await.unwrap();
         assert_eq!(store_b.record_boot(Timestamp::from_millis(1)).await.unwrap(), 1);
+    }
+
+    fn desktop_record(hash: &str, expires_at: Option<i64>) -> CredentialRecord {
+        CredentialRecord {
+            token_hash: hash.into(),
+            role: Role::Desktop,
+            issued_at: Timestamp::from_millis(10),
+            expires_at: expires_at.map(Timestamp::from_millis),
+        }
+    }
+
+    #[tokio::test]
+    async fn issued_credential_can_be_found_by_hash_with_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let record = CredentialRecord { role: Role::Agent, ..desktop_record("h1", Some(99)) };
+
+        store.issue_credential(record.clone()).await.unwrap();
+
+        assert_eq!(store.find_credential("h1").await.unwrap(), Some(record));
+        assert_eq!(store.find_credential("other").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn rotating_revokes_same_role_credentials_but_not_other_roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let agent = CredentialRecord { role: Role::Agent, ..desktop_record("agent", None) };
+        store.issue_credential(desktop_record("old", None)).await.unwrap();
+        store.issue_credential(agent.clone()).await.unwrap();
+
+        store.rotate_credential(desktop_record("new", None)).await.unwrap();
+
+        assert_eq!(store.find_credential("old").await.unwrap(), None);
+        assert!(store.find_credential("new").await.unwrap().is_some());
+        assert_eq!(store.find_credential("agent").await.unwrap(), Some(agent));
+    }
+
+    #[tokio::test]
+    async fn credentials_survive_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        store.issue_credential(desktop_record("h", None)).await.unwrap();
+        drop(store);
+
+        let reopened = Store::open(dir.path()).await.unwrap();
+        assert!(reopened.find_credential("h").await.unwrap().is_some());
     }
 
     #[tokio::test]

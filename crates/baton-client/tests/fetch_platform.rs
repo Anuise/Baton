@@ -1,7 +1,10 @@
 //! 桌面殼向 Runtime 查詢平台狀態。
 
-use baton_client::fetch_platform;
+use std::sync::Arc;
+
+use baton_client::RuntimeClient;
 use baton_domain::platform::{OsFamily, PlatformSnapshot, SupportStatus};
+use baton_harness::fakes::FakeSecretProtector;
 use baton_harness::Harness;
 
 #[tokio::test]
@@ -16,7 +19,9 @@ async fn fetches_the_platform_status_from_a_running_runtime() {
         process_arch: "x64".into(),
     });
 
-    let response = fetch_platform(harness.addr()).await.unwrap();
+    let client = RuntimeClient::new(harness.addr(), harness.data_dir().to_path_buf(), Arc::new(FakeSecretProtector));
+
+    let response = client.platform().await.unwrap();
 
     assert_eq!(response.platform.os_build, "19045");
     assert_eq!(response.assessment.status, SupportStatus::Unsupported);

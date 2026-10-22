@@ -8,6 +8,8 @@ publish.workspace = true
 # 桌面 App 用來連回或啟動 Runtime 的用戶端邏輯（不含 Tauri，方便獨立測試）
 [dependencies]
 baton-api = { path = "../baton-api" }
+baton-credential = { path = "../baton-credential" }
+baton-ports = { path = "../baton-ports" }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = "1"
 thiserror = "2"

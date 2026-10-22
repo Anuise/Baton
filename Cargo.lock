@@ -170,7 +170,10 @@ dependencies = [
  "axum",
  "baton-domain",
  "baton-ports",
+ "baton-store",
+ "futures",
  "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -178,12 +181,24 @@ name = "baton-client"
 version = "0.1.0"
 dependencies = [
  "baton-api",
+ "baton-credential",
  "baton-domain",
  "baton-harness",
+ "baton-ports",
  "reqwest 0.12.28",
  "serde",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "baton-credential"
+version = "0.1.0"
+dependencies = [
+ "baton-ports",
+ "tempfile",
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -192,6 +207,7 @@ version = "0.1.0"
 dependencies = [
  "baton-api",
  "baton-client",
+ "baton-credential",
  "baton-domain",
  "tauri",
  "tauri-build",
@@ -204,6 +220,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -213,12 +230,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "baton-api",
+ "baton-credential",
  "baton-domain",
  "baton-ports",
  "baton-runtime",
  "futures",
  "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -242,10 +261,12 @@ dependencies = [
  "axum",
  "baton-api",
  "baton-client",
+ "baton-credential",
  "baton-domain",
  "baton-ports",
  "baton-store",
  "futures",
+ "getrandom 0.3.4",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

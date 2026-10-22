@@ -8,6 +8,7 @@ mod clock;
 mod platform;
 mod process;
 mod quota;
+mod secret;
 mod workspace_fs;
 
 use std::sync::Arc;
@@ -17,6 +18,7 @@ pub use clock::Clock;
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
+pub use secret::SecretProtector;
 pub use workspace_fs::{DirtyState, WorkspaceFs};
 
 /// Port 呼叫的共同錯誤。
@@ -40,4 +42,5 @@ pub struct Ports {
     pub quota_observer: Arc<dyn QuotaObserver>,
     pub workspace_fs: Arc<dyn WorkspaceFs>,
     pub platform_info: Arc<dyn PlatformInfo>,
+    pub secret_protector: Arc<dyn SecretProtector>,
 }

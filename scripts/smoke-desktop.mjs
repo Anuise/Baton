@@ -4,6 +4,7 @@
 //   1. App 啟動後自動啟動 Runtime，狀態列顯示「Runtime 運作中」
 //   2. 關閉 App 視窗後 Runtime 仍在執行
 //   3. 再次開啟 App 時連回同一個 Runtime（boot_count 不增加、pid 不變）
+//   4. 不帶憑證的請求被 Runtime 拒絕（桌面憑證由 App 自動讀取 DPAPI 保護檔，不需人工複製）
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -62,7 +63,23 @@ async function evaluate(debugPort, expression) {
   return result.result?.result?.value;
 }
 
-const health = async (port) => (await fetch(`http://127.0.0.1:${port}/api/v1/health`)).json();
+/** 以目前使用者身分還原 DPAPI 保護的桌面憑證（與 App 相同的來源）。 */
+function readDesktopCredential(dir) {
+  const file = join(dir, "auth", "desktop-credential.bin");
+  const script = `Add-Type -AssemblyName System.Security; $b = [IO.File]::ReadAllBytes('${file.replaceAll("'", "''")}'); [Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($b, $null, 'CurrentUser'))`;
+  const result = spawnSync("powershell", ["-NoProfile", "-Command", script], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`無法讀取桌面憑證：${result.stderr}`);
+  return result.stdout.trim();
+}
+
+const runtimeUrl = (port) => `http://127.0.0.1:${port}/api/v1/health`;
+
+const health = async (port) =>
+  (
+    await fetch(runtimeUrl(port), {
+      headers: { Authorization: `Bearer ${readDesktopCredential(dataDir)}`, "X-Baton-Client": "baton-desktop" },
+    })
+  ).json();
 
 function launchApp(env) {
   return spawn(exe, [], { env: { ...process.env, ...env }, stdio: "ignore" });
@@ -133,6 +150,13 @@ try {
     throw new Error(`再次開啟後不是同一個 Runtime：${JSON.stringify(second)}`);
   }
   console.log("✔ 再次開啟時連回同一個 Runtime（沒有重複啟動）");
+
+  // 4. 不帶憑證的請求（例如瀏覽器中的其他程式）被拒絕
+  const anonymous = await fetch(runtimeUrl(runtimePort));
+  if (anonymous.status !== 403 && anonymous.status !== 401) {
+    throw new Error(`未帶憑證的請求應被拒絕，實際回應 ${anonymous.status}`);
+  }
+  console.log(`✔ 未帶憑證的請求被拒絕（${anonymous.status}）`);
   killProcess(app2.pid);
   console.log("冒煙測試通過");
 } catch (error) {

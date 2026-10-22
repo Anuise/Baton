@@ -8,5 +8,8 @@ publish.workspace = true
 [dependencies]
 baton-domain = { path = "../baton-domain" }
 baton-ports = { path = "../baton-ports" }
+baton-store = { path = "../baton-store" }
 axum = "0.8"
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync"] }
