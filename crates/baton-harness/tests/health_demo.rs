@@ -130,7 +130,7 @@ async fn every_port_can_be_driven_through_its_fake() {
     harness.agent_adapter.set_capability(Capability::NotResumable);
     let capability = ports
         .agent_adapter
-        .resume_capability(&SessionRef { native_session_id: "s".into() })
+        .resume_capability(&SessionRef { native_session_id: "s".into(), config_dir: None, working_dir: None })
         .await
         .unwrap();
     assert_eq!(capability, Capability::NotResumable);

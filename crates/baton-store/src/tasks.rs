@@ -8,6 +8,7 @@ use baton_domain::agent::ReportRecord;
 use baton_domain::budget::{self, BudgetView, TaskBudget};
 use baton_domain::guard::ActiveGuard;
 use baton_domain::run::{ExecutionLease, Run, RunView};
+use baton_domain::session::AgentSession;
 use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
 use baton_domain::workdir::{TaskKind, Workdir, WorkdirView};
@@ -70,6 +71,8 @@ pub(crate) struct Loaded {
     pub(crate) contracts: Vec<TaskContract>,
     pub(crate) runs: Vec<Run>,
     pub(crate) leases: Vec<ExecutionLease>,
+    /// Workspace 內的 Session（票 15），依建立順序。
+    pub(crate) sessions: Vec<AgentSession>,
     /// 每個 Run 每種回報最新一筆被接受的回報（給面板顯示用）。
     pub(crate) reports: Vec<ReportRecord>,
     /// 平台登記的工作目錄（票 20）。
@@ -273,6 +276,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
     let reports = super::agent::load_latest_reports(conn, workspace_id)?;
     let workdirs = super::workdirs::load_workdirs(conn, workspace_id)?;
     let integrations = super::integration::load_entries(conn, Some(workspace_id))?;
+    let sessions = super::sessions::load_sessions(conn, workspace_id)?;
     let budgets = super::budgets::load_budgets(conn, workspace_id)?;
     Ok(Loaded {
         workspace,
@@ -287,6 +291,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
         workdirs,
         integrations,
         guards: Vec::new(),
+        sessions,
         budgets,
     })
 }

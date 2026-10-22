@@ -114,6 +114,8 @@ fn run(id: &str, profile_id: &str, status: RunStatus) -> Run {
         started_at: None,
         ended_at: None,
         native_session_id: None,
+        agent_session_id: None,
+        resume_native_session_id: None,
     }
 }
 
@@ -169,6 +171,17 @@ impl World {
             },
             kind,
         )
+    }
+
+    fn place_preferring(&self, preferred: Option<&str>) -> Placement {
+        let capacity = Capacity {
+            profiles: &self.profiles,
+            settings: &self.settings,
+            active_runs: &self.runs,
+            quota_used: &self.quota,
+            halt: self.halt.clone(),
+        };
+        place_preferring(&capacity, SlotKind::Normal, preferred)
     }
 }
 
@@ -310,6 +323,14 @@ fn the_first_task_goes_to_the_earliest_account_and_the_second_to_the_other_accou
     assert_eq!(placed(world.place(SlotKind::Normal)), "p1", "同樣空閒時取較早建立的帳號");
     world.runs.push(run("r1", "p1", RunStatus::Queued));
     assert_eq!(placed(world.place(SlotKind::Normal)), "p2", "第一個帳號已有 Run，換第二個帳號");
+}
+
+#[test]
+fn a_preferred_account_that_can_take_the_task_wins_over_a_less_busy_one() {
+    let world = World::new(vec![usable("p1"), usable("p2")], CapacityMode::ReserveHandoff).with_runs(&[("p2", 1)]);
+    assert_eq!(placed(world.place_preferring(Some("p2"))), "p2", "上一個 Run 的帳號仍可派就留在原帳號");
+    assert_eq!(placed(world.place_preferring(Some("gone"))), "p1", "偏好的帳號不能派時照常選擇");
+    assert_eq!(placed(world.place_preferring(None)), "p1");
 }
 
 #[test]

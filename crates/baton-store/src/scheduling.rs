@@ -106,6 +106,7 @@ impl Store {
                         workdirs: &loaded.workdirs,
                         guards: &loaded.guards,
                         settings_version: None,
+                        sessions: &loaded.sessions,
                         budgets: &loaded.budgets,
                     };
                     if let Err(rejected) = scheduler::evaluate(&ctx, &capacity, &request.task_id, SlotKind::Normal) {
@@ -136,6 +137,7 @@ impl Store {
                         workdirs: &loaded.workdirs,
                         guards: &loaded.guards,
                         settings_version: None,
+                        sessions: &loaded.sessions,
                         budgets: &loaded.budgets,
                     };
                     let waiting = |reasons| WaitingTask {
@@ -232,6 +234,7 @@ impl Store {
                     workdirs: &loaded.workdirs,
                     guards: &loaded.guards,
                     settings_version: None,
+                    sessions: &loaded.sessions,
                     budgets: &loaded.budgets,
                 };
                 let budget = backoff_budget(&loaded, &entry.task_id);

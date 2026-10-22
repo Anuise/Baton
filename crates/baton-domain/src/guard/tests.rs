@@ -101,6 +101,8 @@ fn failed_run(id: &str, contract_version: i64) -> Run {
         started_at: None,
         ended_at: Some(T0),
         native_session_id: None,
+        agent_session_id: None,
+        resume_native_session_id: None,
     }
 }
 

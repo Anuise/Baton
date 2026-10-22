@@ -56,7 +56,7 @@ async fn store_with_running_tasks(dir: &std::path::Path) -> Store {
         crate::workdirs::register_ready(&store, "w1", task, T1).await;
         let commands = [
             RunCommand::Dispatch { run_id: run.into(), task_id: task.into(), profile_id: "p1".into() },
-            RunCommand::BeginLaunch { run_id: run.into(), command_id: format!("cmd-{run}") },
+            RunCommand::BeginLaunch { run_id: run.into(), command_id: format!("cmd-{run}"), working_dir: "C:/work".into(), resume_check: None },
             RunCommand::RecordReceipt {
                 run_id: run.into(),
                 process: ProcessRecord { pid: 1, created_at_millis: 1, command_hash: "h".into() },

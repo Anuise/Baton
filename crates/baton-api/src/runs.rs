@@ -53,9 +53,10 @@ pub struct RunList {
 impl From<RunError> for TaskApiError {
     fn from(error: RunError) -> Self {
         let status = match &error {
-            RunError::WorkspaceNotFound(_) | RunError::TaskNotFound(_) | RunError::RunNotFound(_) => {
-                StatusCode::NOT_FOUND
-            }
+            RunError::WorkspaceNotFound(_)
+            | RunError::TaskNotFound(_)
+            | RunError::RunNotFound(_)
+            | RunError::SessionNotFound(_) => StatusCode::NOT_FOUND,
             RunError::AdmissionDenied(missing) => {
                 return Self::Denied { message: error.to_string(), missing: missing.clone() }
             }
@@ -70,7 +71,8 @@ impl From<RunError> for TaskApiError {
             | RunError::CancelNotRequested
             | RunError::LaunchHalted
             | RunError::WorkdirNotPrepared(_)
-            | RunError::WorkdirUnavailable(_) => StatusCode::CONFLICT,
+            | RunError::WorkdirUnavailable(_)
+            | RunError::SessionBusy { .. } => StatusCode::CONFLICT,
         };
         Self::Plain(ApiError { status, code: error.code(), message: error.to_string() })
     }

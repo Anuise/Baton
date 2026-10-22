@@ -1,6 +1,6 @@
 # 28: 檢查點與主動跨帳號交接
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R094-28-impl，2026-10-22 19:17）
 Blocked by: 27, 15
 
 **What to build:** 依 issue §5.2 五步驟與 spec D-13：推估用量 ≥75% 停止對該帳號派新工作、≥85% 或觀測到限流警告即進入 draining，選擇具相同能力與權限的承接帳號；在安全邊界保存檢查點，確認舊程序停止後以條件更新轉移世代、建立 successor Run 與 handoff 紀錄；新 Worker 確認接手。交接不消耗修正預算；同 Task 換帳號冷卻 10 分鐘；<60% 或重置後恢復可派。

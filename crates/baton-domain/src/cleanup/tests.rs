@@ -58,6 +58,8 @@ fn run(id: &str, status: RunStatus) -> Run {
         native_session_id: None,
         admitted_at: None,
         settings_version: None,
+        agent_session_id: None,
+        resume_native_session_id: None,
     }
 }
 
