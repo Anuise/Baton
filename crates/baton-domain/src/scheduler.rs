@@ -8,8 +8,8 @@
 //!   使用者看到的是該處理哪一類問題，而不是一句「暫時不能派」。
 //! - **只信任傳進來的事實**：帳號核對結果、進行中的 Run 與額度樣本都由呼叫端（Store 在同一個交易中）載入，
 //!   所以判定與寫入之間不會有別人插進來改變容量。
-//! - **額度只做「停止派新工作」這一道門檻**（spec D-13 的 ≥75%）：沒有樣本（未觀測）不阻擋；
-//!   遲滯（<60% 才恢復）、draining 與交接屬於額度觀測與交接的票。
+//! - **額度門檻**（spec D-13）：用量 ≥75% 或帳號的門檻狀態（`handoff::GateState`，票 28）是 paused／draining 時不派新工作；
+//!   沒有樣本（未觀測）不阻擋。遲滯（<60% 或重置後才恢復）由門檻狀態表達，draining 帳號上進行中的 Run 由交接接手。
 
 use std::collections::HashMap;
 
@@ -19,6 +19,7 @@ use crate::authorization::AdmissionDenied;
 use crate::budget::{BudgetKind, TaskBudget};
 use crate::event::DomainEvent;
 use crate::guard::GuardSource;
+use crate::handoff::GateState;
 use crate::profile::{self, AccountProfile, ProfileStatus};
 use crate::run::{self, Run, RunContext, RunError};
 use crate::task::MissingCode;
@@ -286,6 +287,8 @@ pub struct Capacity<'a> {
     pub active_runs: &'a [Run],
     /// Profile 識別 → 已知的用量比例（0.0–1.0）；未觀測的帳號沒有項目，不當作 0。
     pub quota_used: &'a HashMap<String, f64>,
+    /// Profile 識別 → 額度門檻狀態（票 28）；沒有項目的帳號是 `open`。
+    pub quota_gates: &'a HashMap<String, GateState>,
     /// 生命週期的阻擋（完全退出的停止意圖、Workspace 等待「繼續工作」，`lifecycle::dispatch_halt`）。
     /// 有值時任何名額（含交接）都不派，佇列重試與額度恢復也就不會啟動新的 Run。
     pub halt: Option<WaitReason>,
@@ -394,18 +397,8 @@ pub fn place_preferring(capacity: &Capacity<'_>, kind: SlotKind, preferred: Opti
 
     let mut candidates = Vec::new();
     for profile in usable {
-        if let Some(used) = capacity.quota_used.get(&profile.id).filter(|u| **u >= QUOTA_STOP_DISPATCH_RATIO) {
-            reasons.push(reason(
-                WaitCategory::Quota,
-                "quota_near_limit",
-                format!(
-                    "帳號「{}」的用量約 {:.0}%，已達 {:.0}% 的停止派工門檻",
-                    profile.name,
-                    used * 100.0,
-                    QUOTA_STOP_DISPATCH_RATIO * 100.0
-                ),
-                Some(&profile.id),
-            ));
+        if let Some(waiting) = quota_reason(capacity, profile) {
+            reasons.push(waiting);
             continue;
         }
         let running = capacity.running_of(&profile.id);
@@ -432,6 +425,34 @@ pub fn place_preferring(capacity: &Capacity<'_>, kind: SlotKind, preferred: Opti
         Some((_, profile)) => Placement::Place { profile_id: profile.id.clone() },
         None => Placement::Wait(reasons),
     }
+}
+
+/// 帳號因額度不能派工的原因：門檻狀態是 draining／paused（遲滯：回到 60% 以下或重置後才恢復），或用量已達 75%。
+fn quota_reason(capacity: &Capacity<'_>, profile: &AccountProfile) -> Option<WaitReason> {
+    let gate = capacity.quota_gates.get(&profile.id).copied().unwrap_or_default();
+    let used = capacity.quota_used.get(&profile.id).copied();
+    let percent = used.map_or_else(|| "未知".to_string(), |u| format!("約 {:.0}%", u * 100.0));
+    let (code, message) = match gate {
+        GateState::Draining => (
+            "quota_draining",
+            format!("帳號「{}」的用量{percent}，已接近上限（交接中），進行中的工作會交接到其他帳號", profile.name),
+        ),
+        GateState::Paused => (
+            "quota_near_limit",
+            format!(
+                "帳號「{}」的用量{percent}，已達 {:.0}% 的停止派工門檻；回到 {:.0}% 以下或重置後才恢復派工",
+                profile.name,
+                QUOTA_STOP_DISPATCH_RATIO * 100.0,
+                crate::handoff::QUOTA_RESUME_RATIO * 100.0
+            ),
+        ),
+        GateState::Open if used.is_some_and(|u| u >= QUOTA_STOP_DISPATCH_RATIO) => (
+            "quota_near_limit",
+            format!("帳號「{}」的用量{percent}，已達 {:.0}% 的停止派工門檻", profile.name, QUOTA_STOP_DISPATCH_RATIO * 100.0),
+        ),
+        GateState::Open => return None,
+    };
+    Some(reason(WaitCategory::Quota, code, message, Some(&profile.id)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

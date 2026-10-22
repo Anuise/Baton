@@ -543,6 +543,28 @@ fn a_successful_exit_only_moves_the_task_to_verifying_never_completed() {
 }
 
 #[test]
+fn a_hand_off_ends_the_run_as_interrupted_not_failed_and_frees_the_writer_slot() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+
+    let change = world.step(RunCommand::HandOff { run_id: run_id.clone(), handoff_id: "hof_1".into() }, later(1_000)).unwrap();
+
+    let run = world.run(&run_id);
+    assert_eq!(run.status, RunStatus::Interrupted, "交接不是失敗");
+    assert_eq!(run.end_reason.as_deref(), Some(crate::handoff::HANDED_OFF_REASON));
+    assert!(!world.lease(&run_id).is_held());
+    assert_eq!(world.task("t1").status, TaskStatus::Ready, "同一個交易接著派 successor");
+    let event = change.events.iter().find(|e| e.event_type == EVENT_RUN_HANDED_OFF).unwrap();
+    assert_eq!(event.payload["handoff_id"], "hof_1");
+    assert!(!change.events.iter().any(|e| e.event_type == EVENT_RUN_FAILED));
+    let successor = world.dispatch("t1", later(1_000)).unwrap();
+    assert_eq!(world.run(&successor).generation, 2);
+
+    let again = world.step(RunCommand::HandOff { run_id, handoff_id: "hof_1".into() }, later(2_000));
+    assert_eq!(again.unwrap_err().code(), "run_transition_invalid", "已結束的 Run 不能再交接");
+}
+
+#[test]
 fn a_failed_exit_returns_the_task_to_ready_and_frees_it_for_another_run() {
     let mut world = World::new(&["t1"]);
     let run_id = world.running("t1", T0);
@@ -809,6 +831,7 @@ enum Op {
     Reconcile(usize, u8),
     RequestCancel(usize),
     ConfirmCancel(usize),
+    HandOff(usize),
     MakeReady(usize),
     CancelTask(usize),
     Advance(u32),
@@ -826,6 +849,7 @@ fn op() -> impl Strategy<Value = Op> {
         (0..6usize, 0..3u8).prop_map(|(i, o)| Op::Reconcile(i, o)),
         (0..6usize).prop_map(Op::RequestCancel),
         (0..6usize).prop_map(Op::ConfirmCancel),
+        (0..6usize).prop_map(Op::HandOff),
         (0..3usize).prop_map(Op::MakeReady),
         (0..3usize).prop_map(Op::CancelTask),
         (1..90_000u32).prop_map(Op::Advance),
@@ -910,6 +934,10 @@ proptest! {
                 },
                 Op::RequestCancel(i) => match run_of(&world, i) { Some((run_id, _)) => RunCommand::RequestCancel { run_id }, None => continue },
                 Op::ConfirmCancel(i) => match run_of(&world, i) { Some((run_id, _)) => RunCommand::ConfirmCancelled { run_id }, None => continue },
+                Op::HandOff(i) => match run_of(&world, i) {
+                    Some((run_id, _)) => RunCommand::HandOff { run_id, handoff_id: "hof".into() },
+                    None => continue,
+                },
             };
             let before = world.clone();
             if world.step(command, now).is_err() {

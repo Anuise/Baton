@@ -160,26 +160,28 @@ impl Store {
 
     /// 全部 Profile 目前的額度判斷（沒有任何觀測的 Profile 也有一筆「未知」）。
     pub async fn quota_status(&self, now: Timestamp) -> StoreResult<HashMap<String, AccountQuota>> {
-        self.read(move |conn| {
-            let mut latest: HashMap<String, Vec<QuotaObservation>> = HashMap::new();
-            let mut statement = conn.prepare(&format!(
-                "SELECT {OBSERVATION_COLUMNS} FROM quota_observation WHERE seq IN
-                 (SELECT MAX(seq) FROM quota_observation GROUP BY profile_id, origin, quota_window)"
-            ))?;
-            for observation in statement.query_map([], observation_row)? {
-                let observation = observation?;
-                latest.entry(observation.profile_id.clone()).or_default().push(observation);
-            }
-            let mut status = HashMap::new();
-            for profile in load_profiles(conn)? {
-                let observations = latest.remove(&profile.id).unwrap_or_default();
-                let (plan_limits, _) = load_plan_limits(conn, &profile.id)?;
-                status.insert(profile.id, AccountQuota { assessment: quota::assess(&observations, now), plan_limits });
-            }
-            Ok(status)
-        })
-        .await
+        self.read(move |conn| Ok(load_quota_status(conn, now)?)).await
     }
+}
+
+/// 全部 Profile 目前的額度判斷（在呼叫端的交易或連線中）。
+pub(crate) fn load_quota_status(conn: &Connection, now: Timestamp) -> rusqlite::Result<HashMap<String, AccountQuota>> {
+    let mut latest: HashMap<String, Vec<QuotaObservation>> = HashMap::new();
+    let mut statement = conn.prepare(&format!(
+        "SELECT {OBSERVATION_COLUMNS} FROM quota_observation WHERE seq IN
+         (SELECT MAX(seq) FROM quota_observation GROUP BY profile_id, origin, quota_window)"
+    ))?;
+    for observation in statement.query_map([], observation_row)? {
+        let observation = observation?;
+        latest.entry(observation.profile_id.clone()).or_default().push(observation);
+    }
+    let mut status = HashMap::new();
+    for profile in load_profiles(conn)? {
+        let observations = latest.remove(&profile.id).unwrap_or_default();
+        let (plan_limits, _) = load_plan_limits(conn, &profile.id)?;
+        status.insert(profile.id, AccountQuota { assessment: quota::assess(&observations, now), plan_limits });
+    }
+    Ok(status)
 }
 
 const OBSERVATION_COLUMNS: &str = "profile_id, origin, source, quota_window, status, used, tokens, limit_tokens, \

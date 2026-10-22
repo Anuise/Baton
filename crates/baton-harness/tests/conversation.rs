@@ -12,6 +12,7 @@
 //!   `a_crash_after_the_controller_process_...`、`a_crash_before_the_result_is_saved_...`、
 //!   `a_controller_that_dies_without_exiting_...`（程序沒有結束事件就死亡，含 Runtime 重建）、
 //!   `a_result_that_arrives_after_the_process_is_found_dead_...`、`controller_wakes_wait_while_crash_recovery_...`
+//! - Controller 的帳號遵守額度門檻的遲滯（票 28）：`controller_wakes_skip_an_account_held_by_the_quota_gate`
 //! - 暫停／取消不排隊（DR-20261022-01）：`cancel_takes_effect_while_the_controller_is_busy`、
 //!   `full_exit_stops_the_controller_and_keeps_its_inputs_pending`
 
@@ -21,7 +22,7 @@ use baton_domain::storage_health::StorageFaultKind;
 use baton_domain::Timestamp;
 use baton_harness::fakes::{FakeStop, HangPoint};
 use baton_harness::Harness;
-use baton_ports::{AdapterEvent, Capability, Liveness, StopResult};
+use baton_ports::{AdapterEvent, Capability, Clock, Confidence, Liveness, QuotaSample, QuotaSource, StopResult};
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
@@ -589,6 +590,38 @@ async fn controller_wakes_wait_while_crash_recovery_blocks_dispatch() {
     harness.process_control.script_stop(&identity, FakeStop::Result(StopResult::ForceKilled));
     advance(&harness, 30_000);
     harness.supervise().await;
+    harness.supervise().await;
+    assert_eq!(controller_spawns(&harness), 1);
+}
+
+#[tokio::test]
+async fn controller_wakes_skip_an_account_held_by_the_quota_gate() {
+    let harness = Harness::builder().clock_at(CLOCK_START).start().await;
+    let account = harness.add_account("帳號 1", "account1@example.com").await;
+    let path = plain_dir(&harness, "main");
+    let (status, body) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": path }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ws = body["id"].as_str().unwrap().to_string();
+    let observe = |used: f64| {
+        let now = harness.clock.now();
+        let sample =
+            QuotaSample { source: QuotaSource::Observed, observed_at: now, used: Some(used), reset_at: None, confidence: Confidence::Observed };
+        harness.quota_observer.set_sample(&account, sample);
+    };
+
+    // 80% 關閉門檻（paused）；降到 70% 仍在遲滯中，Controller 也不用這個帳號
+    observe(0.8);
+    harness.supervise().await;
+    advance(&harness, 5 * 60_000);
+    observe(0.7);
+    send(&harness, &ws, "請評估進度").await;
+    advance(&harness, WINDOW_MS);
+    harness.supervise().await;
+    assert_eq!(controller_spawns(&harness), 0);
+
+    // 回到 60% 以下才恢復
+    advance(&harness, 5 * 60_000);
+    observe(0.5);
     harness.supervise().await;
     assert_eq!(controller_spawns(&harness), 1);
 }

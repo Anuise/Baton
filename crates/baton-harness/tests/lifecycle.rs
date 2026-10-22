@@ -303,7 +303,8 @@ async fn after_the_stop_intent_quota_recovery_starts_no_runs() {
     let tid = ready_task(&harness, &ws, &goal, "研究").await;
     let (status, body) = dispatch(&harness, &ws, &tid).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-    assert_eq!(body["reasons"][0]["code"], "quota_near_limit");
+    // 90% 已達 85% 的交接門檻（票 28）：帳號在 draining，同樣不派新工作
+    assert_eq!(body["reasons"][0]["code"], "quota_draining");
 
     full_exit(&harness).await;
     // 額度恢復到門檻以下：沒有停止意圖時下一次處理就會派出

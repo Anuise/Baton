@@ -192,7 +192,8 @@ async fn an_exhausted_signal_counts_until_its_reset_then_returns_to_unknown() {
     let tid = ready_task(&harness, &ws, &goal, "等重置").await;
     let (status, body) = dispatch(&harness, &ws, &tid).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
-    assert_eq!(body["reasons"][0]["code"], "quota_near_limit", "{body}");
+    // 已達上限也達到 85% 的交接門檻（票 28）：帳號在 draining
+    assert_eq!(body["reasons"][0]["code"], "quota_draining", "{body}");
 
     // 重置之後：訊號失效，回到未知而不是 0
     harness.clock.set(reset);

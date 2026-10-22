@@ -12,6 +12,7 @@ import type {
   DrillReport,
   DecisionRequestView,
   ExitRunResult,
+  Handoff,
   LifecycleStatus,
   ImportPreview,
   IntegrationEntry,
@@ -312,7 +313,7 @@ export function quotaAssessment(overrides: Partial<QuotaAssessment> = {}): Quota
   };
 }
 
-/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、沒有設定方案上限、每帳號上限 2。 */
+/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、沒有設定方案上限、每帳號上限 2、額度門檻從未離開 open。 */
 export function accountScheduling(overrides: Partial<AccountScheduling> = {}): AccountScheduling {
   return {
     profile_id: "prof_1",
@@ -325,6 +326,7 @@ export function accountScheduling(overrides: Partial<AccountScheduling> = {}): A
     running: 0,
     limit: 2,
     runs: [],
+    quota_gate: null,
     ...overrides,
   };
 }
@@ -657,6 +659,34 @@ export function budgetView(overrides: Partial<BudgetView> = {}): BudgetView {
     retry_not_before: null,
     exhausted: null,
     decision_request_id: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的交接：task_1 第 1 次 Run 從 prof_1 交接到 prof_2（達 85% 交接門檻），剛要求、尚未保存檢查點。 */
+export function handoff(overrides: Partial<Handoff> = {}): Handoff {
+  return {
+    id: "ho_1",
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    from_run_id: "run_1",
+    from_profile_id: "prof_1",
+    from_generation: 1,
+    to_profile_id: "prof_2",
+    to_run_id: null,
+    to_generation: null,
+    phase: "requested",
+    reason: "drain_threshold",
+    checkpoint: null,
+    stop_outcome: null,
+    confirmation: null,
+    abandoned_reason: null,
+    requested_at: CHECKED_AT,
+    stopping_at: null,
+    transferred_at: null,
+    confirmed_at: null,
+    updated_at: CHECKED_AT,
+    version: 1,
     ...overrides,
   };
 }

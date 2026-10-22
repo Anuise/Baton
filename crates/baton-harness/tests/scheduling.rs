@@ -661,15 +661,22 @@ async fn quota_blocks_from_seventy_five_percent_and_not_below() {
     let (ws, goal) = setup(&harness).await;
     let tid = ready_task(&harness, &ws, &goal, "邊界").await;
 
-    for blocked in [0.75, 0.9, 1.0] {
+    // 85% 以上另進入 draining（票 28），同樣是額度類的等待原因
+    for (blocked, code) in [(0.75, "quota_near_limit"), (0.9, "quota_draining"), (1.0, "quota_draining")] {
         set_quota(&harness, &accounts[0], blocked);
         harness.clock.advance_millis(QUOTA_POLL_MILLIS);
         let body = dispatch_queued(&harness, &ws, &tid).await;
-        assert_eq!(reasons(&body), [pair("quota", "quota_near_limit")], "用量 {blocked}：{body}");
+        assert_eq!(reasons(&body), [pair("quota", code)], "用量 {blocked}：{body}");
     }
     assert_eq!(queued_task_ids(&overview(&harness).await), [tid.clone()], "重複派工仍只有一筆佇列項目");
 
+    // 遲滯（spec D-13，票 28）：門檻關閉後要回到 60% 以下才恢復；74% 仍不派
     set_quota(&harness, &accounts[0], 0.74);
+    harness.clock.advance_millis(QUOTA_POLL_MILLIS);
+    let body = dispatch_queued(&harness, &ws, &tid).await;
+    assert_eq!(reasons(&body), [pair("quota", "quota_draining")], "{body}");
+
+    set_quota(&harness, &accounts[0], 0.59);
     harness.clock.advance_millis(QUOTA_POLL_MILLIS);
     let (status, run) = dispatch(&harness, &ws, &tid).await;
 

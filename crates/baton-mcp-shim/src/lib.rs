@@ -10,10 +10,11 @@ use std::time::Duration;
 
 use baton_domain::agent::{
     AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, DETAILS_MAX_BYTES, REASON_MAX_CHARS, RUNTIME_URL_ENV, SUMMARY_MAX_CHARS,
-    TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
+    TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
     TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::authority::Matter;
+use baton_domain::handoff::CONFIRMATION_MAX_CHARS;
 use baton_domain::message::{
     MessageKind, BODY_MAX_BYTES, ID_MAX_CHARS, INBOX_DEFAULT_LIMIT, INBOX_MAX_LIMIT, MAX_RECIPIENTS, SUBJECT_MAX_CHARS,
 };
@@ -428,6 +429,23 @@ fn tool_definitions() -> Value {
                 "required": ["idempotency_key", "result"],
             },
         },
+        {
+            "name": TOOL_CONFIRM_HANDOFF,
+            "description": "你是交接的接手者時（Prompt 中有「交接」段落），開始工作前先核對檢查點與工作目錄、成果的實際狀態，再呼叫這個工具確認接手：已完成、未完成與結果不明的副作用。不是接手者時會被拒絕。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "completed": { "type": "string", "maxLength": CONFIRMATION_MAX_CHARS, "description": "核對後確認已完成的部分" },
+                    "incomplete": { "type": "string", "maxLength": CONFIRMATION_MAX_CHARS, "description": "尚未完成、接下來要做的部分" },
+                    "unknown_side_effects": {
+                        "type": "string",
+                        "maxLength": CONFIRMATION_MAX_CHARS,
+                        "description": "結果不明的副作用（例如不確定是否已送出的外部操作）；沒有就寫「無」",
+                    },
+                },
+                "required": ["completed", "incomplete", "unknown_side_effects"],
+            },
+        },
     ])
 }
 
@@ -449,6 +467,7 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_SEARCH_KNOWLEDGE,
         TOOL_BEGIN_EXTERNAL_OPERATION,
         TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
+        TOOL_CONFIRM_HANDOFF,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));

@@ -34,6 +34,7 @@ mod budgets;
 mod decisions;
 mod external_operations;
 mod guards;
+mod handoffs;
 mod health;
 mod integration;
 mod knowledge;
@@ -56,6 +57,7 @@ pub use conversations::{ConversationApplyError, ControllerWake};
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
 pub use external_operations::ExternalApplyError;
 pub use guards::{GuardApplyError, GuardOverview};
+pub use handoffs::{HandoffApplyError, HandoffWork};
 pub use health::classify as storage_fault_of;
 pub use integration::{IntegrationApplyError, IntegrationWork};
 pub use knowledge::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, ScopeRequest};
@@ -1040,7 +1042,50 @@ const MIGRATIONS: &[Migration] = &[
             UNIQUE (event_id, round, seq)
         );",
     },
-    // 票 16（第 29 個 migration）：Controller 長期對話。每個 Workspace 一個 conversation；conversation_turn 是使用者訊息、
+    // 票 28（第 29 個 migration）：帳號的額度門檻（遲滯：paused／draining）與交接紀錄（issue §5.2 的 phase）。
+    // 同一個 Run、同一個 Task 任何時刻最多一個進行中（requested／stopping）的交接。
+    Migration {
+        name: "quota_gate_and_handoff",
+        sql: "CREATE TABLE quota_gate (
+            profile_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK (state IN ('open', 'paused', 'draining')),
+            reason TEXT NOT NULL,
+            used REAL,
+            reset_at INTEGER,
+            since INTEGER NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1)
+        );
+        CREATE TABLE handoff (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            from_run_id TEXT NOT NULL REFERENCES run (id),
+            from_profile_id TEXT NOT NULL,
+            from_generation INTEGER NOT NULL,
+            to_profile_id TEXT NOT NULL,
+            to_run_id TEXT REFERENCES run (id),
+            to_generation INTEGER,
+            phase TEXT NOT NULL CHECK (phase IN ('requested', 'stopping', 'transferred', 'confirmed', 'abandoned')),
+            reason TEXT NOT NULL,
+            checkpoint TEXT,
+            stop_outcome TEXT,
+            confirmation TEXT,
+            abandoned_reason TEXT,
+            requested_at INTEGER NOT NULL,
+            stopping_at INTEGER,
+            transferred_at INTEGER,
+            confirmed_at INTEGER,
+            updated_at INTEGER NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            CHECK ((to_run_id IS NOT NULL) = (phase IN ('transferred', 'confirmed')))
+        );
+        CREATE INDEX handoff_workspace ON handoff (workspace_id);
+        CREATE INDEX handoff_task ON handoff (task_id);
+        CREATE INDEX handoff_to_run ON handoff (to_run_id);
+        CREATE UNIQUE INDEX handoff_one_in_flight_per_run ON handoff (from_run_id) WHERE phase IN ('requested', 'stopping');
+        CREATE UNIQUE INDEX handoff_one_in_flight_per_task ON handoff (task_id) WHERE phase IN ('requested', 'stopping');",
+    },
+    // 票 16（第 30 個 migration）：Controller 長期對話。每個 Workspace 一個 conversation；conversation_turn 是使用者訊息、
     // 工作事件與 Controller 回覆，輸入帶處理狀態；controller_run 是 Controller 的一輪（只綁 conversation，不綁 Task）。
     // 同一個 conversation 任何時刻最多一輪未結束（B1）由唯一索引保證；同一個工作事件來源只會成為一個輸入
     Migration {
