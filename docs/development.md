@@ -6,9 +6,9 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`：版本校驗、六種處理方式、合併與連結、Controller 動作判定）、決策權限表（`authority.rs`，spec D-15）、權限提示的歸類與授權判定（`permission.rs`）、單次批准（E1）的綁定與核對（`approval.rs`）、備份的觸發／保留／還原演練核對（`backup.rs`）、知識條目與教訓的可信狀態轉換、版本、取代關係、可見範圍與搜尋關鍵字（`knowledge.rs`）、Guard 規則、啟用停用、Run 准入時的違反判定與重犯事件（`guard.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔）、Task 工作目錄（worktree／輸出目錄）的位置與登記（`workdir.rs`）、單一整合佇列的狀態機（`integration.rs`） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`：版本校驗、六種處理方式、合併與連結、Controller 動作判定）、決策權限表（`authority.rs`，spec D-15）、權限提示的歸類與授權判定（`permission.rs`）、單次批准（E1）的綁定與核對（`approval.rs`）、備份的觸發／保留／還原演練核對（`backup.rs`）、知識條目與教訓的可信狀態轉換、版本、取代關係、可見範圍與搜尋關鍵字（`knowledge.rs`）、Guard 規則、啟用停用、Run 准入時的違反判定與重犯事件（`guard.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔）、Task 工作目錄（worktree／輸出目錄）的位置與登記（`workdir.rs`）、單一整合佇列的狀態機（`integration.rs`）、修正與重試預算的計數／退避／重設（`budget.rs`，spec D-16） |
 | `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`，以及 `write_readonly_files`：把一組檔案寫成唯讀目錄）、PlatformInfo、SecretProtector、ClaudeEnvironment、CommandRunner（驗證命令）、UserSettingsSource（唯讀讀取使用者平常使用的 Claude Code 設定，只有白名單內的三個檔案）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、裁定請求／裁定／單次批准／連結與 Workspace 決策權限表（`decisions.rs`）、備份／還原／還原演練（`backup.rs`）、知識條目與版本（`knowledge.rs`：`knowledge_entry`、`knowledge_entry_version`，以及每次開啟時重建的全文檢索索引 `knowledge_fts`）、Guard 與重犯事件（`guards.rs`：`guard`、`lesson_recurrence`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`） |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、裁定請求／裁定／單次批准／連結與 Workspace 決策權限表（`decisions.rs`）、備份／還原／還原演練（`backup.rs`）、知識條目與版本（`knowledge.rs`：`knowledge_entry`、`knowledge_entry_version`，以及每次開啟時重建的全文檢索索引 `knowledge_fts`）、Guard 與重犯事件（`guards.rs`：`guard`、`lesson_recurrence`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`）、修正與重試預算（`budgets.rs`：`task_budget`） |
 | `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照、成果瀏覽與成果接受）、`/api/v1/scheduling`、`/api/v1/lifecycle`、`/api/v1/decisions/pending`、`/api/v1/decisions/batch`（與 `/api/v1/workspaces/{id}/decisions`、`/api/v1/workspaces/{id}/decision-authority`）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/backups`（備份與還原演練狀態）、`/api/v1/knowledge`、`/api/v1/guards`（與 `/api/v1/knowledge/{id}/recurrences`）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `controller_action`、`register_artifact`；`knowledge.rs` 的 `record_lesson_candidate`、`search_knowledge`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`，`RuntimeOptions` 含 `full_text_search`；含啟動時核對停止意圖與完全退出的執行者）、Supervisor（`supervisor.rs`，含完全退出的停止流程與重新開啟）、Claude Code Adapter（`claude_adapter.rs`）、備份排程（`backup.rs`）、確定性檢查的執行（`verifier.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe`（`baton-runtime restore …` 還原備份） |
@@ -377,11 +377,11 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 | `kind` | 欄位 | 通過條件 |
 | --- | --- | --- |
-| `command` | `program`、`args`、`expected_exit_code`（預設 0） | 在受驗 Run 的工作目錄執行（不經過 shell，`CommandRunner` Port），結束碼相符；逾時 10 分鐘、被終止或無法啟動都算未通過 |
-| `file` | `path`、`sha256?` | 工作目錄內的相對路徑（不可含 `..`、磁碟代號、從根目錄開始）是存在的檔案，有 `sha256` 時雜湊相符（`WorkspaceFs::read_workspace_file`） |
+| `command` | `program`、`args`、`expected_exit_code`（預設 0） | 在受驗 Run 的工作目錄執行（不經過 shell，`CommandRunner` Port），結束碼相符；結束碼不符算未通過，逾時 10 分鐘、被終止或無法啟動取不到證據，算**不完整**（`inconclusive`，票 36） |
+| `file` | `path`、`sha256?` | 工作目錄內的相對路徑（不可含 `..`、磁碟代號、從根目錄開始）是存在的檔案，有 `sha256` 時雜湊相符（`WorkspaceFs::read_workspace_file`）；讀取失敗算不完整 |
 | `artifact` | `name`、`sha256?` | 這個 Task 有這個名稱的成果，最新版本的檔案與 manifest 雜湊一致，有 `sha256` 時也相符 |
 
-**流程**：Supervisor 每次處理的最後一步（第 8 步）找出 `verifying`、有受驗 Run（世代最大且 `succeeded` 的 Run）而且契約宣告了檢查的 Task，逐項取得事實（命令輸出保留結尾 4000 字元作為證據）、由 Domain 判定，再以**成果接受交易**提交。全部通過 → `completed`；任一未通過 → 回到 `ready`（可修正、可再派工；不會自動重新排隊），證據保存在驗證紀錄。沒有宣告任何檢查的 Task 停在 `verifying`，等使用者手動接受。背景迴圈把這一步放在另一個工作執行，長時間的檢查命令不會擋住啟動、取消與 lease 核對；測試 harness 的 `supervise()` 則會等它做完。Runtime 在檢查途中當掉時沒有任何紀錄，重啟後會重新執行檢查。
+**流程**：Supervisor 每次處理的最後一步（第 8 步）找出 `verifying`、有受驗 Run（世代最大且 `succeeded` 的 Run）而且契約宣告了檢查的 Task，逐項取得事實（命令輸出保留結尾 4000 字元作為證據）、由 Domain 判定，再以**成果接受交易**提交。全部通過 → `completed`；任一未通過 → 回到 `ready`（可修正、可再派工；不會自動重新排隊），證據保存在驗證紀錄；沒有未通過但有不完整 → 結果 `inconclusive`，Task 留在 `verifying`，下一次處理重新執行檢查（重驗）。未通過與不完整分別計入修正與重試預算（見「修正與重試預算」）。沒有宣告任何檢查的 Task 停在 `verifying`，等使用者手動接受。背景迴圈把這一步放在另一個工作執行，長時間的檢查命令不會擋住啟動、取消與 lease 核對；測試 harness 的 `supervise()` 則會等它做完。Runtime 在檢查途中當掉時沒有任何紀錄，重啟後會重新執行檢查。
 
 **成果接受交易**同時校驗三件事，任一不符就拒絕、什麼都不寫：
 
@@ -393,7 +393,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 契約在 Run 派工後被改版時，Supervisor 不執行檢查，直接記錄一筆「未通過」（原因寫在 `note`），Task 回到 `ready` 重新執行；這個 Run 的成果不能在新契約下被接受，手動接受也會被拒絕。過期 Run 的回報（登記成果、結束事件）本來就因不是目前寫入所有者而被拒絕（`run_report_stale`），所以不能推進 Task。Workspace 封存後，其中 `verifying` 的 Task 不再自動檢查（`automatic` 為 `false`），成果接受（含手動接受）一律 409 `workspace_archived`，Task 停在 `verifying`。
 
-**驗證紀錄**：追加式資料表 `task_verification`（migration 16，觸發器禁止更新與刪除；`run_id` 唯一：一個 Run 最多一筆；部分唯一索引：一個 Task 最多一筆 `passed`）。每筆含方式（`checks`／`manual`）、結果（`passed`／`failed`）、受驗 Run 與世代、契約版本、每項檢查的結果與證據、驗證時的成果 manifest、手動接受者（桌面憑證雜湊的前 16 字元，**不是**憑證本身）與附註。同一個交易追加 Task 事件 `task_verification_recorded`（payload 含上述摘要與未通過的檢查）與 `task_status_changed`（`reason` 為 `verification_passed`／`verification_failed`）。
+**驗證紀錄**：追加式資料表 `task_verification`（migration 16 建立、migration 23 重建，觸發器禁止更新與刪除；部分唯一索引：一個 Run 最多一筆有結論（`passed`／`failed`）的紀錄、`inconclusive` 可以有多筆，一個 Task 最多一筆 `passed`）。每筆含方式（`checks`／`manual`）、結果（`passed`／`failed`／`inconclusive`）、受驗 Run 與世代、契約版本、每項檢查的結果與證據、驗證時的成果 manifest、手動接受者（桌面憑證雜湊的前 16 字元，**不是**憑證本身）與附註。同一個交易追加 Task 事件 `task_verification_recorded`（payload 含上述摘要與未通過的檢查）與 `task_status_changed`（`reason` 為 `verification_passed`／`verification_failed`）。
 
 **桌面端點**（都在 `/api/v1/workspaces/{id}/tasks/{task_id}/` 之下）：
 
@@ -410,6 +410,26 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 - 檔案檢查只擋住路徑字面上的逃逸（`..`、絕對路徑），不處理工作目錄內指向外部的符號連結或 junction。
 - 命令輸出以 UTF-8 解讀，非 UTF-8 的主控台輸出（例如 `cmd` 的 Big5）在證據中會變成替代字元。
 - 沒有「手動駁回」：沒有宣告檢查而成果不理想時，目前只能取消 Task 或修改契約讓它重新執行。
+
+### 修正與重試預算
+
+每個 Task 有三種互不影響的計數（spec D-16，規則在 `baton_domain::budget`，計入點在 `run`、`verification` 的轉換中）：
+
+| 種類（`kind`） | 上限 | 計入的事件 |
+| --- | --- | --- |
+| 實作失敗修正（`implementation`） | 3 | Worker 以失敗結束（`run_failed`，`exited_with_failure`）；確定性檢查未通過 |
+| 驗證不完整重驗（`verification`） | 2 | 確定性檢查結果 `inconclusive`（取不到證據） |
+| 基礎設施重試（`infrastructure`） | 5 | 啟動失敗（`launch_failed`）；lease 過期後確認程序已不在（`process_dead_after_lease_expired`） |
+
+**不計入任何一種**：突然限流（Adapter 回報額度用盡 `RateLimited { status: exhausted }` 之後程序以失敗結束 → Run `interrupted`，`end_reason` 為 `quota_limited：…`，Task 回到 `ready`）、恢復與完全退出的中斷（`Interrupt`：`launch_outcome_unknown`、完全退出、還原）、取消，以及「契約在派工後變更」造成的未通過。
+
+**預算內**：計數加一，Task 照原本的轉換（實作失敗回 `ready`、不完整留在 `verifying`）。基礎設施重試另外自動排回派工佇列，並設定退避期限 `retry_not_before`（1、2、4、8、10 分鐘，上限 10 分鐘）；期限前排程的等待原因是 `backoff`／`retry_backoff`。實作失敗不會自動重新排隊（由 Controller 在預算內重派或使用者派工）。
+
+**用盡**（已用到上限後再發生一次）：計數停在上限，Task 進入 `blocked`，同一個交易建立「預算用盡後的下一步」裁定請求（`kind = authority`、`authority.matter = next_step_after_budget`，識別為 `dr_budget_<Run 或驗證紀錄識別>`，阻擋範圍是這個 Task，選項 `approve`／`reject`）。核准 `approve` → 只重設用盡的那一種計數，Task 繼續（驗證類回到 `verifying` 重驗，其他回到 `ready` 並排回派工佇列），核准同時記為已使用（Controller 不能再拿它當單次核准）；駁回 → Task 維持 `blocked`，由使用者修改契約、取消或手動標為可派工（`POST ready`）。
+
+資料表 `task_budget`（migration 23 `retry_budgets`；從未計入的 Task 沒有列）。事件聚合 `task_budget`（聚合識別是 Task）：`task_budget_charged`、`task_budget_exhausted`、`task_budget_reset`。`GET tasks/{task_id}` 回傳 `budget`、`GET tasks` 回傳 `budgets`（`BudgetView`：三項 `counters`（`kind`、`label`、`used`、`limit`）、`retry_not_before`、`exhausted`、`decision_request_id`）；Web UI 在 Task 卡片顯示計數、退避期限與用盡提示。
+
+**已知限制**：突然限流的判定只記在 Supervisor 的記憶體中，Runtime 在「回報額度用盡」與「程序結束」之間重建的話，這次結束會被當成實作失敗（交接的票 28、29 會改為持久化的交接流程）。
 
 ### 備份與還原演練
 
@@ -601,7 +621,7 @@ Task 有**種類**（`kind`：`development`／`research`／`document`，建立�
 **整合佇列**（開發 Task）：成果接受交易（確定性檢查全部通過或手動接受）在同一個交易中把平台分支排入 `integration_entry`，Task 停在 `verifying`（`VerificationView.basis` 變成 `null`，不能再接受一次：409 `acceptance_already_queued`）。Supervisor 在驗證之後依序處理，一次一個（處理中的項目有唯一索引保證最多一個）：
 
 1. `merging`：先持久化，再在整合目錄 `<Workspace>\.baton\integration` 以 detached HEAD 簽出目標分支並 `--no-ff` 合併（`WorkspaceFs::merge_for_integration`）；目標分支本身不動。衝突 → `failed`。
-2. `verifying`：以 Task 契約的同一份確定性檢查，在整合目錄中執行整合驗證。任一未通過 → `failed`，證據保存在項目的 `checks`。
+2. `verifying`：以 Task 契約的同一份確定性檢查，在整合目錄中執行整合驗證。任一未通過或不完整 → `failed`，證據保存在項目的 `checks`。
 3. `advancing`：把目標分支從合併當時的 commit 以 fast-forward 前移到合併結果（`advance_branch`，冪等）；整合期間目標分支被更新 → `failed`。
 4. `integrated`：Task 進入 `completed`。
 
@@ -797,7 +817,7 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - 完全退出：`POST /api/v1/lifecycle/exit` 之後以 `harness.wait_for_exit()` 等停止流程結束（Harness 的 Runtime 在退出後不會自行結束服務，由測試決定何時 `restart`）；`Harness::builder().exit_timing(..)` 縮短 30 + 10 秒的上限；`process_control.script_stop(identity, FakeStop::Result(..)／Hang／Fail(..))` 指定某個程序停不停得下來，`stop_graces()` 讀取每次停止收到的寬限期；`harness.lifecycle_file_path()` 是生命週期檔的位置。
 - `Harness::builder().without_full_text_search()`：以 `RuntimeOptions.full_text_search = false` 啟動，視同 FTS5 不可用，知識搜尋退回 LIKE（`search_mode = like_fallback`，日誌記錄降級）；之後 `harness.set_full_text_search(true)` 再 `harness.restart()`，即模擬 FTS5 恢復可用、啟動時重建索引。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`、`claude_env`：具體的 fake，可腳本化回應並讀取呼叫紀錄。`claude_env` 可設定 Claude Code／Git 是否存在與版本（`set_claude`、`set_git`、`fail_tool_probes`）、在某個設定目錄完成原生登入（`log_in`，會像真實的 Claude Code 一樣把登入資料寫進該目錄）、模擬環境變數覆蓋（`set_env_override`）、讓開啟登入終端機時順便登入（`script_terminal_login`），並記錄開啟過的終端機（`login_terminals`）。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；裁定中心與權限提示情境：`crates/baton-harness/tests/decisions.rs`；完整裁定中心（版本校驗、六種處理方式、批次、合併連結、決策權限表）情境：`crates/baton-harness/tests/decision_center_full.rs`；單次批准（E1）與修改授權情境：`crates/baton-harness/tests/one_off_approval.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`；知識、教訓與全文檢索（含降級）情境：`crates/baton-harness/tests/knowledge.rs`；Guard 與重犯事件情境：`crates/baton-harness/tests/guards.rs`；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`；Worktree、輸出目錄與整合佇列情境：`crates/baton-harness/tests/worktrees.rs`。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；裁定中心與權限提示情境：`crates/baton-harness/tests/decisions.rs`；完整裁定中心（版本校驗、六種處理方式、批次、合併連結、決策權限表）情境：`crates/baton-harness/tests/decision_center_full.rs`；單次批准（E1）與修改授權情境：`crates/baton-harness/tests/one_off_approval.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`；知識、教訓與全文檢索（含降級）情境：`crates/baton-harness/tests/knowledge.rs`；Guard 與重犯事件情境：`crates/baton-harness/tests/guards.rs`；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`；Worktree、輸出目錄與整合佇列情境：`crates/baton-harness/tests/worktrees.rs`；修正與重試預算情境：`crates/baton-harness/tests/retry_budgets.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 
