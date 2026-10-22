@@ -28,6 +28,7 @@ use tokio::sync::oneshot;
 mod agent;
 mod artifacts;
 mod cleanup;
+mod context;
 mod conversations;
 pub mod backup;
 mod budgets;
@@ -54,6 +55,7 @@ mod workdirs;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use cleanup::{CleanupApplyError, CleanupWork};
+pub use context::ContextApplyError;
 pub use conversations::{ConversationApplyError, ControllerWake};
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
 pub use external_operations::ExternalApplyError;
@@ -1309,7 +1311,22 @@ const MIGRATIONS: &[Migration] = &[
         ALTER TABLE controller_run ADD COLUMN handoff_from_profile_id TEXT;
         ALTER TABLE controller_run ADD COLUMN handoff_reason TEXT;",
     },
-    // 票 33（第 35 個 migration）：跨 Windows 登入的啟動與續跑。runtime_boot 記下每次啟動時的登入識別（取不到為 NULL）；
+    // 票 39（第 35 個 migration）：每個 Run 派工時保存的 context receipt（載入項目、版本、省略原因與預算）。
+    // 與 Run 在同一個交易中寫入、在 run 列之前插入，所以外鍵延到提交時檢查；只追加，不更新也不刪除
+    Migration {
+        name: "context_receipt",
+        sql: "CREATE TABLE context_receipt (
+            run_id TEXT PRIMARY KEY REFERENCES run (id) DEFERRABLE INITIALLY DEFERRED,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            receipt TEXT NOT NULL CHECK (json_valid(receipt)),
+            created_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER context_receipt_no_update BEFORE UPDATE ON context_receipt
+        BEGIN SELECT RAISE(ABORT, 'context_receipt 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER context_receipt_no_delete BEFORE DELETE ON context_receipt
+        BEGIN SELECT RAISE(ABORT, 'context_receipt 是追加式資料表，不可刪除'); END;",
+    },
+    // 票 33（第 36 個 migration）：跨 Windows 登入的啟動與續跑。runtime_boot 記下每次啟動時的登入識別（取不到為 NULL）；
     // 每個 Workspace 的「跨登入自動續跑」與「完全退出後自動續跑」分開成兩個欄位，暫停另記原因（既有的暫停都來自完全退出）；
     // 「登入時自動啟動」是目前使用者層級的偏好，只有一列
     Migration {

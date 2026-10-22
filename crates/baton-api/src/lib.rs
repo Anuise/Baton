@@ -103,7 +103,10 @@ pub use recovery::{RecoveryStatusView, RECOVERY_PATH, RECOVERY_RETRY_PATH};
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
 pub use sessions::{session_path, sessions_path, SessionList};
-pub use runs::{run_cancel_path, run_path, runs_path, task_dispatch_path, DispatchRequest, QueuedDispatch, RunList};
+pub use runs::{
+    run_cancel_path, run_context_path, run_path, runs_path, task_dispatch_path, DispatchRequest, QueuedDispatch,
+    RunContextView, RunList,
+};
 pub use scheduling::{
     AccountRun, AccountScheduling, CapacityModeInfo, CapacityView, QueueEntryView, SchedulingOverview,
     SchedulingSettingsView, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
@@ -250,6 +253,7 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
+        .route(runs::CONTEXT_ROUTE, get(runs::context))
         .route(conversations::CONVERSATION_ROUTE, get(conversations::view))
         .route(conversations::MESSAGES_ROUTE, post(conversations::post_message))
         .route(sessions::SESSIONS_ROUTE, get(sessions::list))

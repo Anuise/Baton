@@ -3151,16 +3151,61 @@
 - 影響：用本票較早的分支（migration 33 是 `controller_handoff`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R113）提到的 AI-327～AI-331 是改號前的編號，分別對應現在的 AI-344～AI-348。
 - 審閱：未審
 
-### AI-350：「跨登入」以登入識別比較判斷，手動開 App 也適用；識別取不到時不自動續跑
+### AI-350：Context Builder 的 token 預算與估計方式
+- 重要度：中
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：每個 Worker Run 的 context 預算固定為 8,000（估計的 token 數），不提供設定。token 以字元估計：非 ASCII 字元（含中文）每字算 1、ASCII 每 4 個字元算 1（無條件進位）；放入一項時以「放入後整個 Prompt 的估計值」判斷是否超出，receipt 的 `used_tokens` 就是最終 Prompt 的估計值。
+- 理由：spec 與票都沒有給數值；8,000 足以放下契約、檢查點、數則決策與教訓與摘要，又讓 Worker 的起始 context 保持聚焦（其餘可用 `search_knowledge`、`read_inbox` 取得）。以字元估計不需要 tokenizer 依賴，且偏保守（中文實際常低於 1 token／字）。
+- 替代方案：(1) 依 Workspace 或模型設定預算——目前沒有需求，之後要調整時只需改常數或加設定；(2) 呼叫 API 計算精確 token——需要網路與帳號額度，不適合在派工交易中做。
+- 影響：預算不夠時省略的項目會記在 receipt；若實際使用發現常被省略，調高常數即可，不影響既有 receipt。
+- 審閱：未審
+
+### AI-351：載入的內容、優先序與相關性排序
+- 重要度：中
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：(1) 優先序（也是 Prompt 中的順序）：Task 契約 → 交接說明（或沒有交接時的最近檢查點）→ 適用決策 → 相關教訓 → 未讀訊息摘要 → 證據索引。契約與交接說明是必要項目，即使超出預算也一定載入；其餘逐項放入，放不下的「整項省略」（不截斷），後面較小的項目仍可放入。(2) 決策與教訓只取有效且適用於該 Run 的條目（已驗證、在有效期間內、範圍為全域或涵蓋該 Task 的 Workspace／Goal／Task，與 `search_knowledge` 相同）；一般知識（`fact`）不主動載入。(3) 相關性：範圍越具體越前面（Task > Goal > Workspace > 全域），同範圍內「標籤出現在 Task 標題或契約文字中」的較前面，再依最後更新時間由新到舊。(4) 「重要約束優先保留」解讀為：決策（使用者定案的判斷）排在教訓之前，兩者都排在訊息與證據之前。
+- 理由：契約與交接說明缺一不可（交接說明含 `confirm_handoff` 指示與延續的檢查點）；決策與教訓是約束，訊息與證據是可以用工具再取得的參考。整項省略讓 receipt 的「載入」與「省略」語意清楚，不會出現半截內容。一般知識量可能很大，留給 Worker 以 `search_knowledge` 查詢。
+- 替代方案：以全文檢索比對契約關鍵字決定相關性——中文分詞不可靠，且範圍已表達大部分相關性；截斷過長的項目——receipt 需要再記錄截斷位置，版本與內容的對應變得模糊。
+- 影響：同一範圍內教訓很多時，最舊且標籤不相符的會先被省略。
+- 審閱：未審
+
+### AI-352：教訓摘要、決策與證據索引的呈現
+- 重要度：低
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：每個決策與教訓以 `〔條目識別 v內容版本〕標題` 開頭，讓 Prompt 中的內容可以對回 receipt。決策放標題與內文；教訓摘要放標題、觸發條件與做法（兩者都空白時改放內文），根因與證據不放。「證據索引」定義為這個 Task 與它直接依賴的 Task 已登記成果的最新版本，每項列出成果識別、版本、名稱、所屬 Task、sha256 前 12 碼與說明，只列索引不放內容。
+- 理由：觸發條件與做法是 Worker 避免重犯需要的部分；證據索引讓 Worker 知道有哪些既有成果可讀，而不佔用預算放入內容。依賴 Task 的成果通常就是這個 Task 的輸入。
+- 替代方案：把知識條目的 `evidence` 欄位列為證據索引——那是條目自己的依據，不是 Worker 可讀的成果；列出整個 Workspace 的成果——與 Task 無關的項目會擠掉預算。
+- 影響：需要根因或證據時，Worker 以 `search_knowledge` 取得完整條目。
+- 審閱：未審
+
+### AI-353：context receipt 的形狀、保存與查看
+- 重要度：中
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：(1) receipt 與 Prompt 在派工的同一個交易中由同一次組裝產生，之後都不再改變；記錄 `run_id`、`task_id`、`built_at`、`budget_tokens`、`used_tokens`、`prompt_sha256`，以及依優先序的全部候選項目（種類、來源識別、版本、標題、估計 token、`loaded`／`omitted` 與省略原因 `budget_exceeded`）。「版本」是契約版本、知識條目的內容版本、成果版本與檢查點的世代；未讀訊息摘要是一個整體、沒有版本。不適用或無效的條目不算候選，不出現在 receipt。(2) 第 35 個 migration `context_receipt`（每個 Run 一列、追加式）；因為要在 `run` 列寫入前插入，`run_id` 外鍵設為 `DEFERRABLE INITIALLY DEFERRED`，四個派工點只需把原本附加未讀摘要的一行換成 Context Builder。(3) 查看：`GET /api/v1/workspaces/{id}/runs/{run_id}/context` 回傳 receipt 與派工 Outbox 中實際交給 Worker 的 Prompt；本票之前建立的 Run 回 404 `context_receipt_not_found`。Web UI 在工作面板的 Run 狀態列提供可展開的「Context receipt」，展開時才載入；桌面殼新增 Tauri 指令 `run_context`。(4) Controller 的輪次不是 Run，不產生 receipt。
+- 理由：同一次組裝保證「receipt 版本與實際載入內容一致」；Prompt 雜湊讓事後可核對。回傳實際 Prompt 符合使用者故事 61「追查 Worker 當時知道什麼」。延遲外鍵避免更動 `RunChange` 與所有建構它的地方。
+- 替代方案：把 receipt 嵌在 RunView 中——每次列出 Run 都要載入全部 receipt；在 `save` 之後另外寫入——四個派工點都要多改一段。
+- 影響：Prompt 會出現在桌面 API 與 UI（只限桌面憑證）；其中可能含未讀訊息主旨與決策內容，與知識分頁、訊息本身的可見範圍相同。
+- 審閱：未審
+
+### AI-354：檢查點的載入時機與未讀摘要的交付標記
+- 重要度：低
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：(1) 交接時，檢查點仍包含在交接說明中（必要項目），receipt 另列一項 `checkpoint` 記錄延續了哪個檢查點（0 token，避免重複計算）。(2) 沒有交接的派工（例如實作失敗後重派）也載入 Task 最近一筆被接受的檢查點（任一世代），依預算放入；先前只有交接的 successor 會拿到檢查點。(3) 未讀訊息摘要只有放進 Prompt 時才把列出的訊息標為已交付；因預算省略時維持未交付。
+- 理由：票要求每個 Run 都有「最近檢查點」；重派的 Worker 也需要知道上一個 Run 做到哪裡。交付標記代表 Worker 真的被告知過。
+- 替代方案：重派不帶檢查點——Worker 會從頭做或重複已完成的部分。
+- 影響：重派的 Prompt 比以前多一段「最近的檢查點」。
+- 審閱：未審
+
+### AI-355：「跨登入」以登入識別比較判斷，手動開 App 也適用；識別取不到時不自動續跑
 - 重要度：高
 - 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
-- 決策：Runtime 每次啟動都在 `runtime_boot.login_session` 記下目前 Windows 登入工作階段的識別，與上一次啟動比較：不同就是「跨登入啟動」（`new_login`），依各 Workspace 的「跨登入自動續跑」暫停或續跑；相同（重開 App、監護重啟）或第一次啟動不做任何事；這一次或上一次的識別取不到就是無法核對（`login_unverified`），每個使用中的 Workspace 都暫停、不論設定。不論 Runtime 是登入啟動入口拉起還是使用者手動開 App 啟動，判斷都一樣。Windows 上的識別是 `LsaGetLogonSessionData` 的登入時間（LogonTime）加終端機工作階段識別，不只用 token 的 AuthenticationId LUID。停止意圖生效時不做任何跨登入處置（完全退出優先，見 AI-352）。
+- 決策：Runtime 每次啟動都在 `runtime_boot.login_session` 記下目前 Windows 登入工作階段的識別，與上一次啟動比較：不同就是「跨登入啟動」（`new_login`），依各 Workspace 的「跨登入自動續跑」暫停或續跑；相同（重開 App、監護重啟）或第一次啟動不做任何事；這一次或上一次的識別取不到就是無法核對（`login_unverified`），每個使用中的 Workspace 都暫停、不論設定。不論 Runtime 是登入啟動入口拉起還是使用者手動開 App 啟動，判斷都一樣。Windows 上的識別是 `LsaGetLogonSessionData` 的登入時間（LogonTime）加終端機工作階段識別，不只用 token 的 AuthenticationId LUID。停止意圖生效時不做任何跨登入處置（完全退出優先，見 AI-357）。
 - 理由：ADR-0007 的「跨登入自動續跑」是針對「跨了一次登入」這件事，不是針對啟動方式；若只看啟動來源，登入自啟動關閉時手動開 App 就會讓所有 Workspace 直接續跑，設定形同虛設，而且登入啟動與手動開 App 同時發生時，結果會取決於誰先取得單實例鎖。以識別比較則兩者結果相同。LUID 在重新開機後從小數字重新配發，可能與上次相同，會把重開機誤判為同一次登入。「啟動來源或停止意圖無法核對時不自動續跑」（ADR-0007）對應到識別取不到時全部暫停。
 - 替代方案：(1) 只有登入啟動入口啟動的 Runtime 才套用跨登入設定：簡單，但手動開 App 會繞過設定、競態結果不確定。(2) 以開機時間判斷：登出再登入（不重開機）判斷不出來，且系統時間調整會造成誤差。(3) 只用 LUID：重開機後可能重複。
 - 影響：重新開機或登出再登入後，沒有開啟跨登入自動續跑的 Workspace 一律等「繼續工作」（即使使用者是手動開 App）。由本票之前版本升級的資料庫，上一次啟動沒有識別，第一次啟動會被視為無法核對而暫停全部 Workspace 一次。以系統管理員提升權限執行時 token 屬於另一個連結工作階段，可能被判為跨登入（Validation Required，已記在開發指南）。
 - 審閱：未審
 
-### AI-351：跨登入暫停沿用 Workspace 的暫停機制並記下原因；完全退出後重新開啟只解除完全退出造成的暫停
+### AI-356：跨登入暫停沿用 Workspace 的暫停機制並記下原因；完全退出後重新開啟只解除完全退出造成的暫停
 - 重要度：中
 - 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
 - 決策：跨登入時暫停的是「沒有開啟跨登入自動續跑的每個使用中 Workspace」（不論是否有進行中的工作），與 DR-01 完全退出的暫停相同：`paused_since` 有值、派工等待原因 `lifecycle`／`awaiting_resume`、使用者按「繼續工作」解除。`workspace_lifecycle` 新增 `paused_by`（`full_exit`、`new_login`、`login_unverified`），等待原因與 UI 依它說明；既有的暫停資料（migration 時）與沒有原因的列都視為 `full_exit`。跨登入處置只會新增暫停、不解除既有的暫停。同時修改票 25 的重新開啟：「完全退出後自動續跑」只解除 `full_exit` 造成的暫停，跨登入造成的暫停照樣等「繼續工作」。
@@ -3169,7 +3214,7 @@
 - 影響：重新登入後沒有工作的 Workspace 也需要按一次「繼續工作」，新派的工作才會出去。改動了票 25 的 `reopen` 規則（只影響跨登入暫停的 Workspace，既有測試行為不變）。
 - 審閱：未審
 
-### AI-352：登入啟動入口是監護執行檔的 `--login` 模式，之後接著當監護；登入啟動的 Runtime 遇停止意圖不提供服務
+### AI-357：登入啟動入口是監護執行檔的 `--login` 模式，之後接著當監護；登入啟動的 Runtime 遇停止意圖不提供服務
 - 重要度：中
 - 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
 - 決策：HKCU Run 登記的命令列是 `"<安裝資料夾>\baton-guardian.exe" --login --data-dir "<資料目錄（絕對路徑）>" --port <埠>`。啟動入口先讀生命週期檔，有完全退出的停止意圖、維護抑制或檔案讀不懂就直接結束（不開資料庫、不寫任何監護檔）；否則已有 Runtime 就不再啟動，沒有就以 `BATON_START_SOURCE=login` 啟動 `baton-runtime.exe`；之後有 Runtime 可監看就由同一個程序接著當監護（監護的單實例鎖照舊）。登入啟動只啟動背景的 Runtime 與監護，不開 App 視窗。登入啟動的 Runtime 與監護拉起的相同：資料庫的停止意圖仍生效（生命週期檔沒寫成的情形）時不提供服務、記下正常結束，並把停止意圖補回生命週期檔。`RuntimeHost` 新增必要方法 `start_runtime_at_login`。
@@ -3178,7 +3223,7 @@
 - 影響：登入啟動後沒有系統匣圖示，要手動開 App 才看得到狀態。登入啟動被抑制時 Runtime 仍會先記一次啟動、輪替桌面憑證才結束（沿用票 32 監護路徑的既有行為）。
 - 審閱：未審
 
-### AI-353：「登入時自動啟動」偏好存在控制資料庫，Windows 的登記跟著偏好；先登記成功才保存
+### AI-358：「登入時自動啟動」偏好存在控制資料庫，Windows 的登記跟著偏好；先登記成功才保存
 - 重要度：中
 - 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
 - 決策：偏好存在 `login_startup`（只有一列，預設關閉），Windows 的 HKCU Run 值 `Baton` 跟著它。`PUT /api/v1/lifecycle/login-startup` 先改 Windows 的登記，成功才保存偏好；登記失敗回 500 `login_startup_registration_failed`，偏好不變。Runtime 每次啟動時比對登記與偏好（值存在且命令列完全相同才算已登記），不一致就補正（被刪掉就補回、殘留就移除）；失敗只記日誌，設定頁以 `registered` 顯示登記狀態。完全退出不改變偏好、不移除登記（停止抑制另存於生命週期檔，ADR-0007「保留原自啟動偏好」）。
@@ -3187,22 +3232,31 @@
 - 影響：多個資料目錄（或多個安裝）共用同一個值名稱 `Baton`，同時開啟時後啟動的那個會覆寫前一個的登記。解除安裝時移除登記屬於票 34（spec D-19）。
 - 審閱：未審
 
-### AI-354：跨登入的 API、事件與 migration 35 的形狀
+### AI-359：跨登入的 API、事件與 migration 36 的形狀
 - 重要度：低
 - 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
-- 決策：`GET /api/v1/lifecycle` 加 `login_startup: { enabled, registered }`（`registered` 查不到為 `null`），各 Workspace 加 `auto_resume_across_login` 與 `paused_by`；新端點 `PUT /api/v1/lifecycle/login-startup`（`{ "enabled": bool }`）與 `PUT /api/v1/workspaces/{id}/login-resume`（`{ "auto_resume_across_login": bool }`），不擴充既有的 `PUT /api/v1/workspaces/{id}/lifecycle`。事件：`login_startup` 聚合的 `login_startup_changed`，`workspace_lifecycle` 聚合的 `workspace_login_resume_changed`、`workspace_paused_by_login`。migration 35 `cross_login_startup`：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`（預設 0）與 `paused_by`（既有的暫停填 `full_exit`）、`login_startup` 表。兩個 Workspace 設定是同一列的兩個獨立欄位，各有自己的端點、事件與 UI 勾選框。桌面殼新增 `workspace_login_resume_update`、`lifecycle_login_startup_update` 指令。
+- 決策：`GET /api/v1/lifecycle` 加 `login_startup: { enabled, registered }`（`registered` 查不到為 `null`），各 Workspace 加 `auto_resume_across_login` 與 `paused_by`；新端點 `PUT /api/v1/lifecycle/login-startup`（`{ "enabled": bool }`）與 `PUT /api/v1/workspaces/{id}/login-resume`（`{ "auto_resume_across_login": bool }`），不擴充既有的 `PUT /api/v1/workspaces/{id}/lifecycle`。事件：`login_startup` 聚合的 `login_startup_changed`，`workspace_lifecycle` 聚合的 `workspace_login_resume_changed`、`workspace_paused_by_login`。migration 36 `cross_login_startup`：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`（預設 0）與 `paused_by`（既有的暫停填 `full_exit`）、`login_startup` 表。兩個 Workspace 設定是同一列的兩個獨立欄位，各有自己的端點、事件與 UI 勾選框。桌面殼新增 `workspace_login_resume_update`、`lifecycle_login_startup_update` 指令。
 - 理由：獨立端點讓兩項設定的保存與顯示完全分開（驗收條件），既有的用戶端也不必改請求格式。
 - 替代方案：既有 PUT 改成兩個選填欄位：端點較少，但兩個設定共用一個請求，容易一起被改到。
 - 影響：Web UI 在「完全退出後自動續跑」之外另有「跨登入自動續跑」勾選框，設定區新增「登入 Windows 時自動啟動 Baton」。
 - 審閱：未審
 
-### AI-355：Harness 以單實例模型模擬「登入啟動與手動開 App 同時發生」
+### AI-360：Harness 以單實例模型模擬「登入啟動與手動開 App 同時發生」
 - 重要度：低
 - 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
 - 決策：Harness 的程序內 Runtime 改為遵守單實例：已有 Runtime 時，監護或登入啟動入口再啟動的 Runtime 視為取不到單實例鎖而立即結束（不開資料庫、不覆蓋現有的 Runtime）。新增 `sign_in_again`（結束同一次登入的 Runtime 與監護、換新的登入識別）、`windows_login_startup`（有登記才執行啟動入口，之後有 Runtime 就接著當監護）、`open_app_during_next_login_start`（啟動入口啟動 Runtime 的同一刻，App 的 Runtime 先取得鎖）。fake 新增 `FakeLoginSession`、`FakeStartupRegistration`。另以真實執行檔測試兩者同時啟動時只有一個 Runtime 在服務、啟動次數為 1。
 - 理由：真實環境的單一控制平面由具名 mutex 保證；harness 原本在已有 Runtime 時會直接覆蓋，無法重現競態。
 - 替代方案：只靠真實程序測試：涵蓋單實例本身，但看不到跨登入處置只做一次等控制資料庫的結果。
 - 影響：監護的既有情境測試行為不變（監護在啟動前都會先確認沒有 Runtime）。
+- 審閱：未審
+
+### AI-361：票 33 整合 rebuild/v1（票 39）：migration 順延為第 36 個、AI 編號改為 AI-355～AI-360
+- 重要度：中
+- 時間／階段：2026-10-22，票 33 整合（run R121-33-integrate）
+- 決策：(1) 整合分支併入票 39，第 35 個 migration 是 `context_receipt`（新建追加式的 `context_receipt` 表與兩個觸發器）。本票的 `cross_login_startup` 順延為第 36 個、排在 `context_receipt` 之後；兩者沒有共用的資料表（本票只對 `runtime_boot`、`workspace_lifecycle` 加欄並新建 `login_startup`），都不需要 `foreign_keys=OFF`，都會套用。migration 註解、開發指南〈跨 Windows 登入的啟動與續跑〉與原 AI-354 的「migration 35」改為 36。(2) 本票條目原寫成 AI-350～AI-355，與票 39 的 AI-350～AI-354 同號，現改為 AI-355～AI-360，移到票 39 的 AI-354 之後；條目內引用本票編號之處（原 AI-350 的「見 AI-352」→「見 AI-357」）一併更新。整合分支的條目逐字未動；本票的程式碼、文件與票面沒有引用這些編號。(3) 衝突只有兩處：`baton-store` 的 migration 清單（票 39 在前、本票在後），以及開發指南的目錄表（以整合分支的列為底，補回本票在 `baton-domain`（`login.rs`）、`baton-ports`（`LoginSession`、`StartupRegistration`）、`baton-store`（跨登入的欄位與 `login_startup`）與 `baton-api`（login-startup／login-resume 路由）的描述）。其餘檔案（API、Client、Tauri 指令、Web UI、`ai-decisions.md`）由 git 自動合併，兩邊行為都保留。本次只整合、不新增行為。
+- 理由：依編號規則，後合併的票順延到整合分支的最大編號之後；不修改整合分支已有的 migration 與條目。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票較早的分支（migration 35 是 `cross_login_startup`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R120）提到的 AI-350～AI-355、migration 35 是改號前的編號，分別對應現在的 AI-355～AI-360、migration 36。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

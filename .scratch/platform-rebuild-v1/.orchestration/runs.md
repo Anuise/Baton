@@ -120,5 +120,6 @@
 | R116-41-integrate | 41 | integrate | Work-8 | 2026-10-22 22:32 | 2026-10-22 22:38 | DONE，依 AI-109 直接合併 |
 | R117-30-integrate | 30 | integrate | Work-3 | 2026-10-22 22:37 | 2026-10-22 22:45 | DONE，依 AI-109 直接合併 |
 | R118-42-impl | 42 | impl | Work-8 | 2026-10-22 22:38 | | |
-| R119-39-verify | 39 | verify | Work-3 | 2026-10-22 22:54 | | |
-| R120-33-verify | 33 | verify | Work-8 | 2026-10-22 22:56 | | |
+| R119-39-verify | 39 | verify | Work-3 | 2026-10-22 22:54 | 2026-10-22 23:02 | PASS |
+| R120-33-verify | 33 | verify | Work-8 | 2026-10-22 22:56 | 2026-10-22 23:04 | PASS（基底早於票 39，依 AI-109 整合後合併；主控確認 HKCU Run 無 Baton 殘留） |
+| R121-33-integrate | 33 | integrate | Work-3 | 2026-10-22 23:04 | | |

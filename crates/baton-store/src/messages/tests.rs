@@ -1,5 +1,5 @@
 use baton_domain::message::{Classified, SendInput};
-use baton_domain::run::RunCommand;
+use baton_domain::run::{RunChange, RunCommand};
 use baton_domain::task::{ContractContent, ContractField, TaskCommand};
 
 use super::*;

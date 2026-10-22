@@ -13,6 +13,7 @@ pub mod authorization;
 pub mod backup;
 pub mod budget;
 pub mod config;
+pub mod context;
 pub mod conversation;
 pub mod decision;
 pub mod event;

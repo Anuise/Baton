@@ -384,10 +384,8 @@ impl Store {
                         return Ok(abandon_in(tx, &current, &format!("no_successor：{why}"), now));
                     }
                 };
-                if let Some(outbox) = change.outbox.as_mut() {
-                    outbox.payload.prompt.push_str(&handoff::successor_prompt(&current, checkpoint.as_ref()));
-                }
-                super::messages::attach_unread_summary(tx, &mut change, now)?;
+                // 交接說明（含要延續的 checkpoint）由 Context Builder 放進 Prompt
+                super::context::attach_context(tx, &loaded, &mut change, Some(&current), now)?;
                 save(tx, &change, now)?;
                 let Some(successor) = change.run.as_ref() else {
                     return Ok(Err(RunError::RunNotFound(current.task_id.clone()).into()));
@@ -523,14 +521,11 @@ fn resume_in(
         Err(rejected) => return Ok(Err(failed_check(&rejected))),
     };
     let checkpoint = handoff::latest_checkpoint(&loaded.reports, &loaded.runs, &current.task_id);
-    if let Some(outbox) = change.outbox.as_mut() {
-        outbox.payload.prompt.push_str(&handoff::successor_prompt(current, checkpoint.as_ref()));
-    }
     // Task 回到 ready 的事件在派工事件之前（版本依序）
     for event in &resumed {
         append_event(tx, event)?;
     }
-    super::messages::attach_unread_summary(tx, &mut change, now)?;
+    super::context::attach_context(tx, &loaded, &mut change, Some(current), now)?;
     save(tx, &change, now)?;
     let Some(successor) = change.run.as_ref() else {
         return Ok(Err(failed_check(&RunError::RunNotFound(current.task_id.clone()))));
