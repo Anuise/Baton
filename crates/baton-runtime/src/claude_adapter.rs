@@ -8,13 +8,15 @@
 //!
 //! 啟動參數只有旗標、檔案路徑與模型名稱，**不含任何憑證值**；`CLAUDE_CONFIG_DIR` 指向 Run 帳號的 Profile 目錄，
 //! 並移除 Runtime 繼承到、會改變認證來源的環境變數（`ANTHROPIC*`、`CLAUDE*`）。
-//! 共同設定以 Run 專屬唯讀快照傳入（spec D-09），使用者層設定來源不載入（`--setting-sources project,local`）。
+//! 共同設定以 Run 專屬唯讀快照傳入（spec D-09）；使用者層、專案層與本機層的設定檔一律不載入（`--setting-sources ""`），
+//! Worker 無法藉由寫入 Workspace 內的 `.claude\settings*.json` 改變自己的權限。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use baton_domain::agent::{mcp_config_json, MCP_SERVER_NAME};
+use baton_domain::quota::{LimitStatus, QuotaWindow};
 use baton_domain::shared_settings::{INSTRUCTIONS_FILE, MCP_FILE, SETTINGS_FILE};
 use baton_ports::{
     write_file_atomic, AdapterEvent, AgentAdapter, AgentHandle, Capability, PortError, PortResult, RunSpec, SessionRef,
@@ -90,8 +92,8 @@ impl ClaudeCodeAdapter {
 impl AgentAdapter for ClaudeCodeAdapter {
     fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
         let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"].map(String::from).to_vec();
-        // 使用者層的設定（CLAUDE_CONFIG_DIR 下的 settings.json）不載入；共同設定只來自 Run 的快照
-        args.extend(["--setting-sources", "project,local"].map(String::from));
+        // 不載入任何設定檔來源（使用者層、Workspace 的 .claude\settings*.json）：設定只來自 Run 的快照
+        args.extend(["--setting-sources", ""].map(String::from));
         // 只使用這個 Run 的 MCP 設定：Baton 的 shim，加上快照中的共同 MCP 伺服器
         args.extend(["--strict-mcp-config", "--mcp-config"].map(String::from));
         args.push(self.file(&spec.run_id, RUN_MCP_FILE));
@@ -208,8 +210,8 @@ async fn read_from(path: &Path, offset: u64) -> Vec<u8> {
 ///
 /// - `system/init`：原生 Session 識別 → `Started`。
 /// - `assistant`：文字內容 → `Message`。
-/// - `rate_limit_event` 且 `status` 為 `rejected`：→ `RateLimited`（`resetsAt` 是秒）。
-/// - `result`：`is_error` 為 false 且 `subtype` 為 `success` → `Exited { success: true }`；
+/// - `rate_limit_event`：→ `RateLimited`（見 `rate_limits`；`resetsAt` 是秒）。
+/// - `result`：有 `usage` 時先 `UsageReported`；`is_error` 為 false 且 `subtype` 為 `success` → `Exited { success: true }`；
 ///   否則先 `Error`（`result` 文字或結束原因）再 `Exited { success: false }`。
 /// - 不是 JSON 的行 → `Error`（輸出被截斷或混入非協定內容）。
 pub fn parse_stream_line(line: &str) -> Vec<AdapterEvent> {
@@ -235,29 +237,70 @@ pub fn parse_stream_line(line: &str) -> Vec<AdapterEvent> {
             .filter(|t| !t.trim().is_empty())
             .map(|text| AdapterEvent::Message { text })
             .collect(),
-        Some("rate_limit_event") => {
-            let info = value.get("rate_limit_info");
-            let rejected = info.and_then(|i| i.get("status")).and_then(Value::as_str) == Some("rejected");
-            if !rejected {
-                return Vec::new();
-            }
-            let reset_at_millis = info.and_then(|i| i.get("resetsAt")).and_then(Value::as_i64).map(|secs| secs * 1000);
-            vec![AdapterEvent::RateLimited { reset_at_millis }]
-        }
+        Some("rate_limit_event") => value.get("rate_limit_info").map(|info| rate_limits(info, line)).unwrap_or_default(),
         Some("result") => {
+            let mut events = Vec::new();
+            if let Some(tokens) = value.get("usage").and_then(usage_tokens) {
+                events.push(AdapterEvent::UsageReported { tokens, raw: line.to_string() });
+            }
             let is_error = value.get("is_error").and_then(Value::as_bool).unwrap_or(true);
             let subtype = text(&value, "subtype").unwrap_or_default();
             if !is_error && subtype == "success" {
-                return vec![AdapterEvent::Exited { success: true }];
+                events.push(AdapterEvent::Exited { success: true });
+                return events;
             }
             let detail = text(&value, "result")
                 .filter(|r| !r.trim().is_empty())
                 .or_else(|| text(&value, "terminal_reason"))
                 .unwrap_or_else(|| subtype.clone());
-            vec![AdapterEvent::Error { message: truncate(&detail) }, AdapterEvent::Exited { success: false }]
+            events.extend([AdapterEvent::Error { message: truncate(&detail) }, AdapterEvent::Exited { success: false }]);
+            events
         }
         _ => Vec::new(),
     }
+}
+
+/// `rate_limit_event` 的 `rate_limit_info` → 限流訊號（「已觀測」來源，spec D-12）。
+///
+/// `status`／`rateLimitType` 描述 CLI 目前回報的那個限制：`allowed` → 未受限、`allowed_warning` → 警告、
+/// `rejected` → 已達上限；不認識的狀態不轉換。`unifiedWindows` 另外帶有每個視窗的已用比例，
+/// 其他視窗也各送一個訊號（狀態視為未受限，判斷以已用比例為準）。
+fn rate_limits(info: &Value, raw: &str) -> Vec<AdapterEvent> {
+    let status = match info.get("status").and_then(Value::as_str) {
+        Some("allowed") => LimitStatus::Allowed,
+        Some("allowed_warning") => LimitStatus::Warning,
+        Some("rejected") => LimitStatus::Exhausted,
+        _ => return Vec::new(),
+    };
+    let window_name = info.get("rateLimitType").and_then(Value::as_str);
+    let unified = info.get("unifiedWindows").and_then(Value::as_object);
+    let used_of = |name: &str| unified.and_then(|w| w.get(name)).and_then(|w| w.get("utilization")).and_then(Value::as_f64);
+    let reset_of = |entry: Option<&Value>| entry.and_then(|e| e.get("resetsAt")).and_then(Value::as_i64).map(|secs| secs * 1000);
+    let mut events = vec![AdapterEvent::RateLimited {
+        window: window_name.and_then(QuotaWindow::parse),
+        status,
+        used: info.get("utilization").and_then(Value::as_f64).or_else(|| window_name.and_then(used_of)),
+        reset_at_millis: reset_of(Some(info)),
+        raw: raw.to_string(),
+    }];
+    for (name, entry) in unified.into_iter().flatten() {
+        let Some(window) = QuotaWindow::parse(name).filter(|_| Some(name.as_str()) != window_name) else { continue };
+        events.push(AdapterEvent::RateLimited {
+            window: Some(window),
+            status: LimitStatus::Allowed,
+            used: entry.get("utilization").and_then(Value::as_f64),
+            reset_at_millis: reset_of(Some(entry)),
+            raw: raw.to_string(),
+        });
+    }
+    events
+}
+
+/// `result` 的 `usage` → 這一輪用掉的 token 數：輸入 + 輸出 + 快取建立（快取讀取不計，AI-121 的建議）。
+fn usage_tokens(usage: &Value) -> Option<u64> {
+    let field = |name: &str| usage.get(name).and_then(Value::as_u64);
+    let counted = ["input_tokens", "output_tokens", "cache_creation_input_tokens"].map(field);
+    counted.iter().any(Option::is_some).then(|| counted.iter().flatten().sum())
 }
 
 fn truncate(text: &str) -> String {
@@ -277,10 +320,10 @@ mod tests {
     // 以下各行取自 Claude Code 2.1.307 的實際 stream-json 輸出（欄位精簡、路徑與識別已改為範例值）
     const INIT: &str = r#"{"type":"system","subtype":"init","cwd":"C:\\work\\app","session_id":"326f0edb-57c5-40e9-8560-99ae95e9027e","tools":["Bash","Edit"],"mcp_servers":[{"name":"baton","status":"connected"}],"model":"claude-opus-5-5","permissionMode":"default","apiKeySource":"none","claude_code_version":"2.1.307","uuid":"04c0e190-abce-4973-ad8f-14ea3eba5e8b"}"#;
     const ASSISTANT: &str = r#"{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"thinking","thinking":"..."},{"type":"text","text":"OK"},{"type":"tool_use","id":"t1","name":"Read","input":{}}]},"session_id":"326f0edb-57c5-40e9-8560-99ae95e9027e"}"#;
-    const RATE_ALLOWED: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1792660800,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false},"session_id":"c40db023"}"#;
-    const RATE_WARNING: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1793116800,"rateLimitType":"seven_day","utilization":0.5},"session_id":"7fabe7af"}"#;
+    const RATE_ALLOWED: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1792660800,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0,"resetsAt":1792660800},"seven_day":{"utilization":0.01,"resetsAt":1792724400}}},"session_id":"c40db023"}"#;
+    const RATE_WARNING: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1793116800,"rateLimitType":"seven_day","utilization":0.5,"unifiedWindows":{"five_hour":{"utilization":0.16,"resetsAt":1792660800},"seven_day":{"utilization":0.5,"resetsAt":1793116800}}},"session_id":"7fabe7af"}"#;
     const RATE_REJECTED: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792660800,"rateLimitType":"five_hour"},"session_id":"c40db023"}"#;
-    const RESULT_OK: &str = r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","api_error_status":null,"num_turns":91,"result":"RESULT: DONE","session_id":"c40db023-7d52-4b61-80bd-f12978568919"}"#;
+    const RESULT_OK: &str = r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","api_error_status":null,"num_turns":91,"result":"RESULT: DONE","usage":{"input_tokens":10,"cache_creation_input_tokens":1000,"cache_read_input_tokens":50000,"output_tokens":200},"session_id":"c40db023-7d52-4b61-80bd-f12978568919"}"#;
     const RESULT_NOT_LOGGED_IN: &str = r#"{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"326f0edb-57c5-40e9-8560-99ae95e9027e","total_cost_usd":0,"terminal_reason":"api_error","is_error":true,"num_turns":1,"subtype":"success","api_error_status":null,"result":"Not logged in · Please run /login","type":"result"}"#;
     const THINKING: &str = r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":50,"session_id":"c40db023"}"#;
 
@@ -297,23 +340,59 @@ mod tests {
         assert_eq!(parse_stream_line(ASSISTANT), [AdapterEvent::Message { text: "OK".into() }]);
     }
 
-    #[test]
-    fn only_a_rejected_rate_limit_is_a_rate_limit_signal_with_its_reset_time_in_millis() {
-        assert_eq!(parse_stream_line(RATE_ALLOWED), []);
-        assert_eq!(parse_stream_line(RATE_WARNING), []);
-        assert_eq!(parse_stream_line(RATE_REJECTED), [AdapterEvent::RateLimited { reset_at_millis: Some(1_792_660_800_000) }]);
+    fn limited(window: QuotaWindow, status: LimitStatus, used: Option<f64>, reset_secs: i64, raw: &str) -> AdapterEvent {
+        AdapterEvent::RateLimited { window: Some(window), status, used, reset_at_millis: Some(reset_secs * 1000), raw: raw.into() }
     }
 
     #[test]
-    fn a_successful_result_ends_the_run_successfully() {
-        assert_eq!(parse_stream_line(RESULT_OK), [AdapterEvent::Exited { success: true }]);
+    fn rate_limit_events_report_the_status_of_the_reported_window_and_the_usage_of_every_window() {
+        assert_eq!(
+            parse_stream_line(RATE_ALLOWED),
+            [
+                limited(QuotaWindow::FiveHour, LimitStatus::Allowed, Some(0.0), 1_792_660_800, RATE_ALLOWED),
+                limited(QuotaWindow::SevenDay, LimitStatus::Allowed, Some(0.01), 1_792_724_400, RATE_ALLOWED),
+            ]
+        );
+        assert_eq!(
+            parse_stream_line(RATE_WARNING),
+            [
+                limited(QuotaWindow::SevenDay, LimitStatus::Warning, Some(0.5), 1_793_116_800, RATE_WARNING),
+                limited(QuotaWindow::FiveHour, LimitStatus::Allowed, Some(0.16), 1_792_660_800, RATE_WARNING),
+            ]
+        );
+        assert_eq!(
+            parse_stream_line(RATE_REJECTED),
+            [limited(QuotaWindow::FiveHour, LimitStatus::Exhausted, None, 1_792_660_800, RATE_REJECTED)]
+        );
+    }
+
+    #[test]
+    fn rate_limits_with_an_unknown_status_or_window_are_not_guessed() {
+        let unknown_status = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"throttled","rateLimitType":"five_hour"}}"#;
+        assert_eq!(parse_stream_line(unknown_status), []);
+        let unknown_window = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"opus_weekly"}}"#;
+        let events = parse_stream_line(unknown_window);
+        assert!(
+            matches!(&events[..], [AdapterEvent::RateLimited { window: None, status: LimitStatus::Exhausted, used: None, reset_at_millis: None, .. }]),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_successful_result_reports_its_usage_then_ends_the_run_successfully() {
+        assert_eq!(
+            parse_stream_line(RESULT_OK),
+            [AdapterEvent::UsageReported { tokens: 1_210, raw: RESULT_OK.into() }, AdapterEvent::Exited { success: true }],
+            "快取讀取不計入"
+        );
     }
 
     #[test]
     fn an_error_result_reports_its_text_then_ends_the_run_as_failed_even_with_subtype_success() {
         assert_eq!(
             parse_stream_line(RESULT_NOT_LOGGED_IN),
-            [AdapterEvent::Error { message: "Not logged in · Please run /login".into() }, AdapterEvent::Exited { success: false }]
+            [AdapterEvent::Error { message: "Not logged in · Please run /login".into() }, AdapterEvent::Exited { success: false }],
+            "沒有 usage 就不回報用量"
         );
         let max_turns = r#"{"type":"result","subtype":"error_max_turns","is_error":false,"session_id":"s"}"#;
         assert_eq!(
@@ -372,7 +451,7 @@ mod tests {
 
         assert_eq!(spec.program, "claude");
         assert_eq!(&spec.args[..4], ["-p", "--output-format", "stream-json", "--verbose"]);
-        assert_eq!(value_after(&spec.args, "--setting-sources"), Some("project,local"));
+        assert_eq!(value_after(&spec.args, "--setting-sources"), Some(""), "不載入任何設定檔來源");
         assert!(spec.args.contains(&"--strict-mcp-config".to_string()));
         let mcp = data.path().join(RUNS_DIR).join("run_1").join(RUN_MCP_FILE);
         assert_eq!(value_after(&spec.args, "--mcp-config"), Some(mcp.to_string_lossy().as_ref()));
@@ -474,6 +553,7 @@ mod tests {
                 AdapterEvent::Heartbeat,
                 AdapterEvent::Started { native_session_id: Some("326f0edb-57c5-40e9-8560-99ae95e9027e".into()) },
                 AdapterEvent::Message { text: "OK".into() },
+                AdapterEvent::UsageReported { tokens: 1_210, raw: RESULT_OK.into() },
                 AdapterEvent::Exited { success: true },
             ]
         );

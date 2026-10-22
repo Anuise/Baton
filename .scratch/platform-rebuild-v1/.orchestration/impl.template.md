@@ -21,6 +21,8 @@
 8. 結束前：`git merge rebuild/v1`（若整合分支有新 commit），解決衝突，確認全部測試通過，工作樹乾淨。
 9. 不要 push，不要動 `main` 或 `rebuild/v1`。
 
+**執行方式限制：** 這是 `claude -p` 非互動 run，你一結束回合，run 就結束。不要使用 Monitor、`run_in_background`、排程或任何「等通知再繼續」的方式；建置與測試一律在前景執行到結束（必要時把 Bash 的 timeout 設到 600000）。
+
 最後一則回覆請用以下格式：
 ```
 RESULT: DONE | FAILED

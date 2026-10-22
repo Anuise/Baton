@@ -295,6 +295,40 @@ describe("Runtime 用戶端", () => {
     expect(invoke.mock.calls).toEqual([["scheduling_overview"], ["scheduling_set_mode", { mode: "reserve_handoff" }]]);
   });
 
+  it("HTTP 版設定方案上限：PUT 到 Profile 的 quota-limits，未設定的視窗送 null", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.setQuotaLimits("prof_1", { five_hour_tokens: 500_000, seven_day_tokens: null });
+
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/profiles/prof_1/quota-limits", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ five_hour_tokens: 500_000, seven_day_tokens: null }),
+    });
+  });
+
+  it("HTTP 版設定方案上限被拒絕時，錯誤訊息是 Runtime 的說明", async () => {
+    const body = { error: "plan_limit_invalid", message: "方案上限必須是正整數（token）；不知道就留空" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 400 }));
+
+    await expect(
+      createHttpClient(fetchFn as unknown as typeof fetch).setQuotaLimits("prof_1", {
+        five_hour_tokens: 0,
+        seven_day_tokens: null,
+      }),
+    ).rejects.toThrow("方案上限必須是正整數（token）；不知道就留空");
+  });
+
+  it("Tauri 版以 profile_set_quota_limits 指令設定方案上限", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const limits = { five_hour_tokens: null, seven_day_tokens: 3_000_000 };
+
+    await createTauriClient(invoke as never).setQuotaLimits("prof_1", limits);
+
+    expect(invoke.mock.calls).toEqual([["profile_set_quota_limits", { id: "prof_1", limits }]]);
+  });
+
   it("HTTP 版把 Task 操作失敗時 Runtime 的說明當成錯誤訊息", async () => {
     const body = { error: "dependency_cycle", message: "相依會形成循環：A → B → A" };
     const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));

@@ -55,7 +55,9 @@ impl Store {
                 let loaded = load(tx, &workspace_id)?;
                 match decide_in(&loaded, &workspace_id, &loaded.tasks, command, now) {
                     Err(rejected) => Ok(Err(rejected)),
-                    Ok(change) => {
+                    Ok(mut change) => {
+                        // 派工（唯一會產生 Outbox 項目的命令）時，Prompt 附上收件 Task 的未讀訊息摘要
+                        super::messages::attach_unread_summary(tx, &mut change, now)?;
                         if change.changed() {
                             save(tx, &change, now)?;
                         }

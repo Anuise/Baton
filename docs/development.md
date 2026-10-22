@@ -6,9 +6,9 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`） |
 | `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`，以及 `write_readonly_files`：把一組檔案寫成唯讀目錄）、PlatformInfo、SecretProtector、ClaudeEnvironment、UserSettingsSource（唯讀讀取使用者平常使用的 Claude Code 設定，只有白名單內的三個檔案）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式） |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`） |
 | `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照與成果瀏覽）、`/api/v1/scheduling`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、Claude Code Adapter（`claude_adapter.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
@@ -150,13 +150,14 @@ Run 的規則在 `baton_domain::run`（純邏輯：命令 + 目前狀態 → 新
 
 **寫入所有權**：同一個 Task 任何時刻最多一個尚未釋放的 `execution_lease`（Domain 判定 + 資料庫唯一索引 `execution_lease_one_held_per_task`；性質測試 `at_most_one_effective_writer_per_task_under_any_command_sequence`）。Run 結束或取消**確認程序停止之後**才釋放；停不掉（`StopResult::StillAlive`）就一直持有，新的 Run 派不出去。
 
-**Supervisor**（`Supervisor::tick`，每次依序做五件事，全部冪等、只信任資料庫）：
+**Supervisor**（`Supervisor::tick`，每次依序做六件事，全部冪等、只信任資料庫）：
 
 1. 啟動派工 Outbox 的 Run：先在交易中持久化 launch intent 與 `command_id`（`starting`），才在交易外 `spawn`，再把回執（PID + 建立時間 + 指令雜湊）寫回（`running`）。Runtime 在任何一點當掉，重建後以 `command_id` 呼叫 `ProcessControl::find` 找回原程序並補寫回執，**不重複啟動**；找不到就把 Run 標為 `interrupted`（`launch_outcome_unknown`），不自動重送，由使用者重新派工。
-2. 收 Adapter 事件：`Heartbeat` 續約 lease（間隔 15 秒、有效 60 秒，spec D-31）；`Exited` 只結束 Run（成功 → Task `verifying`，失敗 → Task 回到 `ready`），**不會**把 Task 標為 `completed`。
+2. 收 Adapter 事件：`Heartbeat` 續約 lease（間隔 15 秒、有效 60 秒，spec D-31）；`RateLimited`、`UsageReported` 記為該 Run 帳號的額度觀測（見「額度觀測」）；`Exited` 只結束 Run（成功 → Task `verifying`，失敗 → Task 回到 `ready`），**不會**把 Task 標為 `completed`。
 3. 取消：要求取消的 Run 先記下意圖（`cancel_requested_at`），Supervisor 停止整個程序樹，確認之後才完成取消、釋放 lease、Task 回到 `ready`；還沒啟動的 Run 立即取消。取消 Task 會在同一個交易中要求取消它進行中的 Run。
 4. 核對 lease：過期只觸發核對（`inspect`）：確認 `Dead` 才中斷 Run，`Alive` 續約，`Unknown` 維持原狀。
-5. 排程：前面幾步可能釋放了名額，於是讓派工佇列依序再試一次（見下一節）；派出的 Run 在同一次 `tick` 就啟動。
+5. 額度：輪詢到期（每個帳號每 5 分鐘）的外部額度觀測器並重新推估（見「額度觀測」）。
+6. 排程：前面幾步可能釋放了名額，於是讓派工佇列依序再試一次（見下一節）；派出的 Run 在同一次 `tick` 就啟動。
 
 正式執行時由背景迴圈每秒（或派工／取消時被喚醒）呼叫 `tick`；`RuntimeOptions { background_supervisor: false }`（harness 使用）不啟動背景迴圈，由測試呼叫 `harness.supervise()`。`RuntimeOptions::stop_grace` 預設 30 秒（spec D-11）。
 
@@ -218,15 +219,43 @@ Worker 不直接碰資料庫或管理 API：它的程序啟動時帶著一組**�
 | `category` | 代表 | 例（`code`） | 怎麼恢復 |
 | --- | --- | --- | --- |
 | `capacity` | 名額已滿 | `account_capacity_full`、`global_capacity_full`、`handoff_slot_reserved` | 名額空出來自動派出 |
-| `quota` | 帳號推估用量 ≥ 75% | `quota_near_limit` | 等重置（遲滯與 draining 屬票 27、28）；沒有樣本（未觀測）**不**阻擋 |
+| `quota` | 帳號的判斷用量（較保守者）≥ 75% | `quota_near_limit` | 等重置（遲滯與 draining 屬票 28）；用量未知**不**阻擋 |
 | `authorization` | Workspace 授權不足或尚未確認 | `capability_not_granted`、`authorization_unconfirmed` | 使用者重新確認授權 |
 | `dependency` | 相依的 Task 還沒完成 | `dependencies_unfinished` | 相依完成後自動派出 |
 | `state_unknown` | 帳號還沒核對、無法確認身分 | `profile_unverified`、`identity_unconfirmed` | 在帳號頁核對 |
 | `account` | 帳號不可用，或根本沒有帳號 | `no_account`、`profile_not_logged_in`、`auth_source_overridden`、`identity_mismatch`、`duplicate_identity` | 登入、移除覆蓋來源、新增帳號 |
 
-等待原因每次由目前狀態重新判定，不保存（所以不會過期）。`GET /api/v1/scheduling` 回傳總覽：容量與使用量、每個使用中帳號的進行中 Run（`accounts[].runs`）與已知用量（未觀測為 `null`）、佇列與各自的原因。額度樣本由 `QuotaObserver` Port 取得（`baton_ports::observe_quota`），Port 失敗或未知的帳號不放進結果。
+等待原因每次由目前狀態重新判定，不保存（所以不會過期）。`GET /api/v1/scheduling` 回傳總覽：容量與使用量、每個使用中帳號的進行中 Run（`accounts[].runs`）、額度判斷（`accounts[].quota`、`quota_used`，未知為 `null`）與方案上限（`accounts[].plan_limits`）、佇列與各自的原因。排程只拿到已知用量的帳號（`baton_api::quota::known_used`）。
 
 測試：`crates/baton-harness/tests/scheduling.rs`（情境測試）、`crates/baton-domain/src/scheduler/tests.rs`（單元與性質測試）、`crates/baton-store/src/scheduling/tests.rs`。harness 的 `harness.add_account(name, email)` 建立一個核對通過、可派工的帳號（同一個 email 不能綁兩個 Profile）。
+
+### 額度觀測
+
+規則在 `baton_domain::quota`（純邏輯：最新的觀測 + 現在時間 → 判斷），持久化在 `baton-store` 的 `quota.rs`，輪詢與方案上限端點在 `baton-api` 的 `quota.rs`，事件來源在 `Supervisor`（spec D-12）。
+
+**三個來源**，每筆觀測都存成 `quota_observation`（來源 `source`、`origin`、視窗、狀態、用量比例、`observed_at`、可信度 `confidence`、原始資料參照 `raw_ref` 與原文 `raw`）：
+
+| `origin` | `source` | 從哪裡來 | `raw_ref` |
+| --- | --- | --- | --- |
+| `adapter` | `observed` | Adapter 解析 CLI 串流的限流訊號：`AdapterEvent::RateLimited { window, status, used, reset_at_millis, raw }`（`status` = `allowed`／`warning`／`exhausted`） | `run:<run_id>` |
+| `estimate` | `estimated` | Run 結果訊息的用量 `AdapterEvent::UsageReported { tokens, raw }` 記入 `quota_usage`；滾動五小時與七日視窗內的本機累計 token ÷ 使用者設定的方案上限 | `quota_usage:seq=a..b` |
+| `observer` | Port 回報的 | `QuotaObserver` Port 每 5 分鐘輪詢一次（spec D-31）；正式版沒有實作（`NotImplemented` 不留紀錄），其他錯誤記為一筆未知的觀測 | `quota_observer` |
+
+**未知不填零**：沒有方案上限、視窗內沒有本機用量、CLI 訊號沒有數字、Port 失敗，用量都是 `null`、可信度 `unknown`。CLI 訊號在 `reset_at` 之後失效（沒有重置時間時維持一個視窗長度），失效後回到未知。沒有說明視窗的訊號歸到五小時視窗。
+
+**較保守者**（`assess`）：每個視窗取已觀測與推估中用量較高者，帳號再取兩個視窗與外部觀測器中最高者；`exhausted` 視為 100%，`warning` 沒有數字時視為 75%（停止派工門檻）。這個值就是排程用的用量。
+
+**觀測不完整**：推估只看得到本機 Baton 派出的 Run。兩個視窗都有來自 CLI 的帳號層級數字（或外部觀測器有已觀測的數字）才算 `complete`；否則 `incomplete_reason` 說明缺哪個視窗、其他裝置與互動式使用的用量看不到。
+
+**輪詢與推估的時機**：每次記下用量、變更方案上限、輪詢時都重新推估並寫入新的推估觀測。輪詢以 `quota_poll` 記錄每個帳號上次輪詢的時間，Supervisor 每次處理與排程端點都會呼叫 `baton_api::quota::current`，只有到期（≥ 5 分鐘）的帳號才真的呼叫 Port。輪詢時刪除超過 8 天的觀測與用量（每個帳號、來源、視窗最新的一筆保留）。
+
+| 端點 | 用途 |
+| --- | --- |
+| `PUT /api/v1/profiles/{id}/quota-limits` | 本文 `{ "five_hour_tokens", "seven_day_tokens" }`（正整數 token，或 `null` 表示未設定），回傳新的排程總覽；400 `plan_limit_invalid`（不是正整數）、404 `profile_not_found`、409 `profile_archived`。有變更時追加事件 `quota_plan_limits_changed`（`aggregate_type = 'quota_plan_limit'`） |
+
+帳號頁（`AccountsPage.tsx`）顯示判斷用量、來源、可信度、重置時間與觀測時間、兩個視窗各自的已觀測與推估、觀測不完整的提示與方案上限表單，每 5 分鐘重新讀取一次（`QUOTA_REFRESH_INTERVAL_MS`）。
+
+測試：`crates/baton-harness/tests/quota.rs`（情境測試）、`crates/baton-domain/src/quota/tests.rs`、`crates/baton-store/src/quota/tests.rs`。harness 的 `quota_observer.observe_count(profile)` 回傳輪詢次數。**Validation Required（票 14）**：stream-json 中限流訊號與用量的實際格式、`tokens` 計入哪些 token 類別，由真實 Adapter 決定並以契約測試記錄。
 
 ### 成果儲存與成果瀏覽
 
@@ -469,7 +498,7 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - `harness.workspace_fs.hang_next_artifact_write_at(ArtifactWritePoint::MidWrite | BeforeRename | AfterRename)`：讓下一次成果寫入在「寫到一半／改名前／改名後（manifest 提交前）」永遠不回來；測試以 `timeout` 丟棄該請求、再 `harness.restart()`，即等同 Runtime 在那一點崩潰。`harness.artifacts_dir()` 回傳成果儲存根目錄（`<資料目錄>\artifacts`），用來確認磁碟上留下哪些檔案。
 - `harness.restart()`：模擬重啟。舊的 Runtime 被丟棄（原位址不再回應），資料目錄與全部 fake 都保留。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`、`claude_env`：具體的 fake，可腳本化回應並讀取呼叫紀錄。`claude_env` 可設定 Claude Code／Git 是否存在與版本（`set_claude`、`set_git`、`fail_tool_probes`）、在某個設定目錄完成原生登入（`log_in`，會像真實的 Claude Code 一樣把登入資料寫進該目錄）、模擬環境變數覆蓋（`set_env_override`）、讓開啟登入終端機時順便登入（`script_terminal_login`），並記錄開啟過的終端機（`login_terminals`）。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 

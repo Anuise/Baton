@@ -7,16 +7,23 @@ import type {
   AccountProfile,
   AccountScheduling,
   AuthSource,
+  PlanLimits,
+  QuotaConfidence,
+  QuotaObservation,
+  QuotaSource,
   SchedulingClient,
   SchedulingOverview,
 } from "./runtimeClient";
 
-/** 排程總覽是選用的：沒有提供時帳號頁只是不顯示進行中的 Run 與用量。 */
+/** 排程總覽是選用的：沒有提供時帳號頁只是不顯示進行中的 Run 與用量；沒有 `setQuotaLimits` 時不顯示方案上限表單。 */
 export type AccountsClient = Pick<
   AccountClient,
   "listProfiles" | "createProfile" | "verifyProfile" | "openLoginTerminal" | "archiveProfile"
 > &
-  Partial<Pick<SchedulingClient, "schedulingOverview">>;
+  Partial<Pick<SchedulingClient, "schedulingOverview" | "setQuotaLimits">>;
+
+/** 額度輪詢間隔：每 5 分鐘重新讀取排程總覽（spec D-31）。 */
+export const QUOTA_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 type ListState =
   | { state: "loading" }
@@ -78,6 +85,15 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const loadOverview = useCallback(async () => {
+    if (!client.schedulingOverview) return;
+    try {
+      setScheduling({ state: "ready", overview: await client.schedulingOverview() });
+    } catch (error) {
+      setScheduling({ state: "failed", reason: reasonOf(error) });
+    }
+  }, [client]);
+
   const refresh = useCallback(async () => {
     try {
       const { profiles, limit } = await client.listProfiles();
@@ -85,18 +101,26 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
     } catch (error) {
       setList({ state: "failed", reason: reasonOf(error) });
     }
-    if (client.schedulingOverview) {
-      try {
-        setScheduling({ state: "ready", overview: await client.schedulingOverview() });
-      } catch (error) {
-        setScheduling({ state: "failed", reason: reasonOf(error) });
-      }
-    }
-  }, [client]);
+    await loadOverview();
+  }, [client, loadOverview]);
 
   useEffect(() => {
     void refresh();
   }, [refresh, refreshKey]);
+
+  // 額度會隨時間變化（重置、其他 Run 的用量），定期重新讀取排程總覽
+  useEffect(() => {
+    if (!client.schedulingOverview) return;
+    const timer = setInterval(() => void loadOverview(), QUOTA_REFRESH_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [client, loadOverview]);
+
+  /** 儲存方案上限，成功後改用回傳的總覽；失敗時把錯誤交給表單顯示。 */
+  const saveLimits =
+    client.setQuotaLimits &&
+    (async (profileId: string, limits: PlanLimits) => {
+      setScheduling({ state: "ready", overview: await client.setQuotaLimits!(profileId, limits) });
+    });
 
   const active = list.state === "ready" ? list.profiles.filter((p) => p.status === "active") : [];
   const limit = list.state === "ready" ? list.limit : 8;
@@ -161,6 +185,8 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
               {scheduling.state === "ready" && (
                 <AccountLoad
                   account={scheduling.overview.accounts.find((account) => account.profile_id === profile.id) ?? null}
+                  timeZone={timeZone}
+                  onSaveLimits={saveLimits}
                 />
               )}
               {profile.blockers.map((blocker) => (
@@ -246,30 +272,171 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
   );
 }
 
-/** 已知用量的顯示：未觀測就是「未知」，不顯示 0。 */
+/** 用量比例的顯示：未觀測就是「未知」，不顯示 0。 */
 function quotaLabel(quotaUsed: number | null): string {
   return quotaUsed === null ? "未知" : `${Math.round(quotaUsed * 100)}%`;
 }
 
-/** 一個帳號目前的並行使用：進行中 n/上限、已知用量，以及進行中的 Run（Task、狀態、是否已要求取消）。 */
-function AccountLoad({ account }: { account: AccountScheduling | null }) {
+const QUOTA_SOURCE_LABELS: Record<QuotaSource, string> = { observed: "已觀測", estimated: "推估" };
+
+const CONFIDENCE_LABELS: Record<QuotaConfidence, string> = { observed: "已觀測", estimated: "推估", unknown: "未知" };
+
+/** 單一來源的用量：CLI 說已達上限、或只有警告沒有數字時照實說明，不換算成百分比。 */
+function observationLabel(observation: QuotaObservation | null): string {
+  if (observation?.status === "exhausted") return "已達上限";
+  if (observation?.status === "warning" && observation.used === null) return "接近上限（CLI 警告）";
+  return quotaLabel(observation?.used ?? null);
+}
+
+function tokenCount(tokens: number): string {
+  return `${tokens.toLocaleString("en-US")} token`;
+}
+
+/** 觀測不完整的說明；Runtime 的說明已帶「觀測不完整」開頭時不重複。 */
+function incompleteLabel(reason: string | null): string {
+  if (reason === null) return "觀測不完整";
+  return reason.startsWith("觀測不完整") ? reason : `觀測不完整：${reason}`;
+}
+
+/** 一個帳號目前的並行使用：進行中 n/上限，以及進行中的 Run（Task、狀態、是否已要求取消）；額度另外分組顯示。 */
+function AccountLoad({
+  account,
+  timeZone,
+  onSaveLimits,
+}: {
+  account: AccountScheduling | null;
+  timeZone?: string;
+  onSaveLimits?: (profileId: string, limits: PlanLimits) => Promise<void>;
+}) {
   if (account === null) return null;
   return (
-    <div className="profile-load" role="group" aria-label={`${account.name} 的進行中 Run`}>
-      <span className="profile-running">
-        進行中 {account.running}/{account.limit}
+    <>
+      <div className="profile-load" role="group" aria-label={`${account.name} 的進行中 Run`}>
+        <span className="profile-running">
+          進行中 {account.running}/{account.limit}
+        </span>
+        {account.runs.length > 0 && (
+          <ul className="profile-runs">
+            {account.runs.map((run) => (
+              <li key={run.run_id}>
+                {run.task_title}（第 {run.generation} 次）：{RUN_STATUS_LABELS[run.status]}
+                {run.cancel_requested && "，已要求取消"}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <AccountQuota account={account} timeZone={timeZone} onSaveLimits={onSaveLimits} />
+    </>
+  );
+}
+
+/** 一個帳號的額度：判斷用量（取較保守者）與來源、可信度、時間，以及各視窗已觀測與推估各自的數值（spec D-12）。 */
+function AccountQuota({
+  account,
+  timeZone,
+  onSaveLimits,
+}: {
+  account: AccountScheduling;
+  timeZone?: string;
+  onSaveLimits?: (profileId: string, limits: PlanLimits) => Promise<void>;
+}) {
+  const { quota, plan_limits } = account;
+  return (
+    <div className="profile-quota" role="group" aria-label={`${account.name} 的額度`}>
+      <span className="quota-used">
+        判斷用量：{quotaLabel(quota.used)}
+        {/* 有數字但可信度未知：CLI 只發警告沒給數字，Runtime 以停止派工門檻作為保守的下限 */}
+        {quota.used !== null && quota.confidence === "unknown" && "（CLI 警告，至少此值）"}
       </span>
-      <span className="profile-quota">已知用量：{quotaLabel(account.quota_used)}</span>
-      {account.runs.length > 0 && (
-        <ul className="profile-runs">
-          {account.runs.map((run) => (
-            <li key={run.run_id}>
-              {run.task_title}（第 {run.generation} 次）：{RUN_STATUS_LABELS[run.status]}
-              {run.cancel_requested && "，已要求取消"}
+      <span className="quota-source">來源：{quota.source === null ? "未知" : QUOTA_SOURCE_LABELS[quota.source]}</span>
+      <span className="quota-confidence">可信度：{CONFIDENCE_LABELS[quota.confidence]}</span>
+      <span className="quota-reset">
+        {quota.reset_at === null ? "重置時間未知" : `重置時間：${formatTimestamp(quota.reset_at, timeZone)}`}
+      </span>
+      <span className="quota-observed-at">
+        {quota.observed_at === null ? "尚未觀測" : `觀測時間：${formatTimestamp(quota.observed_at, timeZone)}`}
+      </span>
+      {!quota.complete && (
+        <p role="note" className="quota-incomplete">
+          {incompleteLabel(quota.incomplete_reason)}
+        </p>
+      )}
+      <ul className="quota-windows">
+        {quota.windows.map((w) => {
+          // 有推估時用它計算時的上限（與顯示的比例一致），還沒有推估時用目前的設定
+          const limit =
+            w.estimated !== null
+              ? w.estimated.limit_tokens
+              : w.window === "five_hour"
+                ? plan_limits.five_hour_tokens
+                : plan_limits.seven_day_tokens;
+          const tokens = w.estimated?.tokens ?? null;
+          return (
+            <li key={w.window}>
+              <span className="quota-window-label">{w.label}</span>
+              <span className="quota-observed">已觀測：{observationLabel(w.observed)}</span>
+              <span className="quota-estimated">
+                推估：{observationLabel(w.estimated)}（{tokens === null ? "" : `本機累計 ${tokenCount(tokens)}；`}
+                {limit === null ? "未設定方案上限" : `方案上限 ${tokenCount(limit)}`}）
+              </span>
             </li>
-          ))}
-        </ul>
+          );
+        })}
+      </ul>
+      {onSaveLimits && (
+        <PlanLimitsForm account={account} onSave={(limits) => onSaveLimits(account.profile_id, limits)} />
       )}
     </div>
+  );
+}
+
+/** 輸入框的文字 → 方案上限：空白是未設定（null）；正整數由輸入框的原生驗證（min、step）把關。 */
+function parseLimit(text: string): number | null {
+  return text.trim() === "" ? null : Number(text);
+}
+
+/** 方案上限表單（推估的分母）；留空代表未設定，失敗時保留輸入讓使用者修正。 */
+function PlanLimitsForm({
+  account,
+  onSave,
+}: {
+  account: AccountScheduling;
+  onSave: (limits: PlanLimits) => Promise<void>;
+}) {
+  const [fiveHour, setFiveHour] = useState(String(account.plan_limits.five_hour_tokens ?? ""));
+  const [sevenDay, setSevenDay] = useState(String(account.plan_limits.seven_day_tokens ?? ""));
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await onSave({ five_hour_tokens: parseLimit(fiveHour), seven_day_tokens: parseLimit(sevenDay) });
+    } catch (failure) {
+      setError(reasonOf(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form className="quota-limits" onSubmit={(event) => void submit(event)}>
+      <label>
+        五小時方案上限
+        <input type="number" min={1} step={1} value={fiveHour} onChange={(e) => setFiveHour(e.target.value)} />
+      </label>
+      <label>
+        七日方案上限
+        <input type="number" min={1} step={1} value={sevenDay} onChange={(e) => setSevenDay(e.target.value)} />
+      </label>
+      <span className="quota-limits-hint">單位為 token；留空代表未設定</span>
+      <button type="submit" disabled={busy} aria-label={`儲存 ${account.name} 的方案上限`}>
+        儲存方案上限
+      </button>
+      {error && <p role="alert">無法儲存方案上限：{error}</p>}
+    </form>
   );
 }

@@ -20,3 +20,5 @@ Blocked by: 10, 08
 ## Comments
 
 - 2026-10-22 主控：票 08 驗證 R040 的觀察——`materialize_run_settings` 同一 Run 並行要求不同版本時共用 staging 目錄；已綁定的 Run 再要求快照時不核對目錄內容。本票接上准入流程時，請依 Run 序列化並在啟動前依 manifest.json 核對快照。
+
+- 2026-10-22 主控：票 22 驗證 R052 的觀察——P3 授權下，寫入 Workspace 內的 `.claude/settings*.json` 會被自動允許（`.git` 有擋）。若 Adapter 啟動時載入專案層級設定，Worker 可藉此改變自己的權限；請在本票處理。

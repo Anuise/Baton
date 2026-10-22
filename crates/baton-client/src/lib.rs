@@ -12,7 +12,7 @@ use baton_api::{
     admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview,
     SHA256_HEADER, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
-    run_settings_snapshot_path, shared_settings_version_path, task_path, task_ready_path, tasks_path, QueuedDispatch,
+    quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_path, task_ready_path, tasks_path, QueuedDispatch,
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
@@ -24,6 +24,7 @@ use baton_api::{
 };
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
+use baton_domain::quota::PlanLimits;
 use baton_domain::run::RunView;
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
@@ -269,6 +270,12 @@ impl RuntimeClient {
     pub async fn set_scheduling_mode(&self, mode: CapacityMode) -> Result<SchedulingOverview, ClientError> {
         let request = UpdateSchedulingSettingsRequest { mode };
         self.send_json(reqwest::Method::PUT, SCHEDULING_SETTINGS_PATH, Some(&request)).await
+    }
+
+    /// 設定一個 Profile 的方案上限（推估的分母，token；`None` 是未設定），回傳新的排程總覽；
+    /// 上限不是正整數或 Profile 已封存時回傳 `ClientError::Rejected`。
+    pub async fn set_quota_limits(&self, profile_id: &str, limits: &PlanLimits) -> Result<SchedulingOverview, ClientError> {
+        self.send_json(reqwest::Method::PUT, &plan_limits_path(profile_id), Some(limits)).await
     }
 
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。

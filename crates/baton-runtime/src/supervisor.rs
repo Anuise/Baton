@@ -1,13 +1,15 @@
 //! Supervisor：launch intent → 啟動 → 回執 → 就緒 → 停止；程序身分核對（spec 「程序與模組架構」）。
 //!
-//! 每次 `tick` 依序做五件事，而且每一件都是冪等的、只信任資料庫中持久化的狀態：
+//! 每次 `tick` 依序做六件事，而且每一件都是冪等的、只信任資料庫中持久化的狀態：
 //! 1. **啟動**派工 Outbox 裡的 Run：先在交易中持久化 launch intent 與 command_id，才在交易外 spawn，
 //!    再把回執寫回。Runtime 在中間任何一點當掉，下一次 tick 都用 command_id 找回原程序，**絕不重新啟動**；
 //!    找不到程序時把 Run 標為 interrupted，交給使用者重新派工，而不是猜測「應該沒啟動」。
-//! 2. **收事件**：接上 Adapter 的事件串流，heartbeat 續約 lease，結束事件只讓 Run 結束，不把 Task 標為 completed。
+//! 2. **收事件**：接上 Adapter 的事件串流，heartbeat 續約 lease，限流訊號與用量記為該 Run 帳號的額度觀測，
+//!    結束事件只讓 Run 結束，不把 Task 標為 completed。
 //! 3. **取消**：對要求取消的 Run 停止整個程序樹；確認停止之後才完成取消、釋放寫入所有權。
 //! 4. **核對 lease**：lease 過期只是「該去看看」：向 ProcessControl 查證，確認死亡才中斷 Run，存活就續約，不確定就維持原狀。
-//! 5. **排程**：前面幾步可能釋放了帳號與全域名額，於是讓佇列中等待的 Task 依優先序逐一嘗試派出（票 19）；
+//! 5. **額度**：輪詢到期（每個帳號每 5 分鐘）的外部額度觀測器並重新推估（票 27）。
+//! 6. **排程**：前面幾步可能釋放了帳號與全域名額，於是讓佇列中等待的 Task 依優先序逐一嘗試派出（票 19）；
 //!    派出的 Run 在同一次 `tick` 就啟動。
 //!
 //! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
@@ -17,13 +19,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::{LogSink, RunSettings};
+use baton_api::{quota, LogSink, RunSettings};
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::AgentScope;
-use baton_domain::profile::ProfileStatus;
+use baton_domain::quota::RateLimitSignal;
 use baton_domain::run::{LaunchPayload, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus};
+use baton_domain::Timestamp;
 use baton_ports::{
-    observe_quota, AdapterEvent, AgentHandle, Liveness, Ports, ProcessIdentity, RunSpec, SpawnSpec, StopResult,
+    AdapterEvent, AgentHandle, Liveness, Ports, ProcessIdentity, RunSpec, SpawnSpec, StopResult,
 };
 use baton_store::{ExecutingRun, PendingLaunch, Store};
 use futures::stream::BoxStream;
@@ -108,6 +111,7 @@ impl Supervisor {
         self.pump_events().await;
         self.process_cancellations().await;
         self.check_leases().await;
+        self.poll_quota().await;
         if self.schedule_queue().await {
             self.launch_pending().await;
         }
@@ -124,6 +128,37 @@ impl Supervisor {
         }
     }
 
+    // ------------------------------------------------------------ 額度
+
+    /// 輪詢到期的帳號；沒有到期的帳號時什麼都不做。
+    async fn poll_quota(&self) {
+        if let Err(error) = quota::poll_due(&self.store, &*self.ports.quota_observer, self.ports.clock.now()).await {
+            self.note(&format!("額度輪詢失敗：{error}"));
+        }
+    }
+
+    /// 把 Run 回報的限流訊號或用量記為該 Run 帳號的額度觀測；沒有帳號的舊 Run（票 19 之前）略過。
+    async fn record_quota_event(&self, run: &Run, event: AdapterEvent) {
+        if run.profile_id.is_empty() {
+            return;
+        }
+        let now = self.ports.clock.now();
+        let result = match event {
+            AdapterEvent::RateLimited { window, status, used, reset_at_millis, raw } => {
+                let signal = RateLimitSignal { window, status, used, reset_at: reset_at_millis.map(Timestamp::from_millis), raw };
+                let observation = baton_domain::quota::observe_signal(&run.profile_id, &run.id, &signal, now);
+                self.store.record_quota_signal(observation).await
+            }
+            AdapterEvent::UsageReported { tokens, raw } => {
+                self.store.record_quota_usage(run.profile_id.clone(), run.id.clone(), tokens, raw, now).await
+            }
+            _ => return,
+        };
+        if let Err(error) = result {
+            self.note(&format!("Run {} 的額度觀測沒有記下：{error}", run.id));
+        }
+    }
+
     // ------------------------------------------------------------ 排程
 
     /// 讓佇列中等待的 Task 依序嘗試派出；回傳這次有沒有派出新的 Run。
@@ -136,16 +171,13 @@ impl Supervisor {
                 return false;
             }
         }
-        let profiles = match self.store.list_profiles().await {
-            Ok(profiles) => profiles,
+        let quota = match quota::current(&self.store, &*self.ports.quota_observer, self.ports.clock.now()).await {
+            Ok(status) => quota::known_used(&status),
             Err(error) => {
-                self.note(&format!("無法讀取帳號 Profile：{error}"));
+                self.note(&format!("無法取得額度觀測：{error}"));
                 return false;
             }
         };
-        let active: Vec<String> =
-            profiles.iter().filter(|p| p.status == ProfileStatus::Active).map(|p| p.id.clone()).collect();
-        let quota = observe_quota(&*self.ports.quota_observer, &active).await;
         match self.store.schedule(None, quota, self.ports.clock.now(), new_run_id).await {
             Ok(outcome) => {
                 for started in &outcome.started {
@@ -337,10 +369,11 @@ impl Supervisor {
                         finished = true;
                         break;
                     }
-                    // 訊息與限流由後續的票處理（對話紀錄、額度觀測與交接）
-                    AdapterEvent::Started { native_session_id: None }
-                    | AdapterEvent::Message { .. }
-                    | AdapterEvent::RateLimited { .. } => {}
+                    event @ (AdapterEvent::RateLimited { .. } | AdapterEvent::UsageReported { .. }) => {
+                        self.record_quota_event(&item.view.run, event).await;
+                    }
+                    // 訊息由後續的票處理（對話紀錄）
+                    AdapterEvent::Started { native_session_id: None } | AdapterEvent::Message { .. } => {}
                 }
             }
             if !finished {

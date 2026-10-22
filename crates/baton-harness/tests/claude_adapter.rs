@@ -177,7 +177,7 @@ async fn the_worker_starts_with_the_profiles_config_dir_the_runs_settings_snapsh
     let in_snapshot = |name: &str| snapshot.join(name).to_string_lossy().into_owned();
     assert_eq!(value_after(&spec.args, "--settings"), Some(in_snapshot("settings.json").as_str()));
     assert_eq!(value_after(&spec.args, "--append-system-prompt-file"), Some(in_snapshot("CLAUDE.md").as_str()));
-    assert_eq!(value_after(&spec.args, "--setting-sources"), Some("project,local"), "不載入使用者層設定");
+    assert_eq!(value_after(&spec.args, "--setting-sources"), Some(""), "不載入使用者層與 Workspace 內的設定檔");
     let config_dir = profile_config_dir(&profile(&harness, &profile_id).await);
     assert!(spec.env.contains(&("CLAUDE_CONFIG_DIR".to_string(), config_dir)), "{:?}", spec.env);
     for removed in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE"] {

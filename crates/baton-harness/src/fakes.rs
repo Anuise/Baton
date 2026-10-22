@@ -313,21 +313,28 @@ impl AgentAdapter for FakeAgentAdapter {
     }
 }
 
-/// 以 profile 為鍵、樣本腳本化的額度觀測器；沒有腳本的 profile 回傳錯誤。
+/// 以 profile 為鍵、樣本腳本化的額度觀測器；沒有腳本的 profile 回傳錯誤。記錄每個 profile 被輪詢的次數。
 #[derive(Default)]
 pub struct FakeQuotaObserver {
     samples: Mutex<HashMap<String, QuotaSample>>,
+    calls: Mutex<HashMap<String, usize>>,
 }
 
 impl FakeQuotaObserver {
     pub fn set_sample(&self, profile: &str, sample: QuotaSample) {
         lock(&self.samples).insert(profile.to_string(), sample);
     }
+
+    /// 某個 profile 被 `observe` 的次數。
+    pub fn observe_count(&self, profile: &str) -> usize {
+        lock(&self.calls).get(profile).copied().unwrap_or(0)
+    }
 }
 
 #[async_trait]
 impl QuotaObserver for FakeQuotaObserver {
     async fn observe(&self, profile: &ProfileRef) -> PortResult<QuotaSample> {
+        *lock(&self.calls).entry(profile.0.clone()).or_default() += 1;
         lock(&self.samples)
             .get(&profile.0)
             .cloned()

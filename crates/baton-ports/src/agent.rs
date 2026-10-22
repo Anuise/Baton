@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use baton_domain::quota::{LimitStatus, QuotaWindow};
 use futures::stream::BoxStream;
 
 use crate::{PortResult, SpawnSpec};
@@ -42,13 +43,23 @@ pub enum Capability {
 }
 
 /// Adapter 回報的事件。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AdapterEvent {
     Started { native_session_id: Option<String> },
     /// 存活訊號；每一次都續約該 Run 的 execution lease（spec D-31）。
     Heartbeat,
     Message { text: String },
-    RateLimited { reset_at_millis: Option<i64> },
+    /// CLI 串流或錯誤中的限流訊號（「已觀測」來源，spec D-12）；觀測不到的欄位為 `None`。
+    /// `used` 是 CLI 回報的已用比例（0.0–1.0），`raw` 是原始事件內容（保存為原始資料）。
+    RateLimited {
+        window: Option<QuotaWindow>,
+        status: LimitStatus,
+        used: Option<f64>,
+        reset_at_millis: Option<i64>,
+        raw: String,
+    },
+    /// Run 結果訊息回報的用量（「推估」來源）：這一輪用掉的 token 數與原始內容。
+    UsageReported { tokens: u64, raw: String },
     /// Agent 回報的錯誤（例如 API 錯誤、未登入）；緊接著的 `Exited { success: false }` 以它作為失敗原因。
     Error { message: String },
     Exited { success: bool },
