@@ -199,7 +199,7 @@ Worker 不直接碰資料庫或管理 API：它的程序啟動時帶著一組**�
 
 ### 成果儲存與成果瀏覽
 
-Worker 產生的成果（Artifact）由 Runtime 保管內容與 manifest。規則在 `baton_domain::artifact`（純邏輯：登記請求驗證、版本遞增、未登記檔案辨識、預覽判定），持久化在 `baton-store`，端點在 `baton-api`（Agent 端 `agent.rs`、桌面端成果瀏覽），檔案存取走 `WorkspaceFs` Port。
+Worker 產生的成果（Artifact）由 Runtime 保管內容與 manifest。規則在 `baton_domain::artifact`（純邏輯：登記請求驗證、版本遞增、未登記檔案辨識、預覽判定），持久化在 `baton-store`，端點在 `baton-api` 的 `artifacts.rs`（Agent 端 `register_artifact` 與桌面端瀏覽、預覽、下載），檔案存取走 `WorkspaceFs` Port（`write_artifact_atomic`、`read_artifact`、`list_artifact_files`）。
 
 **儲存位置**：`<資料目錄>\artifacts\<workspace_id>\<blob 檔名>`。檔名是 `blob_<隨機>`，**每個版本一個獨立檔案、不用成果名稱當檔名**，所以新版本不會覆寫舊版本。manifest 在控制資料庫的兩張追加式表：
 
@@ -225,6 +225,7 @@ Worker 產生的成果（Artifact）由 Runtime 保管內容與 manifest。規�
 **Agent 工具 `register_artifact`**（`POST /agent/v1/tools/register_artifact`，只接受 Agent 憑證）：
 
 - 請求 `{ name, description?, content? | content_base64? }`，內容二選一。**內容以參數內嵌傳入**，Runtime 不讀取 Worker 指定的任何路徑，避免 Worker 藉登記讀走工作目錄以外的檔案。
+- 請求本文上限 32 MiB（Base64 與 JSON 跳脫會讓本文比內容大）；MCP shim 對 Runtime 的請求逾時是 30 秒。
 - 限制：名稱是檔名（不含路徑分隔字元與控制字元，≤ 200 字元，`NAME_MAX_CHARS`）、描述 ≤ 1000 字元（`DESCRIPTION_MAX_CHARS`）、解碼後內容 ≤ 10 MiB（`ARTIFACT_MAX_BYTES`）。
 - 成功回 201 `{ artifact_id, version, name, size_bytes, sha256, created }`（`created` 表示是否建立了新成果，false 為既有成果追加新版本）。
 - 產生者與 Task 關聯一律取自憑證（Workspace、Run、世代；Task 取自 Run）；請求帶的 `workspace_id`／`run_id` 與憑證不符回 403 `agent_scope_mismatch`。
@@ -248,7 +249,7 @@ Worker 產生的成果（Artifact）由 Runtime 保管內容與 manifest。規�
 
 預覽與下載都先**重新計算 SHA-256 與大小**，與 manifest 不符回 409 `artifact_integrity_failed`；檔案不存在回 409 `artifact_file_missing`；不存在的成果或版本回 404 `artifact_not_found`。完整的雜湊核對只發生在預覽與下載，列表的 `file_status` 為了成本只看存在與大小。
 
-Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 Workspace 清單進入）列出成果與版本、預覽文字、下載，並顯示未登記檔案。
+Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 Workspace 清單進入）列出成果與版本、預覽文字、下載，並顯示未登記檔案。桌面殼透過 Tauri 指令 `artifact_list`、`artifact_preview`、`artifact_download` 呼叫 `RuntimeClient`（`list_artifacts`、`preview_artifact`、`download_artifact`，每次都讀憑證檔並帶標頭）；下載內容在 Tauri 指令的 JSON 回傳值中以 base64 交給 Web UI，Web UI 再核對 `X-Baton-Sha256` 與 manifest 的雜湊。測試：`crates/baton-client/tests/artifacts_client.rs`。
 
 **已知限制**：
 

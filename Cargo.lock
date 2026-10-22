@@ -189,6 +189,7 @@ dependencies = [
  "baton-ports",
  "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -207,11 +208,13 @@ dependencies = [
 name = "baton-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "baton-api",
  "baton-client",
  "baton-credential",
  "baton-domain",
  "baton-store",
+ "serde",
  "tauri",
  "tauri-build",
  "tokio",
