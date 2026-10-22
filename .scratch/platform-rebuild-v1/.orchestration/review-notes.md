@@ -33,3 +33,7 @@
 
 ## 8. 訊息字串內多餘空白（票 35）
 - `crates/baton-api/src/agent.rs:436` 的 `requires_decision` 回應訊息中間夾了約 17 個空白，改用 `\` 續行或刪除。
+
+## 9. 票 24 的小問題
+- `crates/baton-api/src/shared_settings.rs:20` 未使用的 `StoreError` import（編譯警告）。
+- `crates/baton-domain/src/authorization.rs:405` 說明文字與 `crates/baton-store/src/runs.rs` 的 `RUN_COLUMNS_QUALIFIED` 有多餘空白（同第 8 項的折行問題）。

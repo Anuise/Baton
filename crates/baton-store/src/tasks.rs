@@ -7,7 +7,9 @@ use baton_domain::authorization::AuthorizationRevision;
 use baton_domain::agent::ReportRecord;
 use baton_domain::guard::ActiveGuard;
 use baton_domain::run::{ExecutionLease, Run, RunView};
+use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
+use baton_domain::workdir::{TaskKind, Workdir, WorkdirView};
 use baton_domain::task::{
     self, ContractContent, Dependency, Goal, MissingItem, Task, TaskChange, TaskCommand, TaskContext, TaskContract,
     TaskError, TaskStatus, TaskView,
@@ -38,6 +40,10 @@ pub struct TaskBoardData {
     pub runs: Vec<RunView>,
     /// 這個 Workspace 的全部驗證紀錄，由舊到新（票 13）。
     pub verifications: Vec<VerificationRecord>,
+    /// 平台登記的工作目錄與曾在其中執行的 Run（票 20）。
+    pub workdirs: Vec<WorkdirView>,
+    /// 這個 Workspace 的整合項目，依排入順序（票 20）。
+    pub integrations: Vec<IntegrationEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +65,10 @@ pub(crate) struct Loaded {
     pub(crate) leases: Vec<ExecutionLease>,
     /// 每個 Run 每種回報最新一筆被接受的回報（給面板顯示用）。
     pub(crate) reports: Vec<ReportRecord>,
+    /// 平台登記的工作目錄（票 20）。
+    pub(crate) workdirs: Vec<Workdir>,
+    /// 這個 Workspace 的整合項目，依排入順序（票 20）。
+    pub(crate) integrations: Vec<IntegrationEntry>,
     /// Run 准入時要檢查的 Guard；只有派工路徑以 `guards::load_active_guards` 填入，其他路徑是空的（票 38）。
     pub(crate) guards: Vec<ActiveGuard>,
 }
@@ -120,7 +130,15 @@ impl Store {
                 let tasks = task::board(&loaded.ctx(&workspace_id));
                 let runs = super::runs::views(&loaded);
                 let verifications = super::verification::load_verifications(conn, &workspace_id)?;
-                Ok(Ok(TaskBoardData { goals: loaded.goals, tasks, runs, verifications }))
+                let workdirs = super::workdirs::views(conn, &loaded.workdirs)?;
+                Ok(Ok(TaskBoardData {
+                    goals: loaded.goals,
+                    tasks,
+                    runs,
+                    verifications,
+                    workdirs,
+                    integrations: loaded.integrations,
+                }))
             })
             .await?;
         Ok(result?)
@@ -194,7 +212,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
 
     let tasks = conn
         .prepare(
-            "SELECT id, goal_id, title, status, version, contract_version, created_at, updated_at
+            "SELECT id, goal_id, title, status, version, contract_version, created_at, updated_at, kind
              FROM task WHERE workspace_id = ?1 ORDER BY rowid",
         )?
         .query_map([workspace_id], |r| {
@@ -204,6 +222,9 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
                 workspace_id: workspace_id.to_string(),
                 goal_id: r.get(1)?,
                 title: r.get(2)?,
+                kind: TaskKind::parse(&r.get::<_, String>(8)?).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, "未知的 Task 種類".into())
+                })?,
                 status: TaskStatus::parse(&status).ok_or_else(|| {
                     rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, "未知的 Task 狀態".into())
                 })?,
@@ -236,7 +257,22 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
     let runs = super::runs::load_runs(conn, workspace_id)?;
     let leases = super::runs::load_leases(conn, workspace_id)?;
     let reports = super::agent::load_latest_reports(conn, workspace_id)?;
-    Ok(Loaded { workspace, authorization, goals, tasks, dependencies, contracts, runs, leases, reports, guards: Vec::new() })
+    let workdirs = super::workdirs::load_workdirs(conn, workspace_id)?;
+    let integrations = super::integration::load_entries(conn, Some(workspace_id))?;
+    Ok(Loaded {
+        workspace,
+        authorization,
+        goals,
+        tasks,
+        dependencies,
+        contracts,
+        runs,
+        leases,
+        reports,
+        workdirs,
+        integrations,
+        guards: Vec::new(),
+    })
 }
 
 fn contract_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskContract> {
@@ -262,8 +298,8 @@ pub(crate) fn load_contract_history(conn: &Connection, task_id: &str) -> rusqlit
 pub(crate) fn save_task(tx: &Transaction<'_>, task: &Task) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO task
-         (id, workspace_id, goal_id, title, status, version, contract_version, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         (id, workspace_id, goal_id, title, status, version, contract_version, created_at, updated_at, kind)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status, version = excluded.version,
            contract_version = excluded.contract_version, updated_at = excluded.updated_at",
@@ -277,6 +313,7 @@ pub(crate) fn save_task(tx: &Transaction<'_>, task: &Task) -> rusqlite::Result<(
             task.contract_version,
             task.created_at.as_millis(),
             task.updated_at.as_millis(),
+            task.kind.as_str(),
         ],
     )?;
     // 離開 ready（派工、取消、被改契約退回 pending）就不再排隊
@@ -360,7 +397,7 @@ mod tests {
         let goal = TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() };
         // 第二次呼叫時 g1 已存在，忽略重複建立
         let _ = apply(store, goal, T1).await;
-        let create = TaskCommand::CreateTask { id: task_id.into(), goal_id: "g1".into(), title: task_id.into(), contract };
+        let create = TaskCommand::CreateTask { id: task_id.into(), goal_id: "g1".into(), title: task_id.into(), kind: Default::default(), contract };
         apply(store, create, T1).await.unwrap();
     }
 

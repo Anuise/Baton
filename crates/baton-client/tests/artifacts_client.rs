@@ -45,7 +45,7 @@ async fn workspace_with_artifact(harness: &Harness, client: &RuntimeClient) -> (
         .unwrap();
     let goal = client.create_goal(&workspace.id, "研究競品").await.unwrap();
     let task = client
-        .create_task(&workspace.id, &CreateTaskRequest { goal_id: goal.id, title: "整理".into(), contract: complete() })
+        .create_task(&workspace.id, &CreateTaskRequest { goal_id: goal.id, title: "整理".into(), kind: Default::default(), contract: complete() })
         .await
         .unwrap();
     client.mark_task_ready(&workspace.id, &task.task.id).await.unwrap();

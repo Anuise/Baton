@@ -26,6 +26,7 @@ fn task(id: &str, status: TaskStatus) -> Task {
         workspace_id: "w1".into(),
         goal_id: "g1".into(),
         title: id.into(),
+        kind: Default::default(),
         status,
         version: 1,
         contract_version: 1,

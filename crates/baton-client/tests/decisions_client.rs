@@ -49,7 +49,7 @@ async fn started_run(harness: &Harness, client: &RuntimeClient) -> (String, Stri
     let created = client
         .create_task(
             &workspace_id,
-            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), contract: complete() },
+            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), kind: Default::default(), contract: complete() },
         )
         .await
         .unwrap();

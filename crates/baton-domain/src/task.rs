@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::authorization::{self, AdmissionDenied, AuthorizationRevision, Capability};
 use crate::event::DomainEvent;
 use crate::verification::VerificationCheck;
+use crate::workdir::TaskKind;
 use crate::workspace::{Workspace, WorkspaceStatus};
 use crate::Timestamp;
 
@@ -330,6 +331,9 @@ pub struct Task {
     pub workspace_id: String,
     pub goal_id: String,
     pub title: String,
+    /// 決定 Task 在哪一種工作目錄中執行（票 20）；建立時決定，之後不變。
+    #[serde(default)]
+    pub kind: TaskKind,
     pub status: TaskStatus,
     /// 每個事件加一；事件的 `aggregate_version` 與它對應。
     pub version: i64,
@@ -523,7 +527,7 @@ pub fn board(ctx: &TaskContext<'_>) -> Vec<TaskView> {
 pub enum TaskCommand {
     /// `id` 由呼叫端產生（Domain 不產生亂數）。
     CreateGoal { id: String, title: String },
-    CreateTask { id: String, goal_id: String, title: String, contract: ContractContent },
+    CreateTask { id: String, goal_id: String, title: String, kind: TaskKind, contract: ContractContent },
     /// 整份取代；內容沒有變動時不產生新版本。
     UpdateContract { task_id: String, contract: ContractContent, note: Option<String> },
     AddDependency { task_id: String, depends_on: String },
@@ -667,7 +671,7 @@ pub fn decide(ctx: &TaskContext<'_>, command: TaskCommand, now: Timestamp) -> Re
             };
             Ok(TaskChange { goal: Some(goal), events: vec![event], ..TaskChange::default() })
         }
-        TaskCommand::CreateTask { id, goal_id, title, contract } => {
+        TaskCommand::CreateTask { id, goal_id, title, kind, contract } => {
             let title = clean_title(&title).ok_or(TaskError::TaskTitleInvalid)?;
             if !ctx.goals.iter().any(|g| g.id == goal_id) {
                 return Err(TaskError::GoalNotFound(goal_id));
@@ -678,6 +682,7 @@ pub fn decide(ctx: &TaskContext<'_>, command: TaskCommand, now: Timestamp) -> Re
                 workspace_id: ctx.workspace_id.to_string(),
                 goal_id,
                 title,
+                kind,
                 status: TaskStatus::Pending,
                 version: 0,
                 contract_version: 1,
@@ -688,7 +693,12 @@ pub fn decide(ctx: &TaskContext<'_>, command: TaskCommand, now: Timestamp) -> Re
             let mut versioned = Versioned { task: &mut task, events: Vec::new(), now };
             versioned.push(
                 EVENT_TASK_CREATED,
-                serde_json::json!({ "goal_id": versioned.task.goal_id, "title": versioned.task.title, "contract_version": 1 }),
+                serde_json::json!({
+                    "goal_id": versioned.task.goal_id,
+                    "title": versioned.task.title,
+                    "kind": versioned.task.kind,
+                    "contract_version": 1,
+                }),
             );
             let events = versioned.events;
             Ok(TaskChange { task: Some(task), contract: Some(contract), events, ..TaskChange::default() })
@@ -872,6 +882,7 @@ mod tests {
                     id: id.into(),
                     goal_id: "g1".into(),
                     title: format!("任務 {id}"),
+                    kind: TaskKind::Research,
                     contract,
                 },
                 T1,
@@ -940,6 +951,7 @@ mod tests {
                     id: "t1".into(),
                     goal_id: "g1".into(),
                     title: "  整理資料  ".into(),
+                    kind: TaskKind::Development,
                     contract: ContractContent::default(),
                 },
                 T1,
@@ -948,6 +960,8 @@ mod tests {
 
         let task = change.task.unwrap();
         assert_eq!((task.title.as_str(), task.status, task.version, task.contract_version), ("整理資料", TaskStatus::Pending, 1, 1));
+        assert_eq!(task.kind, TaskKind::Development, "種類在建立時決定");
+        assert_eq!(change.events[0].payload["kind"], "development");
         assert_eq!(change.contract.unwrap().version, 1);
         assert_eq!(change.events.len(), 1);
         assert_eq!((change.events[0].event_type, change.events[0].aggregate_version), (EVENT_TASK_CREATED, 1));
@@ -966,6 +980,7 @@ mod tests {
                 id: "t1".into(),
                 goal_id: "g1".into(),
                 title: bad.into(),
+                kind: TaskKind::default(),
                 contract: ContractContent::default(),
             };
             assert_eq!(world.run(create, T1), Err(TaskError::TaskTitleInvalid));
@@ -974,6 +989,7 @@ mod tests {
             id: "t1".into(),
             goal_id: "nope".into(),
             title: "x".into(),
+            kind: TaskKind::default(),
             contract: ContractContent::default(),
         };
         assert_eq!(world.run(orphan, T1), Err(TaskError::GoalNotFound("nope".into())));

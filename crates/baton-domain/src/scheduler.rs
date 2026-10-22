@@ -154,6 +154,8 @@ pub enum WaitCategory {
     Authorization,
     /// 相依的 Task 還沒完成。
     Dependency,
+    /// Task 的工作目錄（worktree 或輸出目錄）還沒準備好或不可用（票 20）。
+    Workdir,
     /// 帳號的狀態還不明（尚未核對、無法確認身分）。
     StateUnknown,
     /// 帳號本身不可用（未登入、認證被覆蓋、身分不符、已封存）或根本沒有帳號。
@@ -182,7 +184,7 @@ fn reason(category: WaitCategory, code: &str, message: String, profile_id: Optio
     WaitReason { category, code: code.to_string(), message, profile_id: profile_id.map(str::to_string), guard: None }
 }
 
-/// Task 層級的等待原因（授權、相依、Guard）；其他派工錯誤（Task 不是 ready、已有寫入者、契約失效）不是「等一等就好」，
+/// Task 層級的等待原因（授權、相依、Guard、工作目錄）；其他派工錯誤（Task 不是 ready、已有寫入者、契約失效）不是「等一等就好」，
 /// 回傳 `None` 讓呼叫端照原樣拒絕。
 pub fn task_wait_reasons(error: &RunError) -> Option<Vec<WaitReason>> {
     let authorization = |code: &str, message: String| reason(WaitCategory::Authorization, code, message, None);
@@ -205,6 +207,9 @@ pub fn task_wait_reasons(error: &RunError) -> Option<Vec<WaitReason>> {
                 })
                 .collect(),
         ),
+        RunError::WorkdirNotPrepared(_) | RunError::WorkdirUnavailable(_) => {
+            Some(vec![reason(WaitCategory::Workdir, error.code(), error.to_string(), None)])
+        }
         RunError::AdmissionRejected(
             denied @ (AdmissionDenied::AuthorizationUnconfirmed(_) | AdmissionDenied::CapabilityNotGranted { .. }),
         ) => Some(vec![authorization(denied.code(), denied.to_string())]),

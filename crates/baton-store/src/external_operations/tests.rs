@@ -32,9 +32,10 @@ async fn store_with_running_tasks(dir: &std::path::Path) -> Store {
     store.apply_workspace_command(create, T1).await.unwrap();
     store.apply_task_command("w1".into(), TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() }, T1).await.unwrap();
     for (task, run) in [("t1", "r1"), ("t2", "r2")] {
-        let command = TaskCommand::CreateTask { id: task.into(), goal_id: "g1".into(), title: task.into(), contract: complete() };
+        let command = TaskCommand::CreateTask { id: task.into(), goal_id: "g1".into(), title: task.into(), kind: Default::default(), contract: complete() };
         store.apply_task_command("w1".into(), command, T1).await.unwrap();
         store.apply_task_command("w1".into(), TaskCommand::MarkReady { task_id: task.into() }, T1).await.unwrap();
+        crate::workdirs::register_ready(&store, "w1", task, T1).await;
         let commands = [
             RunCommand::Dispatch { run_id: run.into(), task_id: task.into(), profile_id: "p1".into() },
             RunCommand::BeginLaunch { run_id: run.into(), command_id: format!("cmd-{run}") },

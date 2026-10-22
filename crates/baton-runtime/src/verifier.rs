@@ -4,29 +4,52 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use baton_domain::artifact::Artifact;
 use baton_domain::verification::{
-    judge, CheckResult, CommandObservation, Observation, VerificationCheck, COMMAND_TIMEOUT_MS,
+    judge, CheckResult, CommandObservation, ManifestEntry, Observation, VerificationCheck, COMMAND_TIMEOUT_MS,
 };
 use baton_ports::{CommandOutput, CommandRequest, Ports};
 use baton_store::PendingVerification;
 
 /// 依序執行一個 Task 的全部檢查，結果的順序與契約宣告的順序相同。
 pub async fn run_checks(ports: &Ports, artifacts_root: &Path, item: &PendingVerification) -> Vec<CheckResult> {
-    let mut results = Vec::with_capacity(item.pending.checks.len());
-    for check in &item.pending.checks {
-        let observation = observe(ports, artifacts_root, item, check).await;
+    let subject = Subject {
+        working_dir: &item.working_dir,
+        manifest: &item.pending.manifest,
+        artifacts: &item.artifacts,
+    };
+    run_checks_in(ports, artifacts_root, &item.pending.checks, &subject).await
+}
+
+/// 檢查的對象：命令與檔案檢查所在的工作目錄，以及成果檢查讀取的 manifest 與成果。
+/// 整合驗證（票 20）以同一份檢查清單、在整合目錄中執行。
+pub struct Subject<'a> {
+    pub working_dir: &'a str,
+    pub manifest: &'a [ManifestEntry],
+    pub artifacts: &'a [Artifact],
+}
+
+pub async fn run_checks_in(
+    ports: &Ports,
+    artifacts_root: &Path,
+    checks: &[VerificationCheck],
+    subject: &Subject<'_>,
+) -> Vec<CheckResult> {
+    let mut results = Vec::with_capacity(checks.len());
+    for check in checks {
+        let observation = observe(ports, artifacts_root, subject, check).await;
         results.push(judge(check, observation));
     }
     results
 }
 
-async fn observe(ports: &Ports, artifacts_root: &Path, item: &PendingVerification, check: &VerificationCheck) -> Observation {
+async fn observe(ports: &Ports, artifacts_root: &Path, item: &Subject<'_>, check: &VerificationCheck) -> Observation {
     match check {
         VerificationCheck::Command { program, args, .. } => {
             let request = CommandRequest {
                 program: program.clone(),
                 args: args.clone(),
-                working_dir: PathBuf::from(&item.working_dir),
+                working_dir: PathBuf::from(item.working_dir),
                 timeout: Duration::from_millis(COMMAND_TIMEOUT_MS),
             };
             Observation::Command(match ports.command_runner.run(request).await {
@@ -40,12 +63,12 @@ async fn observe(ports: &Ports, artifacts_root: &Path, item: &PendingVerificatio
         VerificationCheck::File { path, .. } => Observation::File(
             ports
                 .workspace_fs
-                .read_workspace_file(&Path::new(&item.working_dir).join(path))
+                .read_workspace_file(&Path::new(item.working_dir).join(path))
                 .await
                 .map_err(|e| e.to_string()),
         ),
         VerificationCheck::Artifact { name, .. } => {
-            let latest = item.pending.manifest.iter().find(|entry| &entry.name == name).cloned();
+            let latest = item.manifest.iter().find(|entry| &entry.name == name).cloned();
             let storage_path = latest.as_ref().and_then(|entry| {
                 item.artifacts
                     .iter()

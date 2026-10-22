@@ -5,6 +5,8 @@ import { formatTimestamp } from "./time";
 import type {
   AcceptanceBasis,
   Goal,
+  IntegrationEntry,
+  IntegrationStatus,
   MissingItem,
   RunStatus,
   RunView,
@@ -13,6 +15,7 @@ import type {
   TaskBoard as TaskBoardData,
   TaskClient,
   TaskContract,
+  TaskKind,
   TaskStatus,
   TaskView,
   VerificationCheck,
@@ -20,6 +23,7 @@ import type {
   VerificationView,
   WaitCategory,
   WaitReason,
+  WorkdirView,
   Workspace,
 } from "./runtimeClient";
 
@@ -73,9 +77,35 @@ const WAIT_CATEGORY_LABELS: [WaitCategory, string][] = [
   ["dependency", "相依"],
   ["state_unknown", "狀態不明"],
   ["account", "帳號"],
+  ["workdir", "工作目錄"],
   ["lifecycle", "完全退出"],
   ["guard", "Guard 擋下"],
 ];
+
+/** 建立表單的選項順序：預設的「研究」排第一。 */
+const TASK_KIND_LABELS: [TaskKind, string][] = [
+  ["research", "研究"],
+  ["development", "程式開發"],
+  ["document", "文件"],
+];
+
+const kindLabel = (kind: TaskKind) => TASK_KIND_LABELS.find(([k]) => k === kind)?.[1] ?? kind;
+
+const INTEGRATION_STATUS_LABELS: Record<IntegrationStatus, string> = {
+  queued: "排隊等待整合",
+  merging: "合併中",
+  verifying: "整合驗證中",
+  advancing: "更新目標分支中",
+  integrated: "已整合",
+  failed: "未通過整合",
+};
+
+/** 整合項目尚未結束（排隊中或處理中）。 */
+const isIntegrationActive = (status: IntegrationStatus) => status !== "integrated" && status !== "failed";
+
+/** 整合佇列「目前這一個」：正在合併、驗證或前移目標分支。 */
+const isIntegrationProcessing = (status: IntegrationStatus) =>
+  status === "merging" || status === "verifying" || status === "advancing";
 
 /** Run 仍在進行（尚未結束）。 */
 const isRunActive = (status: RunStatus) => status === "queued" || status === "starting" || status === "running";
@@ -85,6 +115,13 @@ function latestRun(runs: RunView[], taskId: string): RunView | null {
   return runs
     .filter((r) => r.task_id === taskId)
     .reduce<RunView | null>((latest, r) => (latest === null || r.generation > latest.generation ? r : latest), null);
+}
+
+/** 同一個 Task 最新的整合項目：seq 最大者。 */
+function latestIntegration(entries: IntegrationEntry[], taskId: string): IntegrationEntry | null {
+  return entries
+    .filter((e) => e.task_id === taskId)
+    .reduce<IntegrationEntry | null>((latest, e) => (latest === null || e.seq > latest.seq ? e : latest), null);
 }
 
 /** 同一個 Task 最新的驗證紀錄（紀錄由舊到新）。 */
@@ -186,6 +223,10 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
   }
   const { board, overview } = loaded;
   const titleOf = (taskId: string) => board.tasks.find((t) => t.id === taskId)?.title ?? taskId;
+  const runLabelOf = (runId: string) => {
+    const found = board.runs.find((r) => r.id === runId);
+    return found ? `第 ${found.generation} 次` : runId;
+  };
 
   /** 執行卡片上的操作：失敗時把 Runtime 的說明顯示在該卡片上；無論成敗都重新載入看板。 */
   const act = async (task: TaskView, action: () => Promise<unknown>): Promise<boolean> => {
@@ -215,6 +256,8 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
           建立 Task
         </button>
       </div>
+
+      <IntegrationQueue entries={board.integrations} titleOf={titleOf} />
 
       {panel && (
         <TaskForm
@@ -248,6 +291,9 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   others={board.tasks.filter((t) => t.id !== task.id)}
                   run={latestRun(board.runs, task.id)}
                   verification={latestVerification(board.verifications, task.id)}
+                  workdir={board.workdirs.filter((w) => w.task_id === task.id).at(-1) ?? null}
+                  runLabelOf={runLabelOf}
+                  integration={latestIntegration(board.integrations, task.id)}
                   accountName={accountNameOf(overview, board.runs, task.id)}
                   queued={queuedInfo(overview, queuedNotice, task)}
                   timeZone={timeZone}
@@ -286,6 +332,12 @@ interface CardProps {
   run: RunView | null;
   /** 這個 Task 最新的驗證紀錄；沒有驗證過為 null。 */
   verification: VerificationRecord | null;
+  /** 這個 Task 登記的工作目錄；尚未準備過為 null。 */
+  workdir: WorkdirView | null;
+  /** Run 的顯示文字（第 N 次）。 */
+  runLabelOf: (runId: string) => string;
+  /** 這個 Task 最新的整合項目；沒有排入過整合為 null。 */
+  integration: IntegrationEntry | null;
   /** 最新 Run 使用的帳號名稱。 */
   accountName: string | null;
   /** 在佇列中等待名額時的順位（未知為 null）與原因；不在佇列為 null。 */
@@ -304,7 +356,7 @@ interface CardProps {
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -325,6 +377,8 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   }, [client, workspaceId, task.id, task.contract_version, historyOpen]);
 
   const closed = isClosed(task.status);
+  // 開發 Task 的成果已通過驗證、排入整合：整合完成前仍停在 verifying，也不能再手動接受
+  const awaitingIntegration = task.status === "verifying" && integration !== null && isIntegrationActive(integration.status);
 
   const addDependency = async () => {
     if (await onAddDependency(dependsOn)) {
@@ -337,6 +391,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
     <article className="task-card" aria-label={task.title}>
       <h4>{task.title}</h4>
       <p className="task-goal">Goal：{goalTitle}</p>
+      <p className="task-kind">種類：{kindLabel(task.kind)}</p>
       <p className="task-contract-version">契約版本 v{task.contract_version}</p>
       {task.unfinished_dependencies.length > 0 && (
         <p className="task-dependencies">等待相依：{task.unfinished_dependencies.map(titleOf).join("、")}</p>
@@ -359,11 +414,15 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
 
       {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
 
+      {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} />}
+
       {run && <RunStatusLine run={run} accountName={accountName} timeZone={timeZone} />}
 
       {verification && <VerificationSummary record={verification} timeZone={timeZone} />}
 
-      {task.status === "verifying" && (
+      {integration && <IntegrationSummary entry={integration} awaiting={awaitingIntegration} />}
+
+      {task.status === "verifying" && !awaitingIntegration && (
         <VerificationPanel client={client} workspaceId={workspaceId} taskId={task.id} onAccepted={onAccepted} />
       )}
 
@@ -445,7 +504,92 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   );
 }
 
-/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、完全退出、Guard 擋下）。 */
+/** 整合佇列：這個 Workspace 尚未結束的整合項目，依排入順序，標出處理中的一個。 */
+function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; titleOf: (taskId: string) => string }) {
+  const pending = entries.filter((e) => isIntegrationActive(e.status)).sort((a, b) => a.seq - b.seq);
+  return (
+    <section className="integration-queue" aria-label="整合佇列">
+      <h3>整合佇列</h3>
+      {pending.length === 0 ? (
+        <p>沒有等待整合的項目</p>
+      ) : (
+        <ol>
+          {pending.map((entry) => {
+            const processing = isIntegrationProcessing(entry.status);
+            return (
+              <li key={entry.id} aria-current={processing ? "step" : undefined}>
+                {titleOf(entry.task_id)}（{entry.branch} → {entry.target_branch}）：{INTEGRATION_STATUS_LABELS[entry.status]}
+                {processing && <strong>（處理中）</strong>}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+/** Task 的工作目錄：種類、路徑、worktree 的分支與整合目標、狀態；準備失敗時醒目顯示原因。 */
+function WorkdirStatus({ workdir, runLabelOf }: { workdir: WorkdirView; runLabelOf: (runId: string) => string }) {
+  const failed = workdir.status === "failed";
+  return (
+    <div className={failed ? "task-workdir task-workdir-failed" : "task-workdir"} role="group" aria-label="工作目錄">
+      <p>
+        {workdir.kind === "worktree" ? "Worktree" : "輸出目錄"}：<code>{workdir.path}</code>
+      </p>
+      {workdir.branch && (
+        <p>
+          分支 {workdir.branch}
+          {workdir.base_branch && ` → 整合到 ${workdir.base_branch}`}
+        </p>
+      )}
+      <p>狀態：{failed ? "準備失敗" : "已就緒"}</p>
+      {failed && <p role="alert">工作目錄無法使用，不會派工：{workdir.failure}</p>}
+      <p>
+        {workdir.run_ids.length === 0
+          ? "尚未有 Run 在此目錄執行"
+          : `在此目錄執行過的 Run：${workdir.run_ids.map(runLabelOf).join("、")}`}
+      </p>
+    </div>
+  );
+}
+
+/** 開發 Task 最新的整合項目：狀態、未通過的原因與整合檢查、已整合的合併 commit。 */
+function IntegrationSummary({ entry, awaiting }: { entry: IntegrationEntry; awaiting: boolean }) {
+  const failedChecks = entry.checks.filter((result) => result.status === "failed");
+  return (
+    <div
+      className={entry.status === "failed" ? "task-integration task-integration-failed" : "task-integration"}
+      role="group"
+      aria-label="整合狀態"
+    >
+      {awaiting && (
+        <p>
+          <strong>成果已通過驗證，等待整合</strong>：整合驗證通過、目標分支更新後才算完成
+        </p>
+      )}
+      <p>
+        整合（{entry.branch} → {entry.target_branch}）：<strong>{INTEGRATION_STATUS_LABELS[entry.status]}</strong>
+      </p>
+      {entry.status === "integrated" && entry.merge_commit && <p>合併 commit {entry.merge_commit.slice(0, 8)}</p>}
+      {entry.failure && <p>{entry.failure}</p>}
+      {failedChecks.length > 0 && (
+        <details>
+          <summary>未通過的整合檢查（{failedChecks.length}）</summary>
+          <ul>
+            {failedChecks.map((result, index) => (
+              <li key={index}>
+                {describeCheck(result.check)}：{result.detail}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、完全退出、工作目錄、Guard 擋下）。 */
 function QueuedStatus({ position, reasons }: { position: number | null; reasons: WaitReason[] }) {
   return (
     <div className="task-queued" role="group" aria-label="排隊原因">
@@ -668,6 +812,9 @@ function VerificationDetail({ view, note, busy, onNoteChange, onAccept }: Verifi
           </ul>
         )}
       </div>
+      {view.integration && (
+        <p>{`最新整合項目：${INTEGRATION_STATUS_LABELS[view.integration.status]}（第 ${view.integration.generation} 次 Run）`}</p>
+      )}
       {view.status !== "verifying" && <p>Task 目前是「{statusLabel(view.status)}」，不能接受成果</p>}
       <label>
         附註（選填）
@@ -706,6 +853,7 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
   const [goalChoice, setGoalChoice] = useState(board.goals[0]?.id ?? NEW_GOAL);
   const [goalTitle, setGoalTitle] = useState("");
   const [title, setTitle] = useState("");
+  const [kind, setKind] = useState<TaskKind>("research");
   const [note, setNote] = useState("");
   const [messages, setMessages] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -735,7 +883,7 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
           setGoalChoice(goal.id);
           onGoalCreated();
         }
-        await client.createTask(workspaceId, { goalId, title: title.trim(), contract });
+        await client.createTask(workspaceId, { goalId, title: title.trim(), kind, contract });
       }
       onDone();
     } catch (e) {
@@ -771,6 +919,16 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
             <label>
               Task 標題
               <input value={title} onChange={(e) => setTitle(e.target.value)} />
+            </label>
+            <label>
+              種類
+              <select value={kind} onChange={(e) => setKind(e.target.value as TaskKind)}>
+                {TASK_KIND_LABELS.map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
             </label>
           </>
         )}
