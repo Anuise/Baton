@@ -341,6 +341,7 @@ mod tests {
             done_criteria: filled("五個產品"),
             blocker_handling: filled("回報"),
             required_capabilities: vec![Capability::ReadFiles],
+            verification_checks: vec![],
         }
     }
 
