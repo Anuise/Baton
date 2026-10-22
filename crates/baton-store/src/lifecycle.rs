@@ -19,7 +19,7 @@ use super::tasks::load;
 use super::*;
 
 /// 生命週期檔名，位於資料目錄之下。
-pub const LIFECYCLE_FILE_NAME: &str = "lifecycle.json";
+pub const LIFECYCLE_FILE_NAME: &str = baton_domain::lifecycle::LIFECYCLE_FILE_NAME;
 
 /// 生命週期總覽的資料：Runtime 的狀態、使用中的 Workspace 與各自的設定、尚未結束的 Run 數。
 #[derive(Debug, Clone, PartialEq)]

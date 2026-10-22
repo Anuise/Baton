@@ -14,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::event::DomainEvent;
+use crate::guardian::GuardianAttempt;
 use crate::scheduler::{WaitCategory, WaitReason};
 use crate::Timestamp;
 
@@ -252,7 +253,24 @@ impl RecoveryError {
 /// - 退避中或已用盡：不改變任何東西（退避期限照舊、不另外計次、用盡不會被清除）。
 /// - 沒有未結束的事件而且崩潰了：建立新事件（第 1 輪、尚未嘗試）。
 pub fn on_start(current: Option<&RecoveryEvent>, crashed: bool, new_event_id: &str, now: Timestamp) -> Option<RecoveryChange> {
+    on_start_owning(current, crashed, None, new_event_id, now)
+}
+
+/// 與 `on_start` 相同，但這次啟動是監護為了 `own_attempt` 這次嘗試拉起的（票 32）：那次嘗試由這個 Runtime 接續，不記為失敗。
+pub fn on_start_owning(
+    current: Option<&RecoveryEvent>,
+    crashed: bool,
+    own_attempt: Option<&str>,
+    new_event_id: &str,
+    now: Timestamp,
+) -> Option<RecoveryChange> {
     match current {
+        Some(event)
+            if event.status == RecoveryStatus::Attempting
+                && own_attempt.is_some_and(|own| event.current_attempt().is_some_and(|a| a.id == own)) =>
+        {
+            None
+        }
         Some(event) if event.status == RecoveryStatus::Attempting => {
             let reason = if crashed { "Runtime 在恢復嘗試進行中再次意外終止" } else { "Runtime 在恢復嘗試進行中結束" };
             Some(fail_current(event, reason, None, now))
@@ -261,26 +279,107 @@ pub fn on_start(current: Option<&RecoveryEvent>, crashed: bool, new_event_id: &s
             Some(fail_current(event, "穩定觀察期間 Runtime 再次意外終止", None, now))
         }
         Some(event) if event.is_open() => None,
-        _ if crashed => {
-            let mut event = RecoveryEvent {
-                id: new_event_id.to_string(),
-                round: 1,
-                status: RecoveryStatus::Waiting,
-                attempts_used: 0,
-                detected_at: now,
-                next_attempt_at: Some(now),
-                observe_until: None,
-                last_failure: None,
-                closed_at: None,
-                version: 0,
-                updated_at: now,
-                attempts: Vec::new(),
-            };
-            let detected = event.push(EVENT_RUNTIME_CRASH_DETECTED, now, serde_json::json!({ "round": 1 }));
-            Some(RecoveryChange { event, events: vec![detected] })
-        }
+        _ if crashed => Some(new_event(new_event_id, now, serde_json::json!({ "round": 1 }))),
         _ => None,
     }
+}
+
+/// 新的恢復事件（第 1 輪、尚未嘗試、第一次立即可做）。
+fn new_event(id: &str, now: Timestamp, payload: serde_json::Value) -> RecoveryChange {
+    let mut event = RecoveryEvent {
+        id: id.to_string(),
+        round: 1,
+        status: RecoveryStatus::Waiting,
+        attempts_used: 0,
+        detected_at: now,
+        next_attempt_at: Some(now),
+        observe_until: None,
+        last_failure: None,
+        closed_at: None,
+        version: 0,
+        updated_at: now,
+        attempts: Vec::new(),
+    };
+    let detected = event.push(EVENT_RUNTIME_CRASH_DETECTED, now, payload);
+    RecoveryChange { event, events: vec![detected] }
+}
+
+/// 一筆監護日誌嘗試匯入後的處置（票 32）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportDisposition {
+    /// 計入這一輪的嘗試（監護寫下即計次，Runtime 接續同一次）。
+    Counted,
+    /// 監護寫下後又撤回（啟動前發現受抑制或已有 Runtime），沒有啟動 Runtime。
+    Withdrawn,
+    /// 停止意圖生效：完全退出優先，不是崩潰恢復。
+    IgnoredStopIntent,
+    /// 這一輪已用盡（監護的鏡像過期才會發生）：不開始第四次。
+    IgnoredExhausted,
+}
+
+impl ImportDisposition {
+    pub const ALL: [ImportDisposition; 4] = [
+        ImportDisposition::Counted,
+        ImportDisposition::Withdrawn,
+        ImportDisposition::IgnoredStopIntent,
+        ImportDisposition::IgnoredExhausted,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImportDisposition::Counted => "counted",
+            ImportDisposition::Withdrawn => "withdrawn",
+            ImportDisposition::IgnoredStopIntent => "ignored_stop_intent",
+            ImportDisposition::IgnoredExhausted => "ignored_exhausted",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|d| d.as_str() == raw)
+    }
+}
+
+/// 匯入的結果：處置與要寫入的變更（沒有變更為 `None`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuardianImport {
+    pub disposition: ImportDisposition,
+    pub change: Option<RecoveryChange>,
+}
+
+/// 匯入一筆監護寫下的嘗試（Runtime 啟動後、任何恢復副作用之前；已匯入過的由呼叫端以嘗試識別去重）。
+///
+/// 監護只在確認 Runtime 意外終止後才寫下嘗試，所以當時進行中或觀察中的嘗試一律失敗；接著以監護的嘗試識別開始下一次，
+/// 序號以控制資料庫的計數為準。退避由監護遵守（它在退避期滿才寫下），這裡不再擋；但用盡之後不會開始第四次。
+pub fn import_guardian_attempt(current: Option<&RecoveryEvent>, attempt: &GuardianAttempt, stop_intent: bool) -> GuardianImport {
+    if stop_intent {
+        return GuardianImport { disposition: ImportDisposition::IgnoredStopIntent, change: None };
+    }
+    let mut events = Vec::new();
+    let mut event = match current.filter(|e| e.is_open()) {
+        Some(event) => event.clone(),
+        None => {
+            let created = new_event(
+                &attempt.event_id,
+                attempt.detected_at,
+                serde_json::json!({ "round": 1, "detected_by": "guardian" }),
+            );
+            events.extend(created.events);
+            created.event
+        }
+    };
+    if matches!(event.status, RecoveryStatus::Attempting | RecoveryStatus::Observing) {
+        let failed = fail_current(&event, "Runtime 意外終止（監護確認）", None, attempt.detected_at);
+        events.extend(failed.events);
+        event = failed.event;
+    }
+    if event.status == RecoveryStatus::Exhausted {
+        let change = (!events.is_empty()).then_some(RecoveryChange { event, events });
+        return GuardianImport { disposition: ImportDisposition::IgnoredExhausted, change };
+    }
+    let started = start_attempt(&event, &attempt.attempt_id, attempt.at, "guardian");
+    events.extend(started.events);
+    GuardianImport { disposition: ImportDisposition::Counted, change: Some(RecoveryChange { event: started.event, events }) }
 }
 
 /// 對恢復事件下的命令。
@@ -326,6 +425,11 @@ fn begin_attempt(event: &RecoveryEvent, attempt_id: &str, now: Timestamp) -> Res
     if event.attempts_used >= MAX_ATTEMPTS {
         return Err(RecoveryError::NotWaiting(RecoveryStatus::Exhausted.as_str()));
     }
+    Ok(start_attempt(event, attempt_id, now, "runtime"))
+}
+
+/// 開始一次嘗試（呼叫端已確認是等待狀態而且還有額度）。`by` 是開始這次嘗試的一方（`runtime`／`guardian`）。
+fn start_attempt(event: &RecoveryEvent, attempt_id: &str, now: Timestamp, by: &str) -> RecoveryChange {
     let mut next = event.clone();
     next.attempts_used += 1;
     next.status = RecoveryStatus::Attempting;
@@ -343,9 +447,9 @@ fn begin_attempt(event: &RecoveryEvent, attempt_id: &str, now: Timestamp) -> Res
     let started = next.push(
         EVENT_RECOVERY_ATTEMPT_STARTED,
         now,
-        serde_json::json!({ "attempt_id": attempt_id, "round": next.round, "seq": next.attempts_used }),
+        serde_json::json!({ "attempt_id": attempt_id, "round": next.round, "seq": next.attempts_used, "by": by }),
     );
-    Ok(RecoveryChange { event: next, events: vec![started] })
+    RecoveryChange { event: next, events: vec![started] }
 }
 
 fn complete_attempt(event: &RecoveryEvent, affected: Vec<AffectedRun>, now: Timestamp) -> Result<RecoveryChange, RecoveryError> {

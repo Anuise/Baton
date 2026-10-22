@@ -1141,7 +1141,24 @@ const MIGRATIONS: &[Migration] = &[
         );
         CREATE INDEX conversation_turn_pending ON conversation_turn (conversation_id) WHERE status = 'pending';",
     },
-    // 票 29（第 31 個 migration）：突然限流後所有合適帳號都受限時，交接停在 `waiting_resource`（Task 在 waiting_resource），
+    // 票 32（第 31 個 migration）：監護日誌的匯入紀錄。每個嘗試識別只匯入一次（去重），連同處置一起保存：
+    // 計入恢復事件、被監護撤回、因停止意圖或已用盡而不計。監護本身不寫控制資料庫，這張表只由 Runtime 寫入
+    Migration {
+        name: "guardian_journal",
+        sql: "CREATE TABLE guardian_journal_import (
+            attempt_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            round INTEGER NOT NULL CHECK (round >= 1),
+            seq INTEGER NOT NULL,
+            detected_at INTEGER NOT NULL,
+            recorded_at INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            disposition TEXT NOT NULL
+                CHECK (disposition IN ('counted', 'withdrawn', 'ignored_stop_intent', 'ignored_exhausted')),
+            imported_at INTEGER NOT NULL
+        );",
+    },
+    // 票 29（第 32 個 migration）：突然限流後所有合適帳號都受限時，交接停在 `waiting_resource`（Task 在 waiting_resource），
     // 記下預計重新評估的時間、退避次數、依據的重置時間與等待原因。phase 的 CHECK 要加一個值，所以重建 `handoff`；
     // 同一個 Task 任何時刻最多一個進行中或等待資源的交接。
     Migration {

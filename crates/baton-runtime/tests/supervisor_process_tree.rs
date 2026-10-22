@@ -16,6 +16,15 @@ use baton_client::{DispatchOutcome, RuntimeClient};
 use baton_domain::run::RunStatus;
 use baton_domain::task::{ContractContent, ContractField, TaskStatus};
 use baton_ports::*;
+
+/// 這個測試不涉及監護（票 32）。
+struct NoGuardian;
+
+impl GuardianProbe for NoGuardian {
+    fn guardian_running(&self) -> bool {
+        false
+    }
+}
 use baton_runtime::production_ports::{LocalCommandRunner, LocalWorkspaceFs, SystemClock};
 use baton_runtime::windows_platform::WindowsPlatformInfo;
 use baton_runtime::windows_process::WindowsProcessControl;
@@ -185,6 +194,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         claude_env: Arc::new(NativeLoginEnv),
         command_runner: Arc::new(LocalCommandRunner),
         user_settings: Arc::new(baton_ports::DirUserSettingsSource::new("unused", "unused")),
+        guardian_probe: Arc::new(NoGuardian),
     };
     let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
     let runtime = Runtime::start_with(
