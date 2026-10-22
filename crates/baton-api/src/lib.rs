@@ -1,8 +1,9 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
 
+mod authorization;
 mod guard;
 mod workspaces;
 
@@ -21,6 +22,10 @@ use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+pub use authorization::{
+    admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
+    AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
+};
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
@@ -91,6 +96,9 @@ pub fn router(state: ApiState) -> Router {
         .route(EVENTS_PATH, get(events))
         .route(WORKSPACES_PATH, get(workspaces::list).post(workspaces::create))
         .route(workspaces::ARCHIVE_ROUTE, post(workspaces::archive))
+        .route(authorization::AUTHORIZATION_ROUTE, get(authorization::view).put(authorization::confirm))
+        .route(authorization::SUMMARY_ROUTE, post(authorization::summary))
+        .route(authorization::ADMISSION_ROUTE, post(authorization::admission_check))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

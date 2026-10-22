@@ -250,7 +250,7 @@ pub enum AuthorizationError {
     DuplicateCapability(Capability),
     #[error("能力「{}」必須指定至少一個目標資源", .0.label())]
     MissingTarget(Capability),
-    #[error("授權包含會執行專案或第三方依賴程式的能力，必須先確認已了解：{TRUSTED_EXECUTION_RISK}")]
+    #[error("授權包含會執行專案或第三方依賴程式、或屬於高風險的能力，必須先確認已了解：{TRUSTED_EXECUTION_RISK}")]
     RiskNotAcknowledged,
 }
 
@@ -288,6 +288,11 @@ pub fn normalize_grants(grants: Vec<Grant>) -> Result<Vec<Grant>, AuthorizationE
     Ok(normalized)
 }
 
+/// 會執行專案或第三方依賴程式、或屬於高風險的能力，確認時必須先承認風險。
+fn needs_risk_acknowledgement(grants: &[Grant]) -> bool {
+    grants.iter().any(|g| g.capability.runs_trusted_code() || g.capability.is_high_risk())
+}
+
 /// 確認前給使用者看的摘要中的一項。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryItem {
@@ -309,7 +314,7 @@ pub struct ConfirmationSummary {
 
 pub fn summarize(grants: Vec<Grant>) -> Result<ConfirmationSummary, AuthorizationError> {
     let grants = normalize_grants(grants)?;
-    let requires_risk_acknowledgement = grants.iter().any(|g| g.capability.runs_trusted_code());
+    let requires_risk_acknowledgement = needs_risk_acknowledgement(&grants);
     let mut risks = Vec::new();
     if requires_risk_acknowledgement {
         risks.push(TRUSTED_EXECUTION_RISK.to_string());
@@ -365,7 +370,7 @@ pub fn confirm(
         ),
     };
     let grants = normalize_grants(request.grants)?;
-    if grants.iter().any(|g| g.capability.runs_trusted_code()) && !request.acknowledged_risk {
+    if needs_risk_acknowledgement(&grants) && !request.acknowledged_risk {
         return Err(AuthorizationError::RiskNotAcknowledged);
     }
     if let Some(current) = current.filter(|c| c.grants == grants) {
@@ -657,6 +662,17 @@ mod tests {
 
         assert_eq!(result, Err(AuthorizationError::RiskNotAcknowledged));
         assert!(AuthorizationError::RiskNotAcknowledged.to_string().contains("Windows 使用者的身分"));
+    }
+
+    #[test]
+    fn a_high_risk_capability_alone_also_requires_acknowledging_the_risk() {
+        let deploy = vec![Grant { capability: Capability::Deploy, targets: vec!["staging".into()], restrictions: vec![] }];
+
+        assert_eq!(
+            confirm(&workspace(), None, request(None, deploy.clone(), false), T1),
+            Err(AuthorizationError::RiskNotAcknowledged)
+        );
+        assert!(confirm(&workspace(), None, request(None, deploy, true), T1).is_ok());
     }
 
     #[test]

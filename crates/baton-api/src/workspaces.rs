@@ -40,9 +40,9 @@ pub struct WorkspaceList {
 
 /// 端點錯誤：穩定的 `code` 加上給使用者看的說明。
 pub(crate) struct ApiError {
-    status: StatusCode,
-    code: &'static str,
-    message: String,
+    pub(crate) status: StatusCode,
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
 }
 
 impl IntoResponse for ApiError {
