@@ -40,6 +40,7 @@ mod health;
 mod integration;
 mod knowledge;
 mod lifecycle;
+mod maintenance;
 mod messages;
 mod profiles;
 mod quota;
@@ -68,6 +69,7 @@ pub use lifecycle::{
     lifecycle_file_path, read_lifecycle_file, write_lifecycle_file, LifecycleApplyError, LifecycleSnapshot,
     WorkspaceLifecycleOutcome, LIFECYCLE_FILE_NAME,
 };
+pub use maintenance::MaintenanceApplyError;
 pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
@@ -1340,6 +1342,17 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TABLE login_startup (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );",
+    },
+    // 更新與解除安裝的維護（票 34，spec D-19）：只有一列；進行中與最近一次結束的維護以 JSON 保存（Domain 型別）。
+    Migration {
+        name: "maintenance",
+        sql: "CREATE TABLE maintenance (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            current TEXT,
+            last TEXT,
             version INTEGER NOT NULL CHECK (version >= 1),
             updated_at INTEGER NOT NULL
         );",

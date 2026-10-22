@@ -22,6 +22,7 @@ use baton_api::{
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     BackupStatus, BACKUPS_PATH,
     RecoveryStatusView, RECOVERY_PATH, RECOVERY_RETRY_PATH,
+    ApplyUpdateRequest, MaintenanceRequestBody, UpdateStatusView, MAINTENANCE_PATH, UPDATES_PATH, UPDATE_APPLY_PATH,
     metrics_path, timeline_path, MetricsResponse, TimelineResponse,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
@@ -66,6 +67,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 下載成果（最多 10 MiB，仍要讀檔並重新計算雜湊）等待回應的上限。
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 同意更新的請求要先下載並驗證安裝程式（票 34），等待回應的上限。
+const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// 需要在本機執行 `claude`、`git` 的請求（核對登入、精靈檢查）等待回應的上限。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -346,6 +350,26 @@ impl RuntimeClient {
     /// 完全退出：Runtime 持久化停止意圖後立即回應，停止進度之後以 `lifecycle` 查詢；重複要求是冪等的。
     pub async fn request_exit(&self) -> Result<LifecycleStatus, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, LIFECYCLE_EXIT_PATH, None).await
+    }
+
+    /// 更新狀態（票 34）：檢查結果（只通知）、進行中與最近一次的維護。
+    pub async fn updates(&self) -> Result<UpdateStatusView, ClientError> {
+        self.get_json(UPDATES_PATH).await
+    }
+
+    /// 同意更新到 `version`（票 34）：Runtime 先下載並驗證簽章，通過才開始維護並回應；之後以 `updates` 查詢維護進度。
+    /// 下載或驗證失敗時回傳 `ClientError::Rejected`（`update_download_failed` 等），工作沒有停止。
+    pub async fn apply_update(&self, version: &str) -> Result<UpdateStatusView, ClientError> {
+        let request = ApplyUpdateRequest { version: version.to_string() };
+        self.send_json_within(reqwest::Method::POST, UPDATE_APPLY_PATH, Some(&request), UPDATE_DOWNLOAD_TIMEOUT).await
+    }
+
+    /// 安裝程式要求維護（票 34；解除安裝、或不經 App 的更新安裝）：Runtime 持久化維護與停止意圖後立即回應。
+    pub async fn request_maintenance(
+        &self,
+        kind: baton_domain::maintenance::MaintenanceKind,
+    ) -> Result<UpdateStatusView, ClientError> {
+        self.send_json(reqwest::Method::POST, MAINTENANCE_PATH, Some(&MaintenanceRequestBody { kind })).await
     }
 
     /// 崩潰恢復總覽：目前的恢復事件（含全部輪次的嘗試與受影響工作）、每輪上限、能否重試與派工阻擋原因（票 31）。
