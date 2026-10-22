@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use baton_domain::agent::{
     AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, DETAILS_MAX_BYTES, REASON_MAX_CHARS, RUNTIME_URL_ENV, SUMMARY_MAX_CHARS,
-    TOOL_GET_TASK_CONTRACT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT,
-    TOOL_SEND_MESSAGE,
+    TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
+    TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::message::{
     MessageKind, BODY_MAX_BYTES, ID_MAX_CHARS, INBOX_DEFAULT_LIMIT, INBOX_MAX_LIMIT, MAX_RECIPIENTS, SUBJECT_MAX_CHARS,
@@ -178,6 +178,53 @@ fn tool_definitions() -> Value {
             },
         },
         {
+            "name": TOOL_REQUEST_DECISION,
+            "description": "遇到需要使用者裁定的問題（你無法自行決定時）才呼叫，並提供 2 到 8 個選項與取捨。呼叫後只有受影響的工作會暫停，不會影響其他工作；使用者裁定前不要自行假設答案。之後請先 save_checkpoint 再 report_blocked 結束，或改做不需要這項裁定的其他步驟。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "要使用者裁定的問題" },
+                    "reason": { "type": "string", "description": "為什麼你無法自行決定" },
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 8,
+                        "description": "可選的選項",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "選項代碼（在這個請求內唯一）" },
+                                "label": { "type": "string", "description": "給使用者看的選項說明" },
+                                "tradeoff": { "type": "string", "description": "選這個選項的取捨" },
+                            },
+                            "required": ["id", "label"],
+                        },
+                    },
+                    "recommendation": { "type": "string", "description": "你建議的選項 id" },
+                    "evidence": { "type": "array", "items": { "type": "string" }, "description": "支持判斷的證據" },
+                    "urgency": { "type": "string", "enum": ["low", "normal", "high"], "description": "急迫程度" },
+                    "deadline_minutes": {
+                        "type": "integer",
+                        "description": "從現在起幾分鐘內需要答案；只用來標示逾期，逾時不代表同意",
+                    },
+                },
+                "required": ["question", "reason", "options"],
+            },
+        },
+        {
+            "name": TOOL_PERMISSION_PROMPT,
+            "description": "給 Claude Code 的 --permission-prompt-tool 使用，不是給模型主動呼叫的工具。回傳 {behavior: allow|deny, ...}：授權範圍內直接允許；範圍外會建立裁定請求並先回 deny，等使用者裁定。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tool_name": { "type": "string", "description": "要求權限的工具名稱" },
+                    "input": { "type": "object", "description": "該工具這次的輸入" },
+                    "tool_use_id": { "type": "string", "description": "這次工具呼叫的 id" },
+                },
+                "required": ["tool_name"],
+            },
+        },
+        {
             "name": TOOL_SEND_MESSAGE,
             "description": "寄訊息給同一個 Workspace 的其他 Task（收件人用 task id）。收件人要到下次讀取收件匣時才看得到，Runtime 不會中途插話；訊息不能改變任何 Task 的契約、範圍或歸屬；重送同一個 message_id 只會交付一次。",
             "inputSchema": {
@@ -267,6 +314,8 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_REPORT_PROGRESS,
         TOOL_SAVE_CHECKPOINT,
         TOOL_REPORT_BLOCKED,
+        TOOL_REQUEST_DECISION,
+        TOOL_PERMISSION_PROMPT,
         TOOL_SEND_MESSAGE,
         TOOL_READ_INBOX,
         TOOL_REGISTER_ARTIFACT,
