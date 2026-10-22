@@ -79,7 +79,7 @@
 - 理由：實測未設定時，`/usage` 被轉成 `C:/Program Files/Git/usage` 並送給模型，Work-3、Work-8、Work-9 各被消耗了一次小額回應。
 - 替代方案：改用 PowerShell 執行查詢。
 - 影響：無。
-- 審閱：未審
+- 審閱：認同 2026-10-22
 
 ### AI-07：watchdog 變數的實際名稱與數值
 - 重要度：中
@@ -214,7 +214,7 @@
 - 理由：`MSYS_NO_PATHCONV=1` 會一併停止環境變數的路徑轉換，Windows 版 claude 把 `/c/Users/...` 解讀成 `C:\c\Users\...`，讀到全新的空設定，R001、R002 因此以「Not logged in」失敗。先前用 `/usage` 驗證帳號時也受影響（它是本機指令，不需登入，所以沒有發現）。
 - 替代方案：拿掉 `MSYS_NO_PATHCONV`；但 prompt 中以 `/` 開頭的字串可能被轉換。
 - 影響：`C:\c\Users\User\.claude-Work-*` 留有誤建的設定目錄（約 288 KB），可以刪除。
-- 審閱：未審
+- 審閱：認同 2026-10-22
 
 ### AI-22：D-04、D-05 的 ADR 仍標示「AI 暫定，待使用者確認」
 - 重要度：中
