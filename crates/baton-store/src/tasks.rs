@@ -13,6 +13,7 @@ use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
 use baton_domain::workdir::{TaskKind, Workdir, WorkdirView};
 use baton_domain::task::{
+    DecisionHold,
     self, ContractContent, Dependency, Goal, MissingItem, Task, TaskChange, TaskCommand, TaskContext, TaskContract,
     TaskError, TaskStatus, TaskView,
 };
@@ -83,6 +84,8 @@ pub(crate) struct Loaded {
     pub(crate) guards: Vec<ActiveGuard>,
     /// 有計入過的 Task 預算（票 36）。
     pub(crate) budgets: Vec<TaskBudget>,
+    /// Controller 提出、尚未回答的裁定請求所阻擋的 Task（票 17）。
+    pub(crate) decision_holds: Vec<DecisionHold>,
 }
 
 impl Loaded {
@@ -95,6 +98,7 @@ impl Loaded {
             tasks: &self.tasks,
             dependencies: &self.dependencies,
             contracts: &self.contracts,
+            decision_holds: &self.decision_holds,
         }
     }
 }
@@ -278,6 +282,17 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
     let integrations = super::integration::load_entries(conn, Some(workspace_id))?;
     let sessions = super::sessions::load_sessions(conn, workspace_id)?;
     let budgets = super::budgets::load_budgets(conn, workspace_id)?;
+    // 只有 Controller 提出的待處理請求會讓 Task 不能准入（Worker 的請求以 waiting_decision 表達）
+    let decision_holds = conn
+        .prepare(
+            "SELECT b.task_id, r.id, r.question FROM decision_request_block b
+             JOIN decision_request r ON r.id = b.request_id
+             WHERE r.workspace_id = ?1 AND r.status = 'pending' AND r.origin = 'controller' ORDER BY r.rowid, b.rowid",
+        )?
+        .query_map([workspace_id], |r| {
+            Ok(DecisionHold { task_id: r.get(0)?, request_id: r.get(1)?, question: r.get(2)? })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Loaded {
         workspace,
         authorization,
@@ -293,6 +308,7 @@ pub(crate) fn load(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Lo
         guards: Vec::new(),
         sessions,
         budgets,
+        decision_holds,
     })
 }
 

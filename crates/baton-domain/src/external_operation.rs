@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::decision::{self, DecisionKind, DecisionOption, DecisionRequest, DecisionStatus, DecisionTarget, Urgency};
+use crate::decision::{self, DecisionKind, DecisionOption, DecisionOrigin, DecisionRequest, DecisionStatus, DecisionTarget, Urgency};
 use crate::event::DomainEvent;
 use crate::run::{self, ExecutionLease, Run};
 use crate::task::{Task, TaskContext, TaskStatus, Versioned};
@@ -595,6 +595,7 @@ fn unknown_request(operation: &ExternalOperation, task_contract_version: i64, re
         workspace_id: operation.workspace_id.clone(),
         run_id: operation.run_id.clone(),
         task_id: operation.task_id.clone(),
+        origin: DecisionOrigin::Worker,
         // 資料庫的種類沒有外部操作；這個請求由 Runtime 代 Worker 提出，與外部操作的關聯記在操作上（`external_operation_id`）
         kind: DecisionKind::Agent,
         status: DecisionStatus::Pending,

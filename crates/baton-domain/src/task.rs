@@ -362,6 +362,8 @@ pub enum MissingCode {
     AuthorizationUnconfirmed,
     CapabilityNotGranted,
     WorkspaceArchived,
+    /// Controller 提出的裁定請求還沒有回答，而這個 Task 依賴它的答案（票 17，ADR-0010）。
+    DecisionPending,
 }
 
 /// 准入檢查列出的一個缺項。
@@ -383,6 +385,16 @@ pub struct TaskContext<'a> {
     pub dependencies: &'a [Dependency],
     /// 每個 Task 目前生效的契約。
     pub contracts: &'a [TaskContract],
+    /// Controller 提出、尚未回答的裁定請求所阻擋的 Task（票 17）：依賴未決答案的 Task 不能進入 ready 或派工。
+    pub decision_holds: &'a [DecisionHold],
+}
+
+/// 一個 Task 正在等待 Controller 提出的裁定請求的答案（票 17）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionHold {
+    pub task_id: String,
+    pub request_id: String,
+    pub question: String,
 }
 
 impl TaskContext<'_> {
@@ -468,6 +480,15 @@ pub fn admission_report(ctx: &TaskContext<'_>, contract: &TaskContract) -> Vec<M
                 }
             }
         }
+    }
+
+    // 依賴未決答案的部分保持等待（ADR-0010）：使用者回答之前不能進入 ready 或派工
+    for hold in ctx.decision_holds.iter().filter(|h| h.task_id == contract.task_id) {
+        missing.push(item(
+            MissingCode::DecisionPending,
+            None,
+            format!("等待使用者回答裁定請求「{}」（{}）", hold.question, hold.request_id),
+        ));
     }
 
     let verdict = authorization::admit(
@@ -809,6 +830,7 @@ mod tests {
         tasks: Vec<Task>,
         dependencies: Vec<Dependency>,
         contracts: Vec<TaskContract>,
+        holds: Vec<DecisionHold>,
         events: Vec<DomainEvent>,
     }
 
@@ -828,6 +850,7 @@ mod tests {
                 tasks: vec![],
                 dependencies: vec![],
                 contracts: vec![],
+                holds: vec![],
                 events: vec![],
             }
         }
@@ -848,6 +871,7 @@ mod tests {
                 tasks: &self.tasks,
                 dependencies: &self.dependencies,
                 contracts: &self.contracts,
+                decision_holds: &self.holds,
             }
         }
 
@@ -1104,6 +1128,23 @@ mod tests {
         let Err(TaskError::AdmissionDenied(missing)) = result else { panic!("{result:?}") };
         assert_eq!(missing.len(), 6);
         assert_eq!((world.task("t1").status, world.events.len()), (TaskStatus::Pending, events_before));
+    }
+
+    #[test]
+    fn a_task_waiting_for_an_unanswered_controller_question_cannot_become_ready() {
+        let mut world = World::with_goal();
+        world.add_task("t1", complete());
+        world.add_task("t2", complete());
+        world.holds.push(DecisionHold { task_id: "t1".into(), request_id: "dr_1".into(), question: "要支援哪些平台？".into() });
+
+        let result = world.run(TaskCommand::MarkReady { task_id: "t1".into() }, T2);
+
+        let Err(TaskError::AdmissionDenied(missing)) = result else { panic!("{result:?}") };
+        assert_eq!(codes(&missing), vec![(MissingCode::DecisionPending, None)]);
+        assert!(missing[0].message.contains("要支援哪些平台？") && missing[0].message.contains("dr_1"));
+        // 不依賴這個答案的 Task 不受影響
+        world.run(TaskCommand::MarkReady { task_id: "t2".into() }, T2).unwrap();
+        assert_eq!((world.task("t1").status, world.task("t2").status), (TaskStatus::Pending, TaskStatus::Ready));
     }
 
     #[test]

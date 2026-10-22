@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use baton_api::{quota, LogSink, RunSettings};
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
-use baton_domain::auth::AgentScope;
+use baton_domain::auth::{AgentScope, ControllerScope};
 use baton_domain::cleanup::{self, CleanupCommand, CleanupStatus, Inspection};
 use baton_domain::conversation::{BeginTurn, ControllerRun, ControllerRunStatus, TurnOutcome};
 use baton_domain::integration::{self, AdvanceResult, IntegrationCommand, IntegrationStatus, MergeResult};
@@ -90,11 +90,6 @@ pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
 /// 受控停止的預設寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
-
-/// Controller 程序的 Agent 憑證環境變數：本票還沒有 Controller 憑證（`credential.run_id` 只能指向 Worker 的 Run），
-/// 但 Run 的 MCP 設定以 `${BATON_AGENT_TOKEN}` 參照它，未設定時 CLI 可能無法解析設定，所以給一個不是秘密的佔位值；
-/// 工具呼叫會被 Agent API 以未授權拒絕。票 17 簽發 Controller 憑證後取代。
-const CONTROLLER_TOKEN_PLACEHOLDER: &str = "controller-credential-not-issued";
 
 /// 背景迴圈沒有被喚醒時，最久多久檢查一次。
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(1);
@@ -1246,7 +1241,7 @@ impl Supervisor {
     }
 
     /// Controller Run 的 `RunSpec`：全部來自持久化的 launch intent，所以重建後組出相同的啟動指令。
-    /// Controller 不綁 Task（`task_id` 為空）、在 Workspace 目錄執行；本票不簽發 Agent 憑證、不套用共同設定快照。
+    /// Controller 不綁 Task（`task_id` 為空）、在 Workspace 目錄執行；不套用共同設定快照（Controller 憑證在 `launch_controller` 簽發）。
     async fn controller_spec(&self, run: &ControllerRun) -> Result<RunSpec, String> {
         Ok(RunSpec {
             run_id: run.id.clone(),
@@ -1367,8 +1362,18 @@ impl Supervisor {
             let reason = format!("無法準備 Controller Run 的啟動檔案：{error}");
             return self.finish_controller(run, TurnOutcome::Failed { reason }).await;
         }
+        // Controller 憑證（票 17）：綁定這一輪，只經環境變數交給 MCP shim；它只能使用 Controller 專屬的工具，
+        // 這一輪結束後失效。簽發失敗就不啟動，這一輪以失敗結束、輸入退回待處理
+        let scope = ControllerScope { workspace_id: run.workspace_id.clone(), controller_run_id: run.id.clone() };
+        let token = match self.credentials.issue_controller(scope).await {
+            Ok(token) => token,
+            Err(error) => {
+                let reason = format!("無法簽發 Controller 憑證：{error}");
+                return self.finish_controller(run, TurnOutcome::Failed { reason }).await;
+            }
+        };
         let mut spawn = self.ports.agent_adapter.spawn_spec(&spec);
-        spawn.env.push((AGENT_TOKEN_ENV.to_string(), CONTROLLER_TOKEN_PLACEHOLDER.to_string()));
+        spawn.env.push((AGENT_TOKEN_ENV.to_string(), token));
         spawn.env.push((RUNTIME_URL_ENV.to_string(), self.runtime_url.clone()));
         let lookup = spawn.clone();
         let receipt = match self.ports.process_control.spawn(spawn).await {

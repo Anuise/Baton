@@ -9,10 +9,12 @@ use std::io;
 use std::time::Duration;
 
 use baton_domain::agent::{
-    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, DETAILS_MAX_BYTES, REASON_MAX_CHARS, RUNTIME_URL_ENV, SUMMARY_MAX_CHARS,
-    TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
-    TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
+    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, BLOCKING_MAX_TASKS, DETAILS_MAX_BYTES, REASON_MAX_CHARS, RUNTIME_URL_ENV, SUMMARY_MAX_CHARS,
+    TOOL_ADD_DEPENDENCY, TOOL_CANCEL_TASK, TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_DISPATCH_TASK, TOOL_GET_TASK_CONTRACT,
+    TOOL_PERMISSION_PROMPT, TOOL_PROPOSE_DECISION_REQUEST, TOOL_PROPOSE_TASK, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
+    TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE, TOOL_UPDATE_TASK,
 };
+use baton_domain::workdir::TaskKind;
 use baton_domain::authority::Matter;
 use baton_domain::handoff::CONFIRMATION_MAX_CHARS;
 use baton_domain::message::{
@@ -446,8 +448,123 @@ fn tool_definitions() -> Value {
                 "required": ["completed", "incomplete", "unknown_side_effects"],
             },
         },
+        {
+            "name": TOOL_PROPOSE_TASK,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：在這個 Workspace 建立一個新的 Task。建立的 Task 一律是 pending，與使用者手動建立的 Task 受相同的准入檢查，之後要用 dispatch_task 才會派工。goal_id 與 goal_title 必須剛好提供一個。資訊不足時把契約欄位標為 unknown，不要虛構內容。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Task 標題" },
+                    "goal_id": { "type": "string", "description": "歸屬的既有 Goal；與 goal_title 二擇一" },
+                    "goal_title": { "type": "string", "description": "建立新 Goal 並歸屬其下；與 goal_id 二擇一" },
+                    "kind": {
+                        "type": "string",
+                        "enum": TaskKind::ALL.map(TaskKind::as_str),
+                        "default": TaskKind::default().as_str(),
+                        "description": "Task 種類：development（程式開發）、research（研究，預設）、document（文件）；建立後不可變更",
+                    },
+                    "contract": {
+                        "type": "object",
+                        "description": CONTRACT_DESCRIPTION,
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+        {
+            "name": TOOL_UPDATE_TASK,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：以新契約整份取代 Task 的契約（內容相同不會新增版本）。已派工過的 Task 修改完成條件（done_criteria）必須由使用者裁定，Runtime 會回 requires_decision，等待裁定、不要繞過。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "要修改的 Task" },
+                    "contract": { "type": "object", "description": CONTRACT_DESCRIPTION },
+                    "note": { "type": "string", "description": "這次修改的說明（選填）" },
+                },
+                "required": ["task_id", "contract"],
+            },
+        },
+        {
+            "name": TOOL_ADD_DEPENDENCY,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讓 task_id 依賴 depends_on（depends_on 完成前 task_id 不會被派出）。重複新增是冪等的；Runtime 拒絕自我相依與造成循環的相依。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "要等待的 Task" },
+                    "depends_on": { "type": "string", "description": "被依賴、必須先完成的 Task" },
+                },
+                "required": ["task_id", "depends_on"],
+            },
+        },
+        {
+            "name": TOOL_DISPATCH_TASK,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：派工一個 Task。pending 的 Task 會先做完整准入檢查再派工，准入不過回 task_admission_denied（附缺項）；超出 Workspace 授權時被拒絕並自動建立裁定請求（requires_decision），等使用者裁定、不要繞過。依賴未回答裁定請求的 Task 不會被派出。成功時回應 status 是 started（已開始執行）或 queued（已排入佇列）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "要派工的 Task" },
+                    "priority": { "type": "integer", "description": "優先順序（選填），數字越大越優先" },
+                },
+                "required": ["task_id"],
+            },
+        },
+        {
+            "name": TOOL_CANCEL_TASK,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：取消一個 Task；取消後不能再改契約、加相依或派工。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "要取消的 Task" },
+                },
+                "required": ["task_id"],
+            },
+        },
+        {
+            "name": TOOL_PROPOSE_DECISION_REQUEST,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：向使用者提出裁定請求，提供 2 到 8 個選項與取捨。只問會阻擋下一步的關鍵問題。列在 blocking 的 Task 在使用者回答前不會被派出；不依賴這個答案的工作可以照常派出。使用者回答後你會在對話中收到工作事件，不要自行假設答案。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string", "description": "要使用者裁定的問題" },
+                    "reason": { "type": "string", "description": "為什麼你無法自行決定" },
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 8,
+                        "description": "可選的選項",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "選項代碼（在這個請求內唯一）" },
+                                "label": { "type": "string", "description": "給使用者看的選項說明" },
+                                "tradeoff": { "type": "string", "description": "選這個選項的取捨" },
+                            },
+                            "required": ["id", "label"],
+                        },
+                    },
+                    "recommendation": { "type": "string", "description": "你建議的選項 id" },
+                    "evidence": { "type": "array", "items": { "type": "string" }, "description": "支持判斷的證據" },
+                    "urgency": { "type": "string", "enum": ["low", "normal", "high"], "description": "急迫程度" },
+                    "deadline_minutes": {
+                        "type": "integer",
+                        "description": "從現在起幾分鐘內需要答案；只用來標示逾期，逾時不代表同意",
+                    },
+                    "blocking": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": BLOCKING_MAX_TASKS,
+                        "description": "依賴這個答案的 Task id；使用者回答前這些 Task 不會被派出",
+                    },
+                },
+                "required": ["question", "reason", "options", "blocking"],
+            },
+        },
     ])
 }
+
+/// propose_task 與 update_task 的契約欄位說明（六項最小契約，見 ADR-0011）。
+const CONTRACT_DESCRIPTION: &str = "六項最小契約：objective（目標）、inputs（輸入與依據）、scope（範圍與限制）、deliverables（預期成果）、done_criteria（完成與驗證條件）、blocker_handling（阻礙處理），每項是下列之一：{\"status\":\"filled\",\"text\":…,\"references\"?:[{\"kind\",\"target\",\"version\"}]}（已填寫）、{\"status\":\"not_applicable\",\"reason\":…}（不適用，必須附理由；objective、done_criteria 不可標不適用）、{\"status\":\"unknown\",\"note\"?:…}（未知，補足前無法派工）。另有 required_capabilities：這個 Task 需要的 Workspace 授權能力（字串陣列）。資訊不足時標 unknown，不要虛構。";
 
 /// 處理 `tools/call`：協定層的錯誤回 `Err`，Runtime 的結果（含失敗）一律包成 MCP 工具結果。
 async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value) -> Result<Value, (i64, String)> {
@@ -468,6 +585,12 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_BEGIN_EXTERNAL_OPERATION,
         TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
         TOOL_CONFIRM_HANDOFF,
+        TOOL_PROPOSE_TASK,
+        TOOL_UPDATE_TASK,
+        TOOL_ADD_DEPENDENCY,
+        TOOL_DISPATCH_TASK,
+        TOOL_CANCEL_TASK,
+        TOOL_PROPOSE_DECISION_REQUEST,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));

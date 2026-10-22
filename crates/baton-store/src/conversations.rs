@@ -8,6 +8,7 @@ use baton_domain::conversation::{
     self, BeginTurn, ControllerRun, ControllerRunStatus, Conversation, ConversationChange, ConversationError,
     ConversationState, ConversationTurn, ConversationView, TurnKind, TurnOutcome, TurnStatus, WakePlan,
 };
+use baton_domain::auth::ControllerScope;
 use baton_domain::run::{self, ProcessRecord, RunChange};
 use baton_domain::session::{self, AgentSession, SessionOwner};
 use baton_domain::workspace::{AgentRole, WorkspaceStatus};
@@ -186,6 +187,22 @@ impl Store {
     }
 
     /// 尚未結束（starting、running）的 Controller Run（跨 Workspace，依建立順序）。
+    /// Controller 憑證是否仍然有效（票 17）：它所屬的一輪屬於這個 Workspace，而且還沒結束（`starting`／`running`）。
+    pub async fn controller_run_active(&self, scope: &ControllerScope) -> StoreResult<bool> {
+        let scope = scope.clone();
+        self.read(move |conn| {
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2",
+                    [&scope.controller_run_id, &scope.workspace_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(matches!(status.as_deref(), Some("starting" | "running")))
+        })
+        .await
+    }
+
     pub async fn executing_controller_runs(&self) -> StoreResult<Vec<ControllerRun>> {
         self.read(|conn| Ok(load_runs(conn, "status IN ('starting', 'running')", [])?)).await
     }
@@ -289,6 +306,21 @@ pub(crate) fn enqueue_work_events(tx: &Transaction<'_>, change: &RunChange, now:
         save(tx, &received)?;
     }
     Ok(())
+}
+
+/// Controller 提出的裁定請求被回答或過期（票 17）：在同一個交易中成為該 Workspace conversation 的工作事件。
+/// 同一個 `source` 只會成為一個輸入；Workspace 沒有 conversation 時不建立（Controller 的請求一定有）。
+pub(crate) fn enqueue_notice(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    source: &str,
+    content: &str,
+    now: Timestamp,
+) -> rusqlite::Result<()> {
+    let Some(state) = load_state_of_workspace(tx, workspace_id)? else { return Ok(()) };
+    let received = conversation::receive(&state, TurnKind::WorkEvent, content, Some(source.to_string()), now)
+        .expect("工作事件沒有長度限制，不會被拒絕");
+    save(tx, &received)
 }
 
 // ---------------------------------------------------------------- 讀寫
