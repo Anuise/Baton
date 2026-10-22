@@ -2458,7 +2458,69 @@
 - 影響：用本票分支（本次合併前）建過的開發資料庫，`agent_session_and_transcript` 記在第 25 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
-### AI-273：額度門檻以每個帳號持久化的 open／paused／draining 表達遲滯；恢復條件是 <60%、用量未知或過了進入時的重置時間
+### AI-273：哪些事件計入哪一種預算；交接、恢復、取消與契約變更都不計入
+- 重要度：高
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：(1) 實作失敗修正：Worker 以失敗結束（`RunOutcome::Failed`）、確定性檢查有任一項未通過。(2) 驗證不完整重驗：確定性檢查沒有未通過、但有取不到證據的項目（AI-274）。(3) 基礎設施重試：啟動失敗（`LaunchFailed`）、lease 過期後確認程序已不在（`ReconcileLease` 觀察到 `Dead`）。(4) 不計入：額度交接——目前還沒有交接流程（票 28、29），以「Adapter 回報額度用盡 `RateLimited { status: Exhausted }` 之後程序以失敗結束」視為突然限流，新增 `RunOutcome::QuotaLimited`，Run 記為 `interrupted`（`quota_limited：…`）、Task 回到 `ready`；恢復與停止——所有 `RunCommand::Interrupt`（`launch_outcome_unknown`、完全退出後程序已不在、完全退出停止、還原）；使用者取消；「契約在 Run 派工後變更」造成的驗證未通過（不是任何人的失敗）。只有 Task 還在 `running`／`verifying` 而實際發生轉換時才計入（使用者已取消的 Task 不計）。
+- 理由：spec D-16 只列了三種名稱。Worker 自己宣告失敗、或成果被檢查否決，是「實作」需要修正；平台啟動不了程序或程序無故消失是「基礎設施」；取不到證據既不是產品缺陷也不是通過（使用者故事 70）。交接、恢復與取消明文不計入，契約變更比照辦理。
+- 替代方案：Worker 以失敗結束也可能是 CLI 或 API 錯誤（偏基礎設施）；但目前 Adapter 分不出原因，一律算實作失敗較保守（預算較快用完、較早問使用者）。
+- 影響：票 28、29 實作交接時，應讓交接結束的舊 Run 走 `QuotaLimited` 或新的不計入路徑；票 31 的恢復嘗試若改用 `Interrupt` 以外的命令，需要明確標為不計入。
+- 審閱：未審
+
+### AI-274：「驗證不完整」的定義與重驗方式；整合驗證把不完整當成未通過
+- 重要度：中
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：確定性檢查新增結果 `inconclusive`：命令無法啟動、被終止（沒有結束碼）、逾時 10 分鐘，檔案或成果檔讀取失敗。結束碼不符、檔案不存在、雜湊不符、成果未登記或與 manifest 不符仍是 `failed`。一次驗證中只要有 `failed` 就是未通過（實作失敗）；沒有 `failed` 但有 `inconclusive` 時，驗證紀錄的結果是 `inconclusive`，Task 留在 `verifying`，Supervisor 下一次處理就重新執行檢查（不另設延遲）。整合佇列的整合驗證把 `inconclusive` 視為未通過。`task_verification` 原本 `run_id` 唯一且結果只允許 passed／failed，改以 migration 27 重建：同一個 Run 最多一筆有結論（passed／failed）的紀錄，`inconclusive` 可以有多筆。
+- 理由：要計數「驗證不完整」必須先有這個結論；逾時歸為不完整，因為逾時本身不能證明產品錯誤（也可能是機器忙）。重驗不設延遲，是因為 spec 只對基礎設施重試規定退避；兩次重驗很快用完時會送裁定，由使用者處理環境問題。
+- 替代方案：逾時算未通過（產品可能卡死）；重驗也加退避。都可以之後再調。
+- 影響：票 13 的「無法執行／讀取失敗算未通過」改為不完整（原有 Domain 測試已更新）。票 45 會導入完整的 reason_code（environment_blocked 等），屆時可細分。
+- 審閱：未審
+
+### AI-275：計數的意義、用盡的時點，以及哪一種會自動重試
+- 重要度：中
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：計數是「已用掉的重試次數」：第一次嘗試不算，每次計入的失敗讓計數加一，直到等於上限；已到上限後再發生一次才是「用盡」，此時計數停在上限、Task 進入 `blocked`。也就是實作最多執行 1＋3 次、驗證最多 1＋2 次、基礎設施最多 1＋5 次。只有基礎設施重試在預算內會自動排回派工佇列（優先序 0），並設定退避期限：第 n 次重試等 min(1 分鐘 × 2^(n−1), 10 分鐘)，即 1、2、4、8、10 分鐘；期限前留在佇列，等待原因 `backoff`／`retry_backoff`。實作失敗仍照票 10 回到 `ready`、不自動排隊（spec D-15 把「在預算內重派」交給 Controller）。
+- 理由：「修正 3 次」最自然的讀法是首次之外再修 3 次。spec 只給了退避上限 10 分鐘，起點 1 分鐘讓五次重試正好用到上限。退避只對自動重試有意義，所以只有基礎設施重試自動排隊。
+- 替代方案：計數包含第一次嘗試（總共 3 次）；退避起點 30 秒（30 秒到 8 分鐘，用不到上限）。
+- 影響：既有情境測試 `acceptance.rs` 的「程序死亡後重新派工」需要先等過 1 分鐘的退避期限（已更新）。使用者在退避期間手動派工也會留在佇列。
+- 審閱：未審
+
+### AI-276：用盡時的裁定請求沿用「Controller 動作」種類，核准即重設並讓 Task 繼續
+- 重要度：中
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：用盡時由 Runtime 在同一個交易建立裁定請求，種類用既有的 `authority`、事項 `next_step_after_budget`（spec D-15 的「預算用盡後的下一步」），fingerprint 與 Controller 動作相同（`next_step_after_budget:<Task>`），`run_id` 指向用盡預算的 Run（驗證時是受驗 Run），識別為 `dr_budget_<Run 識別或驗證紀錄識別>`，阻擋範圍是這個 Task，選項 `approve`（再給一輪這一種預算）與 `reject`（維持阻擋），沒有建議選項。核准（接受或修改條件選 `approve`）時：只重設用盡的那一種計數（基礎設施另外清掉退避期限），Task 從 `blocked` 回到 `ready` 並排回派工佇列；驗證不完整用盡的回到 `verifying` 重驗（`TaskStatus` 新增 `blocked → verifying` 轉換）；核准同時記為已使用（`decision_approval_use`），Controller 之後不能再拿它當單次核准。駁回或其他處理方式只記下裁定，Task 維持 `blocked`。核准的不是目前用盡的那個請求（之後又用盡而有新請求）時只記裁定，不重設。用盡期間使用者仍可用既有的 `POST ready` 把 Task 標回可派工（不擋），之後再失敗會立即再用盡並建立新的請求。
+- 理由：新增一種 `DecisionKind` 要再重建 `decision_request` 表（CHECK 約束）；而這件事本來就是權限表中的事項，沿用 `authority` 讓裁定中心既有的 UI、批次與過期機制全部適用。只有核准有直接效果，才不會出現「回答了卻什麼都沒發生」。
+- 替代方案：新增 `budget` 種類；核准後重設全部三種計數；核准後不自動排隊。
+- 影響：Controller（票 16、17）對同一個 Task 提出 `next_step_after_budget` 時，若預算請求還在等待，會拿到這個既有的請求。
+- 審閱：未審
+
+### AI-277：突然限流的判定只存在 Supervisor 記憶體中
+- 重要度：低
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：Supervisor 收到某個 Run 的 `RateLimited { status: Exhausted }` 時，在記憶體中記下這個 Run；同一個 Run 之後以失敗結束時送出 `RunOutcome::QuotaLimited`，不計入預算。不寫入資料庫；Runtime 在兩個事件之間重建時，這次結束會被當成實作失敗。
+- 理由：與既有的「最後一個錯誤當失敗原因」（`last_errors`）同樣做法，改動最小；完整、可恢復的交接流程屬於票 28、29。
+- 替代方案：結束時查詢該 Run 的額度觀測紀錄（`raw_ref = run:<id>`）判斷；需要在 Run 命令的交易中多載入額度資料。
+- 影響：票 28、29 實作交接時應以持久化的交接 phase 取代這個判定。
+- 審閱：未審
+
+### AI-278：預算的資料與 API 形狀（migration 27 `retry_budgets`）
+- 重要度：低
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：新表 `task_budget`（每個 Task 一列，從未計入的沒有列）：三種計數、`retry_not_before`、`exhausted`、`request_id`（參照裁定請求；兩者同時有或同時沒有）、`version`、`updated_at`；上限不寫進 CHECK（D-16 改動成本低，改數字不需要 migration）。事件聚合 `task_budget`（識別是 Task）：`task_budget_charged`、`task_budget_exhausted`、`task_budget_reset`。API：`GET tasks/{id}` 新增 `budget`、`GET tasks` 新增 `budgets`（`BudgetView`：`counters[{kind,label,used,limit}]`、`retry_not_before`、`exhausted`、`decision_request_id`）；排程等待類別新增 `backoff`。Web UI 在 Task 卡片有計數時才顯示「修正與重試預算」區塊、退避期限與用盡提示，並把不完整的驗證與整合檢查另外列出。
+- 理由：計數要能在 Runtime 重建後延續，也要與 Run／驗證的結果在同一個交易寫入；放在獨立的表，不改動 `task` 表與 Task 的版本。
+- 替代方案：每次由 Run 與驗證紀錄重新推算（重設要另外記錄起點，較複雜）。
+- 影響：與其他進行中的票合併時，migration 與 AI 編號可能需要順延。
+- 審閱：未審
+
+### AI-279：票 36 整合 rebuild/v1（票 24、21、26、15）：migration 順延為第 27 個、AI 編號改為 AI-273～AI-278、准入被拒不計入預算
+- 重要度：中
+- 時間／階段：2026-10-22，票 36 實作 run R086-36-impl（結束前整合，三次）
+- 決策：(1) 實作期間整合分支先後併入票 24（第 23 個 migration `run_admission`）、票 21（第 24 個 `worktree_cleanup`）、票 26（第 25 個 `external_operation`）與票 15（第 26 個 `agent_session_and_transcript`），本票的 `retry_budgets` 順延為第 27 個，排在最後；彼此不參照。migration 註解、開發指南與 AI-274、AI-278 中的序號改為 27；Store 的 migration 測試以名稱找出位置，不受序號影響。(2) 整合分支已用到 AI-272，本票條目改為 AI-273～AI-278，移到 AI-272 之後，條目內互相引用的編號一併更新；本票第一次整合時寫的整合條目由這一條取代。(3) 票 24 新增的「啟動准入被拒」（`deny_admission`：Run `interrupted`、Task 回 `ready` 並重新排隊）不計入任何預算——授權不足不是失敗，與 AI-273 的「恢復、停止不計入」同一原則。(4) 票 26 與本票都把「寫入新的裁定請求」抽成 `decisions::insert_request`，內容相同，只合併說明；外部操作結果未知時 Task 轉為 `waiting_decision` 的規則不碰 `blocked` 的 Task，所以預算用盡（`blocked`）與結果未知同時發生時 Task 維持 `blocked`，兩個裁定請求都會出現。程序意外消失同時是基礎設施重試，裁定恢復的 Task 仍要等過退避期限才再派；票 26 的情境測試 `a_crash_after_an_external_operation_was_sent_never_resends_it_and_holds_only_the_related_task` 因此在回答之後先把時鐘推過 1 分鐘（只加這一行，斷言不變）。(5) 其餘衝突兩邊都保留：`RunContext`（`settings_version`、票 15 的 `sessions` 與 `budgets`）、`RunChange`（`sessions` 與預算三欄）、`DecisionContext`（`authorizations` 與 `budgets`）、`run.rs` 模組說明、Web 工作面板（清理狀態與預算區塊、兩組測試）、開發指南的模組表與情境測試清單。票 21 的清理重試（AI-249）沿用與本票相同的退避數列，兩者各自計數、互不影響。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-237、AI-252、AI-260 同）。
+- 替代方案：無（編號規則已定）；准入被拒也可算基礎設施重試，但那會讓撤銷授權消耗預算。
+- 影響：用本票分支建過的開發資料庫，`retry_budgets` 記在第 23、25 或 26 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-238～AI-243、AI-253～AI-259、AI-263～AI-269 與 migration 23、25、26 是改號前的編號。
+- 審閱：未審
+### AI-280：額度門檻以每個帳號持久化的 open／paused／draining 表達遲滯；恢復條件是 <60%、用量未知或過了進入時的重置時間
 - 重要度：高
 - 時間／階段：2026-10-22，票 28 實作
 - 決策：新增 `quota_gate`（每個帳號一列，從未離開 open 的帳號沒有紀錄），由 `handoff::evaluate_gate` 依額度判斷（`quota::assess` 的較保守者）推進：用量 ≥75% → `paused`（不派新工作、進行中的繼續）；≥85% 或目前有 CLI 的限流警告／已達上限 → `draining`（不派新工作、進行中的交接）；用量 <60%、用量變成未知（CLI 訊號在重置時間失效）、或已過進入時記下的 `reset_at` → `open`；60%～75% 維持原狀，已在 draining 的帳號在重置前用量降到 75%～85% 也維持 draining。門檻在 `baton_api::quota::current` 每次被呼叫時推進（Supervisor 每次處理與排程端點都會呼叫），狀態改變才寫入並追加 `quota_gate_changed`。排程的 `Capacity` 新增 `quota_gates`（由 Store 在派工交易中讀取），paused／draining 的帳號不派，等待原因分別為 `quota_near_limit`／`quota_draining`（用量未知也照實顯示）。
@@ -2467,7 +2529,7 @@
 - 影響：既有情境測試中 90%、100% 的派工等待原因從 `quota_near_limit` 改為 `quota_draining`（`lifecycle.rs`、`quota.rs`、`scheduling.rs`）；`scheduling.rs` 的「74% 就能派」改為「關閉後 74% 仍不派、59% 才派」。帳號頁顯示門檻狀態、原因、當時用量、進入時間與重置時間。
 - 審閱：未審
 
-### AI-274：交接的前兩步：先選定承接帳號才開始；安全邊界是「要求後保存了 checkpoint」或等滿 2 分鐘
+### AI-281：交接的前兩步：先選定承接帳號才開始；安全邊界是「要求後保存了 checkpoint」或等滿 2 分鐘
 - 重要度：高
 - 時間／階段：2026-10-22，票 28 實作
 - 決策：Supervisor 每次處理在額度輪詢之後、排程之前做交接。`requested`：帳號 draining、Run 是 running 且沒有要求取消、沒有進行中的交接、Task 不在冷卻期，**而且**以 `SlotKind::Handoff` 找得到承接帳號（可派工、門檻 open、名額夠，可用交接保留槽）才建立交接；找不到就不交接，Run 留在原帳號繼續執行（全部受限的等待屬票 29）。Worker 經回報（進度、checkpoint、受阻）的回應 `stop_requested`、`handoff_requested` 得知要保存 checkpoint 並結束（spec D-27：Runtime 不中途插話）。`stopping`：舊 Run 在要求之後保存了 checkpoint（`saved_at >= requested_at`），或等滿 `CHECKPOINT_WAIT_MS` = 2 分鐘，**而且**承接帳號仍有名額，才記下要延續的 checkpoint（Task 最新一筆被接受的 checkpoint，任一世代）並進入 stopping，之後 Supervisor 才以 `stop_grace`（30 秒，D-11）要求舊程序停止。
@@ -2476,16 +2538,16 @@
 - 影響：從 draining 到 successor 啟動最長約 2 分鐘 + 30 秒（+ 10 秒強制終止）。2 分鐘是暫定值，**Validation Required**：以真實 Worker 實測它回應 `stop_requested` 的速度再調整。
 - 審閱：未審
 
-### AI-275：轉移是單一交易，以「舊 Run 仍持有 from_generation 的 lease」為條件；舊程序未確認停止就停在 stopping
+### AI-282：轉移是單一交易，以「舊 Run 仍持有 from_generation 的 lease」為條件；舊程序未確認停止就停在 stopping
 - 重要度：高
 - 時間／階段：2026-10-22，票 28 實作
-- 決策：只有在 `ProcessControl::stop` 回 `StoppedGracefully`／`ForceKilled`、`inspect` 為 `Dead`，或 Worker 自行結束（AI-276）時才轉移；`StillAlive` 或停止失敗時交接留在 stopping、舊 Run 繼續持有寫入所有權，每次處理再要求停止。`Store::transfer_handoff` 在單一交易中：檢查舊 Run 仍是 `from_generation` 的寫入所有者 → 新命令 `RunCommand::HandOff` 結束舊 Run（`interrupted`、`end_reason` = `handed_off`、事件 `run_handed_off`）並釋放 lease → 以 `SlotKind::Handoff` 選承接帳號（優先選定的那個）並 `RunCommand::Dispatch` 派出 successor（完整派工檢查，世代 +1）→ successor 的派工 Prompt 附上交接段落（舊 Run、checkpoint 摘要與細節、先核對再 `confirm_handoff`）→ 交接進入 `transferred`。舊 Run 已由別的路徑結束（使用者取消、程序消失、完全退出）時放棄交接（`abandoned`，`from_run_ended：…`），Task 照該路徑原本的流程；轉移時沒有承接帳號則放棄並把 Task 排回派工佇列。資料庫另有唯一索引：一個 Run、一個 Task 同時最多一個 requested／stopping 的交接。
+- 決策：只有在 `ProcessControl::stop` 回 `StoppedGracefully`／`ForceKilled`、`inspect` 為 `Dead`，或 Worker 自行結束（AI-283）時才轉移；`StillAlive` 或停止失敗時交接留在 stopping、舊 Run 繼續持有寫入所有權，每次處理再要求停止。`Store::transfer_handoff` 在單一交易中：檢查舊 Run 仍是 `from_generation` 的寫入所有者 → 新命令 `RunCommand::HandOff` 結束舊 Run（`interrupted`、`end_reason` = `handed_off`、事件 `run_handed_off`）並釋放 lease → 以 `SlotKind::Handoff` 選承接帳號（優先選定的那個）並 `RunCommand::Dispatch` 派出 successor（完整派工檢查，世代 +1）→ successor 的派工 Prompt 附上交接段落（舊 Run、checkpoint 摘要與細節、先核對再 `confirm_handoff`）→ 交接進入 `transferred`。舊 Run 已由別的路徑結束（使用者取消、程序消失、完全退出）時放棄交接（`abandoned`，`from_run_ended：…`），Task 照該路徑原本的流程；轉移時沒有承接帳號則放棄並把 Task 排回派工佇列。資料庫另有唯一索引：一個 Run、一個 Task 同時最多一個 requested／stopping 的交接。
 - 理由：驗收「舊 writer 未確認停止前，新 Worker 不能進入同一可寫目錄」與「不出現兩個 writer」：successor 只在舊 lease 釋放的同一個交易中建立，沿用票 10 的「同一 Task 最多一個未釋放 lease」不變條件；每個 phase 先持久化才有外部副作用，Runtime 在任何一點重建後依 phase 繼續（stopping 先 inspect 再停止；successor 走一般的啟動 Outbox，以 command_id 找回）。
 - 替代方案：successor 先建立、等舊程序停止才啟動（會有兩個未結束的 Run，違反既有不變條件）；舊程序停不下來時逾時強行轉移（可能兩個 writer）。
 - 影響：使用者取消交接中的 Run 不會被交接出去；舊 Run 在交接途中程序消失（lease 核對判定 Dead）時同樣放棄交接，Task 回到 ready（由票 29 的突然限流恢復接手）。AI-264「替代 Session 的 Prompt 暫不附檢查點」對交接的 successor 不再成立：交接的 successor Prompt 一律附上最近的有效檢查點。
 - 審閱：未審
 
-### AI-276：交接中的 Worker 自行結束（不論結束碼）視為舊程序已停止，直接轉移
+### AI-283：交接中的 Worker 自行結束（不論結束碼）視為舊程序已停止，直接轉移
 - 重要度：中
 - 時間／階段：2026-10-22，票 28 實作
 - 決策：Supervisor 收到 `Exited` 時，若這個 Run 有 requested／stopping 的交接，就不送 `Finish`，而以 `stop_outcome` = `exited` 轉移給 successor；成功或失敗的結束碼都一樣，不把 Task 推進驗證，也不算失敗。查不到交接紀錄（讀取失敗）時照一般的結束處理。
@@ -2494,7 +2556,7 @@
 - 影響：Worker 若剛好在 draining 時真的完成了工作，successor 會先核對 checkpoint 與成果再確認（多花一些額度，但不會漏做或誤判完成）。
 - 審閱：未審
 
-### AI-277：「新 Worker 確認接手」以新的 Agent 工具 `confirm_handoff` 回報三欄；不確認不阻擋工作
+### AI-284：「新 Worker 確認接手」以新的 Agent 工具 `confirm_handoff` 回報三欄；不確認不阻擋工作
 - 重要度：中
 - 時間／階段：2026-10-22，票 28 實作
 - 決策：新增 Agent 工具 `confirm_handoff`（MCP shim 第 15 個工具），本文 `completed`、`incomplete`、`unknown_side_effects` 三欄必填（去掉前後空白不能是空的，沒有就寫「無」；各 4000 字元上限）。只有仍是寫入所有者、且是 transferred 交接之 successor 的 Run 可以確認（否則 409 `handoff_not_pending`／`run_report_stale`）；確認後交接進入 `confirmed`，重複確認冪等。successor 沒有確認時交接停在 `transferred`，Worker 照常工作，不另外阻擋或逾時。
@@ -2503,7 +2565,7 @@
 - 影響：Context Builder（票 39）可以把確認內容納入後續 Prompt；工作面板顯示確認的三欄。
 - 審閱：未審
 
-### AI-278：「具相同能力與權限的承接帳號」的解讀
+### AI-285：「具相同能力與權限的承接帳號」的解讀
 - 重要度：中
 - 時間／階段：2026-10-22，票 28 實作
 - 決策：帳號 Profile 目前沒有能力差異（都是同一個 Claude Code 執行工具），所以承接帳號 = 排程判定可派工（核對無誤、未封存）、額度門檻 open（且用量 <75%）、名額夠的帳號，以 `SlotKind::Handoff` 選（可用交接保留槽），優先選要求交接時選定的帳號，同數時取進行中 Run 較少、較早建立者。「權限」由 successor 的派工交易重新做完整檢查（Workspace 授權涵蓋契約能力、Guard、相依、工作目錄）；檢查不過就放棄交接並把 Task 排回佇列。
@@ -2512,7 +2574,7 @@
 - 影響：日後若 Profile 有模型或方案差異，需在 `scheduler::place_preferring` 的候選篩選加上比對。
 - 審閱：未審
 
-### AI-279：同一個 Task 的換帳號冷卻以上一次交接的 `transferred_at` 起算 10 分鐘
+### AI-286：同一個 Task 的換帳號冷卻以上一次交接的 `transferred_at` 起算 10 分鐘
 - 重要度：低
 - 時間／階段：2026-10-22，票 28 實作
 - 決策：`handoff::cooldown_until` = 該 Task 最近一次交接的 `transferred_at` + 10 分鐘；冷卻期內不為這個 Task 建立新的交接（Run 繼續在 draining 帳號上執行）。只計交接造成的換帳號；被放棄的交接、一般重派到別的帳號都不算。spec D-13「除非是突然限流」的例外留給票 29（突然限流不經過主動交接）。
@@ -2521,16 +2583,16 @@
 - 影響：冷卻期內帳號若撞到上限，由票 29 的突然限流處理。
 - 審閱：未審
 
-### AI-280：交接不計入修正預算：舊 Run 以專用的 `HandOff` 命令結束，不經 `Finish`／`Interrupt`
+### AI-287：交接不計入修正預算：舊 Run 以專用的 `HandOff` 命令結束，不經 `Finish`／`Interrupt`
 - 重要度：中
 - 時間／階段：2026-10-22，票 28 實作
-- 決策：交接結束的舊 Run 一律經 `RunCommand::HandOff`（`interrupted`、`handed_off`、事件 `run_handed_off`），不會產生 `run_failed` 或一般的 `run_interrupted` 事件，Task 也不會停在 ready 等待重派（同一個交易就派出 successor）。整合分支目前還沒有修正預算（票 36 平行進行中），本票的情境測試以「交接後沒有 `run_failed`／`run_interrupted` 事件、只有 `run_handed_off`、Task 維持 running」驗證。
+- 決策：交接結束的舊 Run 一律經 `RunCommand::HandOff`（`interrupted`、`handed_off`、事件 `run_handed_off`），不會產生 `run_failed` 或一般的 `run_interrupted` 事件，Task 也不會停在 ready 等待重派（同一個交易就派出 successor）。本票的情境測試以「交接後沒有 `run_failed`／`run_interrupted` 事件、只有 `run_handed_off`、Task 維持 running、三種預算計數都是 0」驗證。
 - 理由：讓預算的計入點（票 36 在 `Editing::finish` 依命令決定計入哪一種）可以明確把交接排除，而不是依結束原因字串猜測。
 - 替代方案：沿用 `Interrupt` 並以原因字串區分（票 36 把恢復類中斷視為不計入，但無法與其他中斷區分顯示）。
-- 影響：票 36 合併時，`RunCommand::HandOff` 呼叫 `finish` 需傳入「不計入」（`None`），並在 `a_handoff_is_not_a_failure_and_adds_no_correction_count` 補上「三種預算計數都是 0」的斷言。
+- 影響：整合票 36 之後（AI-290），`RunCommand::HandOff` 呼叫 `finish` 時傳入「不計入」（`None`），`a_handoff_is_not_a_failure_and_adds_no_correction_count` 另斷言工作面板上三種預算計數都是 0。
 - 審閱：未審
 
-### AI-281：票 27 驗證意見：沒有數字的限流警告不算該視窗「已觀測完整」
+### AI-288：票 27 驗證意見：沒有數字的限流警告不算該視窗「已觀測完整」
 - 重要度：低
 - 時間／階段：2026-10-22，票 28 實作
 - 決策：`quota::assess` 判斷視窗是否缺少已觀測用量時，改用「CLI 訊號有數字（`used.is_some()`）或已達上限（`status == Exhausted`）」；沒有數字的 warning 判斷時仍視為 75%，但該視窗標為觀測不完整。補 Domain 測試 `a_warning_without_a_number_does_not_make_the_window_complete`。
@@ -2539,13 +2601,22 @@
 - 影響：只影響 `complete`／`incomplete_reason` 的顯示，不影響判斷用量與排程。
 - 審閱：未審
 
-### AI-282：交接的資料形狀、API 與 migration
+### AI-289：交接的資料形狀、API 與 migration
 - 重要度：低
 - 時間／階段：2026-10-22，票 28 實作
-- 決策：第 27 個 migration `quota_gate_and_handoff`：`quota_gate`（`profile_id` 主鍵、`state`、`reason`、`used`、`reset_at`、`since`、`version`）與 `handoff`（舊／新 Run、帳號、世代、`phase`、`reason`、JSON 的 `checkpoint` 與 `confirmation`、`stop_outcome`、`abandoned_reason`、各 phase 時間、`version`；`to_run_id` 只在 transferred／confirmed 有值，以 CHECK 保證；兩個部分唯一索引限制同一 Run、同一 Task 只有一個進行中的交接）。API：`GET /api/v1/scheduling` 的 `accounts[].quota_gate`（從未離開 open 為 `null`）、工作面板 `GET /api/v1/workspaces/{id}/tasks` 的 `handoffs`、回報回應 `ReportAck.handoff_requested`、Agent 工具 `confirm_handoff`。事件：`quota_gate_changed`、`handoff_requested`／`stopping`／`transferred`／`confirmed`／`abandoned`、`run_handed_off`。Web UI：帳號頁顯示門檻，工作卡片顯示最新一筆交接（spec D-21 的「交接狀態」），交接結束的 Run 顯示「已交接」。
+- 決策：第 28 個 migration `quota_gate_and_handoff`：`quota_gate`（`profile_id` 主鍵、`state`、`reason`、`used`、`reset_at`、`since`、`version`）與 `handoff`（舊／新 Run、帳號、世代、`phase`、`reason`、JSON 的 `checkpoint` 與 `confirmation`、`stop_outcome`、`abandoned_reason`、各 phase 時間、`version`；`to_run_id` 只在 transferred／confirmed 有值，以 CHECK 保證；兩個部分唯一索引限制同一 Run、同一 Task 只有一個進行中的交接）。API：`GET /api/v1/scheduling` 的 `accounts[].quota_gate`（從未離開 open 為 `null`）、工作面板 `GET /api/v1/workspaces/{id}/tasks` 的 `handoffs`、回報回應 `ReportAck.handoff_requested`、Agent 工具 `confirm_handoff`。事件：`quota_gate_changed`、`handoff_requested`／`stopping`／`transferred`／`confirmed`／`abandoned`、`run_handed_off`。Web UI：帳號頁顯示門檻，工作卡片顯示最新一筆交接（spec D-21 的「交接狀態」），交接結束的 Run 顯示「已交接」。
 - 理由：交接紀錄獨立成表（不加在 Run 上），舊 Run 與 successor 都不必多欄位，也方便票 29、30 沿用。
 - 替代方案：在 `run` 上加 `handoff_from`／`handoff_to` 欄位（每次交接要改兩個 Run，phase 無處存放）。
 - 影響：與平行進行的票（16、31、36）合併時，migration 與 AI 編號依序順延。
+- 審閱：未審
+
+### AI-290：票 28 整合 rebuild/v1（票 36）：migration 順延為第 28 個、AI 編號改為 AI-280～AI-289、交接不計入預算
+- 重要度：低
+- 時間／階段：2026-10-22，票 28 實作
+- 決策：整合分支併入票 36（第 27 個 migration `retry_budgets`，AI-273～AI-279）。本票的 `quota_gate_and_handoff` 順延為第 28 個、排在 `retry_budgets` 之後（兩者沒有共用的資料表）；本票條目 AI-273～AI-282 順延為 AI-280～AI-289，移到 AI-279 之後，條目間的互相引用一併改為新編號。衝突合併：`RunCommand::HandOff` 結束舊 Run 時以 `finish(..., None)` 不計入任何預算；交接中的 Worker 結束時，Supervisor 先檢查交接（本票），不是交接才依票 36 判斷突然限流（`QuotaLimited`）或一般失敗，並一併清掉該 Run 的突然限流標記；工作面板 `TaskBoard` 同時帶 `budgets`（票 36）與 `handoffs`（本票），卡片同時顯示預算與交接狀態；開發指南的目錄表與測試清單兩邊的增補都保留。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票分支（本次合併前）建過的開發資料庫，`quota_gate_and_handoff` 記在第 27 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

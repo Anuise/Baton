@@ -15,11 +15,16 @@
 //! - **准入 = launch intent 持久化（R1-a，票 24）**：派工只建立排隊中的 Run；`BeginLaunch` 的交易才以「這一刻生效」的
 //!   授權重新檢查並固定授權 revision 與共同設定版本。授權更新與 `BeginLaunch` 都經過 Store 的單一寫入佇列，
 //!   所以兩者的先後就是持久化順序：先准入的沿用舊版，排隊中或有 Outbox 但尚未准入的一律用新版。
+//! - **修正與重試預算（票 36）**：Worker 以失敗結束計入實作失敗修正，啟動失敗與程序意外消失計入基礎設施重試；
+//!   突然限流而結束（額度交接）、恢復與完全退出的中斷、取消都不計入。預算用盡時 Task 改為進入 `blocked`，
+//!   並在同一個交易建立「預算用盡後的下一步」裁定請求；基礎設施重試在預算內時排回派工佇列（等待退避期限）。
 
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{BlockedNote, CheckpointNote, ProgressNote, ReportContent, ReportRecord};
 use crate::authorization::{self, AdmissionDenied};
+use crate::budget::{self, BudgetKind, ChargeOutcome, TaskBudget};
+use crate::decision::{self, DecisionRequest};
 use crate::event::DomainEvent;
 use crate::guard::{self, ActiveGuard, GuardViolation};
 use crate::session::{self, AgentSession, BindOutcome, LaunchFacts, ResumeCheck, SessionEdits};
@@ -268,6 +273,9 @@ impl RunView {
 pub enum RunOutcome {
     Succeeded,
     Failed { reason: String },
+    /// 帳號突然限流而結束（Adapter 回報額度用盡之後程序以失敗結束）：Run 中斷、Task 回到 `ready` 等其他帳號接手，
+    /// 不計入任何預算（票 36）。
+    QuotaLimited { reason: String },
 }
 
 /// Supervisor 實際觀察到的程序狀態（對應 ProcessControl 的 `Liveness`；Domain 不依賴 Port）。
@@ -345,6 +353,12 @@ pub struct RunChange {
     pub outbox_delivered: Option<String>,
     /// 被接受的 Worker 回報（追加式稽核）。
     pub report: Option<ReportRecord>,
+    /// Run 結束計入後的預算（票 36）。
+    pub budget: Option<TaskBudget>,
+    /// 預算用盡時建立的「預算用盡後的下一步」裁定請求（票 36）。
+    pub decision: Option<DecisionRequest>,
+    /// 基礎設施重試在預算內：把 Task 排回派工佇列（排程會等到退避期限）。
+    pub requeue: bool,
     /// 因 Run 而改變（或新建）的 Session（票 15）。
     pub sessions: Vec<AgentSession>,
     pub events: Vec<DomainEvent>,
@@ -358,6 +372,7 @@ impl RunChange {
             || self.outbox.is_some()
             || self.outbox_delivered.is_some()
             || self.report.is_some()
+            || self.budget.is_some()
             || !self.sessions.is_empty()
             || !self.events.is_empty()
     }
@@ -459,6 +474,8 @@ pub struct RunContext<'a> {
     pub guards: &'a [ActiveGuard],
     /// Workspace 內的 Session（依建立順序）；綁定原生識別時另含同一帳號下綁定了該識別的其他 Session。
     pub sessions: &'a [AgentSession],
+    /// Workspace 內 Task 的修正與重試預算（票 36）；Run 結束時依結束原因計入。
+    pub budgets: &'a [TaskBudget],
 }
 
 impl RunContext<'_> {
@@ -549,12 +566,14 @@ impl<'a> Editing<'a> {
 
     /// Run 結束：釋放寫入所有權、Task 依結果轉換（只有 Task 還在 `running` 才轉換；
     /// 使用者已經取消的 Task 不會被拉回來）、派工 Outbox 視為處理完畢。
+    /// `charge` 是這種結束要計入的預算（票 36）；Task 沒有轉換時不計入。
     fn finish(
         mut self,
         to: RunStatus,
         event_type: &'static str,
         reason: &str,
         task_after: TaskStatus,
+        charge: Option<BudgetKind>,
     ) -> Result<RunChange, RunError> {
         let from = self.run.status;
         self.change_status(to)?;
@@ -567,12 +586,39 @@ impl<'a> Editing<'a> {
             session::release_driver(&mut self.sessions, self.ctx.sessions, &session_id, &self.run.id, self.now);
         }
 
-        let mut task = None;
+        let (mut task, mut budget, mut decision, mut requeue) = (None, None, None, false);
         if let Some(current) = self.ctx.task.task(&self.run.task_id).filter(|t| t.status == TaskStatus::Running) {
+            let mut task_after = (task_after, event_type);
+            let mut budget_events = Vec::new();
+            if let Some(kind) = charge {
+                let request_id = format!("dr_budget_{}", self.run.id);
+                let current_budget = TaskBudget::of(self.ctx.budgets, current);
+                let charged = budget::charge(&current_budget, kind, &self.run.id, reason, request_id, self.now);
+                budget_events.push(charged.event);
+                match charged.outcome {
+                    ChargeOutcome::Retry { requeue: again } => requeue = again,
+                    ChargeOutcome::Exhausted { request_id } => {
+                        // 預算用盡：不再自動重試，Task 阻擋並等使用者裁定下一步
+                        let (request, requested) = decision::budget_exhausted_request(
+                            request_id,
+                            &self.run,
+                            current,
+                            kind,
+                            vec![reason.to_string()],
+                            self.now,
+                        );
+                        budget_events.push(requested);
+                        decision = Some(request);
+                        task_after = (TaskStatus::Blocked, budget::EVENT_BUDGET_EXHAUSTED);
+                    }
+                }
+                budget = Some(charged.budget);
+            }
             let mut moved = current.clone();
             let mut versioned = Versioned { task: &mut moved, events: Vec::new(), now: self.now };
-            versioned.change_status(task_after, event_type).map_err(|_| RunError::TaskNotReady(current.status))?;
+            versioned.change_status(task_after.0, task_after.1).map_err(|_| RunError::TaskNotReady(current.status))?;
             self.events.extend(versioned.events);
+            self.events.extend(budget_events);
             task = Some(moved);
         }
         let outbox_delivered = matches!(from, RunStatus::Queued | RunStatus::Starting).then(|| self.run.id.clone());
@@ -584,6 +630,9 @@ impl<'a> Editing<'a> {
             outbox: None,
             outbox_delivered,
             report: None,
+            budget,
+            decision,
+            requeue,
             sessions,
             events,
         })
@@ -672,7 +721,8 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             Ok(change)
         }
         RunCommand::LaunchFailed { reason, .. } => {
-            edit.finish(RunStatus::Failed, EVENT_RUN_FAILED, &format!("launch_failed：{reason}"), TaskStatus::Ready)
+            let reason = format!("launch_failed：{reason}");
+            edit.finish(RunStatus::Failed, EVENT_RUN_FAILED, &reason, TaskStatus::Ready, Some(BudgetKind::Infrastructure))
         }
         RunCommand::Heartbeat { generation, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
@@ -759,16 +809,32 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
         RunCommand::Finish { generation, outcome, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
             match outcome {
-                RunOutcome::Succeeded => {
-                    edit.finish(RunStatus::Succeeded, EVENT_RUN_SUCCEEDED, "exited_successfully", TaskStatus::Verifying)
-                }
-                RunOutcome::Failed { reason } => {
-                    edit.finish(RunStatus::Failed, EVENT_RUN_FAILED, &format!("exited_with_failure：{reason}"), TaskStatus::Ready)
-                }
+                RunOutcome::Succeeded => edit.finish(
+                    RunStatus::Succeeded,
+                    EVENT_RUN_SUCCEEDED,
+                    "exited_successfully",
+                    TaskStatus::Verifying,
+                    None,
+                ),
+                RunOutcome::Failed { reason } => edit.finish(
+                    RunStatus::Failed,
+                    EVENT_RUN_FAILED,
+                    &format!("exited_with_failure：{reason}"),
+                    TaskStatus::Ready,
+                    Some(BudgetKind::Implementation),
+                ),
+                RunOutcome::QuotaLimited { reason } => edit.finish(
+                    RunStatus::Interrupted,
+                    EVENT_RUN_INTERRUPTED,
+                    &format!("quota_limited：{reason}"),
+                    TaskStatus::Ready,
+                    None,
+                ),
             }
         }
+        // 中斷都來自恢復、完全退出或還原：不計入任何預算
         RunCommand::Interrupt { reason, .. } => {
-            edit.finish(RunStatus::Interrupted, EVENT_RUN_INTERRUPTED, &reason, TaskStatus::Ready)
+            edit.finish(RunStatus::Interrupted, EVENT_RUN_INTERRUPTED, &reason, TaskStatus::Ready, None)
         }
         RunCommand::ReconcileLease { observed, .. } => {
             if !matches!(run.status, RunStatus::Starting | RunStatus::Running) {
@@ -784,11 +850,13 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                     Ok(edit.into_change())
                 }
                 // 只有確實觀察到程序已經不在，才把 Run 判定為中斷
+                // 程序意外消失是基礎設施問題
                 ProcessObservation::Dead => edit.finish(
                     RunStatus::Interrupted,
                     EVENT_RUN_INTERRUPTED,
                     "process_dead_after_lease_expired",
                     TaskStatus::Ready,
+                    Some(BudgetKind::Infrastructure),
                 ),
                 ProcessObservation::Unknown => Ok(RunChange::default()),
             }
@@ -799,7 +867,7 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             }
             if run.status == RunStatus::Queued {
                 // 還沒有任何程序：立即取消，不需要等任何確認
-                return edit.finish(RunStatus::Cancelled, EVENT_RUN_CANCELLED, "cancelled_before_launch", TaskStatus::Ready);
+                return edit.finish(RunStatus::Cancelled, EVENT_RUN_CANCELLED, "cancelled_before_launch", TaskStatus::Ready, None);
             }
             edit.run.cancel_requested_at = Some(now);
             edit.push(EVENT_RUN_CANCEL_REQUESTED, serde_json::json!({}));
@@ -812,14 +880,15 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             if run.status == RunStatus::Cancelled {
                 return Ok(RunChange::default());
             }
-            edit.finish(RunStatus::Cancelled, EVENT_RUN_CANCELLED, "cancelled_by_user", TaskStatus::Ready)
+            edit.finish(RunStatus::Cancelled, EVENT_RUN_CANCELLED, "cancelled_by_user", TaskStatus::Ready, None)
         }
         RunCommand::HandOff { handoff_id, .. } => {
             if !matches!(run.status, RunStatus::Starting | RunStatus::Running) {
                 return Err(RunError::TransitionInvalid { from: run.status, to: RunStatus::Interrupted });
             }
-            let mut change =
-                edit.finish(RunStatus::Interrupted, EVENT_RUN_HANDED_OFF, crate::handoff::HANDED_OFF_REASON, TaskStatus::Ready)?;
+            // 交接不是失敗：不計入任何預算（spec D-16）
+            let reason = crate::handoff::HANDED_OFF_REASON;
+            let mut change = edit.finish(RunStatus::Interrupted, EVENT_RUN_HANDED_OFF, reason, TaskStatus::Ready, None)?;
             if let Some(event) = change.events.iter_mut().find(|e| e.event_type == EVENT_RUN_HANDED_OFF) {
                 event.payload["handoff_id"] = serde_json::json!(handoff_id);
             }
@@ -847,9 +916,11 @@ fn admit_at_launch(ctx: &RunContext<'_>, run: &Run) -> Result<authorization::Adm
 }
 
 /// 准入被拒：Run 以 `interrupted` 結束、釋放寫入所有權、Task 回到 `ready`（Store 在同一交易中重新排隊）。
+/// 授權不足不是失敗，不計入任何預算（票 36）。
 fn deny_admission(edit: Editing<'_>, denied: &AdmissionDenied, current: Option<i64>) -> Result<RunChange, RunError> {
     let reason = format!("{ADMISSION_DENIED_REASON}：{denied}");
-    let mut change = edit.finish(RunStatus::Interrupted, EVENT_RUN_ADMISSION_DENIED, &reason, TaskStatus::Ready)?;
+    let mut change =
+        edit.finish(RunStatus::Interrupted, EVENT_RUN_ADMISSION_DENIED, &reason, TaskStatus::Ready, None)?;
     if let Some(event) = change.events.iter_mut().find(|e| e.event_type == EVENT_RUN_ADMISSION_DENIED) {
         event.payload["code"] = serde_json::json!(denied.code());
         event.payload["authorization_revision"] = serde_json::json!(current);
@@ -1012,6 +1083,9 @@ fn dispatch(
         outbox: Some(outbox),
         outbox_delivered: None,
         report: None,
+        budget: None,
+        decision: None,
+        requeue: false,
         sessions: Vec::new(),
         events: edit.events,
     })

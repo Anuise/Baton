@@ -8,10 +8,14 @@
 //!   任何一項不符就拒絕，什麼都不寫；檢查未通過時 Task 回到 `ready`（可修正狀態），證據保存在驗證紀錄中。
 //! - 開發 Task（票 20）通過時還不算完成：同一個交易把平台分支排入整合佇列，Task 停在 `verifying`，
 //!   由整合佇列合併並通過整合驗證後才完成（見 `integration` 模組）。
+//! - 取不到證據的檢查（無法執行、被終止、逾時、讀不到）是「不完整」，不算通過也不算產品缺陷：沒有檢查未通過時
+//!   Task 留在 `verifying` 重驗。未通過計入實作失敗修正、不完整計入驗證不完整重驗，用盡時 Task 進入 `blocked`（票 36）。
 
 use serde::{Deserialize, Serialize};
 
 use crate::artifact::{self, Artifact, ArtifactDraft};
+use crate::budget::{self, BudgetKind, ChargeOutcome, TaskBudget};
+use crate::decision::{self, DecisionRequest};
 use crate::event::DomainEvent;
 use crate::integration::{self, IntegrationEntry};
 use crate::run::{Run, RunStatus};
@@ -132,6 +136,8 @@ fn normalized_sha(sha: Option<String>) -> Result<Option<String>, String> {
 pub enum CheckStatus {
     Passed,
     Failed,
+    /// 取不到證據（無法執行、被終止、逾時、讀不到）：不算通過，也不算產品缺陷（票 36）。
+    Inconclusive,
 }
 
 /// 一項檢查的結果與證據。
@@ -173,16 +179,16 @@ pub fn judge(check: &VerificationCheck, observation: Observation) -> CheckResult
                 (status, with_output(format!("結束碼 {code}（預期 {expected_exit_code}）"), &output))
             }
             CommandObservation::Terminated { output } => {
-                (CheckStatus::Failed, with_output("程序被終止，沒有結束碼".into(), &output))
+                (CheckStatus::Inconclusive, with_output("程序被終止，沒有結束碼".into(), &output))
             }
             CommandObservation::TimedOut { output } => (
-                CheckStatus::Failed,
+                CheckStatus::Inconclusive,
                 with_output(format!("超過 {} 分鐘沒有結束，已終止", COMMAND_TIMEOUT_MS / 60_000), &output),
             ),
-            CommandObservation::NotStarted { reason } => (CheckStatus::Failed, format!("無法執行：{reason}")),
+            CommandObservation::NotStarted { reason } => (CheckStatus::Inconclusive, format!("無法執行：{reason}")),
         },
         (VerificationCheck::File { sha256, .. }, Observation::File(read)) => match read {
-            Err(reason) => (CheckStatus::Failed, format!("無法讀取：{reason}")),
+            Err(reason) => (CheckStatus::Inconclusive, format!("無法讀取：{reason}")),
             Ok(None) => (CheckStatus::Failed, "檔案不存在".into()),
             Ok(Some(bytes)) => compare_hash(sha256.as_deref(), &artifact::sha256_hex(&bytes), bytes.len()),
         },
@@ -191,7 +197,7 @@ pub fn judge(check: &VerificationCheck, observation: Observation) -> CheckResult
             Some(entry) => {
                 let label = format!("版本 {}", entry.version);
                 match content {
-                    Err(reason) => (CheckStatus::Failed, format!("{label} 無法讀取：{reason}")),
+                    Err(reason) => (CheckStatus::Inconclusive, format!("{label} 無法讀取：{reason}")),
                     Ok(None) => (CheckStatus::Failed, format!("{label} 的檔案遺失")),
                     Ok(Some(bytes)) => {
                         let actual = artifact::sha256_hex(&bytes);
@@ -383,6 +389,8 @@ impl VerificationMethod {
 pub enum VerificationOutcome {
     Passed,
     Failed,
+    /// 驗證不完整：沒有檢查未通過，但有檢查取不到證據；Task 留在 `verifying` 重驗（票 36）。
+    Inconclusive,
 }
 
 impl VerificationOutcome {
@@ -390,11 +398,14 @@ impl VerificationOutcome {
         match self {
             VerificationOutcome::Passed => "passed",
             VerificationOutcome::Failed => "failed",
+            VerificationOutcome::Inconclusive => "inconclusive",
         }
     }
 
     pub fn parse(raw: &str) -> Option<Self> {
-        [VerificationOutcome::Passed, VerificationOutcome::Failed].into_iter().find(|m| m.as_str() == raw)
+        [VerificationOutcome::Passed, VerificationOutcome::Failed, VerificationOutcome::Inconclusive]
+            .into_iter()
+            .find(|m| m.as_str() == raw)
     }
 }
 
@@ -440,6 +451,8 @@ pub struct AcceptanceContext<'a> {
     pub workdirs: &'a [Workdir],
     /// Workspace 的整合項目：受驗 Run 已排入整合時不能再接受。
     pub integrations: &'a [IntegrationEntry],
+    /// Workspace 內 Task 的修正與重試預算（票 36）。
+    pub budgets: &'a [TaskBudget],
 }
 
 /// 接受交易的結果：Task 的新狀態、驗證紀錄與事件，在同一個交易中寫入。
@@ -449,6 +462,10 @@ pub struct AcceptanceChange {
     pub record: VerificationRecord,
     /// 開發 Task 通過時排入整合佇列的項目（票 20）；此時 Task 仍是 `verifying`。
     pub integration: Option<IntegrationEntry>,
+    /// 未通過或不完整時計入後的預算（票 36）。
+    pub budget: Option<TaskBudget>,
+    /// 預算用盡時建立的「預算用盡後的下一步」裁定請求（票 36）。
+    pub decision: Option<DecisionRequest>,
     pub events: Vec<DomainEvent>,
 }
 
@@ -576,12 +593,17 @@ pub fn decide(
                 if !matches {
                     return Err(AcceptanceError::ResultsMismatch);
                 }
-                let failed = results.iter().filter(|r| r.status == CheckStatus::Failed).count();
-                if failed == 0 {
-                    (VerificationMethod::Checks, VerificationOutcome::Passed, results, None, None)
-                } else {
+                let count = |status| results.iter().filter(|r| r.status == status).count();
+                let (failed, inconclusive) = (count(CheckStatus::Failed), count(CheckStatus::Inconclusive));
+                if failed > 0 {
+                    // 有任何一項未通過就是產品缺陷，即使另有取不到證據的檢查
                     let note = format!("{} 項確定性檢查中有 {failed} 項未通過", results.len());
                     (VerificationMethod::Checks, VerificationOutcome::Failed, results, None, Some(note))
+                } else if inconclusive > 0 {
+                    let note = format!("{} 項確定性檢查中有 {inconclusive} 項取不到證據，驗證不完整", results.len());
+                    (VerificationMethod::Checks, VerificationOutcome::Inconclusive, results, None, Some(note))
+                } else {
+                    (VerificationMethod::Checks, VerificationOutcome::Passed, results, None, None)
                 }
             }
         }
@@ -616,11 +638,31 @@ pub fn decide(
             "artifacts": record.artifacts,
             "accepted_by": record.accepted_by,
             "failed_checks": record.checks.iter().filter(|c| c.status == CheckStatus::Failed).map(|c| c.check.describe()).collect::<Vec<_>>(),
+            "inconclusive_checks": record.checks.iter().filter(|c| c.status == CheckStatus::Inconclusive).map(|c| c.check.describe()).collect::<Vec<_>>(),
             "note": record.note,
         }),
     );
     // 通過才完成；未通過回到 ready（可修正、可重新派工），證據留在驗證紀錄。
-    // 開發 Task 通過時排入整合佇列、停在 verifying：未通過整合不能宣告完成（票 20）
+    // 開發 Task 通過時排入整合佇列、停在 verifying：未通過整合不能宣告完成（票 20）。
+    // 未通過計入實作失敗修正、不完整計入驗證不完整重驗；契約在派工後變更不是任何人的失敗，不計入（票 36）
+    let charge = match outcome {
+        VerificationOutcome::Failed if contract_matches_run => Some(BudgetKind::Implementation),
+        VerificationOutcome::Inconclusive => Some(BudgetKind::Verification),
+        _ => None,
+    };
+    let (mut budget, mut exhausted, mut budget_events) = (None, None, Vec::new());
+    if let Some(kind) = charge {
+        let request_id = format!("dr_budget_{}", record.id);
+        let reason = record.note.clone().unwrap_or_default();
+        let charged = budget::charge(&TaskBudget::of(ctx.budgets, task), kind, &record.id, &reason, request_id, now);
+        budget_events.push(charged.event);
+        if let ChargeOutcome::Exhausted { request_id } = charged.outcome {
+            let (request, event) = decision::budget_exhausted_request(request_id, run, task, kind, vec![reason], now);
+            budget_events.push(event);
+            exhausted = Some(request);
+        }
+        budget = Some(charged.budget);
+    }
     let mut queued = None;
     let transition = match outcome {
         VerificationOutcome::Passed if task.kind == TaskKind::Development => {
@@ -639,13 +681,18 @@ pub fn decide(
             None
         }
         VerificationOutcome::Passed => Some((TaskStatus::Completed, "verification_passed")),
+        // 預算用盡：停止自動重試，等使用者裁定下一步
+        _ if exhausted.is_some() => Some((TaskStatus::Blocked, budget::EVENT_BUDGET_EXHAUSTED)),
         VerificationOutcome::Failed => Some((TaskStatus::Ready, "verification_failed")),
+        // 不完整：留在 verifying，下一次處理重新執行檢查
+        VerificationOutcome::Inconclusive => None,
     };
     if let Some((to, reason)) = transition {
         versioned.change_status(to, reason).map_err(|_| AcceptanceError::TaskNotVerifying(task.status))?;
     }
-    let events = versioned.events;
-    Ok(AcceptanceChange { task: moved, record, integration: queued, events })
+    let mut events = versioned.events;
+    events.extend(budget_events);
+    Ok(AcceptanceChange { task: moved, record, integration: queued, budget, decision: exhausted, events })
 }
 
 // ---------------------------------------------------------------- 檢視

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use baton_domain::budget::TaskBudget;
 use baton_domain::profile::AccountProfile;
 use baton_domain::run::{self, Run, RunCommand, RunContext, RunError};
 use baton_domain::scheduler::{
@@ -109,6 +110,7 @@ impl Store {
                         guards: &loaded.guards,
                         settings_version: None,
                         sessions: &loaded.sessions,
+                        budgets: &loaded.budgets,
                     };
                     if let Err(rejected) = scheduler::evaluate(&ctx, &capacity, &request.task_id, SlotKind::Normal) {
                         return Ok(Err(rejected));
@@ -139,13 +141,18 @@ impl Store {
                         guards: &loaded.guards,
                         settings_version: None,
                         sessions: &loaded.sessions,
+                        budgets: &loaded.budgets,
                     };
                     let waiting = |reasons| WaitingTask {
                         workspace_id: entry.workspace_id.clone(),
                         task_id: entry.task_id.clone(),
                         reasons,
                     };
-                    match scheduler::evaluate(&ctx, &capacity, &entry.task_id, SlotKind::Normal) {
+                    // 基礎設施重試的退避期間留在佇列（票 36）
+                    let budget = backoff_budget(&loaded, &entry.task_id);
+                    let evaluation = scheduler::evaluate(&ctx, &capacity, &entry.task_id, SlotKind::Normal)
+                        .map(|e| scheduler::apply_backoff(e, budget.as_ref(), now));
+                    match evaluation {
                         Ok(Evaluation::Dispatch { profile_id }) => {
                             let Some(run_id) = new_run_id() else {
                                 outcome.waiting.push(waiting(vec![WaitReason {
@@ -232,8 +239,12 @@ impl Store {
                     guards: &loaded.guards,
                     settings_version: None,
                     sessions: &loaded.sessions,
+                    budgets: &loaded.budgets,
                 };
-                let reasons = match scheduler::evaluate(&ctx, &capacity, &entry.task_id, SlotKind::Normal) {
+                let budget = backoff_budget(&loaded, &entry.task_id);
+                let evaluation = scheduler::evaluate(&ctx, &capacity, &entry.task_id, SlotKind::Normal)
+                    .map(|e| scheduler::apply_backoff(e, budget.as_ref(), now));
+                let reasons = match evaluation {
                     // 現在就能派：只是還沒輪到排程處理，沒有需要使用者處理的原因
                     Ok(Evaluation::Dispatch { .. }) => Vec::new(),
                     Ok(Evaluation::Wait(reasons)) => reasons,
@@ -278,6 +289,11 @@ impl Store {
 
 /// 派工前的檢查在排隊期間不再通過、又不是授權或相依這類可以等的原因（例如前一個 Run 還沒確認停止）：
 /// 保留在佇列並如實顯示，歸為「狀態不明」。
+/// 佇列中這個 Task 的預算（退避期限）；找不到 Task 時沒有退避（之後的判定會把它移出佇列）。
+fn backoff_budget(loaded: &super::tasks::Loaded, task_id: &str) -> Option<TaskBudget> {
+    loaded.tasks.iter().find(|t| t.id == task_id).map(|t| TaskBudget::of(&loaded.budgets, t))
+}
+
 pub(crate) fn failed_check(error: &RunError) -> WaitReason {
     WaitReason {
         category: WaitCategory::StateUnknown,

@@ -505,6 +505,13 @@ async fn a_handoff_is_not_a_failure_and_adds_no_correction_count() {
         .query_row("SELECT COUNT(*) FROM event WHERE event_type = 'run_handed_off'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(handed_off, 1);
+
+    // 三種修正與重試預算（票 36）都沒有被計入
+    let board = w.board().await;
+    let budget = board["budgets"].as_array().unwrap().iter().find(|b| b["task_id"] == w.task.as_str()).unwrap().clone();
+    for counter in budget["counters"].as_array().unwrap() {
+        assert_eq!(counter["used"], 0, "{budget}");
+    }
 }
 
 // --- D-13 的其他規則 ---
