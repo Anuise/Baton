@@ -6,10 +6,10 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、資料目錄位置判定（`storage_location.rs`） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、資料目錄位置判定（`storage_location.rs`） |
 | `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl、AgentAdapter、QuotaObserver、WorkspaceFs、PlatformInfo |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、授權 revision 與事件表 |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權與准入檢查）、`/api/v1/events`）與入口防護 `guard`（憑證、Host、Origin、CORS） |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、授權 revision、Goal／Task／契約版本／相依與事件表 |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal 與 Task）、`/api/v1/events`）與入口防護 `guard`（憑證、Host、Origin、CORS） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-harness` | 測試 harness 與全部 Port 的 fake（主要測試 seam，spec D-04） |
@@ -100,6 +100,45 @@ Workspace API（桌面憑證才能使用）：`GET /api/v1/workspaces`（含已�
 
 revision 存在 append-only 的 `authorization_revision` 表（觸發器禁止更新與刪除），並在同一交易追加 `authorization_confirmed` 事件（聚合版本 = revision 編號）。Run 還不存在時（票 10 之前），准入判定 `authorization::admit` 只由 `admission-check` 端點使用；派工交易要呼叫同一個函式。
 
+### Task、六項最小派工契約與工作面板
+
+Goal 與 Task 的規則在 `baton_domain::task`（純邏輯：命令 + 目前狀態 → 新狀態 + 事件），持久化在 `baton-store` 的 `tasks.rs`，端點在 `baton-api` 的 `tasks.rs`。Task 屬於 Goal、Goal 屬於 Workspace，所有查詢與命令都以 Workspace 為界。
+
+**狀態機**：`pending`、`ready`、`running`、`waiting_decision`、`waiting_resource`、`blocked`、`verifying`、`completed`、`cancelled`。允許的轉換集中在 `TaskStatus::allowed_next`；本票對外只有「標記 ready」（pending → ready，必須通過准入檢查）與「取消」。`completed`、`cancelled` 是終止狀態：不能再轉換、改契約或加相依。
+
+**六項最小契約**（ADR-0011）：`objective`（目標）、`inputs`（輸入與依據）、`scope`（範圍與限制）、`deliverables`（預期成果）、`done_criteria`（完成與驗證條件）、`blocker_handling`（阻礙處理），外加 `required_capabilities`（這個 Task 需要的 Workspace 授權能力）。每個欄位是下列之一：
+
+| 內容 | 意義 |
+| --- | --- |
+| `{"status":"filled","text":…,"references":[{"kind","target","version"}]}` | 已填寫；引用保存可解析的目標與適用版本 |
+| `{"status":"not_applicable","reason":…}` | 不適用，必須附理由；`objective`、`done_criteria` 不可標不適用 |
+| `{"status":"unknown","note"?:…}` | 明確標示未知；**不算完整**，必須補足才能 ready |
+| 省略或 `null` | 未提供（另一種缺項，和「未知」分開顯示） |
+
+引用種類：`task_contract`（同 Workspace 的 Task + 契約版本）、`goal`、`authorization`（目標是 Workspace 識別、版本是授權 revision）。儲存時不檢查引用（可先存），**准入檢查**時才判定失效：目標不存在、版本不存在、被引用的 Task 已取消。
+
+契約每次變更（內容與目前版本不同）追加一個版本，存在追加式的 `task_contract_version` 表（觸發器禁止更新與刪除）；內容相同回 200、不新增版本。ready 的 Task 改契約會退回 pending，必須重新通過准入。
+
+**准入檢查**（`task::admission_report`，Run 出現後派工交易也呼叫同一個函式）列出全部缺項，每項有穩定代碼：`field_missing`、`field_unknown`、`reference_invalid`、`authorization_unconfirmed`、`capability_not_granted`、`workspace_archived`。授權部分直接呼叫票 06 的 `authorization::admit`：`required_capabilities` 為空就不需要確認授權。相依是否完成**不是** ready 的條件；Scheduler 派工時才檢查，面板以 `unfinished_dependencies` 顯示等待原因。
+
+**相依**：`task_dependency` 邊（task_id 依賴 depends_on）；自我相依 400 `dependency_self`、造成循環 409 `dependency_cycle`（訊息含完整循環路徑）；重複新增是冪等的。
+
+桌面憑證專用的端點（Agent 憑證得到 403），都在 `/api/v1/workspaces/{id}/` 之下：
+
+| 端點 | 用途 |
+| --- | --- |
+| `GET tasks` | 工作面板：全部 Goal、Task（含目前契約、相依、未完成的相依、pending 的缺項）、能力清單 |
+| `POST goals` | `{ "title" }` 建立 Goal |
+| `POST tasks` | `{ "goal_id", "title", "contract"? }` 建立 Task（pending、契約 v1；契約可先不完整） |
+| `GET tasks/{task_id}` | Task 與契約版本歷史 |
+| `PUT tasks/{task_id}/contract` | `{ "contract", "note"? }` 整份取代；新版本 201、內容相同 200 |
+| `POST tasks/{task_id}/dependencies` | `{ "depends_on" }`；新增 201、已存在 200 |
+| `POST tasks/{task_id}/admission-check` | 唯讀預覽：`{ "admissible", "missing": [...] }` |
+| `POST tasks/{task_id}/ready` | pending → ready；未通過回 409 `task_admission_denied`，body 帶 `missing` |
+| `POST tasks/{task_id}/cancel` | 取消 |
+
+事件（追加式 `event` 表，`aggregate_type = 'task'`，版本連續遞增）：`task_created`、`task_contract_changed`、`task_dependency_added`、`task_status_changed`（含 `from`／`to`／`reason`）；Goal 是 `goal_created`。Web UI 的工作面板（`web/src/TaskBoard.tsx`）依狀態分欄顯示，pending 卡片列出缺項，並提供契約編輯器（`ContractEditor.tsx`）、版本歷史、新增相依與標記 ready／取消；從左側 Workspace 清單的「工作面板」進入。
+
 ### 本機 API 的存取防護
 
 Runtime 同時監聽 IPv4 與 IPv6 loopback（`127.0.0.1:<port>`、`[::1]:<port>`），拒絕非 loopback 的監聽位址。所有端點（含 `/api/v1/events` 串流與未知路徑）都要求：
@@ -163,7 +202,7 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - `Harness::builder().prepare_data_dir(..).try_start()`：Runtime 第一次啟動前先整理資料目錄（例如放入較新版本的資料庫），並回傳啟動錯誤而不是 panic。
 - `harness.restart()`：模擬重啟。舊的 Runtime 被丟棄（原位址不再回應），資料目錄與全部 fake 都保留。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`：具體的 fake，可腳本化回應並讀取呼叫紀錄。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 
