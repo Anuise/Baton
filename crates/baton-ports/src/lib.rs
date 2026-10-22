@@ -16,6 +16,7 @@ mod quota;
 mod secret;
 mod update;
 mod user_settings;
+mod verification;
 mod workspace_fs;
 
 use std::sync::Arc;
@@ -36,6 +37,7 @@ pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource}
 pub use secret::SecretProtector;
 pub use update::UpdateSource;
 pub use user_settings::{DirUserSettingsSource, SourceFile, SourceFiles, UserSettingsSource};
+pub use verification::{HttpOutcome, HttpRequest, ServiceHandle, ServiceRequest, VerificationDriver};
 pub use workspace_fs::{
     directory_state, list_files_recursive, partial_path, read_file_if_exists, write_file_atomic, write_readonly_tree,
     AdvanceOutcome, DirectoryState, FileEntry, GitState, MergeOutcome, WorkspaceFs, WorktreeState,
@@ -75,4 +77,6 @@ pub struct Ports {
     pub startup_registration: Arc<dyn StartupRegistration>,
     /// 簽章更新的來源（票 34）。
     pub update_source: Arc<dyn UpdateSource>,
+    /// CLI／API 驗證 Adapter 的命令、HTTP、受驗服務與狀態目錄（票 45）。
+    pub verification_driver: Arc<dyn VerificationDriver>,
 }
