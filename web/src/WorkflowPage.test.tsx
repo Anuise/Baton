@@ -150,6 +150,49 @@ describe("流程", () => {
     expect(skipped).not.toHaveTextContent("desktop");
   });
 
+  it("Gate 失效時標示需重驗、顯示 Runtime 記錄的失效原因、通過時的 build 與重驗後沿用的說明", async () => {
+    const invalidated = stageAttempt({
+      id: "att_3",
+      attempt: 2,
+      outcome: "invalidated",
+      evidence: [{ check: "reproduction", kind: "artifact", artifact_id: "art_1", status: "build_changed" }],
+      missing: [{ check: "reproduction", reason: "build 已改變：通過時是 c1，目前是 c2" }],
+      note: "依賴改變，需要重驗",
+      recorded_by: "runtime",
+      profile_id: null,
+      created_at: CHECKED_AT + 120_000,
+    });
+    const workflow = workflowView({
+      current_stage: "reproduction",
+      resume_stage: "minimization",
+      stages: workflowView().stages.map((s) =>
+        s.key === "reproduction"
+          ? { ...s, state: "invalidated" as const, attempts: [stageAttempt({ build: "c1" }), invalidated] }
+          : s.key === "minimization"
+            ? { ...s, state: "pending" as const }
+            : s,
+      ),
+    });
+    renderPage(fakeClient(workflowList({ workflows: [workflow] })));
+
+    const region = await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
+    expect(region).toHaveTextContent("Gate 失效後重驗中：重驗通過後，在「縮小範圍」之前仍有效的 Gate 會直接沿用");
+    expect(stage("建立重現")).toHaveTextContent("需重驗");
+
+    const attempts = within(screen.getByRole("list", { name: "建立重現 的嘗試紀錄" })).getAllByRole("listitem", {
+      name: /^第 \d 次$/,
+    });
+    expect(attempts[0]).toHaveTextContent("第 1 次・通過・2023/11/15 06:13・build：c1");
+    expect(attempts[1]).toHaveTextContent("第 2 次・已失效");
+    expect(attempts[1]).not.toHaveTextContent("build：");
+    expect(within(attempts[1]).getByRole("list", { name: "失效原因" })).toHaveTextContent(
+      "reproduction：build 已改變：通過時是 c1，目前是 c2",
+    );
+    expect(within(attempts[1]).getByRole("list", { name: "證據" })).toHaveTextContent("reproduction：產出物 art_1・build 已改變");
+    expect(attempts[1]).toHaveTextContent("記錄者：Runtime");
+    expect(attempts[1]).not.toHaveTextContent("帳號");
+  });
+
   it("跳過目前 Stage 必須輸入原因；送出時帶目前 revision，成功後以回應更新畫面", async () => {
     const skippedView = workflowView({
       revision: 4,

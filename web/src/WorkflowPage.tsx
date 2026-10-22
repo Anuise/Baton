@@ -40,6 +40,7 @@ const STAGE_STATE_LABELS: Record<StageState, string> = {
   blocked: "已阻擋",
   passed: "已通過",
   skipped: "已跳過",
+  invalidated: "需重驗",
 };
 
 const GATE_LABELS: Record<Exclude<StageGate, "none">, string> = {
@@ -53,6 +54,7 @@ const OUTCOME_LABELS: Record<StageAttemptOutcome, string> = {
   blocked: "已阻擋",
   failed: "失敗",
   skipped: "已跳過",
+  invalidated: "已失效",
 };
 
 const EVIDENCE_KIND_LABELS: Record<EvidenceKind, string> = {
@@ -66,6 +68,7 @@ const EVIDENCE_STATUS_LABELS: Record<StageEvidence["status"], string> = {
   not_found: "找不到",
   pending: "尚未完成",
   not_accepted: "未接受",
+  build_changed: "build 已改變",
 };
 
 /** 使用者看到的 Workflow 已過時時的提示；重新載入後讓使用者再決定。 */
@@ -196,6 +199,11 @@ function WorkflowCard({
         <dt>建立於</dt>
         <dd>{formatTimestamp(workflow.created_at, timeZone)}</dd>
       </dl>
+      {workflow.resume_stage !== null && (
+        <p className="workflow-resume">
+          Gate 失效後重驗中：重驗通過後，在「{stageTitle(workflow.resume_stage)}」之前仍有效的 Gate 會直接沿用
+        </p>
+      )}
       {notice && (
         <p className="workflow-notice" role="status">
           {notice}
@@ -277,16 +285,20 @@ function failureRouteLabel(route: FailureRoute, stageTitle: (key: string) => str
   }
 }
 
-/** 一次嘗試：結果、缺少的證據、證據與查驗狀態、說明與記錄者；桌面記錄的是使用者本人。 */
+/** 記錄者的顯示名稱；桌面記錄的是使用者本人，runtime 是 Runtime 記錄的失效。 */
+const RECORDER_LABELS: Record<string, string> = { desktop: "使用者", runtime: "Runtime" };
+
+/** 一次嘗試：結果、受驗 build、缺少的證據（失效時是失效原因）、證據與查驗狀態、說明與記錄者。 */
 function AttemptView({ attempt, timeZone }: { attempt: StageAttempt; timeZone?: string }) {
-  const recorder = attempt.recorded_by === "desktop" ? "使用者" : attempt.recorded_by;
+  const recorder = RECORDER_LABELS[attempt.recorded_by] ?? attempt.recorded_by;
   return (
     <li aria-label={`第 ${attempt.attempt} 次`} className={`workflow-attempt attempt-${attempt.outcome}`}>
       <span>
         第 {attempt.attempt} 次・{OUTCOME_LABELS[attempt.outcome]}・{formatTimestamp(attempt.created_at, timeZone)}
+        {attempt.build !== undefined && `・build：${attempt.build}`}
       </span>
       {attempt.missing.length > 0 && (
-        <ul className="workflow-attempt-missing" aria-label="缺少的證據">
+        <ul className="workflow-attempt-missing" aria-label={attempt.outcome === "invalidated" ? "失效原因" : "缺少的證據"}>
           {attempt.missing.map((missing, index) => (
             <li key={index}>
               {missing.check}：{missing.reason}
