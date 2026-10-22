@@ -104,3 +104,7 @@
 ## 28. 【高】harness 測試遺留暫存資料目錄（2026-10-23 主控發現）
 - Runtime harness 每次建立的資料目錄（`%TEMP%\.tmpXXXX`，含 `control.sqlite`、`logs`、`guardian`、`profiles`）測試結束後沒有刪除；重建期間累積約 13.6 萬個，把 C 槽吃到只剩 13 GB。
 - 修法：harness 在 drop 時刪除資料目錄（重建 Runtime 時保留，整個 Harness 結束才刪）；檢查其他測試是否用了 `TempDir::into_path`／`keep` 或在 Windows 上因 SQLite 檔案鎖刪除失敗而靜默略過，並補一個測試斷言 harness 結束後資料目錄不存在。
+
+## 29. 最終修正後仍待處理（R157 觀察）
+- Web 的確認授權呼叫尚未帶 `expected_revision: summary.changes?.base_revision`（AI-471），後端的並行編輯保護目前不會生效。
+- R151 第 3 項（Controller 重現案例的程式與 HTTP 目標限制）的新限制尚未寫進 mcp-shim 工具說明。

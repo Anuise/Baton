@@ -8,10 +8,12 @@
 //!   [`Store::revalidate_gates`] 在一個交易中重新查驗所有未完成 Workflow 已通過的 Gate，失效時追加 `invalidated` attempt、
 //!   退回最早失效的 Stage，驗證證據失效時自動排入重驗的驗證要求，並以工作事件通知 Controller。
 
+use baton_domain::authority::Matter;
 use baton_domain::context::StageItem;
+use baton_domain::decision::{ActionContent, ControllerOutcome, DecisionCommand, DecisionOutcome};
 use baton_domain::workdir::TaskKind;
 use baton_domain::workflow::{
-    self, AttemptOutcome, CheckedEvidence, ClaimedOutcome, Evidence, EvidenceRef, EvidenceStatus, MethodDefinition,
+    self, AttemptOutcome, BudgetDecision, CheckedEvidence, ClaimedOutcome, Evidence, EvidenceRef, EvidenceStatus, MethodDefinition,
     MethodVersion, Origin, PlaybookDefinition, PlaybookVersion, Recorder, Situation, StageAttempt, StageResultInput,
     StartInput, WorkflowChange, WorkflowError, WorkflowInstance, WorkflowNote, WorkflowStatus,
 };
@@ -277,10 +279,14 @@ fn subject_dir(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -> 
     conn.query_row("SELECT path FROM workspace WHERE id = ?1", [workspace_id], |r| r.get(0))
 }
 
-/// Workflow 的 Task 依據的假設已被推翻時的說明（票 50）。
+/// Workflow 的 Task 依據的假設已被推翻時的說明（票 50）。已完成或取消的 Task 不算：它不能再改契約，
+/// 「先更新契約」永遠做不到，Workflow 會退回後卡住（R151 第 12 項）。
 fn basis_overturned(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -> rusqlite::Result<Option<String>> {
     let Some(task_id) = task_id else { return Ok(None) };
     let loaded = super::tasks::load(conn, workspace_id)?;
+    if loaded.tasks.iter().any(|t| t.id == task_id && t.status.is_terminal()) {
+        return Ok(None);
+    }
     Ok(loaded.ctx(workspace_id).overturned_basis(task_id))
 }
 
@@ -316,6 +322,8 @@ fn check_evidence(
                 _ => EvidenceStatus::NotFound,
             }
         }
+        // 成果接受只看 Workflow 綁定的 Task（review-notes #21）
+        EvidenceRef::TaskAccepted { task_id } if workflow_task.is_some_and(|bound| bound != task_id) => EvidenceStatus::OtherSubject,
         EvidenceRef::TaskAccepted { task_id } => {
             let found: Option<i64> = conn
                 .query_row(
@@ -340,15 +348,58 @@ fn check_evidence(
             }
         }
         EvidenceRef::Review { review_id } => {
-            let (status, by) = super::reviews::check_review(conn, workspace_id, review_id, workflow_task)?;
+            let current = builds.get(&subject_dir(conn, workspace_id, workflow_task)?).cloned().flatten();
+            let (status, by) = super::reviews::check_review(conn, workspace_id, review_id, workflow_task, current.as_deref())?;
             reviewers = by;
             status
         }
         EvidenceRef::Verification { evidence_bundle_id } => {
-            super::verification_profiles::verification_evidence_status(conn, workspace_id, evidence_bundle_id, builds)?
+            super::verification_profiles::verification_evidence_status(conn, workspace_id, evidence_bundle_id, workflow_task, builds)?
         }
     };
     Ok(CheckedEvidence { evidence, status, reviewers })
+}
+
+/// Stage 預算用盡後，證據齊全的回報要前進前依決策權限表判定「預算用盡後的下一步」（review-notes #20）：在記錄的同一個
+/// 交易中由 Controller 的這一輪送出（同一個 Stage 第一次建立裁定請求，之後回到同一個請求；核准在這次回報用掉）。
+/// 裁定請求必須掛在 Task 上，只綁定 Goal 的 Workflow 無法送出。
+fn budget_decision(
+    tx: &Transaction<'_>,
+    workflow: &WorkflowInstance,
+    playbook: &PlaybookVersion,
+    stage: &str,
+    controller_run_id: &str,
+    attempt_id: &str,
+    now: Timestamp,
+) -> StoreResult<BudgetDecision> {
+    let Some(task_id) = workflow.task_id.as_deref() else {
+        return Ok(BudgetDecision::Unavailable { reason: "這個 Workflow 只綁定 Goal，沒有可以掛裁定請求的 Task".to_string() });
+    };
+    let title = playbook.definition.stage(stage).map_or(stage, |s| s.title.as_str());
+    let summary = format!("讓 Workflow {} 的 Stage「{title}」在用盡預算後繼續", workflow.id);
+    let reason = "這個 Stage 已用盡失敗預算而阻擋；Controller 已附齊證據，要繼續必須由你裁定";
+    let content = match ActionContent::new(Matter::NextStepAfterBudget, Some(task_id), &summary, reason, Vec::new(), None) {
+        Ok(content) => content.with_subject(&format!("stage:{}:{stage}", workflow.id)),
+        Err(rejected) => return Ok(BudgetDecision::Unavailable { reason: rejected.to_string() }),
+    };
+    let command = DecisionCommand::ControllerGate {
+        request_id: format!("decision_{attempt_id}"),
+        audit_id: format!("authz_{attempt_id}"),
+        controller_run_id: controller_run_id.to_string(),
+        content,
+    };
+    Ok(match super::decisions::apply_in(tx, &workflow.workspace_id, command, now)? {
+        Ok(DecisionOutcome::Controller { outcome, .. }) => match outcome {
+            ControllerOutcome::Allowed | ControllerOutcome::Approved { .. } => BudgetDecision::Approved,
+            ControllerOutcome::RequiresDecision { request_id, .. } => BudgetDecision::Pending { request_id },
+            ControllerOutcome::Denied { request_id, .. } => BudgetDecision::Denied { request_id },
+            ControllerOutcome::HumanOnly => {
+                BudgetDecision::Unavailable { reason: "決策權限表把這個事項設為只能由使用者發起".to_string() }
+            }
+        },
+        Ok(other) => unreachable!("ControllerGate 只會得到 Controller 結果：{other:?}"),
+        Err(rejected) => BudgetDecision::Unavailable { reason: rejected.to_string() },
+    })
 }
 
 /// 寫回 Workflow 的變更：新 Workflow 插入，既有的以先前的 revision 條件更新。
@@ -471,9 +522,12 @@ fn queue_reverification(
             }
         }
     }
+    // 只供診斷的重現或修復驗證不算：它的 Bundle 不能作為 Gate 的驗證證據，沿用的話重驗等於被吃掉（R151 第 11 項）
     let queued: Option<String> = tx
         .query_row(
-            "SELECT id FROM verification_request WHERE workspace_id = ?1 AND task_id IS ?2 AND status = 'queued'",
+            "SELECT id FROM verification_request r WHERE workspace_id = ?1 AND task_id IS ?2 AND status = 'queued'
+               AND NOT EXISTS (SELECT 1 FROM exploration_attempt e
+                               WHERE e.request_id = r.id AND e.purpose IN ('reproduce', 'verify_fix'))",
             rusqlite::params![workflow.workspace_id, workflow.task_id],
             |r| r.get(0),
         )
@@ -844,7 +898,24 @@ impl Store {
                 let profile_id: Option<String> = tx
                     .query_row("SELECT profile_id FROM controller_run WHERE id = ?1", [&controller_run_id], |r| r.get(0))
                     .optional()?;
-                let input = StageResultInput { stage, expected_revision, outcome, evidence: checked, note, build, basis_overturned };
+                let mut input = StageResultInput {
+                    stage,
+                    expected_revision,
+                    outcome,
+                    evidence: checked,
+                    note,
+                    build,
+                    basis_overturned,
+                    budget_decision: BudgetDecision::NotRequested,
+                };
+                match workflow::needs_budget_decision(&workflow, &playbook, &prior, &input) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        input.budget_decision =
+                            budget_decision(tx, &workflow, &playbook, &input.stage, &controller_run_id, &attempt_id, now)?;
+                    }
+                    Err(rejected) => return Ok(Err(rejected.into())),
+                }
                 let recorder = Recorder { recorded_by: controller_run_id, profile_id };
                 let change = match workflow::record_result(&workflow, &playbook, &prior, input, attempt_id, recorder, now) {
                     Ok(change) => change,

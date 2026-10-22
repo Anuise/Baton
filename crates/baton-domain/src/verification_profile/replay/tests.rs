@@ -293,3 +293,45 @@ fn a_new_recording_replaces_the_case_and_otherwise_stale_reasons_mark_it() {
     );
     assert_eq!(bundle.usage, VerificationUsage::default(), "舊的 Bundle 沒有用量時是 0");
 }
+
+/// review-notes #26：目標或參數含本次驗證的佔位字（`{{run_id}}`、`{{state_dir}}`）時，錄下的具體動作帶著代換後的值，
+/// 下一次驗證重播會帶入舊值；這類步驟不重播、也不保存錄製。
+#[test]
+fn an_act_step_that_uses_run_scoped_placeholders_is_never_replayed_or_recorded() {
+    let mut scoped = definition();
+    scoped.journeys[0].steps[1].operation = browser(BrowserAction::Act {
+        goal: "以訂單備註建立訂單".into(),
+        params: BTreeMap::from([("note".to_string(), "order-{{run_id}}".to_string())]),
+        replay_in_production: false,
+    });
+    let identity = identity_of(&scoped, ENGINE);
+    let recorded = entry(identity.clone(), ReplayStatus::Valid);
+    assert!(
+        matches!(decide(Some(&recorded), &identity, false, false), ReplayDecision::Live { cache: CacheState::None, .. }),
+        "含本次驗證佔位字的步驟不能重播"
+    );
+    // 沒有佔位字的步驟照常重播
+    let plain = identity_of(&definition(), ENGINE);
+    assert!(matches!(decide(Some(&entry(plain.clone(), ReplayStatus::Valid)), &plain, false, false), ReplayDecision::Replay(_)));
+
+    let action = ActionRecord {
+        journey: "checkout".into(),
+        step: "add".into(),
+        goal: "g".into(),
+        cache: CacheState::None,
+        source: Some(ActionSource::Live),
+        action: None,
+        stale_reasons: Vec::new(),
+        recorded: Some(RecordedAction { identity, action: BrowserAction::Fill { selector: "#note".into(), text: "order-vr_9".into() } }),
+    };
+    let bundle: EvidenceBundle = serde_json::from_value(serde_json::json!({
+        "id": "evb_3", "workspace_id": "ws", "request_id": "r", "task_id": null, "run_id": null, "generation": null,
+        "requirement_version": null, "profile_version_id": "vp", "profile_version": 1, "candidate_revision": null,
+        "build": null, "subject_dir": "d", "journeys": [], "steps": [], "verdict": "passed", "reason_code": "x",
+        "covered_features": [], "uncovered": [],
+        "cleanup": { "state_dir": "s", "state_dir_removed": true },
+        "actions": [action], "started_at": 1, "finished_at": 2,
+    }))
+    .unwrap();
+    assert_eq!(updates(&bundle), Vec::new(), "不保存錄製");
+}

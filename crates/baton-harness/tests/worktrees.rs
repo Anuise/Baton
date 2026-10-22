@@ -363,6 +363,30 @@ async fn a_merge_conflict_fails_the_integration_without_completing_the_task() {
 }
 
 #[tokio::test]
+async fn a_task_redone_after_a_failed_integration_can_pass_verification_again_and_complete() {
+    // R151 第 1 項：第一次驗證通過、整合失敗回到 ready；重做的 Run 再通過時不能撞上「每個 Task 一筆通過」而卡在 verifying
+    let harness = harness().await;
+    let (ws, dir, goal) = setup(&harness, true).await;
+    harness.command_runner.script_exit("cargo", 0, "ok");
+    harness.workspace_fs.conflict_next_merge("src/login.rs");
+    let tid = ready_task(&harness, &ws, &goal, "修正登入", "development", true).await;
+    let first = start_run(&harness, &ws, &tid).await;
+    worker_exits(&harness, &first, true).await;
+    assert_eq!(task_status(&harness, &ws, &tid).await, "ready", "整合衝突：回到可修正狀態");
+
+    let second = start_run(&harness, &ws, &tid).await;
+    worker_exits(&harness, &second, true).await;
+
+    assert_eq!(task_status(&harness, &ws, &tid).await, "completed", "重做的 Run 通過驗證並整合後完成");
+    let (_, view) = harness.send_json(Method::GET, &format!("{}/verification", task_path(&ws, &tid)), None).await;
+    let records = view["records"].as_array().unwrap();
+    assert_eq!(records.len(), 2, "{view}");
+    assert!(records.iter().all(|r| r["outcome"] == "passed"), "兩個 Run 各有一筆通過紀錄：{view}");
+    assert_eq!(view["integration"]["status"], "integrated", "{view}");
+    assert_eq!(harness.workspace_fs.branch_tip(&dir, "main"), harness.workspace_fs.merges().last().unwrap().commit);
+}
+
+#[tokio::test]
 async fn a_manually_accepted_development_task_also_waits_for_integration() {
     let harness = harness().await;
     let (ws, dir, goal) = setup(&harness, true).await;

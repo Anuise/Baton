@@ -80,11 +80,12 @@ struct World {
     decisions: Vec<Decision>,
     contracts: Vec<crate::task::TaskContract>,
     assumptions: Vec<crate::task::Assumption>,
+    budgets: Vec<TaskBudget>,
 }
 
 impl World {
     fn new(tasks: Vec<Task>, requests: Vec<DecisionRequest>) -> Self {
-        Self { workspace: workspace(), tasks, requests, decisions: vec![], contracts: vec![], assumptions: vec![] }
+        Self { workspace: workspace(), tasks, requests, decisions: vec![], contracts: vec![], assumptions: vec![], budgets: vec![] }
     }
 
     fn run(&self, command: DecisionCommand) -> Result<DecisionChange, DecisionError> {
@@ -110,7 +111,7 @@ impl World {
             authority: &policy,
             artifacts: &[],
             authorizations: &[],
-            budgets: &[],
+            budgets: &self.budgets,
         };
         decide(&ctx, command, T1)
     }
@@ -557,6 +558,62 @@ fn a_controller_gate_with_a_subject_only_shares_requests_and_approvals_for_the_s
     assert!(matches!(other.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { existing: false, .. }, .. }));
     let used = world.run(gate_on(Matter::DismissReviewFinding, "t1", "fnd_1", "dr4")).unwrap();
     assert!(matches!(used.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::Approved { .. }, .. }));
+}
+
+/// Worker 以 `controller_action` 提出的同一事項請求（指紋與 Controller 的相同）。
+fn worker_authority(id: &str, matter: Matter, task_id: &str) -> DecisionRequest {
+    let mut request = pending(id, DecisionKind::Authority, task_id);
+    request.authority =
+        Some(AuthorityDetail { matter, summary: "派出部署 Task".into(), fingerprint: format!("{}:{task_id}", matter.as_str()) });
+    request.options = vec![option(OPTION_APPROVE), option(OPTION_REJECT)];
+    request
+}
+
+#[test]
+fn a_controller_gate_neither_joins_nor_consumes_requests_raised_by_a_worker() {
+    // Worker 的請求還在等待：Controller 另建自己的請求，回答後才會喚醒 Controller（R151 第 8 項）
+    let mut world = World::new(vec![task("t1", TaskStatus::Pending, 1)], vec![worker_authority("w", Matter::ExceedAuthorization, "t1")]);
+    let change = world.run(gate(Matter::ExceedAuthorization, "t1")).unwrap();
+    assert!(
+        matches!(&change.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { request_id, existing: false }, .. } if request_id == "dg"),
+        "{:?}",
+        change.outcome
+    );
+
+    // Worker 的請求已核准：Controller 不能用掉它
+    let answered = world.run(answer("w", 1, DecisionAction::Accept, Some(OPTION_APPROVE), None)).unwrap();
+    world.requests = answered.updated.clone();
+    world.decisions.push(answered.decision.clone().unwrap());
+    let change = world.run(gate(Matter::ExceedAuthorization, "t1")).unwrap();
+    assert!(
+        matches!(change.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { existing: false, .. }, .. }),
+        "{:?}",
+        change.outcome
+    );
+    assert!(change.approval_use.is_none());
+}
+
+#[test]
+fn the_budget_exhausted_request_survives_a_contract_change_and_still_resets_the_budget() {
+    // 預算用盡後使用者先修改契約（版本 1 → 2），再核准「再給一輪」：請求不因契約改版過期（R151 第 10 項）
+    let mut request = worker_authority("b", Matter::NextStepAfterBudget, "t");
+    request.run_id = "run_t".into();
+    let mut world = World::new(vec![task("t", TaskStatus::Blocked, 2)], vec![request]);
+    let mut budget = TaskBudget::fresh(&world.tasks[0]);
+    budget.implementation = 3;
+    budget.exhausted = Some(BudgetKind::Implementation);
+    budget.request_id = Some("b".into());
+    world.budgets.push(budget);
+
+    let change = world.run(answer("b", 1, DecisionAction::Accept, Some(OPTION_APPROVE), None)).unwrap();
+    assert!(matches!(change.outcome, DecisionOutcome::Answered { .. }), "{:?}", change.outcome);
+    assert_eq!((change.budgets[0].implementation, change.budgets[0].exhausted), (0, None));
+    assert_eq!(change.tasks[0].status, TaskStatus::Ready);
+
+    // 已經不是目前用盡的那個請求時，照舊因契約改版而過期
+    world.budgets[0].request_id = Some("newer".into());
+    let change = world.run(answer("b", 1, DecisionAction::Accept, Some(OPTION_APPROVE), None)).unwrap();
+    assert!(matches!(change.outcome, DecisionOutcome::Superseded { .. }), "{:?}", change.outcome);
 }
 
 // --- 票 50：使用者的答案推翻既有假設 ---

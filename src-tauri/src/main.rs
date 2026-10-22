@@ -363,6 +363,7 @@ async fn workspace_authorization_confirm(
     grants: Vec<Grant>,
     acknowledged_risk: bool,
     acknowledged_expansion: Option<bool>,
+    expected_revision: Option<i64>,
 ) -> Result<AuthorizationRevision, String> {
     if let Err(reason) = link.ensure_started().await {
         return Err(reason.clone());
@@ -373,6 +374,7 @@ async fn workspace_authorization_confirm(
             grants,
             acknowledged_risk,
             acknowledged_expansion: acknowledged_expansion.unwrap_or(false),
+            expected_revision,
         })
         .await
         .map_err(|e| e.to_string())

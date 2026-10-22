@@ -158,5 +158,6 @@
 | R154-fix-a | final-a | final-fix | Work-3 | 2026-10-23 03:59 | 2026-10-23 04:59 | DONE（修 33 項，未修 6 項附 AI 決策） |
 | R155-fix-b | final-b | final-fix | Work-8 | 2026-10-23 03:59 | | |
 | R156-fix-c | final-c | final-fix | Work-9 | 2026-10-23 03:59 | 2026-10-23 05:00 | DONE（修 14 項，未修 1 項附 AI-455；含 harness 資料目錄清理 AI-457） |
-| R157-final-verify-a | final-a | final-verify | Work-3 | 2026-10-23 04:59 | | |
-| R158-final-verify-c | final-c | final-verify | Work-9 | 2026-10-23 05:00 | | |
+| R157-final-verify-a | final-a | final-verify | Work-3 | 2026-10-23 04:59 | 2026-10-23 05:09 | PASS |
+| R158-final-verify-c | final-c | final-verify | Work-9 | 2026-10-23 05:00 | 2026-10-23 05:17 | FAIL（harness 最後一個資料目錄與 runtime 測試仍留 .tmp） |
+| R159-final-fix-c2 | final-c | final-fix | Work-9 | 2026-10-23 05:17 | | |

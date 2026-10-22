@@ -570,3 +570,52 @@ async fn switching_accounts_continues_the_workflow_from_its_current_stage_instea
     w.harness.restart().await;
     assert_eq!(w.workflow(&workflow["id"]).await["current_stage"], "conclusion");
 }
+
+#[tokio::test]
+async fn a_stage_whose_budget_is_used_up_only_continues_after_the_user_decides() {
+    let w = world(1).await;
+    let worker = w.evidence_worker().await;
+    let (_, token) = w.controller_turn("新增匯出功能").await;
+    let task = w.task("新增 CSV 匯出", "development").await;
+    let mut workflow = w.started(&token, json!({ "situation": "feature", "task_id": task, "rationale": "新功能" })).await;
+    let max = stage(&workflow, "requirements_contract")["budget"]["max_attempts"].as_i64().unwrap();
+    for _ in 0..max {
+        let (status, body) = w.record(&token, &workflow, "failed", json!([]), "需求還不清楚").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        workflow = body["workflow"].clone();
+    }
+    assert_eq!(workflow["status"], "blocked", "{workflow}");
+
+    // 附齊證據回報 passed 也不能自行解除：預算用盡後的下一步必須由使用者裁定（review-notes #20）
+    let name = format!("{}-requirements.md", workflow["id"].as_str().unwrap());
+    let evidence = json!([{ "check": stage(&workflow, "requirements_contract")["exit_checks"][0]["key"], "artifact_id": w.artifact(&worker, &name).await }]);
+    let (status, body) = w.record(&token, &workflow, "passed", evidence.clone(), "").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!((body["attempt"]["outcome"].as_str(), body["workflow"]["status"].as_str()), (Some("blocked"), Some("blocked")), "{body}");
+    assert!(body["workflow"]["blocked_reason"].as_str().unwrap().contains("預算用盡後的下一步"), "{body}");
+    workflow = body["workflow"].clone();
+    let (status, list) = w.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/decisions", w.ws), None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let request = list["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["status"] == "pending" && d["authority"]["matter"] == "next_step_after_budget")
+        .cloned()
+        .unwrap_or_else(|| panic!("應該建立「預算用盡後的下一步」裁定請求：{list}"));
+    assert!(workflow["blocked_reason"].as_str().unwrap().contains(request["id"].as_str().unwrap()), "{workflow}");
+    // 等待裁定時再回報一次：回到同一個請求，不重複建立
+    let (_, body) = w.record(&token, &workflow, "passed", evidence.clone(), "").await;
+    assert_eq!(body["attempt"]["outcome"], "blocked", "{body}");
+    workflow = body["workflow"].clone();
+
+    // 使用者核准後，同樣的證據才能讓 Workflow 繼續
+    let path = format!("{WORKSPACES}/{}/decisions/{}", w.ws, request["id"].as_str().unwrap());
+    let (_, view) = w.h().send_json(Method::GET, &path, None).await;
+    let body = json!({ "action": "accept", "option_id": "approve", "expected_revision": view["revision"] });
+    let (status, answered) = w.h().send_json(Method::POST, &format!("{path}/answer"), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answered}");
+    let (_, body) = w.record(&token, &workflow, "passed", evidence, "").await;
+    assert_eq!((body["attempt"]["outcome"].as_str(), body["workflow"]["status"].as_str()), (Some("passed"), Some("active")), "{body}");
+    assert_eq!(body["workflow"]["current_stage"], "design");
+}

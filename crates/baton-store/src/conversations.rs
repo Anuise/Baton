@@ -175,6 +175,11 @@ impl Store {
                     return Ok(Err(ConversationError::NothingToWake));
                 };
                 let workspace_id = state.conversation.workspace_id.clone();
+                // controller_wakes 是交易外的讀取：封存可能在那之後才提交，所以在寫入交易中再確認一次
+                let workspace = load_workspaces(tx)?.into_iter().find(|w| w.id == workspace_id);
+                if workspace.is_none_or(|w| w.status == WorkspaceStatus::Archived) {
+                    return Ok(Err(ConversationError::WorkspaceArchived(workspace_id)));
+                }
                 if super::lifecycle::launch_halted_in(tx, &workspace_id)? {
                     return Ok(Err(ConversationError::LaunchHalted));
                 }
@@ -629,4 +634,44 @@ fn save(tx: &Transaction<'_>, change: &ConversationChange) -> rusqlite::Result<(
         append_event(tx, event)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T1: Timestamp = Timestamp::from_millis(1_000);
+
+    fn begin() -> BeginTurn {
+        BeginTurn {
+            run_id: "crun_1".into(),
+            command_id: "cmd_1".into(),
+            profile_id: "p1".into(),
+            working_dir: "C:\\work\\app".into(),
+            model: None,
+            resume_check: None,
+            handoff: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_controller_turn_is_not_begun_once_the_workspace_is_archived() {
+        // 封存與喚起同時發生：controller_wakes 讀到時還在使用中，寫入交易開始前 Workspace 已封存（R151 第 27 項）
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), T1).await.unwrap();
+        let create = WorkspaceCommand::Create { id: "w1".into(), name: None, path: "C:\\work\\app".into() };
+        store.apply_workspace_command(create, T1).await.unwrap();
+        let (turn, _) = store.post_user_message("w1", "整理需求".into(), T1).await.unwrap();
+        store.apply_workspace_command(WorkspaceCommand::Archive { id: "w1".into() }, T1).await.unwrap();
+
+        let now = T1.plus_millis(conversation::MERGE_WINDOW_MS + 1);
+        let result = store.begin_controller_run(&turn.conversation_id, begin(), now).await;
+
+        assert!(
+            matches!(result, Err(ConversationApplyError::Rejected(ConversationError::WorkspaceArchived(_)))),
+            "{result:?}"
+        );
+        let view = store.conversation_view("w1", now).await.unwrap();
+        assert!(view.runs.is_empty(), "沒有建立 Controller Run");
+    }
 }

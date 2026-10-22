@@ -848,7 +848,9 @@ pub fn decide(ctx: &TaskContext<'_>, command: TaskCommand, now: Timestamp) -> Re
         }
         TaskCommand::MarkReady { task_id } => {
             let mut task = find_task(&task_id)?;
-            if !task.status.can_transition_to(TaskStatus::Ready) {
+            // 只有 pending 與（預算用盡等原因而）blocked 的 Task 可以標為 ready（AI-276）；進行中、驗證中或等待中的
+            // Task 由各自的流程離開，不能被直接標回 ready
+            if !matches!(task.status, TaskStatus::Pending | TaskStatus::Blocked) {
                 return Err(TaskError::TransitionInvalid { from: task.status, to: TaskStatus::Ready });
             }
             let contract = ctx.contract_of(&task).ok_or_else(|| TaskError::TaskNotFound(task_id.clone()))?;
@@ -1012,7 +1014,13 @@ mod tests {
                 .find(|t| t.id == TEMPLATE_RESEARCH_DOCS)
                 .unwrap()
                 .grants;
-            let request = ConfirmRequest { template_id: None, grants, acknowledged_risk: false, acknowledged_expansion: true };
+            let request = ConfirmRequest {
+                template_id: None,
+                grants,
+                acknowledged_risk: false,
+                acknowledged_expansion: true,
+                expected_revision: None,
+            };
             match crate::authorization::confirm(&self.workspace, None, request, T1).unwrap() {
                 ConfirmOutcome::Created { revision, .. } => self.authorization = Some(revision),
                 other => panic!("{other:?}"),
@@ -1238,6 +1246,27 @@ mod tests {
         let again = world.run(TaskCommand::MarkReady { task_id: "t1".into() }, T2);
 
         assert_eq!(again, Err(TaskError::TransitionInvalid { from: TaskStatus::Ready, to: TaskStatus::Ready }));
+    }
+
+    #[test]
+    fn only_pending_and_blocked_tasks_can_be_marked_ready() {
+        // 進行中、驗證中或等待中的 Task 被標成 ready 會讓舊 Run 的結果被忽略、整件工作重做（R151 第 22 項）
+        for status in [TaskStatus::Running, TaskStatus::Verifying, TaskStatus::WaitingDecision, TaskStatus::WaitingResource] {
+            let mut world = World::with_goal();
+            world.add_task("t1", complete());
+            world.tasks[0].status = status;
+
+            let result = world.run(TaskCommand::MarkReady { task_id: "t1".into() }, T2);
+
+            assert_eq!(result, Err(TaskError::TransitionInvalid { from: status, to: TaskStatus::Ready }));
+            assert_eq!(world.task("t1").status, status);
+        }
+        // 預算用盡而阻擋的 Task 仍可由使用者標回可派工（AI-276）
+        let mut world = World::with_goal();
+        world.add_task("t1", complete());
+        world.tasks[0].status = TaskStatus::Blocked;
+        world.run(TaskCommand::MarkReady { task_id: "t1".into() }, T2).unwrap();
+        assert_eq!(world.task("t1").status, TaskStatus::Ready);
     }
 
     #[test]

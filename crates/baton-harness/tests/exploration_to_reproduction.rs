@@ -525,6 +525,65 @@ async fn a_suspicion_cannot_be_triaged_away_while_its_reproduction_is_queued() {
     assert_eq!(section(&w.exploration().await, "confirmed").len(), 1);
 }
 
+#[tokio::test]
+async fn a_queued_reproduction_does_not_stand_in_for_the_reverification_of_an_invalidated_gate() {
+    let (w, controller, _, task, finding) = explored().await;
+    w.shop(180);
+    let out = w.dir.join(".baton").join("outputs").join(&task);
+    w.h().verification_driver.set_revision(&out, "r1");
+    // 兩個 Stage：真實介面驗證 → 使用者驗收；停在第二個，Workflow 才不會完成
+    let (status, catalog) = w.h().send_json(Method::GET, PLAYBOOKS, None).await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let mut playbook =
+        catalog["playbooks"].as_array().unwrap().iter().filter(|p| p["key"] == "investigation").last().unwrap()["definition"].clone();
+    let mut verify = playbook["stages"][0].clone();
+    verify["key"] = json!("real_interface");
+    verify["gate"] = json!("safety");
+    verify["exit_checks"] = json!([{ "key": "journey_passed", "description": "在真實介面通過", "requires": "verification" }]);
+    let mut sign_off = playbook["stages"][0].clone();
+    sign_off["key"] = json!("sign_off");
+    sign_off["gate"] = json!("decision");
+    sign_off["exit_checks"] = json!([{ "key": "approved", "description": "使用者驗收", "requires": "decision" }]);
+    playbook["stages"] = json!([verify, sign_off]);
+    let (status, body) = w.h().send_json(Method::POST, PLAYBOOKS, Some(playbook)).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, workflow) =
+        w.h().call_tool(&controller, "start_workflow", json!({ "situation": "investigation", "task_id": task, "rationale": "確認行為" })).await;
+    assert_eq!(status, StatusCode::OK, "{workflow}");
+    let (status, request) = w.h().call_tool(&controller, "run_verification", json!({ "task_id": task })).await;
+    assert_eq!(status, StatusCode::CREATED, "{request}");
+    w.h().supervise().await;
+    let (_, overview) = w.h().send_json(Method::GET, &w.verification(""), None).await;
+    let done = overview["requests"].as_array().unwrap().iter().find(|r| r["id"] == request["id"]).unwrap().clone();
+    let record = json!({
+        "workflow_id": workflow["id"],
+        "stage": "real_interface",
+        "expected_revision": workflow["revision"],
+        "outcome": "passed",
+        "evidence": [{ "check": "journey_passed", "evidence_bundle_id": done["bundle_id"] }],
+    });
+    let (status, recorded) = w.h().call_tool(&controller, "record_stage_result", record).await;
+    assert_eq!((status, recorded["workflow"]["current_stage"].as_str()), (StatusCode::OK, Some("sign_off")), "{recorded}");
+
+    // 同一個 Task 有一個排隊中的重現（只供診斷）時程式碼改了：重驗必須另外排入，不能沿用那個重現（R151 第 11 項）
+    let (status, queued) =
+        w.h().call_tool(&controller, "reproduce_exploration_finding", json!({ "finding_id": finding["id"], "journey": case() })).await;
+    assert_eq!(status, StatusCode::CREATED, "{queued}");
+    w.h().verification_driver.set_revision(&out, "r2");
+    w.h().supervise().await;
+
+    let (_, overview) = w.h().send_json(Method::GET, &w.verification(""), None).await;
+    let reverify = overview["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["requested_by"].as_str().unwrap_or_default().contains("gate_invalidated"))
+        .cloned()
+        .unwrap_or_else(|| panic!("應該另外排入 Gate 的重驗：{overview}"));
+    assert_ne!(reverify["id"], queued["request"]["id"]);
+    assert_eq!(reverify["task_id"], task.as_str());
+}
+
 // --- 章程、未驗風險與預期設計 ---
 
 #[tokio::test]
