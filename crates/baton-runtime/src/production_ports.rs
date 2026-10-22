@@ -1,6 +1,6 @@
 //! 正式執行環境使用的 Port。
 //!
-//! 目前只有系統時鐘是真實實作；其餘 Port 的正式版由後續的票提供，
+//! 目前只有系統時鐘與 DPAPI 憑證保護是真實實作；其餘 Port 的正式版由後續的票提供，
 //! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
 
 use std::path::Path;
@@ -94,5 +94,7 @@ pub fn production_ports() -> Ports {
         quota_observer: unavailable.clone(),
         workspace_fs: unavailable.clone(),
         platform_info: unavailable,
+        // DPAPI 是真實實作：桌面憑證檔一定要受保護
+        secret_protector: Arc::new(baton_credential::DpapiProtector),
     }
 }

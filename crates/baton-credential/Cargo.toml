@@ -1,0 +1,17 @@
+[package]
+name = "baton-credential"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 桌面憑證檔：Runtime 寫入、桌面 App 讀取；內容以 DPAPI（目前使用者範圍）保護（spec D-22）
+[dependencies]
+baton-ports = { path = "../baton-ports" }
+thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[dev-dependencies]
+tempfile = "3"

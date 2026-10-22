@@ -169,7 +169,12 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "baton-domain",
+ "baton-ports",
+ "baton-store",
+ "futures",
  "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -181,6 +186,16 @@ dependencies = [
  "reqwest 0.12.28",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "baton-credential"
+version = "0.1.0"
+dependencies = [
+ "baton-ports",
+ "tempfile",
+ "thiserror 2.0.21",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -211,12 +226,14 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "baton-api",
+ "baton-credential",
  "baton-domain",
  "baton-ports",
  "baton-runtime",
  "futures",
  "reqwest 0.12.28",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -240,10 +257,12 @@ dependencies = [
  "axum",
  "baton-api",
  "baton-client",
+ "baton-credential",
  "baton-domain",
  "baton-ports",
  "baton-store",
  "futures",
+ "getrandom 0.3.4",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

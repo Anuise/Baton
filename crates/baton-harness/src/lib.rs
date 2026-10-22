@@ -3,12 +3,19 @@
 //! 在測試中以程序內方式啟動完整 Runtime（真實 Domain、真實 Store 與暫存目錄中的 SQLite、
 //! 真實 Axum HTTP API），只替換 Port。`restart` 丟棄 Runtime 實例、保留資料目錄後重建，
 //! 並沿用同一組 fake，用來模擬重啟。
+//!
+//! `get_json` 與桌面 App 一樣：每次從憑證檔讀取目前的桌面憑證再帶上標頭，
+//! 所以重啟後會自動使用新憑證；要測試拒絕情境時改用 `request` 自行組裝請求。
 
 pub mod fakes;
 
 use std::ops::Deref;
+use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
+use baton_api::{CLIENT_HEADER, CLIENT_HEADER_VALUE};
+use baton_domain::auth::Role;
 use baton_domain::Timestamp;
 use baton_ports::Ports;
 use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig};
@@ -79,15 +86,53 @@ impl Harness {
         self.runtime.as_ref().expect("Runtime 尚未啟動").local_addr()
     }
 
+    /// IPv6 loopback 的監聽位址；本機沒有 IPv6 時為 `None`。
+    pub fn addr_v6(&self) -> Option<SocketAddr> {
+        self.runtime.as_ref().expect("Runtime 尚未啟動").local_addr_v6()
+    }
+
+    /// Runtime 目前監聽的全部位址。
+    pub fn local_addrs(&self) -> Vec<SocketAddr> {
+        std::iter::once(self.addr()).chain(self.addr_v6()).collect()
+    }
+
     /// 目前 Runtime 的 URL。
     pub fn url(&self, path: &str) -> String {
         let addr = self.runtime.as_ref().expect("Runtime 尚未啟動").local_addr();
         format!("http://{addr}{path}")
     }
 
-    /// 對目前 Runtime 發出真實 HTTP GET 並解析 JSON；非 2xx 視為測試失敗。
+    /// 讀取目前的桌面憑證，方式與桌面 App 相同：讀取受保護的憑證檔。
+    pub fn desktop_credential(&self) -> String {
+        baton_credential::read_desktop_credential(self.data_dir.path(), &*self.fakes.secret_protector)
+            .expect("無法讀取桌面憑證檔")
+    }
+
+    /// 簽發額外的憑證（例如 Agent 角色或會過期的憑證），回傳 token。
+    pub async fn issue_credential(&self, role: Role, ttl: Option<Duration>) -> String {
+        let runtime = self.runtime.as_ref().expect("Runtime 尚未啟動");
+        runtime.credentials().issue(role, ttl).await.expect("無法簽發憑證")
+    }
+
+    /// 日誌檔的全部內容；日誌尚未建立時為空字串。
+    pub fn log_text(&self) -> String {
+        std::fs::read_to_string(baton_runtime::log::log_path(self.data_dir.path())).unwrap_or_default()
+    }
+
+    /// 對目前 Runtime 組一個沒有任何驗證標頭的原始請求；測試自行決定要帶什麼。
+    pub fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+        self.http.request(method, self.url(path))
+    }
+
+    /// 對目前 Runtime 發出真實 HTTP GET 並解析 JSON；帶桌面憑證，非 2xx 視為測試失敗。
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> T {
-        let response = self.http.get(self.url(path)).send().await.expect("HTTP 請求失敗");
+        let response = self
+            .request(reqwest::Method::GET, path)
+            .bearer_auth(self.desktop_credential())
+            .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+            .send()
+            .await
+            .expect("HTTP 請求失敗");
         let status = response.status();
         assert!(status.is_success(), "GET {path} 回應 {status}");
         response.json().await.expect("回應不是預期的 JSON")

@@ -11,11 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 baton-api = { path = "../baton-api" }
+baton-credential = { path = "../baton-credential" }
 baton-domain = { path = "../baton-domain" }
 baton-ports = { path = "../baton-ports" }
 baton-store = { path = "../baton-store" }
 async-trait = "0.1"
 futures = "0.3"
+getrandom = "0.3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
 axum = "0.8"

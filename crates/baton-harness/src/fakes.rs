@@ -279,6 +279,28 @@ impl PlatformInfo for FakePlatformInfo {
 }
 
 /// 一組 fake Port 的具體型別，測試可直接操作腳本與讀取紀錄。
+/// 可逆但不是明文的保護器：以固定前綴加逐位元 XOR 模擬 DPAPI，不依賴作業系統。
+#[derive(Default)]
+pub struct FakeSecretProtector;
+
+const FAKE_PROTECT_PREFIX: &[u8] = b"FAKE-DPAPI:";
+const FAKE_PROTECT_KEY: u8 = 0x5A;
+
+impl SecretProtector for FakeSecretProtector {
+    fn protect(&self, plaintext: &[u8]) -> PortResult<Vec<u8>> {
+        let mut out = FAKE_PROTECT_PREFIX.to_vec();
+        out.extend(plaintext.iter().map(|b| b ^ FAKE_PROTECT_KEY));
+        Ok(out)
+    }
+
+    fn unprotect(&self, protected: &[u8]) -> PortResult<Vec<u8>> {
+        let body = protected
+            .strip_prefix(FAKE_PROTECT_PREFIX)
+            .ok_or_else(|| PortError::Failed("不是這個保護器產生的資料".into()))?;
+        Ok(body.iter().map(|b| b ^ FAKE_PROTECT_KEY).collect())
+    }
+}
+
 pub struct FakePorts {
     pub clock: Arc<FakeClock>,
     pub process_control: Arc<FakeProcessControl>,
@@ -286,6 +308,7 @@ pub struct FakePorts {
     pub quota_observer: Arc<FakeQuotaObserver>,
     pub workspace_fs: Arc<FakeWorkspaceFs>,
     pub platform_info: Arc<FakePlatformInfo>,
+    pub secret_protector: Arc<FakeSecretProtector>,
 }
 
 impl FakePorts {
@@ -297,6 +320,7 @@ impl FakePorts {
             quota_observer: Arc::default(),
             workspace_fs: Arc::default(),
             platform_info: Arc::default(),
+            secret_protector: Arc::default(),
         }
     }
 
@@ -309,6 +333,7 @@ impl FakePorts {
             quota_observer: self.quota_observer.clone(),
             workspace_fs: self.workspace_fs.clone(),
             platform_info: self.platform_info.clone(),
+            secret_protector: self.secret_protector.clone(),
         }
     }
 }
