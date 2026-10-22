@@ -39,6 +39,7 @@ mod lifecycle;
 mod messages;
 mod profiles;
 mod quota;
+mod recovery;
 mod runs;
 mod scheduling;
 mod sessions;
@@ -62,6 +63,7 @@ pub use lifecycle::{
 pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
+pub use recovery::RecoveryApplyError;
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use sessions::TranscriptProgress;
 pub use scheduling::{
@@ -956,6 +958,39 @@ const MIGRATIONS: &[Migration] = &[
             UNIQUE (run_id, first_position)
         );
         CREATE INDEX transcript_segment_session ON transcript_segment (agent_session_id);",
+    },
+    // 票 31：Runtime 意外崩潰後的自動恢復。runtime_boot 記下正常結束的時間（沒有值就是意外終止；
+    // 既有的啟動紀錄視為正常結束，升級不會被誤判為崩潰）。恢復事件只有最新一筆會被處理；
+    // 嘗試以 (事件, 輪次, 序號) 唯一，序號只能是 1～3（同一輪不可能有第四次）
+    Migration {
+        name: "crash_recovery",
+        sql: "ALTER TABLE runtime_boot ADD COLUMN ended_cleanly_at INTEGER;
+        UPDATE runtime_boot SET ended_cleanly_at = started_at;
+        CREATE TABLE recovery_event (
+            id TEXT PRIMARY KEY,
+            round INTEGER NOT NULL CHECK (round >= 1),
+            status TEXT NOT NULL CHECK (status IN ('waiting', 'attempting', 'observing', 'succeeded', 'exhausted')),
+            attempts_used INTEGER NOT NULL CHECK (attempts_used BETWEEN 0 AND 3),
+            detected_at INTEGER NOT NULL,
+            next_attempt_at INTEGER,
+            observe_until INTEGER,
+            last_failure TEXT,
+            closed_at INTEGER,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE recovery_attempt (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL REFERENCES recovery_event (id),
+            round INTEGER NOT NULL CHECK (round >= 1),
+            seq INTEGER NOT NULL CHECK (seq BETWEEN 1 AND 3),
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            outcome TEXT NOT NULL CHECK (outcome IN ('in_progress', 'observing', 'succeeded', 'failed')),
+            failure TEXT,
+            affected TEXT NOT NULL CHECK (json_valid(affected)),
+            UNIQUE (event_id, round, seq)
+        );",
     },
 ];
 
