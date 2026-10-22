@@ -406,7 +406,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_SEARCH_KNOWLEDGE,
-            "description": "搜尋這個 Run 適用範圍內「已驗證且有效」的決策、教訓與知識（候選、已撤銷或過期的不會出現）。",
+            "description": "搜尋這個 Run 適用範圍內「已驗證且有效」的決策、教訓與知識（候選、已撤銷或過期的不會出現）。Controller 呼叫時範圍是全域加上整個 Workspace。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

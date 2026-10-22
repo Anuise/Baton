@@ -2,7 +2,8 @@
 //!
 //! - 管理 API（桌面憑證）：在「知識」分頁列出與搜尋條目、建立（直接是已驗證）、確認候選、修正、撤銷、淘汰，以及查看版本與變更歷史。
 //! - Agent API：`record_lesson_candidate` 只能提交候選教訓（狀態由 Runtime 決定，請求無法指定）；
-//!   `search_knowledge` 只回傳這個 Run 適用範圍內「已驗證且在有效期間內」的條目。
+//!   `search_knowledge` 只回傳這個 Run 適用範圍內「已驗證且在有效期間內」的條目；Controller 憑證（spec D-05 共同工具）
+//!   看得到全域與它的 Workspace 內所有範圍的有效條目。
 //! - 搜尋以 FTS5 + trigram 為主；FTS5 不可用時退回 LIKE，回應的 `search_mode` 會標明降級。
 
 use std::sync::Arc;
@@ -21,6 +22,7 @@ use baton_store::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, R
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{scope_of, Claims};
+use crate::controller::controller_scope;
 use crate::authorization::bad_json;
 use crate::workspaces::{new_id, ApiError};
 use crate::ApiState;
@@ -381,22 +383,26 @@ pub(crate) async fn search_knowledge(
     body: Result<Json<SearchRequest>, JsonRejection>,
 ) -> Result<Json<KnowledgeList>, ApiError> {
     let Json(request) = body.map_err(bad_json)?;
-    let scope = scope_of(&record, &request.claims)?;
-    let terms = knowledge::parse_query(&request.query)?;
-    let context = state.store.agent_context(&scope).await?;
-    if !context.is_current {
-        return Err(ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            code: "credential_revoked",
-            message: "這個 Run 已經結束或已被接替，憑證已失效".to_string(),
-        });
-    }
-    let now = state.clock.now();
-    let audience = KnowledgeAudience::Run {
-        workspace_id: scope.workspace_id,
-        goal_id: context.task.goal_id,
-        task_id: context.task.id,
+    // Controller（spec D-05 共同工具）：規劃整個 Workspace 的工作，看得到全域與它的 Workspace 內所有範圍的條目
+    let (audience, terms) = if record.controller.is_some() {
+        let scope = controller_scope(&state, &record, &request.claims).await?;
+        (KnowledgeAudience::Desktop { workspace_id: Some(scope.workspace_id) }, knowledge::parse_query(&request.query)?)
+    } else {
+        let scope = scope_of(&record, &request.claims)?;
+        let terms = knowledge::parse_query(&request.query)?;
+        let context = state.store.agent_context(&scope).await?;
+        if !context.is_current {
+            return Err(ApiError {
+                status: StatusCode::UNAUTHORIZED,
+                code: "credential_revoked",
+                message: "這個 Run 已經結束或已被接替，憑證已失效".to_string(),
+            });
+        }
+        let audience =
+            KnowledgeAudience::Run { workspace_id: scope.workspace_id, goal_id: context.task.goal_id, task_id: context.task.id };
+        (audience, terms)
     };
+    let now = state.clock.now();
     // Agent 只能拿到有效的條目：候選、撤銷、淘汰、被取代與過期的一律不回傳
     let entries = state.store.knowledge_search(audience, terms, false, now).await?;
     Ok(Json(KnowledgeList {

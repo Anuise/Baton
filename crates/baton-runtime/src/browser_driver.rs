@@ -242,6 +242,8 @@ struct RawPage {
     title: String,
     status: Option<u16>,
     text: String,
+    #[serde(default)]
+    fields: Vec<String>,
     visible: Vec<bool>,
     screenshot: Option<String>,
 }
@@ -254,7 +256,15 @@ fn page_of(value: Option<&Value>) -> PortResult<Option<PageSnapshot>> {
         .map(|png| base64::engine::general_purpose::STANDARD.decode(png))
         .transpose()
         .map_err(|e| failed(format!("無法解讀瀏覽器 Runner 回報的截圖：{e}")))?;
-    Ok(Some(PageSnapshot { url: raw.url, title: raw.title, status: raw.status, text: raw.text, visible: raw.visible, screenshot }))
+    Ok(Some(PageSnapshot {
+        url: raw.url,
+        title: raw.title,
+        status: raw.status,
+        text: raw.text,
+        fields: raw.fields,
+        visible: raw.visible,
+        screenshot,
+    }))
 }
 
 fn parse_step_response(response: &Value) -> PortResult<BrowserOutcome> {

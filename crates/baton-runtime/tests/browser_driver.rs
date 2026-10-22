@@ -182,6 +182,70 @@ fn assert_no_password_in_trace(bytes: &[u8], scratch: &std::path::Path) {
     assert!(entries > 0);
 }
 
+/// 秘密只出現在輸入欄位的值（含開放的 shadow DOM）或一閃而過的中間畫面：不在畫面文字中。
+const SETTINGS_PAGE: &str = r#"<!doctype html><html><head><title>設定</title></head><body>
+<h1>API 設定</h1>
+<input id="key" value="tok-INPUT-1234">
+<textarea id="note">tok-AREA-5678</textarea>
+<input id="pw" type="password" value="pw-masked-0000">
+<div id="host"></div>
+<script>
+document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<input id="inner" value="tok-SHADOW-9012">';
+</script>
+</body></html>"#;
+
+/// 回應中帶有秘密、但在畫出之前就被換掉的頁面（步驟之間的中間畫面）。
+const FLASH_PAGE: &str = r#"<!doctype html><html><head><title>處理中</title></head><body>
+<p id="out">tok-FLASH-3333</p>
+<script>document.getElementById('out').textContent = '已處理';</script>
+</body></html>"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn field_values_are_reported_and_the_trace_is_searchable_for_secrets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let site = listener.local_addr().unwrap();
+    let app = axum::Router::new()
+        .route("/settings", axum::routing::get(|| async { Html(SETTINGS_PAGE) }))
+        .route("/flash", axum::routing::get(|| async { Html(FLASH_PAGE) }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let project = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let driver = LocalBrowserDriver::default();
+    let request = BrowserSessionRequest {
+        working_dir: project.path().to_path_buf(),
+        scratch_dir: scratch.path().to_path_buf(),
+        trace: true,
+        video: false,
+    };
+    let session = match driver.open(request).await {
+        Ok(session) => session,
+        Err(error) if unavailable(&error) => {
+            eprintln!("略過：{error}（可設定 BATON_PLAYWRIGHT_DIR 指向已安裝 playwright 的目錄）");
+            return;
+        }
+        Err(error) => panic!("{error}"),
+    };
+
+    // 輸入欄位的值不在畫面文字中，另外回報（含開放的 shadow DOM）；密碼欄位畫面上只顯示遮罩，不回報
+    let goto = BrowserCommand::Goto { url: format!("http://{site}/settings") };
+    let page = done(driver.step(&session, step(goto, &[], Some(&[]))).await.unwrap());
+    assert!(page.text.contains("API 設定") && !page.text.contains("tok-INPUT-1234"), "{}", page.text);
+    for value in ["tok-INPUT-1234", "tok-AREA-5678", "tok-SHADOW-9012"] {
+        assert!(page.fields.iter().any(|f| f == value), "{value} 不在 {:?}", page.fields);
+    }
+    assert!(!page.fields.iter().any(|f| f.contains("pw-masked-0000")), "{:?}", page.fields);
+
+    // 中間畫面：觀察到的畫面已經沒有秘密，但 trace 記下了它；trace 不再壓縮，Runtime 能以位元組找到秘密而不保存
+    let goto = BrowserCommand::Goto { url: format!("http://{site}/flash") };
+    let page = done(driver.step(&session, step(goto, &[], None)).await.unwrap());
+    assert!(page.text.contains("已處理") && !page.text.contains("tok-FLASH-3333"), "{}", page.text);
+    let files = driver.close(&session).await.unwrap();
+    let trace = files.iter().find(|f| f.kind == "trace").expect("有 trace");
+    for needle in ["tok-INPUT-1234", "tok-FLASH-3333"] {
+        assert!(trace.bytes.windows(needle.len()).any(|w| w == needle.as_bytes()), "trace 中找不到 {needle}");
+    }
+}
+
 #[tokio::test]
 async fn opening_without_playwright_in_the_project_explains_what_to_install() {
     if std::env::var_os("BATON_PLAYWRIGHT_DIR").is_some() {
