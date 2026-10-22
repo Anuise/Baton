@@ -22,6 +22,7 @@ mod setup;
 mod shared_settings;
 mod tasks;
 mod verification;
+pub mod workdirs;
 mod workspaces;
 
 use std::convert::Infallible;
@@ -95,6 +96,7 @@ pub use shared_settings::{
     RunSettings, RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH,
 };
+pub use workdirs::INTEGRATION_QUEUE_PATH;
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
 /// 健康端點路徑。
@@ -224,6 +226,7 @@ pub fn router(state: ApiState) -> Router {
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
         .route(lifecycle::WORKSPACE_RESUME_ROUTE, post(lifecycle::resume_workspace))
         .route(SCHEDULING_PATH, get(scheduling::view))
+        .route(INTEGRATION_QUEUE_PATH, get(workdirs::queue))
         .route(SCHEDULING_SETTINGS_PATH, axum::routing::put(scheduling::update_settings))
         .route(SHARED_SETTINGS_PATH, get(shared_settings::status))
         .route(SHARED_SETTINGS_PREVIEW_PATH, post(shared_settings::preview))

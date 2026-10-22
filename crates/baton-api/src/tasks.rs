@@ -12,7 +12,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::authorization::Capability;
 use baton_domain::run::RunView;
+use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
+use baton_domain::workdir::{TaskKind, WorkdirView};
 use baton_domain::task::{ContractContent, Goal, MissingItem, TaskCommand, TaskContract, TaskError, TaskView};
 use baton_store::TaskApplyError;
 use serde::{Deserialize, Serialize};
@@ -72,6 +74,9 @@ pub struct CreateGoalRequest {
 pub struct CreateTaskRequest {
     pub goal_id: String,
     pub title: String,
+    /// Task 的種類，決定它在 worktree 還是輸出目錄中執行（票 20）；省略時是研究。
+    #[serde(default)]
+    pub kind: TaskKind,
     /// 省略時建立一份空白契約（版本 1），之後再補。
     #[serde(default)]
     pub contract: ContractContent,
@@ -100,6 +105,10 @@ pub struct TaskBoard {
     pub runs: Vec<RunView>,
     /// Workspace 的全部驗證紀錄，由舊到新；卡片上的驗證結果與證據由它組出（票 13）。
     pub verifications: Vec<VerificationRecord>,
+    /// 平台登記的工作目錄與曾在其中執行的 Run（票 20）。
+    pub workdirs: Vec<WorkdirView>,
+    /// 這個 Workspace 的整合項目，依排入順序（票 20）。
+    pub integrations: Vec<IntegrationEntry>,
     /// 契約「所需能力」可選的清單。
     pub capabilities: Vec<CapabilityInfo>,
 }
@@ -215,6 +224,8 @@ pub(crate) async fn board(
         tasks: data.tasks,
         runs: data.runs,
         verifications: data.verifications,
+        workdirs: data.workdirs,
+        integrations: data.integrations,
         capabilities: Capability::ALL
             .into_iter()
             .map(|c| CapabilityInfo { capability: c, label: c.label().to_string(), high_risk: c.is_high_risk() })
@@ -245,6 +256,7 @@ pub(crate) async fn create_task(
         id: task_id.clone(),
         goal_id: request.goal_id,
         title: request.title,
+        kind: request.kind,
         contract: request.contract,
     };
     apply_and_view(&state, id, task_id, command, StatusCode::CREATED).await

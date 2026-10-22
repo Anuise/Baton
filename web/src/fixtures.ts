@@ -10,6 +10,7 @@ import type {
   ExitRunResult,
   LifecycleStatus,
   ImportPreview,
+  IntegrationEntry,
   PlatformResponse,
   QuotaAssessment,
   QuotaObservation,
@@ -21,6 +22,7 @@ import type {
   WorkspaceLifecycleView,
   VerificationRecord,
   VerificationView,
+  WorkdirView,
 } from "./runtimeClient";
 
 /** 測試用的平台狀態：Windows 11 26H2 Pro x64，正式支援。 */
@@ -438,6 +440,7 @@ export function verificationView(overrides: Partial<VerificationView> = {}): Ver
     artifacts: [{ artifact_id: "art_1", name: "report.md", version: 1, sha256: REPORT_SHA256 }],
     automatic: true,
     records: [],
+    integration: null,
     ...overrides,
   };
 }
@@ -467,6 +470,49 @@ export function verificationRecord(overrides: Partial<VerificationRecord> = {}):
     accepted_by: null,
     note: null,
     decided_at: CHECKED_AT,
+    ...overrides,
+  };
+}
+
+/** 測試用的工作目錄：task_1 已就緒的 worktree（平台分支 baton/task_1，整合到 main），run_1 在其中執行過。 */
+export function workdirView(overrides: Partial<WorkdirView> = {}): WorkdirView {
+  return {
+    task_id: "task_1",
+    workspace_id: "ws_1",
+    kind: "worktree",
+    path: "C:\\work\\app\\.baton\\worktrees\\task_1",
+    branch: "baton/task_1",
+    base_branch: "main",
+    status: "ready",
+    failure: null,
+    version: 1,
+    attempted_at: CHECKED_AT,
+    ready_at: CHECKED_AT,
+    run_ids: ["run_1"],
+    ...overrides,
+  };
+}
+
+/** 測試用的整合項目：task_1 第 1 次 Run 的平台分支排隊等待整合到 main。 */
+export function integrationEntry(overrides: Partial<IntegrationEntry> = {}): IntegrationEntry {
+  return {
+    id: "int_1",
+    seq: 1,
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    run_id: "run_1",
+    generation: 1,
+    branch: "baton/task_1",
+    target_branch: "main",
+    status: "queued",
+    version: 1,
+    merge_commit: null,
+    target_tip: null,
+    checks: [],
+    failure: null,
+    queued_at: CHECKED_AT,
+    started_at: null,
+    finished_at: null,
     ...overrides,
   };
 }

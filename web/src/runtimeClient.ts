@@ -410,6 +410,8 @@ export interface VerificationView {
   automatic: boolean;
   /** 由舊到新。 */
   records: VerificationRecord[];
+  /** 這個 Task 最新的整合項目（只有開發 Task 會有）；沒有為 null。 */
+  integration: IntegrationEntry | null;
 }
 
 /** 手動接受成果：`basis` 原樣送回 Runtime 取得的值。 */
@@ -441,11 +443,15 @@ export type TaskStatus =
   | "completed"
   | "cancelled";
 
+/** Task 種類：決定 Run 在哪種工作目錄執行（開發 Task 用 worktree，研究／文件用輸出目錄）。 */
+export type TaskKind = "development" | "research" | "document";
+
 export interface TaskView {
   id: string;
   workspace_id: string;
   goal_id: string;
   title: string;
+  kind: TaskKind;
   status: TaskStatus;
   version: number;
   contract_version: number;
@@ -531,7 +537,7 @@ export type RunView = Run & {
   blocked: BlockedNote | null;
 };
 
-/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。`lifecycle` 是完全退出中或等待「繼續工作」。 */
+/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。`lifecycle` 是完全退出中或等待「繼續工作」，`workdir` 是工作目錄不可用。 */
 export type WaitCategory =
   | "capacity"
   | "quota"
@@ -540,6 +546,7 @@ export type WaitCategory =
   | "state_unknown"
   | "account"
   | "lifecycle"
+  | "workdir"
   | "guard";
 
 /** 等待原因（對應 Rust 的 WaitReason）；`code` 是穩定的機器可讀代碼。 */
@@ -582,6 +589,57 @@ export interface TaskBoard {
   capabilities: { capability: Capability; label: string; high_risk: boolean }[];
   /** Workspace 全部驗證紀錄，由舊到新。 */
   verifications: VerificationRecord[];
+  /** 各 Task 在平台登記的工作目錄。 */
+  workdirs: WorkdirView[];
+  /** 這個 Workspace 的整合佇列項目，依排入順序。 */
+  integrations: IntegrationEntry[];
+}
+
+/** Task 在平台登記的工作目錄（對應 Rust 的 WorkdirView）；時間是 UTC 毫秒。 */
+export interface WorkdirView {
+  task_id: string;
+  workspace_id: string;
+  /** worktree：開發 Task 的 Git worktree；output_dir：研究／文件 Task 的輸出目錄。 */
+  kind: "worktree" | "output_dir";
+  /** 絕對路徑。 */
+  path: string;
+  /** worktree 的平台分支。 */
+  branch: string | null;
+  /** 整合目標分支。 */
+  base_branch: string | null;
+  status: "ready" | "failed";
+  /** 準備失敗的原因（給使用者看）。 */
+  failure: string | null;
+  version: number;
+  attempted_at: number;
+  ready_at: number | null;
+  /** 在這個目錄中執行過的 Run，依建立順序。 */
+  run_ids: string[];
+}
+
+export type IntegrationStatus = "queued" | "merging" | "verifying" | "advancing" | "integrated" | "failed";
+
+/** 整合佇列的一個項目（對應 Rust 的 IntegrationEntry）；時間是 UTC 毫秒。 */
+export interface IntegrationEntry {
+  id: string;
+  /** 排入順序；佇列依它處理。 */
+  seq: number;
+  workspace_id: string;
+  task_id: string;
+  run_id: string;
+  generation: number;
+  branch: string;
+  target_branch: string;
+  status: IntegrationStatus;
+  version: number;
+  merge_commit: string | null;
+  target_tip: string | null;
+  /** 整合驗證的結果。 */
+  checks: CheckResult[];
+  failure: string | null;
+  queued_at: number;
+  started_at: number | null;
+  finished_at: number | null;
 }
 
 export interface TaskDetail {
@@ -598,6 +656,8 @@ export interface AdmissionReport {
 export interface CreateTaskRequest {
   goalId: string;
   title: string;
+  /** 省略時 Runtime 預設為 research。 */
+  kind?: TaskKind;
   contract?: ContractInput;
 }
 
@@ -1581,8 +1641,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     },
     getTaskBoard: (workspaceId) => send(`${workspacePath(workspaceId)}/tasks`),
     createGoal: (workspaceId, title) => send(`${workspacePath(workspaceId)}/goals`, { method: "POST", body: { title } }),
-    createTask: (workspaceId, { goalId, title, contract }) =>
-      send(`${workspacePath(workspaceId)}/tasks`, { method: "POST", body: { goal_id: goalId, title, contract } }),
+    createTask: (workspaceId, { goalId, title, kind, contract }) =>
+      send(`${workspacePath(workspaceId)}/tasks`, { method: "POST", body: { goal_id: goalId, title, kind, contract } }),
     getTask: (workspaceId, taskId) => send(taskPath(workspaceId, taskId)),
     updateTaskContract: (workspaceId, taskId, contract, note) =>
       send(`${taskPath(workspaceId, taskId)}/contract`, { method: "PUT", body: { contract, note } }),
@@ -1705,8 +1765,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
       }),
     getTaskBoard: (workspaceId) => call<TaskBoard>("task_board", { workspaceId }),
     createGoal: (workspaceId, title) => call<Goal>("goal_create", { workspaceId, title }),
-    createTask: (workspaceId, { goalId, title, contract }) =>
-      call<TaskView>("task_create", { workspaceId, goalId, title, contract }),
+    createTask: (workspaceId, { goalId, title, kind, contract }) =>
+      call<TaskView>("task_create", { workspaceId, goalId, title, kind, contract }),
     getTask: (workspaceId, taskId) => call<TaskDetail>("task_detail", { workspaceId, taskId }),
     updateTaskContract: (workspaceId, taskId, contract, note) =>
       call<TaskView>("task_contract_update", { workspaceId, taskId, contract, note }),

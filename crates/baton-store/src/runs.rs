@@ -159,7 +159,13 @@ pub(crate) fn decide_in(
 ) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
-    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, guards: &loaded.guards };
+    let ctx = RunContext {
+        task: &task_ctx,
+        runs: &loaded.runs,
+        leases: &loaded.leases,
+        workdirs: &loaded.workdirs,
+        guards: &loaded.guards,
+    };
     run::decide(&ctx, command, now)
 }
 

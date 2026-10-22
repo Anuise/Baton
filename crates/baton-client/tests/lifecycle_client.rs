@@ -50,7 +50,7 @@ async fn new_workspace(harness: &Harness, client: &RuntimeClient) -> String {
 async fn dispatched_run(client: &RuntimeClient, workspace_id: &str) -> String {
     let goal = client.create_goal(workspace_id, "研究競品").await.unwrap();
     let created = client
-        .create_task(workspace_id, &CreateTaskRequest { goal_id: goal.id, title: "整理".into(), contract: complete() })
+        .create_task(workspace_id, &CreateTaskRequest { goal_id: goal.id, title: "整理".into(), kind: Default::default(), contract: complete() })
         .await
         .unwrap();
     client.mark_task_ready(workspace_id, &created.task.id).await.unwrap();

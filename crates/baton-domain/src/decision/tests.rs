@@ -31,6 +31,7 @@ fn task(id: &str, status: TaskStatus, contract_version: i64) -> Task {
         workspace_id: "ws".into(),
         goal_id: "g".into(),
         title: format!("工作 {id}"),
+        kind: crate::workdir::TaskKind::default(),
         status,
         version: 1,
         contract_version,

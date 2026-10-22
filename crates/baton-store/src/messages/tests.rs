@@ -32,9 +32,10 @@ async fn store_with_running_t1(dir: &Path) -> (Store, AgentScope) {
     let goal = TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() };
     store.apply_task_command("w1".into(), goal, T1).await.unwrap();
     for id in ["t1", "t2"] {
-        let task = TaskCommand::CreateTask { id: id.into(), goal_id: "g1".into(), title: id.into(), contract: complete() };
+        let task = TaskCommand::CreateTask { id: id.into(), goal_id: "g1".into(), title: id.into(), kind: Default::default(), contract: complete() };
         store.apply_task_command("w1".into(), task, T1).await.unwrap();
         store.apply_task_command("w1".into(), TaskCommand::MarkReady { task_id: id.into() }, T1).await.unwrap();
+        crate::workdirs::register_ready(&store, "w1", id, T1).await;
     }
     dispatch(&store, "r1", "t1").await;
     (store, AgentScope { workspace_id: "w1".into(), run_id: "r1".into(), generation: 1 })
@@ -120,9 +121,10 @@ async fn the_same_message_id_in_another_workspace_is_a_different_message() {
     store.apply_workspace_command(create, T1).await.unwrap();
     store.apply_task_command("w2".into(), TaskCommand::CreateGoal { id: "g2".into(), title: "目標".into() }, T1).await.unwrap();
     for id in ["u1", "u2"] {
-        let task = TaskCommand::CreateTask { id: id.into(), goal_id: "g2".into(), title: id.into(), contract: complete() };
+        let task = TaskCommand::CreateTask { id: id.into(), goal_id: "g2".into(), title: id.into(), kind: Default::default(), contract: complete() };
         store.apply_task_command("w2".into(), task, T1).await.unwrap();
         store.apply_task_command("w2".into(), TaskCommand::MarkReady { task_id: id.into() }, T1).await.unwrap();
+        crate::workdirs::register_ready(&store, "w2", id, T1).await;
     }
     let command = RunCommand::Dispatch { run_id: "r9".into(), task_id: "u1".into(), profile_id: "p1".into() };
     store.apply_run_command("w2".into(), command, T1).await.unwrap();
