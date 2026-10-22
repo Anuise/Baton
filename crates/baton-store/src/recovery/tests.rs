@@ -144,3 +144,61 @@ async fn withdrawn_and_stop_intent_records_are_remembered_but_not_counted() {
     assert!(store.recovery_event().await.unwrap().is_none());
     assert_eq!(store.recovery_mirror(T0).await.unwrap().journal_cursor.as_deref(), Some("rcv_g2"));
 }
+
+fn guardian_for(event_id: &str, id: &str) -> JournalRecord {
+    match guardian(1, id) {
+        JournalRecord::Attempt(attempt) => JournalRecord::Attempt(GuardianAttempt { event_id: event_id.into(), ..attempt }),
+        other => other,
+    }
+}
+
+/// 把最新的恢復事件推到成功（處置完成、觀察期滿）。
+async fn succeed_latest(store: &Store) {
+    store.apply_recovery(RecoveryCommand::Complete { affected: vec![] }, T0).await.unwrap();
+    let after = T0.plus_millis(24 * 60 * 60 * 1000);
+    let event = store.apply_recovery(RecoveryCommand::Observe, after).await.unwrap();
+    assert_eq!(event.status, RecoveryStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn a_guardian_record_pointing_at_a_closed_event_starts_a_new_event_instead_of_failing_the_import() {
+    // 監護的鏡像過期：rec_g 已成功結束，監護仍以 rec_g 寫下新的嘗試（R151 第 2 項）
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path()).await;
+    store.import_guardian_journal(vec![guardian(1, "rcv_g1")], T0).await.unwrap();
+    succeed_latest(&store).await;
+
+    let journal = vec![guardian(1, "rcv_g1"), guardian_for("rec_g", "rcv_g2")];
+    let imported = store.import_guardian_journal(journal.clone(), T0).await.unwrap();
+    assert_eq!(imported, vec![("rcv_g2".to_string(), ImportDisposition::Counted)]);
+    let event = store.recovery_event().await.unwrap().unwrap();
+    assert_ne!(event.id, "rec_g", "不能沿用已結束事件的識別");
+    assert_eq!((event.attempts_used, event.status), (1, RecoveryStatus::Attempting));
+    assert_eq!(event.current_attempt().unwrap().id, "rcv_g2");
+
+    // 舊事件維持成功，之後再次啟動讀到同一份日誌也不會失敗
+    let closed: String = store
+        .read(|conn| Ok(conn.query_row("SELECT status FROM recovery_event WHERE id = 'rec_g'", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(closed, "succeeded");
+    assert!(store.import_guardian_journal(journal, T0).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_guardian_record_pointing_at_an_older_closed_event_also_starts_a_new_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path()).await;
+    store.import_guardian_journal(vec![guardian(1, "rcv_g1")], T0).await.unwrap();
+    succeed_latest(&store).await;
+    // Runtime 自己偵測到另一次崩潰並恢復成功，最新事件變成 rec_2
+    store.note_runtime_start(true, "rec_2".into(), T0).await.unwrap();
+    store.apply_recovery(RecoveryCommand::Begin { attempt_id: "a1".into() }, T0).await.unwrap();
+    succeed_latest(&store).await;
+
+    let imported = store.import_guardian_journal(vec![guardian_for("rec_g", "rcv_g3")], T0).await.unwrap();
+    assert_eq!(imported, vec![("rcv_g3".to_string(), ImportDisposition::Counted)]);
+    let event = store.recovery_event().await.unwrap().unwrap();
+    assert!(event.id != "rec_g" && event.id != "rec_2", "新事件：{}", event.id);
+    assert_eq!(event.status, RecoveryStatus::Attempting);
+}

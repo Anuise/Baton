@@ -147,6 +147,16 @@ impl KnowledgeScope {
     pub fn global() -> Self {
         Self { kind: ScopeKind::Global, workspace_id: None, goal_id: None, task_id: None }
     }
+
+    /// 這個範圍涵蓋 `other`：`other` 適用的地方，這個範圍也都適用。
+    pub fn covers(&self, other: &KnowledgeScope) -> bool {
+        match self.kind {
+            ScopeKind::Global => true,
+            ScopeKind::Workspace => other.kind != ScopeKind::Global && other.workspace_id == self.workspace_id,
+            ScopeKind::Goal => matches!(other.kind, ScopeKind::Goal | ScopeKind::Task) && other.goal_id == self.goal_id,
+            ScopeKind::Task => other.kind == ScopeKind::Task && other.task_id == self.task_id,
+        }
+    }
 }
 
 /// 條目的來源：使用者，或提交它的 Agent Run（含世代與當時的 Task）。
@@ -440,7 +450,7 @@ fn check_validity(from: Timestamp, until: Option<Timestamp>) -> Result<(), Knowl
 }
 
 /// 建立條目。狀態由來源決定：使用者建立的是已驗證；Agent 只能提交教訓，而且一律是候選。
-/// 指定 `supersedes` 時（只限使用者），被取代的條目必須是同種類、已驗證，並在同一個變更中轉為「被取代」。
+/// 指定 `supersedes` 時（只限使用者），被取代的條目必須是同種類、已驗證、範圍不比新條目寬，並在同一個變更中轉為「被取代」。
 pub fn create(
     new: NewKnowledge,
     supersedes: Option<&KnowledgeEntry>,
@@ -468,6 +478,10 @@ pub fn create(
         }
         if old.status != KnowledgeStatus::Verified {
             return Err(KnowledgeError::SupersedeInvalid(format!("被取代的條目目前是「{}」，必須是已驗證", old.status.as_str())));
+        }
+        // 範圍較窄的條目若能取代較寬的，就能讓別的 Workspace 的有效知識（與以它為來源的 Guard）跟著失效
+        if !new.scope.covers(&old.scope) {
+            return Err(KnowledgeError::SupersedeInvalid("新條目的適用範圍不能比被取代的條目窄".into()));
         }
         let mut old = old.clone();
         old.status = KnowledgeStatus::Superseded;

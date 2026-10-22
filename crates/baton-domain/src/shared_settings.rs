@@ -356,6 +356,14 @@ fn is_secret_entry(key: &str, value: &str) -> bool {
 fn clean(value: &Value, path: &str, dropped: &mut Vec<(String, ExclusionReason)>) -> Result<Value, Tainted> {
     match value {
         Value::String(text) if secrets::contains_secret_value(text) => Err(Tainted),
+        // `["--api-key", "<值>"]`：旗標與值是相鄰的兩個元素
+        Value::Array(items)
+            if items.windows(2).any(|pair| {
+                matches!(pair, [Value::String(flag), Value::String(value)] if secrets::flag_has_secret(flag, Some(value)))
+            }) =>
+        {
+            Err(Tainted)
+        }
         Value::Array(items) => {
             items.iter().enumerate().map(|(i, item)| clean(item, &format!("{path}[{i}]"), dropped)).collect::<Result<_, _>>().map(Value::Array)
         }

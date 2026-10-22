@@ -123,7 +123,12 @@ impl Store {
                     ImportDisposition::Withdrawn
                 } else {
                     let current = load_latest(tx)?;
-                    let outcome = recovery::import_guardian_attempt(current.as_ref(), attempt, stop_intent);
+                    let taken: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM recovery_event WHERE id = ?1)",
+                        [&attempt.event_id],
+                        |r| r.get(0),
+                    )?;
+                    let outcome = recovery::import_guardian_attempt(current.as_ref(), attempt, stop_intent, taken);
                     if let Some(change) = &outcome.change {
                         save_change(tx, change)?;
                     }

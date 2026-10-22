@@ -237,20 +237,24 @@ pub enum JourneyPlan {
     Run,
     /// 沿用先前嘗試完整結束的結果（build 與 candidate revision 相同）。
     Reuse { attempt: u32, steps: Vec<StepRecord>, artifacts: Vec<EvidenceArtifact> },
-    /// 先前的嘗試已經開始其中的外部操作而旅程沒有完成：不重送、不重跑，保留那次的紀錄。
+    /// 先前的嘗試已經開始其中的外部操作，而旅程沒有完成或不能沿用：不重送、不重跑，保留那次的紀錄。
     NotResent { attempt: u32, step: String, reason: &'static str, steps: Vec<StepRecord>, artifacts: Vec<EvidenceArtifact> },
 }
 
 /// 決定一條旅程在這次嘗試中怎麼處理（`previous` 依嘗試順序）：
-/// 1. 最近一次完整結束、而且驗證的是同一個 build 與 revision 的結果直接沿用；
-/// 2. 否則，最近一次開始了其中外部操作而沒有完成的嘗試：不重送（有結果未知的操作時以它為準）；
+/// 1. 最近一次完整結束、而且驗證的是同一個 build 與 revision 的結果直接沿用（兩者都觀察不到時無法證明相同，不沿用）；
+/// 2. 否則，最近一次開始了其中外部操作的嘗試：不重送（有結果未知的操作時以它為準）。旅程完整結束、只因 build
+///    不同而不能沿用時也一樣，同一個驗證要求中已開始的外部操作一律不重送（AI-428）；
 /// 3. 其餘整條重跑（未完成的步驟不拼接到新的嘗試）。
 pub fn plan_journey(journey: &Journey, previous: &[Attempt], candidate_revision: Option<&str>, build: Option<&str>) -> JourneyPlan {
     let key = journey.key.as_str();
-    if let Some(done) = previous.iter().rev().find(|a| a.completed(key) && a.build() == Some((candidate_revision, build))) {
+    let observed = candidate_revision.is_some() || build.is_some();
+    if let Some(done) =
+        previous.iter().rev().find(|a| observed && a.completed(key) && a.build() == Some((candidate_revision, build)))
+    {
         return JourneyPlan::Reuse { attempt: done.attempt, steps: done.records_of(key), artifacts: done.artifacts_of(key) };
     }
-    for attempt in previous.iter().rev().filter(|a| !a.completed(key)) {
+    for attempt in previous.iter().rev() {
         let externals = attempt.externals_of(key);
         let chosen = externals.iter().find(|(_, done)| !done).or(externals.last());
         if let Some((step, done)) = chosen {

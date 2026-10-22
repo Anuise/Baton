@@ -390,7 +390,7 @@ impl Store {
 }
 
 /// 在交易中載入目前狀態、交給 Domain 判定、寫入結果。
-fn apply_in(
+pub(crate) fn apply_in(
     tx: &Transaction<'_>,
     workspace_id: &str,
     command: DecisionCommand,

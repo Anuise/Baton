@@ -27,6 +27,7 @@ use crate::budget::{self, BudgetKind, ChargeOutcome, TaskBudget};
 use crate::decision::{self, DecisionRequest};
 use crate::event::DomainEvent;
 use crate::guard::{self, ActiveGuard, GuardViolation};
+use crate::handoff::GateState;
 use crate::session::{self, AgentSession, BindOutcome, LaunchFacts, ResumeCheck, SessionEdits};
 use crate::task::{
     self, ContractContent, ContractField, ContractFieldName, MissingItem, Task, TaskContext, TaskStatus, Versioned,
@@ -52,6 +53,8 @@ pub const EVENT_RUN_BLOCKED_REPORTED: &str = "run_blocked_reported";
 pub const EVENT_RUN_ADMISSION_DENIED: &str = "run_admission_denied";
 /// 准入被拒的結束原因前綴。
 pub const ADMISSION_DENIED_REASON: &str = "admission_denied";
+/// 寫入 launch intent 時帳號的額度門檻已不是 open：Run 沒有啟動就結束的結束原因前綴。
+pub const QUOTA_GATE_CLOSED_REASON: &str = "quota_gate_closed";
 pub const EVENT_RUN_NATIVE_SESSION_BOUND: &str = "run_native_session_bound";
 pub const EVENT_RUN_NATIVE_SESSION_CONFLICT: &str = "run_native_session_conflict";
 /// 交接（票 28）：舊程序已確認停止，Run 結束、寫入所有權交給 successor。
@@ -273,8 +276,8 @@ impl RunView {
 pub enum RunOutcome {
     Succeeded,
     Failed { reason: String },
-    /// 帳號突然限流而結束（Adapter 回報額度用盡之後程序以失敗結束）：Run 中斷、Task 回到 `ready` 等其他帳號接手，
-    /// 不計入任何預算（票 36）。
+    /// 帳號突然限流而結束（Adapter 回報額度用盡之後程序以失敗結束）：Run 中斷、Task 回到 `ready` 並排回派工佇列
+    /// 等其他帳號接手，不計入任何預算（票 36）。
     QuotaLimited { reason: String },
 }
 
@@ -361,7 +364,7 @@ pub struct RunChange {
     pub budget: Option<TaskBudget>,
     /// 預算用盡時建立的「預算用盡後的下一步」裁定請求（票 36）。
     pub decision: Option<DecisionRequest>,
-    /// 基礎設施重試在預算內：把 Task 排回派工佇列（排程會等到退避期限）。
+    /// 把 Task 排回派工佇列：基礎設施重試在預算內（排程會等到退避期限）、突然限流的退路，或啟動時帳號門檻已關閉。
     pub requeue: bool,
     /// 因 Run 而改變（或新建）的 Session（票 15）。
     pub sessions: Vec<AgentSession>,
@@ -472,6 +475,8 @@ pub struct RunContext<'a> {
     pub leases: &'a [ExecutionLease],
     /// 這一刻准入的 Run 會固定使用的共同設定版本（沒有採用任何版本為 `None`）；只有 `BeginLaunch` 使用。
     pub settings_version: Option<i64>,
+    /// 這一刻 Run 帳號的額度門檻；只有 `BeginLaunch` 使用（其他命令填 `Open`）。
+    pub launch_gate: GateState,
     /// Workspace 內平台登記的工作目錄（票 20）；派工只認已可用的目錄。
     pub workdirs: &'a [Workdir],
     /// Run 准入時要檢查的 Guard（Store 已篩出「啟用且來源教訓現在有效」者；範圍由 `guard::violations` 判定）。
@@ -642,6 +647,22 @@ impl<'a> Editing<'a> {
         })
     }
 
+    /// 同 `finish`，但使用者已要求取消的 Run 不論以哪種方式結束（啟動失敗、程序消失、Worker 失敗或限流結束）
+    /// 都完成取消：不計入任何預算、不重新排隊（取消 Run＝暫停，AI-241）。
+    fn finish_unless_cancelling(
+        self,
+        to: RunStatus,
+        event_type: &'static str,
+        reason: &str,
+        task_after: TaskStatus,
+        charge: Option<BudgetKind>,
+    ) -> Result<RunChange, RunError> {
+        if self.run.cancel_requested_at.is_some() {
+            return self.finish(RunStatus::Cancelled, EVENT_RUN_CANCELLED, "cancelled_by_user", TaskStatus::Ready, None);
+        }
+        self.finish(to, event_type, reason, task_after, charge)
+    }
+
     fn into_change(mut self) -> RunChange {
         let (sessions, events) = self.take_events();
         RunChange { run: Some(self.run), lease: self.lease, sessions, events, ..RunChange::default() }
@@ -672,6 +693,15 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                 Ok(admission) => admission,
                 Err(denied) => return deny_admission(edit, &denied, ctx.task.authorization.map(|a| a.revision)),
             };
+            // 派工之後帳號才進入 paused／draining（或撞上限）：不啟動程序，以不計預算的中斷結束，
+            // Task 重新排隊由排程交給其他帳號
+            if ctx.launch_gate.blocks_dispatch() {
+                let reason = format!("{QUOTA_GATE_CLOSED_REASON}：{}", ctx.launch_gate.as_str());
+                let mut change =
+                    edit.finish(RunStatus::Interrupted, EVENT_RUN_INTERRUPTED, &reason, TaskStatus::Ready, None)?;
+                change.requeue = true;
+                return Ok(change);
+            }
             edit.change_status(RunStatus::Starting)?;
             // 原生識別取得前，平台 Session、launch intent 與 command_id 在同一個交易中持久化
             let check = resume_check.as_ref();
@@ -726,7 +756,8 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
         }
         RunCommand::LaunchFailed { reason, .. } => {
             let reason = format!("launch_failed：{reason}");
-            edit.finish(RunStatus::Failed, EVENT_RUN_FAILED, &reason, TaskStatus::Ready, Some(BudgetKind::Infrastructure))
+            let charge = Some(BudgetKind::Infrastructure);
+            edit.finish_unless_cancelling(RunStatus::Failed, EVENT_RUN_FAILED, &reason, TaskStatus::Ready, charge)
         }
         RunCommand::Heartbeat { generation, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
@@ -788,6 +819,7 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                 }
                 None => BindOutcome::Bound,
             };
+            let in_use = matches!(outcome, BindOutcome::InUse { .. });
             match &run.native_session_id {
                 Some(bound) if *bound == native_session_id => {}
                 Some(bound) => {
@@ -795,13 +827,23 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                     let payload = serde_json::json!({ "bound": bound, "reported": native_session_id });
                     edit.push(EVENT_RUN_NATIVE_SESSION_CONFLICT, payload);
                 }
+                None if in_use => {
+                    // 原生識別已屬於另一個平台 Session：不綁到這個 Run，衝突留下事件供查核
+                    let payload = serde_json::json!({
+                        "bound": null,
+                        "reported": native_session_id,
+                        "reason": session::NATIVE_SESSION_IN_USE,
+                    });
+                    edit.push(EVENT_RUN_NATIVE_SESSION_CONFLICT, payload);
+                }
                 None => {
                     edit.push(EVENT_RUN_NATIVE_SESSION_BOUND, serde_json::json!({ "native_session_id": native_session_id }));
                     edit.run.native_session_id = Some(native_session_id);
                 }
             }
-            // 同一個原生 Session 正由另一個 Run 驅動：後到的這個 Run 必須停下，不能有兩個執行者
-            if matches!(outcome, BindOutcome::InUse { driven: true, .. }) && edit.run.cancel_requested_at.is_none() {
+            // 同一個原生 Session 已屬於另一個平台 Session：正由別的 Run 驅動，或暫停中、之後可能被別的 Run 接續。
+            // 後到的這個 Run 都必須停下，不能有兩個執行者
+            if in_use && edit.run.cancel_requested_at.is_none() {
                 edit.run.cancel_requested_at = Some(now);
                 edit.push(EVENT_RUN_CANCEL_REQUESTED, serde_json::json!({ "reason": session::NATIVE_SESSION_IN_USE }));
             }
@@ -820,20 +862,26 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                     TaskStatus::Verifying,
                     None,
                 ),
-                RunOutcome::Failed { reason } => edit.finish(
+                RunOutcome::Failed { reason } => edit.finish_unless_cancelling(
                     RunStatus::Failed,
                     EVENT_RUN_FAILED,
                     &format!("exited_with_failure：{reason}"),
                     TaskStatus::Ready,
                     Some(BudgetKind::Implementation),
                 ),
-                RunOutcome::QuotaLimited { reason } => edit.finish(
-                    RunStatus::Interrupted,
-                    EVENT_RUN_INTERRUPTED,
-                    &format!("quota_limited：{reason}"),
-                    TaskStatus::Ready,
-                    None,
-                ),
+                RunOutcome::QuotaLimited { reason } => {
+                    let cancelling = run.cancel_requested_at.is_some();
+                    let mut change = edit.finish_unless_cancelling(
+                        RunStatus::Interrupted,
+                        EVENT_RUN_INTERRUPTED,
+                        &format!("quota_limited：{reason}"),
+                        TaskStatus::Ready,
+                        None,
+                    )?;
+                    // 等其他帳號接手：排回派工佇列（已要求取消的不重派）
+                    change.requeue = !cancelling;
+                    Ok(change)
+                }
             }
         }
         // 中斷都來自恢復、完全退出或還原：不計入任何預算
@@ -855,7 +903,7 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                 }
                 // 只有確實觀察到程序已經不在，才把 Run 判定為中斷
                 // 程序意外消失是基礎設施問題
-                ProcessObservation::Dead => edit.finish(
+                ProcessObservation::Dead => edit.finish_unless_cancelling(
                     RunStatus::Interrupted,
                     EVENT_RUN_INTERRUPTED,
                     "process_dead_after_lease_expired",

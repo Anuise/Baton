@@ -263,11 +263,14 @@ fn save_deviation_status(tx: &Transaction<'_>, d: &DesignDeviation) -> rusqlite:
 }
 
 /// Gate 查驗審查證據（票 44）：審查存在、審的是 Workflow 的 Task、對照目前的規格版本、是最新 candidate 的審查、兩軸都通過。
+/// 兩軸都通過之外，審查的 candidate 也必須是受驗目錄目前的 revision（`current_build`，觀察不到時不比較）：
+/// 審查之後才提交的改動沒有被審過（比照驗證證據，R151 第 13 項）。
 pub(crate) fn check_review(
     conn: &Connection,
     workspace_id: &str,
     review_id: &str,
     workflow_task: Option<&str>,
+    current_build: Option<&str>,
 ) -> rusqlite::Result<(EvidenceStatus, Option<AxisReviewers>)> {
     let Some(review) = load_review(conn, workspace_id, review_id)? else {
         return Ok((EvidenceStatus::NotFound, None));
@@ -281,12 +284,21 @@ pub(crate) fn check_review(
         workflow_task,
     );
     let status = match standing {
+        review::Standing::Passed if current_build.is_some_and(|b| !same_revision(&record.review.candidate_revision, b)) => {
+            EvidenceStatus::BuildChanged
+        }
         review::Standing::Passed => EvidenceStatus::Valid,
         review::Standing::NotPassed(_) => EvidenceStatus::NotPassed,
         review::Standing::Stale(_) => EvidenceStatus::Stale,
         review::Standing::OtherSubject => EvidenceStatus::OtherSubject,
     };
     Ok((status, Some(record.review.reviewers())))
+}
+
+/// reviewer 填的 candidate 與觀察到的 revision（完整的 commit）是否是同一個：相同，或 candidate 是它的縮寫（至少 7 位十六進位）。
+fn same_revision(candidate: &str, observed: &str) -> bool {
+    candidate == observed
+        || (candidate.len() >= 7 && candidate.chars().all(|c| c.is_ascii_hexdigit()) && observed.starts_with(candidate))
 }
 
 impl Store {
@@ -662,5 +674,20 @@ impl Store {
             })
             .await?;
         outcome
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_revision;
+
+    #[test]
+    fn a_candidate_matches_the_observed_commit_only_when_equal_or_a_hex_abbreviation_of_it() {
+        let head = "0123456789abcdef0123456789abcdef01234567";
+        assert!(same_revision(head, head));
+        assert!(same_revision("0123456", head), "7 位以上的縮寫");
+        assert!(!same_revision("012345", head), "太短的縮寫不算");
+        assert!(!same_revision("fedcba9", head));
+        assert!(!same_revision("HEAD", head), "分支或 HEAD 這類會移動的名稱不算");
     }
 }

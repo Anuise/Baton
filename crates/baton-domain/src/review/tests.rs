@@ -166,6 +166,27 @@ fn an_axis_is_reused_only_when_the_change_provably_does_not_touch_what_it_review
 }
 
 #[test]
+fn git_quoted_paths_are_unquoted_before_matching_and_unparsable_ones_count_as_touching() {
+    // 檔名含 `"`、`\`、控制字元或非 ASCII 時 git 會加 C 風格引號（review-notes #22）
+    assert!(touches(r#""src/a\"b.rs""#, "src/a\"b.rs"));
+    assert!(touches(r#""src/back\\slash.rs""#, "src"));
+    assert!(touches(r#""src/tab\there.rs""#, "src/tab\there.rs"));
+    assert!(touches(r#""src/line\nbreak.rs""#, "src/line\nbreak.rs"));
+    assert!(touches(r#""src/\345\214\257\345\207\272.rs""#, "src/匯出.rs"), "八進位跳脫組回 UTF-8");
+    assert!(!touches(r#""docs/a\"b.md""#, "src"), "還原後不在範圍內就不受影響");
+    // 無法解析的引號路徑：寧可判為受影響
+    assert!(touches(r#""docs/bad\q.md""#, "src"));
+    assert!(touches(r#""docs/\377.md""#, "src"), "不是合法的 UTF-8");
+    assert!(touches(r#""docs/unterminated\""#, "src"));
+
+    // 經由沿用審查：被引號包住的變更檔案落在審過的範圍內，不能沿用
+    let first = submitted("r1", submission("c1", axis("規範", &["src"], &["錯誤處理"]), axis("需求", &["src/a\"b.rs"], &[])));
+    let err = submit_as("r2", "t_reviewer2", submission("c2", axis("規範", &["src"], &[]), reuse("r1")), &[prior(&first, Ok(vec![r#""src/a\"b.rs""#]))])
+        .unwrap_err();
+    assert_eq!(err.code(), "review_reuse_rejected", "{err}");
+}
+
+#[test]
 fn reuse_also_requires_the_same_spec_version_or_standards_source_and_recorded_paths() {
     let first = submitted("r1", submission("c1", axis("規範", &[], &[]), axis("需求", &["src"], &[])));
     // 規範軸沒有記錄範圍：無法證明

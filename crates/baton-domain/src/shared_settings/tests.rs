@@ -403,3 +403,31 @@ fn secret_named_headers_with_long_token_values_are_detected() {
         assert!(!secrets::contains_secret_value(plain), "{plain} 不應被偵測");
     }
 }
+
+#[test]
+fn a_secret_named_flag_followed_by_its_value_as_a_separate_word_is_a_secret() {
+    // R151 第 17 項：旗標名稱與值分成兩個字詞（`--token abcd…`、`["--api-key","abcd…"]`）
+    for secret in ["mytool --token abcd1234efgh5678", "--api-key abcdefghijkl1234", "--password hunter2hunter2"] {
+        assert!(secrets::contains_secret_value(secret), "{secret} 應被偵測");
+    }
+    for plain in ["--api-key ${API_KEY}", "--max-tokens 4000", "--token-file", "--token --verbose", "--token-limit 5000"] {
+        assert!(!secrets::contains_secret_value(plain), "{plain} 不應被偵測");
+    }
+
+    let candidate = import_ok(
+        None,
+        None,
+        Some(
+            r#"{"mcpServers":{"leaky":{"command":"x","args":["--api-key","abcdefghijkl1234"]},
+                              "ref":{"command":"y","args":["--api-key","${API_KEY}"]},
+                              "budget":{"command":"z","args":["--max-tokens","4000"]}}}"#,
+        ),
+    );
+    assert!(!candidate.bundle.mcp_servers.contains_key("leaky"));
+    assert!(candidate.bundle.mcp_servers.contains_key("ref"));
+    assert!(candidate.bundle.mcp_servers.contains_key("budget"));
+    assert!(!serde_json::to_string(&candidate).unwrap().contains("abcdefghijkl1234"));
+
+    let (redacted, count) = secrets::redact_secrets("run --token abcd1234efgh5678 now", "***");
+    assert_eq!((redacted.as_str(), count), ("run --token *** now", 1));
+}

@@ -3,6 +3,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::authorization::{AuthorizationRevision, Capability, Grant, RevisionSource, SourceKind};
 use crate::guard::{self, ActiveGuard, GuardRule};
+use crate::handoff::GateState;
 use crate::knowledge::{self, KnowledgeContent, KnowledgeKind, KnowledgeScope, KnowledgeSource, NewKnowledge};
 use crate::task::{
     ContractField, Dependency, Goal, TaskChange, TaskCommand, TaskContract,
@@ -48,6 +49,8 @@ struct World {
     authorization: Option<AuthorizationRevision>,
     /// 這一刻准入的 Run 會固定使用的共同設定版本。
     settings_version: Option<i64>,
+    /// 寫入 launch intent 這一刻，Run 帳號的額度門檻。
+    launch_gate: GateState,
 }
 
 impl World {
@@ -69,6 +72,7 @@ impl World {
             next_run: 0,
             authorization: None,
             settings_version: None,
+            launch_gate: GateState::Open,
         };
         world.task_command(TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() }).unwrap();
         for id in task_ids {
@@ -137,6 +141,7 @@ impl World {
             workdirs: &self.workdirs,
             guards: &self.guards,
             settings_version: self.settings_version,
+            launch_gate: self.launch_gate,
             sessions: &self.sessions,
             budgets: &self.budgets,
         };
@@ -1203,6 +1208,28 @@ fn a_run_reporting_a_native_session_driven_by_another_run_is_asked_to_stop() {
     assert_eq!(second_session.native_session_id, None, "同一個原生 Session 不會綁到第二個平台 Session");
 }
 
+#[test]
+fn a_run_reporting_a_native_session_owned_by_a_suspended_session_is_not_bound_and_is_asked_to_stop() {
+    // 暫停中的 Session 之後可能被另一個 Run 以 --resume 接續：後到的 Run 不能繼續驅動同一個原生 Session（review-notes #11）
+    let mut world = World::new(&["t1", "t2"]);
+    let first = world.running("t1", T0);
+    bind(&mut world, &first, "sess-a").unwrap();
+    world.step(RunCommand::Interrupt { run_id: first.clone(), reason: "x".into() }, later(500)).unwrap();
+    let suspended = world.run(&first).agent_session_id.clone().unwrap();
+    let suspended = world.sessions.iter().find(|s| s.id == suspended).unwrap();
+    assert_eq!((suspended.state, suspended.driver_run_id.as_deref()), (session::SessionState::Suspended, None));
+    let second = world.running("t2", T0);
+
+    let change = bind(&mut world, &second, "sess-a").unwrap();
+
+    assert_eq!(world.run(&second).native_session_id, None, "原生識別屬於另一個平台 Session，不綁到這個 Run");
+    assert_eq!(world.run(&second).cancel_requested_at, Some(later(1_000)));
+    let events = run_events(&change);
+    assert!(events.iter().any(|e| e.event_type == EVENT_RUN_NATIVE_SESSION_CONFLICT));
+    let cancel = events.into_iter().find(|e| e.event_type == EVENT_RUN_CANCEL_REQUESTED).unwrap();
+    assert_eq!(cancel.payload["reason"], session::NATIVE_SESSION_IN_USE);
+}
+
 // ---------------------------------------------------------------- 修正與重試預算（票 36）
 
 fn used(world: &World, task_id: &str) -> (u32, u32, u32) {
@@ -1269,4 +1296,96 @@ fn quota_limits_recovery_interruptions_and_cancellations_never_charge_any_budget
 
     assert_eq!(used(&world, "t1"), (0, 0, 0));
     assert!(world.budgets.is_empty());
+}
+
+// ------------------------------------------------------------ 取消意圖優先（R151 第 4 項）
+
+/// 已要求取消的 Run 以失敗類路徑結束：一律完成取消，不計任何預算、不重新排隊（取消 Run＝暫停）。
+fn assert_cancelled_without_charge(world: &World, change: &RunChange, run_id: &str) {
+    assert_eq!(world.run(run_id).status, RunStatus::Cancelled);
+    assert_eq!(world.run(run_id).end_reason.as_deref(), Some("cancelled_by_user"));
+    assert!(change.events.iter().any(|e| e.event_type == EVENT_RUN_CANCELLED));
+    assert!(!change.requeue, "取消不自動重派");
+    assert!(change.budget.is_none() && change.decision.is_none(), "取消不計預算");
+    assert!(!world.lease(run_id).is_held());
+    assert_eq!(world.task("t1").status, TaskStatus::Ready);
+    assert_eq!(used(world, "t1"), (0, 0, 0));
+}
+
+#[test]
+fn a_launch_failure_after_a_cancel_request_completes_the_cancel() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.dispatch("t1", T0).unwrap();
+    world.step(begin(&run_id, "cmd"), T0).unwrap();
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+
+    let change = world.step(RunCommand::LaunchFailed { run_id: run_id.clone(), reason: "找不到 claude".into() }, T0).unwrap();
+
+    assert_cancelled_without_charge(&world, &change, &run_id);
+}
+
+#[test]
+fn a_process_found_dead_after_a_cancel_request_completes_the_cancel() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+
+    let now = later(LEASE_DURATION_MS + 1);
+    let change =
+        world.step(RunCommand::ReconcileLease { run_id: run_id.clone(), observed: ProcessObservation::Dead }, now).unwrap();
+
+    assert_cancelled_without_charge(&world, &change, &run_id);
+}
+
+#[test]
+fn a_failed_or_quota_limited_exit_after_a_cancel_request_completes_the_cancel() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+    let failed = RunOutcome::Failed { reason: "收到停止訊號".into() };
+    let change = world.step(RunCommand::Finish { run_id: run_id.clone(), generation: 1, outcome: failed }, T0).unwrap();
+    assert_cancelled_without_charge(&world, &change, &run_id);
+
+    let run_id = world.running("t1", T0);
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+    let limited = RunOutcome::QuotaLimited { reason: "usage limit reached".into() };
+    let change = world.step(RunCommand::Finish { run_id: run_id.clone(), generation: 2, outcome: limited }, T0).unwrap();
+    assert_cancelled_without_charge(&world, &change, &run_id);
+}
+
+// ------------------------------------------------------------ 額度門檻（R151 第 20、21 項）
+
+#[test]
+fn the_launch_intent_rechecks_the_accounts_quota_gate_and_ends_the_run_without_a_process_or_charge() {
+    for gate in [GateState::Paused, GateState::Draining] {
+        let mut world = World::new(&["t1"]);
+        let run_id = world.dispatch("t1", T0).unwrap();
+        // 派工之後帳號才進入 paused／draining
+        world.launch_gate = gate;
+
+        let change = world.begin_launch(&run_id, later(1_000));
+
+        let run = world.run(&run_id);
+        assert_eq!(run.status, RunStatus::Interrupted);
+        assert!(run.end_reason.as_deref().unwrap().starts_with("quota_gate_closed"), "{:?}", run.end_reason);
+        assert_eq!((run.command_id.as_deref(), run.admitted_at, run.agent_session_id.as_deref()), (None, None, None));
+        assert!(world.sessions.is_empty(), "沒有寫入 launch intent，不建立 Session");
+        assert!(!world.lease(&run_id).is_held());
+        assert_eq!(world.task("t1").status, TaskStatus::Ready);
+        assert!(change.requeue, "Task 重新排隊，由排程交給其他帳號");
+        assert_eq!(change.outbox_delivered.as_deref(), Some(run_id.as_str()));
+        assert_eq!((change.budget, used(&world, "t1")), (None, (0, 0, 0)));
+    }
+}
+
+#[test]
+fn a_quota_limited_exit_requeues_the_task_for_another_account() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    let limited = RunOutcome::QuotaLimited { reason: "usage limit reached".into() };
+
+    let change = world.step(RunCommand::Finish { run_id, generation: 1, outcome: limited }, T0).unwrap();
+
+    assert!(change.requeue, "等其他帳號接手：排回派工佇列");
+    assert_eq!((change.budget, world.task("t1").status), (None, TaskStatus::Ready));
 }

@@ -53,6 +53,18 @@ fn report(
     evidence: Vec<CheckedEvidence>,
     note: &str,
 ) -> Result<WorkflowInstance, WorkflowError> {
+    report_with(workflow, playbook, prior, outcome, evidence, note, BudgetDecision::default())
+}
+
+fn report_with(
+    workflow: &WorkflowInstance,
+    playbook: &PlaybookVersion,
+    prior: &mut Vec<StageAttempt>,
+    outcome: ClaimedOutcome,
+    evidence: Vec<CheckedEvidence>,
+    note: &str,
+    budget_decision: BudgetDecision,
+) -> Result<WorkflowInstance, WorkflowError> {
     let input = StageResultInput {
         stage: workflow.current_stage.clone().unwrap(),
         expected_revision: workflow.revision,
@@ -61,6 +73,7 @@ fn report(
         note: note.into(),
         build: None,
         basis_overturned: None,
+        budget_decision,
     };
     let change = record_result(workflow, playbook, prior, input, format!("att_{}", prior.len()), recorder(), T0)?;
     prior.push(change.attempt.unwrap());
@@ -69,6 +82,16 @@ fn report(
 
 /// 以每項 exit check 都有效的證據通過目前的 Stage。
 fn pass(workflow: &WorkflowInstance, playbook: &PlaybookVersion, prior: &mut Vec<StageAttempt>) -> WorkflowInstance {
+    pass_with(workflow, playbook, prior, BudgetDecision::default())
+}
+
+/// 同 [`pass`]，附上「預算用盡後的下一步」裁定的狀態。
+fn pass_with(
+    workflow: &WorkflowInstance,
+    playbook: &PlaybookVersion,
+    prior: &mut Vec<StageAttempt>,
+    budget_decision: BudgetDecision,
+) -> WorkflowInstance {
     let stage = playbook.definition.stage(workflow.current_stage.as_deref().unwrap()).unwrap();
     let evidence = stage
         .exit_checks
@@ -86,7 +109,22 @@ fn pass(workflow: &WorkflowInstance, playbook: &PlaybookVersion, prior: &mut Vec
             CheckedEvidence { evidence: Evidence { check: c.key.clone(), reference }, status: EvidenceStatus::Valid, reviewers }
         })
         .collect();
-    report(workflow, playbook, prior, ClaimedOutcome::Passed, evidence, "").unwrap()
+    report_with(workflow, playbook, prior, ClaimedOutcome::Passed, evidence, "", budget_decision).unwrap()
+}
+
+/// 每項 exit check 都有效的證據（給 [`needs_budget_decision`] 判斷用）。
+fn full_input(workflow: &WorkflowInstance, playbook: &PlaybookVersion) -> StageResultInput {
+    let stage = playbook.definition.stage(workflow.current_stage.as_deref().unwrap()).unwrap();
+    StageResultInput {
+        stage: stage.key.clone(),
+        expected_revision: workflow.revision,
+        outcome: ClaimedOutcome::Passed,
+        evidence: stage.exit_checks.iter().map(|c| evidence(&c.key, EvidenceStatus::Valid)).collect(),
+        note: String::new(),
+        build: None,
+        basis_overturned: None,
+        budget_decision: BudgetDecision::default(),
+    }
 }
 
 #[test]
@@ -251,6 +289,7 @@ fn only_the_current_stage_at_the_current_revision_can_be_reported() {
         note: String::new(),
         build: None,
         basis_overturned: None,
+        budget_decision: BudgetDecision::default(),
     };
     let error = record_result(&workflow, &playbook, &[], input.clone(), "a".into(), recorder(), T0).unwrap_err();
     assert_eq!(error.code(), "stage_not_current");
@@ -278,12 +317,30 @@ fn failures_follow_the_failure_route_until_the_budget_is_used_up() {
         assert_eq!(workflow.status == WorkflowStatus::Blocked, n == 3, "第 {n} 次");
     }
     assert!(workflow.blocked_reason.as_deref().unwrap().contains("用盡預算"));
-    // 缺證據的回報不解除預算用盡的阻擋
+    // 缺證據的回報不解除預算用盡的阻擋，也不需要送裁定
+    assert!(!needs_budget_decision(&workflow, &playbook, &prior, &StageResultInput { evidence: vec![], ..full_input(&workflow, &playbook) }).unwrap());
     workflow = report(&workflow, &playbook, &mut prior, ClaimedOutcome::Passed, vec![], "").unwrap();
     assert_eq!(workflow.status, WorkflowStatus::Blocked);
-    // 有證據的通過才繼續
-    workflow = pass(&workflow, &playbook, &mut prior);
+    // 證據齊全也不能由 Controller 自行解除：預算用盡後的下一步必須經使用者裁定（review-notes #20，spec D-15）
+    assert!(needs_budget_decision(&workflow, &playbook, &prior, &full_input(&workflow, &playbook)).unwrap());
+    for decision in [
+        BudgetDecision::NotRequested,
+        BudgetDecision::Pending { request_id: "dr_budget".into() },
+        BudgetDecision::Denied { request_id: "dr_budget".into() },
+        BudgetDecision::Unavailable { reason: "Workflow 沒有綁定 Task".into() },
+    ] {
+        let still = pass_with(&workflow, &playbook, &mut prior, decision.clone());
+        assert_eq!((still.status, still.current_stage.as_deref()), (WorkflowStatus::Blocked, Some("hypothesis")), "{decision:?}");
+        assert!(still.blocked_reason.as_deref().unwrap().contains("預算用盡後的下一步"), "{decision:?}");
+        assert_eq!(prior.last().unwrap().outcome, AttemptOutcome::Blocked);
+        workflow = still;
+    }
+    assert!(workflow.blocked_reason.as_deref().unwrap().contains("Workflow 沒有綁定 Task"));
+    // 使用者核准之後，有證據的通過才繼續
+    workflow = pass_with(&workflow, &playbook, &mut prior, BudgetDecision::Approved);
     assert_eq!((workflow.status, workflow.current_stage.as_deref()), (WorkflowStatus::Active, Some("probe")));
+    // 預算沒有用盡的 Stage 不需要裁定
+    assert!(!needs_budget_decision(&workflow, &playbook, &prior, &full_input(&workflow, &playbook)).unwrap());
 }
 
 #[test]
@@ -339,7 +396,7 @@ fn the_last_stage_completes_the_workflow_and_stage_states_follow_the_attempts() 
     }
     assert_eq!(workflow.status, WorkflowStatus::Completed);
     assert!(stage_states(&workflow, &playbook, &prior).iter().all(|s| *s == StageState::Passed));
-    let input = StageResultInput { stage: "conclusion".into(), expected_revision: workflow.revision, outcome: ClaimedOutcome::Passed, evidence: vec![], note: String::new(), build: None, basis_overturned: None };
+    let input = StageResultInput { stage: "conclusion".into(), expected_revision: workflow.revision, outcome: ClaimedOutcome::Passed, evidence: vec![], note: String::new(), build: None, basis_overturned: None, budget_decision: BudgetDecision::default() };
     assert_eq!(record_result(&workflow, &playbook, &prior, input, "a".into(), recorder(), T0).unwrap_err().code(), "workflow_completed");
 }
 

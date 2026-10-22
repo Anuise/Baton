@@ -148,15 +148,17 @@ fn apply_replay_updates(tx: &Transaction<'_>, bundle: &EvidenceBundle) -> rusqli
                     ],
                 )?;
             }
+            // 只推翻這次驗證開始前就有的錄製：同時跑的另一個驗證在這之後錄下的新動作，不是這次重播或比對的對象
             ReplayUpdate::MarkStale { case_key, reasons } => {
                 tx.execute(
                     "UPDATE replay_action SET status = 'stale', stale_reasons = ?3, updated_at = ?4
-                     WHERE workspace_id = ?1 AND case_key = ?2",
+                     WHERE workspace_id = ?1 AND case_key = ?2 AND recorded_at <= ?5",
                     rusqlite::params![
                         bundle.workspace_id,
                         case_key,
                         serde_json::to_string(&reasons).expect("原因一定可以序列化"),
                         now,
+                        bundle.started_at.as_millis(),
                     ],
                 )?;
             }
@@ -208,17 +210,21 @@ fn active_workspace(conn: &Connection, workspace_id: &str) -> Result<String, Ver
 /// 在交易中查驗 Stage 的驗證證據（票 43 的 exit check）：Bundle 必須判定為 passed，依據的是這個 Workspace 目前的
 /// Profile 版本，而且綁定 Task 時，那個 Task 的契約版本仍與驗證當時相同。
 /// 證據為 passed 之外，Bundle 驗證的 build 也必須是受驗目錄目前的 revision（票 50；`builds` 是 Runtime 觀察到的目前 build，
-/// 沒有觀察到的目錄不比較）。
+/// 沒有觀察到的目錄不比較）。Workflow 綁定 Task（`workflow_task`）時，Bundle 必須是那個 Task 的驗證（review-notes #21）。
 pub(crate) fn verification_evidence_status(
     conn: &Connection,
     workspace_id: &str,
     bundle_id: &str,
+    workflow_task: Option<&str>,
     builds: &super::workflows::Builds,
 ) -> rusqlite::Result<baton_domain::workflow::EvidenceStatus> {
     use baton_domain::workflow::EvidenceStatus;
     let Some(bundle) = load_bundles(conn, "id = ?1 AND workspace_id = ?2", [bundle_id, workspace_id])?.pop() else {
         return Ok(EvidenceStatus::NotFound);
     };
+    if workflow_task.is_some_and(|task| bundle.task_id.as_deref() != Some(task)) {
+        return Ok(EvidenceStatus::OtherSubject);
+    }
     let current_profile = latest_profile(conn, workspace_id)?.map(|p| p.id);
     let current_requirement: Option<i64> = match &bundle.task_id {
         Some(task_id) => {
@@ -514,5 +520,54 @@ impl Store {
     pub async fn evidence_bundle(&self, workspace_id: &str, bundle_id: &str) -> StoreResult<Option<EvidenceBundle>> {
         let (workspace_id, bundle_id) = (workspace_id.to_string(), bundle_id.to_string());
         self.read(move |conn| Ok(load_bundles(conn, "id = ?1 AND workspace_id = ?2", [&bundle_id, &workspace_id])?.pop())).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T1: Timestamp = Timestamp::from_millis(1_000);
+
+    /// 只帶一筆「把 checkout/add 標為 stale」動作紀錄的 Bundle，驗證期間是 `started_at`～`finished_at`。
+    fn stale_bundle(id: &str, started_at: i64, finished_at: i64) -> EvidenceBundle {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "workspace_id": "w1", "request_id": format!("vr_{id}"), "task_id": null, "run_id": null, "generation": null,
+            "requirement_version": null, "profile_version_id": "vp", "profile_version": 1, "candidate_revision": null,
+            "build": null, "subject_dir": "d", "journeys": [], "steps": [], "verdict": "inconclusive", "reason_code": "x",
+            "covered_features": [], "uncovered": [],
+            "cleanup": { "state_dir": "s", "state_dir_removed": true },
+            "actions": [{ "journey": "checkout", "step": "add", "goal": "g", "cache": "valid", "source": "replay",
+                "stale_reasons": ["postcondition_failed"] }],
+            "started_at": started_at, "finished_at": finished_at,
+        }))
+        .unwrap()
+    }
+
+    /// review-notes #26：兩個驗證同時跑時，較早開始、較晚結束的驗證不能把它開始之後才錄下的新錄製標為 stale。
+    #[tokio::test]
+    async fn a_verification_cannot_mark_stale_a_recording_made_after_it_started() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Store::open(dir.path(), T1).await.unwrap());
+        let mut conn = Connection::open(dir.path().join(DB_FILE_NAME)).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO replay_action (workspace_id, case_key, identity, action, status, stale_reasons, bundle_id, recorded_at, updated_at)
+             VALUES ('w1', 'checkout/add', '{}', '{}', 'valid', '[]', 'evb_new', 100, 100);",
+        )
+        .unwrap();
+        let status = |conn: &Connection| -> String {
+            conn.query_row("SELECT status FROM replay_action WHERE case_key = 'checkout/add'", [], |r| r.get(0)).unwrap()
+        };
+
+        let tx = conn.transaction().unwrap();
+        apply_replay_updates(&tx, &stale_bundle("evb_old", 50, 300)).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(status(&conn), "valid", "較早開始的驗證重播的是舊錄製，不能推翻新的錄製");
+
+        let tx = conn.transaction().unwrap();
+        apply_replay_updates(&tx, &stale_bundle("evb_later", 150, 400)).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(status(&conn), "stale", "錄製之後才開始的驗證可以推翻它");
     }
 }

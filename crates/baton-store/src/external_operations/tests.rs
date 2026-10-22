@@ -120,6 +120,43 @@ async fn answering_verified_done_closes_the_operation_and_resumes_the_task_toget
     assert_eq!(task_status(&store, "t1").await, TaskStatus::Ready);
 }
 
+/// review-notes #10 的路徑：成功結束、進入驗證的 Task 留下未回報的操作 → 等裁定 → 查證後回到 ready →
+/// 重做的 Run 成功後可以照常通過驗證並完成，不會卡在 verifying（R151 第 1 項）。
+#[tokio::test]
+async fn a_verifying_task_sent_back_to_ready_by_an_unknown_operation_can_pass_verification_after_the_redo() {
+    use baton_domain::run::RunOutcome;
+    use baton_domain::verification::AcceptanceCommand;
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_running_tasks(dir.path()).await;
+    store.begin_external_operation(&scope("r1"), "op1".into(), deploy("deploy-1"), T1).await.unwrap();
+    let finish = |run: &str, generation| RunCommand::Finish { run_id: run.into(), generation, outcome: RunOutcome::Succeeded };
+    store.apply_run_command("w1".into(), finish("r1", 1), T2).await.unwrap();
+    assert_eq!(task_status(&store, "t1").await, TaskStatus::WaitingDecision, "成功結束但留下未回報的操作");
+    let request_id = store.external_operations("w1").await.unwrap()[0].decision_request_id.clone().unwrap();
+    verify(&store, &request_id, OPTION_VERIFIED_DONE, None).await.unwrap();
+    assert_eq!(task_status(&store, "t1").await, TaskStatus::Ready);
+
+    let commands = [
+        RunCommand::Dispatch { run_id: "r1b".into(), task_id: "t1".into(), profile_id: "p1".into() },
+        RunCommand::BeginLaunch { run_id: "r1b".into(), command_id: "cmd-r1b".into(), working_dir: "C:/work".into(), resume_check: None },
+        RunCommand::RecordReceipt {
+            run_id: "r1b".into(),
+            process: ProcessRecord { pid: 2, created_at_millis: 2, command_hash: "h".into() },
+        },
+        finish("r1b", 2),
+    ];
+    for command in commands {
+        store.apply_run_command("w1".into(), command, T2).await.unwrap();
+    }
+    assert_eq!(task_status(&store, "t1").await, TaskStatus::Verifying);
+    let basis = store.task_verification("w1", "t1").await.unwrap().basis.expect("重做的 Run 可以接受");
+    assert_eq!(basis.run_id, "r1b");
+    let accept = AcceptanceCommand::AcceptManually { task_id: "t1".into(), basis, accepted_by: "desk".into(), note: None };
+    store.apply_acceptance("w1".into(), accept, "v1".into(), T2).await.unwrap();
+
+    assert_eq!(task_status(&store, "t1").await, TaskStatus::Completed);
+}
+
 #[tokio::test]
 async fn answering_verified_not_done_lets_the_next_run_try_again() {
     let dir = tempfile::tempdir().unwrap();
@@ -168,4 +205,25 @@ async fn a_rejected_command_writes_nothing() {
     assert!(matches!(error, ExternalApplyError::Rejected(ExternalOperationError::KeyConflict(_))), "{error}");
     let operations = store.external_operations("w1").await.unwrap();
     assert_eq!((operations.len(), operations[0].target.as_str()), (1, "production"));
+}
+
+#[tokio::test]
+async fn a_decision_blocking_several_tasks_appears_on_each_blocked_tasks_timeline() {
+    // review-notes #17：擋多個 Task 的裁定請求，被擋的每個 Task 的時間線都看得到
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_running_tasks(dir.path()).await;
+    store.begin_external_operation(&scope("r1"), "op1".into(), deploy("deploy-1"), T1).await.unwrap();
+    store.apply_run_command("w1".into(), RunCommand::Interrupt { run_id: "r1".into(), reason: "x".into() }, T2).await.unwrap();
+    let request_id = store.external_operations("w1").await.unwrap()[0].decision_request_id.clone().unwrap();
+    store.begin_external_operation(&scope("r2"), "ignored".into(), deploy("deploy-1"), T2).await.unwrap();
+    verify(&store, &request_id, OPTION_VERIFIED_DONE, None).await.unwrap();
+
+    let decision_events = |entries: Vec<baton_domain::timeline::TimelineEntry>| -> Vec<String> {
+        entries.into_iter().filter(|e| e.aggregate_id == request_id).map(|e| e.event_type).collect()
+    };
+    let for_t2 = decision_events(store.timeline("w1", Some("t2")).await.unwrap());
+    assert!(for_t2.contains(&"decision_requested".to_string()), "{for_t2:?}");
+    assert!(for_t2.contains(&"decision_answered".to_string()), "{for_t2:?}");
+    let entry = store.timeline("w1", None).await.unwrap().into_iter().find(|e| e.aggregate_id == request_id).unwrap();
+    assert_eq!(entry.task_ids, vec!["t1".to_string(), "t2".to_string()]);
 }

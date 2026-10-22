@@ -218,6 +218,9 @@ pub struct IntegrationContext<'a> {
     pub entry: &'a IntegrationEntry,
     pub workspace: Option<&'a Workspace>,
     pub task: Option<&'a Task>,
+    /// Task 目前受驗的 Run（世代最大、已成功結束的 Run，見 `verification::subject_run`）；不是這個項目的 Run 時
+    /// 項目不再整合，也不改變 Task（R151 第 24 項）。
+    pub subject_run: Option<&'a str>,
     /// Task 目前生效的契約宣告的確定性檢查（整合驗證執行同一份清單）。
     pub checks: &'a [VerificationCheck],
 }
@@ -371,11 +374,21 @@ fn cannot_integrate(ctx: &IntegrationContext<'_>) -> Option<String> {
         Some(task) if task.status != TaskStatus::Verifying => {
             Some(format!("Task 目前是 {} 狀態，已不在等待整合，不再整合", task.status.as_str()))
         }
+        Some(_) if !is_subject(ctx) => Some(format!(
+            "Task 目前受驗的是 Run {}，已不是這個整合項目的 Run {}，不再整合",
+            ctx.subject_run.unwrap_or("（沒有）"),
+            ctx.entry.run_id
+        )),
         Some(_) => None,
     }
 }
 
-/// 以失敗結束：Task 若仍在驗證中就回到 `ready`（可修正、可重新派工）。
+/// 這個項目的 Run 仍是 Task 目前受驗的 Run。
+fn is_subject(ctx: &IntegrationContext<'_>) -> bool {
+    ctx.subject_run == Some(ctx.entry.run_id.as_str())
+}
+
+/// 以失敗結束：Task 若仍在驗證這個項目的 Run 就回到 `ready`（可修正、可重新派工）。
 fn fail(
     ctx: &IntegrationContext<'_>,
     mut entry: IntegrationEntry,
@@ -398,7 +411,8 @@ fn move_task(
     reason: &str,
     now: Timestamp,
 ) -> Option<Task> {
-    let current = ctx.task.filter(|t| t.status == TaskStatus::Verifying)?;
+    // 受驗的已是較新的 Run 時，Task 的結果由那個 Run 的整合項目決定
+    let current = ctx.task.filter(|t| t.status == TaskStatus::Verifying && is_subject(ctx))?;
     let mut moved = current.clone();
     let mut versioned = Versioned { task: &mut moved, events: Vec::new(), now };
     versioned.change_status(to, reason).ok()?;
