@@ -33,4 +33,4 @@ Runtime 提供本機 MCP 工具伺服器，並為每個 Run 注入專屬設定�
 - 多一個需要打包、版本相容與測試的元件（MCP shim）；它必須通過 Adapter 契約測試。
 - 依賴 Claude Code 的 MCP 設定與 `permission-prompt` 工具行為；具體 CLI 參數與最低版本為 Validation Required，Adapter 啟動前以版本探測決定能力，不支援時阻擋並顯示原因，不改為全面放行。
 - 工具集是平台對 Agent 的正式契約，新增或改名工具會影響 Prompt、契約測試與已保存的 Playbook，改動成本高。
-- 本決策為 AI 暫定。`ai-decisions.md` 的「Spec 決策審閱紀錄」載有使用者於 2026-10-22 對 D-05 的認同，但本 ADR 在使用者於 ADR 層級確認前，仍依票 02 的驗收條件標示為待確認（見 AI-21）。
+- 本決策為 AI 暫定。`ai-decisions.md` 的「Spec 決策審閱紀錄」載有使用者於 2026-10-22 對 D-05 的認同，但本 ADR 在使用者於 ADR 層級確認前，仍依票 02 的驗收條件標示為待確認（見 AI-22）。
