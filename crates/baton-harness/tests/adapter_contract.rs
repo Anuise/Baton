@@ -55,6 +55,7 @@ fn contract_spec(run_id: &str, scenario: Scenario, model: Option<String>, config
             Scenario::Completes => model,
             Scenario::InvalidModel => Some(INVALID_MODEL.to_string()),
         },
+        resume_native_session_id: None,
     }
 }
 
@@ -74,9 +75,17 @@ async fn collect(adapter: &dyn AgentAdapter, spec: RunSpec) -> Vec<AdapterEvent>
 
 // ---------------------------------------------------------------- 契約條款
 
-/// 不含 heartbeat 的事件（heartbeat 的次數取決於輸出的時機，不屬於契約）。
+/// 不含 heartbeat 與對話紀錄的事件（heartbeat 的次數取決於輸出的時機；對話紀錄另由 `assert_transcript_positions` 檢查）。
 fn meaningful(events: &[AdapterEvent]) -> Vec<&AdapterEvent> {
-    events.iter().filter(|e| **e != AdapterEvent::Heartbeat).collect()
+    events.iter().filter(|e| **e != AdapterEvent::Heartbeat && !matches!(e, AdapterEvent::Transcript { .. })).collect()
+}
+
+/// 對話紀錄（若有）的位置從 1 起連續遞增：Runtime 以位置去重與找出缺口。fake 不送對話紀錄。
+fn assert_transcript_positions(events: &[AdapterEvent]) {
+    let positions: Vec<u64> =
+        events.iter().filter_map(|e| if let AdapterEvent::Transcript { position, .. } = e { Some(*position) } else { None }).collect();
+    let expected: Vec<u64> = (1..=positions.len() as u64).collect();
+    assert_eq!(positions, expected, "對話紀錄的位置必須從 1 起連續：{events:?}");
 }
 
 /// 同一個 Run 回報的原生 Session 只有一個，而且在任何結果之前就回報。
@@ -105,6 +114,7 @@ async fn contract_completes(subject: &dyn Subject, spec: RunSpec) {
 
     assert_single_native_session_first(&events);
     assert_ends_with_one_exit(&events, true);
+    assert_transcript_positions(&events);
     assert!(!events.iter().any(|e| matches!(e, AdapterEvent::Error { .. })), "正常完成不應有錯誤：{events:?}");
     assert!(
         events.iter().any(|e| matches!(e, AdapterEvent::Message { text } if text.contains("OK"))),
@@ -122,12 +132,14 @@ async fn contract_invalid_model(subject: &dyn Subject, spec: RunSpec) {
 
     assert_single_native_session_first(&events);
     assert_ends_with_one_exit(&events, false);
+    assert_transcript_positions(&events);
     let error_at = events.iter().position(|e| matches!(e, AdapterEvent::Error { message } if !message.trim().is_empty()));
     let exit_at = events.iter().position(|e| matches!(e, AdapterEvent::Exited { .. }));
     assert!(error_at.is_some() && error_at < exit_at, "失敗前先交出非空的錯誤原因：{events:?}");
 }
 
 /// 啟動指令只由 RunSpec 決定（Runtime 重建後據此找回程序），而且 Prompt 不放在指令列上。
+/// 接續原生 Session 時以 `--resume <原生識別>` 傳入（票 15），沒有要接續時不帶。
 fn contract_spawn_spec(subject: &dyn Subject, spec: &RunSpec) {
     let adapter = subject.adapter();
     let first = adapter.spawn_spec(spec);
@@ -135,6 +147,13 @@ fn contract_spawn_spec(subject: &dyn Subject, spec: &RunSpec) {
     assert_eq!(first, adapter.spawn_spec(spec), "同一個 RunSpec 必須得到同一個啟動指令");
     assert_eq!(first.command_id, spec.command_id);
     assert!(!first.args.iter().any(|a| a.contains(PROMPT)), "Prompt 不放在指令列：{:?}", first.args);
+    assert!(!first.args.iter().any(|a| a == "--resume"), "沒有要接續時不帶 --resume：{:?}", first.args);
+
+    let resumed = RunSpec { resume_native_session_id: Some("contract-native-session".into()), ..spec.clone() };
+    let resumed_spawn = adapter.spawn_spec(&resumed);
+    assert_eq!(resumed_spawn, adapter.spawn_spec(&resumed), "同一個 RunSpec 必須得到同一個啟動指令");
+    let at = resumed_spawn.args.iter().position(|a| a == "--resume").expect("接續時帶 --resume");
+    assert_eq!(resumed_spawn.args.get(at + 1).map(String::as_str), Some("contract-native-session"), "{:?}", resumed_spawn.args);
 }
 
 // ---------------------------------------------------------------- fake
@@ -244,6 +263,25 @@ async fn recorded_claude_code_reports_an_invalid_model() {
     let dir = tempfile::tempdir().unwrap();
     let spec = contract_spec("run_replay_bad", Scenario::InvalidModel, None, None, dir.path());
     contract_invalid_model(&replay(dir.path()), spec).await;
+}
+
+/// 錄下的每個非空白行依序成為一筆對話紀錄，內容是原始的行（不含結尾換行）。
+#[tokio::test]
+async fn recorded_claude_code_transcript_is_every_recorded_line_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = contract_spec("run_replay_transcript", Scenario::Completes, None, None, dir.path());
+
+    let events = replay(dir.path()).run(Scenario::Completes, spec).await;
+
+    let recorded = std::fs::read_to_string(fixture_path(Scenario::Completes.fixture())).unwrap();
+    let expected: Vec<AdapterEvent> = recorded
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .zip(1..)
+        .map(|(line, position)| AdapterEvent::Transcript { position, line: line.to_string() })
+        .collect();
+    let transcripts: Vec<AdapterEvent> = events.into_iter().filter(|e| matches!(e, AdapterEvent::Transcript { .. })).collect();
+    assert_eq!(transcripts, expected);
 }
 
 #[test]

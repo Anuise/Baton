@@ -297,6 +297,11 @@ fn profile_blocker_category(code: &str) -> WaitCategory {
 /// 選帳號：在「核對無誤、額度未達門檻、帳號名額未滿」的帳號中，挑進行中 Run 最少的，同數時取較早建立的。
 /// 這讓兩個帳號同時有空時，第一個 Task 給第一個帳號、第二個 Task 給第二個帳號。
 pub fn place(capacity: &Capacity<'_>, kind: SlotKind) -> Placement {
+    place_preferring(capacity, kind, None)
+}
+
+/// 同 `place`，但 `preferred` 帳號可派時優先選它（票 15：同一個 Task 續跑時留在原帳號，才能沿用原生 Session）。
+pub fn place_preferring(capacity: &Capacity<'_>, kind: SlotKind, preferred: Option<&str>) -> Placement {
     if let Some(halt) = &capacity.halt {
         return Placement::Wait(vec![halt.clone()]);
     }
@@ -392,6 +397,9 @@ pub fn place(capacity: &Capacity<'_>, kind: SlotKind) -> Placement {
     if global_full {
         return Placement::Wait(reasons);
     }
+    if let Some((_, profile)) = candidates.iter().find(|(_, p)| Some(p.id.as_str()) == preferred) {
+        return Placement::Place { profile_id: profile.id.clone() };
+    }
     // `min_by_key` 在同數時取最先出現的，也就是較早建立的帳號
     match candidates.into_iter().min_by_key(|(running, _)| *running) {
         Some((_, profile)) => Placement::Place { profile_id: profile.id.clone() },
@@ -425,7 +433,10 @@ pub fn evaluate(
             None => Err(error),
         };
     }
-    Ok(match place(capacity, kind) {
+    // 同一個 Task 再次派工時優先留在上一個 Run 的帳號（原生 Session 不能跨帳號接續）
+    let previous = ctx.runs.iter().filter(|r| r.task_id == task_id).max_by_key(|r| r.generation);
+    let preferred = previous.map(|r| r.profile_id.as_str()).filter(|p| !p.is_empty());
+    Ok(match place_preferring(capacity, kind, preferred) {
         Placement::Place { profile_id } => Evaluation::Dispatch { profile_id },
         Placement::Wait(reasons) => Evaluation::Wait(reasons),
     })

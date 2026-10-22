@@ -98,6 +98,8 @@ impl World {
             started_at: None,
             ended_at: None,
             native_session_id: None,
+            agent_session_id: None,
+            resume_native_session_id: None,
         });
     }
 

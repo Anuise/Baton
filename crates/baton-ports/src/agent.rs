@@ -22,16 +22,22 @@ pub struct RunSpec {
     pub settings_dir: Option<String>,
     /// 指定的模型（Workspace 依角色覆寫，spec D-30）；`None` 時沿用帳號的預設模型。
     pub model: Option<String>,
+    /// 要以原生方式接續的原生 Session（票 15）；`None` 時建立新的原生 Session。
+    /// 在寫入 launch intent 的同一個交易中決定並持久化在 Run 上，所以 Runtime 重建後組出相同的啟動指令。
+    pub resume_native_session_id: Option<String>,
 }
 
 /// 已啟動 Run 的控制代碼。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AgentHandle(pub String);
 
-/// 原生 Session 的參照。
+/// 原生 Session 的參照：原生識別只在同一個執行工具、帳號與 Session 儲存命名空間內唯一，
+/// 所以查驗時一併帶上帳號的 `CLAUDE_CONFIG_DIR` 與當初的工作目錄。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRef {
     pub native_session_id: String,
+    pub config_dir: Option<String>,
+    pub working_dir: Option<String>,
 }
 
 /// Adapter 能否以原生方式接續某個 Session。
@@ -60,6 +66,9 @@ pub enum AdapterEvent {
     },
     /// Run 結果訊息回報的用量（「推估」來源）：這一輪用掉的 token 數與原始內容。
     UsageReported { tokens: u64, raw: String },
+    /// 原生對話紀錄的一筆（票 15）：`position` 是這個 Run 內從 1 起、單調遞增的事件位置，
+    /// Runtime 以它去重與找出缺口；`line` 是原始內容（匯入時才遮蔽秘密）。重新接上串流時可能重播已送過的位置。
+    Transcript { position: u64, line: String },
     /// Agent 回報的錯誤（例如 API 錯誤、未登入）；緊接著的 `Exited { success: false }` 以它作為失敗原因。
     Error { message: String },
     Exited { success: bool },
@@ -76,5 +85,6 @@ pub trait AgentAdapter: Send + Sync {
     /// 程序已啟動後，建立事件來源（控制代碼只由 `run_id` 決定，重複呼叫安全）。
     async fn launch(&self, spec: RunSpec) -> PortResult<AgentHandle>;
     fn events(&self, handle: &AgentHandle) -> BoxStream<'static, AdapterEvent>;
+    /// 能否以原生方式接續這個 Session；判斷不了時回 `Unknown`（Runtime 不會把 `Unknown` 當成可接續）。
     async fn resume_capability(&self, session: &SessionRef) -> PortResult<Capability>;
 }

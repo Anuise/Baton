@@ -51,6 +51,8 @@ fn run(id: &str, task_id: &str, generation: i64) -> Run {
         command_id: Some(format!("cmd-{id}")),
         process: None,
         native_session_id: None,
+        agent_session_id: None,
+        resume_native_session_id: None,
         cancel_requested_at: None,
         end_reason: None,
         created_at: T0,

@@ -10,6 +10,8 @@
 
 mod secrets;
 
+pub(crate) use secrets::redact_secrets;
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};

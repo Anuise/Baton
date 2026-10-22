@@ -5,7 +5,7 @@
 //!    再把回執寫回。Runtime 在中間任何一點當掉，下一次 tick 都用 command_id 找回原程序，**絕不重新啟動**；
 //!    找不到程序時把 Run 標為 interrupted，交給使用者重新派工，而不是猜測「應該沒啟動」。
 //! 2. **收事件**：接上 Adapter 的事件串流，heartbeat 續約 lease，限流訊號與用量記為該 Run 帳號的額度觀測，
-//!    結束事件只讓 Run 結束，不把 Task 標為 completed。
+//!    對話紀錄依事件位置去重、遮蔽秘密後匯入成果儲存（票 15），結束事件只讓 Run 結束，不把 Task 標為 completed。
 //! 3. **取消**：對要求取消的 Run 停止整個程序樹；確認停止之後才完成取消、釋放寫入所有權。
 //! 4. **核對 lease**：lease 過期只是「該去看看」：向 ProcessControl 查證，確認死亡才中斷 Run，存活就續約，不確定就維持原狀。
 //! 5. **額度**：輪詢到期（每個帳號每 5 分鐘）的外部額度觀測器並重新推估（票 27）。
@@ -50,11 +50,14 @@ use baton_domain::quota::RateLimitSignal;
 use baton_domain::run::{
     LaunchPayload, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
 };
+use baton_domain::session::{
+    self, ResumeCapability, ResumeCheck, SegmentAvailability, SegmentPlan, TranscriptEntry, TranscriptSegment,
+};
 use baton_domain::verification::AcceptanceCommand;
 use baton_domain::Timestamp;
 use baton_ports::{
-    AdapterEvent, AdvanceOutcome, AgentHandle, Liveness, MergeOutcome, Ports, ProcessIdentity, RunSpec, SpawnSpec,
-    StopResult, WorktreeState,
+    AdapterEvent, AdvanceOutcome, AgentHandle, Capability, Liveness, MergeOutcome, Ports, ProcessIdentity, RunSpec,
+    SessionRef, SpawnSpec, StopResult, WorktreeState,
 };
 use baton_store::{CleanupWork, ExecutingRun, IntegrationWork, PendingLaunch, Store};
 use futures::stream::{BoxStream, FuturesUnordered};
@@ -63,6 +66,9 @@ use tokio::sync::{watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::CredentialIssuer;
+
+/// 對話紀錄在成果儲存中的子目錄（票 15）；檔名是內容的 SHA-256。
+pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
 /// 受控停止的預設寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
@@ -538,12 +544,7 @@ impl Supervisor {
     /// 組出 Run 的 `RunSpec`：全部來自持久化的狀態（派工 Outbox、Run 的帳號、設定快照的綁定），
     /// 所以啟動時與 Runtime 重建後組出的結果相同，Adapter 才能據此找回同一個程序。
     async fn run_spec(&self, run: &Run, payload: &LaunchPayload, command_id: &str) -> Result<RunSpec, String> {
-        let profiles = self.store.list_profiles().await.map_err(|e| format!("無法讀取帳號 Profile：{e}"))?;
-        let config_dir = profiles
-            .into_iter()
-            .find(|p| p.id == run.profile_id)
-            .map(|p| p.config_dir)
-            .ok_or_else(|| format!("找不到 Run 的帳號 Profile {}", run.profile_id))?;
+        let config_dir = self.config_dir_of(&run.profile_id).await?;
         let pin = self.store.run_settings_pin(&run.id).await.map_err(|e| format!("無法讀取設定快照的綁定：{e}"))?;
         Ok(RunSpec {
             run_id: run.id.clone(),
@@ -554,7 +555,45 @@ impl Supervisor {
             config_dir: Some(config_dir),
             settings_dir: pin.map(|p| p.directory),
             model: payload.model.clone(),
+            resume_native_session_id: run.resume_native_session_id.clone(),
         })
+    }
+
+    /// 帳號 Profile 的 `CLAUDE_CONFIG_DIR`。
+    async fn config_dir_of(&self, profile_id: &str) -> Result<String, String> {
+        let profiles = self.store.list_profiles().await.map_err(|e| format!("無法讀取帳號 Profile：{e}"))?;
+        profiles
+            .into_iter()
+            .find(|p| p.id == profile_id)
+            .map(|p| p.config_dir)
+            .ok_or_else(|| format!("找不到 Run 的帳號 Profile {profile_id}"))
+    }
+
+    /// 寫入 launch intent 之前，對可以沿用的 Session 查驗原生接續能力（票 15）。沒有候選時不需要查驗；
+    /// Adapter 查驗失敗視為未知（不宣稱可續用）。讀不到資料時回傳錯誤，這次不啟動，免得因為暫時的錯誤換掉 Session。
+    async fn resume_check(&self, run: &Run, payload: &LaunchPayload) -> Result<Option<ResumeCheck>, String> {
+        let candidate = self
+            .store
+            .session_resume_candidate(&run.workspace_id, &run.task_id, &run.profile_id, &payload.working_dir)
+            .await
+            .map_err(|e| format!("無法讀取 Session：{e}"))?;
+        let Some(candidate) = candidate else { return Ok(None) };
+        let Some(native_session_id) = candidate.native_session_id.clone() else { return Ok(None) };
+        let reference = SessionRef {
+            native_session_id,
+            config_dir: Some(self.config_dir_of(&run.profile_id).await?),
+            working_dir: Some(payload.working_dir.clone()),
+        };
+        let capability = match self.ports.agent_adapter.resume_capability(&reference).await {
+            Ok(Capability::Resumable) => ResumeCapability::Resumable,
+            Ok(Capability::NotResumable) => ResumeCapability::NotResumable,
+            Ok(Capability::Unknown) => ResumeCapability::Unknown,
+            Err(error) => {
+                self.note(&format!("Run {} 無法查驗 Session {} 能否接續，視為未知：{error}", run.id, candidate.id));
+                ResumeCapability::Unknown
+            }
+        };
+        Ok(Some(ResumeCheck { session_id: candidate.id, capability }))
     }
 
     async fn launch(&self, item: PendingLaunch) {
@@ -562,20 +601,33 @@ impl Supervisor {
             return self.note(&format!("Run {} 無法取得系統亂數，不啟動程序", item.run.id));
         };
         // 1. 先持久化 launch intent 與 command_id；這一步完成之前不會有任何程序被啟動。
-        //    這也是准入（票 24）：同一個交易以這一刻生效的授權重新檢查，被拒時 Run 直接結束、Task 重新排隊
-        let begin = RunCommand::BeginLaunch { run_id: item.run.id.clone(), command_id: command_id.clone() };
-        let settings_version = match self.store.apply_run_command(item.run.workspace_id.clone(), begin, self.ports.clock.now()).await {
+        //    這也是准入（票 24）：同一個交易以這一刻生效的授權重新檢查，被拒時 Run 直接結束、Task 重新排隊。
+        //    同一個交易中也決定沿用或建立 Session（票 15），所以原生識別取得前平台 Session 已經存在
+        let resume_check = match self.resume_check(&item.run, &item.payload).await {
+            Ok(check) => check,
+            Err(error) => return self.note(&format!("Run {} 暫時無法決定 Session，稍後再啟動：{error}", item.run.id)),
+        };
+        let begin = RunCommand::BeginLaunch {
+            run_id: item.run.id.clone(),
+            command_id: command_id.clone(),
+            working_dir: item.payload.working_dir.clone(),
+            resume_check,
+        };
+        let launched = match self.store.apply_run_command(item.run.workspace_id.clone(), begin, self.ports.clock.now()).await {
             Err(error) => return self.note(&format!("Run {} 無法寫入 launch intent，不啟動程序：{error}", item.run.id)),
             Ok(change) => match change.run {
                 Some(run) if run.status != RunStatus::Starting => {
                     let reason = run.end_reason.unwrap_or_default();
                     return self.note(&format!("Run {} 沒有通過啟動准入，不啟動程序：{reason}", item.run.id));
                 }
-                Some(run) => run.settings_version,
+                Some(run) => run,
                 // 已經是同一個 launch intent（冪等）：不會發生，新的 command_id 每次都不同
-                None => item.run.settings_version,
+                None => item.run.clone(),
             },
         };
+        let settings_version = launched.settings_version;
+        // 啟動規格以寫入 launch intent 後的 Run 組出（含要接續的原生 Session）
+        let item = PendingLaunch { run: launched, payload: item.payload };
         // 2. 准入的共同設定：以准入時固定的版本建立 Run 專屬唯讀快照，已綁定的依 manifest 核對（D-09）；
         //    核對不過就不啟動，不以不確定的設定執行
         if let Err(reason) = self.run_settings.for_launch(&item.run.id, settings_version).await {
@@ -679,6 +731,7 @@ impl Supervisor {
                 },
             };
             let mut finished = false;
+            let mut transcript = Vec::new();
             // 只處理目前已經到達的事件，不等待；之後的事件由下一次 tick 處理
             while let Some(next) = stream.next().now_or_never() {
                 let Some(event) = next else {
@@ -721,12 +774,68 @@ impl Supervisor {
                         self.record_quota_event(&item.view.run, event).await;
                     }
                     // 訊息由後續的票處理（對話紀錄）
+                    AdapterEvent::Transcript { position, line } => transcript.push(TranscriptEntry { position, line }),
                     AdapterEvent::Started { native_session_id: None } | AdapterEvent::Message { .. } => {}
                 }
+            }
+            if !transcript.is_empty() {
+                self.import_transcript(&item.view.run, &transcript).await;
             }
             if !finished {
                 self.streams.lock().await.insert(run_id, stream);
             }
+        }
+    }
+
+    /// 把一批對話紀錄匯入受控儲存（票 15）：已保存過的位置略過（重新接上串流時的重播）、跳號記為缺口，
+    /// 內容遮蔽秘密後以雜湊命名寫入成果儲存，再記錄段落。寫入失敗時停在那裡，之後到達的位置會把沒保存的部分記成缺口。
+    async fn import_transcript(&self, run: &Run, entries: &[TranscriptEntry]) {
+        let progress = match self.store.transcript_progress(&run.id).await {
+            Ok(Some(progress)) => progress,
+            Ok(None) => return self.note(&format!("Run {} 沒有 Session，對話紀錄沒有匯入", run.id)),
+            Err(error) => return self.note(&format!("Run {} 無法讀取對話紀錄的進度：{error}", run.id)),
+        };
+        let now = self.ports.clock.now();
+        let mut segments = Vec::new();
+        for plan in session::plan_transcript_import(progress.imported_through, entries) {
+            let segment = |first_position, last_position, availability, stored: Option<(String, String, u64)>, entries, redactions| {
+                let (storage_path, sha256, byte_len) = match stored {
+                    Some((path, sha, len)) => (Some(path), Some(sha), Some(len)),
+                    None => (None, None, None),
+                };
+                TranscriptSegment {
+                    agent_session_id: progress.agent_session_id.clone(),
+                    run_id: run.id.clone(),
+                    first_position,
+                    last_position,
+                    availability,
+                    storage_path,
+                    sha256,
+                    byte_len,
+                    entry_count: entries,
+                    redactions,
+                    recorded_at: now,
+                }
+            };
+            match plan {
+                SegmentPlan::Missing { first_position, last_position } => {
+                    segments.push(segment(first_position, last_position, SegmentAvailability::Missing, None, 0, 0));
+                }
+                SegmentPlan::Stored { first_position, last_position, content, entry_count, redactions } => {
+                    let sha256 = baton_domain::artifact::sha256_hex(content.as_bytes());
+                    let storage_path = format!("{TRANSCRIPTS_DIR}/{sha256}.jsonl");
+                    let target = self.artifacts_root.join(&storage_path);
+                    if let Err(error) = self.ports.workspace_fs.write_artifact_atomic(&target, content.as_bytes()).await {
+                        self.note(&format!("Run {} 的對話紀錄（位置 {first_position}–{last_position}）無法保存：{error}", run.id));
+                        break;
+                    }
+                    let stored = Some((storage_path, sha256, content.len() as u64));
+                    segments.push(segment(first_position, last_position, SegmentAvailability::Stored, stored, entry_count, redactions));
+                }
+            }
+        }
+        if let Err(error) = self.store.record_transcript_segments(segments, now).await {
+            self.note(&format!("Run {} 的對話紀錄段落沒有記錄：{error}", run.id));
         }
     }
 

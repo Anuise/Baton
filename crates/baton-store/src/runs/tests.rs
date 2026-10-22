@@ -83,7 +83,7 @@ async fn launch_intent_receipt_and_outbox_acknowledgement_are_persisted_step_by_
     let store = store_with_ready_task(dir.path()).await;
     run_cmd(&store, dispatch("r1"), T1).await.unwrap();
 
-    run_cmd(&store, RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "cmd-1".into() }, T1).await.unwrap();
+    run_cmd(&store, RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "cmd-1".into(), working_dir: "C:/work".into(), resume_check: None }, T1).await.unwrap();
     let starting = store.executing_runs().await.unwrap();
     let process = ProcessRecord { pid: 4242, created_at_millis: 99, command_hash: "h".into() };
     run_cmd(&store, RunCommand::RecordReceipt { run_id: "r1".into(), process: process.clone() }, T2).await.unwrap();
@@ -132,15 +132,15 @@ async fn rejected_and_unchanged_run_commands_write_nothing() {
     let stale =
         run_cmd(&store, RunCommand::Finish { run_id: "r1".into(), generation: 9, outcome: RunOutcome::Succeeded }, T2).await;
     let repeated_intent = {
-        run_cmd(&store, RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "c".into() }, T2).await.unwrap();
+        run_cmd(&store, RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "c".into(), working_dir: "C:/work".into(), resume_check: None }, T2).await.unwrap();
         let after_first = count();
-        run_cmd(&store, RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "c".into() }, T2).await.unwrap();
+        run_cmd(&store, RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "c".into(), working_dir: "C:/work".into(), resume_check: None }, T2).await.unwrap();
         (after_first, count())
     };
 
     assert!(matches!(second_dispatch, Err(RunApplyError::Rejected(RunError::TaskNotReady(TaskStatus::Running)))));
     assert!(matches!(stale, Err(RunApplyError::Rejected(RunError::StaleReport))));
-    assert_eq!(repeated_intent.0, before + 1, "第一次寫入 launch intent 追加一個事件");
+    assert_eq!(repeated_intent.0, before + 2, "第一次寫入 launch intent 追加 Run 與新 Session 各一個事件（票 15）");
     assert_eq!(repeated_intent.1, repeated_intent.0, "重複寫入同一個 launch intent 不追加事件");
 }
 
@@ -149,7 +149,7 @@ async fn cancelling_a_task_asks_its_active_run_to_cancel_in_the_same_transaction
     let dir = tempfile::tempdir().unwrap();
     let store = store_with_ready_task(dir.path()).await;
     run_cmd(&store, dispatch("r1"), T1).await.unwrap();
-    run_cmd(&store, RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "c".into() }, T1).await.unwrap();
+    run_cmd(&store, RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "c".into(), working_dir: "C:/work".into(), resume_check: None }, T1).await.unwrap();
     let process = ProcessRecord { pid: 1, created_at_millis: 1, command_hash: "h".into() };
     run_cmd(&store, RunCommand::RecordReceipt { run_id: "r1".into(), process }, T1).await.unwrap();
 

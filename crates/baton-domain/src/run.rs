@@ -22,6 +22,7 @@ use crate::agent::{BlockedNote, CheckpointNote, ProgressNote, ReportContent, Rep
 use crate::authorization::{self, AdmissionDenied};
 use crate::event::DomainEvent;
 use crate::guard::{self, ActiveGuard, GuardViolation};
+use crate::session::{self, AgentSession, BindOutcome, LaunchFacts, ResumeCheck, SessionEdits};
 use crate::task::{
     self, ContractContent, ContractField, ContractFieldName, MissingItem, Task, TaskContext, TaskStatus, Versioned,
 };
@@ -166,6 +167,12 @@ pub struct Run {
     /// Adapter 首次回報的原生 Session 識別；綁定後不會被改成別的 Session。
     #[serde(default)]
     pub native_session_id: Option<String>,
+    /// 這個 Run 驅動的平台 Session（票 15）；寫入 launch intent 時決定，之前為 `None`。
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+    /// 啟動時要以原生方式接續的原生 Session；建立新原生 Session 時為 `None`。與 launch intent 一起持久化。
+    #[serde(default)]
+    pub resume_native_session_id: Option<String>,
 }
 
 /// execution lease：Task 的寫入所有權。
@@ -274,8 +281,10 @@ pub enum RunCommand {
     /// 派工交易：建立 Run、取得 lease、寫入派工 Outbox，Task 進入 `running`。`run_id` 由呼叫端產生；
     /// `profile_id` 是 Scheduler（`crate::scheduler`）在同一個交易中選定的帳號。
     Dispatch { run_id: String, task_id: String, profile_id: String },
-    /// Supervisor 在啟動程序之前先持久化 launch intent 與 command_id（`queued` → `starting`）。
-    BeginLaunch { run_id: String, command_id: String },
+    /// Supervisor 在啟動程序之前先持久化 launch intent 與 command_id（`queued` → `starting`），
+    /// 同一個交易中決定沿用或建立 Session（票 15）：`working_dir` 是派工時固定的工作目錄，
+    /// `resume_check` 是 Supervisor 對候選 Session（`session::resume_candidate`）查驗接續能力的結果。
+    BeginLaunch { run_id: String, command_id: String, working_dir: String, resume_check: Option<ResumeCheck> },
     /// 啟動回執寫回（`starting` → `running`）；重複寫回同一個回執是冪等的。
     RecordReceipt { run_id: String, process: ProcessRecord },
     /// 啟動程序失敗（確定沒有程序在跑）。
@@ -330,6 +339,8 @@ pub struct RunChange {
     pub outbox_delivered: Option<String>,
     /// 被接受的 Worker 回報（追加式稽核）。
     pub report: Option<ReportRecord>,
+    /// 因 Run 而改變（或新建）的 Session（票 15）。
+    pub sessions: Vec<AgentSession>,
     pub events: Vec<DomainEvent>,
 }
 
@@ -341,6 +352,7 @@ impl RunChange {
             || self.outbox.is_some()
             || self.outbox_delivered.is_some()
             || self.report.is_some()
+            || !self.sessions.is_empty()
             || !self.events.is_empty()
     }
 }
@@ -379,6 +391,10 @@ pub enum RunError {
     WorkdirNotPrepared(WorkdirKind),
     #[error("Task 的工作目錄不可用：{0}")]
     WorkdirUnavailable(String),
+    #[error("找不到 Session {0}")]
+    SessionNotFound(String),
+    #[error("Session {session_id} 仍由 Run {run_id} 驅動，同一個 Session 不能有兩個執行者")]
+    SessionBusy { session_id: String, run_id: String },
 }
 
 fn workdir_label(kind: WorkdirKind) -> &'static str {
@@ -416,6 +432,8 @@ impl RunError {
             RunError::LaunchHalted => "launch_halted",
             RunError::WorkdirNotPrepared(_) => "workdir_not_prepared",
             RunError::WorkdirUnavailable(_) => "workdir_unavailable",
+            RunError::SessionNotFound(_) => "session_not_found",
+            RunError::SessionBusy { .. } => "session_busy",
         }
     }
 }
@@ -433,6 +451,8 @@ pub struct RunContext<'a> {
     pub workdirs: &'a [Workdir],
     /// Run 准入時要檢查的 Guard（Store 已篩出「啟用且來源教訓現在有效」者；範圍由 `guard::violations` 判定）。
     pub guards: &'a [ActiveGuard],
+    /// Workspace 內的 Session（依建立順序）；綁定原生識別時另含同一帳號下綁定了該識別的其他 Session。
+    pub sessions: &'a [AgentSession],
 }
 
 impl RunContext<'_> {
@@ -459,13 +479,29 @@ struct Editing<'a> {
     run: Run,
     lease: Option<ExecutionLease>,
     events: Vec<DomainEvent>,
+    sessions: SessionEdits,
     now: Timestamp,
     ctx: &'a RunContext<'a>,
 }
 
 impl<'a> Editing<'a> {
     fn new(ctx: &'a RunContext<'a>, run: &Run, now: Timestamp) -> Self {
-        Self { run: run.clone(), lease: ctx.lease_of(&run.id).cloned(), events: Vec::new(), now, ctx }
+        Self {
+            run: run.clone(),
+            lease: ctx.lease_of(&run.id).cloned(),
+            events: Vec::new(),
+            sessions: SessionEdits::default(),
+            now,
+            ctx,
+        }
+    }
+
+    /// Run 的事件之後接著 Session 的事件。
+    fn take_events(&mut self) -> (Vec<AgentSession>, Vec<DomainEvent>) {
+        let edits = std::mem::take(&mut self.sessions);
+        let mut events = std::mem::take(&mut self.events);
+        events.extend(edits.events);
+        (edits.sessions, events)
     }
 
     fn push(&mut self, event_type: &'static str, payload: serde_json::Value) {
@@ -520,6 +556,10 @@ impl<'a> Editing<'a> {
         self.run.end_reason = Some(reason.to_string());
         self.push(event_type, serde_json::json!({ "from": from, "reason": reason }));
         self.release_lease(reason);
+        // 驅動的 Session 跟著放開：有原生識別的暫停（可能可以接續），從未取得的標為不可用
+        if let Some(session_id) = self.run.agent_session_id.clone() {
+            session::release_driver(&mut self.sessions, self.ctx.sessions, &session_id, &self.run.id, self.now);
+        }
 
         let mut task = None;
         if let Some(current) = self.ctx.task.task(&self.run.task_id).filter(|t| t.status == TaskStatus::Running) {
@@ -530,6 +570,7 @@ impl<'a> Editing<'a> {
             task = Some(moved);
         }
         let outbox_delivered = matches!(from, RunStatus::Queued | RunStatus::Starting).then(|| self.run.id.clone());
+        let (sessions, events) = self.take_events();
         Ok(RunChange {
             run: Some(self.run),
             lease: self.lease,
@@ -537,12 +578,14 @@ impl<'a> Editing<'a> {
             outbox: None,
             outbox_delivered,
             report: None,
-            events: self.events,
+            sessions,
+            events,
         })
     }
 
-    fn into_change(self) -> RunChange {
-        RunChange { run: Some(self.run), lease: self.lease, events: self.events, ..RunChange::default() }
+    fn into_change(mut self) -> RunChange {
+        let (sessions, events) = self.take_events();
+        RunChange { run: Some(self.run), lease: self.lease, sessions, events, ..RunChange::default() }
     }
 }
 
@@ -558,7 +601,7 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
     let mut edit = Editing::new(ctx, run, now);
     match command {
         RunCommand::Dispatch { .. } => unreachable!("上面已經處理"),
-        RunCommand::BeginLaunch { command_id, .. } => {
+        RunCommand::BeginLaunch { command_id, working_dir, resume_check, .. } => {
             if run.status == RunStatus::Starting && run.command_id.as_deref() == Some(command_id.as_str()) {
                 return Ok(RunChange::default());
             }
@@ -571,10 +614,24 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                 Err(denied) => return deny_admission(edit, &denied, ctx.task.authorization.map(|a| a.revision)),
             };
             edit.change_status(RunStatus::Starting)?;
+            // 原生識別取得前，平台 Session、launch intent 與 command_id 在同一個交易中持久化
+            let check = resume_check.as_ref();
+            let plan = session::plan_launch(ctx.sessions, &run.id, &run.task_id, &run.profile_id, &working_dir, check)
+                .map_err(|busy| RunError::SessionBusy { session_id: busy.session_id, run_id: busy.run_id })?;
+            let facts = LaunchFacts {
+                run_id: &run.id,
+                workspace_id: &run.workspace_id,
+                task_id: &run.task_id,
+                profile_id: &run.profile_id,
+                working_dir: &working_dir,
+            };
+            let (session_id, resume_native) = session::apply_plan(&mut edit.sessions, ctx.sessions, plan, check, &facts, now);
             edit.run.command_id = Some(command_id.clone());
             edit.run.authorization_revision = admission.authorization_revision;
             edit.run.settings_version = ctx.settings_version;
             edit.run.admitted_at = Some(now);
+            edit.run.agent_session_id = Some(session_id.clone());
+            edit.run.resume_native_session_id = resume_native.clone();
             edit.renew_lease();
             edit.push(
                 EVENT_RUN_LAUNCH_STARTED,
@@ -582,6 +639,8 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                     "command_id": command_id,
                     "authorization_revision": admission.authorization_revision,
                     "settings_version": ctx.settings_version,
+                    "agent_session_id": session_id,
+                    "resume_native_session_id": resume_native,
                 }),
             );
             Ok(edit.into_change())
@@ -662,20 +721,34 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
         }
         RunCommand::BindNativeSession { generation, native_session_id, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
+            // 平台 Session 的條件綁定（票 15）：同一個帳號內已由別的 Session 綁定的原生識別不再綁定
+            let outcome = match &run.agent_session_id {
+                Some(session_id) => {
+                    session::bind_native(&mut edit.sessions, ctx.sessions, session_id, &run.id, &native_session_id, now)
+                }
+                None => BindOutcome::Bound,
+            };
             match &run.native_session_id {
-                Some(bound) if *bound == native_session_id => Ok(RunChange::default()),
+                Some(bound) if *bound == native_session_id => {}
                 Some(bound) => {
                     // 條件綁定：已綁定的 Session 不會被靜默改指；衝突留下事件供查核
                     let payload = serde_json::json!({ "bound": bound, "reported": native_session_id });
                     edit.push(EVENT_RUN_NATIVE_SESSION_CONFLICT, payload);
-                    Ok(edit.into_change())
                 }
                 None => {
                     edit.push(EVENT_RUN_NATIVE_SESSION_BOUND, serde_json::json!({ "native_session_id": native_session_id }));
                     edit.run.native_session_id = Some(native_session_id);
-                    Ok(edit.into_change())
                 }
             }
+            // 同一個原生 Session 正由另一個 Run 驅動：後到的這個 Run 必須停下，不能有兩個執行者
+            if matches!(outcome, BindOutcome::InUse { driven: true, .. }) && edit.run.cancel_requested_at.is_none() {
+                edit.run.cancel_requested_at = Some(now);
+                edit.push(EVENT_RUN_CANCEL_REQUESTED, serde_json::json!({ "reason": session::NATIVE_SESSION_IN_USE }));
+            }
+            if edit.events.is_empty() && edit.sessions.events.is_empty() {
+                return Ok(RunChange::default());
+            }
+            Ok(edit.into_change())
         }
         RunCommand::Finish { generation, outcome, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
@@ -869,6 +942,8 @@ fn dispatch(
         started_at: None,
         ended_at: None,
         native_session_id: None,
+        agent_session_id: None,
+        resume_native_session_id: None,
     };
     let lease = ExecutionLease {
         run_id: run_id.clone(),
@@ -893,7 +968,8 @@ fn dispatch(
         delivered_at: None,
     };
 
-    let mut edit = Editing { run: run.clone(), lease: Some(lease), events: Vec::new(), now, ctx };
+    let mut edit =
+        Editing { run: run.clone(), lease: Some(lease), events: Vec::new(), sessions: SessionEdits::default(), now, ctx };
     edit.push(
         EVENT_RUN_CREATED,
         serde_json::json!({
@@ -919,6 +995,7 @@ fn dispatch(
         outbox: Some(outbox),
         outbox_delivered: None,
         report: None,
+        sessions: Vec::new(),
         events: edit.events,
     })
 }
