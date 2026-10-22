@@ -1,5 +1,5 @@
 {
   "bundle": {
-    "externalBin": ["binaries/baton-runtime"]
+    "externalBin": ["binaries/baton-runtime", "binaries/baton-guardian"]
   }
 }

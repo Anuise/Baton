@@ -234,6 +234,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "baton-guardian"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "baton-domain",
+ "baton-ports",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "baton-harness"
 version = "0.1.0"
 dependencies = [
@@ -243,6 +258,7 @@ dependencies = [
  "baton-api",
  "baton-credential",
  "baton-domain",
+ "baton-guardian",
  "baton-mcp-shim",
  "baton-ports",
  "baton-runtime",
@@ -291,6 +307,7 @@ dependencies = [
  "baton-client",
  "baton-credential",
  "baton-domain",
+ "baton-guardian",
  "baton-ports",
  "baton-store",
  "futures",

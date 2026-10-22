@@ -2,7 +2,9 @@
 
 use baton_runtime::production_ports::production_ports;
 use baton_runtime::single_instance::InstanceGuard;
-use baton_runtime::{Runtime, RuntimeConfig};
+use baton_domain::guardian::GUARDIAN_ATTEMPT_ENV;
+use baton_guardian::files::{self, InstanceRecord};
+use baton_runtime::{Runtime, RuntimeConfig, RuntimeOptions};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -28,7 +30,18 @@ async fn run() -> Result<(), String> {
         return Ok(());
     };
 
-    let runtime = Runtime::start(config.clone(), production_ports(&config.data_dir)).await.map_err(|e| e.to_string())?;
+    let ports = production_ports(&config.data_dir);
+    // 記下本程序的身分，監護據此確認「是這個 Runtime 結束了」（票 32）
+    let instance = InstanceRecord { pid: std::process::id(), recorded_at: ports.clock.now() };
+    if let Err(error) = files::write_instance(&files::runtime_instance_path(&config.data_dir), &instance) {
+        eprintln!("無法記下 Runtime 的程序身分（監護將無法監看這個 Runtime）：{error}");
+    }
+    // 監護拉起本程序時交付的嘗試識別（票 32）
+    let options = RuntimeOptions {
+        guardian_attempt: std::env::var(GUARDIAN_ATTEMPT_ENV).ok().filter(|id| !id.is_empty()),
+        ..RuntimeOptions::default()
+    };
+    let runtime = Runtime::start_with(config.clone(), ports, options).await.map_err(|e| e.to_string())?;
     println!("Runtime 已啟動：http://{}", runtime.local_addr());
 
     tokio::select! {

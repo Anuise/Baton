@@ -10,6 +10,7 @@ publish.workspace = true
 baton-api = { path = "../baton-api" }
 baton-credential = { path = "../baton-credential" }
 baton-domain = { path = "../baton-domain" }
+baton-guardian = { path = "../baton-guardian" }
 baton-ports = { path = "../baton-ports" }
 baton-runtime = { path = "../baton-runtime" }
 baton-store = { path = "../baton-store" }

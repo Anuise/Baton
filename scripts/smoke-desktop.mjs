@@ -10,7 +10,7 @@
 //   6. 首次設定精靈以本機真實的 claude 與 git 檢查；帳號頁新增 Profile 並以真實的 claude auth status 核對，
 //      第 9 個 Profile 被拒絕（不會開啟登入終端機，避免在測試中彈出視窗）
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -133,6 +133,15 @@ function launchApp(env) {
 /** 只結束指定程序，不含子程序（Runtime 不隨 App 結束）。強制結束不會觸發 CloseRequested，所以不受「關窗隱藏到系統匣」影響。 */
 function killProcess(pid) {
   spawn("taskkill", ["/PID", String(pid), "/F"], { stdio: "ignore" });
+}
+
+/** App 拉起的監護程序（baton-guardian.exe）記在資料目錄裡的程序識別碼；沒有監護時為 undefined。 */
+function guardianPid(dir) {
+  try {
+    return JSON.parse(readFileSync(join(dir, "guardian", "guardian.json"), "utf8")).pid;
+  } catch {
+    return undefined;
+  }
 }
 
 /** 清掉使用指定 WebView2 資料夾的殘留程序（msedgewebview2），否則資料夾無法刪除。 */
@@ -286,6 +295,12 @@ try {
   console.error(`冒煙測試失敗：${error.message}`);
   process.exitCode = 1;
 } finally {
+  // 先結束監護再結束 Runtime：否則監護會把被強制結束的 Runtime 當成意外終止而重啟它
+  const guardian = guardianPid(dataDir);
+  if (guardian) {
+    // 加上映像名稱篩選：記錄檔裡的 PID 若已被其他程序重用，不會誤殺
+    spawnSync("taskkill", ["/PID", String(guardian), "/FI", "IMAGENAME eq baton-guardian.exe", "/F"], { stdio: "ignore" });
+  }
   if (runtimePid) killProcess(runtimePid);
   killWebviewProcesses(webviewDir);
   await sleep(1000);
