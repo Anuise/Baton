@@ -14,6 +14,9 @@ use baton_api::{
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     task_path, task_ready_path, tasks_path, QueuedDispatch, SchedulingOverview, UpdateSchedulingSettingsRequest,
     SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
+    knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest,
+    CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView, KnowledgeList, KnowledgeListQuery,
+    KnowledgeReasonRequest, KNOWLEDGE_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
     CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse,
     LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus, SummaryRequest, TaskBoard, TaskDetail,
@@ -295,6 +298,71 @@ impl RuntimeClient {
         let sha256 = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
         let bytes = response.bytes().await.map_err(|e| ClientError::Unreachable(e.to_string()))?.to_vec();
         Ok(ArtifactDownload { bytes, sha256 })
+    }
+
+    /// 知識分頁的列表或搜尋：`workspace_id` 省略時只列全域條目；`include_inactive` 為 false 時只回傳有效條目。
+    /// 關鍵字不合規則（例如少於 2 個字元）時回傳 `ClientError::Rejected`（`knowledge_query_invalid`）。
+    pub async fn list_knowledge(&self, query: &KnowledgeListQuery) -> Result<KnowledgeList, ClientError> {
+        // 以 URL 的表單編碼組查詢字串，中文等非 ASCII 字元才會正確編碼
+        let mut url = reqwest::Url::parse("http://localhost").expect("固定的 URL 一定合法");
+        url.set_path(KNOWLEDGE_PATH);
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(workspace_id) = &query.workspace_id {
+                pairs.append_pair("workspace_id", workspace_id);
+            }
+            if let Some(q) = &query.q {
+                pairs.append_pair("q", q);
+            }
+            pairs.append_pair("include_inactive", if query.include_inactive { "true" } else { "false" });
+        }
+        self.get_json(&format!("{}?{}", url.path(), url.query().unwrap_or_default())).await
+    }
+
+    /// 使用者建立條目（直接是已驗證）。
+    pub async fn create_knowledge(&self, request: &CreateKnowledgeRequest) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, KNOWLEDGE_PATH, Some(request)).await
+    }
+
+    /// 單一條目：目前狀態、全部內容版本與變更歷史。
+    pub async fn knowledge_detail(&self, id: &str) -> Result<KnowledgeDetail, ClientError> {
+        self.get_json(&knowledge_entry_path(id)).await
+    }
+
+    /// 確認候選教訓，升為已驗證。
+    pub async fn confirm_knowledge(
+        &self,
+        id: &str,
+        request: &ConfirmKnowledgeRequest,
+    ) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "confirm"), Some(request)).await
+    }
+
+    /// 修正內容（追加新版本，舊版本保留）。
+    pub async fn correct_knowledge(
+        &self,
+        id: &str,
+        request: &CorrectKnowledgeRequest,
+    ) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "correct"), Some(request)).await
+    }
+
+    /// 撤銷條目（需說明原因）。
+    pub async fn revoke_knowledge(
+        &self,
+        id: &str,
+        request: &KnowledgeReasonRequest,
+    ) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "revoke"), Some(request)).await
+    }
+
+    /// 淘汰條目（需說明原因）。
+    pub async fn retire_knowledge(
+        &self,
+        id: &str,
+        request: &KnowledgeReasonRequest,
+    ) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "retire"), Some(request)).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {

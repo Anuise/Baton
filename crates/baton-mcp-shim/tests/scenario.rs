@@ -11,6 +11,10 @@ use baton_domain::agent::{
     TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT,
 };
 use baton_domain::artifact::{ARTIFACT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS, TOOL_REGISTER_ARTIFACT};
+use baton_domain::knowledge::{
+    EVIDENCE_MAX, LESSON_FIELD_MAX_CHARS, QUERY_MAX_CHARS, TAGS_MAX, TITLE_MAX_CHARS, TOOL_RECORD_LESSON_CANDIDATE,
+    TOOL_SEARCH_KNOWLEDGE,
+};
 use baton_mcp_shim::{serve, ShimConfig};
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -116,14 +120,22 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_five_tools_with_their_required_fields() {
+async fn tools_list_has_the_seven_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        [TOOL_GET_TASK_CONTRACT, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT, TOOL_REPORT_BLOCKED, TOOL_REGISTER_ARTIFACT]
+        [
+            TOOL_GET_TASK_CONTRACT,
+            TOOL_REPORT_PROGRESS,
+            TOOL_SAVE_CHECKPOINT,
+            TOOL_REPORT_BLOCKED,
+            TOOL_REGISTER_ARTIFACT,
+            TOOL_RECORD_LESSON_CANDIDATE,
+            TOOL_SEARCH_KNOWLEDGE,
+        ]
     );
     for tool in tools {
         assert!(!tool["description"].as_str().unwrap().is_empty());
@@ -149,6 +161,31 @@ async fn tools_list_has_the_five_tools_with_their_required_fields() {
     for field in ["content", "content_base64"] {
         assert!(properties[field]["description"].as_str().unwrap().contains(&limit), "{field}");
     }
+
+    // 候選教訓：說明要講清楚只是候選、需使用者確認；上限取自 domain 常數
+    let lesson_tool = tools.iter().find(|t| t["name"] == TOOL_RECORD_LESSON_CANDIDATE).unwrap();
+    let description = lesson_tool["description"].as_str().unwrap();
+    assert!(description.contains("候選") && description.contains("確認"), "{description}");
+    let lesson = schema(TOOL_RECORD_LESSON_CANDIDATE);
+    assert_eq!(lesson["required"], json!(["title"]));
+    let properties = &lesson["properties"];
+    assert_eq!(properties["title"]["maxLength"], TITLE_MAX_CHARS);
+    for field in ["trigger", "root_cause", "resolution"] {
+        assert_eq!(properties[field]["maxLength"], LESSON_FIELD_MAX_CHARS, "{field}");
+    }
+    for field in ["tags", "evidence"] {
+        assert_eq!(properties[field]["type"], "array", "{field}");
+        assert_eq!(properties[field]["items"]["type"], "string", "{field}");
+    }
+    assert_eq!(properties["tags"]["maxItems"], TAGS_MAX);
+    assert_eq!(properties["evidence"]["maxItems"], EVIDENCE_MAX);
+    assert_eq!(properties["scope"]["enum"], json!(["task", "goal", "workspace"]));
+    assert_eq!(properties["scope"]["default"], "task");
+
+    let search = schema(TOOL_SEARCH_KNOWLEDGE);
+    assert_eq!(search["properties"]["query"]["type"], "string");
+    assert_eq!(search["properties"]["query"]["maxLength"], QUERY_MAX_CHARS);
+    assert!(search.get("required").is_none(), "query 可省略（等同空字串）");
 }
 
 #[tokio::test]
@@ -348,3 +385,4 @@ fn config_requires_both_variables_and_never_shows_the_token() {
     assert!(no_url.to_string().contains(RUNTIME_URL_ENV));
     assert!(ShimConfig::from_lookup(|_| Some(String::new())).is_err());
 }
+

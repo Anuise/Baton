@@ -7,8 +7,10 @@
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 use baton_domain::Timestamp;
 use baton_harness::Harness;
+use baton_mcp_shim::{serve, ShimConfig};
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
+use tokio::io::{duplex, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const WORKSPACES: &str = "/api/v1/workspaces";
 const KNOWLEDGE: &str = "/api/v1/knowledge";
@@ -507,4 +509,66 @@ async fn without_fts5_search_falls_back_to_like_shows_the_degradation_and_recove
     harness.restart().await;
     assert_eq!(list(&harness, &format!("workspace_id={ws}")).await["search_mode"], "full_text");
     assert_traditional_chinese_search(&harness, &ws).await;
+}
+
+// ============================================================ 經由 MCP shim
+
+/// 以真正的 Runtime 跑 shim：送完所有請求、關閉 stdin，回傳每一行回應。
+async fn talk_to_shim(harness: &Harness, token: &str, requests: &[Value]) -> Vec<Value> {
+    let (client, shim_side) = duplex(64 * 1024);
+    let (shim_read, shim_write) = tokio::io::split(shim_side);
+    let config = ShimConfig::new(harness.runtime_url(), token.to_string());
+    let server = tokio::spawn(async move { serve(BufReader::new(shim_read), shim_write, config).await });
+
+    let (client_read, mut client_write) = tokio::io::split(client);
+    for request in requests {
+        client_write.write_all(format!("{request}
+").as_bytes()).await.unwrap();
+    }
+    client_write.shutdown().await.unwrap();
+    let mut lines = BufReader::new(client_read).lines();
+    let mut responses = Vec::new();
+    while let Some(line) = lines.next_line().await.unwrap() {
+        responses.push(serde_json::from_str(&line).expect("shim 的輸出每一行都是 JSON-RPC 訊息"));
+    }
+    server.await.unwrap().unwrap();
+    responses
+}
+
+fn tool_result(reply: &Value) -> Value {
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn a_lesson_recorded_through_the_mcp_shim_is_only_a_candidate_and_is_not_found_by_search_knowledge() {
+    let harness = harness().await;
+    let (_ws, _goal, _tid, _rid, token) = running(&harness, "main").await;
+    let call = |id: u64, name: &str, arguments: Value| {
+        json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": arguments } })
+    };
+    let lesson = json!({
+        "title": "測試前先清除快取",
+        "body": "快取殘留會讓整合測試誤判為通過",
+        "resolution": "測試前清除快取目錄",
+        "tags": ["測試"],
+        "scope": "task",
+    });
+    let replies = talk_to_shim(
+        &harness,
+        &token,
+        &[
+            call(1, TOOL_RECORD_LESSON_CANDIDATE, lesson),
+            call(2, TOOL_SEARCH_KNOWLEDGE, json!({ "query": "快取" })),
+            call(3, TOOL_SEARCH_KNOWLEDGE, json!({ "query": "" })),
+        ],
+    )
+    .await;
+    assert!(!replies.iter().any(|r| r.to_string().contains(&token)), "shim 的輸出不含憑證");
+
+    let recorded = tool_result(&replies[0]);
+    assert_eq!(recorded["status"], "candidate", "{recorded}");
+    for reply in &replies[1..] {
+        assert_eq!(tool_result(reply)["entries"], json!([]), "候選不是有效知識：{reply}");
+    }
 }

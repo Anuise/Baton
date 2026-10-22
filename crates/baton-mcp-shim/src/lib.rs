@@ -13,6 +13,10 @@ use baton_domain::agent::{
     TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT,
 };
 use baton_domain::artifact::{ARTIFACT_MAX_BYTES, DESCRIPTION_MAX_CHARS, NAME_MAX_CHARS, TOOL_REGISTER_ARTIFACT};
+use baton_domain::knowledge::{
+    BODY_MAX_CHARS, EVIDENCE_MAX, EVIDENCE_MAX_CHARS, LESSON_FIELD_MAX_CHARS, QUERY_MAX_CHARS, QUERY_TERM_MIN_CHARS,
+    TAGS_MAX, TAG_MAX_CHARS, TITLE_MAX_CHARS, TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE,
+};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -200,13 +204,82 @@ fn tool_definitions() -> Value {
                 "required": ["name"],
             },
         },
+        {
+            "name": TOOL_RECORD_LESSON_CANDIDATE,
+            "description": "提交一則候選教訓（踩過的坑、根因與解法）。提交後只是「候選」，不會被當作已驗證的知識，                需使用者在知識分頁確認後才會生效；適用範圍由這個 Run 的 Task 決定。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "maxLength": TITLE_MAX_CHARS, "description": "教訓的簡短標題" },
+                    "body": { "type": "string", "maxLength": BODY_MAX_CHARS, "description": "詳細說明（選填）" },
+                    "trigger": {
+                        "type": "string",
+                        "maxLength": LESSON_FIELD_MAX_CHARS,
+                        "description": "觸發條件：什麼情況下會再犯（選填）",
+                    },
+                    "root_cause": {
+                        "type": "string",
+                        "maxLength": LESSON_FIELD_MAX_CHARS,
+                        "description": "根因或待驗假說（選填）",
+                    },
+                    "resolution": {
+                        "type": "string",
+                        "maxLength": LESSON_FIELD_MAX_CHARS,
+                        "description": "有效解法或禁用做法（選填）",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": TAG_MAX_CHARS },
+                        "maxItems": TAGS_MAX,
+                        "description": "標籤（選填）",
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "items": { "type": "string", "maxLength": EVIDENCE_MAX_CHARS },
+                        "maxItems": EVIDENCE_MAX,
+                        "description": "證據：成果、Run、事件或外部來源的參照與說明（選填）",
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["task", "goal", "workspace"],
+                        "default": "task",
+                        "description": "適用範圍：這個 Task（預設）、所屬 Goal 或整個 Workspace",
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+        {
+            "name": TOOL_SEARCH_KNOWLEDGE,
+            "description": "搜尋這個 Run 適用範圍內「已驗證且有效」的決策、教訓與知識（候選、已撤銷或過期的不會出現）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "maxLength": QUERY_MAX_CHARS,
+                        "description": format!(
+                            "以空白分詞，每個詞至少 {QUERY_TERM_MIN_CHARS} 個字元，全部的詞都要出現；空字串列出全部適用的有效條目"
+                        ),
+                    },
+                },
+            },
+        },
     ])
 }
 
 /// 處理 `tools/call`：協定層的錯誤回 `Err`，Runtime 的結果（含失敗）一律包成 MCP 工具結果。
 async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value) -> Result<Value, (i64, String)> {
     let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "缺少工具名稱 name".to_string()))?;
-    let known = [TOOL_GET_TASK_CONTRACT, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT, TOOL_REPORT_BLOCKED, TOOL_REGISTER_ARTIFACT];
+    let known = [
+        TOOL_GET_TASK_CONTRACT,
+        TOOL_REPORT_PROGRESS,
+        TOOL_SAVE_CHECKPOINT,
+        TOOL_REPORT_BLOCKED,
+        TOOL_REGISTER_ARTIFACT,
+        TOOL_RECORD_LESSON_CANDIDATE,
+        TOOL_SEARCH_KNOWLEDGE,
+    ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));
     }
