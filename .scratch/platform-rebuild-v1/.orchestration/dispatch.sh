@@ -18,11 +18,11 @@ MSYS_NO_PATHCONV=1 env $CLEAN \
   CLAUDE_CONFIG_DIR="$(cygpath -w "$HOME/.claude-Work-$N")" \
   CLAUDE_CODE_RETRY_WATCHDOG=1 \
   CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=18000000 \
-  claude -p --model claude-sonnet-5-5 --effort high \
+  claude -p --model claude-opus-5-5 --effort high \
     --permission-mode bypassPermissions \
     --output-format stream-json --verbose \
     "$(cat "$ORCH/runs/$RUN.prompt.md")" > "$ORCH/runs/$RUN.log" 2>&1
 RC=$?
 # 印出最後的 result 事件
-grep '"type":"result"' "$ORCH/runs/$RUN.log" | tail -1 | python -I -c "import sys,json; t=sys.stdin.read(); d=json.loads(t) if t.strip() else {}; print('subtype:', d.get('subtype'), 'is_error:', d.get('is_error')); print(d.get('result',''))"
+grep '"type":"result"' "$ORCH/runs/$RUN.log" | tail -1 | python -I -X utf8 -c "import sys,json; t=sys.stdin.buffer.read().decode('utf-8'); d=json.loads(t) if t.strip() else {}; print('subtype:', d.get('subtype'), 'is_error:', d.get('is_error')); print(d.get('result',''))"
 echo "exit: $RC"
