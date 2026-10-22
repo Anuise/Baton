@@ -1930,6 +1930,7 @@ impl Store {
     }
 
     /// 唯讀查詢：使用獨立的唯讀連線，不經過寫入佇列。
+    /// 整個查詢包在一個讀取交易中，其中的多個 SELECT 讀到同一個快照，不會混到其間提交的寫入。
     async fn read<T: Send + 'static>(
         &self,
         query: impl FnOnce(&Connection) -> StoreResult<T> + Send + 'static,
@@ -1937,7 +1938,9 @@ impl Store {
         let reader = self.inner.reader.clone();
         tokio::task::spawn_blocking(move || {
             let conn = reader.lock().unwrap_or_else(|e| e.into_inner());
-            query(&conn)
+            // 只讀不寫：交易結束時直接回滾（drop），不需要 commit
+            let tx = conn.unchecked_transaction()?;
+            query(&tx)
         })
         .await
         .map_err(|_| StoreError::Join)?
@@ -2424,6 +2427,27 @@ mod tests {
 
         let second = open(dir.path()).await;
         assert_eq!(second.record_boot(Timestamp::from_millis(2)).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn one_read_sees_a_single_snapshot_even_if_a_write_commits_in_between() {
+        // R151 第 16 項：同一個查詢中的多個 SELECT 不能讀到交易提交前後混在一起的狀態
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        store.record_boot(T0).await.unwrap();
+        let path = dir.path().to_path_buf();
+        let (before, after) = store
+            .read(move |conn| {
+                let count = |c: &Connection| c.query_row("SELECT COUNT(*) FROM runtime_boot", [], |r| r.get::<_, i64>(0));
+                let before = count(conn)?;
+                raw(&path).execute("INSERT INTO runtime_boot (started_at) VALUES (1)", [])?;
+                let after = count(conn)?;
+                Ok((before, after))
+            })
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(store.read(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM runtime_boot", [], |r| r.get::<_, i64>(0))?)).await.unwrap(), 2);
     }
 
     #[tokio::test]
