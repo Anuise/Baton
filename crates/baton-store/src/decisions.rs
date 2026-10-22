@@ -153,6 +153,10 @@ impl Store {
                         if change.changed() {
                             save(tx, &change)?;
                         }
+                        // 外部操作「結果未知」的請求：查證結果與 Task 恢復在同一個交易提交（票 26）
+                        if let Some(decision) = &change.decision {
+                            super::external_operations::resolve_by_decision(tx, &workspace_id, decision, now)?;
+                        }
                         Ok(Ok(change.outcome))
                     }
                 }
@@ -318,42 +322,48 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
     Ok(DecisionData { requests, decisions, uses, artifacts })
 }
 
+/// 寫入一個新的裁定請求與它的阻擋範圍（外部操作結果未知時由 Runtime 建立的請求也走這裡，票 26）。
+pub(crate) fn insert_request(tx: &Transaction<'_>, request: &DecisionRequest) -> rusqlite::Result<()> {
+    // Domain 型別只含字串與數字，序列化不會失敗
+    let options = serde_json::to_string(&request.options).expect("選項可序列化");
+    let evidence = serde_json::to_string(&request.evidence).expect("證據可序列化");
+    let permission = request.permission.as_ref().map(|p| serde_json::to_string(p).expect("權限細節可序列化"));
+    tx.execute(
+        &format!(
+            "INSERT INTO decision_request ({REQUEST_COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
+        ),
+        rusqlite::params![
+            request.id,
+            request.workspace_id,
+            request.run_id,
+            request.task_id,
+            request.kind.as_str(),
+            request.status.as_str(),
+            request.question,
+            request.reason,
+            options,
+            request.recommendation,
+            evidence,
+            request.urgency.as_str(),
+            request.deadline_at.map(|t| t.as_millis()),
+            permission,
+            request.created_at.as_millis(),
+        ],
+    )?;
+    for task_id in &request.blocking {
+        tx.execute(
+            "INSERT INTO decision_request_block (request_id, task_id) VALUES (?1, ?2)",
+            rusqlite::params![request.id, task_id],
+        )?;
+    }
+    Ok(())
+}
+
 /// 把 Domain 的結果寫進同一個交易：請求、裁定、單次批准的消耗、受影響的 Task、喚醒 Outbox 與事件。
 fn save(tx: &Transaction<'_>, change: &DecisionChange) -> rusqlite::Result<()> {
     if let Some(request) = &change.request {
-        // Domain 型別只含字串與數字，序列化不會失敗
-        let options = serde_json::to_string(&request.options).expect("選項可序列化");
-        let evidence = serde_json::to_string(&request.evidence).expect("證據可序列化");
-        let permission = request.permission.as_ref().map(|p| serde_json::to_string(p).expect("權限細節可序列化"));
-        tx.execute(
-            &format!(
-                "INSERT INTO decision_request ({REQUEST_COLUMNS})
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)"
-            ),
-            rusqlite::params![
-                request.id,
-                request.workspace_id,
-                request.run_id,
-                request.task_id,
-                request.kind.as_str(),
-                request.status.as_str(),
-                request.question,
-                request.reason,
-                options,
-                request.recommendation,
-                evidence,
-                request.urgency.as_str(),
-                request.deadline_at.map(|t| t.as_millis()),
-                permission,
-                request.created_at.as_millis(),
-            ],
-        )?;
-        for task_id in &request.blocking {
-            tx.execute(
-                "INSERT INTO decision_request_block (request_id, task_id) VALUES (?1, ?2)",
-                rusqlite::params![request.id, task_id],
-            )?;
-        }
+        insert_request(tx, request)?;
     }
     if let Some(request_id) = &change.answered_request {
         tx.execute("UPDATE decision_request SET status = 'answered' WHERE id = ?1", [request_id])?;
