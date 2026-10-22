@@ -21,7 +21,7 @@ pub struct WorkdirCandidate {
 
 impl Store {
     /// 現在需要準備工作目錄的 Task：派工佇列中排隊的 Task，加上 `explicit`（使用者剛要求派工的 Task，失敗也立即重試）。
-    /// 只考慮 `ready` 的 Task 與使用中的 Workspace；已有可用目錄的不再準備。
+    /// 只考慮 `ready` 的 Task 與使用中、沒有被生命週期擋住派工的 Workspace；已有可用目錄的不再準備。
     pub async fn workdir_candidates(
         &self,
         explicit: Option<(String, String)>,
@@ -43,6 +43,10 @@ impl Store {
                 let Some(workspace) = loaded.workspace.clone().filter(|w| w.status == WorkspaceStatus::Active) else {
                     continue;
                 };
+                // 完全退出中或等待「繼續工作」的 Workspace 不會派工，也就不在這時執行 git 建立目錄
+                if super::lifecycle::halt_for(conn, Some(&workspace), &workspace_id)?.is_some() {
+                    continue;
+                }
                 let Some(task) = loaded.tasks.iter().find(|t| t.id == task_id && t.status == TaskStatus::Ready) else {
                     continue;
                 };

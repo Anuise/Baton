@@ -1,6 +1,6 @@
 # 35: 完整裁定中心與決策權限表
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R064-35-impl，2026-10-22 17:42）
 Blocked by: 22
 
 **What to build:** 裁定中心先顯示總覽再逐項處理：接受、修改條件、回答、要求調查、延後、駁回；批次處理逐項保存對應；相似問題合併或連結；提交時以 expected_revision 校驗，過期請求標記 superseded。內建 spec D-15 的決策權限表，Workspace 可收窄不可放寬，Controller 嘗試自行處理「必須送裁定」事項時被拒絕。狀態列顯示待裁定數（spec D-21）。

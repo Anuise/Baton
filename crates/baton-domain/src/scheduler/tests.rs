@@ -131,6 +131,7 @@ struct World {
     settings: SchedulerSettings,
     runs: Vec<Run>,
     quota: HashMap<String, f64>,
+    halt: Option<WaitReason>,
 }
 
 impl World {
@@ -140,6 +141,7 @@ impl World {
             settings: SchedulerSettings { mode, version: 0, updated_at: None },
             runs: Vec::new(),
             quota: HashMap::new(),
+            halt: None,
         }
     }
 
@@ -155,7 +157,13 @@ impl World {
 
     fn place(&self, kind: SlotKind) -> Placement {
         place(
-            &Capacity { profiles: &self.profiles, settings: &self.settings, active_runs: &self.runs, quota_used: &self.quota },
+            &Capacity {
+                profiles: &self.profiles,
+                settings: &self.settings,
+                active_runs: &self.runs,
+                quota_used: &self.quota,
+                halt: self.halt.clone(),
+            },
             kind,
         )
     }
@@ -182,6 +190,25 @@ fn summary(reasons: &[WaitReason]) -> Vec<(WaitCategory, &str, Option<&str>)> {
 
 fn codes(reasons: &[WaitReason]) -> Vec<&str> {
     reasons.iter().map(|r| r.code.as_str()).collect()
+}
+
+// ============================================================ 生命週期（票 25）
+
+#[test]
+fn stop_intent_halts_every_placement_including_handoff_and_quota_recovery() {
+    let halt = WaitReason {
+        category: WaitCategory::Lifecycle,
+        code: "runtime_stopping".into(),
+        message: "停止中".into(),
+        profile_id: None,
+    };
+    // 帳號都有空、額度也已恢復（低於門檻）：沒有停止意圖時派得出去
+    let mut world = World::new(vec![usable("p1"), usable("p2")], CapacityMode::ReserveHandoff).with_quota("p1", 0.1);
+    assert_eq!(placed(world.place(SlotKind::Normal)), "p1");
+    world.halt = Some(halt.clone());
+    for kind in [SlotKind::Normal, SlotKind::Handoff] {
+        assert_eq!(waiting(world.place(kind)), vec![halt.clone()], "{kind:?} 也不能在停止意圖生效時派出");
+    }
 }
 
 // ============================================================ 容量預設

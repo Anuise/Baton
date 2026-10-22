@@ -343,6 +343,8 @@ pub enum RunError {
     LeaseNotExpired,
     #[error("Run 沒有被要求取消，不能完成取消")]
     CancelNotRequested,
+    #[error("完全退出的停止意圖生效中（或 Workspace 在完全退出後等待「繼續工作」），不啟動新的程序")]
+    LaunchHalted,
     #[error("Task 的{}還沒有準備好", workdir_label(*.0))]
     WorkdirNotPrepared(WorkdirKind),
     #[error("Task 的工作目錄不可用：{0}")]
@@ -376,6 +378,7 @@ impl RunError {
             RunError::StaleReport => "run_report_stale",
             RunError::LeaseNotExpired => "lease_not_expired",
             RunError::CancelNotRequested => "run_cancel_not_requested",
+            RunError::LaunchHalted => "launch_halted",
             RunError::WorkdirNotPrepared(_) => "workdir_not_prepared",
             RunError::WorkdirUnavailable(_) => "workdir_unavailable",
         }

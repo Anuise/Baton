@@ -67,6 +67,7 @@ impl From<RunError> for TaskApiError {
             | RunError::StaleReport
             | RunError::LeaseNotExpired
             | RunError::CancelNotRequested
+            | RunError::LaunchHalted
             | RunError::WorkdirNotPrepared(_)
             | RunError::WorkdirUnavailable(_) => StatusCode::CONFLICT,
         };

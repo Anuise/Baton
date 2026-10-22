@@ -110,12 +110,40 @@ export interface ConfirmationSummary {
   items: { capability: Capability; label: string; targets: string[]; restrictions: string[]; high_risk: boolean }[];
   risks: string[];
   requires_risk_acknowledgement: boolean;
+  /** 相對於目前生效 revision 的變動；第一次確認（還沒有任何 revision）時為 null。 */
+  changes: AuthorizationChanges | null;
+}
+
+/** 修改授權時，一項能力的變動（對應 Rust 的 GrantChange）。 */
+export interface GrantChange {
+  capability: Capability;
+  label: string;
+  high_risk: boolean;
+  new_capability: boolean;
+  removed_capability: boolean;
+  added_targets: string[];
+  removed_targets: string[];
+  added_restrictions: string[];
+  removed_restrictions: string[];
+  expands: boolean;
+}
+
+/** 新內容相對於目前生效 revision 的變動（對應 Rust 的 AuthorizationChanges）。 */
+export interface AuthorizationChanges {
+  base_revision: number;
+  changes: GrantChange[];
+  /** 這次修改擴大授權：確認時必須帶 `acknowledgedExpansion: true`。 */
+  expands: boolean;
+  /** 給使用者看的影響說明。 */
+  impact: string[];
 }
 
 export interface ConfirmAuthorizationRequest {
   templateId: string | null;
   grants: Grant[];
   acknowledgedRisk: boolean;
+  /** 使用者已承認這次修改會擴大授權；修改既有授權且 `changes.expands` 為真時必須是 true。 */
+  acknowledgedExpansion: boolean;
 }
 
 /** Claude Code 實際使用的認證來源（對應 Rust 的 AuthSource）；只有 `native_login` 可以派工。 */
@@ -497,8 +525,16 @@ export type RunView = Run & {
   blocked: BlockedNote | null;
 };
 
-/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。 */
-export type WaitCategory = "capacity" | "quota" | "authorization" | "dependency" | "state_unknown" | "account" | "workdir";
+/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。`lifecycle` 是完全退出中或等待「繼續工作」，`workdir` 是工作目錄不可用。 */
+export type WaitCategory =
+  | "capacity"
+  | "quota"
+  | "authorization"
+  | "dependency"
+  | "state_unknown"
+  | "account"
+  | "lifecycle"
+  | "workdir";
 
 /** 等待原因（對應 Rust 的 WaitReason）；`code` 是穩定的機器可讀代碼。 */
 export interface WaitReason {
@@ -649,6 +685,40 @@ export interface DecisionBlocking {
   task_status: TaskStatus;
 }
 
+/** 「允許本次操作」綁定的單一邏輯操作；執行時逐項核對，任何一項不同就不能沿用。 */
+export interface ApprovalBinding {
+  /** 例如 "Bash:git push"、"Write"。 */
+  operation: string;
+  /** 目標資源，例如 "origin main"、檔案路徑、網址。 */
+  target: string | null;
+  /** 重要參數，例如 { flags: ["--force"] }。 */
+  params: Record<string, unknown>;
+  /** SHA-256 小寫十六進位。 */
+  request_hash: string;
+  /** Task 的成果版本，例如 "report.md@2,notes.md@1"；沒有成果時是空字串。 */
+  artifact_version: string;
+}
+
+/** 單次批准被某個 Run 使用的紀錄。 */
+export interface ApprovalUse {
+  request_id: string;
+  run_id: string;
+  used_at: number;
+}
+
+export type ApprovalMismatchReason =
+  | "operation_changed"
+  | "target_changed"
+  | "params_changed"
+  | "request_hash_changed"
+  | "artifact_version_changed";
+
+/** 先前有單次批准，但這次的操作與它的綁定不符而不能沿用。 */
+export interface RejectedApproval {
+  request_id: string;
+  reason: ApprovalMismatchReason;
+}
+
 /** 權限提示的內容：哪個工具、對應哪項授權能力。 */
 export interface DecisionPermission {
   tool_name: string;
@@ -656,6 +726,13 @@ export interface DecisionPermission {
   capability: Capability | null;
   capability_label: string | null;
   summary: string;
+  /** 單次批准綁定的操作；票 23 之前建立的請求沒有。 */
+  binding: ApprovalBinding | null;
+  /** 同一操作先前已用掉一次批准、結果未知：要先查證再回答。 */
+  prior_use: ApprovalUse | null;
+  rejected_approval: RejectedApproval | null;
+  /** 這個請求的裁定已被某個 Run 使用。 */
+  approval_use: ApprovalUse | null;
 }
 
 /** 使用者已作出的裁定。 */
@@ -723,6 +800,140 @@ export interface ArtifactClient {
   listArtifacts(workspaceId: string): Promise<ArtifactList>;
   previewArtifact(workspaceId: string, artifactId: string, version: number): Promise<ArtifactPreview>;
   downloadArtifact(workspaceId: string, artifactId: string, version: number): Promise<ArtifactDownload>;
+}
+
+/** 知識條目的種類：決策、教訓、知識。 */
+export type KnowledgeKind = "decision" | "lesson" | "fact";
+/** 候選、已驗證、已撤銷、已淘汰、已被取代。 */
+export type KnowledgeStatus = "candidate" | "verified" | "revoked" | "retired" | "superseded";
+/** 適用範圍：全域、Workspace、Goal、Task。 */
+export type ScopeKind = "global" | "workspace" | "goal" | "task";
+/** `like_fallback` 表示全文檢索無法使用，已退回逐筆比對。 */
+export type SearchMode = "full_text" | "like_fallback";
+
+export interface KnowledgeScope {
+  kind: ScopeKind;
+  workspace_id: string | null;
+  goal_id: string | null;
+  task_id: string | null;
+}
+
+export type KnowledgeSource = { kind: "user" } | { kind: "agent"; run_id: string; generation: number; task_id: string };
+
+/** 教訓欄位：觸發條件、根因或待驗假說、解法。 */
+export interface LessonDetail {
+  trigger: string;
+  root_cause: string;
+  resolution: string;
+}
+
+export interface KnowledgeContent {
+  title: string;
+  body: string;
+  tags: string[];
+  evidence: string[];
+  lesson: LessonDetail | null;
+}
+
+/** 知識條目（Rust 以 flatten 攤平在同一層）；`effective` 是「已驗證且現在在有效期間內」。 */
+export interface KnowledgeEntryView {
+  id: string;
+  kind: KnowledgeKind;
+  scope: KnowledgeScope;
+  status: KnowledgeStatus;
+  source: KnowledgeSource;
+  valid_from: number;
+  valid_until: number | null;
+  version: number;
+  revision: number;
+  supersedes: string | null;
+  superseded_by: string | null;
+  status_reason: string | null;
+  content: KnowledgeContent;
+  created_at: number;
+  updated_at: number;
+  effective: boolean;
+}
+
+export interface KnowledgeList {
+  search_mode: SearchMode;
+  /** 最多 100 筆，依 updated_at 由新到舊。 */
+  entries: KnowledgeEntryView[];
+}
+
+export interface KnowledgeVersion {
+  version: number;
+  content: KnowledgeContent;
+  note: string | null;
+  created_at: number;
+}
+
+/** 變更歷史；`event_type` 例如 knowledge_created、knowledge_revoked（payload.reason）。 */
+export interface KnowledgeEvent {
+  revision: number;
+  event_type: string;
+  occurred_at: number;
+  payload: unknown;
+}
+
+export interface KnowledgeDetail {
+  entry: KnowledgeEntryView;
+  /** 由舊到新。 */
+  versions: KnowledgeVersion[];
+  /** 由舊到新。 */
+  history: KnowledgeEvent[];
+}
+
+/** 列表查詢：`workspaceId` 省略時只列全域條目；`q` 空白時不過濾；`includeInactive` 為 true 時連無效條目一起回傳。 */
+export interface KnowledgeListQuery {
+  workspaceId?: string;
+  q?: string;
+  includeInactive: boolean;
+}
+
+export interface CreateKnowledgeRequest {
+  kind: KnowledgeKind;
+  scope: { kind: ScopeKind; workspace_id?: string; goal_id?: string; task_id?: string };
+  title: string;
+  body?: string;
+  tags?: string[];
+  evidence?: string[];
+  /** 只有教訓可以帶。 */
+  lesson?: LessonDetail;
+  valid_from?: number;
+  valid_until?: number;
+  supersedes?: string;
+}
+
+/** 修正：以完整的新內容追加新版本；`valid_until` 省略表示沒有期限。 */
+export interface CorrectKnowledgeRequest {
+  expected_revision: number;
+  title: string;
+  body?: string;
+  tags?: string[];
+  evidence?: string[];
+  lesson?: LessonDetail;
+  valid_until?: number;
+  note?: string;
+}
+
+/** 撤銷或淘汰（都要說明原因）。 */
+export interface KnowledgeReasonRequest {
+  expected_revision: number;
+  reason: string;
+}
+
+/** 知識與教訓（只有桌面憑證能用）。 */
+export interface KnowledgeClient {
+  listKnowledge(query: KnowledgeListQuery): Promise<KnowledgeList>;
+  /** 使用者建立的條目直接是已驗證。 */
+  createKnowledge(request: CreateKnowledgeRequest): Promise<KnowledgeEntryView>;
+  knowledgeDetail(id: string): Promise<KnowledgeDetail>;
+  /** 候選 → 已驗證。 */
+  confirmKnowledge(id: string, expectedRevision: number): Promise<KnowledgeEntryView>;
+  correctKnowledge(id: string, request: CorrectKnowledgeRequest): Promise<KnowledgeEntryView>;
+  revokeKnowledge(id: string, request: KnowledgeReasonRequest): Promise<KnowledgeEntryView>;
+  retireKnowledge(id: string, request: KnowledgeReasonRequest): Promise<KnowledgeEntryView>;
 }
 
 /** 並行容量的預設：保留交接容量（預設）或較高並行。 */
@@ -882,6 +1093,67 @@ export interface AccountClient {
   acknowledgeBackgroundNotice(): Promise<SetupStatus>;
 }
 
+export type LifecyclePhase = "running" | "stopping" | "stopped";
+
+/** 完全退出時單一 Run 的停止結果；`anomaly` 是無法確認已停止的程序（停止異常）。 */
+export type ExitRunOutcome = "pending" | "not_started" | "stopped_gracefully" | "force_killed" | "anomaly";
+
+export type StopAnomaly = "still_alive" | "stop_failed" | "stop_unconfirmed";
+
+export interface ExitRunResult {
+  run_id: string;
+  workspace_id: string;
+  task_id: string;
+  outcome: ExitRunOutcome;
+  /** 只有 outcome 為 anomaly 時才有。 */
+  anomaly?: StopAnomaly;
+  message?: string;
+}
+
+/** 最近一次完全退出的經過；時間是 UTC 毫秒。 */
+export interface ExitReport {
+  requested_at: number;
+  deadline_at: number;
+  completed_at: number | null;
+  runs: ExitRunResult[];
+  notes: string[];
+}
+
+/** 單一 Workspace 的生命週期設定與狀態（對應 Rust 的 WorkspaceLifecycleView）。 */
+export interface WorkspaceLifecycleView {
+  workspace_id: string;
+  name: string;
+  /** 完全退出後重新開啟時是否自動續跑；預設關閉。 */
+  auto_resume_after_exit: boolean;
+  paused_since: number | null;
+  /** 完全退出後暫停中，等使用者按「繼續工作」。 */
+  awaiting_resume: boolean;
+}
+
+/** Runtime 生命週期（對應 Rust 的 LifecycleStatus）。 */
+export interface LifecycleStatus {
+  phase: LifecyclePhase;
+  stop_intent_active: boolean;
+  timing: { stop_grace_ms: number; kill_confirm_ms: number };
+  exit: ExitReport | null;
+  active_runs: number;
+  workspaces: WorkspaceLifecycleView[];
+}
+
+/** 完全退出、各 Workspace 的自動續跑設定與「繼續工作」，以及桌面 App 的結束。 */
+export interface LifecycleClient {
+  lifecycleStatus(): Promise<LifecycleStatus>;
+  /** 完全退出：Runtime 持久化停止意圖並開始停止。 */
+  requestFullExit(): Promise<LifecycleStatus>;
+  /** 只影響下次重新開啟，不立即啟停目前的工作。 */
+  updateWorkspaceLifecycle(workspaceId: string, autoResumeAfterExit: boolean): Promise<WorkspaceLifecycleView>;
+  resumeWorkspace(workspaceId: string): Promise<WorkspaceLifecycleView>;
+  /** 結束桌面 App 程序。 */
+  quitApp(): Promise<void>;
+  /** 使用者在系統匣按「完全退出」時呼叫 handler；回傳取消訂閱的函式。 */
+  onFullExitRequested(handler: () => void): () => void;
+}
+
 /** 共同設定的來源種類（對應 Rust 的 SourceKind）。 */
 export type SettingsSourceKind = "settings" | "instructions" | "user_state";
 
@@ -978,8 +1250,10 @@ export type AppClient = RuntimeClient &
   AccountClient &
   DecisionClient &
   SchedulingClient &
+  LifecycleClient &
   ArtifactClient &
-  SharedSettingsClient;
+  SharedSettingsClient &
+  KnowledgeClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
 export function errorCode(error: unknown): string | null {
@@ -996,6 +1270,9 @@ const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
 const PENDING_DECISIONS_PATH = "/api/v1/decisions/pending";
 const SCHEDULING_PATH = "/api/v1/scheduling";
+const LIFECYCLE_PATH = "/api/v1/lifecycle";
+/** 桌面殼在系統匣「完全退出」時發出的事件（先顯示主視窗再發出）。 */
+export const FULL_EXIT_EVENT = "baton://full-exit-requested";
 const SHARED_SETTINGS_PATH = "/api/v1/shared-settings";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
@@ -1004,6 +1281,17 @@ const decisionPath = (workspaceId: string, requestId: string) =>
   `${workspacePath(workspaceId)}/decisions/${encodeURIComponent(requestId)}`;
 const artifactVersionPath = (workspaceId: string, artifactId: string, version: number) =>
   `${workspacePath(workspaceId)}/artifacts/${encodeURIComponent(artifactId)}/versions/${version}`;
+const KNOWLEDGE_PATH = "/api/v1/knowledge";
+const knowledgePath = (id: string) => `${KNOWLEDGE_PATH}/${encodeURIComponent(id)}`;
+
+/** 列表查詢字串：未指定的 workspace_id 與空白的 q 不送出。 */
+function knowledgeListPath({ workspaceId, q, includeInactive }: KnowledgeListQuery): string {
+  const params = new URLSearchParams();
+  if (workspaceId !== undefined) params.set("workspace_id", workspaceId);
+  if (q !== undefined && q.trim() !== "") params.set("q", q);
+  params.set("include_inactive", String(includeInactive));
+  return `${KNOWLEDGE_PATH}?${params.toString()}`;
+}
 
 /** 直接以 HTTP 查詢（開發時用瀏覽器開啟，由 Vite 代理到 Runtime）。 */
 export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
@@ -1071,11 +1359,16 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       if (!response.ok) throw await failure(response);
       return (await response.json()) as ConfirmationSummary;
     },
-    async confirmAuthorization(workspaceId, { templateId, grants, acknowledgedRisk }) {
+    async confirmAuthorization(workspaceId, { templateId, grants, acknowledgedRisk, acknowledgedExpansion }) {
       const response = await fetchFn(authorizationPath(workspaceId), {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ template_id: templateId, grants, acknowledged_risk: acknowledgedRisk }),
+        body: JSON.stringify({
+          template_id: templateId,
+          grants,
+          acknowledged_risk: acknowledgedRisk,
+          acknowledged_expansion: acknowledgedExpansion,
+        }),
       });
       if (!response.ok) throw await failure(response);
       return (await response.json()) as AuthorizationRevision;
@@ -1114,6 +1407,18 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       send(`${PROFILES_PATH}/${encodeURIComponent(profileId)}/quota-limits`, { method: "PUT", body: limits }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
+    lifecycleStatus: () => send(LIFECYCLE_PATH),
+    requestFullExit: () => send(`${LIFECYCLE_PATH}/exit`, { method: "POST" }),
+    updateWorkspaceLifecycle: (workspaceId, autoResumeAfterExit) =>
+      send(`${workspacePath(workspaceId)}/lifecycle`, {
+        method: "PUT",
+        body: { auto_resume_after_exit: autoResumeAfterExit },
+      }),
+    resumeWorkspace: (workspaceId) => send(`${workspacePath(workspaceId)}/resume`, { method: "POST" }),
+    // 瀏覽器開發模式沒有桌面程序可結束；window.close() 對使用者自己開的分頁無效，所以不做事
+    quitApp: async () => {},
+    // 系統匣只存在於桌面殼，瀏覽器裡不會收到完全退出事件
+    onFullExitRequested: () => () => {},
     taskVerification: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/verification`),
     acceptTask: (workspaceId, taskId, { basis, note }) =>
       send(`${taskPath(workspaceId, taskId)}/verification/accept`, { method: "POST", body: { basis, note } }),
@@ -1130,13 +1435,24 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       if (!response.ok) throw await failure(response);
       return { blob: await response.blob(), sha256: response.headers.get("X-Baton-Sha256") ?? "" };
     },
+    listKnowledge: (query) => send(knowledgeListPath(query)),
+    createKnowledge: (request) => send(KNOWLEDGE_PATH, { method: "POST", body: request }),
+    knowledgeDetail: (id) => send(knowledgePath(id)),
+    confirmKnowledge: (id, expectedRevision) =>
+      send(`${knowledgePath(id)}/confirm`, { method: "POST", body: { expected_revision: expectedRevision } }),
+    correctKnowledge: (id, request) => send(`${knowledgePath(id)}/correct`, { method: "POST", body: request }),
+    revokeKnowledge: (id, request) => send(`${knowledgePath(id)}/revoke`, { method: "POST", body: request }),
+    retireKnowledge: (id, request) => send(`${knowledgePath(id)}/retire`, { method: "POST", body: request }),
   };
 }
 
 type Invoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
-/** 在 Tauri 內透過桌面殼的指令查詢；殼負責連回或啟動 Runtime。 */
-export function createTauriClient(invoke: Invoke): AppClient {
+/** `@tauri-apps/api/event` 的 listen（只用到不帶 payload 的事件）。 */
+type Listen = (event: string, handler: () => void) => Promise<() => void>;
+
+/** 在 Tauri 內透過桌面殼的指令查詢；殼負責連回或啟動 Runtime。`listen` 省略時不接收殼的事件（只有測試會省略）。 */
+export function createTauriClient(invoke: Invoke, listen: Listen = async () => () => {}): AppClient {
   const call = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
     try {
       return await (args === undefined ? invoke<T>(command) : invoke<T>(command, args));
@@ -1153,8 +1469,14 @@ export function createTauriClient(invoke: Invoke): AppClient {
     archiveWorkspace: (id) => call<Workspace>("workspace_archive", { id }),
     getAuthorization: (id) => call<AuthorizationView>("workspace_authorization", { id }),
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
-    confirmAuthorization: (id, { templateId, grants, acknowledgedRisk }) =>
-      call<AuthorizationRevision>("workspace_authorization_confirm", { id, templateId, grants, acknowledgedRisk }),
+    confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion }) =>
+      call<AuthorizationRevision>("workspace_authorization_confirm", {
+        id,
+        templateId,
+        grants,
+        acknowledgedRisk,
+        acknowledgedExpansion,
+      }),
     getTaskBoard: (workspaceId) => call<TaskBoard>("task_board", { workspaceId }),
     createGoal: (workspaceId, title) => call<Goal>("goal_create", { workspaceId, title }),
     createTask: (workspaceId, { goalId, title, kind, contract }) =>
@@ -1186,6 +1508,17 @@ export function createTauriClient(invoke: Invoke): AppClient {
     setSchedulingMode: (mode) => call<SchedulingOverview>("scheduling_set_mode", { mode }),
     setQuotaLimits: (id, limits) => call<SchedulingOverview>("profile_set_quota_limits", { id, limits }),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
+    lifecycleStatus: () => call<LifecycleStatus>("lifecycle_status"),
+    requestFullExit: () => call<LifecycleStatus>("lifecycle_exit"),
+    updateWorkspaceLifecycle: (workspaceId, autoResumeAfterExit) =>
+      call<WorkspaceLifecycleView>("workspace_lifecycle_update", { workspaceId, autoResumeAfterExit }),
+    resumeWorkspace: (workspaceId) => call<WorkspaceLifecycleView>("workspace_resume", { workspaceId }),
+    quitApp: () => call<void>("app_quit"),
+    onFullExitRequested: (handler) => {
+      const registered = listen(FULL_EXIT_EVENT, () => handler());
+      // 註冊是非同步的；取消訂閱時等註冊完成再解除
+      return () => void registered.then((unlisten) => unlisten());
+    },
     taskVerification: (workspaceId, taskId) => call<VerificationView>("task_verification", { workspaceId, taskId }),
     acceptTask: (workspaceId, taskId, { basis, note }) =>
       call<VerificationView>("task_accept", { workspaceId, taskId, request: { basis, note } }),
@@ -1207,14 +1540,23 @@ export function createTauriClient(invoke: Invoke): AppClient {
       const bytes = Uint8Array.from(atob(content_base64), (char) => char.charCodeAt(0));
       return { blob: new Blob([bytes]), sha256 };
     },
+    listKnowledge: ({ workspaceId, q, includeInactive }) =>
+      call<KnowledgeList>("knowledge_list", { workspaceId, q, includeInactive }),
+    createKnowledge: (request) => call<KnowledgeEntryView>("knowledge_create", { request }),
+    knowledgeDetail: (id) => call<KnowledgeDetail>("knowledge_detail", { id }),
+    confirmKnowledge: (id, expectedRevision) =>
+      call<KnowledgeEntryView>("knowledge_confirm", { id, request: { expected_revision: expectedRevision } }),
+    correctKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_correct", { id, request }),
+    revokeKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_revoke", { id, request }),
+    retireKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_retire", { id, request }),
   };
 }
 
 /** 依執行環境挑選用戶端。 */
 export async function createRuntimeClient(): Promise<AppClient> {
   if ("__TAURI_INTERNALS__" in window) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    return createTauriClient(invoke);
+    const [{ invoke }, { listen }] = await Promise.all([import("@tauri-apps/api/core"), import("@tauri-apps/api/event")]);
+    return createTauriClient(invoke, listen);
   }
   return createHttpClient();
 }

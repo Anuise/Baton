@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { formatTimestamp } from "./time";
 import type {
+  AuthorizationChanges,
   AuthorizationClient,
   AuthorizationRevision,
   AuthorizationView,
@@ -64,6 +65,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
   const [templateId, setTemplateId] = useState<string | null>(null);
   const [summary, setSummary] = useState<ConfirmationSummary | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [acknowledgedExpansion, setAcknowledgedExpansion] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -83,6 +85,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
     setLoaded({ state: "loading" });
     setSummary(null);
     setAcknowledged(false);
+    setAcknowledgedExpansion(false);
     setNotice(null);
     setError(null);
     void load();
@@ -104,6 +107,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
     setTemplateId(nextTemplateId);
     setSummary(null);
     setAcknowledged(false);
+    setAcknowledgedExpansion(false);
     setNotice(null);
     setError(null);
   };
@@ -130,6 +134,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
     try {
       setSummary(await client.summarizeAuthorization(workspace.id, grants()));
       setAcknowledged(false);
+      setAcknowledgedExpansion(false);
     } catch (e) {
       setError(reasonOf(e));
     } finally {
@@ -145,10 +150,12 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
         templateId,
         grants: grants(),
         acknowledgedRisk: acknowledged,
+        acknowledgedExpansion,
       });
       await load();
       setSummary(null);
       setAcknowledged(false);
+      setAcknowledgedExpansion(false);
       setNotice(`已保存為 revision ${revision.revision}`);
     } catch (e) {
       setError(reasonOf(e));
@@ -158,6 +165,8 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
   };
 
   const effective = view.effective;
+  // 修改既有授權而擴大範圍時，另外要承認擴大授權；第一次確認沒有 changes，不需要
+  const expands = summary?.changes?.expands ?? false;
   return (
     <section className="authorization" aria-label="授權設定">
       <h2>授權設定：{workspace.name}</h2>
@@ -236,6 +245,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
               ))}
             </ul>
           )}
+          {summary.changes && <ChangesView changes={summary.changes} />}
           {summary.risks.map((risk) => (
             <p key={risk} className="authorization-risk">
               {risk}
@@ -247,9 +257,19 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
               我了解並接受上述風險
             </label>
           )}
+          {expands && (
+            <label>
+              <input
+                type="checkbox"
+                checked={acknowledgedExpansion}
+                onChange={(e) => setAcknowledgedExpansion(e.target.checked)}
+              />
+              我了解這會擴大 Workspace 授權
+            </label>
+          )}
           <button
             type="button"
-            disabled={busy || (summary.requires_risk_acknowledgement && !acknowledged)}
+            disabled={busy || (summary.requires_risk_acknowledgement && !acknowledged) || (expands && !acknowledgedExpansion)}
             onClick={() => void confirm()}
           >
             確認並保存授權
@@ -272,6 +292,41 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
             ))}
           </ol>
         </section>
+      )}
+    </section>
+  );
+}
+
+/** 修改既有授權時，相對於目前 revision 新增／移除的能力、目標與限制，以及影響說明。 */
+function ChangesView({ changes }: { changes: AuthorizationChanges }) {
+  const listed = (label: string, items: string[]) => items.length > 0 && <>；{label}：{items.join("、")}</>;
+  return (
+    <section className="authorization-changes" aria-label="授權變更">
+      <h4>相對於目前授權（revision {changes.base_revision}）的變更</h4>
+      {changes.changes.length === 0 ? (
+        <p>內容與目前授權相同。</p>
+      ) : (
+        <ul>
+          {changes.changes.map((change) => (
+            <li key={change.capability}>
+              <strong>{change.label}</strong>
+              {change.new_capability && "（新增能力）"}
+              {change.removed_capability && "（移除能力）"}
+              {listed("新增目標", change.added_targets)}
+              {listed("移除目標", change.removed_targets)}
+              {listed("新增限制", change.added_restrictions)}
+              {listed("移除限制", change.removed_restrictions)}
+              {change.expands && <span className="authorization-high-risk">（擴大授權）</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {changes.impact.length > 0 && (
+        <ul className="authorization-impact">
+          {changes.impact.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
       )}
     </section>
   );

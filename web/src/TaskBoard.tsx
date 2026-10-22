@@ -78,6 +78,7 @@ const WAIT_CATEGORY_LABELS: [WaitCategory, string][] = [
   ["state_unknown", "狀態不明"],
   ["account", "帳號"],
   ["workdir", "工作目錄"],
+  ["lifecycle", "完全退出"],
 ];
 
 /** 建立表單的選項順序：預設的「研究」排第一。 */
@@ -587,7 +588,7 @@ function IntegrationSummary({ entry, awaiting }: { entry: IntegrationEntry; awai
   );
 }
 
-/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、工作目錄）。 */
+/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、完全退出、工作目錄）。 */
 function QueuedStatus({ position, reasons }: { position: number | null; reasons: WaitReason[] }) {
   return (
     <div className="task-queued" role="group" aria-label="排隊原因">

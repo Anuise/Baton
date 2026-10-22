@@ -28,6 +28,8 @@ mod agent;
 mod artifacts;
 mod decisions;
 mod integration;
+mod knowledge;
+mod lifecycle;
 mod messages;
 mod profiles;
 mod quota;
@@ -41,6 +43,11 @@ pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, PendingByWorkspace};
 pub use integration::{IntegrationApplyError, IntegrationWork};
+pub use knowledge::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, ScopeRequest};
+pub use lifecycle::{
+    lifecycle_file_path, read_lifecycle_file, write_lifecycle_file, LifecycleApplyError, LifecycleSnapshot,
+    WorkspaceLifecycleOutcome, LIFECYCLE_FILE_NAME,
+};
 pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
@@ -553,8 +560,69 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER task_verification_no_delete BEFORE DELETE ON task_verification
         BEGIN SELECT RAISE(ABORT, 'task_verification 是追加式資料表，不可刪除'); END;",
     },
+    // 知識條目與教訓（票 37，第 17 個 migration）：決策、教訓、一般知識同一張表，以 kind 區分。條目列保存目前狀態與目前內容的檢索文字，
+    // 內容的每個版本另存於追加式的 knowledge_entry_version（修正只追加，不覆寫）。全文檢索索引（FTS5）不在 migration 中，
+    // 而是每次開啟時依可用性建立並從 search_text 重建（spec D-26）
     Migration {
-        // 票 20：Task 種類、平台登記的工作目錄（worktree／輸出目錄）與單一整合佇列。
+        name: "knowledge",
+        sql: "CREATE TABLE knowledge_entry (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN ('decision', 'lesson', 'fact')),
+            scope_kind TEXT NOT NULL CHECK (scope_kind IN ('global', 'workspace', 'goal', 'task')),
+            workspace_id TEXT REFERENCES workspace (id),
+            goal_id TEXT REFERENCES goal (id),
+            task_id TEXT REFERENCES task (id),
+            status TEXT NOT NULL CHECK (status IN ('candidate', 'verified', 'revoked', 'retired', 'superseded')),
+            source TEXT NOT NULL CHECK (json_valid(source)),
+            valid_from INTEGER NOT NULL,
+            valid_until INTEGER,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            supersedes TEXT REFERENCES knowledge_entry (id),
+            superseded_by TEXT REFERENCES knowledge_entry (id),
+            status_reason TEXT,
+            search_text TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            CHECK ((scope_kind = 'global') = (workspace_id IS NULL))
+        );
+        CREATE INDEX knowledge_entry_workspace ON knowledge_entry (workspace_id);
+        CREATE TABLE knowledge_entry_version (
+            entry_id TEXT NOT NULL REFERENCES knowledge_entry (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            content TEXT NOT NULL CHECK (json_valid(content)),
+            note TEXT,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (entry_id, version)
+        );
+        CREATE TRIGGER knowledge_entry_version_no_update BEFORE UPDATE ON knowledge_entry_version
+        BEGIN SELECT RAISE(ABORT, 'knowledge_entry_version 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER knowledge_entry_version_no_delete BEFORE DELETE ON knowledge_entry_version
+        BEGIN SELECT RAISE(ABORT, 'knowledge_entry_version 是追加式資料表，不可刪除'); END;
+        CREATE TRIGGER knowledge_entry_no_delete BEFORE DELETE ON knowledge_entry
+        BEGIN SELECT RAISE(ABORT, 'knowledge_entry 不可刪除：撤銷或淘汰只改變狀態'); END;",
+    },
+    // 桌面生命週期與完全退出（票 25）：Runtime 的停止意圖與最近一次退出的經過只有一列；
+    // 每個 Workspace 的「完全退出後自動續跑」與暫停狀態（沒有列的 Workspace 等同預設：關閉、未暫停）
+    Migration {
+        name: "lifecycle",
+        sql: "CREATE TABLE runtime_lifecycle (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            phase TEXT NOT NULL CHECK (phase IN ('running', 'stopping', 'stopped')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            last_exit TEXT CHECK (last_exit IS NULL OR json_valid(last_exit)),
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE workspace_lifecycle (
+            workspace_id TEXT PRIMARY KEY REFERENCES workspace (id),
+            auto_resume_after_exit INTEGER NOT NULL CHECK (auto_resume_after_exit IN (0, 1)),
+            paused_since INTEGER,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );",
+    },
+    Migration {
+        // 票 20（第 19 個 migration）：Task 種類、平台登記的工作目錄（worktree／輸出目錄）與單一整合佇列。
         // 同一個 Task 一個工作目錄、可用的目錄路徑不重複；整合佇列任何時刻最多一個處理中的項目
         name: "task_workdir_and_integration_queue",
         sql: "ALTER TABLE task ADD COLUMN kind TEXT NOT NULL DEFAULT 'research'
@@ -600,6 +668,20 @@ const MIGRATIONS: &[Migration] = &[
     },
 ];
 
+/// 開啟 Store 的選項；預設值就是正式執行的行為。
+#[derive(Debug, Clone, Copy)]
+pub struct StoreOptions {
+    /// 是否嘗試使用全文檢索（FTS5 + trigram）。關閉時視同 FTS5 不可用，搜尋退回 LIKE；
+    /// 測試以它重現「FTS5 不可用」的降級情境（bundled SQLite 一定有 FTS5）。
+    pub full_text_search: bool,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        Self { full_text_search: true }
+    }
+}
+
 /// 一個連線上實際生效的 PRAGMA（啟動時讀回驗證的對象）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PragmaSettings {
@@ -624,6 +706,8 @@ struct Inner {
     writer: Option<Sender<Job>>,
     writer_thread: Option<JoinHandle<()>>,
     reader: Arc<Mutex<Connection>>,
+    /// 全文檢索（FTS5 + trigram）在開啟時確認可用並已重建索引；否則搜尋退回 LIKE（spec D-26）。
+    full_text: bool,
 }
 
 impl Drop for Inner {
@@ -647,13 +731,18 @@ impl Store {
     /// `now` 記錄在 `schema_migrations.applied_at`（UTC，spec D-33）。
     /// 資料目錄位於網路共享或雲端同步資料夾時拒絕（spec D-17）。
     pub async fn open(data_dir: &Path, now: Timestamp) -> StoreResult<Self> {
+        Self::open_with(data_dir, now, StoreOptions::default()).await
+    }
+
+    /// 以指定選項開啟；見 [`StoreOptions`]。
+    pub async fn open_with(data_dir: &Path, now: Timestamp, options: StoreOptions) -> StoreResult<Self> {
         let data_dir = data_dir.to_path_buf();
-        tokio::task::spawn_blocking(move || Self::open_blocking(&data_dir, now))
+        tokio::task::spawn_blocking(move || Self::open_blocking(&data_dir, now, options))
             .await
             .map_err(|_| StoreError::Join)?
     }
 
-    fn open_blocking(data_dir: &Path, now: Timestamp) -> StoreResult<Self> {
+    fn open_blocking(data_dir: &Path, now: Timestamp, options: StoreOptions) -> StoreResult<Self> {
         check_data_dir(data_dir)?;
         std::fs::create_dir_all(data_dir).map_err(|e| StoreError::CreateDir(data_dir.to_path_buf(), e))?;
         let db_path = data_dir.join(DB_FILE_NAME);
@@ -661,6 +750,8 @@ impl Store {
         let mut writer = Connection::open(&db_path)?;
         apply_and_verify(&writer)?;
         migrate(&mut writer, now)?;
+        // 全文檢索不可用（或被選項關閉）不阻擋啟動：搜尋退回 LIKE 並標示降級
+        let full_text = options.full_text_search && knowledge::prepare_full_text(&mut writer).is_ok();
 
         let reader = Connection::open_with_flags(
             &db_path,
@@ -685,6 +776,7 @@ impl Store {
                 writer: Some(sender),
                 writer_thread: Some(thread),
                 reader: Arc::new(Mutex::new(reader)),
+                full_text,
             }),
         })
     }
@@ -1537,7 +1629,7 @@ mod tests {
     // --- 授權 revision ---
 
     fn confirm_request(template_id: Option<&str>, grants: Vec<authorization::Grant>) -> ConfirmRequest {
-        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: true }
+        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: true, acknowledged_expansion: true }
     }
 
     fn research_grants(path: &str) -> Vec<authorization::Grant> {

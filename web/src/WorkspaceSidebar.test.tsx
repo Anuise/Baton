@@ -2,8 +2,9 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
+import { lifecycleStatus, workspaceLifecycle } from "./fixtures";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
-import type { Workspace, WorkspaceClient } from "./runtimeClient";
+import type { Workspace, WorkspaceLifecycleView } from "./runtimeClient";
 
 /** 2023-11-14 22:13:20 UTC（台北是隔天 06:13）。 */
 const CREATED_AT = 1_700_000_000_000;
@@ -21,10 +22,18 @@ function workspace(overrides: Partial<Workspace> = {}): Workspace {
   };
 }
 
-/** 以記憶體模擬 Runtime 的 Workspace 清單，讓測試只看使用者可見的行為。 */
-function fakeClient(initial: Workspace[] = []) {
+/** 以記憶體模擬 Runtime 的 Workspace 清單與各自的生命週期，讓測試只看使用者可見的行為。 */
+function fakeClient(initial: Workspace[] = [], lifecycles: Partial<WorkspaceLifecycleView>[] = []) {
   let items = [...initial];
-  const client: WorkspaceClient = {
+  let views = lifecycles.map((overrides) => workspaceLifecycle(overrides));
+  // 沒指定的 Workspace 用預設值（不自動續跑、沒有暫停）
+  const viewOf = (w: Workspace) =>
+    views.find((view) => view.workspace_id === w.id) ?? workspaceLifecycle({ workspace_id: w.id, name: w.name });
+  const replace = (updated: WorkspaceLifecycleView) => {
+    views = [...views.filter((view) => view.workspace_id !== updated.workspace_id), updated];
+    return updated;
+  };
+  const client = {
     listWorkspaces: vi.fn(async () => ({ workspaces: [...items] })),
     createWorkspace: vi.fn(async ({ path, name }) => {
       const created = workspace({ id: `ws_${items.length + 1}`, path, name: name || path.split("\\").pop()! });
@@ -36,6 +45,15 @@ function fakeClient(initial: Workspace[] = []) {
       items = items.map((w) => (w.id === id ? archived : w));
       return archived;
     }),
+    lifecycleStatus: vi.fn(async () =>
+      lifecycleStatus({ workspaces: items.filter((w) => w.status === "active").map(viewOf) }),
+    ),
+    updateWorkspaceLifecycle: vi.fn(async (id: string, autoResume: boolean) =>
+      replace({ ...viewOf(items.find((w) => w.id === id)!), auto_resume_after_exit: autoResume }),
+    ),
+    resumeWorkspace: vi.fn(async (id: string) =>
+      replace({ ...viewOf(items.find((w) => w.id === id)!), awaiting_resume: false, paused_since: null }),
+    ),
   };
   return client;
 }
@@ -201,6 +219,84 @@ describe("左側 Workspace 清單", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it("每個 Workspace 有「完全退出後自動續跑」勾選，預設關閉並說明只影響下次重新開啟", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+
+    const item = (await screen.findByText("筆記")).closest("li")!;
+    const checkbox = await within(item).findByRole("checkbox", { name: "完全退出後自動續跑 筆記" });
+    expect(checkbox).not.toBeChecked();
+    expect(within(item).getByText("只影響下次重新開啟，不會立即啟停目前工作")).toBeInTheDocument();
+    expect(within(item).queryByRole("button", { name: "繼續工作 筆記" })).not.toBeInTheDocument();
+  });
+
+  it("勾選自動續跑時以 Workspace id 與 true 呼叫設定；取消勾選送出 false", async () => {
+    const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "研究", path: "D:\\research" })]);
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    const checkbox = await screen.findByRole("checkbox", { name: "完全退出後自動續跑 研究" });
+
+    await user.click(checkbox);
+
+    expect(client.updateWorkspaceLifecycle).toHaveBeenCalledWith("ws_2", true);
+    await waitFor(() => expect(checkbox).toBeChecked());
+    expect(screen.getByRole("checkbox", { name: "完全退出後自動續跑 筆記" })).not.toBeChecked();
+
+    await user.click(checkbox);
+
+    expect(client.updateWorkspaceLifecycle).toHaveBeenLastCalledWith("ws_2", false);
+    await waitFor(() => expect(checkbox).not.toBeChecked());
+  });
+
+  it("設定失敗時顯示原因，勾選維持原狀", async () => {
+    const client = fakeClient([workspace()]);
+    vi.mocked(client.updateWorkspaceLifecycle).mockRejectedValueOnce(new Error("Runtime 拒絕連線"));
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+
+    await user.click(await screen.findByRole("checkbox", { name: "完全退出後自動續跑 筆記" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Runtime 拒絕連線");
+    expect(screen.getByRole("checkbox", { name: "完全退出後自動續跑 筆記" })).not.toBeChecked();
+  });
+
+  it("完全退出後暫停中的 Workspace 顯示「繼續工作」，按下後呼叫 resume 並重新讀取", async () => {
+    const client = fakeClient([workspace()], [{ awaiting_resume: true, paused_since: CREATED_AT }]);
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    const item = (await screen.findByText("筆記")).closest("li")!;
+    expect(await within(item).findByText("完全退出後暫停中")).toBeInTheDocument();
+
+    await user.click(within(item).getByRole("button", { name: "繼續工作 筆記" }));
+
+    expect(client.resumeWorkspace).toHaveBeenCalledWith("ws_1");
+    await waitFor(() => expect(within(item).queryByText("完全退出後暫停中")).not.toBeInTheDocument());
+    expect(client.lifecycleStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("停止意圖仍生效而無法繼續工作時顯示 Runtime 的說明，仍維持暫停中", async () => {
+    const client = fakeClient([workspace()], [{ awaiting_resume: true, paused_since: CREATED_AT }]);
+    vi.mocked(client.resumeWorkspace).mockRejectedValueOnce(new Error("Runtime 正在完全退出，無法繼續工作"));
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+
+    await user.click(await screen.findByRole("button", { name: "繼續工作 筆記" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Runtime 正在完全退出，無法繼續工作");
+    expect(screen.getByText("完全退出後暫停中")).toBeInTheDocument();
+  });
+
+  it("讀不到生命週期時清單照常顯示，不顯示自動續跑設定", async () => {
+    const client = fakeClient([workspace()]);
+    vi.mocked(client.lifecycleStatus).mockRejectedValueOnce(new Error("離線"));
+
+    render(<WorkspaceSidebar client={client} />);
+
+    expect(await screen.findByText("筆記")).toBeInTheDocument();
+    await waitFor(() => expect(client.lifecycleStatus).toHaveBeenCalled());
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("每個 Workspace 都有「裁定」入口，不會觸發授權設定", async () => {
     const onSelect = vi.fn();
     const onOpenDecisions = vi.fn();
@@ -242,5 +338,29 @@ describe("左側 Workspace 清單", () => {
     expect(onOpenArtifacts).toHaveBeenCalledWith(workspace());
     expect(onSelect).not.toHaveBeenCalled();
     expect(onOpenTasks).not.toHaveBeenCalled();
+  });
+
+  it("每個 Workspace 都有「知識」入口，不會觸發其他檢視", async () => {
+    const onSelect = vi.fn();
+    const onOpenTasks = vi.fn();
+    const onOpenArtifacts = vi.fn();
+    const onOpenKnowledge = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenTasks={onOpenTasks}
+        onOpenArtifacts={onOpenArtifacts}
+        onOpenKnowledge={onOpenKnowledge}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "知識 筆記" }));
+
+    expect(onOpenKnowledge).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenTasks).not.toHaveBeenCalled();
+    expect(onOpenArtifacts).not.toHaveBeenCalled();
   });
 });

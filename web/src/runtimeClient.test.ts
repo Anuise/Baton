@@ -109,7 +109,12 @@ describe("Runtime 用戶端", () => {
 
     await client.getAuthorization("ws_1");
     await client.summarizeAuthorization("ws_1", grants);
-    await client.confirmAuthorization("ws_1", { templateId: "research_docs", grants, acknowledgedRisk: false });
+    await client.confirmAuthorization("ws_1", {
+      templateId: "research_docs",
+      grants,
+      acknowledgedRisk: false,
+      acknowledgedExpansion: true,
+    });
 
     expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/authorization");
     expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/authorization/summary", {
@@ -120,7 +125,7 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/authorization", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false }),
+      body: JSON.stringify({ template_id: "research_docs", grants, acknowledged_risk: false, acknowledged_expansion: true }),
     });
   });
 
@@ -131,7 +136,7 @@ describe("Runtime 用戶端", () => {
 
     await client.getAuthorization("ws_1");
     await client.summarizeAuthorization("ws_1", grants);
-    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true });
+    await client.confirmAuthorization("ws_1", { templateId: null, grants, acknowledgedRisk: true, acknowledgedExpansion: false });
 
     expect(invoke).toHaveBeenNthCalledWith(1, "workspace_authorization", { id: "ws_1" });
     expect(invoke).toHaveBeenNthCalledWith(2, "workspace_authorization_summary", { id: "ws_1", grants });
@@ -140,6 +145,7 @@ describe("Runtime 用戶端", () => {
       templateId: null,
       grants,
       acknowledgedRisk: true,
+      acknowledgedExpansion: false,
     });
   });
 
@@ -443,6 +449,91 @@ describe("Runtime 用戶端", () => {
       ["setup_acknowledge_notice"],
     ]);
   });
+
+  it("HTTP 版讀取生命週期、完全退出、設定自動續跑與繼續工作", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.lifecycleStatus();
+    await client.requestFullExit();
+    await client.updateWorkspaceLifecycle("ws_1", true);
+    await client.resumeWorkspace("ws_1");
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/lifecycle"],
+      ["/api/v1/lifecycle/exit", { method: "POST" }],
+      [
+        "/api/v1/workspaces/ws_1/lifecycle",
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ auto_resume_after_exit: true }),
+        },
+      ],
+      ["/api/v1/workspaces/ws_1/resume", { method: "POST" }],
+    ]);
+  });
+
+  it("HTTP 版「繼續工作」被拒（停止意圖仍生效）時以 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "stop_intent_active", message: "Runtime 正在完全退出，無法繼續工作" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).resumeWorkspace("ws_1")).rejects.toThrow(
+      "Runtime 正在完全退出，無法繼續工作",
+    );
+  });
+
+  it("HTTP 版沒有桌面程序與系統匣：quitApp 不送請求，完全退出事件不會觸發", async () => {
+    const fetchFn = vi.fn();
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const handler = vi.fn();
+
+    await client.quitApp();
+    const unsubscribe = client.onFullExitRequested(handler);
+    unsubscribe();
+
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("Tauri 版以指令與參數操作生命週期並結束 App", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.lifecycleStatus();
+    await client.requestFullExit();
+    await client.updateWorkspaceLifecycle("ws_1", true);
+    await client.resumeWorkspace("ws_1");
+    await client.quitApp();
+
+    expect(invoke.mock.calls).toEqual([
+      ["lifecycle_status"],
+      ["lifecycle_exit"],
+      ["workspace_lifecycle_update", { workspaceId: "ws_1", autoResumeAfterExit: true }],
+      ["workspace_resume", { workspaceId: "ws_1" }],
+      ["app_quit"],
+    ]);
+  });
+
+  it("Tauri 版監聽系統匣的完全退出事件，取消訂閱時解除監聽", async () => {
+    const unlisten = vi.fn();
+    let emit: () => void = () => {};
+    const listen = vi.fn(async (_event: string, handler: () => void) => {
+      emit = handler;
+      return unlisten;
+    });
+    const handler = vi.fn();
+    const client = createTauriClient(vi.fn() as never, listen);
+
+    const unsubscribe = client.onFullExitRequested(handler);
+    emit();
+    unsubscribe();
+    await vi.waitFor(() => expect(unlisten).toHaveBeenCalledTimes(1));
+
+    expect(listen).toHaveBeenCalledWith("baton://full-exit-requested", expect.any(Function));
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it("Tauri 版以指令與 camelCase 參數操作共同設定", async () => {
     const invoke = vi.fn(async () => ({}));
     const client = createTauriClient(invoke as never);
@@ -616,6 +707,111 @@ describe("Runtime 用戶端", () => {
     ]);
     expect(result.sha256).toBe("cd".repeat(32));
     expect(await result.blob.text()).toBe("hello");
+  });
+
+  it("HTTP 版列出知識：查詢字串含 workspace_id、URL 編碼的中文關鍵字與 include_inactive；省略的條件不送出", async () => {
+    const fetchFn = vi.fn(
+      async (_path: string) => new Response(JSON.stringify({ search_mode: "full_text", entries: [] }), { status: 200 }),
+    );
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.listKnowledge({ workspaceId: "ws_1", q: "部署 憑證", includeInactive: true });
+    await client.listKnowledge({ includeInactive: false });
+    await client.listKnowledge({ workspaceId: "ws/1", q: "  ", includeInactive: false });
+
+    const first = new URL(fetchFn.mock.calls[0][0], "http://localhost");
+    expect(first.pathname).toBe("/api/v1/knowledge");
+    expect(first.searchParams.get("workspace_id")).toBe("ws_1");
+    expect(first.searchParams.get("q")).toBe("部署 憑證");
+    expect(first.searchParams.get("include_inactive")).toBe("true");
+    // 中文以 UTF-8 百分比編碼，不會原樣出現在網址裡
+    expect(fetchFn.mock.calls[0][0]).toContain("q=%E9%83%A8%E7%BD%B2+%E6%86%91%E8%AD%89");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/knowledge?include_inactive=false");
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/knowledge?workspace_id=ws%2F1&include_inactive=false");
+  });
+
+  it("HTTP 版以契約的路徑與 body 建立、查看、確認、修正、撤銷與淘汰知識", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+    const json = { "content-type": "application/json" };
+    const create = {
+      kind: "lesson" as const,
+      scope: { kind: "workspace" as const, workspace_id: "ws_1" },
+      title: "部署前先備份",
+      lesson: { trigger: "部署", root_cause: "沒有備份", resolution: "先備份" },
+    };
+    const correct = { expected_revision: 3, title: "新標題", body: "新內文", note: "補充" };
+
+    await client.createKnowledge(create);
+    await client.knowledgeDetail("kn_1");
+    await client.confirmKnowledge("kn_1", 2);
+    await client.correctKnowledge("kn_1", correct);
+    await client.revokeKnowledge("kn_1", { expected_revision: 4, reason: "錯誤" });
+    await client.retireKnowledge("kn_1", { expected_revision: 5, reason: "過時" });
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/knowledge", { method: "POST", headers: json, body: JSON.stringify(create) }],
+      ["/api/v1/knowledge/kn_1"],
+      ["/api/v1/knowledge/kn_1/confirm", { method: "POST", headers: json, body: JSON.stringify({ expected_revision: 2 }) }],
+      ["/api/v1/knowledge/kn_1/correct", { method: "POST", headers: json, body: JSON.stringify(correct) }],
+      [
+        "/api/v1/knowledge/kn_1/revoke",
+        { method: "POST", headers: json, body: JSON.stringify({ expected_revision: 4, reason: "錯誤" }) },
+      ],
+      [
+        "/api/v1/knowledge/kn_1/retire",
+        { method: "POST", headers: json, body: JSON.stringify({ expected_revision: 5, reason: "過時" }) },
+      ],
+    ]);
+  });
+
+  it("HTTP 版知識操作失敗時保留 Runtime 的說明與錯誤代碼", async () => {
+    const body = { error: "knowledge_revision_conflict", message: "條目已被修改" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    const error = await client.confirmKnowledge("kn_1", 1).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("條目已被修改");
+    expect(errorCode(error)).toBe("knowledge_revision_conflict");
+  });
+
+  it("Tauri 版的錯誤字串含代碼時也能辨識", async () => {
+    const invoke = vi.fn(async () => {
+      throw "Runtime 拒絕連線（knowledge_revision_conflict）：條目已被修改";
+    });
+
+    const error = await createTauriClient(invoke as never).confirmKnowledge("kn_1", 1).catch((e: unknown) => e);
+
+    expect(errorCode(error)).toBe("knowledge_revision_conflict");
+  });
+
+  it("Tauri 版以指令與參數操作知識", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+    const create = { kind: "fact" as const, scope: { kind: "global" as const }, title: "事實" };
+    const correct = { expected_revision: 3, title: "新標題" };
+
+    await client.listKnowledge({ workspaceId: "ws_1", q: "部署", includeInactive: true });
+    await client.listKnowledge({ includeInactive: false });
+    await client.createKnowledge(create);
+    await client.knowledgeDetail("kn_1");
+    await client.confirmKnowledge("kn_1", 2);
+    await client.correctKnowledge("kn_1", correct);
+    await client.revokeKnowledge("kn_1", { expected_revision: 4, reason: "錯誤" });
+    await client.retireKnowledge("kn_1", { expected_revision: 5, reason: "過時" });
+
+    expect(invoke.mock.calls).toEqual([
+      ["knowledge_list", { workspaceId: "ws_1", q: "部署", includeInactive: true }],
+      ["knowledge_list", { workspaceId: undefined, q: undefined, includeInactive: false }],
+      ["knowledge_create", { request: create }],
+      ["knowledge_detail", { id: "kn_1" }],
+      ["knowledge_confirm", { id: "kn_1", request: { expected_revision: 2 } }],
+      ["knowledge_correct", { id: "kn_1", request: correct }],
+      ["knowledge_revoke", { id: "kn_1", request: { expected_revision: 4, reason: "錯誤" } }],
+      ["knowledge_retire", { id: "kn_1", request: { expected_revision: 5, reason: "過時" } }],
+    ]);
   });
 
   const basis = { run_id: "run_1", generation: 2, contract_version: 3, artifacts: [{ artifact_id: "art_1", version: 1 }] };

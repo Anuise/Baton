@@ -13,12 +13,16 @@ use baton_api::{
     authorization_summary_path, decision_answer_path, decision_path, decisions_path, goals_path, run_cancel_path,
     ArtifactList, ArtifactPreview, SHA256_HEADER,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
-    quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_accept_path, task_path, task_ready_path, task_verification_path, tasks_path, AcceptTaskRequest, QueuedDispatch,
+    quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_accept_path, task_path, task_ready_path, task_verification_path, tasks_path, workspace_lifecycle_path, workspace_resume_path, AcceptTaskRequest, LifecycleStatus,
+    QueuedDispatch, UpdateWorkspaceLifecycleRequest, WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
     RunSettingsSnapshot, SetupStatus, SharedSettingsStatus, SnapshotRequest, SummaryRequest, TaskBoard, TaskDetail,
+    knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest,
+    CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView, KnowledgeList, KnowledgeListQuery,
+    KnowledgeReasonRequest, KNOWLEDGE_PATH,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
     PLATFORM_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
@@ -297,6 +301,31 @@ impl RuntimeClient {
         self.send_json::<(), _>(reqwest::Method::POST, &run_cancel_path(workspace_id, run_id), None).await
     }
 
+    /// 生命週期總覽：Runtime 階段、完全退出的停止進度與異常、各 Workspace 的自動續跑設定與暫停狀態。
+    pub async fn lifecycle(&self) -> Result<LifecycleStatus, ClientError> {
+        self.get_json(LIFECYCLE_PATH).await
+    }
+
+    /// 完全退出：Runtime 持久化停止意圖後立即回應，停止進度之後以 `lifecycle` 查詢；重複要求是冪等的。
+    pub async fn request_exit(&self) -> Result<LifecycleStatus, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, LIFECYCLE_EXIT_PATH, None).await
+    }
+
+    /// 變更 Workspace 的「完全退出後自動續跑」（只影響下次重新開啟）。
+    pub async fn set_workspace_auto_resume(
+        &self,
+        workspace_id: &str,
+        auto_resume_after_exit: bool,
+    ) -> Result<WorkspaceLifecycleView, ClientError> {
+        let request = UpdateWorkspaceLifecycleRequest { auto_resume_after_exit };
+        self.send_json(reqwest::Method::PUT, &workspace_lifecycle_path(workspace_id), Some(&request)).await
+    }
+
+    /// 「繼續工作」：解除 Workspace 在完全退出後的暫停。
+    pub async fn resume_workspace(&self, workspace_id: &str) -> Result<WorkspaceLifecycleView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &workspace_resume_path(workspace_id), None).await
+    }
+
     /// 裁定中心：Workspace 內的裁定請求（待處理優先）與待處理數。
     pub async fn decision_list(&self, workspace_id: &str) -> Result<DecisionList, ClientError> {
         self.get_json(&decisions_path(workspace_id)).await
@@ -382,6 +411,71 @@ impl RuntimeClient {
         let sha256 = response.headers().get(SHA256_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
         let bytes = response.bytes().await.map_err(|e| ClientError::Unreachable(e.to_string()))?.to_vec();
         Ok(ArtifactDownload { bytes, sha256 })
+    }
+
+    /// 知識分頁的列表或搜尋：`workspace_id` 省略時只列全域條目；`include_inactive` 為 false 時只回傳有效條目。
+    /// 關鍵字不合規則（例如少於 2 個字元）時回傳 `ClientError::Rejected`（`knowledge_query_invalid`）。
+    pub async fn list_knowledge(&self, query: &KnowledgeListQuery) -> Result<KnowledgeList, ClientError> {
+        // 以 URL 的表單編碼組查詢字串，中文等非 ASCII 字元才會正確編碼
+        let mut url = reqwest::Url::parse("http://localhost").expect("固定的 URL 一定合法");
+        url.set_path(KNOWLEDGE_PATH);
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(workspace_id) = &query.workspace_id {
+                pairs.append_pair("workspace_id", workspace_id);
+            }
+            if let Some(q) = &query.q {
+                pairs.append_pair("q", q);
+            }
+            pairs.append_pair("include_inactive", if query.include_inactive { "true" } else { "false" });
+        }
+        self.get_json(&format!("{}?{}", url.path(), url.query().unwrap_or_default())).await
+    }
+
+    /// 使用者建立條目（直接是已驗證）。
+    pub async fn create_knowledge(&self, request: &CreateKnowledgeRequest) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, KNOWLEDGE_PATH, Some(request)).await
+    }
+
+    /// 單一條目：目前狀態、全部內容版本與變更歷史。
+    pub async fn knowledge_detail(&self, id: &str) -> Result<KnowledgeDetail, ClientError> {
+        self.get_json(&knowledge_entry_path(id)).await
+    }
+
+    /// 確認候選教訓，升為已驗證。
+    pub async fn confirm_knowledge(
+        &self,
+        id: &str,
+        request: &ConfirmKnowledgeRequest,
+    ) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "confirm"), Some(request)).await
+    }
+
+    /// 修正內容（追加新版本，舊版本保留）。
+    pub async fn correct_knowledge(
+        &self,
+        id: &str,
+        request: &CorrectKnowledgeRequest,
+    ) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "correct"), Some(request)).await
+    }
+
+    /// 撤銷條目（需說明原因）。
+    pub async fn revoke_knowledge(
+        &self,
+        id: &str,
+        request: &KnowledgeReasonRequest,
+    ) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "revoke"), Some(request)).await
+    }
+
+    /// 淘汰條目（需說明原因）。
+    pub async fn retire_knowledge(
+        &self,
+        id: &str,
+        request: &KnowledgeReasonRequest,
+    ) -> Result<KnowledgeEntryView, ClientError> {
+        self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "retire"), Some(request)).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {

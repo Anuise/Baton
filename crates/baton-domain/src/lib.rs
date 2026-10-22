@@ -1,8 +1,9 @@
 //! Domain 核心：純邏輯、無 I/O。
 //!
-//! 目前有產品識別、時間型別、本機憑證邏輯、Workspace 狀態機、Workspace 授權與 Goal／Task（含六項最小派工契約）、account_profile 狀態機與首次啟動精靈判定，Run／execution lease／派工 Outbox，多帳號排程與容量，以及額度觀測與判斷、Task 工作目錄（worktree／輸出目錄）與整合佇列；其餘實體的狀態機由後續的票逐步加入。
+//! 目前有產品識別、時間型別、本機憑證邏輯、Workspace 狀態機、Workspace 授權與 Goal／Task（含六項最小派工契約）、account_profile 狀態機與首次啟動精靈判定，Run／execution lease／派工 Outbox，多帳號排程與容量、額度觀測與判斷、桌面生命週期與完全退出，以及 Task 工作目錄（worktree／輸出目錄）與整合佇列；其餘實體的狀態機由後續的票逐步加入。
 
 pub mod agent;
+pub mod approval;
 pub mod artifact;
 pub mod auth;
 pub mod authorization;
@@ -10,6 +11,8 @@ pub mod config;
 pub mod decision;
 pub mod event;
 pub mod integration;
+pub mod knowledge;
+pub mod lifecycle;
 pub mod message;
 pub mod permission;
 pub mod platform;

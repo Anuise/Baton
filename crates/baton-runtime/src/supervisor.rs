@@ -22,6 +22,12 @@
 //!
 //! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
 //! 由測試在想要的時刻呼叫 `tick`，搭配 fake Clock 就能完全決定性地重現任何時序。
+//!
+//! 另有兩件生命週期的工作（票 25）：
+//! - **完全退出**（`full_exit`）：停止意圖已持久化後，先鏡像到生命週期檔，再要求每個 Run 在寬限期內停止、
+//!   逾時終止程序樹並確認（spec D-11，總上限 40 秒）；無法確認停止的記為停止異常。期間握住 tick 的鎖，不會有任何啟動。
+//! - **重新開啟**：Runtime 啟動時若停止意圖仍生效，第一次 `tick` 先核對（找回啟動中的程序、查證上次沒能確認停止的程序），
+//!   再解除停止意圖，依各 Workspace 的「完全退出後自動續跑」設定續跑或等「繼續工作」。
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -32,8 +38,12 @@ use baton_api::{quota, LogSink};
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::AgentScope;
 use baton_domain::integration::{self, AdvanceResult, IntegrationCommand, IntegrationStatus, MergeResult};
+use baton_domain::lifecycle::{
+    ExitReport, ExitTiming, LifecycleFile, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
+    RUN_GONE_AFTER_EXIT_REASON,
+};
 use baton_domain::quota::RateLimitSignal;
-use baton_domain::run::{ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus};
+use baton_domain::run::{ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView};
 use baton_domain::verification::AcceptanceCommand;
 use baton_domain::Timestamp;
 use baton_ports::{
@@ -41,7 +51,7 @@ use baton_ports::{
     StopResult,
 };
 use baton_store::{ExecutingRun, IntegrationWork, PendingLaunch, Store};
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -74,6 +84,21 @@ pub struct Supervisor {
     streams: Mutex<HashMap<String, BoxStream<'static, AdapterEvent>>>,
     /// 這個 Runtime 實例已經向 ProcessControl 「找回」過（取得管理權）的 Run。
     adopted: Mutex<HashSet<String>>,
+    /// 完全退出的時間參數與生命週期檔所在的資料目錄。
+    exit_timing: ExitTiming,
+    data_dir: PathBuf,
+    /// 啟動時停止意圖仍生效：記下當時的生命週期版本，第一次 tick 核對完後重新開啟（版本變了就不重新開啟）。
+    reopen_from: Mutex<Option<i64>>,
+    /// 完全退出的停止流程正在等待或進行：握著 tick 鎖、可能久等的步驟（取消時的停止程序）看到就讓出，交給停止流程。
+    exiting: watch::Sender<bool>,
+}
+
+/// Supervisor 的生命週期參數（票 25）。
+pub struct LifecycleSettings {
+    pub exit_timing: ExitTiming,
+    pub data_dir: PathBuf,
+    /// Runtime 啟動時看到的停止意圖版本；沒有停止意圖為 `None`。
+    pub reopen_from: Option<i64>,
 }
 
 impl Supervisor {
@@ -85,6 +110,7 @@ impl Supervisor {
         runtime_url: String,
         stop_grace: Duration,
         artifacts_root: PathBuf,
+        lifecycle: LifecycleSettings,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
@@ -98,6 +124,10 @@ impl Supervisor {
             artifacts_root,
             streams: Mutex::new(HashMap::new()),
             adopted: Mutex::new(HashSet::new()),
+            exit_timing: lifecycle.exit_timing,
+            data_dir: lifecycle.data_dir,
+            reopen_from: Mutex::new(lifecycle.reopen_from),
+            exiting: watch::Sender::new(false),
         })
     }
 
@@ -133,9 +163,10 @@ impl Supervisor {
         self.integrate_pending().await;
     }
 
-    /// 驗證以外的六個步驟。
+    /// 驗證以外的七個步驟。
     async fn supervise_once(&self) {
         let _serial = self.tick_lock.lock().await;
+        self.reopen_if_pending().await;
         self.launch_pending().await;
         self.pump_events().await;
         self.process_cancellations().await;
@@ -155,6 +186,223 @@ impl Supervisor {
         if let Err(error) = self.store.apply_run_command(run.workspace_id.clone(), command, self.ports.clock.now()).await {
             self.note(&format!("Run {} 的命令沒有套用：{error}", run.id));
         }
+    }
+
+    // ------------------------------------------------------------ 生命週期（票 25）
+
+    /// 啟動時停止意圖仍生效：先核對（找回啟動中的程序、查證上次退出沒能確認停止的程序），再重新開啟。
+    async fn reopen_if_pending(&self) {
+        let Some(expected) = *self.reopen_from.lock().await else { return };
+        self.launch_pending().await;
+        self.reconcile_after_exit().await;
+        match self.store.reopen_after_exit(expected, self.ports.clock.now()).await {
+            Ok(reopened) => {
+                *self.reopen_from.lock().await = None;
+                if reopened {
+                    self.note("重新開啟：已核對程序並解除停止意圖，依各 Workspace 的設定續跑或等待「繼續工作」");
+                    self.mirror_lifecycle_file().await;
+                }
+            }
+            Err(error) => self.note(&format!("重新開啟失敗，下一次處理再試：{error}")),
+        }
+    }
+
+    /// 上次完全退出時沒能確認停止的程序：重新查證，確定已經不在才結束 Run（結果不明，不自動重派）；
+    /// 仍存活或無法判定的維持原狀，不會因為續跑而啟動第二個 Worker。
+    async fn reconcile_after_exit(&self) {
+        let executing = match self.store.executing_runs().await {
+            Ok(executing) => executing,
+            Err(error) => return self.note(&format!("無法讀取執行中的 Run：{error}")),
+        };
+        for item in executing {
+            let Some(process) = item.view.run.process.as_ref() else { continue };
+            self.ensure_managed(&item).await;
+            if let Ok(Liveness::Dead) = self.ports.process_control.inspect(&identity_of(process)).await {
+                let reason = RUN_GONE_AFTER_EXIT_REASON.to_string();
+                self.apply(&item.view.run, RunCommand::Interrupt { run_id: item.view.run.id.clone(), reason }).await;
+            }
+        }
+    }
+
+    /// 把資料庫中的停止意圖鏡像到生命週期檔（spec D-25）；失敗時回傳原因（也記日誌）。
+    async fn mirror_lifecycle_file(&self) -> Option<String> {
+        let problem = match self.store.lifecycle_state().await {
+            Err(error) => Some(format!("無法讀取生命週期狀態：{error}")),
+            Ok(state) => {
+                let file = LifecycleFile::mirror(&state, self.ports.clock.now());
+                let data_dir = self.data_dir.clone();
+                match tokio::task::spawn_blocking(move || baton_store::write_lifecycle_file(&data_dir, &file)).await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(format!("無法寫入生命週期檔：{error}")),
+                    Err(error) => Some(format!("無法寫入生命週期檔：{error}")),
+                }
+            }
+        };
+        if let Some(message) = &problem {
+            self.note(message);
+        }
+        problem
+    }
+
+    /// 完全退出的停止流程（停止意圖已由 API 持久化在資料庫與生命週期檔）：再鏡像一次生命週期檔，停下全部尚未結束的 Run。
+    /// 要求每個 Run 在寬限期內保存並停止，逾時由 ProcessControl 終止整個程序樹並確認；到總上限仍沒有結果的記為停止異常。
+    /// 總上限從要求退出的那一刻（停止報告的 `deadline_at`）算起，等 tick 鎖也算在內；拿到鎖之後握到結束，
+    /// 所以這段期間不會啟動任何程序。回傳最終的停止報告。
+    pub async fn full_exit(&self) -> Option<ExitReport> {
+        self.exiting.send_replace(true);
+        let report = self.run_full_exit().await;
+        self.exiting.send_replace(false);
+        report
+    }
+
+    async fn run_full_exit(&self) -> Option<ExitReport> {
+        let state = match self.store.lifecycle_state().await {
+            Ok(state) => state,
+            Err(error) => {
+                self.note(&format!("完全退出：無法讀取停止意圖：{error}"));
+                return None;
+            }
+        };
+        if state.phase != LifecyclePhase::Stopping {
+            return state.last_exit;
+        }
+        let mut report = state.last_exit.clone()?;
+        // 期限以 Clock 持久化在停止報告中；換算成剩下的真實時間（Clock 已過期限則不再等待）
+        let remaining = (report.deadline_at.as_millis() - self.ports.clock.now().as_millis()).max(0);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining as u64);
+        if let Some(problem) = self.mirror_lifecycle_file().await {
+            report.notes.push(problem);
+        }
+
+        let serial = tokio::time::timeout_at(deadline, self.tick_lock.lock()).await;
+        // 這個實例自己要退出了，不再做啟動時的重新開啟
+        *self.reopen_from.lock().await = None;
+
+        let targets = match self.store.runs_to_stop_for_exit().await {
+            Ok(targets) => targets,
+            Err(error) => {
+                report.notes.push(format!("無法讀取尚未結束的 Run：{error}"));
+                Vec::new()
+            }
+        };
+        for item in &targets {
+            report.record(RunStopRecord::pending(&item.run.id, &item.run.workspace_id, &item.run.task_id));
+        }
+        self.save_progress(&report).await;
+
+        let total = Duration::from_millis(self.exit_timing.total_ms().max(0) as u64);
+        let grace = Duration::from_millis(self.exit_timing.stop_grace_ms.max(0) as u64);
+        let mut stopping = FuturesUnordered::new();
+        // 到期限仍拿不到 tick 鎖（另一個處理卡住）：不在它進行中時停止程序，全部記為無法確認
+        let Ok(_serial) = serial else {
+            report.notes.push("到上限仍等不到 Supervisor 的其他處理結束，沒有要求任何 Run 停止".to_string());
+            return self.finish_exit(report, total).await;
+        };
+        for item in targets {
+            match self.process_of(&item).await {
+                Ok(Some(identity)) => {
+                    let process_control = self.ports.process_control.clone();
+                    stopping.push(async move {
+                        let result = process_control.stop(&identity, grace).await;
+                        (item, result)
+                    });
+                }
+                // 沒有任何程序（還沒啟動，或啟動結果不明且找不到程序）：直接停下
+                Ok(None) => {
+                    let record = self.finish_stopped(&item, RunStopOutcome::NotStarted).await;
+                    report.record(record);
+                    self.save_progress(&report).await;
+                }
+                Err(message) => {
+                    report.record(anomaly(&item, StopAnomaly::StopFailed, message));
+                    self.save_progress(&report).await;
+                }
+            }
+        }
+
+        // 到總上限仍沒有結果就不再等待（逾時的那些在 `finish_exit` 記為停止異常）
+        while let Ok(Some((item, result))) = tokio::time::timeout_at(deadline, stopping.next()).await {
+            let record = match result {
+                Ok(StopResult::StoppedGracefully) => self.finish_stopped(&item, RunStopOutcome::StoppedGracefully).await,
+                Ok(StopResult::ForceKilled) => self.finish_stopped(&item, RunStopOutcome::ForceKilled).await,
+                Ok(StopResult::StillAlive) => anomaly(
+                    &item,
+                    StopAnomaly::StillAlive,
+                    "終止程序樹之後仍有程序存活，無法確認停止；Run 保留寫入所有權".to_string(),
+                ),
+                Err(error) => anomaly(&item, StopAnomaly::StopFailed, format!("停止程序失敗：{error}")),
+            };
+            report.record(record);
+            self.save_progress(&report).await;
+        }
+        self.finish_exit(report, total).await
+    }
+
+    /// 停止流程的收尾：仍沒有結果的 Run 記為停止異常 `stop_unconfirmed`（保留寫入所有權），寫入最終的停止報告。
+    async fn finish_exit(&self, mut report: ExitReport, total: Duration) -> Option<ExitReport> {
+        let unconfirmed: Vec<RunStopRecord> = report
+            .runs
+            .iter()
+            .filter(|r| r.outcome == RunStopOutcome::Pending)
+            .map(|r| RunStopRecord {
+                outcome: RunStopOutcome::Anomaly,
+                anomaly: Some(StopAnomaly::StopUnconfirmed),
+                message: Some(format!("到 {} 秒上限仍無法確認程序停止；Run 保留寫入所有權", total.as_secs_f64())),
+                ..r.clone()
+            })
+            .collect();
+        for record in unconfirmed {
+            report.record(record);
+        }
+
+        let anomalies = report.anomalies().count();
+        match self.store.complete_exit(report, self.ports.clock.now()).await {
+            Ok(state) => {
+                self.note(&format!("完全退出：停止流程結束，停止異常 {anomalies} 個"));
+                state.last_exit
+            }
+            Err(error) => {
+                self.note(&format!("完全退出：無法寫入停止結果：{error}"));
+                None
+            }
+        }
+    }
+
+    async fn save_progress(&self, report: &ExitReport) {
+        if let Err(error) = self.store.record_exit_progress(report.clone(), self.ports.clock.now()).await {
+            self.note(&format!("完全退出：無法寫入停止進度：{error}"));
+        }
+    }
+
+    /// 要停下的 Run 的程序身分：還沒啟動的沒有程序；啟動中（回執未寫回）的以 command_id 找回。
+    async fn process_of(&self, item: &PendingLaunch) -> Result<Option<ProcessIdentity>, String> {
+        if let Some(process) = item.run.process.as_ref() {
+            let executing = ExecutingRun { view: RunView::new(item.run.clone(), None, &[]), payload: item.payload.clone() };
+            self.ensure_managed(&executing).await;
+            return Ok(Some(identity_of(process)));
+        }
+        let Some(command_id) = item.run.command_id.clone() else { return Ok(None) };
+        let spec = self.ports.agent_adapter.spawn_spec(&self.run_spec(item, &command_id));
+        match self.ports.process_control.find(&spec).await {
+            Ok(Some(receipt)) => {
+                self.adopted.lock().await.insert(item.run.id.clone());
+                Ok(Some(receipt.identity))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => Err(format!("無法以 command_id 找回啟動中的程序：{error}")),
+        }
+    }
+
+    /// 程序確定已停止（或從未存在）：結束 Run、釋放寫入所有權，Task 退回 ready 並重新排隊。
+    async fn finish_stopped(&self, item: &PendingLaunch, outcome: RunStopOutcome) -> RunStopRecord {
+        self.streams.lock().await.remove(&item.run.id);
+        let mut record =
+            RunStopRecord { outcome, ..RunStopRecord::pending(&item.run.id, &item.run.workspace_id, &item.run.task_id) };
+        if let Err(error) = self.store.stop_run_for_exit(&item.run.workspace_id, &item.run.id, self.ports.clock.now()).await
+        {
+            record.message = Some(format!("程序已停止，但無法寫入 Run 的結束：{error}"));
+        }
+        record
     }
 
     // ------------------------------------------------------------ 額度
@@ -520,7 +768,15 @@ impl Supervisor {
             let (true, Some(process)) = (run.cancel_requested_at.is_some(), run.process.as_ref()) else { continue };
             self.ensure_managed(&item).await;
             let identity = identity_of(process);
-            match self.ports.process_control.stop(&identity, self.stop_grace).await {
+            // 停止最長要等寬限期加確認上限；完全退出開始時就不再等，讓出 tick 鎖，這個 Run 改由停止流程處理
+            let mut exiting = self.exiting.subscribe();
+            let result = tokio::select! {
+                result = self.ports.process_control.stop(&identity, self.stop_grace) => result,
+                _ = exiting.wait_for(|exiting| *exiting) => {
+                    return self.note(&format!("完全退出開始：Run {} 的取消改由停止流程處理", run.id));
+                }
+            };
+            match result {
                 Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
                     self.streams.lock().await.remove(&run.id);
                     self.apply(run, RunCommand::ConfirmCancelled { run_id: run.id.clone() }).await;
@@ -575,6 +831,15 @@ impl Supervisor {
         if self.ports.process_control.find(&spec).await.is_ok() {
             self.adopted.lock().await.insert(run.id.clone());
         }
+    }
+}
+
+fn anomaly(item: &PendingLaunch, kind: StopAnomaly, message: String) -> RunStopRecord {
+    RunStopRecord {
+        outcome: RunStopOutcome::Anomaly,
+        anomaly: Some(kind),
+        message: Some(message),
+        ..RunStopRecord::pending(&item.run.id, &item.run.workspace_id, &item.run.task_id)
     }
 }
 
