@@ -235,6 +235,7 @@ dependencies = [
  "baton-api",
  "baton-credential",
  "baton-domain",
+ "baton-mcp-shim",
  "baton-ports",
  "baton-runtime",
  "baton-store",
