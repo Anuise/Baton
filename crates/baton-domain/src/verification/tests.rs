@@ -87,6 +87,8 @@ impl World {
             generation,
             contract_version: 1,
             authorization_revision: None,
+            admitted_at: None,
+            settings_version: None,
             command_id: None,
             process: None,
             cancel_requested_at: None,

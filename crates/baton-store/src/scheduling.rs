@@ -104,6 +104,7 @@ impl Store {
                         leases: &loaded.leases,
                         workdirs: &loaded.workdirs,
                         guards: &loaded.guards,
+                        settings_version: None,
                     };
                     if let Err(rejected) = scheduler::evaluate(&ctx, &capacity, &request.task_id, SlotKind::Normal) {
                         return Ok(Err(rejected));
@@ -132,6 +133,7 @@ impl Store {
                         leases: &loaded.leases,
                         workdirs: &loaded.workdirs,
                         guards: &loaded.guards,
+                        settings_version: None,
                     };
                     let waiting = |reasons| WaitingTask {
                         workspace_id: entry.workspace_id.clone(),
@@ -222,6 +224,7 @@ impl Store {
                     leases: &loaded.leases,
                     workdirs: &loaded.workdirs,
                     guards: &loaded.guards,
+                    settings_version: None,
                 };
                 let reasons = match scheduler::evaluate(&ctx, &capacity, &entry.task_id, SlotKind::Normal) {
                     // 現在就能派：只是還沒輪到排程處理，沒有需要使用者處理的原因

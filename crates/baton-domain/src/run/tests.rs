@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 
 use super::*;
-use crate::authorization::Capability;
+use crate::authorization::{AuthorizationRevision, Capability, Grant, RevisionSource, SourceKind};
 use crate::guard::{self, ActiveGuard, GuardRule};
 use crate::knowledge::{self, KnowledgeContent, KnowledgeKind, KnowledgeScope, KnowledgeSource, NewKnowledge};
 use crate::task::{
@@ -42,6 +42,10 @@ struct World {
     workdirs: Vec<Workdir>,
     guards: Vec<ActiveGuard>,
     next_run: u32,
+    /// Workspace 目前生效的授權 revision（測試可以在任何時刻換成新的 revision）。
+    authorization: Option<AuthorizationRevision>,
+    /// 這一刻准入的 Run 會固定使用的共同設定版本。
+    settings_version: Option<i64>,
 }
 
 impl World {
@@ -59,6 +63,8 @@ impl World {
             workdirs: vec![],
             guards: vec![],
             next_run: 0,
+            authorization: None,
+            settings_version: None,
         };
         world.task_command(TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() }).unwrap();
         for id in task_ids {
@@ -90,7 +96,7 @@ impl World {
         TaskContext {
             workspace_id: "w1",
             workspace: Some(&self.workspace),
-            authorization: None,
+            authorization: self.authorization.as_ref(),
             goals: &self.goals,
             tasks: &self.tasks,
             dependencies: &self.dependencies,
@@ -118,17 +124,15 @@ impl World {
 
     fn decide(&self, command: RunCommand, now: Timestamp) -> Result<RunChange, RunError> {
         let task = self.task_ctx();
-        decide(
-            &RunContext {
-                task: &task,
-                runs: &self.runs,
-                leases: &self.leases,
-                workdirs: &self.workdirs,
-                guards: &self.guards,
-            },
-            command,
-            now,
-        )
+        let ctx = RunContext {
+            task: &task,
+            runs: &self.runs,
+            leases: &self.leases,
+            workdirs: &self.workdirs,
+            guards: &self.guards,
+            settings_version: self.settings_version,
+        };
+        decide(&ctx, command, now)
     }
 
     /// 判定並套用；被拒絕時狀態完全不變。
@@ -187,6 +191,40 @@ fn process(pid: u32) -> ProcessRecord {
 
 fn later(ms: i64) -> Timestamp {
     T0.plus_millis(ms)
+}
+
+/// Workspace 授權的一個 revision：每個能力都以 Workspace 目錄為目標。
+fn revision(number: i64, capabilities: &[Capability]) -> AuthorizationRevision {
+    AuthorizationRevision {
+        workspace_id: "w1".into(),
+        revision: number,
+        grants: capabilities
+            .iter()
+            .map(|c| Grant { capability: *c, targets: vec![r"C:\work\app".into()], restrictions: vec![] })
+            .collect(),
+        source: RevisionSource { kind: SourceKind::Custom, template_id: None, base_revision: None, confirmed_by: "desktop".into() },
+        confirmed_at: T0,
+    }
+}
+
+impl World {
+    /// 在目前的授權下建立一個需要 `capabilities` 的 Task 並讓它 ready。
+    fn ready_task_needing(&mut self, id: &str, capabilities: Vec<Capability>) {
+        let create = TaskCommand::CreateTask {
+            id: id.into(),
+            goal_id: "g1".into(),
+            title: id.into(),
+            kind: TaskKind::Research,
+            contract: complete(capabilities),
+        };
+        self.task_command(create).unwrap();
+        self.task_command(TaskCommand::MarkReady { task_id: id.into() }).unwrap();
+        self.prepare(id);
+    }
+
+    fn begin_launch(&mut self, run_id: &str, now: Timestamp) -> RunChange {
+        self.step(RunCommand::BeginLaunch { run_id: run_id.into(), command_id: format!("cmd-{run_id}") }, now).unwrap()
+    }
 }
 
 // ---------------------------------------------------------------- 狀態表
@@ -827,6 +865,92 @@ proptest! {
             check_invariants(&world);
         }
     }
+}
+
+// ---------------------------------------------------------------- 啟動准入（票 24，R1-a）
+
+#[test]
+fn a_queued_run_is_admitted_under_the_authorization_and_settings_in_effect_when_its_launch_intent_is_persisted() {
+    let mut world = World::new(&[]);
+    world.authorization = Some(revision(1, &[Capability::RunBuildTest]));
+    world.ready_task_needing("t1", vec![Capability::RunBuildTest]);
+    let run_id = world.dispatch("t1", T0).unwrap();
+    // 派工之後、准入之前：授權與共同設定都換成新版
+    world.authorization = Some(revision(2, &[Capability::RunBuildTest, Capability::WebRead]));
+    world.settings_version = Some(3);
+
+    let change = world.begin_launch(&run_id, later(1_000));
+
+    let run = world.run(&run_id);
+    assert_eq!(run.status, RunStatus::Starting);
+    assert_eq!(run.authorization_revision, Some(2), "未准入的 Run 用准入當下的新版重新檢查");
+    assert_eq!(run.settings_version, Some(3));
+    assert_eq!(run.admitted_at, Some(later(1_000)));
+    let started = change.events.iter().find(|e| e.event_type == EVENT_RUN_LAUNCH_STARTED).unwrap();
+    assert_eq!(started.payload["authorization_revision"], 2);
+    assert_eq!(started.payload["settings_version"], 3);
+}
+
+#[test]
+fn a_queued_run_whose_capability_was_revoked_before_admission_cannot_take_the_old_authorization() {
+    let mut world = World::new(&[]);
+    world.authorization = Some(revision(1, &[Capability::RunBuildTest]));
+    world.ready_task_needing("t1", vec![Capability::RunBuildTest]);
+    let run_id = world.dispatch("t1", T0).unwrap();
+    assert_eq!(world.run(&run_id).authorization_revision, Some(1), "派工時記下的只是當時的版本，還不是准入");
+    world.authorization = Some(revision(2, &[Capability::ReadFiles]));
+
+    let change = world.begin_launch(&run_id, later(1_000));
+
+    let run = world.run(&run_id);
+    assert_eq!(run.status, RunStatus::Interrupted, "沒有准入就不寫 launch intent");
+    assert_eq!(run.command_id, None);
+    assert_eq!(run.admitted_at, None);
+    assert!(run.end_reason.as_deref().unwrap().starts_with("admission_denied"), "{:?}", run.end_reason);
+    assert!(!world.lease(&run_id).is_held(), "寫入所有權釋放");
+    assert_eq!(world.task("t1").status, TaskStatus::Ready, "Task 回到 ready，之後依新授權重新排隊");
+    assert_eq!(change.outbox_delivered.as_deref(), Some(run_id.as_str()), "派工 Outbox 視為處理完畢，不會再啟動");
+    let denied = change.events.iter().find(|e| e.event_type == EVENT_RUN_ADMISSION_DENIED).unwrap();
+    assert_eq!(denied.payload["authorization_revision"], 2);
+    assert_eq!(denied.payload["code"], "capability_not_granted");
+}
+
+#[test]
+fn an_admitted_run_keeps_its_authorization_revision_after_a_later_revocation() {
+    let mut world = World::new(&[]);
+    world.authorization = Some(revision(1, &[Capability::RunBuildTest]));
+    world.ready_task_needing("t1", vec![Capability::RunBuildTest]);
+    let run_id = world.running("t1", T0);
+
+    world.authorization = Some(revision(2, &[Capability::ReadFiles]));
+    let generation = world.run(&run_id).generation;
+    world.step(RunCommand::Heartbeat { run_id: run_id.clone(), generation }, later(5_000)).unwrap();
+    let progress = ReportContent::Progress { summary: "還在做".into() };
+    world.step(RunCommand::Report { run_id: run_id.clone(), generation, content: progress }, later(6_000)).unwrap();
+
+    let run = world.run(&run_id);
+    assert_eq!((run.status, run.authorization_revision), (RunStatus::Running, Some(1)), "撤權不影響已准入的 Run");
+    assert_eq!(run.admitted_at, Some(T0));
+}
+
+#[test]
+fn a_recovery_run_for_the_same_task_is_admitted_under_the_current_revision_not_the_old_runs() {
+    let mut world = World::new(&[]);
+    world.authorization = Some(revision(1, &[Capability::RunBuildTest]));
+    world.ready_task_needing("t1", vec![Capability::RunBuildTest]);
+    let old = world.running("t1", T0);
+    world.authorization = Some(revision(2, &[Capability::ReadFiles]));
+    world.step(RunCommand::Interrupt { run_id: old.clone(), reason: "process_dead".into() }, later(1_000)).unwrap();
+
+    // 舊 Run 用過的授權不是新 Run 的捷徑：恢復時派工就依新版被擋下
+    let denied = world.dispatch("t1", later(2_000));
+    assert!(matches!(denied, Err(RunError::AdmissionDenied(_) | RunError::AdmissionRejected(_))), "{denied:?}");
+
+    world.authorization = Some(revision(3, &[Capability::RunBuildTest]));
+    let recovery = world.dispatch("t1", later(3_000)).unwrap();
+    world.begin_launch(&recovery, later(4_000));
+    assert_eq!(world.run(&recovery).authorization_revision, Some(3));
+    assert_eq!(world.run(&old).authorization_revision, Some(1), "舊 Run 的紀錄不變");
 }
 
 // ---------------------------------------------------------------- 原生 Session 與模型

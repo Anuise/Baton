@@ -169,14 +169,16 @@ fn version_not_found(version: i64) -> ApiError {
 
 /// 為 Run 產生唯讀設定快照：第一次呼叫把指定（或最新）版本寫成 Run 專屬的唯讀目錄並綁定；
 /// 之後再呼叫回傳同一個綁定（201 → 200），後來採用的新版本不影響已綁定的 Run。
+/// 已准入的 Run 一律使用准入時固定的版本（票 24）：省略版本就用它，指定別的版本回 409。
 pub(crate) async fn snapshot(
     State(state): State<Arc<ApiState>>,
     UrlPath((workspace_id, run_id)): UrlPath<(String, String)>,
     body: Result<Json<SnapshotRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<RunSettingsSnapshot>), TaskApiError> {
     let Json(request) = body?;
-    state.store.run_detail(&workspace_id, &run_id).await?;
-    let (snapshot, created) = state.run_settings.materialize(&run_id, request.version).await?;
+    let run = state.store.run_detail(&workspace_id, &run_id).await?.run;
+    let admitted = run.admitted_at.map(|_| run.settings_version);
+    let (snapshot, created) = state.run_settings.materialize(&run_id, request.version, admitted).await?;
     Ok((if created { StatusCode::CREATED } else { StatusCode::OK }, Json(snapshot)))
 }
 
@@ -202,30 +204,24 @@ impl RunSettings {
         locks.entry(run_id.to_string()).or_default().clone()
     }
 
-    /// Run 啟動前呼叫：已綁定就核對後沿用；尚未綁定就以最新版本建立；還沒有採用任何版本時回傳 `None`
-    /// （此時 Run 不帶共同設定啟動）。錯誤訊息可直接作為 Run 的失敗原因。
-    pub async fn for_launch(&self, run_id: &str) -> Result<Option<RunSettingsSnapshot>, String> {
-        let unadopted = async {
-            Ok::<_, StoreError>(
-                self.store.run_settings_pin(run_id).await?.is_none() && self.store.latest_settings_version().await?.is_none(),
-            )
-        };
-        match unadopted.await {
-            Ok(true) => return Ok(None),
-            Ok(false) => {}
-            Err(error) => return Err(format!("無法讀取共同設定版本：{error}")),
-        }
-        self.materialize(run_id, None)
+    /// Run 啟動前（准入之後）呼叫：使用准入時固定的版本 `admitted`（票 24）；已綁定就核對後沿用。
+    /// 准入時還沒有採用任何版本時回傳 `None`（此時 Run 不帶共同設定啟動，之後採用的版本不會套用到它）。
+    /// 錯誤訊息可直接作為 Run 的失敗原因。
+    pub async fn for_launch(&self, run_id: &str, admitted: Option<i64>) -> Result<Option<RunSettingsSnapshot>, String> {
+        let Some(version) = admitted else { return Ok(None) };
+        self.materialize(run_id, Some(version), Some(admitted))
             .await
             .map(|(snapshot, _)| Some(snapshot))
             .map_err(|error| format!("{}：{}", error.code, error.message))
     }
 
     /// 取得指定（或最新）版本的快照並寫成 Run 專屬唯讀目錄；回傳快照與是否為這次新建立。
+    /// `admitted` 是已准入 Run 准入時固定的版本（`Some(None)` 代表准入時還沒有採用任何版本）；尚未准入為 `None`。
     pub(crate) async fn materialize(
         &self,
         run_id: &str,
         requested: Option<i64>,
+        admitted: Option<Option<i64>>,
     ) -> Result<(RunSettingsSnapshot, bool), ApiError> {
         let lock = self.lock_of(run_id);
         let _serial = lock.lock().await;
@@ -242,6 +238,25 @@ impl RunSettings {
             return Ok((describe(&pin, &version), false));
         }
 
+        // 已准入的 Run 沿用准入時固定的版本，後來採用的新版本不影響它（R1-a）
+        let requested = match admitted {
+            Some(Some(fixed)) if requested.is_some_and(|v| v != fixed) => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "settings_snapshot_pinned",
+                    format!("Run {run_id} 准入時已固定使用共同設定版本 {fixed}，不能改用其他版本"),
+                ));
+            }
+            Some(Some(fixed)) => Some(fixed),
+            Some(None) => {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "shared_settings_not_adopted",
+                    format!("Run {run_id} 准入時還沒有採用任何共同設定版本，之後採用的版本不會套用到它"),
+                ));
+            }
+            None => requested,
+        };
         let version = match requested {
             Some(number) => self.store.settings_version(number).await?.ok_or_else(|| version_not_found(number))?,
             None => self.store.latest_settings_version().await?.ok_or_else(|| {

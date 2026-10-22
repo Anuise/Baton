@@ -395,15 +395,31 @@ pub fn changes(current: &AuthorizationRevision, grants: &[Grant]) -> Authorizati
             impact.push(format!("「{}」範圍內的操作之後會自動允許，不再逐次詢問。", c.label));
         }
         impact.push(
-            "執行中的 Worker 下一次權限提示就依新授權判定；尚未准入、交接與恢復的 Run 也使用新版。".to_string(),
+            "已准入的 Run 沿用准入時的授權版本，不會取得新增的範圍；尚未准入、交接與恢復的 Run 使用新版。".to_string(),
         );
         for c in list.iter().filter(|c| c.expands && c.high_risk) {
             impact.push(format!("「{}」是高風險能力，不屬於可信專案開發範本。", c.label));
         }
     } else if !list.is_empty() {
-        impact.push("這次修改只縮小授權：權限提示立即依新授權判定；已准入的 Run 沿用准入時的版本。".to_string());
+        impact.push(
+            "這次修改只縮小授權：尚未准入（含已排隊）、交接與恢復的 Run 依新授權准入；已准入的 Run 沿用准入時的版本，             撤權沒有固定完成時間，可以自行暫停或取消它們。"
+                .to_string(),
+        );
     }
     AuthorizationChanges { base_revision: current.revision, changes: list, expands, impact }
+}
+
+/// `admitted` 有、但 `current` 已移除或縮小（移除目標、增加限制）的能力：沿用 `admitted` 的 Run
+/// 仍保有、新准入的 Run 不再取得的範圍（R1-a，票 24）。依能力排序。
+pub fn revoked_capabilities(admitted: &AuthorizationRevision, current: &AuthorizationRevision) -> Vec<Capability> {
+    changes(admitted, &current.grants)
+        .changes
+        .into_iter()
+        // 新增的能力（連同它的限制）是擴大，不是撤銷
+        .filter(|c| !c.new_capability)
+        .filter(|c| c.removed_capability || !c.removed_targets.is_empty() || !c.added_restrictions.is_empty())
+        .map(|c| c.capability)
+        .collect()
 }
 
 /// 確認摘要；`current` 是目前生效的 revision（還沒有確認過則為 `None`）。
@@ -879,6 +895,24 @@ mod tests {
         let mut first_time = request(Some(TEMPLATE_TRUSTED_DEV), first.grants.clone(), true);
         first_time.acknowledged_expansion = false;
         assert!(confirm(&workspace(), None, first_time, T1).is_ok());
+    }
+
+    #[test]
+    fn revoked_capabilities_are_those_removed_or_narrowed_since_the_admitted_revision() {
+        let admitted = confirm_template(TEMPLATE_TRUSTED_DEV);
+        let mut grants = admitted.grants.clone();
+        // 移除「建置與測試」、縮小「編輯」的目標、為「讀取」加上限制、新增「部署」（擴大的不算撤銷）
+        grants.retain(|g| g.capability != Capability::RunBuildTest);
+        grants.iter_mut().find(|g| g.capability == Capability::WriteFiles).unwrap().targets = vec!["C:/work/app/docs".into()];
+        grants.iter_mut().find(|g| g.capability == Capability::ReadFiles).unwrap().restrictions.push("只讀 docs".into());
+        grants.push(grant(Capability::Deploy, &["C:/work/app"], &["只部署到測試環境"]));
+        let (current, _) = created(confirm(&workspace(), Some(&admitted), request(None, grants, true), T2).unwrap());
+
+        assert_eq!(
+            revoked_capabilities(&admitted, &current),
+            vec![Capability::ReadFiles, Capability::WriteFiles, Capability::RunBuildTest]
+        );
+        assert!(revoked_capabilities(&current, &current).is_empty());
     }
 
     // --- 准入 ---
