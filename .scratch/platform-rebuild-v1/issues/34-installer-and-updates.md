@@ -1,6 +1,6 @@
 # 34: 安裝程式、更新與解除安裝
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R122-34-impl，2026-10-22 23:11）
 Blocked by: 33
 
 **What to build:** 依 spec D-19：Tauri NSIS 單使用者安裝（免系統管理員）；啟動時與每日檢查簽章更新，只通知；使用者同意後寫入維護抑制、執行完全退出流程、備份、套用、依 DR-01 重新開啟。解除安裝前執行停止流程、移除登入啟動機碼，資料目錄預設保留。
