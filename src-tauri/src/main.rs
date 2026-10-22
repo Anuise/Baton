@@ -18,6 +18,7 @@ use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOu
 use baton_credential::DpapiProtector;
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
 use baton_domain::profile::ProfileView;
+use baton_domain::quota::PlanLimits;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
 use baton_domain::lifecycle::LifecyclePhase;
 use baton_domain::run::RunView;
@@ -453,6 +454,19 @@ async fn scheduling_set_mode(link: State<'_, RuntimeLink>, mode: CapacityMode) -
     link.client.set_scheduling_mode(mode).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 設定一個 Profile 的方案上限（推估的分母），回傳新的排程總覽。
+#[tauri::command]
+async fn profile_set_quota_limits(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    limits: PlanLimits,
+) -> Result<SchedulingOverview, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.set_quota_limits(&id, &limits).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 要求取消 Run；已啟動的 Run 要等程序確認停止才會變 cancelled。
 #[tauri::command]
 async fn run_cancel(
@@ -688,7 +702,8 @@ fn main() {
             lifecycle_exit,
             workspace_lifecycle_update,
             workspace_resume,
-            app_quit
+            app_quit,
+            profile_set_quota_limits
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {
