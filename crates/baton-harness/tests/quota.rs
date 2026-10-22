@@ -98,7 +98,7 @@ async fn emit(harness: &Harness, rid: &str, event: AdapterEvent) {
 }
 
 fn usage(tokens: u64) -> AdapterEvent {
-    AdapterEvent::UsageReported { tokens, raw: format!("{{\"type\":\"result\",\"usage\":{{\"tokens\":{tokens}}}}}") }
+    AdapterEvent::UsageReported { tokens, context_tokens: None, raw: format!("{{\"type\":\"result\",\"usage\":{{\"tokens\":{tokens}}}}}") }
 }
 
 fn signal(window: Option<QuotaWindow>, status: LimitStatus, used: Option<f64>, reset_at: Option<Timestamp>) -> AdapterEvent {

@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、Guard 與重犯事件端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、Guard 與重犯事件端點、時間線與觀測指標端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -26,6 +26,7 @@ mod sessions;
 mod setup;
 mod shared_settings;
 mod tasks;
+mod timeline;
 mod verification;
 pub mod workdirs;
 mod workspaces;
@@ -108,6 +109,7 @@ pub use scheduling::{
     AccountRun, AccountScheduling, CapacityModeInfo, CapacityView, QueueEntryView, SchedulingOverview,
     SchedulingSettingsView, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
 };
+pub use timeline::{metrics_path, timeline_path, MetricsResponse, ServerQuota, TimelineQuery, TimelineResponse};
 pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
 pub use shared_settings::{
     run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
@@ -253,6 +255,8 @@ pub fn router(state: ApiState) -> Router {
         .route(sessions::SESSIONS_ROUTE, get(sessions::list))
         .route(sessions::SESSION_ROUTE, get(sessions::detail))
         .route(external_operations::EXTERNAL_OPERATIONS_ROUTE, get(external_operations::list))
+        .route(timeline::TIMELINE_ROUTE, get(timeline::timeline))
+        .route(timeline::METRICS_ROUTE, get(timeline::metrics))
         .route(LIFECYCLE_PATH, get(lifecycle::status))
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))

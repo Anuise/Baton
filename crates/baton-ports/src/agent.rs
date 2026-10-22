@@ -65,7 +65,8 @@ pub enum AdapterEvent {
         raw: String,
     },
     /// Run 結果訊息回報的用量（「推估」來源）：這一輪用掉的 token 數與原始內容。
-    UsageReported { tokens: u64, raw: String },
+    /// `context_tokens` 是模型讀入的 Context token（觀測指標用，票 41）；結果訊息沒有對應欄位時為 `None`。
+    UsageReported { tokens: u64, context_tokens: Option<u64>, raw: String },
     /// 原生對話紀錄的一筆（票 15）：`position` 是這個 Run 內從 1 起、單調遞增的事件位置，
     /// Runtime 以它去重與找出缺口；`line` 是原始內容（匯入時才遮蔽秘密）。重新接上串流時可能重播已送過的位置。
     Transcript { position: u64, line: String },

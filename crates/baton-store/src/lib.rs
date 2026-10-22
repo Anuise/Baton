@@ -49,6 +49,7 @@ mod scheduling;
 mod sessions;
 mod shared_settings;
 mod tasks;
+mod timeline;
 mod verification;
 mod workdirs;
 pub use agent::AgentContext;
@@ -77,6 +78,7 @@ pub use scheduling::{
     QueuedRequest, ScheduleOutcome, ScheduleRequest, SchedulingSnapshot, StartedRun, WaitingTask,
 };
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
+pub use timeline::TimelineError;
 pub use verification::{AcceptanceApplyError, PendingVerification};
 pub use workdirs::WorkdirCandidate;
 
@@ -1298,7 +1300,18 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER decision_approval_use_no_delete BEFORE DELETE ON decision_approval_use
         BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可刪除'); END;",
     },
-    // 票 39（第 34 個 migration）：每個 Run 派工時保存的 context receipt（載入項目、版本、省略原因與預算）。
+    // 票 30（第 34 個 migration）：Controller 跨帳號交接。conversation 記下沒有可用帳號時的等待原因（下一輪開始時清除）；
+    // controller_run 記下承接換帳號的那一輪的來源帳號、上一輪與原因
+    Migration {
+        name: "controller_handoff",
+        sql: "ALTER TABLE conversation ADD COLUMN wait_code TEXT;
+        ALTER TABLE conversation ADD COLUMN wait_message TEXT;
+        ALTER TABLE conversation ADD COLUMN wait_since INTEGER;
+        ALTER TABLE controller_run ADD COLUMN handoff_from_run_id TEXT REFERENCES controller_run (id);
+        ALTER TABLE controller_run ADD COLUMN handoff_from_profile_id TEXT;
+        ALTER TABLE controller_run ADD COLUMN handoff_reason TEXT;",
+    },
+    // 票 39（第 35 個 migration）：每個 Run 派工時保存的 context receipt（載入項目、版本、省略原因與預算）。
     // 與 Run 在同一個交易中寫入、在 run 列之前插入，所以外鍵延到提交時檢查；只追加，不更新也不刪除
     Migration {
         name: "context_receipt",

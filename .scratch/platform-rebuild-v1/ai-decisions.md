@@ -3016,6 +3016,141 @@
 - 影響：用本票分支（本次合併前）建過的開發資料庫，`controller_tools` 記在第 31 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-312～AI-318 與 migration 31 是改號前的編號。
 - 審閱：未審
 
+### AI-335：時間線的範圍、順序與恢復事件的歸屬
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：時間線直接讀追加式 `event` 表，不另建資料表，依事件表的提交序號 `seq` 排序。上時間線的事件分十類：票面要求的派工（Run 的建立、准入拒絕、啟動、結束、取消）、交接（`handoff` 聚合與 `run_handed_off`）、裁定（裁定請求聚合）、恢復、驗證（`task_verification_recorded`）、清理（`worktree_cleanup` 聚合），以及指標需要的 Task 狀態、外部操作、教訓重犯、用量。Run 的進度、checkpoint、lease 續約、原生 Session 綁定與權限／決策權限表的稽核事件不上時間線。Task 歸屬依聚合決定（見 docs〈事件時間線與觀測指標〉）；外部操作以事件當時的 Run 判定 Task（操作重試時紀錄上的 `task_id` 會被改成新的 Task）。恢復事件屬於整個 Runtime，出現在每個 Workspace 的時間線上，`task_ids` 是它任何一次嘗試處置過、屬於該 Workspace 的 Task；依 Task 過濾 = 未過濾時間線中 `task_ids` 含該 Task 的事件，順序不變。
+- 理由：「依 Task 過濾後完整且有序」最直接的保證是「過濾結果正好是全部事件的子序列」；`seq` 是同一個寫入佇列的提交順序，比 `occurred_at` 可靠（同一毫秒內也有先後）。指標要「可由事件重新計算」，所以計算用到的事件也必須在時間線上看得到。進度與 lease 續約量大，不是派工的轉折。
+- 替代方案：(a) 在 `event` 表加 `task_id` 欄位：要改所有寫入事件的地方與 migration，和同時進行的票衝突。(b) 只放票面列出的六類：指標的來源事件就看不到，無法對照重算。(c) 恢復事件只在受影響的 Workspace 出現：恢復期間擋住的是所有派工，沒有受影響工作的 Workspace 也被擋。
+- 影響：Workspace 很多事件時一次回傳全部，沒有分頁；需要時再加 `after_seq` 之類的參數。新的事件種類要上時間線，須加到 `baton_domain::timeline::category_of`。
+- 審閱：未審
+
+### AI-336：各項觀測指標的定義，全部只由時間線事件計算
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：`baton_domain::metrics::compute(時間線事件)` 是純函式，`GET …/metrics` 回傳的就是它對未過濾時間線的結果。定義：工作完成率 = 最後狀態為 `completed` 的 Task ÷ 建立的 Task（不含已取消）；交接成功率 = 到達 `handoff_transferred` 的交接 ÷ 已結束（轉移或放棄）的交接，另列已確認接手與進行中；恢復耗時 = `runtime_crash_detected` → 最後成功的那次嘗試的 `recovery_attempt_completed`（工作重新排隊），不含 10 分鐘穩定觀察，未成功的算 `pending`；裁定等待時間 = `decision_requested` → 第一次 `decision_answered`，延後不中斷計時，被取代或合併的不計，未回答的算 `pending`；教訓重犯率 = 有重犯事件的 Task ÷ 建立的 Task，另列攔下與回報次數。沒有資料時比率與平均是 `null`，UI 顯示「無資料」。指標是 Workspace 層級（不依 Task 過濾）。
+- 理由：票面要求「每項指標可由事件重新計算並與顯示一致」；指標不另存計數器，任何人拿時間線呼叫同一個函式就得到相同數字（情境測試正是這樣驗證）。完成率排除取消，否則使用者整理清單會壓低數字；恢復耗時不含穩定觀察，因為觀察期間已可派工，那 10 分鐘是固定的政策值。
+- 替代方案：交接成功率以 `handoff_confirmed` 為成功（AI-291：不確認不阻擋工作，以它為準會低估）；恢復耗時算到 `recovery_succeeded`（每筆都多 10 分鐘）；教訓重犯率以教訓為分母（教訓可能是全域的，不屬於單一 Workspace）。
+- 影響：這些定義改起來只要改 `metrics.rs` 與 docs，不影響資料。
+- 審閱：未審
+
+### AI-337：「重複操作事件」= 另一個 Run 以同一個冪等鍵要求再執行而被擋下；新增 `external_operation_duplicate_blocked`
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：外部操作登記（`begin_external_operation`）回 `already_succeeded`、`result_unknown` 或 `in_progress_elsewhere` 時，在同一個交易追加 `external_operation_duplicate_blocked`（`aggregate_type = 'external_operation_duplicate'`，每次擋下各是一個聚合，識別是這次登記新配的操作識別，不改動原操作的版本；內容含原操作、冪等鍵、`status`、Run、Task）。同一個 Run 重送登記（回應遺失）不算。指標「重複操作事件」= 這個事件的次數，依狀態分開，另列變成結果未知的次數（可能重複的風險）。
+- 理由：平台的保證是「同一個冪等鍵不重送」，真正重複送出的操作平台看不到；看得到、也最能反映 Worker 或恢復流程是否企圖重做的，是被擋下的重複登記。原本這些分支什麼都不寫，無從計算。
+- 替代方案：(a) 以「同一個鍵執行超過一次」（查證沒有生效後的再執行）計數：那是合法的重試，不是重複。(b) 只計結果未知：看不出已成功的操作被要求重做幾次。
+- 影響：原本不寫入的這三種登記現在會寫一筆事件，所以控制資料庫寫入故障時它們也回 503（Worker 稍後重試即可）；Worker 反覆以同一個鍵登記，每次都記一筆。
+- 審閱：未審
+
+### AI-338：用量與 Context 使用量改由不可刪除的 `run_usage_reported` 事件計算；Context = 輸入 + 快取建立 + 快取讀取
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：`Store::record_quota_usage` 在同一個交易追加 `run_usage_reported`（`aggregate_type = 'run_usage'`，`aggregate_id` = Run，版本是這個 Run 第幾次回報），內容 `{ run_id, task_id, profile_id, tokens, context_tokens }`。`AdapterEvent::UsageReported` 加上 `context_tokens: Option<u64>`；真實 Adapter 取 `result.usage` 的 `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`，沒有這些欄位為 `None`（未知，不填零）。Context 使用量 = 每個 Run 的 `context_tokens` 加總後的平均與最大，沒有回報的 Run 另計 `runs_unknown`。
+- 理由：`quota_usage` 會在 8 天後刪除（票 27），指標若讀它，過幾天數字就變了，無法「由事件重新計算並與顯示一致」。快取讀取不計入額度推估（票 27），但佔用 Context，所以兩個數字分開。`result.usage` 是整個 `claude -p` 的累計，所以這是「這個 Run 讀入的 Context 總量」，不是某一刻的視窗佔用。
+- 替代方案：在 API 端解析 `quota_usage.raw`：會被刪除，而且把 Claude Code 的格式解析放進 Adapter 以外的地方。以 `modelUsage.contextWindow` 算佔用比例：欄位未經驗證，屬於 Validation Required。
+- 影響：Port 的 `UsageReported` 形狀改變（fake 與契約測試已更新，契約測試要求正常完成時回報 Context）。**Validation Required**：真實 `result.usage` 的欄位以票 14 記錄的樣本為準。
+- 審閱：未審
+
+### AI-339：第一版沒有 Stage，「每階段用量」全部歸在「未分階段」
+- 重要度：中
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：每階段用量依用量事件內容的 `stage` 分組；第一版沒有 Workflow／Stage（票 43），事件沒有這個欄位，全部歸在 `stage: null`，UI 顯示「未分階段」。票 43 加入 Stage 後，在 `run_usage_reported` 帶上 Run 所屬的 Stage 即可分開，指標不必改。
+- 理由：票面要求每階段用量，但 Stage 尚未存在；用 Task 種類或 Task 狀態冒充 Stage 會讓日後的數字前後不一致。
+- 替代方案：以 Task 種類（開發／研究／文件）分組；以 Run 的角色（Worker／Controller）分組。
+- 影響：目前這項指標只有一個分組；票 43 實作時要記得在用量事件帶 `stage`。
+- 審閱：未審
+
+### AI-340：「服務端額度」只採用 Claude Code 回報的帳號層級用量；看不到一律是未知
+- 重要度：低
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：指標回應附 `server_quota`：每個使用中帳號的五小時與七日已用比例，只取該視窗來自 CLI 限流訊號的已觀測用量，其次是外部觀測器的已觀測樣本；本機推估（方案上限 ÷ 本機累計）不是服務端額度，不採用。沒有就是 `null`，UI 顯示「未知」。
+- 理由：票面「不可見的服務端額度顯示未知」；推估只看得到本機 Baton 派出的 Run（票 27），把它當成服務端額度會讓使用者誤以為看得到全部用量。
+- 替代方案：沿用排程的「較保守者」判斷（混入推估，且沒有數字的警告會被當成 75%）。
+- 影響：大多數時間服務端額度會是未知，直到 CLI 送出帶數字的限流訊號。
+- 審閱：未審
+
+### AI-341：Controller Run 的用量計入它的 Workspace，但不屬於任何 Task
+- 重要度：低
+- 時間／階段：2026-10-22，票 41 實作（整合 rebuild/v1 的票 16 之後）
+- 決策：票 16 的 Controller Run 也會回報用量；它的 `run_usage_reported` 沒有 Task，時間線依 `controller_run.workspace_id` 歸到該 Workspace（`task_ids` 為空），計入用量與 Context 指標，依 Task 過濾時不出現。沒有指定 Task 的重犯同樣依它記下的 Workspace 歸屬。
+- 理由：Controller 的用量是這個 Workspace 的真實成本，漏掉會低估；它不屬於任何 Task，硬掛到某個 Task 會讓過濾結果失真。
+- 替代方案：Controller 用量不計入（低估）；另列一個 Controller 分組（等票 43 的 Stage 一起決定）。
+- 影響：用量指標的 Run 數包含 Controller Run。
+- 審閱：未審
+
+### AI-342：時間線與指標的 API、桌面殼指令與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-22，票 41 實作
+- 決策：`GET /api/v1/workspaces/{id}/timeline?task_id=`（`{ workspace_id, task_id, events }`）與 `GET /api/v1/workspaces/{id}/metrics`（`{ workspace_id, metrics, server_quota }`），桌面憑證；Workspace 不存在 404 `workspace_not_found`，Task 不屬於該 Workspace 404 `task_not_found`。桌面殼指令 `workspace_timeline`、`workspace_metrics`（經 `RuntimeClient::timeline`／`metrics`）。UI 在側欄每個 Workspace 加「時間線」按鈕，分頁上方是觀測指標、下方是事件清單與「依 Task 過濾」選擇器（選項取自未過濾時間線出現過的 Task，過濾由 Runtime 做）。
+- 理由：沿用其他 Workspace 分頁（成果、知識、對話）的路徑、錯誤格式與側欄入口慣例（spec D-21 的「時間線」主區分頁）。
+- 替代方案：全域時間線（跨 Workspace）；以 SSE 推送新事件（`/api/v1/events` 目前只有保活）。
+- 影響：時間線分頁不會自動更新，重新開啟或切換過濾才重新讀取。
+- 審閱：未審
+
+### AI-343：票 41 整合 rebuild/v1（票 17）：AI 編號改為 AI-335～AI-342，沒有 migration 要順延
+- 重要度：低
+- 時間／階段：2026-10-22，票 41 整合（run R116-41-integrate）
+- 決策：(1) 整合分支併入票 17（第 33 個 migration `controller_tools`，AI-327～AI-334）。本票沒有新增 migration（時間線直接讀事件表，見 AI-335），所以不必順延，第 33 個 migration 由票 17 套用。(2) 本票條目原寫成 AI-327～AI-334，與票 17 的條目同號，現改為 AI-335～AI-342，移到票 17 的 AI-334 之後；本票程式碼與文件沒有引用這些編號，條目內也沒有互相引用，只改標題；整合分支的條目逐字未動。(3) 衝突只有開發指南：目錄表以整合分支的列為底，補回本票在 `baton-domain`（`timeline.rs`、`metrics.rs`）、`baton-store`（`timeline.rs`）與 `baton-api`（timeline／metrics 路由）的描述；情境測試清單兩邊都保留（`controller_tools.rs` 與 `timeline_and_metrics.rs`）。`ai-decisions.md` 與 Rust 程式碼由 git 自動合併。(4) 票 17 讓 Controller 也能提出裁定請求（`decision_request.origin = 'controller'`，`run_id` 指向 `controller_run`）；時間線仍依 `decision_request.task_id` 歸屬 Task，這類事件的 `run_id` 是 Controller Run 的識別。不為此改動時間線。
+- 理由：已進入整合分支的條目編號不可改動，順延尚未合併的本票；本 run 只做整合，不新增功能。
+- 替代方案：無（編號規則已定）。
+- 影響：本票較早的 commit 與驗證報告（R114）提到的 AI-327～AI-334 是改號前的編號，分別對應現在的 AI-335～AI-342。時間線若要區分 Controller 與 Worker 提出的裁定，日後可在事件內容帶上 `origin`。
+- 審閱：未審
+
+### AI-344：Controller 交接沿用 issue §5.2 的四個 phase，但不另建紀錄表：安全邊界是一輪的結束，交接記在承接的那一輪上
+- 重要度：高
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：Controller 的「同一交接協議」對應如下。(1) 要求：下一輪的帳號由排程另選（上一個 Controller Session 的帳號 paused／draining 或無法使用）；進行中的一輪所在帳號進入 draining 時，只有以 `SlotKind::Handoff` 找得到承接帳號才繼續，否則留在原帳號。(2) 安全邊界：讓這一輪自己結束，從帳號進入 draining（門檻的 `since`）或這一輪開始（取較晚者）起最多等 `CHECKPOINT_WAIT_MS`（2 分鐘），之後先查證程序、仍存活才以 `stop_grace` 要求停止。(3) 轉移：確認停止後，下一次 tick 把串流讀乾淨仍沒有結果才以 `interrupted`、`handed_off：…` 結束（輸入退回待處理、不退避），同一次 tick 的喚起在承接帳號上以新的 Controller Session（`account_changed`）開始下一輪；停不下來就維持原狀、下一次再要求。(4) 確認：承接的那一輪保存了結果。承接的那一輪在 `controller_run` 記下 `handoff`（上一輪、來源帳號、原因），conversation 追加 `controller_handoff_transferred`／`controller_handoff_confirmed` 事件。
+- 理由：Controller 的一輪很短而且不持有 execution lease，最自然的安全邊界就是一輪結束；B1（同一 conversation 最多一輪未結束）已保證不會有兩個 Controller 同時執行，successor 不必與舊 Run 在同一個交易中建立。等待時間與停止寬限沿用票 28，行為與 Worker 一致；只有確認停止才轉移，沿用「不確定不下結論」。
+- 替代方案：(a) 沿用票 28 的 `handoff` 表（`task_id`、`from_run_id` 以外鍵綁 Worker 的 Run 與 Task，要重建表）；(b) 為 Controller 另建 phase 表（四個 phase 都能從 `controller_run` 與門檻狀態推得，多一張表只增加同步成本）；(c) draining 時立即停止進行中的一輪（可能丟掉一輪已做的判斷）。
+- 影響：等待與停止的時點只依持久化的門檻與 Controller Run，Runtime 在任何一點重建後重新判定（停止是冪等的）。從 draining 到承接的一輪開始最長約 2 分鐘 + 30 秒寬限 + 一次 tick；2 分鐘同 AI-288 屬 **Validation Required**。時間線（票 41）可以從 `controller_run.handoff` 與 conversation 事件取得 Controller 的交接。
+- 審閱：未審
+
+### AI-345：沒有保存結果的一輪，帳號受限時一律以 `handed_off` 結束、不退避
+- 重要度：中
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：一輪以失敗結束或確認程序已不在（AI-311 的存活核對）而沒有結果時，若這一輪收到過 CLI 的額度用盡訊號（`RateLimited` 的 `exhausted`），或帳號門檻（先依最新額度推進）是 draining，就以 `TurnOutcome::HandedOff` 結束：Controller Run `interrupted`、`end_reason` = `handed_off：<原本的原因>`、事件 `controller_run_handed_off`，輸入退回待處理；`plan_wake` 在上一輪是交接時不套用 AI-303 的退避，下一輪立即在其他帳號上交付，Prompt 仍註明「可能已部分處理」。成功的結果照常保存；完全退出時停止的一輪、啟動結果不明的一輪仍是一般的中斷。
+- 理由：突然限流、為交接而停止、以及停止途中 Runtime 當掉後被存活核對找回的一輪，原因都在帳號而不是 Controller；一律走同一條路，重建後不必記得「剛才是在交接」（記憶體中的串流會遺失）。門檻已擋住那個帳號，不退避也不會在同一個帳號上反覆重試。`end_reason` 以 `handed_off` 開頭判斷，沿用 `controller_run` 既有的 CHECK（不必重建表加新狀態）。
+- 替代方案：新增 `handed_off` 狀態（要重建 `controller_run`）；突然限流照 AI-303 退避 1 分鐘（全部帳號受限之外沒有理由多等）。
+- 影響：Controller 帳號撞到上限時，輸入通常在同一次 tick 就交給承接帳號。沒有承接帳號時同樣不退避，但喚起找不到帳號、只記下等待原因（AI-347），不會啟動程序。
+- 審閱：未審
+
+### AI-346：新的（含替代的）Controller Session 從對話、最近 20 筆決策與進行中 Task 的檢查點摘要重建
+- 重要度：中
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：Store 在喚起的同一個交易中載入 `ControllerBackground`：Workspace 最近 20 筆已做成的決策（`decision` + `decision_request`：問題 → 選定選項的名稱，沒有選項時是處理方式，附備註），以及狀態不是 completed／cancelled 的 Task 各自最近一筆被接受的檢查點摘要（最多 20 筆，不含細節）。不沿用原生 Session 的 Prompt 在 AI-307 的角色說明、紀錄缺口與最近 40 則對話之後附上這兩段，都標明「只作為背景」；沿用原生 Session 時不附。這一條取代 AI-307 的「本票不附決策、檢查點」，教訓仍不附。
+- 理由：票 30「從持久化對話、決策與檢查點重建」；換帳號一定換原生 Session，新的 Session 沒有先前的脈絡。只附摘要與筆數上限，避免 Prompt 隨 Workspace 成長無限變大；完整的脈絡組裝屬於票 39（Context Builder）。
+- 替代方案：只在換帳號時附（其他原因換 Session 時同樣缺脈絡）；附檢查點細節（最多 64 KB／筆，太大）。
+- 影響：每一輪新的 Session 的 Prompt 多出最多 40 行背景。票 39 可以取代這兩段的組裝方式。
+- 審閱：未審
+
+### AI-347：沒有可用帳號時，等待原因記在 conversation 上；只在輸入已到期卻沒有喚起時顯示
+- 重要度：中
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：喚起時排程回 `Placement::Wait`，Supervisor 以第一個原因的代碼與全部原因的訊息（以「；」串接）寫入 conversation 的 `wait_code`／`wait_message`／`wait_since`（事件 `conversation_controller_waiting`；代碼與訊息都沒變時不寫入，改變時保留開始等待的時間），下一輪開始時在同一個交易中清除。對話 API 的 `waiting` 只在 `plan_wake` 為「現在該喚醒」時回傳（忙碌、合併視窗內、沒有輸入時都是 `null`）。等待期間每次 tick 重新嘗試喚起（只讀，不啟動程序），不採票 29 的「重置後 1 分鐘／退避」重新評估時間。
+- 理由：驗收要求「UI 顯示等待原因」；寫進資料庫才能在 Runtime 重建後、而且不必讓 API 重算排程就顯示。Controller 喚起只需要讀帳號與門檻，沒有啟動成本，帳號一恢復就立即回應使用者比等到重評時間合理。只在到期時顯示，可避免原因在 Workspace 暫停等其他情況下過期仍被顯示。
+- 替代方案：API 每次即時重算排程（API 要依賴額度觀測器）；沿用票 29 的 `waiting_resource` 與重新評估時間（Controller 沒有 Task 狀態可放，且會延遲回應）。
+- 影響：訊息中含用量百分比，額度輪詢改變百分比時會再寫一次等待事件（最多每 5 分鐘一次）。
+- 審閱：未審
+
+### AI-348：Controller 交接的資料形狀、API 與 migration 34
+- 重要度：低
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：第 34 個 migration `controller_handoff`（整合票 32、29 後由第 31 個順延，整合票 17 後再順延為第 34 個）：`conversation` 加 `wait_code`、`wait_message`、`wait_since`；`controller_run` 加 `handoff_from_run_id`（參照 `controller_run`）、`handoff_from_profile_id`、`handoff_reason`。交接原因代碼：上一個帳號門檻 draining → `quota_draining`、paused 或用量 ≥75% → `quota_near_limit`、其他 → `account_unavailable`。API：`GET /api/v1/workspaces/{id}/conversation` 的 `waiting`（`{ code, message, since }` 或 `null`）與 `runs[].handoff`（`{ from_run_id, from_profile_id, reason }` 或 `null`）。事件：`controller_run_handed_off`、`conversation_controller_waiting`、`controller_handoff_transferred`、`controller_handoff_confirmed`。Web UI：對話分頁顯示等待原因（等待時不顯示預計喚醒時間），Controller 回覆與進行中的一輪旁標示交接來源、原因與「已確認」，被交接出去的一輪標示「已交接」。
+- 理由：沿用既有表加欄，不重建；換過帳號後新的 Session 在承接帳號上，之後的輪次留在那裡原生接續，不另設「換回原帳號」的規則。
+- 替代方案：無。
+- 影響：被交接出去而沒有產生回覆的一輪，在對話分頁只看得到承接那一輪的交接標示（頁面沒有 Controller Run 列表）。
+- 審閱：未審
+
+### AI-349：票 30 整合 rebuild/v1（票 17、41）：migration 順延為第 34 個、AI 編號改為 AI-344～AI-348
+- 重要度：中
+- 時間／階段：2026-10-22，票 30 整合（run R117-30-integrate）
+- 決策：(1) 整合分支已併入票 17（第 33 個 migration `controller_tools`，條目 AI-327～AI-334）與票 41（沒有 migration，條目 AI-335～AI-343；run 開始後才併入，所以以合併當下的 `rebuild/v1` 為準重做整合）。本票的 `controller_handoff` 順延為第 34 個、排在 `controller_tools` 之後；兩者沒有共用的欄位（本票只對 `conversation`、`controller_run` 加欄，票 17 加 `credential.controller_run_id` 並重建 `decision_request`、`decision_approval_use`），`controller_handoff` 不需要 `foreign_keys=OFF`。migration 註解、開發指南〈Controller 跨帳號交接〉與原 AI-331 的「migration 33」改為 34。(2) 本票條目原寫成 AI-327～AI-331，與票 17 同號，現改為 AI-344～AI-348，移到 AI-343 之後，條目內引用本票編號之處（原 AI-328 的「AI-330」）一併更新；自動合併時原 AI-331 的 `- 審閱：未審` 行被吃掉、條目與票 17 的條目交錯，重建時以整合分支的檔案為底、逐字保留整合分支的條目，再補回本票條目。程式碼、文件與票面沒有引用這些編號。(3) 衝突合併：`conversations.rs` 同時保留本票的 `load_background` 與票 17 的 `enqueue_notice`；開發指南先放〈Controller 拆工與派工工具（票 17）〉再放〈Controller 跨帳號交接〉。Supervisor、Domain 的 `conversation.rs`、Store 其餘部分與票 41 的變更由 git 自動合併，兩邊行為都保留。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票較早的分支（migration 33 是 `controller_handoff`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R113）提到的 AI-327～AI-331 是改號前的編號，分別對應現在的 AI-344～AI-348。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
