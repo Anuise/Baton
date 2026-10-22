@@ -4,6 +4,8 @@
 //! 交給 Store 或 WorkspaceFs」。預覽不寫入任何東西；採用必須帶預覽時的內容雜湊，來源在預覽後改變就拒絕，
 //! 所以使用者採用的一定是他看過的內容。使用者的原始設定檔只被讀取，從不被修改。
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
@@ -14,6 +16,8 @@ use baton_domain::shared_settings::{
     self, DiffEntry, Exclusion, ImportCandidate, ImportError, RunSettingsPin, SettingsBundle, SettingsVersion,
     SettingsVersionSummary, SourceReport,
 };
+use baton_ports::{Clock, WorkspaceFs};
+use baton_store::{Store, StoreError};
 use serde::{Deserialize, Serialize};
 
 use crate::authorization::bad_json;
@@ -172,67 +176,141 @@ pub(crate) async fn snapshot(
 ) -> Result<(StatusCode, Json<RunSettingsSnapshot>), TaskApiError> {
     let Json(request) = body?;
     state.store.run_detail(&workspace_id, &run_id).await?;
-    let (snapshot, created) = materialize_run_settings(&state, &run_id, request.version).await?;
+    let (snapshot, created) = state.run_settings.materialize(&run_id, request.version).await?;
     Ok((if created { StatusCode::CREATED } else { StatusCode::OK }, Json(snapshot)))
 }
 
-/// 供 Run 准入使用：取得設定版本快照並寫成 Run 專屬唯讀目錄；回傳快照與是否為這次新建立。
-pub(crate) async fn materialize_run_settings(
-    state: &ApiState,
-    run_id: &str,
-    requested: Option<i64>,
-) -> Result<(RunSettingsSnapshot, bool), ApiError> {
-    if let Some(pin) = state.store.run_settings_pin(run_id).await? {
-        if requested.is_some_and(|v| v != pin.version) {
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                "settings_snapshot_pinned",
-                format!("Run {run_id} 已固定使用共同設定版本 {}，不能改用其他版本", pin.version),
-            ));
+/// 產生並核對 Run 專屬的設定快照（D-09）。API 端點與 Supervisor 的啟動流程共用同一個實例：
+/// 同一個 Run 的請求依序處理（不會兩個請求同時寫同一個目錄），已綁定的快照每次都依版本內容與
+/// `manifest.json` 核對目錄，不一致就拒絕，不宣稱設定已固定。
+pub struct RunSettings {
+    store: Store,
+    workspace_fs: Arc<dyn WorkspaceFs>,
+    data_dir: PathBuf,
+    clock: Arc<dyn Clock>,
+    /// 每個 Run 一把鎖；Run 數量有限，鎖用完不回收。
+    locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl RunSettings {
+    pub fn new(store: Store, workspace_fs: Arc<dyn WorkspaceFs>, data_dir: PathBuf, clock: Arc<dyn Clock>) -> Self {
+        Self { store, workspace_fs, data_dir, clock, locks: std::sync::Mutex::new(HashMap::new()) }
+    }
+
+    fn lock_of(&self, run_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.locks.lock().unwrap_or_else(|e| e.into_inner());
+        locks.entry(run_id.to_string()).or_default().clone()
+    }
+
+    /// Run 啟動前呼叫：已綁定就核對後沿用；尚未綁定就以最新版本建立；還沒有採用任何版本時回傳 `None`
+    /// （此時 Run 不帶共同設定啟動）。錯誤訊息可直接作為 Run 的失敗原因。
+    pub async fn for_launch(&self, run_id: &str) -> Result<Option<RunSettingsSnapshot>, String> {
+        let unadopted = async {
+            Ok::<_, StoreError>(
+                self.store.run_settings_pin(run_id).await?.is_none() && self.store.latest_settings_version().await?.is_none(),
+            )
+        };
+        match unadopted.await {
+            Ok(true) => return Ok(None),
+            Ok(false) => {}
+            Err(error) => return Err(format!("無法讀取共同設定版本：{error}")),
         }
-        let version = pinned_version(state, &pin).await?;
-        return Ok((describe(&pin, &version), false));
+        self.materialize(run_id, None)
+            .await
+            .map(|(snapshot, _)| Some(snapshot))
+            .map_err(|error| format!("{}：{}", error.code, error.message))
     }
 
-    let version = match requested {
-        Some(number) => state.store.settings_version(number).await?.ok_or_else(|| version_not_found(number))?,
-        None => state.store.latest_settings_version().await?.ok_or_else(|| {
-            api_error(StatusCode::CONFLICT, "shared_settings_not_adopted", "還沒有採用任何共同設定版本，無法產生 Run 的設定快照")
-        })?,
-    };
-    let directory = state.data_dir.join(RUN_SETTINGS_DIR).join(run_id);
-    write_snapshot(state, &directory, &version).await?;
-    let pin = RunSettingsPin {
-        run_id: run_id.to_string(),
-        version: version.version,
-        content_hash: version.content_hash.clone(),
-        directory: directory.to_string_lossy().into_owned(),
-        created_at: state.clock.now(),
-    };
-    let pin = state.store.pin_run_settings(pin).await?;
-    if pin.version != version.version {
-        // 同一個 Run 同時有另一個請求搶先綁定了別的版本：目錄改寫成已綁定的版本
-        let pinned = pinned_version(state, &pin).await?;
-        write_snapshot(state, &directory, &pinned).await?;
-        return Ok((describe(&pin, &pinned), false));
+    /// 取得指定（或最新）版本的快照並寫成 Run 專屬唯讀目錄；回傳快照與是否為這次新建立。
+    pub(crate) async fn materialize(
+        &self,
+        run_id: &str,
+        requested: Option<i64>,
+    ) -> Result<(RunSettingsSnapshot, bool), ApiError> {
+        let lock = self.lock_of(run_id);
+        let _serial = lock.lock().await;
+        if let Some(pin) = self.store.run_settings_pin(run_id).await? {
+            if requested.is_some_and(|v| v != pin.version) {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "settings_snapshot_pinned",
+                    format!("Run {run_id} 已固定使用共同設定版本 {}，不能改用其他版本", pin.version),
+                ));
+            }
+            let version = self.pinned_version(&pin).await?;
+            self.verify(&pin, &version).await?;
+            return Ok((describe(&pin, &version), false));
+        }
+
+        let version = match requested {
+            Some(number) => self.store.settings_version(number).await?.ok_or_else(|| version_not_found(number))?,
+            None => self.store.latest_settings_version().await?.ok_or_else(|| {
+                api_error(StatusCode::CONFLICT, "shared_settings_not_adopted", "還沒有採用任何共同設定版本，無法產生 Run 的設定快照")
+            })?,
+        };
+        let directory = self.data_dir.join(RUN_SETTINGS_DIR).join(run_id);
+        self.write(&directory, &version).await?;
+        let pin = RunSettingsPin {
+            run_id: run_id.to_string(),
+            version: version.version,
+            content_hash: version.content_hash.clone(),
+            directory: directory.to_string_lossy().into_owned(),
+            created_at: self.clock.now(),
+        };
+        let pin = self.store.pin_run_settings(pin).await?;
+        Ok((describe(&pin, &version), true))
     }
-    Ok((describe(&pin, &version), true))
-}
 
-async fn pinned_version(state: &ApiState, pin: &RunSettingsPin) -> Result<SettingsVersion, ApiError> {
-    state.store.settings_version(pin.version).await?.ok_or_else(|| version_not_found(pin.version))
-}
+    async fn pinned_version(&self, pin: &RunSettingsPin) -> Result<SettingsVersion, ApiError> {
+        self.store.settings_version(pin.version).await?.ok_or_else(|| version_not_found(pin.version))
+    }
 
-async fn write_snapshot(
-    state: &ApiState,
-    directory: &std::path::Path,
-    version: &SettingsVersion,
-) -> Result<(), ApiError> {
-    let files: Vec<(String, Vec<u8>)> =
-        shared_settings::snapshot_files(version).into_iter().map(|f| (f.name, f.bytes)).collect();
-    state.workspace_fs.write_readonly_files(directory, &files).await.map_err(|error| {
-        api_error(StatusCode::INTERNAL_SERVER_ERROR, "settings_snapshot_failed", format!("無法寫入設定快照目錄 {}：{error}", directory.display()))
-    })
+    async fn write(&self, directory: &Path, version: &SettingsVersion) -> Result<(), ApiError> {
+        let files: Vec<(String, Vec<u8>)> =
+            shared_settings::snapshot_files(version).into_iter().map(|f| (f.name, f.bytes)).collect();
+        self.workspace_fs.write_readonly_files(directory, &files).await.map_err(|error| {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "settings_snapshot_failed", format!("無法寫入設定快照目錄 {}：{error}", directory.display()))
+        })
+    }
+
+    /// 目錄中的檔案必須與版本渲染出的檔案完全相同（不多不少、位元組一致），
+    /// 而且 `manifest.json` 記錄的版本與內容雜湊就是綁定的那一個。
+    async fn verify(&self, pin: &RunSettingsPin, version: &SettingsVersion) -> Result<(), ApiError> {
+        let directory = Path::new(&pin.directory);
+        let mismatch = |detail: String| {
+            api_error(
+                StatusCode::CONFLICT,
+                "settings_snapshot_mismatch",
+                format!("Run {} 的設定快照目錄 {} 與綁定的版本 {} 不一致（{detail}），不以這份設定啟動", pin.run_id, pin.directory, pin.version),
+            )
+        };
+        let read_failed = |error: baton_ports::PortError| {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "settings_snapshot_failed", format!("無法讀取設定快照目錄 {}：{error}", pin.directory))
+        };
+        let expected = shared_settings::snapshot_files(version);
+        let listed = self.workspace_fs.list_artifact_files(directory).await.map_err(read_failed)?;
+        let mut names: Vec<String> = listed
+            .iter()
+            .map(|entry| entry.path.strip_prefix(directory).unwrap_or(&entry.path).to_string_lossy().replace('\\', "/"))
+            .collect();
+        names.sort();
+        let mut expected_names: Vec<String> = expected.iter().map(|f| f.name.clone()).collect();
+        expected_names.sort();
+        if names != expected_names {
+            return Err(mismatch(format!("檔案為 {names:?}，應為 {expected_names:?}")));
+        }
+        for file in &expected {
+            let actual = self.workspace_fs.read_artifact(&directory.join(&file.name)).await.map_err(read_failed)?;
+            if actual.as_deref() != Some(file.bytes.as_slice()) {
+                return Err(mismatch(format!("{} 的內容被改變", file.name)));
+            }
+        }
+        // 檔案與版本一致之後，manifest 的版本與雜湊也必須就是綁定的那一個
+        if version.content_hash != pin.content_hash {
+            return Err(mismatch("版本的內容雜湊與綁定時不同".into()));
+        }
+        Ok(())
+    }
 }
 
 fn describe(pin: &RunSettingsPin, version: &SettingsVersion) -> RunSettingsSnapshot {

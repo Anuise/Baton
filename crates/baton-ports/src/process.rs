@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::PortResult;
 
 /// 啟動程序所需的描述。
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct SpawnSpec {
     pub program: String,
     pub args: Vec<String>,
@@ -17,6 +17,14 @@ pub struct SpawnSpec {
     /// 額外交給子程序的環境變數（例如 Agent 憑證），同名時蓋過 Runtime 自己的環境。
     /// 不納入 `command_hash`，也不會出現在 `Debug` 輸出，避免憑證進入日誌。
     pub env: Vec<(String, String)>,
+    /// 啟動前從繼承的環境中移除的變數名稱（不分大小寫）；同名出現在 `env` 時仍以 `env` 的值設定。
+    pub env_remove: Vec<String>,
+    /// 標準輸入改由這個檔案提供；`None` 時是 NUL。
+    pub stdin_file: Option<String>,
+    /// 標準輸出寫入這個檔案（建立或覆寫，寫入期間其他程序可讀取）；`None` 時是 NUL。
+    pub stdout_file: Option<String>,
+    /// 標準錯誤寫入這個檔案（規則同 `stdout_file`）；`None` 時是 NUL。
+    pub stderr_file: Option<String>,
 }
 
 impl std::fmt::Debug for SpawnSpec {
@@ -28,6 +36,10 @@ impl std::fmt::Debug for SpawnSpec {
             .field("working_dir", &self.working_dir)
             .field("command_id", &self.command_id)
             .field("env", &env_names)
+            .field("env_remove", &self.env_remove)
+            .field("stdin_file", &self.stdin_file)
+            .field("stdout_file", &self.stdout_file)
+            .field("stderr_file", &self.stderr_file)
             .finish()
     }
 }

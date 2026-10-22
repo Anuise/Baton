@@ -1765,6 +1765,114 @@
 - 影響：本票較早的 commit 訊息與 `.orchestration` 下的驗證紀錄（R067）提到的 AI-168～AI-176，以及第一次合併 commit 中的 AI-180～AI-189，都是改號前的編號。
 - 審閱：未審
 
+### AI-196：真實 Claude Code Adapter 的啟動參數：不載入任何設定檔來源、權限經 permission_prompt、Prompt 經標準輸入
+- 重要度：高
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：Worker 以 `claude -p --output-format stream-json --verbose --setting-sources "" --strict-mcp-config --mcp-config <Run 的 mcp.json> [<快照的 mcp.json>] --allowedTools mcp__baton --permission-prompt-tool mcp__baton__permission_prompt [--settings …] [--append-system-prompt-file …] [--model …]` 啟動。Prompt 寫成 Run 目錄的 `prompt.md` 經標準輸入交付。權限模式維持 CLI 預設（不使用 `bypassPermissions`），只預先允許 Baton 自己的 MCP 工具，其餘需要核准的操作經票 22 的 `permission_prompt` 交給 Runtime 判定。執行檔是 `claude`（CreateProcessW 依 PATH 找 `claude.exe`），MCP shim 是與 Runtime 同目錄的 `baton-mcp-shim.exe`。
+- 理由：`--setting-sources ""` 讓使用者層與 Workspace 內的 `.claude\settings*.json` 都不載入。實測 `project,local` 時 Workspace 設定的 `defaultMode: acceptEdits` 會生效，而 P3 授權下 Worker 可以寫這些檔案（票 22 驗證 R052 的意見），等於 Worker 能改自己的權限；設定改為只來自 Run 的唯讀快照（D-09）。`--strict-mcp-config` 讓 Worker 只看到 Baton 的 shim 與快照中的共同 MCP 伺服器（D-05）。Prompt 經標準輸入可避開 Windows 指令列長度上限，也不會出現在程序清單。全部參數已在 Claude Code 2.1.307 實測（見 AI-204）。
+- 替代方案：`--setting-sources project,local`（Worker 可藉 Workspace 設定放寬權限）；`--bare`（會改變認證來源的讀取方式）；`bypassPermissions`（違反 D-08）。npm 安裝的 `claude.cmd` 不能直接以 CreateProcessW 啟動，目前不支援，需要時改為經 `cmd.exe` 或解析實際路徑。
+- 影響：repo 自己的 `.claude\settings.json`（hooks、權限、環境變數）對 Worker 不生效；需要的設定要放進共同設定。
+- 審閱：未審
+
+### AI-197：啟動 Worker 前移除繼承的 `ANTHROPIC*`、`CLAUDE*` 環境變數
+- 重要度：高
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：Runtime 啟動時記下繼承到的環境變數名稱；啟動 Worker 前移除名稱以 `ANTHROPIC` 或 `CLAUDE` 開頭（不分大小寫）的全部變數，只保留 `CLAUDE_CODE_GIT_BASH_PATH`，再設定 `CLAUDE_CONFIG_DIR` 為 Run 帳號 Profile 的目錄。移除以新增的 `SpawnSpec.env_remove` 交給 ProcessControl，憑證以 `env` 交付，都不進指令列或 `command_hash`。
+- 理由：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN`、`CLAUDE_CODE_USE_BEDROCK／VERTEX`、`ANTHROPIC_BASE_URL` 等都會讓實際帳號與 Profile 脫鉤；Runtime 若是從 Claude Code session 中啟動，還會繼承 `CLAUDECODE` 等巢狀標記。比照 AI-02 以前綴清除最不容易漏；Git Bash 路徑只影響 Windows 上找 Bash，與認證無關。
+- 替代方案：只移除明列的變數（新版本加入的認證變數會漏掉）；清空整個環境（會失去 PATH、USERPROFILE 等必要變數）。
+- 影響：使用者若以環境變數調整 Claude Code 行為（例如 `CLAUDE_CODE_MAX_OUTPUT_TOKENS`），對 Worker 不生效；需要時應改放共同設定或擴充保留清單。
+- 審閱：未審
+
+### AI-198：CLI 輸出寫入 Run 目錄的檔案，Adapter 追蹤檔案取得事件
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：ProcessControl 依新增的 `SpawnSpec.stdin_file`／`stdout_file`／`stderr_file`，把 `claude` 的標準輸出寫入 `<資料目錄>\runs\<run_id>\stream.jsonl`、標準錯誤寫入 `stderr.log`（share read/write/delete）。Adapter 的事件串流每 250 毫秒讀取檔案新內容並逐行解析，有新輸出就送一次 `Heartbeat`。Runtime 重建後重新接上同一個檔案，從頭重播。
+- 理由：程序由 Job Object 管理，Runtime 結束或當掉時程序繼續執行（D-10；關閉 Job handle 不殺程序），管線在 Runtime 重建後無法接回，檔案可以。重播的 Session 綁定是冪等的，heartbeat 只會續約 lease，過期後仍由 ProcessControl 查證存活。
+- 替代方案：具名管線（重建後無法取回已寫出的內容）；持久化已處理的位移（多一份狀態，目前沒有必要）。
+- 影響：重建後重播會重送限流與用量事件，票 27 的觀測會多記一次同一筆用量（推估偏高、偏保守）；stream 檔案隨 Run 保留在資料目錄，目前沒有清理流程。
+- 審閱：未審
+
+### AI-199：stream-json 事件對應：限流訊號、用量與錯誤
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：`system/init` → `Started`（`session_id`）；`assistant` 的文字區塊 → `Message`。`rate_limit_event`：`status` 的 `allowed`／`allowed_warning`／`rejected` 對應票 27 的 `Allowed`／`Warning`／`Exhausted`（其他狀態不轉換），屬於 `rateLimitType` 的視窗（不認識的視窗為 `None`），`used` 取 `utilization`，沒有時取 `unifiedWindows` 中該視窗的值；`unifiedWindows` 的其他視窗以 `Allowed` 加已用比例各送一個訊號。`result`：有 `usage` 時先送 `UsageReported`，`tokens` = 輸入 + 輸出 + 快取建立（快取讀取不計，採用 AI-121 的建議）；`is_error` 為 false 且 `subtype` 為 `success` 才是成功，否則先送新增的 `AdapterEvent::Error`（`result` 文字，500 字元內）再送 `Exited { success: false }`。不是 JSON 的行送 `Error`。Supervisor 以最後一個錯誤作為 Run 的失敗原因。`resume_capability` 一律回報 `Unknown`。
+- 理由：實測 2.1.307 的未登入與不存在的模型，`result` 都是 `subtype: success` 但 `is_error: true`，只看 `subtype` 會誤判。`unifiedWindows` 同時帶兩個視窗的已用比例，送出後票 27 才能判定「觀測完整」（AI-124）；非主要視窗的狀態 CLI 沒有說，以已用比例為準。快取讀取的 token 很多（實測一次 17140）但計費與額度權重遠低於其他類別，計入會讓推估嚴重偏高。
+- 替代方案：只送主要視窗（另一個視窗永遠只有推估）；`tokens` 計入快取讀取。
+- 影響：撞到限制時的實際形狀尚未實測（`docs/adapter-contract.md`）；resume 屬後續票。
+- 審閱：未審
+
+### AI-200：原生 Session 的條件綁定：不同的 Session 只記錄衝突，不改綁定也不結束 Run
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：Run 新增 `native_session_id`。`BindNativeSession` 需要目前寫入所有者的世代；沒有綁定時綁定並記 `run_native_session_bound`；相同時沒有任何變動；不同時保留原綁定並記 `run_native_session_conflict`（含兩個識別），Run 照常執行。
+- 理由：票面要求「不靜默改指其他原生 Session」。衝突在同一個 `claude -p` 程序內不該發生，若發生代表 CLI 行為改變，應留下可查證的紀錄；直接讓 Run 失敗會中斷可能仍正常的工作，是否要處置交給 Session resume 與交接的票決定。
+- 替代方案：衝突即讓 Run 失敗（較保守，但沒有證據顯示工作本身有問題）；靜默忽略（違反票面）。
+- 影響：UI 目前不顯示衝突事件，只能從事件表查看。
+- 審閱：未審
+
+### AI-201：Claude Code 最低版本固定為 2.1.307，版本記在 Profile 核對中，未知也阻擋
+- 重要度：高
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：新增 `baton_domain::claude_code`，最低版本 `MIN_SUPPORTED_VERSION = 2.1.307`（真實 Adapter 契約實測通過的版本）。首次啟動精靈的 `MIN_CLAUDE_CODE_VERSION` 改由它導出（原暫定 2.1.0）。核對 Profile 時同時執行 `claude --version` 並記入 `verification.cli_version`；低於最低版本是 `cli_version_unsupported`（帳號問題），找不到 Claude Code、取不到或看不懂版本是 `cli_version_unknown`（狀態不明），兩者都阻擋該 Profile 的派工並顯示原因。票 14 之前的核對沒有版本，需要重新核對。
+- 理由：spec D-20 規定最低版本在 Adapter 驗證時固定；D-08 要求以版本探測決定能力、不支援時阻擋並說明，不假設支援。只有 2.1.307 實際驗證過 Adapter 用到的旗標與事件格式。CLI 是本機唯一一份，但「派工會不會成功」以 Profile 為單位判定與顯示，所以放在 Profile 的核對結果裡。
+- 替代方案：最低版本設 2.1.0（未驗證 2.1.0～2.1.306 是否支援全部旗標）；每次啟動 Run 時探測版本（每個 Run 多一次程序啟動，且無法在派工前顯示原因）。
+- 影響：既有的 Profile 在重新核對前都不能派工；CLI 降版後要重新核對才會被阻擋。
+- 審閱：未審
+
+### AI-202：設定快照在啟動前自動准入與核對，API 與 Supervisor 共用並依 Run 序列化
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：新增 `baton_api::RunSettings`（取代 `materialize_run_settings`），API 的快照端點與 Supervisor 共用同一個實例，每個 Run 一把鎖。Supervisor 在 launch intent 持久化之後、簽發憑證之前取得快照：尚未綁定就以最新版本建立；已綁定就核對目錄中的檔案（含 `manifest.json`）與版本渲染結果完全相同。核對失敗以 `LaunchFailed`（`settings_snapshot_mismatch…`）結束 Run，不啟動程序；API 再要求已綁定的快照也做同樣核對，不一致回 409 `settings_snapshot_mismatch`。還沒有採用任何共同設定版本時，Run 不帶共同設定啟動。
+- 理由：回應票 14 的主控意見（票 08 驗證 R040）：同一 Run 並行要求不同版本時共用 staging 目錄、已綁定的 Run 不核對目錄。D-09 要求「無法維持時阻擋並顯示，不宣稱固定成功」。尚未採用共同設定時阻擋，會讓還沒完成首次精靈匯入步驟的使用者完全無法派工；Profile 目錄本身只有登入狀態，加上 `--setting-sources ""`，不帶共同設定執行的風險可接受。
+- 替代方案：未採用共同設定時阻擋派工（較嚴格）；核對失敗時以版本內容重寫目錄（可能掩蓋竄改，也與唯讀目錄的寫入規則衝突）。
+- 影響：鎖只在單一 Runtime 實例內有效（Runtime 本身是單實例）；Run 啟動後快照被改動不會被偵測。
+- 審閱：未審
+
+### AI-203：模型依 Workspace 角色覆寫的資料形狀與生效時機
+- 重要度：低
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：Workspace 新增 `model_overrides { controller, worker, reviewer }`（`null` = 不覆寫），以 `PUT /api/v1/workspaces/{id}/model-overrides` 整組取代；名稱去除空白後只允許英數字與 `. _ - : [ ] @ /`、最長 100 字元。派工時把 Worker 角色的模型固定進派工 Outbox（`LaunchPayload.model`），只影響之後派出的 Run。Controller 與 Reviewer 的覆寫先保存，由各自的票使用。UI 放在 Workspace「授權設定」畫面下方。
+- 理由：spec D-30。模型名稱會成為 `--model` 的引數，限制字元避免被當成其他旗標或夾帶參數；在派工時固定讓 Runtime 重建後組出相同的啟動指令。
+- 替代方案：在 Run 啟動時才讀取 Workspace 的覆寫（重建後可能組出不同指令）；放進共同設定（共同設定是全域的，不能依 Workspace 區分）。
+- 影響：migration `model_overrides_and_native_session` 新增 `workspace.model_overrides` 與 `run.native_session_id`（序號見 AI-205、AI-206）。
+- 審閱：未審
+
+### AI-204：真實 Adapter 契約以 Work-3 實際執行，並把輸出錄進 repo 作為 replay 對象；AI-144 的三個問題已實測
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：契約測試有三種對象：fake、replay（真實 Adapter 讀取真實 CLI 錄下的 stream-json）、live（`#[ignore]`，手動）。本票以 Work-3（`BATON_LIVE_PROFILE_DIR=C:\Users\User\.claude-Work-3`、模型 `haiku`）實際執行 live（最後一次 5/5 通過，另有權限轉接 1/1），把兩個情境的輸出錄成 `crates/baton-harness/tests/fixtures/claude-2.1.307-*.jsonl`（路徑中的使用者名稱改成範例值）。權限轉接以本機假 Agent API 驗證 AI-144：(a) CLI 接受 `behavior` 以外的欄位，`deny` 不需要 `updatedInput`；(b) 收到 `deny` 的 Worker 沒有重試同一個操作並正常結束；(c) CLI 會帶 `tool_use_id`，Runtime 不需要它也能運作。結果記錄在 `docs/adapter-contract.md`。
+- 理由：票面要求真實 Adapter 的結果記錄 CLI 版本；只有 fake 的契約無法發現 fake 與真實不一致（例如 `is_error` 與 `subtype` 的關係）。replay 讓每次 `cargo test` 都以真實輸出驗證解析器，不需要登入。執行前以 usage.py 確認 Work-3 額度足夠，未使用 Work-0；每次請求都極短。
+- 替代方案：不執行 live、只寫說明（無法得知真實的錯誤輸出形狀與權限協定）。
+- 影響：CLI 升版後需要依 `docs/adapter-contract.md` 重新執行 live 並更新錄製檔；`allow` 是否可省略 `updatedInput` 仍未實測（Runtime 一律帶上）。
+- 審閱：未審
+
+### AI-205：票 14 整合 rebuild/v1（票 27、18、22、13、37）：AdapterEvent 合併、migration 第 18 版、AI 編號順延
+- 重要度：低
+- 時間／階段：2026-10-22，票 14 實作（整合 rebuild/v1）
+- 決策：整合分支已併入票 27（migration 13 `quota`）、票 18（14 `message_and_delivery`）、票 22（15 `decision_request_and_decision`）、票 13（16 `task_verification`）與票 37（17 `knowledge`），所以本票的 migration `model_overrides_and_native_session` 由第 13 個順延為第 18 個，排在最後。本票原本以 AI-121～AI-129 追加的條目與整合分支的編號重複，改為 AI-168～AI-177（內容依整合後的實作更新）。票 13 的驗證測試中自行建立的 `Run` 補上 `native_session_id`；Supervisor 同時接收設定快照服務與成果目錄；harness 的 builder 同時保留取代 Agent Adapter 與 `full_text_search` 兩個選項。`AdapterEvent` 採用票 27 的 `RateLimited { window, status, used, reset_at_millis, raw }` 與 `UsageReported`，保留本票新增的 `Error`；Supervisor 同時處理額度事件與原生 Session 綁定。前端 `App.tsx` 同時保留模型設定面板、票 22 的裁定中心與票 37 的知識分頁。裁定中心與知識分頁測試中自建的 Workspace 補上 `model_overrides`。
+- 理由：不可修改整合分支已有的 migration 與 AI 條目；功能彼此獨立。
+- 替代方案：合併 migration（已套用的開發資料庫會漏掉其中一部分）。
+- 影響：用本票分支建過的開發資料庫（第 13 個 migration 是本票的）與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-206：票 14 整合 rebuild/v1（票 25、23）：migration 第 19 版、AI 編號順延為 AI-186～AI-195、完全退出找回程序改用本票的 RunSpec
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 整合 run R069-14-integrate
+- 決策：(1) 整合分支已併入票 25 的 `lifecycle`（migration 18），本票的 `model_overrides_and_native_session` 由第 18 個順延為第 19 個，排在最後；兩者沒有共用欄位（本票只對 `workspace`、`run` 加欄，票 25 新建 `runtime_lifecycle`、`workspace_lifecycle`），都會套用。(2) 整合分支已用到 AI-185（票 25 的 AI-168～AI-179、票 23 的 AI-180～AI-185），本票條目 AI-168～AI-177 順延為 AI-186～AI-195，移到票 23 條目之後；條目間的交互引用（AI-186 的「見 AI-194」、AI-193 的 migration 序號）同步更新，AI-195 決策內文記錄歷史編號的敘述保留原文。整合途中 rebuild/v1 又併入票 23，所以分兩次合併：第一次（只含票 25）的合併 commit 暫時把本票編成 AI-180～AI-189、本條為 AI-190，第二次合併後才定為現在的編號；票 23 沒有新增 migration，也沒有與本票衝突的檔案。自動合併時原 AI-177 的 `- 審閱：未審` 行與票 25 的 AI-168 標題相鄰而被吃掉，重建時補回。程式碼、文件與票面沒有引用這些編號。(3) 票 25 的完全退出要以 command_id 找回「啟動中、回執未寫回」的程序，原本用同步的 `run_spec_of`（只有 prompt 與工作目錄）；本票已把 RunSpec 改為由持久化狀態（Profile 的 CLAUDE_CONFIG_DIR、設定快照綁定、模型）非同步組出，Adapter 依此算出與啟動時相同的 command_hash，所以 `process_of` 改呼叫本票的 `run_spec`，移除 `run_spec_of`；組不出 RunSpec（例如找不到 Profile）時回傳錯誤，由停止流程記為停止異常 `stop_failed`、保留寫入所有權，而不是當作沒有程序。(4) 其餘衝突兩邊都保留：Supervisor 同時有 `run_settings`、`last_errors`（本票）與生命週期欄位（票 25），`Supervisor::new` 同時接收設定快照服務與 `LifecycleSettings`；Runtime 的 `baton_api` 匯入同時有 `RunSettings` 與 `LogSink`；harness 的 builder 同時有 `agent_adapter` 與 `exit_timing`，啟動與重啟都以 `Harness::ports()`（含取代的 Adapter）加上 `exit_timing` 呼叫 `try_start_runtime`；`WorkspaceSidebar.test.tsx` 的假用戶端同時有 `setModelOverrides` 與生命週期方法；開發指南 crate 表的 `baton-runtime` 列以整合分支為準再加回 `claude_adapter.rs`。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-175、AI-179 同）。找回程序時若用與啟動時不同的 RunSpec，真實 Adapter 算出的 command_hash 會不同，找不回程序，停止流程會誤把仍在跑的程序當作「未啟動」而結束 Run。
+- 替代方案：保留 `run_spec_of` 只給停止流程用（真實 Adapter 下找不回程序）；組不出 RunSpec 時視為沒有程序（可能讓仍在跑的程序失去寫入所有權的保護）。
+- 影響：用本票分支建過的開發資料庫，`model_overrides_and_native_session` 記在第 18 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-207：票 14 整合 rebuild/v1（票 40）：AI 編號再順延為 AI-196～AI-206、migration 維持第 19 版、還原指令改用本票的 `production_ports(data_dir)`
+- 重要度：低
+- 時間／階段：2026-10-22，票 14 整合 run R073-14-integrate
+- 決策：(1) 整合分支已併入票 40，用到 AI-195（票 40 的 AI-186～AI-195），本票條目 AI-186～AI-196 順延為 AI-196～AI-206，移到票 40 條目之後；交互引用（AI-196 的「見 AI-204」、AI-203 的 migration 序號見 AI-205、AI-206）同步更新，AI-205、AI-206 記錄歷史編號的敘述與標題保留原文。自動合併時原 AI-196 的 `- 審閱：未審` 行又與票 40 的 AI-186 標題相鄰而被吃掉，重建時補回；票 40 的條目逐字未動。程式碼、文件與票面沒有引用這些編號。(2) 票 40 沒有新增 migration（AI-186 備份），整合分支仍是 18 個，本票的 `model_overrides_and_native_session` 維持第 19 個，兩邊的 schema 都會套用；備份的 `schema_version` 以 `MIGRATIONS.len()` 計算，不受影響。(3) 票 40 的 `baton-runtime restore` 以無參數的 `production_ports()` 取得時鐘，本票已把它改為 `production_ports(data_dir)`（Claude Code Adapter 需要資料目錄），因此改傳還原的目標目錄；建構 Port 組合沒有副作用，還原只用到時鐘。(4) 其餘衝突兩邊都保留：`baton-runtime` 同時有 `backup` 與 `claude_adapter` 模組，`ApiState` 同時有 `run_settings` 與 `request_backup`；`App.tsx` 同時匯入備份設定與模型設定面板；開發指南 crate 表的 `baton-runtime` 列同時列出 `claude_adapter.rs` 與備份排程、還原指令。本次只整合、不新增行為。
+- 理由：已進入整合分支的條目編號不可改動，順延尚未合併的本票（與 AI-205、AI-206 同）；還原指令只需要時鐘，傳目標目錄是改動最小且語意正確的做法。
+- 替代方案：還原指令直接使用 `SystemClock`（要改動票 40 的匯入，與既有寫法不一致）。
+- 影響：無行為變更。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

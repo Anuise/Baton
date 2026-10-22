@@ -14,6 +14,7 @@ fn workspace(id: &str, status: WorkspaceStatus) -> Workspace {
         version: 1,
         created_at: T0,
         archived_at: None,
+        model_overrides: Default::default(),
     }
 }
 

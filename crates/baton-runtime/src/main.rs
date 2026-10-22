@@ -28,7 +28,7 @@ async fn run() -> Result<(), String> {
         return Ok(());
     };
 
-    let runtime = Runtime::start(config, production_ports()).await.map_err(|e| e.to_string())?;
+    let runtime = Runtime::start(config.clone(), production_ports(&config.data_dir)).await.map_err(|e| e.to_string())?;
     println!("Runtime 已啟動：http://{}", runtime.local_addr());
 
     tokio::select! {
@@ -44,7 +44,7 @@ fn restore(args: &[String]) -> Result<(), String> {
     let [backup_dir, target] = args else {
         return Err("用法：baton-runtime restore <備份目錄> <目標資料目錄>".into());
     };
-    let now = production_ports().clock.now();
+    let now = production_ports(target.as_ref()).clock.now();
     let report = baton_store::backup::restore_backup(backup_dir.as_ref(), target.as_ref(), now).map_err(|e| e.to_string())?;
     for check in &report.checks {
         println!("{} {:?}：{}", if check.passed { "通過" } else { "失敗" }, check.kind, check.detail);

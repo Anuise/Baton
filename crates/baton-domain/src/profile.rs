@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::claude_code::{self, VersionCheck};
 use crate::event::DomainEvent;
 use crate::Timestamp;
 
@@ -86,6 +87,9 @@ pub struct Verification {
     pub account: Option<String>,
     /// CLI 實際使用的設定目錄是否就是這個 Profile 的目錄；CLI 沒有回報時視為相符。
     pub config_dir_matches: bool,
+    /// 核對當下 `claude --version` 的輸出；取不到（或票 14 之前的核對）為 `None`。
+    #[serde(default)]
+    pub cli_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +120,10 @@ pub enum Blocker {
     IdentityUnconfirmed,
     IdentityMismatch { expected: String, actual: String },
     DuplicateIdentity { account: String, other_name: String },
+    /// Claude Code 版本低於 Adapter 驗證過的最低版本。
+    CliVersionUnsupported { found: String },
+    /// 無法取得或看不懂 Claude Code 的版本。
+    CliVersionUnknown { raw: Option<String> },
 }
 
 impl Blocker {
@@ -130,6 +138,8 @@ impl Blocker {
             Blocker::IdentityUnconfirmed => "identity_unconfirmed",
             Blocker::IdentityMismatch { .. } => "identity_mismatch",
             Blocker::DuplicateIdentity { .. } => "duplicate_identity",
+            Blocker::CliVersionUnsupported { .. } => "cli_version_unsupported",
+            Blocker::CliVersionUnknown { .. } => "cli_version_unknown",
         }
     }
 
@@ -163,6 +173,17 @@ impl Blocker {
             }
             Blocker::DuplicateIdentity { account, other_name } => {
                 format!("帳號 {account} 已經由 Profile「{other_name}」使用；同一個帳號不能同時綁定兩個 Profile")
+            }
+            Blocker::CliVersionUnsupported { found } => format!(
+                "Claude Code 版本 {found} 低於支援的最低版本 {}，已阻擋派工；請更新 Claude Code 後重新核對",
+                claude_code::MIN_SUPPORTED_VERSION
+            ),
+            Blocker::CliVersionUnknown { raw: Some(raw) } => format!(
+                "無法判讀 Claude Code 的版本（{raw}），無法確認支援 Adapter 需要的功能，已阻擋派工；請確認安裝後重新核對"
+            ),
+            Blocker::CliVersionUnknown { raw: None } => {
+                "核對時沒有取得 Claude Code 的版本，無法確認支援 Adapter 需要的功能，已阻擋派工；請確認安裝後重新核對"
+                    .to_string()
             }
         }
     }
@@ -202,6 +223,14 @@ pub fn blockers(profile: &AccountProfile, all: &[AccountProfile]) -> Vec<Blocker
     }
 
     let mut found = Vec::new();
+    // 版本由核對當下的 `claude --version` 決定：Adapter 只在驗證過的版本上啟動 Worker
+    match claude_code::check(verification.cli_version.as_deref()) {
+        VersionCheck::Supported(_) => {}
+        VersionCheck::Unsupported { found: version } => {
+            found.push(Blocker::CliVersionUnsupported { found: version.to_string() })
+        }
+        VersionCheck::Unknown { raw } => found.push(Blocker::CliVersionUnknown { raw }),
+    }
     if !verification.config_dir_matches {
         found.push(Blocker::ConfigDirMismatch);
     }
@@ -259,7 +288,8 @@ pub fn views(profiles: &[AccountProfile]) -> Vec<ProfileView> {
 pub enum ProfileCommand {
     /// `id` 與 `config_dir` 由呼叫端產生（Domain 不產生亂數，也不決定資料目錄位置）。
     Create { id: String, name: String, config_dir: String, expected_account: Option<String> },
-    RecordVerification { id: String, report: AuthReport },
+    /// `cli_version` 是核對當下 `claude --version` 的輸出（取不到為 `None`）。
+    RecordVerification { id: String, report: AuthReport, cli_version: Option<String> },
     Archive { id: String },
 }
 
@@ -381,7 +411,7 @@ pub fn decide(existing: &[AccountProfile], command: ProfileCommand, now: Timesta
             );
             Ok(Decision { profile, events: vec![created] })
         }
-        ProfileCommand::RecordVerification { id, report } => {
+        ProfileCommand::RecordVerification { id, report, cli_version } => {
             let current = find_active(existing, &id)?;
             let verification = Verification {
                 checked_at: now,
@@ -390,6 +420,7 @@ pub fn decide(existing: &[AccountProfile], command: ProfileCommand, now: Timesta
                 source_detail: report.source_detail.clone(),
                 account: report.account.clone(),
                 config_dir_matches: report.config_dir.as_deref().is_none_or(|dir| dir_key(dir) == dir_key(&current.config_dir)),
+                cli_version,
             };
             let mut profile = AccountProfile {
                 verification: Some(verification.clone()),
@@ -407,6 +438,7 @@ pub fn decide(existing: &[AccountProfile], command: ProfileCommand, now: Timesta
                     "auth_source_detail": verification.source_detail,
                     "account": verification.account,
                     "config_dir_matches": verification.config_dir_matches,
+                    "cli_version": verification.cli_version,
                 }),
             )];
             // 沒有預期帳號時，第一次在這個 Profile 自己的原生登入核對到的帳號就是它的身分
@@ -497,10 +529,14 @@ mod tests {
 
     fn verified(mut profile: AccountProfile, report: AuthReport) -> AccountProfile {
         let decision =
-            decide(std::slice::from_ref(&profile), ProfileCommand::RecordVerification { id: profile.id.clone(), report }, T2)
+            decide(std::slice::from_ref(&profile), ProfileCommand::RecordVerification { id: profile.id.clone(), report, cli_version: supported_cli() }, T2)
                 .unwrap();
         profile = decision.profile;
         profile
+    }
+
+    fn supported_cli() -> Option<String> {
+        Some(format!("{} (Claude Code)", claude_code::MIN_SUPPORTED_VERSION))
     }
 
     fn codes(profile: &AccountProfile, all: &[AccountProfile]) -> Vec<&'static str> {
@@ -609,7 +645,7 @@ mod tests {
         let profile = created("p1", "a");
         let first = decide(
             std::slice::from_ref(&profile),
-            ProfileCommand::RecordVerification { id: "p1".into(), report: native(Some("a@x.com"), "C:\\Baton\\profiles\\p1") },
+            ProfileCommand::RecordVerification { id: "p1".into(), report: native(Some("a@x.com"), "C:\\Baton\\profiles\\p1"), cli_version: supported_cli() },
             T2,
         )
         .unwrap();
@@ -618,7 +654,7 @@ mod tests {
 
         let second = decide(
             std::slice::from_ref(&first.profile),
-            ProfileCommand::RecordVerification { id: "p1".into(), report: native(Some("a@x.com"), "C:\\Baton\\profiles\\p1") },
+            ProfileCommand::RecordVerification { id: "p1".into(), report: native(Some("a@x.com"), "C:\\Baton\\profiles\\p1"), cli_version: supported_cli() },
             T2,
         )
         .unwrap();
@@ -681,6 +717,57 @@ mod tests {
         assert!(blocker.message().contains("阻擋派工"));
     }
 
+    fn verified_with_cli(cli_version: Option<&str>) -> AccountProfile {
+        let profile = created("p1", "a");
+        let report = native(Some("a@x.com"), "C:\\Baton\\profiles\\p1");
+        let command = ProfileCommand::RecordVerification {
+            id: profile.id.clone(),
+            report,
+            cli_version: cli_version.map(Into::into),
+        };
+        decide(std::slice::from_ref(&profile), command, T2).unwrap().profile
+    }
+
+    #[test]
+    fn a_claude_code_older_than_the_supported_minimum_blocks_dispatch_and_says_why() {
+        let profile = verified_with_cli(Some("2.0.5 (Claude Code)"));
+
+        let found = blockers(&profile, std::slice::from_ref(&profile));
+
+        assert_eq!(found, [Blocker::CliVersionUnsupported { found: "2.0.5".into() }]);
+        let message = found[0].message();
+        assert!(message.contains("2.0.5") && message.contains(&claude_code::MIN_SUPPORTED_VERSION.to_string()), "{message}");
+        assert_eq!(profile.verification.unwrap().cli_version.as_deref(), Some("2.0.5 (Claude Code)"));
+    }
+
+    #[test]
+    fn an_unknown_claude_code_version_blocks_dispatch_instead_of_assuming_support() {
+        for cli in [None, Some("not a version")] {
+            let profile = verified_with_cli(cli);
+
+            assert_eq!(codes(&profile, std::slice::from_ref(&profile)), ["cli_version_unknown"], "{cli:?}");
+        }
+    }
+
+    #[test]
+    fn the_supported_claude_code_version_does_not_block() {
+        let profile = verified_with_cli(Some("2.1.307 (Claude Code)"));
+
+        assert!(blockers(&profile, std::slice::from_ref(&profile)).is_empty());
+    }
+
+    #[test]
+    fn verifications_recorded_before_versions_were_checked_must_be_rechecked() {
+        let old = r#"{"checked_at":1,"logged_in":true,"source":"native_login","source_detail":null,"account":"a@x.com","config_dir_matches":true}"#;
+
+        let verification: Verification = serde_json::from_str(old).unwrap();
+
+        assert_eq!(verification.cli_version, None);
+        let mut profile = verified_with_cli(Some("2.1.307"));
+        profile.verification = Some(verification);
+        assert_eq!(codes(&profile, std::slice::from_ref(&profile)), ["cli_version_unknown"]);
+    }
+
     #[test]
     fn a_config_dir_other_than_the_profiles_blocks_dispatch() {
         let profile = verified(created("p1", "a"), native(Some("a@x.com"), "C:\\Users\\me\\.claude"));
@@ -717,7 +804,7 @@ mod tests {
     fn verification_of_unknown_or_archived_profile_fails() {
         let mut archived = created("p1", "a");
         archived.status = ProfileStatus::Archived;
-        let record = |id: &str| ProfileCommand::RecordVerification { id: id.into(), report: native(None, "x") };
+        let record = |id: &str| ProfileCommand::RecordVerification { id: id.into(), report: native(None, "x"), cli_version: supported_cli() };
 
         assert_eq!(decide(&[], record("nope"), T2), Err(ProfileError::NotFound("nope".into())));
         assert_eq!(decide(&[archived], record("p1"), T2), Err(ProfileError::AlreadyArchived("p1".into())));

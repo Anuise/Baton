@@ -211,6 +211,45 @@ body {
   overflow-wrap: anywhere;
 }
 
+.model-overrides {
+  display: grid;
+  gap: 12px;
+  max-width: 720px;
+  margin-bottom: 24px;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.model-overrides h2,
+.model-overrides p {
+  margin: 0;
+}
+
+.model-overrides fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.model-overrides label {
+  display: grid;
+  gap: 4px;
+}
+
+.model-overrides-hint {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.model-overrides [role="alert"] {
+  color: #cf222e;
+  overflow-wrap: anywhere;
+}
+
 .task-board {
   display: grid;
   gap: 12px;

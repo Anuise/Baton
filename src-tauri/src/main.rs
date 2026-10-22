@@ -30,7 +30,7 @@ use baton_domain::verification::VerificationView;
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
-use baton_domain::workspace::Workspace;
+use baton_domain::workspace::{ModelOverrides, Workspace};
 use base64::Engine;
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -151,6 +151,19 @@ async fn workspace_archive(link: State<'_, RuntimeLink>, id: String) -> Result<W
         return Err(reason.clone());
     }
     link.client.archive_workspace(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 設定 Workspace 依角色的模型覆寫（只影響之後派出的 Run）。
+#[tauri::command]
+async fn workspace_set_model_overrides(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    overrides: ModelOverrides,
+) -> Result<Workspace, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.set_model_overrides(&id, &overrides).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 列出帳號 Profile 與可派工判定。
@@ -847,6 +860,7 @@ fn main() {
             workspace_list,
             workspace_create,
             workspace_archive,
+            workspace_set_model_overrides,
             profile_list,
             profile_create,
             profile_verify,
