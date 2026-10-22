@@ -17,6 +17,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
       # 一次跑完 Rust 與前端測試

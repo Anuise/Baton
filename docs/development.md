@@ -1368,7 +1368,7 @@ Runtime 同時監聽 IPv4 與 IPv6 loopback（`127.0.0.1:<port>`、`[::1]:<port>
 
 ## 測試
 
-一條指令跑完 Rust、前端測試與 UI E2E：
+一條指令跑完 Clippy、Rust、前端測試與 UI E2E：
 
 ```powershell
 pnpm test
@@ -1377,12 +1377,13 @@ pnpm test
 等同於：
 
 ```powershell
+powershell -NoProfile -File scripts/with-msvc.ps1 cargo clippy --workspace --all-targets -- -D warnings
 powershell -NoProfile -File scripts/with-msvc.ps1 cargo test --workspace --exclude baton-desktop
 pnpm --filter web test
 node scripts/test-e2e.mjs
 ```
 
-最後一步是 UI E2E（見〈UI E2E〉），找不到 Playwright 時結果列為「略過」，不算失敗也不顯示為通過。
+第一步的 clippy 涵蓋全部 crate（含桌面殼）與測試目標，任何警告都算失敗；確實需要例外時只在該函式加 `#[allow(clippy::…)]` 並以註解說明理由。最後一步是 UI E2E（見〈UI E2E〉），找不到 Playwright 時結果列為「略過」，不算失敗也不顯示為通過。
 
 桌面殼 `baton-desktop` 編譯時需要已建置的 `web/dist`，所以不在預設的 `cargo test` 範圍內；`pnpm build` 會編譯它。殼本身的單元測試（只快取成功的啟動、可取消的完全退出後備計時器）在 `pnpm --filter web build` 之後以 `cargo test -p baton-desktop`（經 `with-msvc.ps1`）執行。
 
@@ -1458,7 +1459,7 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 
 ### CI
 
-`.github/workflows/ci.yml` 在 `windows-latest` 上執行 `pnpm test` 與 `pnpm build`。
+`.github/workflows/ci.yml` 在 `windows-latest` 上執行 `pnpm test`（含 clippy，工具鏈安裝時加上 `clippy` 元件）與 `pnpm build`。
 
 ## 產品名稱
 
