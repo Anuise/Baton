@@ -164,5 +164,6 @@
 | R160-final-verify-b | final-b | final-verify | Work-8 | 2026-10-23 05:30 | 2026-10-23 05:45 | PASS |
 | R161-final-verify-c2 | final-c | final-verify | Work-9 | 2026-10-23 05:41 | 2026-10-23 05:50 | PASS（依 AI-109 整合後合併） |
 | R162-final-integrate-c | final-c | integrate | Work-9 | 2026-10-23 05:50 | 2026-10-23 06:06 | DONE，依 AI-109 直接合併 |
-| R163-54-impl | 54 | impl | Work-8 | 2026-10-23 05:53 | | |
+| R163-54-impl | 54 | impl | Work-8 | 2026-10-23 05:53 | 2026-10-23 06:27 | DONE（0dbb4b9..737f255） |
 | R164-53-impl | 53 | impl | Work-3 | 2026-10-23 06:06 | | |
+| R165-54-verify | 54 | verify | Work-8 | 2026-10-23 06:27 | | |
