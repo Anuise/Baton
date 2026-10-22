@@ -186,6 +186,37 @@ impl Store {
         Ok(result?)
     }
 
+    /// Controller 的 `propose_task`（票 17）：需要時先建立 Goal，再建立 Task，兩者在**同一個交易**中判定與寫入；
+    /// 任一個被 Domain 拒絕就什麼都不寫（不會留下沒有 Task 的 Goal）。規則與使用者手動建立完全相同（`task::decide`）。
+    pub async fn propose_task(
+        &self,
+        workspace_id: String,
+        new_goal: Option<TaskCommand>,
+        create_task: TaskCommand,
+        now: Timestamp,
+    ) -> Result<Vec<TaskChange>, TaskApplyError> {
+        let outcome = self
+            .write(move |tx| {
+                let mut loaded = load(tx, &workspace_id)?;
+                let mut changes = Vec::new();
+                for command in new_goal.into_iter().chain([create_task]) {
+                    let change = match task::decide(&loaded.ctx(&workspace_id), command, now) {
+                        Err(rejected) => return Ok(Err(rejected)),
+                        Ok(change) => change,
+                    };
+                    // 後面的命令要看得到前面建立的 Goal
+                    loaded.goals.extend(change.goal.clone());
+                    changes.push(change);
+                }
+                for change in &changes {
+                    save(tx, change)?;
+                }
+                Ok(Ok(changes))
+            })
+            .await?;
+        Ok(outcome?)
+    }
+
     /// 對任何狀態的 Task 做完整的准入檢查（唯讀預覽，不改狀態）。
     pub async fn task_admission_report(
         &self,

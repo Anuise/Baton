@@ -38,9 +38,9 @@ pub fn tool_path(tool: &str) -> String {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Claims {
     #[serde(default)]
-    workspace_id: Option<String>,
+    pub(crate) workspace_id: Option<String>,
     #[serde(default)]
-    run_id: Option<String>,
+    pub(crate) run_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +98,14 @@ fn api_error(status: StatusCode, code: &'static str, message: &str) -> ApiError 
 
 /// 憑證的範圍；請求聲稱的 Workspace 或 Run 與它不一致就拒絕。
 pub(crate) fn scope_of(record: &CredentialRecord, claims: &Claims) -> Result<AgentScope, ApiError> {
+    // Controller 憑證（票 17）只能使用 Controller 專屬的工具，不能冒充 Worker 的 Run 回報或寫入
+    if record.controller.is_some() {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "worker_only",
+            "這個工具只有 Worker 能使用；Controller 請以 propose_task、dispatch_task 等工具把工作交給 Worker",
+        ));
+    }
     // guard 已經確保 Agent 憑證一定有範圍；沒有就當作無效，不退回任何預設
     let scope = record
         .scope
@@ -317,6 +325,21 @@ pub(crate) async fn permission_prompt(
     body: Result<Json<PermissionPromptRequest>, JsonRejection>,
 ) -> Result<Json<PermissionResponse>, ApiError> {
     let Json(request) = body.map_err(bad_json)?;
+    // Controller 不直接執行任何操作（票 17）：它的權限提示一律拒絕，工作只能透過 Controller 工具交給受管理的 Worker
+    if record.controller.is_some() {
+        return Ok(Json(PermissionResponse {
+            behavior: "deny".to_string(),
+            updated_input: None,
+            message: Some(
+                "Controller 不能直接執行這個操作（不能直接寫資料、執行指令或自行啟動 Worker）；                 請以 propose_task、dispatch_task 等工具把工作交給 Runtime 管理的 Worker。"
+                    .to_string(),
+            ),
+            status: "controller_denied".to_string(),
+            decision_request_id: None,
+            authorization_revision: None,
+            approval_check: None,
+        }));
+    }
     let scope = scope_of(&record, &request.claims)?;
     let input = if request.input.is_null() { serde_json::json!({}) } else { request.input };
     let outcome = state

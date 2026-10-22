@@ -2050,6 +2050,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_controller_tools_migration_keeps_existing_decisions_and_checks_the_requester_by_origin() {
+        // 套用到票 17 之前的版本，放一筆已回答、用過單次批准的 Worker 請求（含阻擋範圍）
+        let dir = tempfile::tempdir().unwrap();
+        let before = MIGRATIONS.iter().position(|m| m.name == "controller_tools").unwrap();
+        {
+            let old = raw(dir.path());
+            old.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (index, migration) in MIGRATIONS[..before].iter().enumerate() {
+                old.execute_batch(migration.sql).unwrap();
+                old.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![index + 1, migration.name],
+                )
+                .unwrap();
+            }
+            old.execute_batch(
+                "INSERT INTO workspace (id, name, path, status, version, created_at) VALUES ('w1', 'w', 'C:/w', 'active', 1, 1);
+                 INSERT INTO goal (id, workspace_id, title, version, created_at) VALUES ('g1', 'w1', 'g', 1, 1);
+                 INSERT INTO task (id, workspace_id, goal_id, title, status, version, contract_version, created_at, updated_at)
+                   VALUES ('t1', 'w1', 'g1', 't', 'running', 1, 1, 1, 1);
+                 INSERT INTO run (id, workspace_id, task_id, status, version, generation, contract_version, created_at, updated_at)
+                   VALUES ('r1', 'w1', 't1', 'running', 1, 1, 1, 1, 1);
+                 INSERT INTO decision_request (id, workspace_id, run_id, task_id, kind, status, question, reason, options,
+                   evidence, urgency, target_task_id, target_contract_version, revision, created_at, updated_at)
+                   VALUES ('d1', 'w1', 'r1', 't1', 'permission', 'answered', '要允許嗎？', '範圍外', '[]', '[]', 'normal',
+                           't1', 1, 2, 1, 2);
+                 INSERT INTO decision_request_block (request_id, task_id) VALUES ('d1', 't1');
+                 INSERT INTO decision (request_id, action, option_id, decided_by, decided_at)
+                   VALUES ('d1', 'accept', 'allow_once', 'desktop', 2);
+                 INSERT INTO decision_approval_use (request_id, run_id, used_at) VALUES ('d1', 'r1', 3);",
+            )
+            .unwrap();
+        }
+
+        drop(open(dir.path()).await);
+
+        let conn = raw(dir.path());
+        let kept: (String, String, String) = conn
+            .query_row("SELECT id, status, origin FROM decision_request", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(kept, ("d1".to_string(), "answered".to_string(), "worker".to_string()));
+        let used: String = conn.query_row("SELECT run_id FROM decision_approval_use", [], |r| r.get(0)).unwrap();
+        assert_eq!(used, "r1");
+        // 子表對重建後的 decision_request 仍有效
+        let violations: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(violations, 0);
+        // 提出者依來源檢查：Worker 的請求要指向 run，Controller 的請求要指向 controller_run
+        let insert = |id: &str, run: &str, origin: &str| {
+            conn.execute(
+                "INSERT INTO decision_request (id, workspace_id, run_id, task_id, kind, status, question, reason, options,
+                   evidence, urgency, target_task_id, target_contract_version, revision, created_at, updated_at, origin)
+                 VALUES (?1, 'w1', ?2, 't1', 'agent', 'pending', 'q', 'r', '[]', '[]', 'normal', 't1', 1, 1, 5, 5, ?3)",
+                rusqlite::params![id, run, origin],
+            )
+        };
+        assert!(insert("d2", "r1", "controller").is_err(), "r1 不是 Controller 的一輪");
+        assert!(insert("d3", "ctl_nope", "controller").is_err());
+        insert("d4", "r1", "worker").unwrap();
+        assert!(conn.execute("UPDATE decision_request SET origin = 'controller', revision = 2 WHERE id = 'd4'", []).is_err());
+    }
+
+    #[tokio::test]
     async fn database_from_older_builds_with_user_version_is_adopted_without_data_loss() {
         let dir = tempfile::tempdir().unwrap();
         {

@@ -473,7 +473,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_UPDATE_TASK,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：以新契約整份取代 Task 的契約（內容相同不會新增版本）。已派工過的 Task 修改完成條件（done_criteria）必須由使用者裁定，Runtime 會回 requires_decision，等待裁定、不要繞過。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：以新契約整份取代 Task 的契約（內容相同不會新增版本）。已派工過的 Task 修改已填寫的完成條件（done_criteria）或驗證檢查（verification_checks）必須由使用者裁定，Runtime 會回 requires_decision，等待裁定、不要繞過。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

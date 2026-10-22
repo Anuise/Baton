@@ -137,12 +137,22 @@ pub(crate) async fn dispatch(
             message: format!("請求內容不正確：{e}"),
         })?
     };
+    dispatch_now(&state, id, task_id, request.priority).await
+}
+
+/// 派工的共同流程：桌面的派工端點與 Controller 的 `dispatch_task`（票 17）都走這裡，所以兩者受相同的准入與排程判定。
+pub(crate) async fn dispatch_now(
+    state: &ApiState,
+    id: String,
+    task_id: String,
+    priority: i32,
+) -> Result<DispatchResponse, TaskApiError> {
     // 派工之前先準備 Task 的工作目錄（票 20）；不可用時登記原因，派工會排隊並顯示它
     crate::workdirs::prepare(&state.store, &*state.workspace_fs, state.clock.now(), Some((id.clone(), task_id.clone())))
         .await
         .map_err(ApiError::from)?;
-    let schedule = ScheduleRequest { workspace_id: id.clone(), task_id: task_id.clone(), priority: request.priority };
-    let outcome = schedule_now(&state, Some(schedule)).await?;
+    let schedule = ScheduleRequest { workspace_id: id.clone(), task_id: task_id.clone(), priority };
+    let outcome = schedule_now(state, Some(schedule)).await?;
     if let Some(started) = outcome.started.iter().find(|s| s.task_id == task_id) {
         let view = state.store.run_detail(&id, &started.run_id).await?;
         return Ok(DispatchResponse::Started(Box::new(view)));
@@ -153,7 +163,7 @@ pub(crate) async fn dispatch(
         .find(|w| w.task_id == task_id)
         .map(|w| w.reasons)
         .unwrap_or_default();
-    Ok(DispatchResponse::Queued(QueuedDispatch { queued: true, task_id, priority: request.priority, reasons }))
+    Ok(DispatchResponse::Queued(QueuedDispatch { queued: true, task_id, priority, reasons }))
 }
 
 pub(crate) async fn list(
