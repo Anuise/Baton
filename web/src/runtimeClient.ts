@@ -2449,8 +2449,18 @@ export type VerificationOperation =
       body?: string;
       timeout_ms?: number;
     }
+  /** 瀏覽器操作（只用於 web 介面）；之後觀察當前畫面。 */
+  | { kind: "browser"; action: VerificationBrowserAction; timeout_ms?: number }
   /** 需要人工判斷的步驟；CLI／API Adapter 判定為 automation_unsupported。 */
   | { kind: "manual"; instruction: string };
+
+/** 瀏覽器操作（對應 Rust 的 BrowserAction）；fill 的 text 可以用 `{{secret:KEY}}` 引用秘密。 */
+export type VerificationBrowserAction =
+  | { kind: "goto"; url: string }
+  | { kind: "click"; selector: string }
+  | { kind: "fill"; selector: string; text: string }
+  | { kind: "press"; selector: string; key: string }
+  | { kind: "wait_for"; selector: string };
 
 /** 程式斷言（對應 Rust 的 Assertion）。 */
 export type VerificationAssertion =
@@ -2458,7 +2468,13 @@ export type VerificationAssertion =
   | { kind: "status"; equals: number }
   | { kind: "contains"; text: string }
   | { kind: "not_contains"; text: string }
-  | { kind: "json_equals"; pointer: string; value: unknown };
+  | { kind: "json_equals"; pointer: string; value: unknown }
+  /** 瀏覽器：selector 對應的元素在當前畫面上可見。 */
+  | { kind: "visible"; selector: string }
+  /** 瀏覽器：當前網址包含這段文字。 */
+  | { kind: "url_contains"; text: string }
+  /** 瀏覽器：受限的語意 judge，只看當前畫面與這段固定預期。 */
+  | { kind: "judge"; expectation: string };
 
 export interface VerificationStep {
   key: string;
@@ -2472,7 +2488,32 @@ export interface VerificationJourney {
   title: string;
   /** 代表旅程：新 Profile 版本要實際跑過並通過它才算可用。 */
   representative: boolean;
+  /** 扮演的角色（Profile 的 personas 的 key）。 */
+  persona?: string;
+  /** 實際登入的身分（Profile 的 identities 的 key）；省略時不登入。 */
+  identity?: string;
   steps: VerificationStep[];
+}
+
+/** 秘密參照（對應 Rust 的 SecretRef）：reference 形如 `env:NAME`，只是參照，不含值。 */
+export interface VerificationSecretRef {
+  key: string;
+  reference: string;
+}
+
+/** 旅程扮演的角色（對應 Rust 的 Persona）。 */
+export interface VerificationPersona {
+  key: string;
+  title: string;
+  description: string;
+}
+
+/** 登入身分（對應 Rust 的 Identity）：login 是登入步驟，check 核對實際登入的身分。 */
+export interface VerificationIdentity {
+  key: string;
+  title: string;
+  login: VerificationStep[];
+  check: VerificationStep;
 }
 
 /** Feature Map 的一項；journeys 空的就是未覆蓋。 */
@@ -2486,7 +2527,7 @@ export interface VerificationFeature {
 
 /** Verification Profile 的內容（對應 Rust 的 ProfileDefinition）。 */
 export interface VerificationProfileDefinition {
-  interface: "cli_api";
+  interface: "cli_api" | "web";
   build?: { program: string; args: string[] };
   doctor: VerificationStep[];
   start?: { program: string; args: string[] };
@@ -2494,11 +2535,23 @@ export interface VerificationProfileDefinition {
   setup: VerificationStep[];
   journeys: VerificationJourney[];
   teardown: VerificationOperation[];
-  evidence: { output_max_chars: number; redact: string[] };
-  budget: { max_operations: number };
+  evidence: {
+    output_max_chars: number;
+    redact: string[];
+    /** 瀏覽器截圖的保存時機；省略時為 on_failure。 */
+    screenshots?: "on_failure" | "every_step" | "off";
+    trace?: boolean;
+    video?: boolean;
+    /** 截圖時遮蔽的 selector。 */
+    mask?: string[];
+  };
+  budget: { max_operations: number; max_model_calls?: number };
   feature_map: VerificationFeature[];
   /** 明確宣告不在自動驗證範圍內的部分。 */
   uncovered: { area: string; reason: string }[];
+  secrets?: VerificationSecretRef[];
+  personas?: VerificationPersona[];
+  identities?: VerificationIdentity[];
 }
 
 /** Profile 的一個不可變版本（對應 Rust 的 ProfileVersion）。 */
@@ -2530,7 +2583,17 @@ export type VerificationVerdict =
   | "budget_exhausted"
   | "automation_unsupported";
 
-export type VerificationPhase = "build" | "doctor" | "start" | "readiness" | "setup" | "journey" | "teardown";
+/** login 與 identity 屬於某條旅程（步驟的 journey 有值）。 */
+export type VerificationPhase =
+  | "build"
+  | "doctor"
+  | "start"
+  | "readiness"
+  | "setup"
+  | "login"
+  | "identity"
+  | "journey"
+  | "teardown";
 
 export interface VerificationAssertionResult {
   assertion: VerificationAssertion;
@@ -2563,6 +2626,10 @@ export interface VerificationJourneyResult {
   key: string;
   title: string;
   representative: boolean;
+  /** 扮演的角色；與 identity（實際登入的帳號）分開。 */
+  persona?: string;
+  /** 實際登入的身分；省略時沒有登入。 */
+  identity?: string;
   verdict: VerificationVerdict;
   reason_code: string;
 }
@@ -2598,8 +2665,35 @@ export interface EvidenceBundle {
   covered_features: string[];
   uncovered: UncoveredItem[];
   cleanup: VerificationCleanup;
+  /** 截圖、trace 與錄影；依 bundle 中的位置（從 0 起）以 evidenceArtifact 讀取內容。 */
+  artifacts: EvidenceArtifact[];
   started_at: number;
   finished_at: number;
+}
+
+/** 證據 Artifact（對應 Rust 的 EvidenceArtifact）；沒有保存時 withheld 記下原因。 */
+export interface EvidenceArtifact {
+  kind: "screenshot" | "trace" | "video";
+  journey?: string;
+  /** 截圖所屬的步驟。 */
+  step?: string;
+  name: string;
+  storage_path?: string;
+  sha256?: string;
+  size_bytes?: number;
+  /** secret_detected、secret_input_recorded、too_large 或 storage_failed。 */
+  withheld?: string;
+}
+
+/** 一個證據 Artifact 的內容（base64）。 */
+export interface EvidenceArtifactContent {
+  bundle_id: string;
+  index: number;
+  kind: EvidenceArtifact["kind"];
+  name: string;
+  content_type: string;
+  size_bytes: number;
+  content_base64: string;
 }
 
 /** 一次驗證的要求（對應 Rust 的 VerificationRequest）。 */
@@ -2650,6 +2744,8 @@ export interface VerificationProfileClient {
   publishVerificationProfile(workspaceId: string, definition: unknown): Promise<PublishProfileResponse>;
   runVerification(workspaceId: string, request: RunVerificationRequest): Promise<VerificationRequest>;
   evidenceBundle(workspaceId: string, bundleId: string): Promise<EvidenceBundle>;
+  /** index 是 bundle.artifacts 中的位置；沒有保存或找不到時回 evidence_artifact_not_found。 */
+  evidenceArtifact(workspaceId: string, bundleId: string, index: number): Promise<EvidenceArtifactContent>;
 }
 
 export type AppClient = RuntimeClient &
@@ -2924,6 +3020,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       send(`${workspacePath(workspaceId)}/verification/runs`, { method: "POST", body: request }),
     evidenceBundle: (workspaceId, bundleId) =>
       send(`${workspacePath(workspaceId)}/verification/bundles/${encodeURIComponent(bundleId)}`),
+    evidenceArtifact: (workspaceId, bundleId, index) =>
+      send(`${workspacePath(workspaceId)}/verification/bundles/${encodeURIComponent(bundleId)}/artifacts/${index}`),
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
@@ -3073,6 +3171,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
       call<PublishProfileResponse>("verification_publish_profile", { workspaceId, definition }),
     runVerification: (workspaceId, request) => call<VerificationRequest>("verification_run", { workspaceId, request }),
     evidenceBundle: (workspaceId, bundleId) => call<EvidenceBundle>("verification_bundle", { workspaceId, bundleId }),
+    evidenceArtifact: (workspaceId, bundleId, index) =>
+      call<EvidenceArtifactContent>("verification_artifact", { workspaceId, bundleId, index }),
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),

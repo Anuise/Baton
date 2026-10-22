@@ -5,7 +5,9 @@
 //!   所以只有使用者能發布（spec D-15：修改驗收標準必須由使用者決定）。
 //! - Controller 工具（只接受 Controller 憑證）：`run_verification` 要求執行驗證，`get_verification` 讀取概況；
 //!   Evidence Bundle 的識別可作為 Stage exit check 的 `verification` 證據。
-//! - 驗證本身由 Supervisor 執行（Runtime 的 CLI／API Adapter），請求只建立要求並喚醒 Supervisor。
+//! - 驗證本身由 Supervisor 執行（Runtime 的 Verification Adapter），請求只建立要求並喚醒 Supervisor。
+//! - 證據檔案（票 46）：截圖、trace、錄影保存在成果儲存，經 `…/bundles/{bundle_id}/artifacts/{index}` 讀取；
+//!   依政策沒有保存的檔案讀不到。
 
 use std::sync::Arc;
 
@@ -14,9 +16,12 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
 use baton_domain::auth::CredentialRecord;
+use baton_domain::artifact::{sha256_hex, ARTIFACTS_DIR};
 use baton_domain::verification_profile::{
-    self, EvidenceBundle, ProfileDefinition, ProfileError, ProfileVersion, UncoveredItem, VerificationRequest,
+    self, EvidenceArtifactKind, EvidenceBundle, ProfileDefinition, ProfileError, ProfileVersion, UncoveredItem,
+    VerificationRequest,
 };
+use base64::Engine;
 use baton_store::{VerificationApplyError, VerificationOverview};
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +35,7 @@ pub(crate) const VERIFICATION_ROUTE: &str = "/api/v1/workspaces/{id}/verificatio
 pub(crate) const PROFILE_ROUTE: &str = "/api/v1/workspaces/{id}/verification/profile";
 pub(crate) const RUNS_ROUTE: &str = "/api/v1/workspaces/{id}/verification/runs";
 pub(crate) const BUNDLE_ROUTE: &str = "/api/v1/workspaces/{id}/verification/bundles/{bundle_id}";
+pub(crate) const ARTIFACT_ROUTE: &str = "/api/v1/workspaces/{id}/verification/bundles/{bundle_id}/artifacts/{index}";
 
 /// 發布者紀錄使用的憑證指紋長度（憑證雜湊的前幾個十六進位字元）。
 const FINGERPRINT_CHARS: usize = 16;
@@ -48,6 +54,23 @@ pub fn verification_runs_path(workspace_id: &str) -> String {
 
 pub fn evidence_bundle_path(workspace_id: &str, bundle_id: &str) -> String {
     format!("{}/bundles/{bundle_id}", workspace_verification_path(workspace_id))
+}
+
+pub fn evidence_artifact_path(workspace_id: &str, bundle_id: &str, index: usize) -> String {
+    format!("{}/artifacts/{index}", evidence_bundle_path(workspace_id, bundle_id))
+}
+
+/// 一個證據檔案的內容（票 46）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceArtifactContent {
+    pub bundle_id: String,
+    /// 在 Bundle `artifacts` 中的位置（從 0 起）。
+    pub index: usize,
+    pub kind: EvidenceArtifactKind,
+    pub name: String,
+    pub content_type: String,
+    pub size_bytes: u64,
+    pub content_base64: String,
 }
 
 /// Workspace 的驗證概況。
@@ -101,7 +124,9 @@ impl From<ProfileError> for ApiError {
     fn from(error: ProfileError) -> Self {
         let status = match error {
             ProfileError::Invalid(_) | ProfileError::RequestInvalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            ProfileError::NotFound | ProfileError::BundleNotFound(_) => StatusCode::NOT_FOUND,
+            ProfileError::NotFound | ProfileError::BundleNotFound(_) | ProfileError::ArtifactNotFound(_) => {
+                StatusCode::NOT_FOUND
+            }
         };
         ApiError { status, code: error.code(), message: error.to_string() }
     }
@@ -200,6 +225,37 @@ pub(crate) async fn bundle(
         Some(bundle) => Ok(Json(bundle)),
         None => Err(ProfileError::BundleNotFound(bundle_id).into()),
     }
+}
+
+/// 讀取一個證據檔案：依政策沒有保存的、檔案不見或內容與 Bundle 記錄的雜湊不符時都讀不到。
+pub(crate) async fn artifact(
+    State(state): State<Arc<ApiState>>,
+    UrlPath((id, bundle_id, index)): UrlPath<(String, String, usize)>,
+) -> Result<Json<EvidenceArtifactContent>, ApiError> {
+    let Some(bundle) = state.store.evidence_bundle(&id, &bundle_id).await? else {
+        return Err(ProfileError::BundleNotFound(bundle_id).into());
+    };
+    let not_found = |why: &str| ProfileError::ArtifactNotFound(format!("Evidence Bundle {bundle_id} 的第 {index} 個檔案{why}"));
+    let artifact = bundle.artifacts.get(index).ok_or_else(|| not_found("不存在"))?;
+    let (Some(storage_path), Some(sha256)) = (&artifact.storage_path, &artifact.sha256) else {
+        return Err(not_found("依證據政策沒有保存").into());
+    };
+    let path = state.data_dir.join(ARTIFACTS_DIR).join(storage_path);
+    let bytes = match state.workspace_fs.read_artifact(&path).await {
+        Ok(Some(bytes)) if &sha256_hex(&bytes) == sha256 => bytes,
+        Ok(Some(_)) => return Err(not_found("的內容與記錄的雜湊不一致").into()),
+        Ok(None) => return Err(not_found("已不在成果儲存中").into()),
+        Err(error) => return Err(not_found(&format!("無法讀取（{error}）")).into()),
+    };
+    Ok(Json(EvidenceArtifactContent {
+        bundle_id,
+        index,
+        kind: artifact.kind,
+        name: artifact.name.clone(),
+        content_type: artifact.kind.content_type().to_string(),
+        size_bytes: bytes.len() as u64,
+        content_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
 }
 
 // ---------------------------------------------------------------- Controller 工具

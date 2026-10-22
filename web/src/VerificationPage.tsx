@@ -3,6 +3,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { formatTimestamp } from "./time";
 import {
   errorCode,
+  type EvidenceArtifact,
+  type EvidenceArtifactContent,
   type EvidenceBundle,
   type PublishProfileResponse,
   type RunVerificationRequest,
@@ -44,8 +46,41 @@ const PHASE_LABELS: Record<VerificationPhase, string> = {
   start: "啟動",
   readiness: "就緒條件",
   setup: "資料準備",
+  login: "登入",
+  identity: "身分核對",
   journey: "旅程",
   teardown: "清理",
+};
+
+/** 票 46 新增的 reason_code 的中文說明；其他代碼只顯示代碼本身。 */
+const REASON_LABELS: Record<string, string> = {
+  judge_rate_limited: "模型限流，無法判定，不是產品缺陷",
+  judge_unavailable: "語意判斷無法使用，無法判定，不是產品缺陷",
+  model_call_budget_exhausted: "模型呼叫預算已用盡，沒有判定",
+  action_failed: "瀏覽器操作沒有完成",
+  browser_unavailable: "無法使用瀏覽器",
+  login_failed: "登入失敗",
+  identity_not_confirmed: "無法確認實際登入的身分",
+  secret_unavailable: "取不到秘密的值",
+  blocked_by_login: "登入失敗，旅程沒有執行",
+  blocked_by_identity: "無法確認登入身分，旅程沒有執行",
+};
+
+/** 語意判斷沒有做出判定時步驟的 reason_code；這時 judge 斷言未通過不代表不符合。 */
+const UNDECIDED_JUDGE_REASONS = new Set(["judge_rate_limited", "judge_unavailable", "model_call_budget_exhausted"]);
+
+const ARTIFACT_KIND_LABELS: Record<EvidenceArtifact["kind"], string> = {
+  screenshot: "截圖",
+  trace: "trace",
+  video: "錄影",
+};
+
+/** 證據 Artifact 沒有保存的原因。 */
+const WITHHELD_LABELS: Record<string, string> = {
+  secret_detected: "內容含有秘密的值",
+  secret_input_recorded: "這個 Session 輸入過秘密，無法確認 trace／錄影已遮蔽",
+  too_large: "檔案太大",
+  storage_failed: "保存失敗",
 };
 
 const UNPROVEN_NOTICE = "這個版本還沒有實際跑過代表旅程，不能當作驗證證據";
@@ -94,7 +129,30 @@ function describeAssertion(assertion: VerificationAssertion): string {
       return `不包含「${assertion.text}」`;
     case "json_equals":
       return `JSON ${assertion.pointer} 等於 ${JSON.stringify(assertion.value)}`;
+    case "visible":
+      return `「${assertion.selector}」可見`;
+    case "url_contains":
+      return `網址包含「${assertion.text}」`;
+    case "judge":
+      return `語意判斷（預期：${assertion.expectation}）`;
   }
+}
+
+/** reason_code 與（有的話）中文說明。 */
+function ReasonCode({ code }: { code: string }) {
+  const label = REASON_LABELS[code];
+  return (
+    <>
+      <code>{code}</code>
+      {label !== undefined && <span className="verification-reason">（{label}）</span>}
+    </>
+  );
+}
+
+/** Profile 中 persona／登入身分的顯示名稱：找得到標題時為「標題（key）」。 */
+function titledKey(items: { key: string; title: string }[] | undefined, key: string): string {
+  const title = items?.find((item) => item.key === key)?.title;
+  return title === undefined ? key : `${title}（${key}）`;
 }
 
 function VerdictBadge({ verdict }: { verdict: VerificationVerdict }) {
@@ -154,7 +212,13 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
             <h3 id="verification-bundles">最近的 Evidence Bundle</h3>
             {loaded.overview.bundles.length === 0 && <p>還沒有 Evidence Bundle；要求執行驗證後，結果會在這裡顯示。</p>}
             {loaded.overview.bundles.map((bundle) => (
-              <BundleCard key={bundle.id} bundle={bundle} profile={loaded.overview.profile} timeZone={timeZone} />
+              <BundleCard
+                key={bundle.id}
+                bundle={bundle}
+                profile={loaded.overview.profile}
+                timeZone={timeZone}
+                onLoadArtifact={(index) => client.evidenceArtifact(workspace.id, bundle.id, index)}
+              />
             ))}
           </section>
         </>
@@ -203,9 +267,61 @@ function ProfileStatus({ overview, timeZone }: { overview: VerificationOverview;
           ) : (
             <p>每項功能都有旅程，也沒有宣告未覆蓋的範圍。</p>
           )}
+          {profile.definition.interface === "web" && <WebProfileDetails definition={profile.definition} />}
         </>
       )}
     </section>
+  );
+}
+
+/** web 介面的秘密參照、persona 與登入身分；秘密只顯示 key 與參照，前端拿不到值。 */
+function WebProfileDetails({ definition }: { definition: VerificationProfileVersion["definition"] }) {
+  const secrets = definition.secrets ?? [];
+  const personas = definition.personas ?? [];
+  const identities = definition.identities ?? [];
+  return (
+    <>
+      <h4>秘密參照</h4>
+      {secrets.length === 0 ? (
+        <p>沒有秘密參照。</p>
+      ) : (
+        <>
+          <p>只記錄參照位置，秘密的值不會顯示，也不會寫入證據。</p>
+          <ul className="verification-features" aria-label="秘密參照">
+            {secrets.map((secret) => (
+              <li key={secret.key}>
+                <code>{secret.key}</code>：<code>{secret.reference}</code>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <h4>Persona</h4>
+      {personas.length === 0 ? (
+        <p>沒有 persona。</p>
+      ) : (
+        <ul className="verification-features" aria-label="Persona">
+          {personas.map((persona) => (
+            <li key={persona.key}>
+              {persona.title}（{persona.key}）{persona.description !== "" && `：${persona.description}`}
+            </li>
+          ))}
+        </ul>
+      )}
+      <h4>登入身分</h4>
+      {identities.length === 0 ? (
+        <p>沒有登入身分；旅程都不登入。</p>
+      ) : (
+        <ul className="verification-features" aria-label="登入身分">
+          {identities.map((identity) => (
+            <li key={identity.key}>
+              {identity.title}（{identity.key}）：登入 {identity.login.length} 個步驟，以「
+              {identity.check.title === "" ? identity.check.key : identity.check.title}」核對身分
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
   );
 }
 
@@ -367,10 +483,12 @@ function BundleCard({
   bundle,
   profile,
   timeZone,
+  onLoadArtifact,
 }: {
   bundle: EvidenceBundle;
   profile: VerificationProfileVersion | null;
   timeZone?: string;
+  onLoadArtifact: (index: number) => Promise<EvidenceArtifactContent>;
 }) {
   const headingId = `bundle-${bundle.id}`;
   const featureTitle = (key: string) => profile?.definition.feature_map.find((f) => f.key === key)?.title ?? key;
@@ -379,7 +497,7 @@ function BundleCard({
     <section className={`verification-bundle bundle-${bundle.verdict}`} aria-labelledby={headingId}>
       <h4 id={headingId}>Evidence Bundle {bundle.id}</h4>
       <p className="verification-bundle-verdict">
-        判定：<VerdictBadge verdict={bundle.verdict} /> <code>{bundle.reason_code}</code>
+        判定：<VerdictBadge verdict={bundle.verdict} /> <ReasonCode code={bundle.reason_code} />
       </p>
       <dl className="verification-summary">
         <dt>build</dt>
@@ -403,9 +521,23 @@ function BundleCard({
       </dl>
       <ul className="verification-journeys" aria-label="旅程結果">
         {bundle.journeys.map((journey) => (
-          <li key={journey.key}>
+          <li key={journey.key} aria-label={journey.title}>
             {journey.title}
-            {journey.representative && "（代表旅程）"}：<VerdictBadge verdict={journey.verdict} /> <code>{journey.reason_code}</code>
+            {journey.representative && "（代表旅程）"}：<VerdictBadge verdict={journey.verdict} />{" "}
+            <ReasonCode code={journey.reason_code} />
+            {(journey.persona !== undefined || journey.identity !== undefined) && (
+              <>
+                {" "}
+                <span className="verification-journey-actor">
+                  persona：
+                  {journey.persona === undefined ? "未指定" : titledKey(profile?.definition.personas, journey.persona)}
+                </span>{" "}
+                <span className="verification-journey-actor">
+                  登入身分：
+                  {journey.identity === undefined ? "未登入" : titledKey(profile?.definition.identities, journey.identity)}
+                </span>
+              </>
+            )}
           </li>
         ))}
       </ul>
@@ -425,6 +557,21 @@ function BundleCard({
           </ul>
         )}
       </div>
+      {bundle.artifacts.length > 0 && (
+        <div className="verification-artifacts">
+          <strong>證據檔案</strong>
+          <ul aria-label="證據檔案">
+            {bundle.artifacts.map((artifact, index) => (
+              <ArtifactItem
+                key={index}
+                artifact={artifact}
+                location={artifactLocation(artifact, bundle, profile)}
+                onLoad={() => onLoadArtifact(index)}
+              />
+            ))}
+          </ul>
+        </div>
+      )}
       <details className="verification-steps">
         <summary>步驟（{bundle.steps.length}）</summary>
         <ol aria-label={`${bundle.id} 的步驟`}>
@@ -437,6 +584,69 @@ function BundleCard({
   );
 }
 
+/** Artifact 所屬的旅程與步驟（找得到時用標題）。 */
+function artifactLocation(artifact: EvidenceArtifact, bundle: EvidenceBundle, profile: VerificationProfileVersion | null): string {
+  if (artifact.journey === undefined) return "整次驗證";
+  const journey = `旅程：${journeyTitle(profile, artifact.journey)}`;
+  if (artifact.step === undefined) return journey;
+  const step = bundle.steps.find((s) => s.journey === artifact.journey && s.key === artifact.step);
+  return `${journey}／步驟：${step === undefined || step.title === "" ? artifact.step : step.title}`;
+}
+
+function ArtifactItem({
+  artifact,
+  location,
+  onLoad,
+}: {
+  artifact: EvidenceArtifact;
+  location: string;
+  onLoad: () => Promise<EvidenceArtifactContent>;
+}) {
+  const [content, setContent] = useState<EvidenceArtifactContent | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const kind = ARTIFACT_KIND_LABELS[artifact.kind];
+  const screenshot = artifact.kind === "screenshot";
+
+  const load = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setContent(await onLoad());
+    } catch (e) {
+      setError(`無法讀取：${describeError(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dataUrl = content && `data:${content.content_type};base64,${content.content_base64}`;
+  return (
+    <li aria-label={`${kind}：${artifact.name}`} className="verification-artifact">
+      <span>
+        {kind}・{artifact.name}・{location}
+        {artifact.size_bytes !== undefined && `・${artifact.size_bytes} 位元組`}
+      </span>
+      {artifact.withheld !== undefined ? (
+        <span className="verification-artifact-withheld">
+          沒有保存：{WITHHELD_LABELS[artifact.withheld] ?? artifact.withheld}
+        </span>
+      ) : dataUrl === null ? (
+        <button type="button" disabled={busy} onClick={() => void load()}>
+          {screenshot ? "開啟截圖" : "準備下載"}
+        </button>
+      ) : screenshot ? (
+        <img src={dataUrl} alt={`截圖：${artifact.name}`} />
+      ) : (
+        <a href={dataUrl} download={artifact.name}>
+          下載 {artifact.name}
+        </a>
+      )}
+      {error && <span role="alert">{error}</span>}
+    </li>
+  );
+}
+
 function StepView({ step, journeyTitle }: { step: VerificationStepRecord; journeyTitle: (key: string) => string }) {
   const name = step.title === "" ? step.key : step.title;
   return (
@@ -444,18 +654,25 @@ function StepView({ step, journeyTitle }: { step: VerificationStepRecord; journe
       <span>
         {PHASE_LABELS[step.phase]}
         {step.journey !== undefined && `（${journeyTitle(step.journey)}）`}・{name}：<VerdictBadge verdict={step.verdict} />{" "}
-        <code>{step.reason_code}</code>
+        <ReasonCode code={step.reason_code} />
         {step.engine_code !== undefined && <> 引擎代碼 <code>{step.engine_code}</code></>}
         {step.attempts > 1 && `・嘗試 ${step.attempts} 次`}
       </span>
       <span className="verification-step-operation">{step.operation}</span>
       {step.assertions.length > 0 && (
         <ul aria-label="斷言結果">
-          {step.assertions.map((result, index) => (
-            <li key={index} className={result.passed ? "assertion-passed" : "assertion-failed"}>
-              {describeAssertion(result.assertion)}：{result.passed ? "符合" : "不符合"}（實際：{result.actual}）
-            </li>
-          ))}
+          {step.assertions.map((result, index) => {
+            const judge = result.assertion.kind === "judge";
+            // 語意判斷沒有做出判定（例如模型限流）時不能說成「不符合」
+            const undecided = judge && !result.passed && UNDECIDED_JUDGE_REASONS.has(step.reason_code);
+            const outcome = result.passed ? "符合" : undecided ? "無法判定" : "不符合";
+            const className = result.passed ? "assertion-passed" : undecided ? "assertion-undecided" : "assertion-failed";
+            return (
+              <li key={index} className={className}>
+                {describeAssertion(result.assertion)}：{outcome}（{judge ? "理由" : "實際"}：{result.actual}）
+              </li>
+            );
+          })}
         </ul>
       )}
       {step.output !== "" && <pre className="verification-step-output">{step.output}</pre>}

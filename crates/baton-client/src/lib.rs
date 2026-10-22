@@ -27,8 +27,9 @@ use baton_api::{
     projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, UnderstandingView,
     workflow_skip_path, workflows_path, PlaybookCatalog, SkipStageRequest, WorkflowList, WorkflowView, PLAYBOOKS_PATH,
     reviews_path, ReviewList,
-    evidence_bundle_path, verification_profile_path, verification_runs_path, workspace_verification_path,
-    PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
+    evidence_artifact_path, evidence_bundle_path, verification_profile_path, verification_runs_path,
+    workspace_verification_path, EvidenceArtifactContent, PublishProfileResponse, RunVerificationRequest,
+    VerificationOverviewView,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
@@ -725,6 +726,16 @@ impl RuntimeClient {
     /// 讀取一份 Evidence Bundle。
     pub async fn evidence_bundle(&self, workspace_id: &str, bundle_id: &str) -> Result<EvidenceBundle, ClientError> {
         self.get_json(&evidence_bundle_path(workspace_id, bundle_id)).await
+    }
+
+    /// 讀取 Evidence Bundle 中第 `index` 個證據檔案的內容（票 46）。
+    pub async fn evidence_artifact(
+        &self,
+        workspace_id: &str,
+        bundle_id: &str,
+        index: usize,
+    ) -> Result<EvidenceArtifactContent, ClientError> {
+        self.get_json(&evidence_artifact_path(workspace_id, bundle_id, index)).await
     }
 
     /// Playbook 與方法的全部版本。

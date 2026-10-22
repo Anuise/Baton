@@ -1874,7 +1874,13 @@ impl Supervisor {
                 self.note("無法取得系統亂數，驗證稍後重試");
                 continue;
             };
-            let bundle = crate::verification_adapter::execute(&self.ports, &self.data_dir, &item, bundle_id).await;
+            let context = crate::verification_adapter::ExecutionContext {
+                ports: &self.ports,
+                data_dir: &self.data_dir,
+                artifacts_root: &self.artifacts_root,
+                judge_account: self.judge_account().await,
+            };
+            let bundle = crate::verification_adapter::execute(context, &item, bundle_id).await;
             let (request_id, verdict) = (item.request.id.clone(), bundle.verdict);
             match self.store.record_evidence_bundle(bundle).await {
                 Ok(true) => self.note(&format!("驗證要求 {request_id} 完成：{}", verdict.as_str())),
@@ -1882,6 +1888,21 @@ impl Supervisor {
                 Err(error) => self.note(&format!("驗證要求 {request_id} 的 Evidence Bundle 沒有保存：{error}")),
             }
         }
+    }
+
+    /// 語意 judge 使用的帳號（票 46）：第一個可派工的帳號；沒有時為 `None`。
+    async fn judge_account(&self) -> Option<baton_ports::JudgeAccount> {
+        let profiles = match self.store.list_profiles().await {
+            Ok(profiles) => profiles,
+            Err(error) => {
+                self.note(&format!("無法讀取帳號，語意判斷無法使用：{error}"));
+                return None;
+            }
+        };
+        baton_domain::scheduler::usable_profiles(&profiles).first().map(|p| baton_ports::JudgeAccount {
+            profile_id: p.id.clone(),
+            config_dir: PathBuf::from(&p.config_dir),
+        })
     }
 
     // ------------------------------------------------------------ 整合

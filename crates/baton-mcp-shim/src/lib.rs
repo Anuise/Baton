@@ -771,7 +771,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_RUN_VERIFICATION,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：依這個 Workspace 的 Verification Profile 排入一次 CLI／API 驗證，由 Runtime 執行（build 識別、doctor、啟動、就緒、資料準備、旅程、清理），結果以 get_verification 查看。每個步驟的判定是 passed、product_failure（產品缺陷）、inconclusive（證據不足）、environment_blocked（環境阻礙）、auth_blocked（授權阻礙）、budget_exhausted（預算用盡）或 automation_unsupported（無法自動化）其中之一，只有 passed 是通過。Profile 版本還沒被證明可用時，這次驗證一定包含代表旅程。判定為 passed 的 Evidence Bundle 可作為 record_stage_result 的 evidence_bundle_id 證據。回應是驗證要求（含 id、固定的 Profile 版本、要執行的 journeys、status）。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：依這個 Workspace 的 Verification Profile 排入一次驗證（CLI／API 或 web），由 Runtime 執行（build 識別、doctor、啟動、就緒、資料準備、旅程、清理），結果以 get_verification 查看。每個步驟的判定是 passed、product_failure（產品缺陷）、inconclusive（證據不足）、environment_blocked（環境阻礙）、auth_blocked（授權阻礙）、budget_exhausted（預算用盡）或 automation_unsupported（無法自動化）其中之一，只有 passed 是通過。Profile 版本還沒被證明可用時，這次驗證一定包含代表旅程。判定為 passed 的 Evidence Bundle 可作為 record_stage_result 的 evidence_bundle_id 證據。回應是驗證要求（含 id、固定的 Profile 版本、要執行的 journeys、status）。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

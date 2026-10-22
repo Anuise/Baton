@@ -21,7 +21,7 @@ use baton_api::{
     ReconcileRequest, UnderstandingView,
     SkipStageRequest, WorkflowList, WorkflowView,
     ReviewList,
-    PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
+    EvidenceArtifactContent, PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
 };
 use baton_client::{
     ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, ClientError, Connection,
@@ -1282,6 +1282,20 @@ async fn verification_bundle(
     link.client.evidence_bundle(&workspace_id, &bundle_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 的驗證分頁：讀取一個證據檔案（截圖、trace、錄影；票 46）。
+#[tauri::command]
+async fn verification_artifact(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    bundle_id: String,
+    index: usize,
+) -> Result<EvidenceArtifactContent, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.evidence_artifact(&workspace_id, &bundle_id, index).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 回報一次沒被 Guard 攔下的重犯。
 #[tauri::command]
 async fn knowledge_report_recurrence(
@@ -1389,7 +1403,8 @@ fn main() {
             workspace_verification,
             verification_publish_profile,
             verification_run,
-            verification_bundle
+            verification_bundle,
+            verification_artifact
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {

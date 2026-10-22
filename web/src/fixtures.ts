@@ -1283,6 +1283,7 @@ export function evidenceBundle(overrides: Partial<EvidenceBundle> = {}): Evidenc
       { feature: "export", area: "匯出", reason: "這次驗證沒有執行對應的旅程" },
     ],
     cleanup: { state_dir: "C:\\data\\verification\\vreq_1", state_dir_removed: true, problems: [] },
+    artifacts: [],
     started_at: CHECKED_AT,
     finished_at: CHECKED_AT + 5_000,
     ...overrides,
@@ -1320,4 +1321,195 @@ export function verificationOverview(overrides: Partial<VerificationOverview> = 
     bundles: [evidenceBundle()],
     ...overrides,
   };
+}
+
+/**
+ * 測試用的 web Profile 內容：代表旅程「管理訂單」扮演店家管理員（admin）、以櫃台人員（clerk）登入；
+ * 「瀏覽商品」扮演訪客（shopper）、不登入。密碼只以秘密參照出現。
+ */
+export function webVerificationProfileDefinition(
+  overrides: Partial<VerificationProfileDefinition> = {},
+): VerificationProfileDefinition {
+  return {
+    interface: "web",
+    doctor: [],
+    setup: [],
+    journeys: [
+      {
+        key: "orders",
+        title: "管理訂單",
+        representative: true,
+        persona: "admin",
+        identity: "clerk",
+        steps: [
+          {
+            key: "open_orders",
+            title: "開啟訂單頁",
+            operation: { kind: "browser", action: { kind: "goto", url: "http://127.0.0.1:3000/orders" } },
+            assertions: [
+              { kind: "url_contains", text: "/orders" },
+              { kind: "judge", expectation: "畫面列出今天的訂單" },
+            ],
+          },
+        ],
+      },
+      {
+        key: "browse",
+        title: "瀏覽商品",
+        representative: false,
+        persona: "shopper",
+        steps: [
+          {
+            key: "list",
+            title: "商品列表",
+            operation: { kind: "browser", action: { kind: "goto", url: "http://127.0.0.1:3000/" } },
+            assertions: [{ kind: "visible", selector: "#products" }],
+          },
+        ],
+      },
+    ],
+    teardown: [],
+    evidence: { output_max_chars: 4000, redact: [], screenshots: "every_step", trace: true, video: true, mask: ["#card"] },
+    budget: { max_operations: 200, max_model_calls: 20 },
+    feature_map: [
+      { key: "orders", title: "訂單管理", criterion: "可以看到今天的訂單", journeys: ["orders"] },
+      { key: "catalog", title: "商品瀏覽", criterion: "訪客可以看到商品", journeys: ["browse"] },
+    ],
+    uncovered: [],
+    secrets: [{ key: "clerk_password", reference: "env:SHOP_CLERK_PASSWORD" }],
+    personas: [
+      { key: "admin", title: "店家管理員", description: "管理商品與訂單" },
+      { key: "shopper", title: "訪客", description: "沒有帳號的顧客" },
+    ],
+    identities: [
+      {
+        key: "clerk",
+        title: "櫃台人員",
+        login: [
+          {
+            key: "goto_login",
+            title: "開啟登入頁",
+            operation: { kind: "browser", action: { kind: "goto", url: "http://127.0.0.1:3000/login" } },
+            assertions: [],
+          },
+          {
+            key: "fill_password",
+            title: "輸入密碼",
+            operation: { kind: "browser", action: { kind: "fill", selector: "#password", text: "{{secret:clerk_password}}" } },
+            assertions: [],
+          },
+        ],
+        check: {
+          key: "whoami",
+          title: "確認登入身分",
+          operation: { kind: "browser", action: { kind: "goto", url: "http://127.0.0.1:3000/me" } },
+          assertions: [{ kind: "contains", text: "clerk" }],
+        },
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/**
+ * 測試用的 web Evidence Bundle：「管理訂單」的語意判斷遇到模型限流（證據不足）；「瀏覽商品」通過。
+ * Artifacts：已保存的截圖、因輸入過秘密而沒有保存的 trace、已保存的錄影。
+ */
+export function webEvidenceBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
+  return evidenceBundle({
+    id: "vbun_web",
+    build: null,
+    journeys: [
+      {
+        key: "orders",
+        title: "管理訂單",
+        representative: true,
+        persona: "admin",
+        identity: "clerk",
+        verdict: "inconclusive",
+        reason_code: "judge_rate_limited",
+      },
+      {
+        key: "browse",
+        title: "瀏覽商品",
+        representative: false,
+        persona: "shopper",
+        verdict: "passed",
+        reason_code: "all_steps_passed",
+      },
+    ],
+    steps: [
+      verificationStepRecord({
+        phase: "login",
+        journey: "orders",
+        key: "fill_password",
+        title: "輸入密碼",
+        operation: "瀏覽器在「#password」輸入「[已遮蔽]」",
+        engine_code: undefined,
+        assertions: [],
+        output: "",
+      }),
+      verificationStepRecord({
+        phase: "identity",
+        journey: "orders",
+        key: "whoami",
+        title: "確認登入身分",
+        operation: "瀏覽器前往 http://127.0.0.1:3000/me",
+        engine_code: undefined,
+        assertions: [{ assertion: { kind: "contains", text: "clerk" }, passed: true, actual: "包含" }],
+        output: "",
+      }),
+      verificationStepRecord({
+        journey: "orders",
+        key: "open_orders",
+        title: "開啟訂單頁",
+        operation: "瀏覽器前往 http://127.0.0.1:3000/orders",
+        verdict: "inconclusive",
+        reason_code: "judge_rate_limited",
+        engine_code: "model:rate_limited",
+        assertions: [
+          { assertion: { kind: "url_contains", text: "/orders" }, passed: true, actual: "http://127.0.0.1:3000/orders" },
+          { assertion: { kind: "judge", expectation: "畫面列出今天的訂單" }, passed: false, actual: "模型限流，無法判定" },
+        ],
+        output: "",
+      }),
+      verificationStepRecord({
+        journey: "browse",
+        key: "list",
+        title: "商品列表",
+        operation: "瀏覽器前往 http://127.0.0.1:3000/",
+        engine_code: undefined,
+        assertions: [
+          { assertion: { kind: "visible", selector: "#products" }, passed: true, actual: "可見" },
+          { assertion: { kind: "judge", expectation: "畫面列出商品" }, passed: true, actual: "畫面上有三項商品與價格" },
+        ],
+        output: "",
+      }),
+    ],
+    verdict: "inconclusive",
+    reason_code: "judge_rate_limited",
+    covered_features: ["catalog"],
+    uncovered: [],
+    artifacts: [
+      {
+        kind: "screenshot",
+        journey: "orders",
+        step: "open_orders",
+        name: "open_orders.png",
+        storage_path: "ws_1/blob_shot",
+        sha256: "aa11",
+        size_bytes: 2048,
+      },
+      { kind: "trace", journey: "orders", name: "orders-trace.zip", withheld: "secret_input_recorded" },
+      {
+        kind: "video",
+        journey: "browse",
+        name: "browse.webm",
+        storage_path: "ws_1/blob_video",
+        sha256: "bb22",
+        size_bytes: 4096,
+      },
+    ],
+    ...overrides,
+  });
 }

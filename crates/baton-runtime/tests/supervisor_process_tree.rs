@@ -235,6 +235,9 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         startup_registration: Arc::new(NoStartup),
         update_source: Arc::new(NoUpdates),
         verification_driver: Arc::new(baton_runtime::verification_driver::LocalVerificationDriver::default()),
+        browser_driver: Arc::new(baton_runtime::browser_driver::LocalBrowserDriver::default()),
+        semantic_judge: Arc::new(baton_runtime::semantic_judge::ClaudeSemanticJudge::default()),
+        secret_resolver: Arc::new(baton_runtime::secret_resolver::EnvSecretResolver),
     };
     let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
     let runtime = Runtime::start_with(

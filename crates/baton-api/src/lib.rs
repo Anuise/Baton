@@ -136,8 +136,9 @@ pub use reviews::{
 };
 pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
 pub use verification_profiles::{
-    evidence_bundle_path, verification_profile_path, verification_runs_path, workspace_verification_path,
-    PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
+    evidence_artifact_path, evidence_bundle_path, verification_profile_path, verification_runs_path,
+    workspace_verification_path, EvidenceArtifactContent, PublishProfileResponse, RunVerificationRequest,
+    VerificationOverviewView,
 };
 pub use workflows::{
     workflow_skip_path, workflows_path, PlaybookCatalog, PlaybookSummary, PublishPlaybookResponse, SkipStageRequest,
@@ -310,6 +311,7 @@ pub fn router(state: ApiState) -> Router {
         .route(verification_profiles::PROFILE_ROUTE, post(verification_profiles::publish))
         .route(verification_profiles::RUNS_ROUTE, post(verification_profiles::run))
         .route(verification_profiles::BUNDLE_ROUTE, get(verification_profiles::bundle))
+        .route(verification_profiles::ARTIFACT_ROUTE, get(verification_profiles::artifact))
         .route(LIFECYCLE_PATH, get(lifecycle::status))
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))

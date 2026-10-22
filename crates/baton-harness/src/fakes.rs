@@ -1363,6 +1363,9 @@ pub struct FakePorts {
     pub startup_registration: Arc<FakeStartupRegistration>,
     pub update_source: Arc<FakeUpdateSource>,
     pub verification_driver: Arc<FakeVerificationDriver>,
+    pub browser_driver: Arc<FakeBrowserDriver>,
+    pub semantic_judge: Arc<FakeSemanticJudge>,
+    pub secret_resolver: Arc<FakeSecretResolver>,
 }
 
 impl FakePorts {
@@ -1384,6 +1387,9 @@ impl FakePorts {
             login_session: Arc::default(),
             startup_registration: Arc::default(),
             update_source: Arc::default(),
+            browser_driver: Arc::default(),
+            semantic_judge: Arc::default(),
+            secret_resolver: Arc::default(),
         }
     }
 
@@ -1405,6 +1411,9 @@ impl FakePorts {
             startup_registration: self.startup_registration.clone(),
             update_source: self.update_source.clone(),
             verification_driver: self.verification_driver.clone(),
+            browser_driver: self.browser_driver.clone(),
+            semantic_judge: self.semantic_judge.clone(),
+            secret_resolver: self.secret_resolver.clone(),
         }
     }
 }
@@ -1570,5 +1579,284 @@ impl VerificationDriver for FakeVerificationDriver {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(PortError::Failed(error.to_string())),
             _ => Ok(()),
         }
+    }
+}
+
+/// 腳本化網站上的一個畫面（票 46）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakePage {
+    /// 導覽到這個畫面時的 HTTP 狀態碼。
+    pub status: u16,
+    pub title: String,
+    pub text: String,
+    /// 畫面上可見（也就是可以操作）的 selector。
+    pub visible: Vec<String>,
+}
+
+impl FakePage {
+    pub fn new(title: &str, text: &str, visible: &[&str]) -> Self {
+        Self { status: 200, title: title.into(), text: text.into(), visible: visible.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// 以這個狀態碼回應的畫面（例如 403 權限不足）。
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = status;
+        self
+    }
+}
+
+/// 畫面的內容可以依這個 Session 目前為止輸入過的值（selector, 文字）決定，例如以哪個帳號登入。
+type PageFn = Arc<dyn Fn(&[(String, String)]) -> FakePage + Send + Sync>;
+
+struct FakeBrowserSessionState {
+    request: BrowserSessionRequest,
+    url: Option<String>,
+    status: Option<u16>,
+    fills: Vec<(String, String)>,
+    log: Vec<String>,
+}
+
+/// 腳本化的瀏覽器 Runner（票 46）：扮演受驗的網站。
+///
+/// - `script_page`：網址對應的畫面（狀態碼預設 200）；沒有腳本的網址連不上。
+/// - `script_link`：點擊或按鍵於某個 selector 之後前往某個網址（例如登入按鈕）。
+/// - 操作的 selector 不在目前畫面的 `visible` 中時，回報 `TimeoutError`（如同 Playwright 等不到元素）。
+/// - 截圖的內容是「網址 + 畫面文字」，trace 是這個 Session 的完整操作紀錄（含輸入的文字，如同真實引擎的 trace），
+///   錄影是固定內容；讓測試檢查 Runtime 是否依政策遮蔽或不保存。
+/// - `commands` 記錄每一個操作（`fill` 記下實際輸入的文字），讓測試確認秘密的值確實交給了 Runner。
+pub struct FakeBrowserDriver {
+    pages: Mutex<HashMap<String, PageFn>>,
+    links: Mutex<HashMap<String, String>>,
+    open_failure: Mutex<Option<String>>,
+    sessions: Mutex<HashMap<String, FakeBrowserSessionState>>,
+    next_session: AtomicU32,
+    commands: Mutex<Vec<String>>,
+    requests: Mutex<Vec<BrowserSessionRequest>>,
+    masks: Mutex<Vec<Vec<String>>>,
+}
+
+impl Default for FakeBrowserDriver {
+    fn default() -> Self {
+        Self {
+            pages: Mutex::default(),
+            links: Mutex::default(),
+            open_failure: Mutex::default(),
+            sessions: Mutex::default(),
+            next_session: AtomicU32::new(1),
+            commands: Mutex::default(),
+            requests: Mutex::default(),
+            masks: Mutex::default(),
+        }
+    }
+}
+
+impl FakeBrowserDriver {
+    /// 這個網址顯示固定的畫面。
+    pub fn script_page(&self, url: &str, page: FakePage) {
+        self.script_page_with(url, move |_| page.clone());
+    }
+
+    /// 這個網址的畫面（含狀態碼）依這個 Session 輸入過的值決定。
+    pub fn script_page_with(&self, url: &str, page: impl Fn(&[(String, String)]) -> FakePage + Send + Sync + 'static) {
+        lock(&self.pages).insert(url.to_string(), Arc::new(page));
+    }
+
+    /// 點擊（或按鍵於）這個 selector 之後前往 `url`。
+    pub fn script_link(&self, selector: &str, url: &str) {
+        lock(&self.links).insert(selector.to_string(), url.to_string());
+    }
+
+    /// 之後開啟 Session 都失敗（例如沒有安裝瀏覽器）；`None` 恢復。
+    pub fn fail_open(&self, reason: Option<&str>) {
+        *lock(&self.open_failure) = reason.map(str::to_string);
+    }
+
+    /// 至今的全部操作，依順序（例如 `open b1`、`goto b1 http://…`、`fill b1 #password hunter2`、`close b1`）。
+    pub fn commands(&self) -> Vec<String> {
+        lock(&self.commands).clone()
+    }
+
+    /// 至今開啟 Session 的要求。
+    pub fn session_requests(&self) -> Vec<BrowserSessionRequest> {
+        lock(&self.requests).clone()
+    }
+
+    /// 每次截圖時要求遮住的 selector，依順序。
+    pub fn screenshot_masks(&self) -> Vec<Vec<String>> {
+        lock(&self.masks).clone()
+    }
+
+    /// 還沒關閉的 Session。
+    pub fn open_sessions(&self) -> usize {
+        lock(&self.sessions).len()
+    }
+
+    fn render(&self, state: &FakeBrowserSessionState) -> FakePage {
+        let page = state.url.as_ref().and_then(|url| lock(&self.pages).get(url).cloned());
+        page.map(|f| f(&state.fills)).unwrap_or_else(|| FakePage::new("", "", &[]))
+    }
+
+    /// 前往網址；沒有腳本的網址連不上。
+    fn navigate(&self, state: &mut FakeBrowserSessionState, url: &str) -> Option<BrowserOutcome> {
+        if !lock(&self.pages).contains_key(url) {
+            return Some(BrowserOutcome::Unreachable { reason: format!("net::ERR_CONNECTION_REFUSED at {url}") });
+        }
+        state.url = Some(url.to_string());
+        state.status = Some(self.render(state).status);
+        None
+    }
+}
+
+/// 不透明的檔案內容：固定檔頭加上內容的雜湊，不含任何明文。
+fn opaque(header: &[u8], content: &str) -> Vec<u8> {
+    let mut bytes = header.to_vec();
+    bytes.extend_from_slice(baton_domain::artifact::sha256_hex(content.as_bytes()).as_bytes());
+    bytes
+}
+
+#[async_trait]
+impl BrowserDriver for FakeBrowserDriver {
+    async fn open(&self, request: BrowserSessionRequest) -> PortResult<BrowserSession> {
+        lock(&self.requests).push(request.clone());
+        if let Some(reason) = lock(&self.open_failure).clone() {
+            lock(&self.commands).push("open failed".into());
+            return Err(PortError::Failed(reason));
+        }
+        let id = format!("b{}", self.next_session.fetch_add(1, Ordering::SeqCst));
+        lock(&self.commands).push(format!("open {id}"));
+        let state = FakeBrowserSessionState { request, url: None, status: None, fills: Vec::new(), log: Vec::new() };
+        lock(&self.sessions).insert(id.clone(), state);
+        Ok(BrowserSession(id))
+    }
+
+    async fn step(&self, session: &BrowserSession, step: BrowserStep) -> PortResult<BrowserOutcome> {
+        let line = match &step.command {
+            BrowserCommand::Goto { url } => format!("goto {} {url}", session.0),
+            BrowserCommand::Click { selector } => format!("click {} {selector}", session.0),
+            BrowserCommand::Fill { selector, text } => format!("fill {} {selector} {text}", session.0),
+            BrowserCommand::Press { selector, key } => format!("press {} {selector} {key}", session.0),
+            BrowserCommand::WaitFor { selector } => format!("wait {} {selector}", session.0),
+        };
+        lock(&self.commands).push(line.clone());
+        let mut sessions = lock(&self.sessions);
+        let state = sessions.get_mut(&session.0).ok_or_else(|| PortError::Failed(format!("Session {} 不存在", session.0)))?;
+        state.log.push(line);
+        let needs = |selector: &str, state: &FakeBrowserSessionState| -> Option<BrowserOutcome> {
+            let page = self.render(state);
+            (!page.visible.iter().any(|v| v == selector)).then(|| BrowserOutcome::ActionFailed {
+                error: "TimeoutError".into(),
+                message: format!("等不到「{selector}」"),
+                page: None,
+            })
+        };
+        let failure = match &step.command {
+            BrowserCommand::Goto { url } => self.navigate(state, url),
+            BrowserCommand::Click { selector } | BrowserCommand::Press { selector, .. } => match needs(selector, state) {
+                Some(failure) => Some(failure),
+                None => match lock(&self.links).get(selector).cloned() {
+                    Some(url) => self.navigate(state, &url),
+                    None => None,
+                },
+            },
+            BrowserCommand::Fill { selector, text } => match needs(selector, state) {
+                Some(failure) => Some(failure),
+                None => {
+                    state.fills.push((selector.clone(), text.clone()));
+                    None
+                }
+            },
+            BrowserCommand::WaitFor { selector } => needs(selector, state),
+        };
+        if let Some(BrowserOutcome::Unreachable { reason }) = failure {
+            return Ok(BrowserOutcome::Unreachable { reason });
+        }
+        let page = self.render(state);
+        let url = state.url.clone().unwrap_or_else(|| "about:blank".into());
+        let screenshot = step.screenshot_mask.map(|mask| {
+            lock(&self.masks).push(mask);
+            // 如同真實引擎的 PNG：畫面上的文字只是像素，位元組中找不到
+            opaque(b"\x89PNG\r\n\x1a\n", &format!("{url}\n{}", page.text))
+        });
+        let snapshot = PageSnapshot {
+            url,
+            title: page.title.clone(),
+            status: state.status,
+            text: page.text.clone(),
+            visible: step.visible.iter().map(|s| page.visible.contains(s)).collect(),
+            screenshot,
+        };
+        // 操作失敗時如同真實引擎附上當前畫面
+        match failure {
+            Some(BrowserOutcome::ActionFailed { error, message, .. }) => {
+                Ok(BrowserOutcome::ActionFailed { error, message, page: Some(snapshot) })
+            }
+            _ => Ok(BrowserOutcome::Done { page: snapshot }),
+        }
+    }
+
+    async fn close(&self, session: &BrowserSession) -> PortResult<Vec<BrowserFile>> {
+        lock(&self.commands).push(format!("close {}", session.0));
+        let Some(state) = lock(&self.sessions).remove(&session.0) else {
+            return Err(PortError::Failed(format!("Session {} 不存在", session.0)));
+        };
+        let mut files = Vec::new();
+        if state.request.trace {
+            // 如同真實引擎壓縮過的 zip：記錄的操作（含輸入的文字）在位元組中找不到
+            let bytes = opaque(b"PK\x03\x04", &state.log.join("\n"));
+            files.push(BrowserFile { kind: "trace".into(), name: "trace.zip".into(), bytes });
+        }
+        if state.request.video {
+            files.push(BrowserFile { kind: "video".into(), name: "video.webm".into(), bytes: format!("WEBM {}", session.0).into_bytes() });
+        }
+        Ok(files)
+    }
+}
+
+/// 腳本化的語意 judge（票 46）：依預期文字依序回應；沒有腳本時回報無法使用。記錄每一次的輸入。
+#[derive(Default)]
+pub struct FakeSemanticJudge {
+    outcomes: Mutex<HashMap<String, VecDeque<JudgeOutcome>>>,
+    requests: Mutex<Vec<JudgeRequest>>,
+}
+
+impl FakeSemanticJudge {
+    /// 對這個預期依序回應這些結果；只剩最後一個時之後每次都相同。
+    pub fn script(&self, expectation: &str, outcomes: Vec<JudgeOutcome>) {
+        lock(&self.outcomes).insert(expectation.to_string(), outcomes.into());
+    }
+
+    /// 至今收到的全部判斷要求（也就是模型 Prompt 的全部輸入）。
+    pub fn requests(&self) -> Vec<JudgeRequest> {
+        lock(&self.requests).clone()
+    }
+}
+
+#[async_trait]
+impl SemanticJudge for FakeSemanticJudge {
+    async fn judge(&self, request: JudgeRequest) -> PortResult<JudgeOutcome> {
+        let expectation = request.expectation.clone();
+        lock(&self.requests).push(request);
+        let mut outcomes = lock(&self.outcomes);
+        let outcome = outcomes.get_mut(&expectation).and_then(|queue| if queue.len() > 1 { queue.pop_front() } else { queue.front().cloned() });
+        Ok(outcome.unwrap_or(JudgeOutcome::Unavailable { reason: "測試沒有設定這個預期的判斷".into() }))
+    }
+}
+
+/// 秘密參照的 fake（票 46）：參照 → 值；沒有設定的參照解析失敗。
+#[derive(Default)]
+pub struct FakeSecretResolver {
+    values: Mutex<HashMap<String, String>>,
+}
+
+impl FakeSecretResolver {
+    pub fn set(&self, reference: &str, value: &str) {
+        lock(&self.values).insert(reference.to_string(), value.to_string());
+    }
+}
+
+#[async_trait]
+impl SecretResolver for FakeSecretResolver {
+    async fn resolve(&self, reference: &str) -> PortResult<String> {
+        lock(&self.values).get(reference).cloned().ok_or_else(|| PortError::Failed(format!("沒有設定秘密參照 {reference}")))
     }
 }
