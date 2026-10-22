@@ -1368,7 +1368,7 @@ Runtime 同時監聽 IPv4 與 IPv6 loopback（`127.0.0.1:<port>`、`[::1]:<port>
 
 ## 測試
 
-一條指令跑完 Rust 與前端測試：
+一條指令跑完 Rust、前端測試與 UI E2E：
 
 ```powershell
 pnpm test
@@ -1379,7 +1379,10 @@ pnpm test
 ```powershell
 powershell -NoProfile -File scripts/with-msvc.ps1 cargo test --workspace --exclude baton-desktop
 pnpm --filter web test
+node scripts/test-e2e.mjs
 ```
+
+最後一步是 UI E2E（見〈UI E2E〉），找不到 Playwright 時結果列為「略過」，不算失敗也不顯示為通過。
 
 桌面殼 `baton-desktop` 編譯時需要已建置的 `web/dist`，所以不在預設的 `cargo test` 範圍內；`pnpm build` 會編譯它。殼本身的單元測試（只快取成功的啟動、可取消的完全退出後備計時器）在 `pnpm --filter web build` 之後以 `cargo test -p baton-desktop`（經 `with-msvc.ps1`）執行。
 
@@ -1393,7 +1396,22 @@ Runtime harness 的資料目錄建在暫存區的 `baton-harness\` 之下（`h<�
 node scripts/smoke-desktop.mjs
 ```
 
-它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕、強制結束 Runtime（不結束監護）後監護重新拉起它且恢復面板與狀態列顯示恢復事件、以頁面內的 Tauri 事件（與系統匣送出的 `baton://full-exit-requested` 相同）觸發完全退出後顯示停止進度，最後 App、Runtime 與監護都結束。系統匣選單本身與殼端 60 秒的後備流程沒有涵蓋。spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」需要真實的 Worker／Controller 執行（裁定請求只能由 Agent 憑證建立），不在冒煙測試範圍，由 harness 情境測試涵蓋（見 ai-decisions AI-498）。這個測試會開啟視窗，所以不納入 `pnpm test`。
+它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕、強制結束 Runtime（不結束監護）後監護重新拉起它且恢復面板與狀態列顯示恢復事件、以頁面內的 Tauri 事件（與系統匣送出的 `baton://full-exit-requested` 相同）觸發完全退出後顯示停止進度，最後 App、Runtime 與監護都結束。系統匣選單本身與殼端 60 秒的後備流程沒有涵蓋。spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」需要 Worker／Controller 執行（裁定請求只能由 Agent 憑證建立），不在冒煙測試範圍，由下一節的 UI E2E 以 fake Port 涵蓋。這個測試會開啟視窗，所以不納入 `pnpm test`。
+
+### UI E2E
+
+spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」以 Playwright 操作真實的 Web UI，連到以 fake Port 啟動的真實 Runtime：
+
+```powershell
+$env:BATON_PLAYWRIGHT_DIR = "$env:LOCALAPPDATA\Temp\baton-pw"   # 已安裝 playwright 與其瀏覽器的目錄
+pnpm test:e2e                                                       # 即 node scripts/test-e2e.mjs
+```
+
+- **測試專用的 Runtime 組態**：`crates/baton-harness/tests/ui_e2e/`。Runtime 是 `Harness`（真實 Domain、Store、Supervisor 與 Axum API，Port 全是 fake），`server.rs` 在 loopback 上提供 `web/dist` 並把 `/api/` 轉給 Runtime：轉送時帶上桌面憑證與固定標頭、不帶瀏覽器的 Origin，等同桌面殼的角色，Runtime 的 API 防護不放寬。瀏覽器中的 Web UI 走 `createHttpClient`（真實 HTTP）。`driver.mjs` 以 JSON 行協定替 Rust 測試操作 Playwright + Chromium，`browser.rs` 以定位鏈（角色與無障礙名稱、標籤、文字）描述元素。使用者動作一律經畫面；Worker／Controller 的行為與 Supervisor 的推進在 Rust 端以 harness 的 fake 進行（`call_tool`、`agent_adapter.emit`、`supervise`）。
+- **不進入正式建置**：組態只是 `baton-harness`（測試專用 crate）的測試目標。`crates/baton-harness/tests/test_only_config.rs` 以 `cargo metadata` 與 Tauri 設定檔檢查：安裝程式打包的 `baton-runtime`、`baton-guardian` 與 `baton-desktop` 的一般與建置相依都到不了 `baton-harness`；`baton-harness` 沒有可執行檔、`ui_e2e` 只是測試目標；安裝程式只打包這兩個 sidecar 與 `web/dist`，Web UI 原始碼不引用測試組態。
+- **略過**：測試都標為 `#[ignore]`，一般的 `cargo test` 顯示為 ignored。`scripts/test-e2e.mjs` 依序從 `BATON_PLAYWRIGHT_DIR`、repo 根目錄、`web/` 尋找 Playwright：找不到時印出「UI E2E 略過」並以結束碼 0 結束（`pnpm test` 的結果列為「略過」）；設定了 `BATON_PLAYWRIGHT_DIR` 卻找不到時失敗。直接以 `cargo test -p baton-harness --test ui_e2e -- --ignored` 執行而找不到 Playwright 時，測試失敗而不是通過。
+- **清理**：腳本先建置 `web/dist`，再以專用的 TEMP／TMP 執行測試，結束後確認裡面除了 harness 共用的空 `baton-harness` 目錄之外沒有任何遺留（harness 資料目錄、Playwright 的暫存設定檔等），再刪除這個目錄；每個測試結尾關閉瀏覽器，斷言 Chromium 的程序與 driver 都已結束。測試 panic 時 driver 讀到 stdin 結束也會自行關閉瀏覽器。
+- **新增旅程**：在 `tests/ui_e2e/` 新增模組並於 `main.rs` 宣告，以 `UiE2e::start()` 開始、`e2e.finish()` 結束，測試加上同樣的 `#[ignore]` 說明。工作面板沒有輪詢，要看到 Supervisor 推進後的狀態時切到其他視圖再切回。
 
 ### 安裝程式冒煙測試
 
