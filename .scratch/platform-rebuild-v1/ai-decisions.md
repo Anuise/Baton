@@ -4720,16 +4720,28 @@
 - 影響：修正後在平行負載下量 6 次，第一步降到 63～199ms。
 - 審閱：未審
 
-### AI-483：harness 資料目錄改為背景重試刪除，程序先結束時以鎖檔判斷由之後的 harness 清理
+### AI-483：harness 資料目錄改為背景重試刪除、程序結束時同步刪除；被終止的程序留下的以鎖檔判斷由之後的 harness 清理
 - 重要度：中
-- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，review-notes #28）
+- 時間／階段：2026-10-23，最終 review 修正（R156-fix-c，review-notes #28；R159-final-fix-c2 依驗證 R158 補上程序結束時的刪除與其他測試的檢查）
 - 決策：
   - 根因：`Harness` 的 `TempDir` 在 Harness 被丟棄的當下刪除，但 Runtime 的背景工作（持有 Store 與日誌）要等測試的 tokio runtime 結束才會被丟棄。Windows 上開著的檔案不能刪除，`TempDir` 又忽略刪除錯誤，所以每個 harness 都留下含 `control.sqlite`、`logs`、`guardian` 的目錄。
-  - 修法（`crates/baton-harness/src/data_dir.rs`）：資料目錄改建在暫存區的 `baton-harness\h<亂數>`，旁邊放一個以不共用方式開啟的鎖檔。Harness 丟棄時先試著刪除，刪不掉就交給背景執行緒以退避重試（上限 10 分鐘），測試的 runtime 結束、檔案關閉後即刪除，再放掉並刪除鎖檔。程序在刪完之前結束時，鎖檔隨程序釋放，之後任何一個 harness 啟動時清掉鎖檔沒人持有的目錄；持有中的不碰。非 Windows 平台開著的檔案本來就刪得掉，不做清理掃描。
-  - 測試：`crates/baton-harness/tests/harness_cleanup.rs`。以手動建立的 runtime 模擬 `#[tokio::test]` 的生命週期（單執行緒與多執行緒），斷言 runtime 結束後目錄被刪除；斷言重建 Runtime 時保留；斷言之後的 harness 會清掉被遺棄的目錄，但不碰持有中的目錄。以專用的 TEMP 跑完整個 `baton-harness`，結束後只剩最後一個程序的 1 個目錄（下次執行時清掉），沒有 `.tmp*`。
+  - 修法（`crates/baton-harness/src/data_dir.rs`）：資料目錄改建在暫存區的 `baton-harness\h<亂數>`，旁邊放一個以不共用方式開啟的鎖檔。Harness 丟棄時先試著刪除，刪不掉就記到程序內的待刪清單，由背景執行緒以退避重試（上限 10 分鐘），測試的 runtime 結束、檔案關閉後即刪除，再放掉並刪除鎖檔。程序結束時（第一次有目錄進入待刪清單時以 `libc::atexit` 註冊）同步重試刪除清單中剩下的目錄，上限 10 秒：這時各測試的 runtime 都已結束，最後一個測試的目錄也刪得掉。程序被終止、`atexit` 沒有執行時，鎖檔隨程序釋放，之後任何一個 harness 啟動時清掉鎖檔沒人持有的目錄；持有中的不碰。非 Windows 平台開著的檔案本來就刪得掉，不做清理掃描。
+  - 測試：`crates/baton-harness/tests/harness_cleanup.rs`。以手動建立的 runtime 模擬 `#[tokio::test]` 的生命週期（單執行緒與多執行緒），斷言 runtime 結束後目錄被刪除；斷言重建 Runtime 時保留；斷言之後的 harness 會清掉被遺棄的目錄，但不碰持有中的目錄；以子程序（指定專用的 TEMP）執行一個持有 harness 到測試結束的測試，斷言子程序結束後 `baton-harness` 之下沒有任何目錄或鎖檔。以專用的 TEMP 跑完整個 `baton-harness` 與整個 `pnpm test`，結束後 `baton-harness` 是空的，也沒有 `.tmp*`。
 - 理由：Harness 的 `Drop` 無法 await Runtime 停止（單執行緒 runtime 在 Drop 期間無法推進背景工作）；要求每個測試結尾明確關閉 harness 要改約 600 個測試。跨程序清理若不判斷「有沒有人在用」，會刪到並行測試程序正在使用的目錄（Windows 只會刪掉沒被鎖住的檔案，例如桌面憑證），造成偶發失敗，所以用鎖檔判斷。
-- 替代方案：程序結束時統一清理（libtest 沒有可靠的結束掛勾）；每個測試結尾呼叫 `harness.shutdown().await`（改動大，漏寫就會再留下目錄）；修改 `baton-runtime` 讓 `RunningRuntime` 提供同步關閉（屬其他範圍，且 tokio 的 abort 本身也不是同步丟棄）。
-- 影響：同一個 harness 測試程序中，被丟棄但 runtime 還沒結束的 harness 會由背景執行緒持續重試，最多 10 分鐘。修正前已留在暫存區根目錄的 `.tmp*` 不會自動清除（無法和其他工具的暫存目錄區分），需在沒有測試執行時手動刪除。其他 crate 的測試若也在 Windows 上留下開著的檔案，不在本範圍內。
+- 替代方案：只在程序結束時清理（測試程序執行期間目錄會累積到數百個）；以 `ctor` 的 `#[dtor]` 取代 `atexit`（多一個依賴，效果相同）；每個測試結尾呼叫 `harness.shutdown().await`（改動大，漏寫就會再留下目錄）；修改 `baton-runtime` 讓 `RunningRuntime` 提供同步關閉（屬其他範圍，且 tokio 的 abort 本身也不是同步丟棄）。
+- 影響：同一個 harness 測試程序中，被丟棄但 runtime 還沒結束的 harness 會由背景執行緒持續重試，最多 10 分鐘。修正前已留在暫存區根目錄的 `.tmp*` 不會自動清除（無法和其他工具的暫存目錄區分），需在沒有測試執行時手動刪除。空的 `baton-harness` 目錄本身保留：程序結束時刪掉它，會和並行程序在其中建立目錄的動作競爭。其他 crate 的測試留下的暫存目錄見 AI-484。
+- 審閱：未審
+
+### AI-484：`baton-runtime` 的程序測試在結尾確認暫存目錄刪得掉，不修改產品的終止流程
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R159-final-fix-c2，驗證 R158 第 2 項，review-notes #28「檢查其他測試」）
+- 決策：
+  - 根因：`tests/command_runner.rs` 的逾時測試、`tests/browser_driver.rs` 開啟失敗（沒有 Playwright）的路徑，產品程式以 `kill_on_drop` 終止子程序但不等它結束；`tests/supervisor_process_tree.rs` 取消 Run 後，被終止的程序樹與 Runtime 的背景工作還沒放掉 Workspace 的 `.baton`。測試結束時子程序仍佔著工作目錄，`TempDir` 刪除失敗又靜默略過，在 TEMP 留下 `.tmp*`。
+  - 修法：新增 `crates/baton-runtime/tests/support/mod.rs` 的 `remove_temp_dir`，在測試結尾有上限（10 秒）地重試刪除並斷言刪掉；三個測試（含略過的路徑）都改用它。逾時代表子程序沒有真的結束，測試會失敗，等於多驗證了「被終止的程序確實結束」。
+  - 其他測試：全 repo 沒有 `TempDir::into_path`／`keep` 的其他用法；以專用的 TEMP 逐一重跑 `baton-runtime` 的每個整合測試 3～4 次、再跑完整 `pnpm test`（設定 `BATON_PLAYWRIGHT_DIR`），結束後 TEMP 沒有 `.tmp*`，只剩空的 `baton-harness`。
+- 理由：本次只允許修改測試檔；在產品端讓 `LocalCommandRunner`／`LocalBrowserDriver` 終止後等待子程序結束屬其他範圍，而且目前沒有已知的產品後果（受驗目錄不會在命令逾時後立即刪除）。
+- 替代方案：修改產品，逾時或開啟失敗時 `kill().await` 等子程序結束（跨範圍）；測試改用不刪除的固定目錄（會累積）。
+- 影響：產品端的這兩條路徑在回傳後仍可能有短暫存活的子程序；若之後有「逾時後立刻刪除工作目錄」的流程，需要在產品端等待子程序結束。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄
