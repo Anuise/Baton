@@ -731,7 +731,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 2. 同一個交易持久化維護（`kind = update`、`phase = stopping`、來源與目標版本、安裝程式路徑）與完全退出的停止意圖（暫停每個使用中的 Workspace），再把生命週期檔寫成「停止抑制 + 維護抑制」。之後每次鏡像停止意圖都帶著維護抑制（`Store::lifecycle_mirror`），監護與登入啟動入口看到就不拉起 Runtime（兩者並存時回報 `Maintenance`）。
 3. 與完全退出相同的停止流程（30 秒寬限 + 10 秒確認，Run 以 `interrupted` 結束、Task 重新排隊）。
 4. 更新前備份（觸發原因 `pre_update`，依一般保留規則）。成功 → `phase = ready`；失敗 → `phase = failed`（不套用更新）。
-5. Runtime 提供 API 5 秒後結束。桌面殼（`update_install`）等 Runtime 不再回應，以 `/P /UPDATE /R`（被動、更新模式、安裝後重新開啟 App）執行安裝程式並結束 App。安裝程式的 PREINSTALL hook 再執行舊版的 `baton-runtime.exe maintenance prepare-update`，確認 Runtime 與監護都已結束才複製檔案。
+5. Runtime 提供 API 5 秒後結束。桌面殼（`update_install`）等 Runtime 不再回應（最多 20 秒，逾時也繼續；Runtime 已結束時用殼最後一次看到的「準備套用」路徑），以 `/P /UPDATE /R`（被動、更新模式、安裝後重新開啟 App）執行安裝程式並結束 App。安裝程式的 PREINSTALL hook 再執行舊版的 `baton-runtime.exe maintenance prepare-update`，確認 Runtime 與監護都已結束才複製檔案。
 6. 安裝程式重新開啟 App → App 啟動 Runtime：**只有手動開啟（含安裝程式代為開啟）才結束維護**——記下結果（`last_maintenance`：來源與執行中的版本、是否已套用）、清掉生命週期檔的維護抑制與下載的安裝程式，之後依 DR-01 先核對再依各 Workspace 的「完全退出後自動續跑」續跑。監護或登入啟動拉起的 Runtime 不結束維護。
 
 **解除安裝**：NSIS 的 PREUNINSTALL hook（更新模式除外）執行 `baton-runtime.exe maintenance prepare-uninstall`：
@@ -1192,6 +1192,16 @@ node scripts/smoke-desktop.mjs
 ```
 
 它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕。這個測試會開啟視窗，所以不納入 `pnpm test`。
+
+### 安裝程式冒煙測試
+
+`pnpm build --bundle` 之後可執行：
+
+```powershell
+node scripts/smoke-installer.mjs
+```
+
+以目前的（非系統管理員）使用者把安裝程式靜默安裝到暫存資料夾，確認安裝成功、已安裝的 Runtime 能以暫存資料目錄啟動，再開啟「登入時自動啟動」後解除安裝，確認 Runtime 已結束、HKCU Run 的 `Baton` 值已移除、資料目錄與控制資料庫仍在。它會暫時寫入目前使用者的安裝紀錄（解除安裝時移除），所以已有 Baton 安裝、登入啟動登記或以系統管理員身分執行時拒絕執行；不納入 `pnpm test`。
 
 ### 測試 harness（主要測試 seam）
 

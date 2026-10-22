@@ -3345,6 +3345,27 @@
 - 影響：其他平行的票若也新增第 37 個 migration，整合時依編號規則順延後合併的那一個。
 - 審閱：未審
 
+### AI-369：桌面殼套用更新時記住最後看到的「準備套用」安裝程式；等 Runtime 結束逾時也繼續
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：`update_install` 先向 Runtime 讀更新狀態；Runtime 已不回應時，改用殼在 `update_status` 最後一次看到的「準備套用」的安裝程式路徑（只接受 Runtime 回報過的路徑，Web UI 不能指定）。之後等 Runtime 不再回應最多 20 秒，逾時也照樣以 `/P /UPDATE /R` 執行安裝程式（PREINSTALL hook 會再等 Runtime 與監護結束），然後結束 App。
+- 理由：Runtime 在維護就緒約 5 秒後結束；有停止異常時要等使用者按「仍要安裝更新並重新開啟」，那時 Runtime 多半已不在，殼若只問 Runtime 就無法套用。讓殼記住 Runtime 自己回報的路徑，比延長 Runtime 的結束時間或讓殼讀資料庫都簡單。
+- 替代方案：(1) 有停止異常時 Runtime 不自行結束：完全退出的結束規則要分兩套。(2) 由 Web UI 傳入路徑：等於讓 UI 能要求殼執行任意檔案。
+- 影響：App 在「準備套用」之後被關掉再開，就需要重新開啟（結束維護）後再更新一次。
+- 審閱：未審
+
+### AI-370：建置與安裝程式冒煙測試的細節
+- 重要度：低
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：
+  - **建置腳本**：`scripts/build.mjs` 只有在 `TAURI_SIGNING_PRIVATE_KEY` 與 `BATON_UPDATE_PUBKEY` 都設定時，才另外寫出 `target/tauri.updater.conf.json`（`createUpdaterArtifacts` + `plugins.updater` 的公鑰與清單網址）並交給 Tauri CLI。Tauri CLI 要產生 `.sig` 一定要有這段設定，也會核對私鑰與公鑰是否成對。因為 `generate_context!` 需要，`src-tauri` 加了 `serde_json`。
+  - **NSIS hook**：以 `nsExec::Exec` 隱藏執行，檔案存成含 BOM 的 UTF-8，讓 makensis 正確讀取中文。hook 執行的是舊版安裝裡的 `baton-runtime.exe`，從沒有 `maintenance` 子命令的舊版升級時不會停止程序；產品尚未發行，影響不大。
+  - **冒煙測試**：`scripts/smoke-installer.mjs` 以 API 開啟登入啟動，不直接寫登錄，因為 Runtime 每次啟動都會讓登記與偏好一致。以下情形拒絕執行：以系統管理員身分執行、已有 HKCU Run 的 `Baton` 值、已有 Baton 的解除安裝機碼、已有 `HKCU\Software\baton\Baton`。結束時清掉這次留下的登錄與暫存資料夾。
+- 理由：沒有設定更新來源的建置不應產生半套的更新設定。冒煙測試會動到真實使用者的登錄，必須避開已有的安裝。
+- 替代方案：冒煙測試直接寫 HKCU Run：可能被 Runtime 啟動時的補正改掉，與真實情境不同。
+- 影響：本機已在 2026-10-22 實際執行，安裝、啟動、解除安裝、Run 值移除、資料保留都通過。無法分辨 Run 值是被我們的 hook 移除，還是被 Tauri 解除安裝程式本身移除，但 `lifecycle.json` 留下的 `maintenance: uninstall` 證明 hook 有執行。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
