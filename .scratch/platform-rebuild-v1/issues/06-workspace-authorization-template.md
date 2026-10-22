@@ -1,6 +1,6 @@
 # 06: Workspace 授權範本與確認（I2／P3）
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R013-06-impl，2026-10-22 14:48）
 Blocked by: 05
 
 **What to build:** 新 Workspace 建立後進入授權設定：提供可編輯範本（研究／文件範本、可信專案開發 P3 範本），以「能力 + 目標資源 + 限制」呈現，確認摘要揭露可信程式以目前 Windows 使用者身分執行的風險；確認並保存後授權才生效並建立 revision。未確認前，任何需要該能力的 Agent 都不能被准入（DR-20261021-03）。管理員／全域安裝、遠端寫入、部署、對外發訊、付費與正式資料操作不在 P3 中。
