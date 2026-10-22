@@ -21,6 +21,10 @@ use baton_domain::knowledge::{
 };
 use baton_domain::message::{INBOX_MAX_LIMIT, MAX_RECIPIENTS};
 use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING};
+use baton_domain::workflow::{
+    EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
+    TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
+};
 use baton_mcp_shim::{serve, ShimConfig};
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -126,7 +130,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_twenty_one_tools_with_their_required_fields() {
+async fn tools_list_has_the_twenty_six_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -157,6 +161,9 @@ async fn tools_list_has_the_twenty_one_tools_with_their_required_fields() {
             TOOL_PROPOSE_DECISION_REQUEST,
             TOOL_RECORD_UNDERSTANDING,
             TOOL_GET_PROJECT_UNDERSTANDING,
+            TOOL_START_WORKFLOW,
+            TOOL_RECORD_STAGE_RESULT,
+            TOOL_GET_WORKFLOWS,
         ]
     );
     for tool in tools {
@@ -257,6 +264,9 @@ async fn tools_list_has_the_twenty_one_tools_with_their_required_fields() {
         TOOL_PROPOSE_DECISION_REQUEST,
         TOOL_RECORD_UNDERSTANDING,
         TOOL_GET_PROJECT_UNDERSTANDING,
+        TOOL_START_WORKFLOW,
+        TOOL_RECORD_STAGE_RESULT,
+        TOOL_GET_WORKFLOWS,
     ] {
         let tool = tools.iter().find(|t| t["name"] == name).unwrap();
         assert!(tool["description"].as_str().unwrap().contains("Controller 專屬"), "{name}");
@@ -290,6 +300,29 @@ async fn tools_list_has_the_twenty_one_tools_with_their_required_fields() {
     assert_eq!(understanding["properties"]["status"]["default"], "hypothesis");
     assert_eq!(understanding["properties"]["sources"]["type"], "array");
     assert_eq!(schema(TOOL_GET_PROJECT_UNDERSTANDING), json!({"type":"object","properties":{}}));
+    let start = schema(TOOL_START_WORKFLOW);
+    assert_eq!(start["required"], json!(["situation", "rationale"]));
+    assert_eq!(
+        start["properties"]["situation"]["enum"],
+        json!(["ambiguous", "feature", "defect", "migration", "performance", "investigation", "exploratory_testing"])
+    );
+    for field in ["task_id", "goal_id", "rationale"] {
+        assert_eq!(start["properties"][field]["type"], "string", "{field}");
+    }
+    assert_eq!(start["properties"]["rationale"]["maxLength"], WORKFLOW_TEXT_MAX_CHARS);
+    let stage = schema(TOOL_RECORD_STAGE_RESULT);
+    assert_eq!(stage["required"], json!(["workflow_id", "stage", "expected_revision", "outcome"]));
+    assert_eq!(stage["properties"]["outcome"]["enum"], json!(["passed", "failed", "blocked"]));
+    assert_eq!(stage["properties"]["expected_revision"]["type"], "integer");
+    assert_eq!(stage["properties"]["expected_revision"]["minimum"], 1);
+    assert_eq!(stage["properties"]["evidence"]["type"], "array");
+    assert_eq!(stage["properties"]["evidence"]["maxItems"], WORKFLOW_EVIDENCE_MAX);
+    assert_eq!(stage["properties"]["evidence"]["items"]["required"], json!(["check"]));
+    for field in ["artifact_id", "decision_request_id", "task_id"] {
+        assert_eq!(stage["properties"]["evidence"]["items"]["properties"][field]["type"], "string", "{field}");
+    }
+    assert_eq!(stage["properties"]["note"]["maxLength"], WORKFLOW_NOTE_MAX_CHARS);
+    assert_eq!(schema(TOOL_GET_WORKFLOWS), json!({"type":"object","properties":{}}));
 }
 
 #[tokio::test]
@@ -315,6 +348,17 @@ async fn controller_tools_forward_to_their_paths_with_credentials_and_unchanged_
             r#"{"changed":true}"#,
         ),
         (TOOL_GET_PROJECT_UNDERSTANDING, json!({}), r#"{"items":[]}"#),
+        (
+            TOOL_START_WORKFLOW,
+            json!({"situation":"defect","task_id":"task_1","rationale":"使用者回報登入失敗"}),
+            r#"{"workflow_id":"wf_1","current_stage":"reproduction","revision":1}"#,
+        ),
+        (
+            TOOL_RECORD_STAGE_RESULT,
+            json!({"workflow_id":"wf_1","stage":"reproduction","expected_revision":1,"outcome":"passed","evidence":[{"check":"reproduction","artifact_id":"art_1"}],"note":"已重現"}),
+            r#"{"outcome":"passed","current_stage":"diagnosis","revision":2}"#,
+        ),
+        (TOOL_GET_WORKFLOWS, json!({}), r#"{"playbooks":[],"workflows":[]}"#),
     ];
     for (tool, arguments, response) in cases {
         let (url, log) = spawn_stub(200, response).await;

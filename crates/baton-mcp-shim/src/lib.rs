@@ -4,6 +4,9 @@
 //! Agent 憑證只存在於 [`ShimConfig`] 與送往 Runtime 的 `Authorization` 標頭，
 //! 不會出現在 stdout、stderr、錯誤訊息或 `Debug` 輸出。
 
+// tool_definitions() 的單一 json! 巨集展開深度超過預設的 128
+#![recursion_limit = "256"]
+
 use std::fmt;
 use std::io;
 use std::time::Duration;
@@ -32,6 +35,10 @@ use baton_domain::external_operation::{
 use baton_domain::understanding::{
     ItemStatus, Section, KEY_MAX_CHARS as UNDERSTANDING_KEY_MAX_CHARS, SOURCES_MAX as UNDERSTANDING_SOURCES_MAX,
     TEXT_MAX_CHARS as UNDERSTANDING_TEXT_MAX_CHARS, TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING,
+};
+use baton_domain::workflow::{
+    Situation, EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
+    TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -606,6 +613,63 @@ fn tool_definitions() -> Value {
             "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取這個 Workspace 目前的專案理解（Project Brief、Glossary、Project Map 的每一項、來源、版本與查驗時間；stale 表示來源檔案在查驗後改變，需要重新查驗）與投影檔狀態。沒有任何項目表示 Workspace 首次接入，請建立專案理解。",
             "inputSchema": { "type": "object", "properties": {} },
         },
+        {
+            "name": TOOL_START_WORKFLOW,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：依工作情境開始一個 Workflow。Router 選該情境 Playbook 的最新版本，把理由與版本記在 Workflow 上；之後 Playbook 升級不影響這個 Workflow。研究與文件 Task 不能用開發流程（feature、defect、migration、performance、exploratory_testing 會被拒絕，playbook_not_applicable），請改用 investigation 或 ambiguous。同一個 Task 同時只能有一個進行中的 Workflow。回應是 Workflow 視圖（含 stages、current_stage、revision）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "situation": {
+                        "type": "string",
+                        "enum": Situation::ALL.map(Situation::as_str),
+                        "description": "工作情境：ambiguous（需求仍模糊）、feature（功能開發）、defect（缺陷處理）、migration（架構或廣泛遷移）、performance（效能改善）、investigation（調查與研究）、exploratory_testing（探索測試）",
+                    },
+                    "task_id": { "type": "string", "description": "這個 Workflow 綁定的 Task（選填）" },
+                    "goal_id": { "type": "string", "description": "這個 Workflow 所屬的 Goal（選填；沒給 task_id 時必填）" },
+                    "rationale": { "type": "string", "maxLength": WORKFLOW_TEXT_MAX_CHARS, "description": "為什麼判斷是這個情境" },
+                },
+                "required": ["situation", "rationale"],
+            },
+        },
+        {
+            "name": TOOL_RECORD_STAGE_RESULT,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：以證據回報目前 Stage 的結果。Runtime 依證據判定，不接受只有文字的「做完了」：outcome=passed 時每項 exit check 都要有經 Runtime 查驗的證據（artifact_id 是已登記的成果、decision_request_id 是已回答的裁定、task_id 是已通過成果接受的 Task），否則記為 incomplete（缺證據，留在原 Stage）或 blocked（裁定尚未回答）。failed 與 blocked 需要在 note 說明原因；failed 依 failure_route 處理，累計失敗達預算時 Workflow 被阻擋。只能回報目前 Stage（已通過的 Stage 不重跑，stage_not_current），必須帶讀到的 revision（不同時回 workflow_revision_mismatch，請重新讀取）。跳過 Stage 只能由使用者在桌面進行。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "workflow_id": { "type": "string", "description": "要回報的 Workflow" },
+                    "stage": { "type": "string", "description": "目前 Stage 的 key" },
+                    "expected_revision": { "type": "integer", "minimum": 1, "description": "讀到的 Workflow revision" },
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["passed", "failed", "blocked"],
+                        "description": "passed（附證據，由 Runtime 判定是否通過）、failed（這個 Stage 的工作失敗）、blocked（無法繼續，例如沒有獨立 reviewer）",
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "maxItems": WORKFLOW_EVIDENCE_MAX,
+                        "description": "證據；每項指明 exit check，並剛好提供 artifact_id、decision_request_id 或 task_id 其中一個",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "check": { "type": "string", "description": "exit check 的 key" },
+                                "artifact_id": { "type": "string", "description": "已登記的成果（register_artifact）" },
+                                "decision_request_id": { "type": "string", "description": "已回答的裁定請求" },
+                                "task_id": { "type": "string", "description": "已通過成果接受的 Task" },
+                            },
+                            "required": ["check"],
+                        },
+                    },
+                    "note": { "type": "string", "maxLength": WORKFLOW_NOTE_MAX_CHARS, "description": "說明；failed 與 blocked 必填" },
+                },
+                "required": ["workflow_id", "stage", "expected_revision", "outcome"],
+            },
+        },
+        {
+            "name": TOOL_GET_WORKFLOWS,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取可用的 Playbook（每個情境的最新版本：key、title、situation、applicability、version）與這個 Workspace 的 Workflow（目前 Stage、revision，以及每個 Stage 的 entry_conditions、expected_outputs、allowed_actions、budget、exit_checks、failure_route、gate 與 attempt 歷史）。換帳號或新的 Session 後從這裡接續，不要從頭跑。",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
     ])
 }
 
@@ -639,6 +703,9 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_PROPOSE_DECISION_REQUEST,
         TOOL_RECORD_UNDERSTANDING,
         TOOL_GET_PROJECT_UNDERSTANDING,
+        TOOL_START_WORKFLOW,
+        TOOL_RECORD_STAGE_RESULT,
+        TOOL_GET_WORKFLOWS,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));
