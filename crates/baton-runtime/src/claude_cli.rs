@@ -1,11 +1,12 @@
 //! 正式的 ClaudeEnvironment：以本機的 `claude` 與 `git` 命令列工具探測環境（spec D-20）。
 //!
 //! - 只執行 `--version`、`claude auth status` 與 `where`；不下載、不安裝、不執行任何腳本。
+//! - Claude Code 以 Runtime 實際啟動 Worker 的同一個程式探測（`claude_program`），精靈的結果與之後的 Run 一致。
 //! - 核對認證時沿用 Runtime 目前的環境變數，只覆寫 `CLAUDE_CONFIG_DIR`，
 //!   所以環境變數或 credential helper 造成的覆蓋會如實出現在結果中（使用者故事 5）。
 //! - 只取用 `claude auth status` 輸出中的認證方式、帳號與設定目錄；登入資料（token）從不經過這裡。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -21,6 +22,39 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub struct ClaudeCli;
+
+/// Runtime 啟動 Claude Code 用的程式（Worker、Controller、語意 judge 與這裡的探測共用，審查 R152）。
+///
+/// PATH 上任何一處有 `claude.exe` 時是 `claude`：CreateProcessW 只會替它補上 `.exe` 並依 PATH 找到，
+/// 啟動指令雜湊也與既有的相同。只有 npm 安裝的批次檔（`claude.cmd`／`claude.bat`）時是第一個批次檔的完整路徑，
+/// 啟動端據此改經 cmd.exe 執行。都找不到時仍是 `claude`（啟動失敗會如實回報）。
+/// 同一台機器、同一個 PATH 下結果固定，所以 Runtime 重建後組出相同的啟動指令。
+pub fn claude_program() -> String {
+    resolve_program("claude", &path_dirs()).unwrap_or_else(|| "claude".to_string())
+}
+
+/// 目前程序的 PATH 中的目錄（依序）。
+fn path_dirs() -> Vec<PathBuf> {
+    std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default()
+}
+
+/// 在 `dirs` 中找 `name`：任一個目錄有 `{name}.exe` 回傳 `name`；否則回傳第一個 `{name}.cmd`／`{name}.bat` 的完整路徑。
+fn resolve_program(name: &str, dirs: &[PathBuf]) -> Option<String> {
+    if dirs.iter().any(|dir| dir.join(format!("{name}.exe")).is_file()) {
+        return Some(name.to_string());
+    }
+    dirs.iter()
+        // 同一個目錄內依 PATHEXT 的預設順序（.BAT 在 .CMD 之前）
+        .flat_map(|dir| ["bat", "cmd"].map(|ext| dir.join(format!("{name}.{ext}"))))
+        .find(|path| path.is_file())
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+/// 程式是批次檔（要經 cmd.exe 執行）。
+pub fn is_batch_file(program: &str) -> bool {
+    let lower = program.to_ascii_lowercase();
+    lower.ends_with(".cmd") || lower.ends_with(".bat")
+}
 
 /// 執行一個命令並收集輸出；`envs` 只追加或覆寫，其餘沿用目前的環境。
 async fn run(program: &str, args: &[&str], envs: &[(&str, &Path)]) -> Result<std::process::Output, String> {
@@ -43,22 +77,30 @@ async fn probe_tool(name: &str) -> PortResult<ToolProbe> {
     if !located.status.success() {
         return Ok(ToolProbe::NotFound);
     }
-    // 透過 cmd 執行，npm 安裝的 claude.cmd 也能啟動；版本取不到不代表工具不存在
-    let version_output = match run("cmd.exe", &["/d", "/c", name, "--version"], &[]).await {
+    // 透過 cmd 執行，PATHEXT 上的批次檔也能啟動；版本取不到不代表工具不存在
+    let version_output = version_line(run("cmd.exe", &["/d", "/c", name, "--version"], &[]).await);
+    Ok(ToolProbe::Found { version_output })
+}
+
+/// `--version` 輸出的第一個非空白行；執行失敗時為 `None`。
+fn version_line(result: Result<std::process::Output, String>) -> Option<String> {
+    match result {
         Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
             .map(str::to_string),
         _ => None,
-    };
-    Ok(ToolProbe::Found { version_output })
+    }
 }
 
 #[async_trait]
 impl ClaudeEnvironment for ClaudeCli {
+    /// 探測 Runtime 實際會啟動的同一個程式（`claude_program`），精靈與 Profile 核對的結果與之後的 Run 一致。
+    /// 批次檔交給標準函式庫經 cmd.exe 執行（它負責批次檔的引數跳脫）。
     async fn probe_claude(&self) -> PortResult<ToolProbe> {
-        probe_tool("claude").await
+        let Some(program) = resolve_program("claude", &path_dirs()) else { return Ok(ToolProbe::NotFound) };
+        Ok(ToolProbe::Found { version_output: version_line(run(&program, &["--version"], &[]).await) })
     }
 
     async fn probe_git(&self) -> PortResult<ToolProbe> {
@@ -67,7 +109,7 @@ impl ClaudeEnvironment for ClaudeCli {
 
     async fn auth_status(&self, config_dir: &Path) -> PortResult<AuthReport> {
         // 未登入時 claude 的結束碼不是 0，但仍會輸出 JSON，所以不看結束碼、只解析輸出
-        let output = run("cmd.exe", &["/d", "/c", "claude", "auth", "status", "--json"], &[("CLAUDE_CONFIG_DIR", config_dir)])
+        let output = run(&claude_program(), &["auth", "status", "--json"], &[("CLAUDE_CONFIG_DIR", config_dir)])
             .await
             .map_err(PortError::Failed)?;
         parse_auth_status(&String::from_utf8_lossy(&output.stdout)).map_err(|reason| {
@@ -242,6 +284,29 @@ mod tests {
         let envs: Vec<_> = command.get_envs().collect();
         assert!(envs.iter().any(|(k, v)| *k == "CLAUDE_CONFIG_DIR" && *v == Some(std::ffi::OsStr::new("C:\\Baton\\profiles\\prof_1"))));
         assert!(!args.iter().any(|a| a.contains("http") || a.contains("irm") || a.contains("curl")), "不下載任何東西：{args:?}");
+    }
+
+    #[test]
+    fn claude_exe_anywhere_on_the_path_is_launched_by_name_and_otherwise_the_first_batch_file_by_full_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = |name: &str| {
+            let dir = temp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let (npm, native, scoop, empty) = (dir("npm dir"), dir("native"), dir("scoop"), dir("empty"));
+        std::fs::write(npm.join("claude.cmd"), "").unwrap();
+        std::fs::write(native.join("claude.exe"), "").unwrap();
+        std::fs::write(scoop.join("claude.bat"), "").unwrap();
+        let full = |path: PathBuf| Some(path.to_string_lossy().into_owned());
+
+        // CreateProcessW 依 PATH 找得到 claude.exe：維持以名稱啟動（與既有的啟動指令雜湊相同）
+        assert_eq!(resolve_program("claude", &[npm.clone(), native.clone()]), Some("claude".to_string()));
+        // 只有批次檔：第一個找到的完整路徑
+        assert_eq!(resolve_program("claude", &[empty.clone(), npm.clone(), scoop.clone()]), full(npm.join("claude.cmd")));
+        assert_eq!(resolve_program("claude", &[scoop.clone()]), full(scoop.join("claude.bat")));
+        assert_eq!(resolve_program("claude", &[empty]), None);
+        assert!(is_batch_file(r"C:\npm\CLAUDE.CMD") && is_batch_file("x.bat") && !is_batch_file("claude"));
     }
 
     /// 在有安裝並登入 Claude Code 的機器上手動執行：`cargo test -p baton-runtime -- --ignored live_`。
