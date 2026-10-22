@@ -8,6 +8,7 @@ use baton_domain::run::{
     self, ExecutionLease, LaunchPayload, OutboxItem, ProcessRecord, Run, RunChange, RunCommand, RunContext, RunError,
     RunStatus, RunView,
 };
+use baton_domain::handoff::GateState;
 use baton_domain::task::{Task, TaskContext, TaskStatus};
 
 use super::tasks::{load, save_task, Loaded};
@@ -69,13 +70,17 @@ impl Store {
                     loaded.sessions.extend(others);
                 }
                 // 准入（launch intent）時固定的共同設定版本，與授權的重新檢查在同一個交易中取得（票 24）
-                let (launching, settings_version) = match &command {
+                // 同一個交易中也重新讀取 Run 帳號的額度門檻：派工之後才關閉的帳號不啟動程序
+                let (launching, settings_version, launch_gate) = match &command {
                     RunCommand::BeginLaunch { run_id, .. } => {
-                        (true, super::shared_settings::admission_settings_version(tx, run_id)?)
+                        let gates = super::handoffs::load_gate_states(tx)?;
+                        let gate = loaded.runs.iter().find(|r| r.id == *run_id).and_then(|r| gates.get(&r.profile_id));
+                        let settings_version = super::shared_settings::admission_settings_version(tx, run_id)?;
+                        (true, settings_version, gate.copied().unwrap_or_default())
                     }
-                    _ => (false, None),
+                    _ => (false, None, GateState::Open),
                 };
-                match decide_with(&loaded, &workspace_id, &loaded.tasks, command, now, settings_version) {
+                match decide_with(&loaded, &workspace_id, &loaded.tasks, command, now, settings_version, launch_gate) {
                     Err(rejected) => Ok(Err(rejected)),
                     Ok(mut change) => {
                         // 派工（唯一會產生 Outbox 項目的命令）時，以 Context Builder 組裝 Prompt 並保存 context receipt（票 39）
@@ -188,10 +193,10 @@ pub(crate) fn decide_in(
     command: RunCommand,
     now: Timestamp,
 ) -> Result<RunChange, RunError> {
-    decide_with(loaded, workspace_id, tasks, command, now, None)
+    decide_with(loaded, workspace_id, tasks, command, now, None, GateState::Open)
 }
 
-/// 同 `decide_in`，另帶准入時要固定的共同設定版本（只有 `BeginLaunch` 使用）。
+/// 同 `decide_in`，另帶准入時要固定的共同設定版本與 Run 帳號的額度門檻（只有 `BeginLaunch` 使用）。
 fn decide_with(
     loaded: &Loaded,
     workspace_id: &str,
@@ -199,6 +204,7 @@ fn decide_with(
     command: RunCommand,
     now: Timestamp,
     settings_version: Option<i64>,
+    launch_gate: GateState,
 ) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
@@ -209,6 +215,7 @@ fn decide_with(
         workdirs: &loaded.workdirs,
         guards: &loaded.guards,
         settings_version,
+        launch_gate,
         sessions: &loaded.sessions,
         budgets: &loaded.budgets,
     };
@@ -451,7 +458,7 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
     }
     if let Some(task) = &change.task {
         save_task(tx, task)?;
-        // 基礎設施重試在預算內：排回派工佇列，排程等到退避期限才派（票 36）
+        // Domain 要求重新排隊（例如基礎設施重試在預算內，排程等到退避期限才派，票 36）
         if change.requeue && task.status == TaskStatus::Ready {
             super::budgets::requeue(tx, task, now)?;
         }

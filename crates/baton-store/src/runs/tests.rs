@@ -198,3 +198,34 @@ async fn run_queries_are_scoped_to_the_workspace() {
     assert!(matches!(wrong_workspace, Err(RunApplyError::Rejected(RunError::RunNotFound(_)))));
     assert!(matches!(unknown_workspace, Err(RunApplyError::Rejected(RunError::WorkspaceNotFound(_)))));
 }
+
+#[tokio::test]
+async fn a_launch_intent_on_an_account_whose_quota_gate_closed_after_dispatch_ends_the_run_and_requeues_the_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with_ready_task(dir.path()).await;
+    run_cmd(&store, dispatch("r1"), T1).await.unwrap();
+    // 派工之後帳號 p1 才進入 paused
+    raw(dir.path())
+        .execute(
+            "INSERT INTO quota_gate (profile_id, state, reason, used, reset_at, since, version)
+             VALUES ('p1', 'paused', 'stop_dispatch_threshold', 0.8, NULL, ?1, 1)",
+            [T1.as_millis()],
+        )
+        .unwrap();
+
+    let begin = RunCommand::BeginLaunch { run_id: "r1".into(), command_id: "cmd-1".into(), working_dir: "C:/work".into(), resume_check: None };
+    let change = run_cmd(&store, begin, T2).await.unwrap();
+
+    let run = change.run.unwrap();
+    assert_eq!((run.status, run.command_id), (RunStatus::Interrupted, None));
+    assert!(store.pending_launches().await.unwrap().is_empty(), "Outbox 已處理完畢，不再啟動");
+    assert_eq!(store.task_board("w1").await.unwrap().tasks[0].task.status, TaskStatus::Ready);
+    let queued: Vec<String> = raw(dir.path())
+        .prepare("SELECT task_id FROM dispatch_request")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(queued, vec!["t1".to_string()], "排回派工佇列，由排程交給其他帳號");
+}
