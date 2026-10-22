@@ -117,6 +117,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if let Some(model) = &spec.model {
             args.extend(["--model".to_string(), model.clone()]);
         }
+        // 以原生方式接續既有的 Session（票 15）：init 與 result 回報的 session_id 維持同一個識別
+        if let Some(native_session_id) = &spec.resume_native_session_id {
+            args.extend(["--resume".to_string(), native_session_id.clone()]);
+        }
 
         let mut env_remove: Vec<String> = self.inherited_env.iter().filter(|name| affects_auth(name)).cloned().collect();
         env_remove.sort();
@@ -155,12 +159,16 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
     /// 從頭讀取 stream 檔案並持續追蹤新的內容；交出 `Exited` 之後串流結束。
     /// Runtime 重建後重新接上時會重播先前的事件（Session 綁定是冪等的，heartbeat 只會續約 lease）。
+    ///
+    /// 每個非空白行先交出 `Transcript`（位置是它在 stream 檔案中是第幾個非空白行，從 1 起），
+    /// 再交出由它解析出的事件；重播時同一行得到同一個位置，Runtime 據此去重。
     fn events(&self, handle: &AgentHandle) -> BoxStream<'static, AdapterEvent> {
         let path = self.run_dir(&handle.0).join(STREAM_FILE);
         let poll = self.poll;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut offset = 0u64;
+            let mut position = 0u64;
             let mut pending: Vec<u8> = Vec::new();
             while !tx.is_closed() {
                 let fresh = read_from(&path, offset).await;
@@ -172,8 +180,17 @@ impl AgentAdapter for ClaudeCodeAdapter {
                         return;
                     }
                     while let Some(end) = pending.iter().position(|b| *b == b'\n') {
-                        let line: Vec<u8> = pending.drain(..=end).collect();
-                        for event in parse_stream_line(&String::from_utf8_lossy(&line)) {
+                        let bytes: Vec<u8> = pending.drain(..=end).collect();
+                        let decoded = String::from_utf8_lossy(&bytes);
+                        let line = decoded.trim_end_matches(['\r', '\n']);
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        position += 1;
+                        if tx.send(AdapterEvent::Transcript { position, line: line.to_string() }).is_err() {
+                            return;
+                        }
+                        for event in parse_stream_line(line) {
                             let exited = matches!(event, AdapterEvent::Exited { .. });
                             if tx.send(event).is_err() || exited {
                                 return;
@@ -187,10 +204,47 @@ impl AgentAdapter for ClaudeCodeAdapter {
         Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
     }
 
-    /// 原生 Session 的接續屬於 Session 持久化與 resume 的票；在那之前不宣稱可以接續。
-    async fn resume_capability(&self, _session: &SessionRef) -> PortResult<Capability> {
-        Ok(Capability::Unknown)
+    /// 原生 Session 檔案 `{CLAUDE_CONFIG_DIR}\projects\{工作目錄的目錄名}\{原生識別}.jsonl` 存在才可接續。
+    /// 缺帳號目錄或工作目錄、目錄名規則未實測、`projects` 目錄讀不到 → `Unknown`；
+    /// `projects` 可讀但沒有這個檔案、或原生識別不是單純的識別（不能組成路徑）→ `NotResumable`。
+    async fn resume_capability(&self, session: &SessionRef) -> PortResult<Capability> {
+        let (Some(config_dir), Some(working_dir)) = (&session.config_dir, &session.working_dir) else {
+            return Ok(Capability::Unknown);
+        };
+        if !is_plain_id(&session.native_session_id) {
+            return Ok(Capability::NotResumable);
+        }
+        let project = native_project_dir(working_dir);
+        if project.chars().count() > NATIVE_PROJECT_DIR_MAX_CHARS {
+            return Ok(Capability::Unknown);
+        }
+        let projects = Path::new(config_dir).join("projects");
+        let file = projects.join(project).join(format!("{}.jsonl", session.native_session_id));
+        tokio::task::spawn_blocking(move || match std::fs::metadata(&file) {
+            Ok(meta) if meta.is_file() => Capability::Resumable,
+            Ok(_) => Capability::NotResumable,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && std::fs::read_dir(&projects).is_ok() => {
+                Capability::NotResumable
+            }
+            Err(_) => Capability::Unknown,
+        })
+        .await
+        .map_err(|e| PortError::Failed(format!("查驗原生 Session 的工作被中斷：{e}")))
     }
+}
+
+/// 原生 Session 識別只能是英數字、`-`、`_`（Claude Code 用 UUID），其餘一律不拿來組路徑，避免逃逸出帳號目錄。
+fn is_plain_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// 已實測的目錄名規則所涵蓋的最大長度（字元數）；更長的工作目錄 Claude Code 可能另外截斷，未實測。
+const NATIVE_PROJECT_DIR_MAX_CHARS: usize = 200;
+
+/// Claude Code 存放某工作目錄原生 Session 的目錄名（`{CLAUDE_CONFIG_DIR}\projects\` 之下）：
+/// 每個不是 ASCII 英數字的字元換成 `-`（2.1.307 實測）。
+fn native_project_dir(working_dir: &str) -> String {
+    working_dir.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 /// 讀取檔案從 `offset` 起的新內容；檔案還不存在或暫時讀不到時視為沒有新內容。
@@ -554,11 +608,174 @@ mod tests {
             collected,
             [
                 AdapterEvent::Heartbeat,
+                transcript(1, INIT),
                 AdapterEvent::Started { native_session_id: Some("326f0edb-57c5-40e9-8560-99ae95e9027e".into()) },
+                transcript(2, ASSISTANT),
                 AdapterEvent::Message { text: "OK".into() },
+                transcript(3, RESULT_OK),
                 AdapterEvent::UsageReported { tokens: 1_210, raw: RESULT_OK.into() },
                 AdapterEvent::Exited { success: true },
             ]
+        );
+    }
+
+    fn transcript(position: u64, line: &str) -> AdapterEvent {
+        AdapterEvent::Transcript { position, line: line.into() }
+    }
+
+    #[tokio::test]
+    async fn every_non_blank_line_is_a_transcript_entry_with_the_same_position_when_the_stream_is_replayed() {
+        use futures::StreamExt;
+        let data = tempfile::tempdir().unwrap();
+        let mut adapter = adapter(data.path(), &[]);
+        adapter.poll = Duration::from_millis(10);
+        let dir = adapter.run_dir("run_1");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 空白行不佔位置；Windows 的 CRLF 與結尾換行都不屬於內容
+        std::fs::write(dir.join(STREAM_FILE), format!("{INIT}\r\n\n   \n{THINKING}\n{RESULT_OK}\n")).unwrap();
+        let handle = adapter.launch(run_spec(None, None)).await.unwrap();
+
+        let transcripts = |events: Vec<AdapterEvent>| -> Vec<AdapterEvent> {
+            events.into_iter().filter(|e| matches!(e, AdapterEvent::Transcript { .. })).collect()
+        };
+        let first = transcripts(adapter.events(&handle).collect().await);
+        let replayed = transcripts(adapter.events(&handle).collect().await);
+
+        assert_eq!(first, [transcript(1, INIT), transcript(2, THINKING), transcript(3, RESULT_OK)]);
+        assert_eq!(replayed, first, "重新接上時從頭重播，同一行得到同一個位置");
+    }
+
+    #[test]
+    fn a_resumed_run_passes_the_native_session_to_resume_and_nothing_else_changes() {
+        let data = tempfile::tempdir().unwrap();
+        let adapter = adapter(data.path(), &[]);
+        let fresh = run_spec(None, Some("sonnet"));
+        let resumed = RunSpec { resume_native_session_id: Some("326f0edb-57c5-40e9-8560-99ae95e9027e".into()), ..fresh.clone() };
+
+        let fresh_spec = adapter.spawn_spec(&fresh);
+        let resumed_spec = adapter.spawn_spec(&resumed);
+
+        assert!(!fresh_spec.args.contains(&"--resume".to_string()), "{:?}", fresh_spec.args);
+        assert_eq!(value_after(&resumed_spec.args, "--resume"), Some("326f0edb-57c5-40e9-8560-99ae95e9027e"));
+        let without_resume: Vec<String> = {
+            let at = resumed_spec.args.iter().position(|a| a == "--resume").unwrap();
+            let mut args = resumed_spec.args.clone();
+            args.drain(at..at + 2);
+            args
+        };
+        assert_eq!(without_resume, fresh_spec.args, "除了 --resume 之外的參數不變");
+        assert_eq!(SpawnSpec { args: fresh_spec.args.clone(), ..resumed_spec.clone() }, fresh_spec);
+        assert_eq!(adapter.spawn_spec(&resumed), resumed_spec, "同一個 RunSpec 永遠得到同一個啟動指令");
+    }
+
+    #[test]
+    fn the_native_project_directory_replaces_every_non_alphanumeric_character_with_a_dash() {
+        assert_eq!(
+            native_project_dir(r"C:\Users\User\AppData\Local\Temp\resume-probe"),
+            "C--Users-User-AppData-Local-Temp-resume-probe",
+            "實測的 Claude Code 2.1.307 目錄名"
+        );
+        assert_eq!(native_project_dir(r"D:\工作\my_app.v2"), "D-----my-app-v2");
+    }
+
+    #[tokio::test]
+    async fn a_working_directory_too_long_for_the_verified_naming_rule_is_unknown() {
+        let data = tempfile::tempdir().unwrap();
+        let profile = data.path().join("profile");
+        std::fs::create_dir_all(profile.join("projects")).unwrap();
+        let long = format!(r"C:\{}", "a".repeat(NATIVE_PROJECT_DIR_MAX_CHARS));
+
+        let capability = adapter(data.path(), &[]).resume_capability(&session(Some(&profile), Some(&long), SESSION_ID)).await;
+
+        assert_eq!(capability.unwrap(), Capability::Unknown, "超過長度的目錄名規則未實測，不宣稱不可接續");
+    }
+
+    const SESSION_ID: &str = "326f0edb-57c5-40e9-8560-99ae95e9027e";
+    const WORK_DIR: &str = r"C:\work\app";
+
+    fn session(config_dir: Option<&Path>, working_dir: Option<&str>, id: &str) -> SessionRef {
+        SessionRef {
+            native_session_id: id.into(),
+            config_dir: config_dir.map(|d| d.to_string_lossy().into_owned()),
+            working_dir: working_dir.map(Into::into),
+        }
+    }
+
+    /// 在帳號目錄下照 Claude Code 的規則放一個原生 Session 檔案。
+    fn store_native_session(config_dir: &Path, working_dir: &str, id: &str) {
+        let project = config_dir.join("projects").join("C--work-app");
+        assert_eq!(working_dir, WORK_DIR);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{id}.jsonl")), "{}\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_native_session_file_in_the_accounts_project_directory_is_resumable() {
+        let data = tempfile::tempdir().unwrap();
+        let profile = data.path().join("profile");
+        store_native_session(&profile, WORK_DIR, SESSION_ID);
+
+        let capability = adapter(data.path(), &[]).resume_capability(&session(Some(&profile), Some(WORK_DIR), SESSION_ID)).await;
+
+        assert_eq!(capability.unwrap(), Capability::Resumable);
+    }
+
+    #[tokio::test]
+    async fn a_missing_native_session_file_is_not_resumable() {
+        let data = tempfile::tempdir().unwrap();
+        let profile = data.path().join("profile");
+        store_native_session(&profile, WORK_DIR, "other-session");
+        let adapter = adapter(data.path(), &[]);
+
+        let missing = adapter.resume_capability(&session(Some(&profile), Some(WORK_DIR), SESSION_ID)).await;
+        let other_dir = adapter.resume_capability(&session(Some(&profile), Some(r"C:\work\other"), "other-session")).await;
+
+        assert_eq!(missing.unwrap(), Capability::NotResumable);
+        assert_eq!(other_dir.unwrap(), Capability::NotResumable, "原生 Session 依工作目錄分開存放");
+    }
+
+    #[tokio::test]
+    async fn without_the_account_or_working_directory_or_a_readable_projects_directory_resumability_is_unknown() {
+        let data = tempfile::tempdir().unwrap();
+        let profile = data.path().join("profile");
+        store_native_session(&profile, WORK_DIR, SESSION_ID);
+        let adapter = adapter(data.path(), &[]);
+
+        for unknown in [
+            session(None, Some(WORK_DIR), SESSION_ID),
+            session(Some(&profile), None, SESSION_ID),
+            session(Some(&data.path().join("no-such-profile")), Some(WORK_DIR), SESSION_ID),
+        ] {
+            assert_eq!(adapter.resume_capability(&unknown).await.unwrap(), Capability::Unknown, "{unknown:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_native_session_id_that_is_not_a_plain_identifier_is_never_resumable() {
+        let data = tempfile::tempdir().unwrap();
+        let profile = data.path().join("profile");
+        store_native_session(&profile, WORK_DIR, SESSION_ID);
+        // 逃逸目標：若把識別直接接進路徑，這些檔案都「存在」
+        std::fs::write(profile.join("projects").join("escape.jsonl"), "{}\n").unwrap();
+        let outside = data.path().join("outside.jsonl");
+        std::fs::write(&outside, "{}\n").unwrap();
+        let absolute = outside.with_extension("").to_string_lossy().into_owned();
+        let adapter = adapter(data.path(), &[]);
+
+        for id in ["../escape", r"..\escape", "..", "", "a/b", r"C:\x", "C:escape", &absolute, "326f0edb.jsonl"] {
+            let capability = adapter.resume_capability(&session(Some(&profile), Some(WORK_DIR), id)).await.unwrap();
+            assert_eq!(capability, Capability::NotResumable, "{id:?}");
+        }
+    }
+
+    /// `--resume` 不存在的原生 Session（2.1.307 實測）：沒有 `system/init`，只有一行失敗的 `result`。
+    #[test]
+    fn resuming_a_missing_native_session_ends_the_run_as_failed() {
+        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"session_id":"326f0edb-57c5-40e9-8560-99ae95e9027e"}"#;
+
+        assert_eq!(
+            parse_stream_line(line),
+            [AdapterEvent::Error { message: "error_during_execution".into() }, AdapterEvent::Exited { success: false }]
         );
     }
 

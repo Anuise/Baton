@@ -12,9 +12,10 @@ Runtime harness（spec D-04 第 1 層）用 `FakeAgentAdapter` 取代真實的 C
 
 | 情境 | 條款 |
 | --- | --- |
-| 正常完成（Prompt：只回覆 OK） | 第一個非 heartbeat 事件是帶原生 Session 識別的 `Started`；同一個 Run 只回報一個原生 Session；回覆以 `Message` 交出；結束前以 `UsageReported` 回報用量（token 數 > 0）；沒有 `Error`；以恰好一個 `Exited { success: true }` 結尾 |
+| 正常完成（Prompt：只回覆 OK） | 第一個非 heartbeat、非 `Transcript` 的事件是帶原生 Session 識別的 `Started`；同一個 Run 只回報一個原生 Session；回覆以 `Message` 交出；結束前以 `UsageReported` 回報用量（token 數 > 0）；沒有 `Error`；以恰好一個 `Exited { success: true }` 結尾 |
 | 不存在的模型（`--model baton-contract-no-such-model`） | 同樣先回報唯一的原生 Session；結束前交出非空的 `Error`；以恰好一個 `Exited { success: false }` 結尾 |
-| 啟動指令 | 同一個 `RunSpec` 永遠得到同一個 `SpawnSpec`（Runtime 重建後據此找回程序）；`command_id` 相同；Prompt 不放在指令列上 |
+| 啟動指令 | 同一個 `RunSpec` 永遠得到同一個 `SpawnSpec`（Runtime 重建後據此找回程序）；`command_id` 相同；Prompt 不放在指令列上；`resume_native_session_id` 有值時帶 `--resume <原生識別>`，沒有時不帶 |
+| 對話紀錄（兩個執行情境） | `Transcript` 的位置從 1 起連續遞增（fake 不送對話紀錄）；replay 另外檢查每個非空白的錄製行依序成為一筆，內容是原始的行 |
 
 另外兩個只在 live 執行的驗證（對應 spec 的 Validation Required）：
 
@@ -65,9 +66,26 @@ powershell -NoProfile -File scripts/with-msvc.ps1 cargo test -p baton-harness --
 - `rate_limit_event` 的 `rate_limit_info` 帶 `status`（`allowed`、`allowed_warning`）、`rateLimitType`（`five_hour`、`seven_day`）、`resetsAt`（秒）、可能有 `utilization`，以及 `unifiedWindows`（每個視窗的 `utilization` 與 `resetsAt`）。
 - 權限轉接：CLI 以 MCP `tools/call` 呼叫 `permission_prompt`，參數是 `tool_name`、`input`（例如 Bash 的 `command` 與 `description`）與 `tool_use_id`。回覆 `{"behavior":"deny","message":…,"status":"waiting_decision","decision_request_id":…}` 被接受（額外欄位不影響），`message` 會交給模型；被拒絕的工具沒有執行，`result.permission_denials` 列出被拒絕的呼叫。回覆 `allow` 時 `updatedInput` 是否可以省略尚未實測（Runtime 一律帶上）。
 
+### 原生 Session 的接續與對話紀錄（票 15）
+
+2026-10-22 以 Claude Code 2.1.307（Work-3 帳號）手動實測：
+
+- `claude -p --output-format stream-json --verbose --resume <id>`：`system/init` 與 `result` 的 `session_id` 維持 `<id>`，對話內容延續。
+- 原生 Session 存放在 `{CLAUDE_CONFIG_DIR}\projects\{目錄名}\{id}.jsonl`，目錄名是工作目錄把每個不是 ASCII 英數字的字元換成 `-`。例：`C:\Users\User\AppData\Local\Temp\resume-probe` → `C--Users-User-AppData-Local-Temp-resume-probe`。
+- `--resume` 不存在的 id：stream 只有一行 `result`（`"subtype":"error_during_execution","is_error":true`，`session_id` 是要求的 id），沒有 `system/init`；標準錯誤為 `No conversation found with session ID: <id>`，結束碼 1。
+
+`ClaudeCodeAdapter` 的對應方式：
+
+| 項目 | 做法 |
+| --- | --- |
+| 啟動參數 | `RunSpec.resume_native_session_id` 有值時在其他參數之後加上 `--resume <id>`，其餘參數不變 |
+| `resume_capability` | 依上面的規則組出 Session 檔案路徑：檔案存在 → `Resumable`；`projects` 目錄可讀但沒有這個檔案 → `NotResumable`；`config_dir` 或 `working_dir` 為 `None`、`projects` 目錄讀不到（含不存在）→ `Unknown`。原生識別只接受英數字、`-`、`_`，其他（路徑分隔字元、`..`、`:` 等）一律 `NotResumable`，不拿來組路徑。目錄名超過 200 字元時 Claude Code 的命名規則未實測，回 `Unknown` |
+| 接續失敗 | 不存在的 Session 只產生 `Error`（`error_during_execution`）與 `Exited { success: false }`，**沒有 `Started`**；「No conversation found」只在 `stderr.log` |
+| 對話紀錄 | stream 檔案的每個非空白行，在它解析出的事件之前先送 `Transcript { position, line }`：`position` 是它在 stream 檔案中是第幾個非空白行（從 1 起），`line` 是原始內容（去掉結尾的換行與 `\r`；不遮蔽秘密，由 Runtime 匯入時遮蔽）。重新接上時從頭重播，同一行得到同一個位置 |
+
 ### 尚未驗證（Validation Required）
 
 - 撞到限制時 `rate_limit_event`（`rejected`）與 `result` 的實際形狀（屬額度觀測與突然限流的票）。
-- 原生 Session 的 resume（屬 Session 持久化與 resume 的票）；Adapter 的 `resume_capability` 目前一律回報 `Unknown`。
+- 接續原生 Session 尚未納入 live 契約（以上為手動實測）；工作目錄很長（目錄名超過 200 字元）時的 Session 目錄命名。
 - `CLAUDE_CONFIG_DIR` 中的使用者層 `CLAUDE.md` 是否仍被載入、快照設定檔的熱重載（spec D-09）。Baton 的 Profile 目錄只放登入狀態，實務上沒有可合併的內容，但尚未以刻意放入的檔案實測。
 - 權限轉接回覆 `allow` 的路徑（需要真實 Runtime 的授權判定，屬裁定中心與授權的後續驗證）。
