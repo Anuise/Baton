@@ -86,3 +86,4 @@
 | R082-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:28 | 2026-10-22 18:34 | DONE（b92b816），但票 20 隨後合併，需再整合 |
 | R083-21-impl | 21 | impl | Work-8 | 2026-10-22 18:34 | | |
 | R084-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:34 | 2026-10-22 18:41 | DONE，依 AI-109 直接合併 |
+| R085-24-integrate | 24 | integrate | Work-3 | 2026-10-22 18:41 | | |
