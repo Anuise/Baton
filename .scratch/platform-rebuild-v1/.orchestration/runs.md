@@ -80,6 +80,7 @@
 | R076-20-verify | 20 | verify | Work-8 | 2026-10-22 18:12 | 2026-10-22 18:19 | 功能項全 PASS，只缺整合；等 38 合併後再整合，避免 migration 20 撞號 |
 | R077-15-impl | 15 | impl | Work-3 | 2026-10-22 18:18 | | |
 | R078-38-integrate | 38 | integrate | Work-9 | 2026-10-22 18:19 | 2026-10-22 18:24 | DONE，依 AI-109 直接合併 |
-| R079-35-verify | 35 | verify | Work-3 | 2026-10-22 18:22 | | |
+| R079-35-verify | 35 | verify | Work-3 | 2026-10-22 18:22 | 2026-10-22 18:28 | PASS（基底早於票 38，依 AI-109 整合後合併） |
 | R080-20-integrate | 20 | integrate | Work-8 | 2026-10-22 18:24 | | |
 | R081-24-verify | 24 | verify | Work-8 | 2026-10-22 18:28 | | |
+| R082-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:28 | | |
