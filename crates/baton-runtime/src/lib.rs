@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use baton_api::ApiState;
 use baton_ports::Ports;
-use baton_store::{Store, StoreError};
+use baton_store::{Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
@@ -60,11 +60,13 @@ pub struct RuntimeOptions {
     pub background_backup: bool,
     /// 要求 Run 的程序停止時給它的寬限期（spec D-11 的 30 秒）；逾時強制終止整個程序樹。
     pub stop_grace: Duration,
+    /// 是否嘗試使用全文檢索（spec D-26）。關閉時視同 FTS5 不可用：知識搜尋退回 LIKE 並標示降級（測試降級情境用）。
+    pub full_text_search: bool,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        Self { background_supervisor: true, background_backup: true, stop_grace: supervisor::DEFAULT_STOP_GRACE }
+        Self { background_supervisor: true, background_backup: true, stop_grace: supervisor::DEFAULT_STOP_GRACE, full_text_search: true }
     }
 }
 
@@ -88,7 +90,8 @@ impl Runtime {
             return Err(RuntimeError::NotLoopback(config.bind));
         }
         let started_at = ports.clock.now();
-        let store = Store::open(&config.data_dir, started_at).await?;
+        let store_options = StoreOptions { full_text_search: options.full_text_search };
+        let store = Store::open_with(&config.data_dir, started_at, store_options).await?;
         let boot_count = store.record_boot(started_at).await?;
         let log = log::open_log(&config.data_dir, ports.clock.clone()).map_err(RuntimeError::Log)?;
 
@@ -102,6 +105,9 @@ impl Runtime {
         (log)(&format!("Runtime 啟動：第 {boot_count} 次，監聽 {addr}{}，桌面憑證已輪替", {
             addr_v6.map(|a| format!(" 與 {a}")).unwrap_or_default()
         }));
+        if store.search_mode() == baton_domain::knowledge::SearchMode::LikeFallback {
+            (log)("全文檢索（FTS5 + trigram）無法使用，知識搜尋已降級為逐筆 LIKE 比對");
+        }
 
         let (stop_tx, stop_rx) = watch::channel(false);
         let supervisor_wake = Arc::new(Notify::new());

@@ -1432,7 +1432,88 @@
 - 影響：以本票分支（合併前）建立過的開發資料庫需刪除重建。
 - 審閱：未審
 
-### AI-159：備份存放在資料目錄的 `backups/`，成果以雜湊命名的副本共用；不新增 migration
+### AI-159：知識條目與教訓共用一張 `knowledge_entry` 表；內容版本追加式、條目不可刪除
+- 重要度：中
+- 時間／階段：2026-10-22，票 37 實作
+- 決策：票面的「knowledge_entries 與 lessons」實作為 migration 14 `knowledge` 的兩張表：`knowledge_entry`（決策 `decision`、教訓 `lesson`、一般知識 `fact` 以 `kind` 區分；保存範圍、可信狀態、來源、有效期間、內容版本號、聚合版本 `revision`、取代關係、撤銷／淘汰原因與目前內容的檢索文字 `search_text`）與追加式的 `knowledge_entry_version`（每個內容版本一列，觸發器禁止更新與刪除）。教訓特有的「觸發條件、根因或待驗假說、解法」放在內容 JSON 的 `lesson` 欄（只有教訓有）。`knowledge_entry` 有觸發器禁止刪除。變更歷史取自既有的追加式 `event` 表（`aggregate_type = 'knowledge_entry'`）。
+- 理由：GLOSSARY 已定義「Decision 與 Lesson 都是 Knowledge Entry 的特定形態」；狀態、範圍、有效期間、版本、取代關係與搜尋對三種形態完全相同，拆兩張表只會複製一整套程式與索引。仿照 Task 契約（`task` + 追加式 `task_contract_version`）的做法，歷史不需要另一張稽核表。
+- 替代方案：`knowledge_entry` 與 `lesson` 兩張表（教訓欄位成為獨立欄位，Guard 查詢較直接，但版本、狀態、搜尋要做兩份）；每個版本一列、以 lineage 串起（查目前狀態要取最大版本，狀態變更也要複製內容）。
+- 影響：票 38（Guard）以條目 id 參照教訓；若 Guard 需要結構化的教訓欄位，可在 `lesson` JSON 內擴充或另加欄位。整合 rebuild/v1 時 migration 由第 12 個順延為第 14 個（見 AI-165），第二次整合再順延為第 16 個（見 AI-166），第三次整合再順延為第 17 個（見 AI-167）。
+- 審閱：未審
+
+### AI-160：驗收條件中的「決策」以知識分頁的決策條目滿足；裁定中心的正式 Decision 尚未納入搜尋
+- 重要度：中
+- 時間／階段：2026-10-22，票 37 實作
+- 決策：「繁體中文兩字以上關鍵字可搜到決策與教訓」的「決策」，指 `kind = decision` 的知識條目（使用者在知識分頁記錄的已定案判斷與理由，可指定取代舊決策）。票 22／35 的裁定（Decision Request 經人工裁定產生的正式 Decision）目前不在本分支，所以沒有被寫入知識索引。
+- 理由：本票只依賴票 12，票 22 仍在平行實作中，無法引用它的資料表；知識條目本身已具備 Decision 詞條要求的來源、理由、範圍、有效期間與取代關係。
+- 替代方案：等待票 22 合併後再做（阻塞本票）；在本票預先建立裁定的資料表（與票 22 衝突）。
+- 影響：票 35（完整裁定中心）或之後的整合，應在保存正式 Decision 的同一個交易中建立對應的 `kind = decision` 知識條目（來源指向該 Decision），才能用同一個搜尋找到裁定；在那之前，裁定中心的 Decision 搜不到。
+- 審閱：未審
+
+### AI-161：`record_lesson_candidate` 暫時開放給所有 Agent 憑證；不論誰提交都只能是候選教訓
+- 重要度：高
+- 時間／階段：2026-10-22，票 37 實作
+- 決策：spec D-05 把 `record_lesson_candidate` 列為 Controller 專屬工具，但目前 Agent 憑證只有一種角色（Worker Run，見 AI-88；Controller 憑證屬票 16、17），所以本票讓任何 Agent 憑證都能呼叫。限制一律由 Runtime 決定、請求無法改變：(1) 只會建立 `kind = lesson`、`status = candidate` 的條目（請求帶 `status`、`kind` 會被忽略；Domain 的 `knowledge::create` 依來源決定狀態，Agent 來源只能是候選教訓）；(2) 範圍只能是憑證所屬 Run 的 Task（預設）、它的 Goal 或它的 Workspace，以 `scope` 字串指定、不接受任何識別，全域被拒絕；(3) Run 必須仍是寫入所有者，否則 409 `run_report_stale`、不寫入；(4) Agent 憑證不能呼叫知識分頁的管理 API（確認、修正、撤銷、建立都需要桌面憑證）。`search_knowledge` 同樣需要 Run 仍是寫入所有者（否則 401 `credential_revoked`），只回傳這個 Run 適用範圍內有效的條目。
+- 理由：D-28 的核心是「候選須使用者確認才升為已驗證」，這由狀態規則保證，與提交者是 Controller 或 Worker 無關；讓 Worker 也能提交候選不會讓任何教訓繞過確認，而等 Controller 憑證出現才做工具會讓本票無法以真實 API 驗證。
+- 替代方案：本票不提供 Agent 工具，只做 Domain 與管理 API（無法驗證「Controller 只能提交候選」）；以新的憑證角色模擬 Controller（會搶先決定票 16、17 的角色模型）。
+- 影響：票 16／17 建立 Controller 憑證角色時，應把 `record_lesson_candidate` 限制為 Controller 角色（Worker 呼叫改回 403），或決定保留 Worker 提交候選的能力並更新本條目。在那之前 Worker 可以提交候選教訓，知識分頁的候選區會看到來源 Run。
+- 審閱：未審
+
+### AI-162：可信狀態與轉換規則、有效的定義、取代關係與並行修改校驗
+- 重要度：中
+- 時間／階段：2026-10-22，票 37 實作
+- 決策：可信狀態五種：候選 `candidate`、已驗證 `verified`、已撤銷 `revoked`、已淘汰 `retired`、已被取代 `superseded`。狀態由來源決定：使用者在知識分頁建立的直接是已驗證，Agent 提交的是候選。轉換：確認（候選→已驗證）；修正（候選或已驗證，追加新內容版本、狀態不變，只改有效期限時不追加版本）；撤銷（候選或已驗證→已撤銷，表示內容是錯的，需原因；拒絕候選也用撤銷）；淘汰（只限已驗證→已淘汰，表示曾經正確但已不適用，需原因）；取代（使用者建立新條目時指定 `supersedes`，被取代者必須是同種類且已驗證，同一交易轉為已被取代並互相連結）。撤銷、淘汰、被取代都是終態。**有效 = 已驗證且現在在有效期間內**（`valid_from ≤ now < valid_until`），只有有效條目會被 Agent 取得或出現在預設搜尋結果。每個操作都必須帶 `expected_revision`，不符回 409 `knowledge_revision_conflict`。
+- 理由：票面要求「可修正、撤銷、淘汰並保留歷史」；把「錯的」與「過時的」分開，事後追查教訓重犯率（spec #93）時才分得出是教訓錯了還是環境變了。expected_revision 沿用裁定的校驗方式（issue §6），避免兩個畫面互相覆蓋。
+- 替代方案：確認時允許同時編輯內容（先修正再確認即可達成）；淘汰也允許用於候選（與撤銷重疊）；修正後回到候選重新確認（使用者自己修正的內容不需要再確認自己）。
+- 影響：過期的已驗證條目仍是「已驗證」，只是不有效；延長期限需透過修正。Agent 提交的候選若被使用者修正，仍保留 Agent 來源。
+- 審閱：未審
+
+### AI-163：全文檢索的實作：每次啟動重建 FTS5 索引；2 字元關鍵字走 LIKE；降級的偵測與顯示
+- 重要度：中
+- 時間／階段：2026-10-22，票 37 實作
+- 決策：(1) FTS5 虛擬表 `knowledge_fts(entry_id UNINDEXED, content, tokenize = 'trigram')` 不放在 migration，而是 Store 每次開啟時建立（不存在時）並從 `knowledge_entry.search_text` 整個重建；建立或重建失敗（FTS5 或 trigram 不可用、schema 較新）就以 LIKE 模式運作。之後的寫入在同一個交易中更新索引。(2) 查詢以空白分詞、全部都要出現（AND）；每個詞至少 2 個字元（單字元回 400 `knowledge_query_invalid`），最多 8 個詞、200 字元。FTS5 可用時，3 個字元以上的詞以片語 MATCH 查 trigram 索引；**2 個字元的詞一律以 LIKE 比對 `search_text`**（trigram 索引無法涵蓋少於 3 字元的詞）；FTS5 不可用時全部以 LIKE（`%`、`_`、`\` 已跳脫）。(3) 結果依最後更新時間由新到舊，最多 100 筆，不做相關度排序。(4) 降級顯示：列表與 `search_knowledge` 的回應帶 `search_mode`（`full_text`／`like_fallback`），Runtime 啟動時在日誌記一行降級訊息，知識分頁顯示降級提示。(5) 測試以 `RuntimeOptions.full_text_search = false`（Store 的 `StoreOptions`、harness 的 `without_full_text_search`／`set_full_text_search`）重現「FTS5 不可用」，因為 bundled SQLite 一定有 FTS5。
+- 理由：每次重建讓索引永遠是可丟棄的衍生資料：降級期間寫入的條目、備份還原或手動修改資料庫之後都不會漏，條目數量在個人使用規模下重建成本可忽略。中文常見的兩字詞（「快取」「部署」）必須搜得到，trigram 對它們無能為力，LIKE 結果相同只是需要逐筆比對。
+- 替代方案：FTS5 表放進 migration（FTS5 不可用時 migration 失敗、Runtime 無法啟動，違反「退回 LIKE」）；外部內容表（external content）＋觸發器維護（觸發器依賴 FTS5 存在，降級時寫入會失敗）；以 bigram 自訂 tokenizer 支援兩字詞（需要載入擴充，bundled 不提供）；bm25 排序（LIKE 模式無法對應，兩種模式結果順序會不同）。
+- 影響：條目數量很大時，啟動重建與 2 字元的 LIKE 掃描會變慢，需要時再改為增量或加上 bigram 索引。搜尋沒有相關度排序。
+- 審閱：未審
+
+### AI-164：知識 API 與 Agent 工具的形狀與限制
+- 重要度：低
+- 時間／階段：2026-10-22，票 37 實作
+- 決策：管理 API（桌面憑證）：`GET /api/v1/knowledge?workspace_id=&q=&include_inactive=`（省略 `workspace_id` 時只列全域；`include_inactive=true` 時連同無效條目一起回傳，供「顯示歷史」與候選區使用）、`POST /api/v1/knowledge`、`GET /api/v1/knowledge/{id}`（目前狀態、全部內容版本、變更歷史）、`POST …/{id}/confirm|correct|revoke|retire`。範圍由 Runtime 核對存在與一致性，Task 範圍的 Goal 一律取自 Task。Agent 工具 `record_lesson_candidate`、`search_knowledge` 放在 `/agent/v1/tools/` 之下（AI-88）。Agent 看得到的範圍：全域、它的 Workspace、它的 Goal、它的 Task；知識分頁看得到：全域與該 Workspace 內所有範圍。限制：標題 200、內文 10,000、教訓各欄 2,000、標籤 20 個各 50、證據 20 項各 1,000、原因與修正說明 1,000 字元。
+- 理由：沿用既有管理 API 與 Agent API 的分流與錯誤代碼慣例；數值是預設值，改起來便宜。
+- 替代方案：知識 API 掛在 `/api/v1/workspaces/{id}/knowledge` 下（全域條目沒有自然的位置）；搜尋改用 POST 本文（查詢字串已足夠，中文由用戶端 URL 編碼）。
+- 影響：知識分頁目前沒有 Goal／Task 範圍的建立入口（API 支援），也不能在 UI 修改有效期間（修正時沿用原值）；需要時由後續票補上。Context Builder（票 39）載入教訓時應沿用 `search_knowledge` 的「適用範圍 + 有效」判定。
+- 審閱：未審
+
+### AI-165：票 37 整合 rebuild/v1（票 08、27）：migration 與 AI 編號順延、錯誤代碼輔助函式合併
+- 重要度：低
+- 時間／階段：2026-10-22，票 37 實作（結束前合併 rebuild/v1）
+- 決策：票 08（`shared_settings_version`，第 12 個）與票 27（`quota`，第 13 個）已先合併，本票的 migration `knowledge` 由第 12 個順延為第 14 個；兩者互不參照（`knowledge_entry` 只參照 `workspace`、`goal`、`task` 與自己），先後不影響 schema。本票的 AI 條目由 AI-110～AI-115 順延為 AI-128～AI-133（第二次整合再順延為 AI-148～AI-153，見 AI-166；第三次整合再順延為 AI-159～AI-164，見 AI-167），內容不變（程式碼與文件沒有引用這些編號）。Web UI 原本新增的 `hasErrorCode` 與票 08 的 `errorCode` 功能重疊，改用整合分支的 `errorCode`，刪除 `hasErrorCode`。其餘衝突（API 路由與匯出、Tauri 指令清單、`AppClient`、開發指南的目錄表與情境測試清單）一律兩邊都保留。
+- 理由：整合分支已有的 migration 與 AI 編號不可變動（AI-108 同樣做法）；兩個做同一件事的輔助函式只留一個。
+- 替代方案：保留兩個輔助函式（重複且判斷規則不同：`hasErrorCode` 以子字串比對，`errorCode` 只認訊息開頭的代碼格式）。
+- 影響：以本票分支（合併前）建立過的開發資料庫，其 `schema_migrations` 第 12 筆是 `knowledge`，與整合後不一致，需刪除重建；尚無發布版本，不提供轉換。
+- 審閱：未審
+
+### AI-166：票 37 整合：第二次整合 rebuild/v1（票 18、22）：migration 第 16 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 37 整合（R056-37-integrate）
+- 決策：rebuild/v1 已合併票 18（`message_and_delivery`，第 14 個 migration）與票 22（`decision_request_and_decision`，第 15 個），本票的 `knowledge` 順延為第 16 個 migration，排在兩者之後；開發指南的「migration 14 `knowledge`」同步改為 16。整合分支的 AI 編號已用到 AI-147（AI-128～AI-134 為票 18，AI-137 為主控，AI-138～AI-147 為票 22），本票的決策由 AI-128～AI-134 順延為 AI-148～AI-154，移到 AI-147 之後，內容不變，只把條目間的互相引用改成新編號，並在 AI-148、AI-154 的歷史說明加註再次順延；票 16 票面引用的「票 37 的 AI-130」改為 AI-150。（本 run 先合併票 18 時曾暫編為 AI-138～AI-145、migration 第 15 個；合併過程中 rebuild/v1 又合併了票 22，所以再順延一次，中間的 merge commit 保留在歷史中。）衝突合併方式：Agent 工具變成 11 個（原有 4 個＋票 22 的 `request_decision`、`permission_prompt`＋票 18 的 `send_message`、`read_inbox`＋`register_artifact`＋本票的 `record_lesson_candidate`、`search_knowledge`），順序依 shim 工具定義，shim 的已知工具清單、情境測試的名稱斷言與 API 路由兩邊保留；shim 情境測試改名為 `tools_list_has_the_eleven_tools_with_their_required_fields`，stdio 測試的工具數改為 11，各票的 schema 斷言都保留。Domain、Store、API、`baton-client`、Tauri 的匯入與指令兩邊保留；Web 的 `Opened.view` 同時有 `decisions` 與 `knowledge`，側欄依序顯示「裁定」「成果與驗證」「知識」按鈕；開發指南的目錄表與情境測試清單以詞為單位合併，兩邊新增的項目都保留。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。知識表只參照 `workspace`、`goal`、`task` 與自己，與訊息、裁定的資料表互不相依，先後不影響 schema。
+- 替代方案：本票的 AI 編號用整合分支空著的 AI-135、AI-136（其他平行票的分支已占用這兩個編號，之後整合還會再撞號）。
+- 影響：以本票分支（先前任一次整合後）建立過的開發資料庫，`schema_migrations` 中 `knowledge` 的版本號與整合後不一致，需刪除重建。之後再新增 Agent 工具，要同時更新 shim 的兩個工具數量測試。第三次整合後本票條目再順延為 AI-159～AI-166、migration 為第 17 個（見 AI-167），本條目內的編號是當時的編號。
+- 審閱：未審
+
+### AI-167：票 37 整合：第三次整合 rebuild/v1（票 13）：migration 第 17 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 37 整合（R061-37-integrate）
+- 決策：rebuild/v1 已合併票 13（`task_verification`，第 16 個 migration，AI-148～AI-158），本票的 `knowledge` 順延為第 17 個 migration，排在其後；Store 的 migration 註解與開發指南的「migration 16 `knowledge`」同步改為 17。本票的條目由 AI-148～AI-155 順延為 AI-159～AI-166，移到整合分支的 AI-158 之後，內容不變，只把條目間互相引用的編號改成新編號，並在 AI-159（原 AI-148）、AI-165（原 AI-154）、AI-166（原 AI-155）的歷史說明加註再次順延；票 16 票面引用的「票 37 的 AI-150」改為 AI-161。自動合併時原 AI-155 的 `- 審閱：未審` 行與票 13 的 AI-148 標題相鄰而被吃掉，重建檔案時補回。衝突合併方式：API 的模組說明兩邊端點都列出；Store 的 migration 先放票 13 再放本票；Tauri 的 `baton_api` 匯入兩邊保留；`runtimeClient.test.ts` 的知識測試與驗證測試都保留；開發指南的 crate 表以整合分支的列為準，再加回本票的 `knowledge.rs`、`knowledge_entry`／`knowledge_fts`、`/api/v1/knowledge`、Agent 工具與 `RuntimeOptions.full_text_search`。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布。知識表只參照 `workspace`、`goal`、`task` 與自己，驗證紀錄表只參照 `workspace`、`task`、`run`，互不相依，先後不影響 schema。
+- 替代方案：把本票的 migration 插在驗證紀錄表之前（會改動整合分支已存在的版本號）。
+- 影響：以本票分支（先前任一次整合後）建立過的開發資料庫，`schema_migrations` 中 `knowledge` 的版本號與整合後不一致，需刪除重建。
+- 審閱：未審
+
+### AI-168：備份存放在資料目錄的 `backups/`，成果以雜湊命名的副本共用；不新增 migration
 - 重要度：中
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：每份備份是 `backups/<13 位數毫秒>-<觸發原因>/`，內含 Online Backup API 的快照 `control.sqlite` 與 `manifest.json`（觸發原因、時間、schema 版本、快照雜湊、快照中登記的全部成果版本）；成果檔案複製成 `backups/blobs/<SHA-256>`，多份備份共用；最新一次演練結果寫在 `backups/drill.json`。備份清單與演練紀錄都只存在檔案系統，不進控制資料庫，所以本票沒有 migration。備份引擎放在 `baton-store`（需要 SQLite 連線），直接用 `std::fs`，不經 WorkspaceFs Port。
@@ -1441,7 +1522,7 @@
 - 影響：備份目錄可直接整個複製到別處保存；harness 以真實檔案系統驗證。成果副本只在內容雜湊相符時沿用，損毀的副本會在下一次備份時以成果檔案重寫。
 - 審閱：未審
 
-### AI-160：備份不含任何憑證與登入資料：只備份控制資料庫與成果，並清空 `credential` 表
+### AI-169：備份不含任何憑證與登入資料：只備份控制資料庫與成果，並清空 `credential` 表
 - 重要度：高
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：備份只包含控制資料庫快照與被登記的成果檔案。Profile 的原生設定目錄（`profiles/`，含 `.credentials.json`）、DPAPI 保護的桌面憑證檔（`auth/`）、Run 設定快照（`run-settings/`）與日誌都不在備份內。快照中的 `credential` 表（token 雜湊與範圍）在快照上清空並 VACUUM，被刪除的內容不殘留在空閒頁面。情境測試逐位元組掃描備份目錄，確認原生登入 token、登入檔內容、桌面與 Agent 憑證的原文與雜湊、憑證檔內容都不存在。
@@ -1450,7 +1531,7 @@
 - 影響：還原後每個 Profile 都要重新核對；若原本的 Profile 目錄不見了，需要重新登入。舊 Run 的 Agent 憑證在還原後一律 401。
 - 審閱：未審
 
-### AI-161：還原只寫入空目錄；備份當下尚未結束的 Run 在還原時一律結束，派工佇列保留
+### AI-170：還原只寫入空目錄；備份當下尚未結束的 Run 在還原時一律結束，派工佇列保留
 - 重要度：高
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：`restore_backup`（與 `baton-runtime restore <備份目錄> <目標資料目錄>`）只接受空目錄或不存在的目標。資料庫完整時，還原會套用 migration，再把狀態是 starting／running 的 Run 以 `Interrupt` 標為中斷（原因以 `restored_from_backup` 開頭）、queued 的 Run 以 `RequestCancel` 取消（Domain 的狀態機不允許 queued → interrupted，沿用既有的「尚未啟動立即取消」）；兩者都釋放寫入所有權、Outbox 視為處理完畢、Task 回到 ready。派工佇列（`dispatch_request`）不動。
@@ -1459,7 +1540,7 @@
 - 影響：還原後 Runtime 啟動時，排隊中的 Task 會照常被 Scheduler 派出新的 Run；還原時被取消的 queued Run，事件原因是 `cancelled_before_launch`，看不出是還原造成的（Run 的數量記在演練結果的 `interrupted_runs`）。
 - 審閱：未審
 
-### AI-162：觸發規則的解讀：每日 = 距上一份滿 24 小時；每個正式裁定都是「重要裁定」；一小時合併 = 距上一份滿一小時才執行
+### AI-171：觸發規則的解讀：每日 = 距上一份滿 24 小時；每個正式裁定都是「重要裁定」；一小時合併 = 距上一份滿一小時才執行
 - 重要度：中
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：每日備份在距離上一份備份（不論原因）滿 24 小時時建立。每個正式裁定（`POST …/decisions/{id}/answer` 成功，含權限提示的裁定與冪等重送）都要求一次備份；距離上一份備份已滿一小時就在下一次處理時立刻備份，否則等到滿一小時，期間的要求合併成一份。Stage 完成也走同一個入口（`BackupScheduler::request_milestone_backup`），但 Stage 在第四階段才有，目前沒有呼叫端。待處理的要求只存在記憶體。背景迴圈每分鐘檢查一次。
@@ -1468,7 +1549,7 @@
 - 影響：Runtime 在要求後一小時內重啟，那次裁定最晚要等到下一次每日備份才被備份。
 - 審閱：未審
 
-### AI-163：保留規則的解讀：7 個有備份的 UTC 日子與 4 個有備份的週各留最新一份，另留最新一份 migration 前備份
+### AI-172：保留規則的解讀：7 個有備份的 UTC 日子與 4 個有備份的週各留最新一份，另留最新一份 migration 前備份
 - 重要度：中
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：每次備份後套用保留規則：由新到舊，最近 7 個「有備份的 UTC 日子」各留當天最新的一份（每日），最近 4 個「有備份的週」（UTC，星期一開始）各留該週最新的一份（每週），另外永遠留下最新一份 migration 前的備份；其餘刪除，沒有被保留備份引用的成果副本一起刪除。同一天的多份備份（例如每日與重要裁定）只留最新那份。
@@ -1477,7 +1558,7 @@
 - 影響：備份總數最多約 12 份（7＋4，與 migration 前那份可能重疊）。同一天較早的重要裁定備份會被當天較晚的備份取代。
 - 審閱：未審
 
-### AI-164：migration 前的備份失敗時不套用 migration，Runtime 拒絕啟動
+### AI-173：migration 前的備份失敗時不套用 migration，Runtime 拒絕啟動
 - 重要度：中
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：`Store::open` 發現既有資料庫需要套用 migration（已套用版本 > 0 且 < 程式支援的版本）時，先以寫入連線建立 migration 前的備份；備份失敗就回報 `StoreError::PreMigrationBackup`，不套用任何 migration，Runtime 啟動失敗。新建的資料庫與已是最新版本的資料庫不備份；比程式新的資料庫照舊由 `IncompatibleSchema` 處理。
@@ -1486,7 +1567,7 @@
 - 影響：磁碟空間不足時，新版程式在使用者騰出空間之前無法啟動。
 - 審閱：未審
 
-### AI-165：還原演練的做法：第一份備份後立即演練、之後每週；演練最新備份；結果只保留最新一次
+### AI-174：還原演練的做法：第一份備份後立即演練、之後每週；演練最新備份；結果只保留最新一次
 - 重要度：低
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：演練從沒做過、或上次演練已滿 7 天時進行（所以第一份備份之後的第一次處理就會演練）。演練把最新的備份還原到 `backups/.drill/`（與正式資料目錄隔離，前後都整個刪除），核對五項：還原（快照雜湊與 manifest 相符）、`integrity_check`、`foreign_key_check`、成果檔案大小與雜湊、資料庫登記的成果版本與 manifest 一一對應；任何一項沒過就是不通過。結果寫進 `drill.json`，只保留最新一次，設定頁顯示。成果檔案在備份時已缺少或損毀，備份照常完成，由演練回報成果雜湊不一致。
@@ -1495,20 +1576,22 @@
 - 影響：每週會有一次完整複製最新備份的 I/O；演練歷史看不到。
 - 審閱：未審
 
-### AI-166：「備份期間暫停成果清理」目前沒有可暫停的對象；異地副本與還原 UI 不在本票
+### AI-175：「備份期間暫停成果清理」目前沒有可暫停的對象；異地副本與還原 UI 不在本票
 - 重要度：低
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：目前沒有任何會刪除成果檔案的機制（票 12 明定未登記檔案不自動刪除），所以本票沒有實作暫停的開關；備份排程本身以互斥鎖依序進行，保留規則刪除舊備份時不會與備份或演練並行。日後新增成果清理時，必須與 `BackupScheduler::tick` 互斥。spec D-18 的「使用者另外指定的額外備份目錄」沒有列在票面，本票不做；還原只有 `baton-runtime restore` 指令，設定頁只顯示狀態，沒有操作按鈕。
 - 理由：為不存在的清理機制先做暫停開關是推測性的功能；異地副本與還原 UI 都不在票面的驗收條件內。
 - 替代方案：先在 Store 加一個「備份中」旗標給未來的清理機制使用；設定頁加「立即備份」「立即演練」「還原」按鈕。
 - 影響：使用者需要在命令列還原；做成果清理的票要記得處理與備份的互斥。
-### AI-167：票 40 整合 rebuild/v1（票 22、13）：AI 編號順延為 AI-159～AI-166
+- 審閱：未審
+
+### AI-176：票 40 整合 rebuild/v1（票 22、13、37）：AI 編號順延為 AI-168～AI-175
 - 重要度：低
 - 時間／階段：2026-10-22，票 40 實作
-- 決策：實作期間 rebuild/v1 先後合入票 22（AI-138～AI-147）與票 13（AI-148～AI-158），本票原本記為 AI-148～AI-155 的八個條目改為 AI-159～AI-166，內容不變，放在 AI-158 之後。本票沒有 migration，所以沒有 migration 版本需要順延；合併時把裁定中心的正式裁定接上備份要求（AI-162）。
+- 決策：實作期間 rebuild/v1 先後合入票 22（AI-138～AI-147）、票 13（AI-148～AI-158）與票 37（AI-159～AI-167），本票的八個條目改為 AI-168～AI-175，內容不變，放在 AI-167 之後。本票沒有 migration，所以沒有 migration 版本需要順延；整合票 22 後把裁定中心的正式裁定接上備份要求（AI-171）；整合票 37 後 `RuntimeOptions` 同時有 `background_backup` 與 `full_text_search`。
 - 理由：AI 編號只能往後追加，並行的票先合入的保留原編號。
-- 替代方案：保留原編號（會與票 13 的條目重複）。
-- 影響：本票的 commit 訊息中提到的 AI-148～AI-155 指的是改號前的編號。
+- 替代方案：保留原編號（會與已合入的條目重複）。
+- 影響：本票較早的 commit 訊息中提到的 AI-148～AI-155 指的是改號前的編號。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄
