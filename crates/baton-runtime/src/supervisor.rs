@@ -561,14 +561,16 @@ impl Supervisor {
         }
     }
 
-    /// 把恢復事件鏡像給監護（票 32）；這個版本已經寫過就略過。
+    /// 把恢復事件鏡像給監護（票 32）；這個版本已經寫成功過就略過，寫入失敗下一次再寫。
     async fn mirror_recovery(&self, event: &RecoveryEvent) {
         let key = (event.id.clone(), event.version);
         let mut mirrored = self.mirrored.lock().await;
         if mirrored.as_ref() == Some(&key) {
             return;
         }
-        crate::write_recovery_mirror(&self.store, &self.data_dir, &self.ports, &self.log).await;
+        if !crate::write_recovery_mirror(&self.store, &self.data_dir, &self.ports, &self.log).await {
+            return;
+        }
         *mirrored = Some(key);
     }
 
@@ -2140,23 +2142,34 @@ impl Supervisor {
             Ok(executing) => executing,
             Err(error) => return self.note(&format!("無法讀取執行中的 Run：{error}")),
         };
+        // 所有被取消的 Run 同時停止（各自有寬限期）：一個停得慢的 Run 不會讓其他取消排在後面等
+        let mut stopping = FuturesUnordered::new();
         for item in executing {
-            let run = &item.view.run;
+            let run = item.view.run.clone();
             let (true, Some(process)) = (run.cancel_requested_at.is_some(), run.process.as_ref()) else { continue };
             self.ensure_managed(&item).await;
             let identity = identity_of(process);
-            // 停止最長要等寬限期加確認上限；完全退出開始時就不再等，讓出 tick 鎖，這個 Run 改由停止流程處理
-            let mut exiting = self.exiting.subscribe();
-            let result = tokio::select! {
-                result = self.ports.process_control.stop(&identity, self.stop_grace) => result,
+            let process_control = self.ports.process_control.clone();
+            let grace = self.stop_grace;
+            stopping.push(async move {
+                let result = process_control.stop(&identity, grace).await;
+                (run, result)
+            });
+        }
+        // 最長要等寬限期加確認上限；完全退出開始時就不再等，讓出 tick 鎖，還沒停止的 Run 改由停止流程處理
+        let mut exiting = self.exiting.subscribe();
+        loop {
+            let next = tokio::select! {
+                next = stopping.next() => next,
                 _ = exiting.wait_for(|exiting| *exiting) => {
-                    return self.note(&format!("完全退出開始：Run {} 的取消改由停止流程處理", run.id));
+                    return self.note(&format!("完全退出開始：{} 個 Run 的取消改由停止流程處理", stopping.len()));
                 }
             };
+            let Some((run, result)) = next else { return };
             match result {
                 Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
                     self.streams.lock().await.remove(&run.id);
-                    self.apply(run, RunCommand::ConfirmCancelled { run_id: run.id.clone() }).await;
+                    self.apply(&run, RunCommand::ConfirmCancelled { run_id: run.id.clone() }).await;
                 }
                 // 程序還在：保留寫入所有權，下一次 tick 再試；這段期間不會有第二個 writer
                 Ok(StopResult::StillAlive) => self.note(&format!("Run {} 的程序沒有停止，保留寫入所有權並稍後重試", run.id)),

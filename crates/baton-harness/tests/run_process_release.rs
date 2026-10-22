@@ -7,6 +7,7 @@
 
 use baton_domain::run::LEASE_DURATION_MS;
 use baton_domain::Timestamp;
+use baton_harness::fakes::FakeStop;
 use baton_harness::Harness;
 use baton_ports::{AdapterEvent, Liveness, ProcessIdentity, StopResult};
 use reqwest::{Method, StatusCode};
@@ -41,7 +42,11 @@ async fn harness() -> Harness {
 
 /// 建立 Workspace、Goal 與一個 ready 的 Task，派工並讓 Supervisor 啟動它；回傳 (workspace_id, task_id, run_id)。
 async fn running_run(harness: &Harness) -> (String, String, String) {
-    let dir = harness.data_dir().join("projects").join("main");
+    running_run_in(harness, "main").await
+}
+
+async fn running_run_in(harness: &Harness, name: &str) -> (String, String, String) {
+    let dir = harness.data_dir().join("projects").join(name);
     std::fs::create_dir_all(&dir).unwrap();
     let (status, ws) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": dir.to_string_lossy() }))).await;
     assert_eq!(status, StatusCode::CREATED, "{ws}");
@@ -161,4 +166,48 @@ async fn a_worker_is_told_to_save_and_stop_once_its_run_is_cancelled() {
     assert_eq!(status, StatusCode::OK, "{ack}");
     assert_eq!(ack["stop_requested"], true);
     assert_eq!(ack["handoff_requested"], false);
+}
+
+#[tokio::test]
+async fn cancelled_runs_are_stopped_side_by_side_so_one_slow_stop_does_not_hold_up_the_others() {
+    let harness = harness().await;
+    harness.add_account("第二個帳號", "second@example.com").await;
+    let (ws_a, _, slow) = running_run_in(&harness, "a").await;
+    let (ws_b, _, quick) = running_run_in(&harness, "b").await;
+    let spawned = harness.process_control.spawned();
+    let slow_identity = harness.process_control.identity_of(&spawned[0].command_id).unwrap();
+
+    // 先取消的 Run 停止得很慢（寬限期內一直沒有結束）；後取消的 Run 不必排在它後面等
+    harness.process_control.script_stop(&slow_identity, FakeStop::Hang);
+    for (ws, rid) in [(&ws_a, &slow), (&ws_b, &quick)] {
+        let (status, body) = harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/runs/{rid}/cancel"), None).await;
+        assert!(status.is_success(), "{body}");
+    }
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(500), harness.supervise()).await;
+    assert!(outcome.is_err(), "慢的停止還在等");
+
+    assert_eq!(harness.process_control.stop_calls().len(), 2, "兩個取消同時開始停止");
+    assert_eq!(run_status(&harness, &ws_b, &quick).await, "cancelled");
+    assert_eq!(run_status(&harness, &ws_a, &slow).await, "running", "還沒確認停止的 Run 保留寫入所有權");
+}
+
+#[tokio::test]
+async fn a_recovery_mirror_that_failed_to_write_is_written_again_on_the_next_pass() {
+    let mut harness = harness().await;
+    running_run(&harness).await;
+    harness.crash_restart().await;
+
+    // 崩潰恢復開始時，鏡像的位置暫時被佔住，Supervisor 寫給監護的鏡像寫入失敗
+    let mirror = baton_guardian::files::recovery_mirror_path(harness.data_dir());
+    let _ = std::fs::remove_file(&mirror);
+    std::fs::create_dir_all(mirror.join("blocked")).unwrap();
+    harness.supervise().await;
+    assert!(baton_guardian::files::read_recovery_mirror(harness.data_dir()).is_none());
+    std::fs::remove_dir_all(&mirror).unwrap();
+
+    // 失敗的那次不算已鏡像：恢復事件沒有變動，下一次處理仍重寫，監護不會一直讀到過時（或沒有）的狀態
+    let before = harness.send_json(Method::GET, "/api/v1/recovery", None).await;
+    harness.supervise().await;
+    assert_eq!(harness.send_json(Method::GET, "/api/v1/recovery", None).await, before, "恢復事件沒有變動");
+    assert!(baton_guardian::files::read_recovery_mirror(harness.data_dir()).is_some(), "寫入失敗後應重寫鏡像");
 }

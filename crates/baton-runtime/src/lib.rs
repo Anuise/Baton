@@ -353,16 +353,26 @@ async fn import_guardian_journal(store: &Store, data_dir: &std::path::Path, port
 }
 
 /// 把恢復狀態鏡像給監護（票 32）；失敗只記日誌（監護看到的是較舊的狀態，計次仍以控制資料庫為準）。
-pub(crate) async fn write_recovery_mirror(store: &Store, data_dir: &std::path::Path, ports: &Ports, log: &LogSink) {
+/// 回傳是否寫入成功；失敗只記錄，呼叫端下一次再寫。
+pub(crate) async fn write_recovery_mirror(store: &Store, data_dir: &std::path::Path, ports: &Ports, log: &LogSink) -> bool {
     let mirror = match store.recovery_mirror(ports.clock.now()).await {
         Ok(mirror) => mirror,
-        Err(error) => return (log)(&format!("監護：無法讀取恢復狀態，沒有更新鏡像：{error}")),
+        Err(error) => {
+            (log)(&format!("監護：無法讀取恢復狀態，沒有更新鏡像：{error}"));
+            return false;
+        }
     };
     let dir = data_dir.to_path_buf();
     match tokio::task::spawn_blocking(move || baton_guardian::files::write_recovery_mirror(&dir, &mirror)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => (log)(&format!("監護：無法寫入恢復狀態鏡像：{error}")),
-        Err(error) => (log)(&format!("監護：無法寫入恢復狀態鏡像：{error}")),
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            (log)(&format!("監護：無法寫入恢復狀態鏡像：{error}"));
+            false
+        }
+        Err(error) => {
+            (log)(&format!("監護：無法寫入恢復狀態鏡像：{error}"));
+            false
+        }
     }
 }
 
