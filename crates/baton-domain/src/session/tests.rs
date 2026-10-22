@@ -210,7 +210,7 @@ fn binding_is_conditional_first_report_binds_same_is_a_no_op_different_is_only_r
     assert_eq!((bound.state, bound.native_session_id.as_deref()), (SessionState::Active, Some("N1")));
 
     let mut edits = SessionEdits::default();
-    assert_eq!(bind_native(&mut edits, &[bound.clone()], "ses_1", "run_1", "N1", T1), BindOutcome::Bound);
+    assert_eq!(bind_native(&mut edits, std::slice::from_ref(&bound), "ses_1", "run_1", "N1", T1), BindOutcome::Bound);
     assert!(edits.sessions.is_empty() && edits.events.is_empty());
 
     assert_eq!(bind_native(&mut edits, &[bound], "ses_1", "run_1", "N2", T1), BindOutcome::Mismatch);

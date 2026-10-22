@@ -6,9 +6,9 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`：版本校驗、六種處理方式、合併與連結、Controller 動作判定）、決策權限表（`authority.rs`，spec D-15）、權限提示的歸類與授權判定（`permission.rs`）、單次批准（E1）的綁定與核對（`approval.rs`）、備份的觸發／保留／還原演練核對（`backup.rs`）、知識條目與教訓的可信狀態轉換、版本、取代關係、可見範圍與搜尋關鍵字（`knowledge.rs`）、Guard 規則、啟用停用、Run 准入時的違反判定與重犯事件（`guard.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔）、Task 工作目錄（worktree／輸出目錄）的位置與登記（`workdir.rs`）、單一整合佇列的狀態機（`integration.rs`） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`：版本校驗、六種處理方式、合併與連結、Controller 動作判定）、決策權限表（`authority.rs`，spec D-15）、權限提示的歸類與授權判定（`permission.rs`）、單次批准（E1）的綁定與核對（`approval.rs`）、備份的觸發／保留／還原演練核對（`backup.rs`）、知識條目與教訓的可信狀態轉換、版本、取代關係、可見範圍與搜尋關鍵字（`knowledge.rs`）、Guard 規則、啟用停用、Run 准入時的違反判定與重犯事件（`guard.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔）、Task 工作目錄（worktree／輸出目錄）的位置與登記（`workdir.rs`）、單一整合佇列的狀態機（`integration.rs`）、Agent Session 的沿用／替換決定、條件綁定與對話紀錄的去重和遮蔽（`session.rs`） |
 | `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`，以及 `write_readonly_files`：把一組檔案寫成唯讀目錄）、PlatformInfo、SecretProtector、ClaudeEnvironment、CommandRunner（驗證命令）、UserSettingsSource（唯讀讀取使用者平常使用的 Claude Code 設定，只有白名單內的三個檔案）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、裁定請求／裁定／單次批准／連結與 Workspace 決策權限表（`decisions.rs`）、備份／還原／還原演練（`backup.rs`）、知識條目與版本（`knowledge.rs`：`knowledge_entry`、`knowledge_entry_version`，以及每次開啟時重建的全文檢索索引 `knowledge_fts`）、Guard 與重犯事件（`guards.rs`：`guard`、`lesson_recurrence`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`） |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、裁定請求／裁定／單次批准／連結與 Workspace 決策權限表（`decisions.rs`）、備份／還原／還原演練（`backup.rs`）、知識條目與版本（`knowledge.rs`：`knowledge_entry`、`knowledge_entry_version`，以及每次開啟時重建的全文檢索索引 `knowledge_fts`）、Guard 與重犯事件（`guards.rs`：`guard`、`lesson_recurrence`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`）、Agent Session 與對話紀錄段落（`sessions.rs`：`agent_session`、`session_events` 檢視、`transcript_segment`） |
 | `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照、成果瀏覽與成果接受）、`/api/v1/scheduling`、`/api/v1/lifecycle`、`/api/v1/decisions/pending`、`/api/v1/decisions/batch`（與 `/api/v1/workspaces/{id}/decisions`、`/api/v1/workspaces/{id}/decision-authority`）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/backups`（備份與還原演練狀態）、`/api/v1/knowledge`、`/api/v1/guards`（與 `/api/v1/knowledge/{id}/recurrences`）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `controller_action`、`register_artifact`；`knowledge.rs` 的 `record_lesson_candidate`、`search_knowledge`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`，`RuntimeOptions` 含 `full_text_search`；含啟動時核對停止意圖與完全退出的執行者）、Supervisor（`supervisor.rs`，含完全退出的停止流程與重新開啟）、Claude Code Adapter（`claude_adapter.rs`）、備份排程（`backup.rs`）、確定性檢查的執行（`verifier.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe`（`baton-runtime restore …` 還原備份） |
@@ -717,16 +717,39 @@ Runtime 的環境設了 `CLAUDE_CONFIG_DIR` 時，改讀該目錄下的 `setting
 | Run 檔案 | `<資料目錄>\runs\<run_id>\`：`prompt.md`（經標準輸入交付，不放進指令列）、`mcp.json`（只指向 shim，憑證以 `${BATON_AGENT_TOKEN}` 參照）、`stream.jsonl`（標準輸出）、`stderr.log` |
 | 環境 | `CLAUDE_CONFIG_DIR` = Run 帳號 Profile 的目錄；移除 Runtime 繼承到的 `ANTHROPIC*`、`CLAUDE*` 變數（`CLAUDE_CODE_GIT_BASH_PATH` 除外）；Supervisor 再加上 `BATON_AGENT_TOKEN`、`BATON_RUNTIME_URL` |
 | 憑證 | 啟動參數只有旗標、檔案路徑與模型名稱，**不含任何憑證值**（情境測試比對 Agent 憑證與 Profile 的登入資料） |
-| 事件 | 從 `stream.jsonl` 追蹤（Runtime 重建後重新接上同一個檔案）：`system/init` → `Started`（原生 Session）、`assistant` 文字 → `Message`、`rate_limit_event` → `RateLimited`（見「額度觀測」）、`result` → `UsageReported`，失敗時再 `Error`，最後 `Exited`；有新輸出就是 `Heartbeat` |
+| 事件 | 從 `stream.jsonl` 追蹤（Runtime 重建後重新接上同一個檔案）：每個非空白行先送 `Transcript`（位置 = 第幾個非空白行，從 1 起，重播時不變），再送該行的事件：`system/init` → `Started`（原生 Session）、`assistant` 文字 → `Message`、`rate_limit_event` → `RateLimited`（見「額度觀測」）、`result` → `UsageReported`，失敗時再 `Error`，最後 `Exited`；有新輸出就是 `Heartbeat` |
 | 原生 Session | 第一次回報時以 `BindNativeSession` 綁定到 Run（`run.native_session_id`，事件 `run_native_session_bound`）；之後相同不變，不同則只記錄 `run_native_session_conflict`，**不改綁定** |
 | 失敗原因 | `result` 的 `is_error` 為 true（即使 `subtype` 是 `success`）時，Run 以 CLI 回報的文字作為 `end_reason` |
-| resume | `resume_capability` 一律回報 `Unknown`（屬 Session 持久化與 resume 的票） |
+| resume | `RunSpec.resume_native_session_id` 有值時加上 `--resume <id>`；`resume_capability` 查 `<CLAUDE_CONFIG_DIR>\projects\<工作目錄的非英數字元換成 -（超過 200 字元時回 Unknown）>\<id>.jsonl`：存在 → `Resumable`、不存在 → `NotResumable`、讀不到或資訊不足 → `Unknown`（實測與細節見 [adapter-contract.md](adapter-contract.md)） |
 
 ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdin_file`、`stdout_file`、`stderr_file` 處理環境與標準輸入輸出；輸出檔以 share read/write/delete 開啟，Adapter 可在程序執行中讀取。
 
 **模型（spec D-30）**：平台預設不指定模型。Workspace 可依角色覆寫：`PUT /api/v1/workspaces/{id}/model-overrides`，本文 `{ "controller"?, "worker"?, "reviewer"? }`（`null`、省略或空白 = 不覆寫；名稱只允許英數字與 `. _ - : [ ] @ /`，否則 400 `model_name_invalid`；封存的 Workspace 409 `workspace_already_archived`），回 200 與 Workspace（`model_overrides`）。派工時把 Worker 角色的模型固定進派工 Outbox（`LaunchPayload.model`），所以**只影響之後派出的 Run**。UI 在 Workspace 的「授權設定」畫面下方。
 
 **Adapter 契約測試**：`crates/baton-harness/tests/adapter_contract.rs`，同一份契約跑在 fake、replay（真實 CLI 錄下的 stream-json）與 live（真實 CLI，手動）上；執行方式與結果記錄見 [adapter-contract.md](adapter-contract.md)。
+
+### Session 持久化、沿用與替換
+
+票 15 實作 issue §3.1～3.3：平台 Session（`agent_session_id`）、原生 Session（`native_session_id`）與程序身分（Run 上的 PID + 建立時間 + 指令雜湊）分開保存，規則在 `baton_domain::session`，Session 只隨 Run 命令在同一個交易中改變。
+
+**何時決定**：Supervisor 寫入 launch intent（`BeginLaunch`）的同一個交易中決定沿用或建立 Session，所以原生識別取得前，平台 Session、launch intent 與 command_id 已經一起持久化；Runtime 在 spawn 前後任何一點當掉，都以 command_id 找回原程序，不會建立第二個 writer。寫入之前 Supervisor 先對**候選 Session**（同一個 Task 最近的 Session，帳號、工作目錄相同、已有原生識別、暫停中）呼叫 Adapter 的 `resume_capability`，結果與 launch intent 一起交給 Domain。
+
+| 情況 | 結果 |
+| --- | --- |
+| Task 第一次啟動 | 新 Session（`allocating`，`driver_run_id` = 該 Run）；Adapter 回報原生識別後 `active` |
+| 同帳號、同工作目錄，查驗為 `Resumable` | 新 Run 沿用同一個 Session（`session_resumed`），Run 的 `resume_native_session_id` 固定為原生識別，啟動參數帶 `--resume` |
+| 查驗為 `NotResumable` | 前任標為 `unavailable`（`native_session_unavailable`），建立替代 Session |
+| 查驗為 `Unknown`（或查驗失敗） | 不宣稱可續用：前任標為 `closed`（`resume_capability_unknown`），建立替代 Session |
+| 換帳號／換工作目錄 | 不查驗；前任 `closed`（`account_changed`／`working_directory_changed`），建立替代 Session |
+| 前一個 Run 沒取得原生識別就結束 | 該 Session 在 Run 結束時已是 `unavailable`（`native_session_never_bound`），建立替代 Session 並沿用這個原因 |
+
+替代 Session 保存 `predecessor_session_id` 與 `replacement_reason`，前任的識別與原生識別不被覆蓋；替代 Session 一律有 `history_gap`（原生對話沒有延續，只能從平台保存的狀態重建），不宣稱已完整恢復。驅動 Session 的 Run 結束（任何結果）時：有原生識別的 Session 變成 `suspended`，從未取得的變成 `unavailable`。同一個 Task 再次派工時，Scheduler 優先選上一個 Run 的帳號（`scheduler::place_preferring`），才有機會原生接續。
+
+**同一原生 Session 只有一個執行者**：平台 Session 的 `driver_run_id` 記錄目前驅動它的 Run，有執行者時不能被沿用（`session_busy`）；資料庫另有唯一約束（同一 Session 最多一個 `starting`／`running` 的 Run、同一個 `執行工具 + 帳號` 內原生識別只綁一個 Session）。Run 回報的原生識別已由同帳號另一個平台 Session 綁定時不綁定、記 `session_native_conflict`；若那個 Session 正由別的 Run 驅動，後到的 Run 被要求取消（`run_cancel_requested` 的 `reason` = `native_session_in_use`），Supervisor 停止它的程序。
+
+**對話紀錄**：Adapter 的 `Transcript { position, line }` 依 Run 收集，`session::plan_transcript_import` 略過已保存的位置（重新接上串流時的重播）、跳號記為 `missing` 段落，每一行遮蔽秘密（JSON 行逐一遮蔽解碼後的字串；規則同共同設定的秘密辨識，另把 64 個十六進位字元的片段視為 Runtime 簽發的憑證）後，以 SHA-256 命名寫入成果儲存 `<資料目錄>\artifacts\transcripts\<sha256>.jsonl`，再於 `transcript_segment` 記錄位置區間、雜湊、大小、筆數與遮蔽數（同一個 Run 的區間不重疊）。
+
+**端點**（桌面角色）：`GET /api/v1/workspaces/{id}/sessions`（`{ sessions: [...] }`，每個 Session 附 `run_ids` 與 `transcript`：stored／missing 段落數、每個 Run 已保存到的位置）、`GET /api/v1/workspaces/{id}/sessions/{session_id}`（`{ session, events, segments }`；`events` 來自 `session_events` 檢視；不存在 404 `session_not_found`）。Run 的回應多了 `agent_session_id` 與 `resume_native_session_id`。事件：`session_created`、`session_native_bound`、`session_resumed`、`session_suspended`、`session_unavailable`、`session_closed`、`session_native_conflict`。情境測試在 `crates/baton-harness/tests/sessions.rs`。
 
 ### 本機 API 的存取防護
 
