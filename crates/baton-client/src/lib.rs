@@ -9,15 +9,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    admission_check_path, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
+    admission_check_path, authorization_path, authorization_summary_path, decision_answer_path, decision_path,
+    decisions_path, goals_path, run_cancel_path,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     task_path, task_ready_path, tasks_path,
-    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
+    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AnswerRequest, AuthorizationView,
+    ConfirmAuthorizationRequest,
     CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse,
-    LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus, SummaryRequest, TaskBoard, TaskDetail,
-    UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, PROFILES_PATH,
-    SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, WORKSPACES_PATH,
+    LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList, SetupStatus, SummaryRequest, TaskBoard, TaskDetail,
+    UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
+    PLATFORM_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, WORKSPACES_PATH,
 };
+use baton_domain::decision::DecisionView;
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
 use baton_domain::run::RunView;
@@ -25,6 +28,7 @@ use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
+use baton_store::{AnswerResult, DecisionList};
 
 /// 一般請求等待回應的上限。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -232,6 +236,32 @@ impl RuntimeClient {
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。
     pub async fn cancel_run(&self, workspace_id: &str, run_id: &str) -> Result<RunView, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &run_cancel_path(workspace_id, run_id), None).await
+    }
+
+    /// 裁定中心：Workspace 內的裁定請求（待處理優先）與待處理數。
+    pub async fn decision_list(&self, workspace_id: &str) -> Result<DecisionList, ClientError> {
+        self.get_json(&decisions_path(workspace_id)).await
+    }
+
+    pub async fn decision_detail(&self, workspace_id: &str, request_id: &str) -> Result<DecisionView, ClientError> {
+        self.get_json(&decision_path(workspace_id, request_id)).await
+    }
+
+    /// 提交正式裁定；同樣的答案重送是冪等的，不同的答案回傳 `ClientError::Rejected`（`decision_already_answered`）。
+    pub async fn decision_answer(
+        &self,
+        workspace_id: &str,
+        request_id: &str,
+        option_id: &str,
+        note: Option<String>,
+    ) -> Result<AnswerResult, ClientError> {
+        let request = AnswerRequest { option_id: option_id.to_string(), note };
+        self.send_json(reqwest::Method::POST, &decision_answer_path(workspace_id, request_id), Some(&request)).await
+    }
+
+    /// 全域待處理裁定數（狀態列）。
+    pub async fn pending_decisions(&self) -> Result<PendingDecisions, ClientError> {
+        self.get_json(PENDING_DECISIONS_PATH).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {

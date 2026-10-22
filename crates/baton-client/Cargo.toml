@@ -11,6 +11,7 @@ baton-api = { path = "../baton-api" }
 baton-credential = { path = "../baton-credential" }
 baton-domain = { path = "../baton-domain" }
 baton-ports = { path = "../baton-ports" }
+baton-store = { path = "../baton-store" }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = "1"
 thiserror = "2"
@@ -18,4 +19,5 @@ tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 baton-harness = { path = "../baton-harness" }
+serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "time"] }

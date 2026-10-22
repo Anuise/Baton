@@ -403,6 +403,93 @@ export interface TaskClient {
   cancelRun(workspaceId: string, runId: string): Promise<RunView>;
 }
 
+/** 裁定請求的種類：Agent 主動請求，或工具權限提示。 */
+export type DecisionKind = "agent" | "permission";
+
+export type DecisionUrgency = "low" | "normal" | "high";
+
+export interface DecisionOption {
+  id: string;
+  label: string;
+  tradeoff: string | null;
+}
+
+/** 這個裁定擋住的 Task；只有這些 Task 受影響。 */
+export interface DecisionBlocking {
+  task_id: string;
+  task_title: string;
+  task_status: TaskStatus;
+}
+
+/** 權限提示的內容：哪個工具、對應哪項授權能力。 */
+export interface DecisionPermission {
+  tool_name: string;
+  input: unknown;
+  capability: Capability | null;
+  capability_label: string | null;
+  summary: string;
+}
+
+/** 使用者已作出的裁定。 */
+export interface DecisionOutcome {
+  option_id: string;
+  option_label: string;
+  note: string | null;
+  decided_by: string;
+  decided_at: number;
+}
+
+/** 裁定請求（對應 Rust 的 DecisionRequestView）；時間一律是 UTC 毫秒。 */
+export interface DecisionRequestView {
+  id: string;
+  workspace_id: string;
+  run_id: string;
+  task_id: string;
+  task_title: string;
+  kind: DecisionKind;
+  status: "pending" | "answered";
+  question: string;
+  /** 為什麼 Agent 無法自行決定。 */
+  reason: string;
+  options: DecisionOption[];
+  /** 建議的 option id。 */
+  recommendation: string | null;
+  evidence: string[];
+  urgency: DecisionUrgency;
+  /** 期限只用來標示逾期，逾期不代表任何決定。 */
+  deadline_at: number | null;
+  overdue: boolean;
+  blocking: DecisionBlocking[];
+  permission: DecisionPermission | null;
+  created_at: number;
+  decision: DecisionOutcome | null;
+}
+
+export interface DecisionList {
+  pending_count: number;
+  decisions: DecisionRequestView[];
+}
+
+export interface AnswerResponse {
+  decision: DecisionRequestView;
+  /** 因這次裁定而恢復的 Task。 */
+  resumed_task_ids: string[];
+}
+
+/** 全部 Workspace 的待裁定數（頂部狀態列用）。 */
+export interface PendingDecisions {
+  pending_count: number;
+  by_workspace: { workspace_id: string; pending_count: number }[];
+}
+
+/** 裁定中心：列出、讀取、回答裁定請求（只有桌面憑證能用）。 */
+export interface DecisionClient {
+  listDecisions(workspaceId: string): Promise<DecisionList>;
+  getDecision(workspaceId: string, requestId: string): Promise<DecisionRequestView>;
+  answerDecision(workspaceId: string, requestId: string, optionId: string, note?: string): Promise<AnswerResponse>;
+  pendingDecisions(): Promise<PendingDecisions>;
+}
+
 /** 帳號 Profile 與首次啟動精靈；與其他用戶端分開，讓只關心帳號的畫面不必知道它們。 */
 export interface AccountClient {
   listProfiles(): Promise<ProfileList>;
@@ -417,16 +504,19 @@ export interface AccountClient {
   acknowledgeBackgroundNotice(): Promise<SetupStatus>;
 }
 
-export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient & TaskClient & AccountClient;
+export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient & TaskClient & AccountClient & DecisionClient;
 
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
 const WORKSPACES_PATH = "/api/v1/workspaces";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
+const PENDING_DECISIONS_PATH = "/api/v1/decisions/pending";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
+const decisionPath = (workspaceId: string, requestId: string) =>
+  `${workspacePath(workspaceId)}/decisions/${encodeURIComponent(requestId)}`;
 
 /** 直接以 HTTP 查詢（開發時用瀏覽器開啟，由 Vite 代理到 Runtime）。 */
 export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
@@ -526,6 +616,11 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     dispatchTask: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/dispatch`, { method: "POST" }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
+    listDecisions: (workspaceId) => send(`${workspacePath(workspaceId)}/decisions`),
+    getDecision: (workspaceId, requestId) => send(decisionPath(workspaceId, requestId)),
+    answerDecision: (workspaceId, requestId, optionId, note) =>
+      send(`${decisionPath(workspaceId, requestId)}/answer`, { method: "POST", body: { option_id: optionId, note } }),
+    pendingDecisions: () => send(PENDING_DECISIONS_PATH),
   };
 }
 
@@ -574,6 +669,11 @@ export function createTauriClient(invoke: Invoke): AppClient {
     acknowledgeBackgroundNotice: () => call<SetupStatus>("setup_acknowledge_notice"),
     dispatchTask: (workspaceId, taskId) => call<RunView>("task_dispatch", { workspaceId, taskId }),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
+    listDecisions: (workspaceId) => call<DecisionList>("decision_list", { workspaceId }),
+    getDecision: (workspaceId, requestId) => call<DecisionRequestView>("decision_detail", { workspaceId, requestId }),
+    answerDecision: (workspaceId, requestId, optionId, note) =>
+      call<AnswerResponse>("decision_answer", { workspaceId, requestId, optionId, note }),
+    pendingDecisions: () => call<PendingDecisions>("decisions_pending"),
   };
 }
 

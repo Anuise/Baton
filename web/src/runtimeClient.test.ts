@@ -348,4 +348,68 @@ describe("Runtime 用戶端", () => {
       ["setup_acknowledge_notice"],
     ]);
   });
+
+  it("HTTP 版以契約的路徑與 body 操作裁定", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.listDecisions("ws_1");
+    await client.getDecision("ws_1", "dec_1");
+    await client.answerDecision("ws_1", "dec_1", "keep", "照舊就好");
+    await client.answerDecision("ws_1", "dec_1", "keep");
+    await client.pendingDecisions();
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/decisions");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/decisions/dec_1");
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/decisions/dec_1/answer", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ option_id: "keep", note: "照舊就好" }),
+    });
+    // 沒有備註時 body 不含 note
+    expect(fetchFn).toHaveBeenNthCalledWith(4, "/api/v1/workspaces/ws_1/decisions/dec_1/answer", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ option_id: "keep" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(5, "/api/v1/decisions/pending");
+  });
+
+  it("HTTP 版回答裁定的回應原樣回傳", async () => {
+    const answered = { decision: { id: "dec_1", status: "answered" }, resumed_task_ids: ["task_1", "task_2"] };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(answered), { status: 200 }));
+
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).answerDecision("ws_1", "dec_1", "keep");
+
+    expect(result).toEqual(answered);
+  });
+
+  it.each([
+    [404, "decision_not_found", "找不到這個裁定請求"],
+    [400, "decision_option_unknown", "選項不屬於這個裁定請求"],
+    [409, "decision_already_answered", "這個裁定已經回答過了"],
+  ])("HTTP 版回答裁定失敗（%i %s）時，錯誤訊息是 Runtime 的說明", async (status, error, message) => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ error, message }), { status }));
+
+    await expect(
+      createHttpClient(fetchFn as unknown as typeof fetch).answerDecision("ws_1", "dec_1", "keep"),
+    ).rejects.toThrow(message);
+  });
+
+  it("Tauri 版以指令與參數操作裁定", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.listDecisions("ws_1");
+    await client.getDecision("ws_1", "dec_1");
+    await client.answerDecision("ws_1", "dec_1", "keep", "照舊就好");
+    await client.pendingDecisions();
+
+    expect(invoke.mock.calls).toEqual([
+      ["decision_list", { workspaceId: "ws_1" }],
+      ["decision_detail", { workspaceId: "ws_1", requestId: "dec_1" }],
+      ["decision_answer", { workspaceId: "ws_1", requestId: "dec_1", optionId: "keep", note: "照舊就好" }],
+      ["decisions_pending"],
+    ]);
+  });
 });

@@ -9,12 +9,14 @@ use std::time::Duration;
 
 use baton_api::{
     AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest, CreateProfileRequest, CreateTaskRequest,
-    CreateWorkspaceRequest, HealthResponse, LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus,
-    SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
+    CreateWorkspaceRequest, HealthResponse, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
+    SetupStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, RuntimeClient};
 use baton_credential::DpapiProtector;
+use baton_store::{AnswerResult, DecisionList};
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
+use baton_domain::decision::DecisionView;
 use baton_domain::profile::ProfileView;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
 use baton_domain::run::RunView;
@@ -390,6 +392,51 @@ async fn run_cancel(
     link.client.cancel_run(&workspace_id, &run_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 讀取裁定中心：Workspace 內的裁定請求與待處理數。
+#[tauri::command]
+async fn decision_list(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<DecisionList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_list(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn decision_detail(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request_id: String,
+) -> Result<DecisionView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_detail(&workspace_id, &request_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 提交正式裁定（只有桌面角色能做）。
+#[tauri::command]
+async fn decision_answer(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request_id: String,
+    option_id: String,
+    note: Option<String>,
+) -> Result<AnswerResult, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_answer(&workspace_id, &request_id, &option_id, note).await.map_err(|e| e.to_string())
+}
+
+/// 狀態列的全域待處理裁定數。
+#[tauri::command]
+async fn decisions_pending(link: State<'_, RuntimeLink>) -> Result<PendingDecisions, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.pending_decisions().await.map_err(|e| e.to_string())
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
@@ -421,7 +468,11 @@ fn main() {
             task_ready,
             task_cancel,
             task_dispatch,
-            run_cancel
+            run_cancel,
+            decision_list,
+            decision_detail,
+            decision_answer,
+            decisions_pending
         ])
         .setup(|app| {
             // 不等 Web UI 來問：App 一開啟就連回或啟動 Runtime

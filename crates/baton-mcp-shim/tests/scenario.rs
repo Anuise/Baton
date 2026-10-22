@@ -7,8 +7,8 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Router;
 use baton_domain::agent::{
-    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED,
-    TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT,
+    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT,
+    TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT,
 };
 use baton_mcp_shim::{serve, ShimConfig};
 use serde_json::{json, Value};
@@ -115,12 +115,22 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_four_tools_with_their_required_fields() {
+async fn tools_list_has_the_six_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, [TOOL_GET_TASK_CONTRACT, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT, TOOL_REPORT_BLOCKED]);
+    assert_eq!(
+        names,
+        [
+            TOOL_GET_TASK_CONTRACT,
+            TOOL_REPORT_PROGRESS,
+            TOOL_SAVE_CHECKPOINT,
+            TOOL_REPORT_BLOCKED,
+            TOOL_REQUEST_DECISION,
+            TOOL_PERMISSION_PROMPT
+        ]
+    );
     for tool in tools {
         assert!(!tool["description"].as_str().unwrap().is_empty());
         assert_eq!(tool["inputSchema"]["type"], "object");
@@ -131,6 +141,61 @@ async fn tools_list_has_the_four_tools_with_their_required_fields() {
     assert_eq!(schema(TOOL_SAVE_CHECKPOINT)["required"], json!(["summary"]));
     assert_eq!(schema(TOOL_SAVE_CHECKPOINT)["properties"]["details"]["type"], "string");
     assert_eq!(schema(TOOL_REPORT_BLOCKED)["required"], json!(["reason"]));
+
+    let decision = schema(TOOL_REQUEST_DECISION);
+    assert_eq!(decision["required"], json!(["question", "reason", "options"]));
+    assert_eq!(decision["properties"]["options"]["type"], "array");
+    assert_eq!(decision["properties"]["options"]["minItems"], 2);
+    assert_eq!(decision["properties"]["options"]["maxItems"], 8);
+    assert_eq!(decision["properties"]["options"]["items"]["required"], json!(["id", "label"]));
+    assert_eq!(decision["properties"]["urgency"]["enum"], json!(["low", "normal", "high"]));
+    assert_eq!(decision["properties"]["deadline_minutes"]["type"], "integer");
+    for optional in ["recommendation", "evidence"] {
+        assert!(decision["properties"].get(optional).is_some(), "缺少 {optional}");
+    }
+    let permission = schema(TOOL_PERMISSION_PROMPT);
+    assert_eq!(permission["required"], json!(["tool_name"]));
+    assert_eq!(permission["properties"]["input"]["type"], "object");
+    assert!(permission["properties"].get("tool_use_id").is_some());
+}
+
+#[tokio::test]
+async fn request_decision_is_forwarded_to_its_tool_path_with_unchanged_arguments() {
+    let (url, log) = spawn_stub(200, r#"{"decision_request_id":"d1","status":"waiting_decision","existing":false,"message":"ok"}"#).await;
+    let arguments = json!({
+        "question": "用哪個資料庫？",
+        "reason": "契約沒有指定",
+        "options": [{"id":"a","label":"SQLite"},{"id":"b","label":"Postgres","tradeoff":"要另外架設"}],
+        "recommendation": "a",
+        "urgency": "high",
+        "deadline_minutes": 30
+    });
+
+    let reply = call(&url, tool_call(8, TOOL_REQUEST_DECISION, arguments.clone())).await;
+
+    assert_eq!(reply["result"]["isError"], false);
+    assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("waiting_decision"));
+    let log = log.lock().unwrap();
+    assert_eq!(log[0].method, "POST");
+    assert_eq!(log[0].path, format!("{AGENT_TOOLS_PREFIX}/{TOOL_REQUEST_DECISION}"));
+    assert_eq!(log[0].headers["authorization"], format!("Bearer {TOKEN}"));
+    assert_eq!(serde_json::from_slice::<Value>(&log[0].body).unwrap(), arguments);
+}
+
+#[tokio::test]
+async fn permission_prompt_is_forwarded_and_a_waiting_deny_is_not_a_tool_error() {
+    // Runtime 在等待裁定時回 HTTP 200 與 behavior=deny；這是正常的權限回應，不是工具錯誤
+    let body = r#"{"behavior":"deny","message":"等待使用者裁定","status":"waiting_decision","decision_request_id":"d2"}"#;
+    let (url, log) = spawn_stub(200, body).await;
+    let arguments = json!({"tool_name":"Bash","input":{"command":"rm -rf x"},"tool_use_id":"toolu_1"});
+
+    let reply = call(&url, tool_call(9, TOOL_PERMISSION_PROMPT, arguments.clone())).await;
+
+    assert_eq!(reply["result"]["isError"], false);
+    assert_eq!(reply["result"]["content"][0]["text"], body);
+    let log = log.lock().unwrap();
+    assert_eq!(log[0].path, format!("{AGENT_TOOLS_PREFIX}/{TOOL_PERMISSION_PROMPT}"));
+    assert_eq!(serde_json::from_slice::<Value>(&log[0].body).unwrap(), arguments);
 }
 
 #[tokio::test]
