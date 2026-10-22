@@ -26,6 +26,7 @@ use serde_json::Value;
 use crate::approval::{self, ApprovalBinding, ArtifactMark, Mismatch};
 use crate::authority::{Authority, AuthorityPolicy, Matter};
 use crate::authorization::{AuthorizationRevision, Capability};
+use crate::budget::{self, BudgetKind, TaskBudget};
 use crate::event::DomainEvent;
 use crate::permission::{self, Verdict};
 use crate::run::{self, ExecutionLease, Run};
@@ -651,6 +652,8 @@ pub struct DecisionChange {
     pub tasks: Vec<Task>,
     /// 恢復排程（回到 `ready`）的 Task；Store 要在同一個交易把它們排回派工佇列。
     pub resumed: Vec<String>,
+    /// 因核准「預算用盡後的下一步」而重設的預算（票 36）。
+    pub budgets: Vec<TaskBudget>,
     pub outbox: Vec<WakeItem>,
     pub events: Vec<DomainEvent>,
     pub outcome: DecisionOutcome,
@@ -667,6 +670,7 @@ impl DecisionChange {
             approval_use: None,
             tasks: Vec::new(),
             resumed: Vec::new(),
+            budgets: Vec::new(),
             outbox: Vec::new(),
             events: Vec::new(),
             outcome,
@@ -754,6 +758,8 @@ pub struct DecisionContext<'a> {
     pub authority: &'a AuthorityPolicy,
     /// 各 Task 成果的最新版本（單次批准綁定的成果版本，票 23）。
     pub artifacts: &'a [ArtifactMark],
+    /// 各 Task 的修正與重試預算（票 36）：核准用盡時建立的請求要重設它。
+    pub budgets: &'a [TaskBudget],
 }
 
 impl DecisionContext<'_> {
@@ -1310,6 +1316,120 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
+/// 預算用盡（票 36）：Runtime 建立「預算用盡後的下一步」裁定請求（spec D-15 必須送裁定的事項）。
+/// 呼叫端已在同一個交易中把 Task 轉為 `blocked`；請求的阻擋範圍是這個 Task，指向用盡預算的 Run。
+pub fn budget_exhausted_request(
+    request_id: String,
+    run: &Run,
+    task: &Task,
+    kind: BudgetKind,
+    evidence: Vec<String>,
+    now: Timestamp,
+) -> (DecisionRequest, DomainEvent) {
+    let matter = Matter::NextStepAfterBudget;
+    let label = kind.label();
+    let limit = kind.limit();
+    let summary = format!("「{}」的{label}預算（{limit} 次）已用完", task.title);
+    let mut request = DecisionRequest {
+        id: request_id,
+        workspace_id: task.workspace_id.clone(),
+        run_id: run.id.clone(),
+        task_id: task.id.clone(),
+        kind: DecisionKind::Authority,
+        status: DecisionStatus::Pending,
+        question: truncate(&format!("Task「{}」的{label}預算（{limit} 次）已用完，下一步怎麼做？", task.title), QUESTION_MAX_CHARS),
+        reason: format!(
+            "Runtime 已停止自動重試並把 Task 設為阻擋。依決策權限表，「{}」必須由你裁定（spec D-16、D-15）。",
+            matter.label()
+        ),
+        options: vec![
+            DecisionOption {
+                id: OPTION_APPROVE.to_string(),
+                label: format!("再給一輪{label}預算（{limit} 次），讓 Task 繼續"),
+                tradeoff: Some("只重設這一種計數，另外兩種不變；可能再次用盡".to_string()),
+            },
+            DecisionOption {
+                id: OPTION_REJECT.to_string(),
+                label: "維持阻擋，由我處理".to_string(),
+                tradeoff: Some("Task 留在阻擋，可以修改契約、取消，或之後手動標為可派工".to_string()),
+            },
+        ],
+        recommendation: None,
+        evidence: evidence
+            .iter()
+            .map(|e| e.trim())
+            .filter(|e| !e.is_empty())
+            .take(EVIDENCE_MAX_ITEMS)
+            .map(|e| truncate(e, EVIDENCE_MAX_CHARS))
+            .collect(),
+        urgency: Urgency::Normal,
+        deadline_at: None,
+        permission: None,
+        authority: Some(AuthorityDetail {
+            matter,
+            fingerprint: format!("{}:{}", matter.as_str(), task.id),
+            summary: truncate(&summary, SUMMARY_MAX_CHARS),
+        }),
+        blocking: vec![task.id.clone()],
+        target: DecisionTarget { task_id: task.id.clone(), contract_version: task.contract_version, authorization_revision: None },
+        revision: 1,
+        event_version: 0,
+        deferred_until: None,
+        merged_into: None,
+        status_reason: None,
+        links: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    let requested = request.event(
+        EVENT_DECISION_REQUESTED,
+        now,
+        serde_json::json!({
+            "kind": request.kind,
+            "run_id": request.run_id,
+            "task_id": request.task_id,
+            "question": request.question,
+            "blocking": request.blocking,
+            "target": request.target,
+            "budget": kind,
+            "linked": [],
+        }),
+    );
+    (request, requested)
+}
+
+/// 核准了用盡預算時建立的請求（票 36）：重設用盡的那一種計數，阻擋中的 Task 繼續——驗證不完整回到 `verifying` 重驗，
+/// 其他回到 `ready` 並排回派工佇列。核准在這裡就用掉（記為已使用），Controller 之後不能再拿它當單次核准。
+/// 不是目前用盡的那個請求（例如之後又用盡而建立了新請求）時只記下裁定，什麼都不改。
+fn continue_after_budget(
+    ctx: &DecisionContext<'_>,
+    request: &DecisionRequest,
+    change: &mut DecisionChange,
+    now: Timestamp,
+) -> Result<Vec<String>, DecisionError> {
+    let Some(task) = ctx.task.task(&request.target.task_id) else { return Ok(Vec::new()) };
+    let Some((budget, kind, event)) = budget::reset(&TaskBudget::of(ctx.budgets, task), &request.id, now) else {
+        return Ok(Vec::new());
+    };
+    change.events.push(event);
+    change.budgets.push(budget);
+    change.approval_use = Some(ApprovalUse { request_id: request.id.clone(), run_id: request.run_id.clone(), used_at: now });
+    if task.status != TaskStatus::Blocked {
+        return Ok(Vec::new());
+    }
+    let to = if kind == BudgetKind::Verification { TaskStatus::Verifying } else { TaskStatus::Ready };
+    let mut moved = task.clone();
+    let mut versioned = Versioned { task: &mut moved, events: Vec::new(), now };
+    versioned.change_status(to, budget::EVENT_BUDGET_RESET).map_err(|_| DecisionError::TaskNotFound(task.id.clone()))?;
+    change.events.extend(versioned.events);
+    change.tasks.push(moved);
+    if to != TaskStatus::Ready {
+        return Ok(Vec::new());
+    }
+    change.resumed.push(task.id.clone());
+    Ok(vec![task.id.clone()])
+}
+
 /// 請求結束（回答或過期）後，阻擋範圍中可以恢復的 Task：必須還在等裁定，而且沒有別的待處理請求也阻擋它。
 /// `closing` 是這次一併結束的請求（重新整理時可能一次結束好幾個）。
 fn resume_tasks(
@@ -1499,7 +1619,10 @@ fn answer(
         decided_at: now,
         batch_id: batch_id.clone(),
     });
-    let resumed = resume_tasks(ctx, &[request], &mut change, EVENT_DECISION_ANSWERED, now)?;
+    let mut resumed = resume_tasks(ctx, &[request], &mut change, EVENT_DECISION_ANSWERED, now)?;
+    if action.needs_option() && option_id.as_deref() == Some(OPTION_APPROVE) {
+        resumed.extend(continue_after_budget(ctx, request, &mut change, now)?);
+    }
     let answered = updated.event(
         EVENT_DECISION_ANSWERED,
         now,
