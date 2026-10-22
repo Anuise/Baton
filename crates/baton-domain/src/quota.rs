@@ -432,9 +432,10 @@ pub fn assess(latest: &[QuotaObservation], now: Timestamp) -> QuotaAssessment {
         .fold(None, |best, o| Some(more_conservative(best, o)));
 
     let external_complete = external.as_ref().is_some_and(|o| o.source == QuotaSource::Observed && o.used.is_some());
+    // 「已觀測用量」只算 CLI 給的數字或已達上限；沒有數字的警告雖然判斷時視為 75%，但不是觀測到的用量
     let missing: Vec<&str> = windows
         .iter()
-        .filter(|w| w.observed.as_ref().is_none_or(|o| o.judged_used().is_none()))
+        .filter(|w| w.observed.as_ref().is_none_or(|o| o.used.is_none() && o.status != Some(LimitStatus::Exhausted)))
         .map(|w| w.window.label())
         .collect();
     let complete = external_complete || missing.is_empty();
