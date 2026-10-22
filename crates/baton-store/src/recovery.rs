@@ -4,10 +4,12 @@
 //! 寫入事件、嘗試與 Domain 事件」，以及判斷上一次執行是否正常結束（`runtime_boot.ended_cleanly_at`）。
 //! 恢復的派工阻擋由 `lifecycle::halt_for`、`lifecycle::launch_halted_in` 在各自的交易中呼叫 `recovery_halt`。
 
+use baton_domain::guardian::{self, JournalRecord, RecoveryMirror};
+use rusqlite::OptionalExtension;
 use baton_domain::lifecycle::LifecyclePhase;
 use baton_domain::recovery::{
-    self, AffectedRun, AttemptOutcome, RecoveryAttempt, RecoveryChange, RecoveryCommand, RecoveryError, RecoveryEvent,
-    RecoveryStatus, RUN_STOPPED_BY_RECOVERY_REASON,
+    self, AffectedRun, AttemptOutcome, ImportDisposition, RecoveryAttempt, RecoveryChange, RecoveryCommand, RecoveryError,
+    RecoveryEvent, RecoveryStatus, RUN_STOPPED_BY_RECOVERY_REASON,
 };
 use baton_domain::run::RunChange;
 use baton_domain::scheduler::WaitReason;
@@ -69,16 +71,95 @@ impl Store {
         new_event_id: String,
         now: Timestamp,
     ) -> StoreResult<Option<RecoveryEvent>> {
+        self.note_runtime_start_owning(previous_unclean, None, new_event_id, now).await
+    }
+
+    /// 與 `note_runtime_start` 相同；`own_attempt` 是監護拉起這個 Runtime 時交付的嘗試識別（票 32），
+    /// 那次嘗試由這個 Runtime 接續，不記為失敗。
+    pub async fn note_runtime_start_owning(
+        &self,
+        previous_unclean: bool,
+        own_attempt: Option<String>,
+        new_event_id: String,
+        now: Timestamp,
+    ) -> StoreResult<Option<RecoveryEvent>> {
         self.write(move |tx| {
             let stop_intent = super::lifecycle::load_lifecycle(tx)?.phase != LifecyclePhase::Running;
             let current = load_latest(tx)?;
-            match recovery::on_start(current.as_ref(), previous_unclean && !stop_intent, &new_event_id, now) {
+            let crashed = previous_unclean && !stop_intent;
+            match recovery::on_start_owning(current.as_ref(), crashed, own_attempt.as_deref(), &new_event_id, now) {
                 Some(change) => {
                     save_change(tx, &change)?;
                     Ok(Some(change.event))
                 }
                 None => Ok(current),
             }
+        })
+        .await
+    }
+
+    /// 匯入監護日誌（票 32；spec D-24）：Runtime 啟動後、任何恢復副作用之前呼叫。已匯入過的嘗試識別略過（去重），
+    /// 其餘依序交給 Domain 判定並與處置一起寫入 `guardian_journal_import`，全部在同一個交易中。回傳這次新匯入的紀錄與處置。
+    pub async fn import_guardian_journal(
+        &self,
+        journal: Vec<JournalRecord>,
+        now: Timestamp,
+    ) -> StoreResult<Vec<(String, ImportDisposition)>> {
+        self.write(move |tx| {
+            let stop_intent = super::lifecycle::load_lifecycle(tx)?.phase != LifecyclePhase::Running;
+            let withdrawn = guardian::withdrawn_ids(&journal);
+            let mut imported = Vec::new();
+            for record in &journal {
+                let JournalRecord::Attempt(attempt) = record else { continue };
+                let known: bool = tx.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM guardian_journal_import WHERE attempt_id = ?1)",
+                    [&attempt.attempt_id],
+                    |r| r.get(0),
+                )?;
+                if known {
+                    continue;
+                }
+                let disposition = if withdrawn.contains(attempt.attempt_id.as_str()) {
+                    ImportDisposition::Withdrawn
+                } else {
+                    let current = load_latest(tx)?;
+                    let outcome = recovery::import_guardian_attempt(current.as_ref(), attempt, stop_intent);
+                    if let Some(change) = &outcome.change {
+                        save_change(tx, change)?;
+                    }
+                    outcome.disposition
+                };
+                tx.execute(
+                    "INSERT INTO guardian_journal_import (attempt_id, event_id, round, seq, detected_at, recorded_at, reason,
+                       disposition, imported_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![
+                        attempt.attempt_id,
+                        attempt.event_id,
+                        attempt.round,
+                        attempt.seq,
+                        attempt.detected_at.as_millis(),
+                        attempt.at.as_millis(),
+                        attempt.reason,
+                        disposition.as_str(),
+                        now.as_millis(),
+                    ],
+                )?;
+                imported.push((attempt.attempt_id.clone(), disposition));
+            }
+            Ok(imported)
+        })
+        .await
+    }
+
+    /// 給監護看的恢復狀態鏡像：最新的事件與已匯入的最後一筆監護日誌（票 32）。
+    pub async fn recovery_mirror(&self, now: Timestamp) -> StoreResult<RecoveryMirror> {
+        self.read(move |conn| {
+            let event = load_latest(conn)?;
+            let cursor = conn
+                .query_row("SELECT attempt_id FROM guardian_journal_import ORDER BY rowid DESC LIMIT 1", [], |r| r.get(0))
+                .optional()?;
+            Ok(RecoveryMirror::of(event.as_ref(), cursor, now))
         })
         .await
     }
