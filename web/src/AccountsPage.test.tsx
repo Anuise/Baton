@@ -3,8 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { AccountsPage } from "./AccountsPage";
-import { profile } from "./fixtures";
-import type { AccountClient, AccountProfile } from "./runtimeClient";
+import { accountRun, accountScheduling, profile, schedulingOverview } from "./fixtures";
+import type { AccountClient, AccountProfile, AccountScheduling } from "./runtimeClient";
 
 type PageClient = Pick<
   AccountClient,
@@ -235,5 +235,111 @@ describe("帳號頁", () => {
     await screen.findByText("主要帳號");
 
     expect(screen.queryByLabelText(/密碼|token|金鑰|API key/i)).not.toBeInTheDocument();
+  });
+
+  describe("進行中的 Run 與並行容量", () => {
+    /** 帶排程總覽的 client；帳號清單與 Profile 共用同一份 fake。 */
+    function withOverview(accounts: AccountScheduling[], profiles: AccountProfile[] = [profile()]) {
+      return {
+        ...fakeClient(profiles),
+        schedulingOverview: vi.fn(async () => schedulingOverview({ accounts })),
+      };
+    }
+
+    it("每個帳號顯示「進行中 n/上限」與進行中的 Run（Task 標題、狀態）", async () => {
+      const client = withOverview([
+        accountScheduling({
+          running: 2,
+          limit: 2,
+          runs: [
+            accountRun({ run_id: "run_1", task_title: "整理資料", status: "running" }),
+            accountRun({ run_id: "run_2", task_title: "寫報告", status: "starting", generation: 2 }),
+          ],
+        }),
+      ]);
+
+      render(<AccountsPage client={client} />);
+
+      const item = (await screen.findByText("主要帳號")).closest("li")!;
+      const load = await within(item).findByRole("group", { name: "主要帳號 的進行中 Run" });
+      expect(within(load).getByText("進行中 2/2")).toBeInTheDocument();
+      expect(within(load).getByText("整理資料（第 1 次）：執行中")).toBeInTheDocument();
+      expect(within(load).getByText("寫報告（第 2 次）：啟動中")).toBeInTheDocument();
+    });
+
+    it("已要求取消的 Run 標示「已要求取消」，沒有的不標示", async () => {
+      const client = withOverview([
+        accountScheduling({
+          running: 2,
+          runs: [
+            accountRun({ run_id: "run_1", task_title: "整理資料", cancel_requested: true }),
+            accountRun({ run_id: "run_2", task_title: "寫報告" }),
+          ],
+        }),
+      ]);
+
+      render(<AccountsPage client={client} />);
+
+      expect(await screen.findByText("整理資料（第 1 次）：執行中，已要求取消")).toBeInTheDocument();
+      expect(screen.getByText("寫報告（第 1 次）：執行中")).toBeInTheDocument();
+    });
+
+    it("沒有進行中的 Run 時顯示 0/上限，不列出 Run", async () => {
+      render(<AccountsPage client={withOverview([accountScheduling({ running: 0, limit: 3 })])} />);
+
+      const load = await screen.findByRole("group", { name: "主要帳號 的進行中 Run" });
+      expect(within(load).getByText("進行中 0/3")).toBeInTheDocument();
+      expect(within(load).queryByRole("list")).not.toBeInTheDocument();
+    });
+
+    it("用量未知顯示「未知」而不是 0；已知時顯示百分比", async () => {
+      const client = withOverview(
+        [
+          accountScheduling({ quota_used: null }),
+          accountScheduling({ profile_id: "prof_2", name: "備用帳號", quota_used: 0.42 }),
+        ],
+        [profile(), profile({ id: "prof_2", name: "備用帳號" })],
+      );
+
+      render(<AccountsPage client={client} />);
+
+      const unknown = await screen.findByRole("group", { name: "主要帳號 的進行中 Run" });
+      expect(within(unknown).getByText("已知用量：未知")).toBeInTheDocument();
+      expect(within(unknown).queryByText(/0%/)).not.toBeInTheDocument();
+      const known = screen.getByRole("group", { name: "備用帳號 的進行中 Run" });
+      expect(within(known).getByText("已知用量：42%")).toBeInTheDocument();
+    });
+
+    it("總覽沒有這個帳號時不顯示並行資訊", async () => {
+      const client = withOverview([]);
+      render(<AccountsPage client={client} />);
+
+      await screen.findByText("主要帳號");
+      await waitFor(() => expect(client.schedulingOverview).toHaveBeenCalled());
+      expect(screen.queryByText(/進行中 \d+\/\d+/)).not.toBeInTheDocument();
+    });
+
+    it("讀不到排程總覽時說明原因，帳號清單照常顯示", async () => {
+      const client = withOverview([]);
+      client.schedulingOverview.mockRejectedValueOnce(new Error("connection refused"));
+
+      render(<AccountsPage client={client} />);
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("無法取得排程總覽：connection refused");
+      expect(screen.getByText("主要帳號")).toBeInTheDocument();
+    });
+
+    it("上層要求重新讀取時，並行資訊一併更新", async () => {
+      const client = withOverview([accountScheduling({ running: 0 })]);
+      const { rerender } = render(<AccountsPage client={client} refreshKey={0} />);
+      expect(await screen.findByText("進行中 0/2")).toBeInTheDocument();
+
+      client.schedulingOverview.mockResolvedValue(
+        schedulingOverview({ accounts: [accountScheduling({ running: 1, runs: [accountRun()] })] }),
+      );
+      rerender(<AccountsPage client={client} refreshKey={1} />);
+
+      expect(await screen.findByText("進行中 1/2")).toBeInTheDocument();
+    });
   });
 });

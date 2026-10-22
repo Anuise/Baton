@@ -27,7 +27,10 @@ const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
 // --- 共用輔助 ---
 
 async fn harness() -> Harness {
-    Harness::builder().clock_at(CLOCK_START).start().await
+    let harness = Harness::builder().clock_at(CLOCK_START).start().await;
+    // 派工需要一個可派工的帳號（票 19）
+    harness.add_account("主要帳號", "main@example.com").await;
+    harness
 }
 
 async fn new_workspace(harness: &Harness, name: &str) -> String {

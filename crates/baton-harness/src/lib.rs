@@ -223,6 +223,22 @@ impl Harness {
         (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
     }
 
+    /// 建立一個可派工的帳號 Profile：在它自己的設定目錄完成（fake 的）原生登入並核對，回傳 Profile 識別。
+    /// `account` 是登入的電子郵件；同一個帳號不能綁兩個 Profile，所以每個 Profile 要用不同的帳號。
+    pub async fn add_account(&self, name: &str, account: &str) -> String {
+        let (status, created) =
+            self.send_json(reqwest::Method::POST, "/api/v1/profiles", Some(serde_json::json!({ "name": name }))).await;
+        assert!(status.is_success(), "建立 Profile 失敗：{created}");
+        let id = created["id"].as_str().expect("Profile 回應沒有 id").to_string();
+        let config_dir = created["config_dir"].as_str().expect("Profile 回應沒有 config_dir");
+        self.fakes.claude_env.log_in(Path::new(config_dir), account);
+        let (status, verified) =
+            self.send_json(reqwest::Method::POST, &format!("/api/v1/profiles/{id}/verify"), None).await;
+        assert!(status.is_success(), "核對 Profile 失敗：{verified}");
+        assert_eq!(verified["dispatchable"], true, "Profile 應該可派工：{verified}");
+        id
+    }
+
     /// 以唯讀方式直接開啟控制資料庫，檢查實際落地的內容（不經過 Runtime）。
     pub fn db(&self) -> rusqlite::Connection {
         rusqlite::Connection::open_with_flags(

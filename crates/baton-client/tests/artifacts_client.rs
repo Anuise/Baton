@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use baton_api::{CreateTaskRequest, CreateWorkspaceRequest};
-use baton_client::{ClientError, RuntimeClient};
+use baton_client::{ClientError, DispatchOutcome, RuntimeClient};
 use baton_domain::artifact::{Preview, TOOL_REGISTER_ARTIFACT};
 use baton_domain::task::{ContractContent, ContractField};
 use baton_harness::fakes::FakeSecretProtector;
@@ -34,6 +34,8 @@ fn complete() -> ContractContent {
 
 /// 一個進行中的 Run 並登記了一個成果：回傳 (workspace_id, artifact_id)。
 async fn workspace_with_artifact(harness: &Harness, client: &RuntimeClient) -> (String, String) {
+    // 每個 Run 必屬一個帳號（票 19），先建立一個可派工的帳號
+    harness.add_account("主要帳號", "main@example.com").await;
     let dir = harness.data_dir().join("app");
     std::fs::create_dir_all(&dir).unwrap();
     let workspace = client
@@ -46,7 +48,10 @@ async fn workspace_with_artifact(harness: &Harness, client: &RuntimeClient) -> (
         .await
         .unwrap();
     client.mark_task_ready(&workspace.id, &task.task.id).await.unwrap();
-    let run = client.dispatch_task(&workspace.id, &task.task.id).await.unwrap();
+    let run = match client.dispatch_task(&workspace.id, &task.task.id).await.unwrap() {
+        DispatchOutcome::Started(view) => *view,
+        DispatchOutcome::Queued(queued) => panic!("應該直接派出，卻排隊中：{queued:?}"),
+    };
     harness.supervise().await;
     let token = harness.agent_credential(&run.run.id).expect("Worker 的 Agent 憑證");
     let (status, registered) =

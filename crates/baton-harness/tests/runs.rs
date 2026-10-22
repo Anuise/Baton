@@ -143,8 +143,18 @@ fn held_leases(harness: &Harness, task_id: &str) -> i64 {
         .unwrap()
 }
 
+/// 啟動 Harness 並建立一個可派工的帳號（票 19 之後沒有可派工的帳號就不能建立 Run）。
 async fn harness() -> Harness {
-    Harness::builder().clock_at(CLOCK_START).start().await
+    let harness = Harness::builder().clock_at(CLOCK_START).start().await;
+    harness.add_account("主要帳號", "main@example.com").await;
+    harness
+}
+
+/// 目前唯一的帳號 Profile 識別。
+async fn only_profile_id(harness: &Harness) -> String {
+    let (status, list) = harness.send_json(Method::GET, "/api/v1/profiles", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    list["profiles"][0]["id"].as_str().unwrap().to_string()
 }
 
 /// 讓 Supervisor 處理一次；若 spawn 設成會「當掉」，等一小段時間後放棄那一次處理（等同 Runtime 在那一點崩潰）。
@@ -165,6 +175,7 @@ async fn dispatch_creates_a_queued_run_with_a_lease_and_starts_no_process() {
 
     assert_eq!(status, StatusCode::CREATED, "{run}");
     assert_eq!((status_of(&run), run["generation"].as_i64(), run["task_id"].as_str()), ("queued", Some(1), Some(tid.as_str())));
+    assert_eq!(run["profile_id"].as_str(), Some(only_profile_id(&harness).await.as_str()), "Run 記錄 Scheduler 選的帳號");
     assert_eq!(run["lease"]["expires_at"].as_i64(), Some(CLOCK_START.as_millis() + LEASE_DURATION_MS));
     assert!(run["lease"]["released_at"].is_null(), "派工當下就持有寫入所有權");
     assert!(run["command_id"].is_null() && run["process"].is_null(), "launch intent 與程序身分要等 Supervisor 處理");
@@ -200,7 +211,7 @@ async fn a_task_that_is_not_ready_cannot_be_dispatched_and_nothing_is_written() 
 }
 
 #[tokio::test]
-async fn dispatch_re_checks_admission_so_a_revoked_capability_blocks_it() {
+async fn dispatch_re_checks_admission_so_a_revoked_capability_queues_it_with_an_authorization_reason() {
     let harness = harness().await;
     let (ws, _, goal) = setup(&harness).await;
     confirm_template(&harness, &ws, "trusted_dev_p3").await;
@@ -210,9 +221,15 @@ async fn dispatch_re_checks_admission_so_a_revoked_capability_blocks_it() {
 
     let (status, body) = dispatch(&harness, &ws, &tid).await;
 
-    assert_eq!((status, error_code(&body)), (StatusCode::CONFLICT, "task_admission_denied"), "{body}");
-    assert_eq!(body["missing"][0]["code"], "capability_not_granted");
-    assert_eq!(task_status(&harness, &ws, &tid).await, "ready", "被拒絕時 Task 不變");
+    // 票 19：授權不足不再是 409，而是排隊（202）並說明原因；Task 留在 ready，沒有 Run、沒有 Outbox 項目
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["queued"], true);
+    assert_eq!(body["task_id"], json!(tid));
+    assert_eq!(body["reasons"][0]["category"], "authorization", "{body}");
+    assert_eq!(body["reasons"][0]["code"], "capability_not_granted", "{body}");
+    assert_eq!(task_status(&harness, &ws, &tid).await, "ready", "排隊時 Task 不變");
+    let runs: i64 = harness.db().query_row("SELECT COUNT(*) FROM run", [], |r| r.get(0)).unwrap();
+    assert_eq!(runs, 0);
     assert_eq!(undelivered_outbox(&harness), 0);
 }
 
@@ -230,7 +247,7 @@ async fn the_run_records_the_authorization_revision_it_was_admitted_under() {
 }
 
 #[tokio::test]
-async fn a_task_with_unfinished_dependencies_cannot_be_dispatched() {
+async fn a_task_with_unfinished_dependencies_is_queued_instead_of_dispatched() {
     let harness = harness().await;
     let (ws, _, goal) = setup(&harness).await;
     let first = ready_task(&harness, &ws, &goal, "先做").await;
@@ -243,8 +260,16 @@ async fn a_task_with_unfinished_dependencies_cannot_be_dispatched() {
     let (blocked_status, blocked) = dispatch(&harness, &ws, &second).await;
     let (free_status, _) = dispatch(&harness, &ws, &first).await;
 
-    assert_eq!((blocked_status, error_code(&blocked)), (StatusCode::CONFLICT, "dependencies_unfinished"), "{blocked}");
+    // 票 19：相依未完成不再是 409，而是排隊（202）；Task 仍是 ready，沒有 Run
+    assert_eq!(blocked_status, StatusCode::ACCEPTED, "{blocked}");
+    assert_eq!(blocked["queued"], true);
+    assert_eq!(blocked["reasons"][0]["category"], "dependency", "{blocked}");
     assert_eq!(free_status, StatusCode::CREATED);
+    assert_eq!(task_status(&harness, &ws, &second).await, "ready");
+
+    // 目前沒有任何 API 能把 Task 標為 completed（驗證屬於後續的票），所以只確認相依未完成時 Supervisor 不會提前派出它
+    harness.supervise().await;
+    assert_eq!(task_status(&harness, &ws, &second).await, "ready", "相依還沒完成，Supervisor 不會派出它");
 }
 
 #[tokio::test]

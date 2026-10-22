@@ -189,6 +189,26 @@
 - **關係**：優先於額度恢復、資源喚醒、自動續跑與恢復；跨 Windows 登入保留；只有使用者手動開啟 App 才進入「主動退出後重新開啟」流程。
 - **避免使用**：shutdown flag、kill switch、取消（取消是針對 Task 或 Run）。
 
+### Scheduler（排程）
+- **定義**：Runtime 內決定「現在能不能派、派給哪個 Account Profile、不能派的話為什麼」的模組。依相依、優先序、授權、帳號狀態、額度門檻與並行容量判斷；判定與寫入在同一個交易中，兩個同時到達的要求不會搶到同一個名額。
+- **關係**：派工要求（使用者或 Controller）交給它；有帳號與名額就建立 Run，否則進入派工佇列並回報等待原因；Supervisor 每次處理時讓佇列依序再試一次；不處理額度觀測、交接與 draining（那些改變的是「帳號能不能接新工作」，由 Quota 與 handoff 提供事實）。
+- **避免使用**：dispatcher（Outbox Dispatcher 是另一個模組）、load balancer、queue manager。
+
+### 派工佇列（dispatch queue）
+- **定義**：已被要求派工、但目前沒有帳號或名額的 ready Task。只記錄「誰在排隊」與優先序；等待原因每次依目前狀態重新判定，不保存。
+- **關係**：Task 離開 `ready`（派出、取消、契約被改而退回 pending）就離開佇列；失敗的 Run 讓 Task 回到 `ready` 但**不會**自動重新排隊（沒有重試預算前不自動重派）；與 waiting_resource（所有合適帳號都受限、進度已保存）是不同階段。
+- **避免使用**：queued（Run 的 `queued` 是已建立、等 Supervisor 啟動）、backlog、pending（Task 的 `pending` 是契約尚未通過准入）。
+
+### 等待原因（wait reason）
+- **定義**：Task 還沒有開始的原因，分六類：名額已滿（capacity）、額度（quota）、授權（authorization）、相依（dependency）、狀態不明（state_unknown）、帳號（account：未登入、認證被覆蓋、身分不符、沒有任何帳號）。每個原因有穩定代碼與說明。
+- **關係**：讓使用者知道該處理哪一類問題：名額已滿會自動恢復，額度要等重置，授權與相依要使用者或 Controller 處理，狀態不明與帳號要先核對帳號。
+- **避免使用**：blocked（Task 的 `blocked` 是預算用盡後的狀態）、reason code（泛稱）。
+
+### 並行容量與交接槽（capacity、handoff slot）
+- **定義**：並行容量是每個帳號與全域同時進行的 Run 上限，有「保留交接容量」（預設：每帳號 2、全域 6，可用帳號數 ≥ 3 時保留 1 個交接槽）與「較高並行」（每帳號 3、全域 8、不保留）兩組預設，使用者可在設定頁切換。交接槽是保留給交接 successor 的全域名額，一般派工佔不到。
+- **關係**：進行中 = 尚未結束的 Run（含已要求取消、程序還沒確認停止者）；切換預設不影響已在執行的 Run；交接槽由 handoff 使用。
+- **避免使用**：slot（泛稱）、quota（額度是帳號用量，不是並行數）、concurrency limit。
+
 ### Admission（准入）
 - **定義**：Run 啟動前最後一次授權與設定版本檢查，並持久化啟動許可。已准入的 Run 沿用當時的授權與設定版本。
 - **關係**：建立 queued Run 或 Outbox 項目不等於已准入；撤銷授權不停止已准入的 Run；交接與恢復產生的新 Run 重新檢查新版。

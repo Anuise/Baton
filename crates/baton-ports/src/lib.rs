@@ -19,7 +19,7 @@ pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, ToolProbe};
 pub use clock::Clock;
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
-pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
+pub use quota::{observe_quota, Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
 pub use secret::SecretProtector;
 pub use workspace_fs::{
     directory_state, list_files_recursive, partial_path, read_file_if_exists, write_file_atomic, DirectoryState, DirtyState,

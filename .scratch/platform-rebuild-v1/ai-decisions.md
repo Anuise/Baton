@@ -874,7 +874,79 @@
 - 影響：每個 run 的額度消耗預期上升，帳號較快接近 5h／7d 門檻；派工前檢查照舊。
 - 審閱：認同 2026-10-22（使用者指定）
 
-### AI-95：`register_artifact` 的內容以參數內嵌傳入，不接受 Worker 指定的路徑
+### AI-95：每個 Run 必屬一個帳號；派工要求交給 Scheduler，沒有名額就排隊而不是拒絕
+- 重要度：高
+- 時間／階段：2026-10-22，票 19 實作
+- 決策：`Run` 新增 `profile_id`（派工當下選定、之後不變），沒有可派工的帳號 Profile 就不能建立 Run。`POST …/tasks/{id}/dispatch` 改由 Scheduler 處理：有帳號與名額 → 201 + Run（沿用票 10 的回應，多了 `profile_id`）；沒有帳號、名額已滿、額度達門檻、授權不足或相依未完成 → **202** + `{ queued: true, reasons }`，Task 維持 `ready` 並留在派工佇列。因此票 10 原本回 409 的 `dependencies_unfinished` 與「授權被撤銷」（`task_admission_denied` 中只含授權缺項者）改成 202 排隊；「不是等一等就好」的錯誤（Task 不是 ready、找不到、契約欄位或引用失效、已有寫入者）仍是原本的 409／404，且不寫入任何東西。
+- 理由：票面要求「達到上限時新 Task 排隊並顯示原因」「阻擋原因區分額度、授權、相依與狀態不明」，原因必須在「被擋住的 Task」身上呈現；若授權與相依仍是 409，使用者看不到它們與容量並列的原因，Controller（票 17）「依賴未回答問題的 Task 不會被派出」也需要等待而非失敗。
+- 替代方案：全部維持 409，只有容量排隊（授權、相依就沒有「等待」語意，與票 24 的撤權後行為不一致）；Run 沒有帳號也可建立、啟動時再選帳號（違反「Run 與帳號關聯正確」，且容量無法在派工交易內保證）。
+- 影響：票 10 的兩個測試（撤銷授權、相依未完成）已隨之更新；測試與 Runtime 整合測試需要先有可派工的帳號（harness 新增 `add_account`）。`profile_id` 欄位在資料庫可為空（票 19 之前建立的 Run），Domain 以空字串表示，沒有外鍵（Profile 不刪除，只封存）。Controller 的 `dispatch_task` 工具（票 17）要處理 202。
+- 審閱：未審
+
+### AI-96：派工佇列只記錄「誰在排隊」；失敗後不自動重新排隊；優先序是要求時的整數
+- 重要度：高
+- 時間／階段：2026-10-22，票 19 實作
+- 決策：新增 `dispatch_request(task_id 唯一, workspace_id, priority, requested_at)`。佇列只在使用者（或 Controller）要求派工時加入；Task 離開 `ready`（派出、取消、改契約退回 `pending`）時由 `save_task` 一併移出。Run 失敗、中斷或取消讓 Task 回到 `ready`，**不會**自動回到佇列（沿用 AI-66：沒有重試預算前不自動重派，否則失敗會造成無限重派迴圈）。「優先序」是派工要求本文的整數 `priority`（預設 0，越大越優先，同值依要求順序），沒有其他設定介面。等待原因**不落地**，每次由目前狀態重新判定。
+- 理由：自動把每個 ready 的 Task 當作排隊會與 AI-66、票 36（重試預算）衝突；原因若存起來，授權或帳號狀態一變就過期。Task 目前沒有優先序欄位，調整優先序（使用者故事 25）屬 Controller 的票，這裡只提供 Scheduler 需要的排序鍵。
+- 替代方案：ready 的 Task 全部自動排隊（失敗後無限重派）；在 Task 上加 `priority` 欄位（需要修改 Task 狀態機、契約與面板，超出本票範圍）。
+- 影響：沒有 UI 設定優先序（API 支援）；對同一個排隊中的 Task 重複要求是冪等的，且可以更新其優先序。Run 失敗後使用者仍需手動再派一次。
+- 審閱：未審
+
+### AI-97：容量的兩組預設、保留交接槽的判斷、進行中的定義與選帳號規則
+- 重要度：中
+- 時間／階段：2026-10-22，票 19 實作
+- 決策：兩組預設：「保留交接容量」（預設，即 spec D-14：每帳號 2、全域 6，可用帳號數 ≥ 3 時保留 1 個全域名額，一般派工最多 5 個）與「較高並行」（每帳號 3、全域 8、不保留）。「帳號數 ≥ 3」以**可用（使用中且核對無誤）的帳號數**計，不是 Profile 總數；帳號太少時實際保留數是 0。進行中的 Run = 尚未結束者（`queued`、`starting`、`running`，含已要求取消但程序還沒確認停止者，因為它仍持有寫入所有權與程序）。選帳號：在核對無誤、額度未達門檻、帳號名額未滿的帳號中挑進行中 Run 最少者，同數取較早建立的。切換預設存在 `scheduler_setting` 單列表，產生 `scheduler_settings_changed` 事件（相同模式不寫入）；切換後立即排程一次，已在執行的 Run 不受影響。
+- 理由：spec 只說「可在較高並行／保留交接容量間切換預設組合」而沒有數字，「較高並行」的數字（3／8）是我定的：8 剛好是帳號數上限、每帳號 3 與 D-14 的 2 有明顯差異。以可用帳號數計保留槽，是因為被擋住的帳號無法接手交接，卻仍佔著保留名額會白白降低產能。最少者優先讓兩個帳號同時有空時各拿一個 Task（票面第一條）。
+- 替代方案：以 Profile 總數計（簡單，但一個帳號被擋就浪費名額）；平手時輪流（需要額外狀態）；「較高並行」只拿掉保留槽而數字不變（切換前後差異太小）。
+- 影響：這些數字都集中在 `CapacityMode::limits`，spec D-14 要求使用者回頭檢視；「保留交接容量」被命名為預設，但 spec 另提到的「保留較多交接容量」（story 47）目前沒有第三組。
+- 審閱：未審
+
+### AI-98：阻擋原因分六類（比票面多「名額已滿」與「帳號」）；額度只擋新派工、未觀測不擋
+- 重要度：中
+- 時間／階段：2026-10-22，票 19 實作
+- 決策：`WaitCategory` = `capacity`（名額已滿）、`quota`、`authorization`、`dependency`、`state_unknown`、`account`。Profile 的阻擋原因對應：`profile_unverified`、`identity_unconfirmed`（還不知道）→ `state_unknown`；未登入、認證被覆蓋、設定目錄不符、身分不符、重複帳號、已封存與沒有任何帳號 → `account`。額度只實作 spec D-13 的第一道門檻：QuotaObserver 回報用量 ≥ 0.75 就不派新 Run 給該帳號（`quota_near_limit`）；Port 失敗、沒有樣本或用量未知的帳號**不阻擋**（未知不當作 0，也不因為還沒有觀測器而讓整個產品無法派工）。遲滯（<60% 才恢復）、≥85% 的 draining 與交接留給票 27、28。
+- 理由：票面列了額度、授權、相依、狀態不明四類，但「名額已滿」（票面第二條）與「帳號未登入」是不同的處理方式，混進四類任何一類都會誤導；正式執行檔的 QuotaObserver 還是「尚未實作」，若把未知當阻擋，所有派工都會被擋。
+- 替代方案：把容量與帳號問題硬塞進四類；未觀測就阻擋（保守，但在票 27 之前派不出任何 Run）。
+- 影響：UI 需要六個類別標籤；票 27 加入遲滯時，只需讓 `quota_used` 的輸入包含「已進入停止派工狀態」的資訊或在 Scheduler 加入帳號狀態。`state_unknown` 也用於排隊期間發現「前一個 Run 還沒確認停止」（`execution_conflict`）這類不屬於其他類別的檢查失敗。
+- 審閱：未審
+
+### AI-99：交接槽（`SlotKind::Handoff`）只在 Domain 存在，本票沒有任何流程使用它
+- 重要度：低
+- 時間／階段：2026-10-22，票 19 實作
+- 決策：Scheduler 的 `place` 接受 `SlotKind::Normal`（一般派工，扣掉保留槽）與 `SlotKind::Handoff`（可以用到全域上限）。本票所有派工路徑都是 `Normal`，交接槽「不被一般派工佔用」由 harness 情境測試證明（派滿一般名額後第 6 個排隊，總覽顯示保留數），「交接可以使用保留槽」只由 Domain 單元測試證明。
+- 理由：交接流程（票 28）還不存在，沒有外部入口可以呈現交接派工；先把規則放在 Domain，票 28 直接呼叫即可。
+- 替代方案：加一個測試專用的交接派工端點（把測試需求放進正式 API 面）。
+- 影響：票 28 需要新增以 `SlotKind::Handoff` 派工的 Store 路徑，並補上「交接 successor 使用保留槽」的情境測試。
+- 審閱：未審
+
+### AI-100：排程在單一交易中完成，並在 Supervisor 的每次處理與派工 API 呼叫時執行
+- 重要度：低
+- 時間／階段：2026-10-22，票 19 實作
+- 決策：`Store::schedule` 在一個寫入交易中載入全部 Profile、全域進行中的 Run 與容量設定，逐一判定並寫入，所以容量判定與 Run 建立不會被別的要求插隊。額度樣本是非同步 Port 呼叫，在交易外先取得再傳入（觀測不到的帳號不在結果中）。執行時機有三個：派工 API（同步，帶新要求）、容量預設切換（帶 `None`）與 `Supervisor::tick` 的最後一步（帶 `None`；派出新的 Run 時同一次 tick 再啟動它們）。Run 識別由呼叫端以閉包提供（Domain 不產生亂數）。佇列與等待原因不追加事件（事件只有 Run 的 `run_created`，其 payload 含 `profile_id`；容量切換有 `scheduler_settings_changed`）。
+- 理由：「判定與寫入分開」會讓兩個同時到達的要求一起搶到最後一個名額；Supervisor 每秒處理一次，名額釋出後不需要另外的喚醒機制。排隊本身不是領域狀態變更（沒有版本、沒有轉換規則），所以不追加事件；時間線（票 41）需要時再加。
+- 替代方案：判定在交易外、寫入在交易內再檢查一次（較複雜且仍要重判）；為排隊進入／離開追加事件（目前沒有消費者）。
+- 影響：名額釋出到排隊 Task 啟動最長約 1 秒（背景迴圈間隔）；`harness.supervise()` 同一次呼叫就會把釋出的名額派出去。
+- 審閱：未審
+
+### AI-101：排程相關的 API 與 UI 形狀
+- 重要度：低
+- 時間／階段：2026-10-22，票 19 實作
+- 決策：新增 `GET /api/v1/scheduling`（容量與使用量、每個使用中帳號的進行中 Run、已知用量、佇列與等待原因）與 `PUT /api/v1/scheduling/settings`（`{ "mode": "reserve_handoff" | "higher_concurrency" }`，回傳新的總覽）；Tauri 指令 `scheduling_overview`、`scheduling_set_mode`；`task_dispatch` 回傳 `DispatchOutcome`（Run，或帶 `queued: true` 的排隊結果）。UI：帳號頁每個帳號顯示「進行中 n／上限」與其進行中 Run；新增「並行容量」設定元件（導覽尚未存在，與 AI-37、AI-85 相同放在主區）；工作面板的 ready 卡片顯示「排隊中（第 N 位）」與依類別分組的原因，Run 狀態列顯示帳號名稱。
+- 理由：帳號頁、設定頁與工作面板需要同一份總覽，單一端點避免各自重算；D-21 的導覽結構尚未存在。
+- 替代方案：把進行中 Run 併進 `GET /profiles`（Profile 管理與排程混在一起，且總覽還要有佇列）。
+- 影響：Controller 工具（票 17）與其他 UI 若要顯示等待原因，用同一個端點。
+- 審閱：未審
+
+### AI-102：資料表（migration 10）與既有資料
+- 重要度：低
+- 時間／階段：2026-10-22，票 19 實作
+- 決策：migration 10 `scheduling`（接在票 11 的 `agent_credential_scope`、`agent_report` 之後）：`run.profile_id`（可為空、無外鍵，並建立索引）、`dispatch_request`（`task_id` 唯一）、`scheduler_setting`（單列，`CHECK (id = 1)`）。`run.profile_id` 不設外鍵，因為新增欄位時 SQLite 的外鍵欄位必須預設為 NULL，而 Domain 以選帳號的結果保證關聯正確；Profile 只封存不刪除，所以不會有懸空參照。
+- 理由：尚無發布版本（AI-86 同樣前提），不需要回填舊 Run 的帳號。
+- 替代方案：重建 `run` 表加外鍵（對尚無資料的開發版本沒有價值，且風險高）。
+- 影響：本票原本是第 8 個 migration，整合 rebuild/v1（票 11 已有第 8、9 個）時順延為第 10 個；AI 編號同樣由 AI-87～AI-94 順延為 AI-95～AI-102。
+- 審閱：未審
+
+### AI-103：`register_artifact` 的內容以參數內嵌傳入，不接受 Worker 指定的路徑
 - 重要度：高
 - 時間／階段：2026-10-22，票 12 實作
 - 決策：Worker 呼叫 `register_artifact` 時，內容直接放在參數裡：`content`（UTF-8 文字）或 `content_base64`（二進位），二選一；單一成果最多 10 MiB（`ARTIFACT_MAX_BYTES`）。Runtime 不讀取請求中的任何檔案路徑。
@@ -883,7 +955,7 @@
 - 影響：大型成果（超過 10 MiB，例如影片、資料集）目前無法登記；JSON 內嵌會使 MCP 本文約為內容的 1.4 倍（Base64），Runtime 的登記路由因此把本文上限設為 32 MiB。若日後要支援大檔，需新增「由 Runtime 讀取受限路徑」的第二條路徑並另行審閱。**Validation Required（票 14）**：Claude Code 對單一 MCP 工具呼叫的參數大小是否有自己的上限，需要以真實 Worker 驗證。
 - 審閱：未審
 
-### AI-96：成果檔案的儲存位置、寫入順序與「未登記檔案」不自動刪除
+### AI-104：成果檔案的儲存位置、寫入順序與「未登記檔案」不自動刪除
 - 重要度：中
 - 時間／階段：2026-10-22，票 12 實作
 - 決策：成果存放在 `<資料目錄>\artifacts\<workspace_id>\blob_<隨機>`，每個版本一個獨立檔案、檔名與成果名稱無關。寫入順序是：暫存檔 `<檔名>.partial` → fsync → 原子改名 → 在單一交易提交 manifest 與事件。中途中斷只會留下「未登記檔案」：`.partial` 暫存檔（`staging`，內容不完整）或已改名但 manifest 未提交的檔案（`unregistered`，內容完整但不算成果）。`GET …/artifacts` 的 `unregistered_files` 列出它們，恢復時可辨識；Runtime **不自動刪除**，也不在啟動時搬移。`WorkspaceFs` Port 新增 `read_artifact`、`list_artifact_files`，`write_artifact_atomic` 補上正式實作；fake 在三個點（`MidWrite`、`BeforeRename`、`AfterRename`）可模擬崩潰。
@@ -892,7 +964,7 @@
 - 影響：崩潰多次後儲存區會累積殘留檔案，直到後續票加入清理或備份流程；列表每次都會掃描 Workspace 的成果目錄（成果數量大時需要改成索引）。
 - 審閱：未審
 
-### AI-97：成果與版本的識別：同 Workspace、同 Task、同名是同一個成果
+### AI-105：成果與版本的識別：同 Workspace、同 Task、同名是同一個成果
 - 重要度：中
 - 時間／階段：2026-10-22，票 12 實作
 - 決策：成果以（Workspace、Task、名稱）唯一識別；再次登記同名成果只追加新版本（版本號從 1 起連續遞增），不同名稱是另一個成果。Task 與產生者（Run、世代）一律取自憑證所屬的 Run，請求不能指定。`artifact`、`artifact_version` 是追加式資料表（觸發器禁止更新與刪除，`storage_path` 唯一），每個版本追加事件 `artifact_registered`（`aggregate_type = 'artifact'`，聚合版本 = 成果版本號）。同一個 Run 重送相同內容不去重，會產生新版本。
@@ -901,7 +973,7 @@
 - 影響：不同 Task 之間沒有版本關係；Task 重派後的新 Run 仍歸入同一個成果（同 Task 同名）。票 13 的驗證 Gate 若需要「某個版本被接受」的狀態，要另建紀錄，不可改寫版本表。
 - 審閱：未審
 
-### AI-98：預覽與下載重新核對雜湊；列表只比對大小；桌面殼以 base64 傳遞下載內容
+### AI-106：預覽與下載重新核對雜湊；列表只比對大小；桌面殼以 base64 傳遞下載內容
 - 重要度：中
 - 時間／階段：2026-10-22，票 12 實作
 - 決策：預覽與下載每次都重新讀檔、計算 SHA-256 並比對大小，與 manifest 不符回 409 `artifact_integrity_failed`，檔案不存在回 409 `artifact_file_missing`，不交出內容。列表的 `file_status`（`ok`／`missing`／`size_mismatch`）只比對存在與大小，避免列表為每個版本讀整個檔案。管理 API 只接受桌面憑證（既有 `guard` 規則），Agent 憑證不能下載；成果一律以 Workspace 為界，跨 Workspace 或不存在一律回 404 `artifact_not_found`。Tauri 殼的 `artifact_download` 指令把內容以 base64 放在 JSON 回傳值裡交給 Web UI（Web UI 再核對 `X-Baton-Sha256` 與 manifest 雜湊）。
@@ -910,13 +982,22 @@
 - 影響：大成果的預覽與下載每次都要讀整個檔案。使用者要「忽略完整性失敗仍想取回檔案」沒有入口，需要時直接從資料目錄取得。
 - 審閱：未審
 
-### AI-99：成果登記的限制值與未涵蓋的行為
+### AI-107：成果登記的限制值與未涵蓋的行為
 - 重要度：低
 - 時間／階段：2026-10-22，票 12 實作
 - 決策：名稱必須是檔名（不含路徑分隔字元、控制字元與 Windows 不允許的 `:*?"<>|`，不可是 `.`／`..`，最多 200 字元）；描述最多 1000 字元；預覽最多 64 KiB 並在字元邊界截斷，含 NUL 或不是有效 UTF-8 者視為 `binary`。登記**不改變 Task 狀態**（接受成果屬票 13 的驗證 Gate）、**不續約 lease**（只有三個回報工具與 Heartbeat 續約）；過期世代的登記回 409 `run_report_stale`，不寫入任何檔案、也不像三個回報工具那樣留稽核紀錄。
 - 理由：數值是預設值，改起來便宜；不續約 lease 與不留稽核都是為了讓本票只做票面要求的事，避免提早決定後續票的語意。
 - 替代方案：登記同時視為存活訊號並續約 lease；過期世代的登記也留稽核（需要保存被拒絕的內容，成果可達 10 MiB，不適合放進追加式資料表）。
 - 影響：Worker 若長時間只登記成果而不回報進度，lease 仍會照原本的規則過期並被核對。
+- 審閱：未審
+
+### AI-108：票 12 整合 rebuild/v1（票 19）：migration 與 AI 編號順延、衝突合併方式
+- 重要度：低
+- 時間／階段：2026-10-22，票 12 整合（R036-12-integrate）
+- 決策：票 12 的 migration `artifact` 原本是第 10 個，與票 19 的 `scheduling`（migration 10）重號，順延為第 11 個，排在 `scheduling` 之後；兩者互不參照（`artifact_version.run_id` 只參照 `run.id`），所以先後順序不影響 schema。票 12 的 AI 編號由 AI-95～AI-99 順延為 AI-103～AI-107，內容不變；程式碼與文件沒有引用這些編號，不需同步。其餘衝突（API 路由、Tauri 指令清單、`AppClient` 型別、開發指南的 crate 表與章節）一律兩邊都保留：路由與指令並列，`AppClient` 同時包含 `SchedulingClient` 與 `ArtifactClient`，開發指南「多帳號並行排程與容量」在前、「成果儲存與成果瀏覽」在後。票 19 起派工必須有可派工帳號、`dispatch_task` 改回傳 `DispatchOutcome`，所以本票的 `crates/baton-harness/tests/artifacts.rs` 與 `crates/baton-client/tests/artifacts_client.rs` 在共用設定中加上 `harness.add_account`（與票 19 調整 `agent_api.rs` 的方式相同），並把派工結果拆成 `Started`；測試的斷言不變。
+- 理由：整合分支已有的 migration 與 AI 編號不可變動；已套用的資料庫以 migration 序號判斷，只能把後合併的一方往後排。
+- 替代方案：把兩個 migration 合併成一個（會改動整合分支已有的 migration 10，已套用的開發資料庫會漏掉其中一半）。
+- 影響：以票 12 分支（合併前）建立過的開發資料庫，其 `schema_migrations` 第 10 筆是 `artifact`，與整合後的 `scheduling` 不一致，需刪除重建；尚無發布版本，不提供轉換。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄
