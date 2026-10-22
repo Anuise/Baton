@@ -5,6 +5,7 @@ import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { ModelOverridesPanel } from "./ModelOverridesPanel";
 import { DecisionCenter } from "./DecisionCenter";
+import { KnowledgePage } from "./KnowledgePage";
 import { PlatformPage } from "./PlatformPage";
 import { SchedulingSettings } from "./SchedulingSettings";
 import { SetupWizard } from "./SetupWizard";
@@ -14,8 +15,8 @@ import { createRuntimeClient, type AppClient, type HealthResponse, type PendingD
 import { TaskBoard } from "./TaskBoard";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、工作面板、裁定中心或成果與驗證。 */
-type Opened = { view: "authorization" | "tasks" | "decisions" | "artifacts"; workspace: Workspace };
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、工作面板、裁定中心、成果與驗證或知識。 */
+type Opened = { view: "authorization" | "tasks" | "decisions" | "artifacts" | "knowledge"; workspace: Workspace };
 
 export function App() {
   const [client, setClient] = useState<AppClient | null>(null);
@@ -48,6 +49,7 @@ export function App() {
             }}
             pendingDecisions={pendingByWorkspace}
             onOpenArtifacts={(workspace) => setOpened({ view: "artifacts", workspace })}
+            onOpenKnowledge={(workspace) => setOpened({ view: "knowledge", workspace })}
           />
         )}
         <main className="main">
@@ -68,6 +70,7 @@ export function App() {
             />
           )}
           {client && opened?.view === "artifacts" && <ArtifactsPage client={client} workspace={opened.workspace} />}
+          {client && opened?.view === "knowledge" && <KnowledgePage client={client} workspace={opened.workspace} />}
           {client && <PlatformPage client={client} />}
         </main>
       </div>

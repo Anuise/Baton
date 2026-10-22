@@ -802,3 +802,199 @@ body {
 .artifact-unregistered ul {
   padding-left: 18px;
 }
+
+.knowledge-page {
+  display: grid;
+  gap: 12px;
+}
+
+.knowledge-page h2,
+.knowledge-page h3,
+.knowledge-page h4 {
+  margin: 0;
+}
+
+.knowledge-page h3 {
+  font-size: 14px;
+}
+
+.knowledge-search {
+  display: flex;
+  gap: 6px;
+}
+
+.knowledge-search input {
+  flex: 1;
+  max-width: 480px;
+}
+
+.knowledge-page > [role="alert"] {
+  color: #cf222e;
+}
+
+.knowledge-notice,
+.knowledge-degraded {
+  margin: 0;
+  padding: 8px 12px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  border-radius: 6px;
+}
+
+.knowledge-degraded {
+  font-weight: 600;
+}
+
+.knowledge-section {
+  display: grid;
+  gap: 6px;
+}
+
+.knowledge-section > p {
+  margin: 0;
+  color: #656d76;
+  font-size: 12px;
+}
+
+.knowledge-card,
+.knowledge-detail,
+.knowledge-create {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.knowledge-card p,
+.knowledge-card ul,
+.knowledge-card dl,
+.knowledge-detail p,
+.knowledge-detail ul,
+.knowledge-detail dl {
+  margin: 0;
+}
+
+.knowledge-card h4 {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.knowledge-badge {
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #ddf4ff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 候選必須一眼看出「尚未驗證」 */
+.knowledge-candidate {
+  border: 1px dashed #bf8700;
+  background: #fffbea;
+}
+
+.knowledge-candidate .knowledge-badge {
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+}
+
+.knowledge-inactive {
+  background: #f6f8fa;
+  color: #656d76;
+}
+
+.knowledge-inactive .knowledge-badge {
+  background: #ffebe9;
+  color: #cf222e;
+}
+
+.knowledge-meta {
+  color: #656d76;
+}
+
+.knowledge-body {
+  white-space: pre-wrap;
+}
+
+.knowledge-lesson {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 8px;
+}
+
+.knowledge-lesson dt {
+  font-weight: 600;
+}
+
+.knowledge-lesson dd {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.knowledge-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0;
+  list-style: none;
+}
+
+.knowledge-tags li {
+  padding: 1px 6px;
+  background: #eaeef2;
+  border-radius: 10px;
+}
+
+.knowledge-evidence ul,
+.knowledge-versions,
+.knowledge-history {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.knowledge-versions li {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.knowledge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knowledge-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 480px;
+}
+
+.knowledge-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.knowledge-form textarea {
+  min-height: 48px;
+  font: inherit;
+}
+
+.knowledge-card [role="alert"],
+.knowledge-form [role="alert"] {
+  color: #cf222e;
+}
+
+.knowledge-history-toggle {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}

@@ -41,11 +41,18 @@ pub struct HarnessBuilder {
     clock_start: Timestamp,
     prepare: Option<PrepareDataDir>,
     adapter: Option<AdapterFactory>,
+    full_text_search: bool,
 }
 
 impl HarnessBuilder {
     pub fn clock_at(mut self, start: Timestamp) -> Self {
         self.clock_start = start;
+        self
+    }
+
+    /// 視同 FTS5 不可用：知識搜尋退回 LIKE（spec D-26 的降級情境）。之後可用 `Harness::set_full_text_search` 在重啟時切換。
+    pub fn without_full_text_search(mut self) -> Self {
+        self.full_text_search = false;
         self
     }
 
@@ -73,8 +80,15 @@ impl HarnessBuilder {
         }
         let fakes = FakePorts::new(self.clock_start);
         let adapter = self.adapter.map(|factory| factory(data_dir.path()));
-        let mut harness = Harness { data_dir, fakes, adapter, runtime: None, http: reqwest::Client::new() };
-        harness.runtime = Some(try_start_runtime(harness.data_dir.path(), &harness.ports()).await?);
+        let mut harness = Harness {
+            data_dir,
+            fakes,
+            adapter,
+            runtime: None,
+            http: reqwest::Client::new(),
+            full_text_search: self.full_text_search,
+        };
+        harness.runtime = Some(try_start_runtime(harness.data_dir.path(), &harness.ports(), harness.full_text_search).await?);
         Ok(harness)
     }
 }
@@ -86,6 +100,7 @@ pub struct Harness {
     adapter: Option<Arc<dyn AgentAdapter>>,
     runtime: Option<RunningRuntime>,
     http: reqwest::Client,
+    full_text_search: bool,
 }
 
 /// 讓測試可用 `harness.clock`、`harness.process_control` 等直接取得 fake。
@@ -99,7 +114,7 @@ impl Deref for Harness {
 
 impl Harness {
     pub fn builder() -> HarnessBuilder {
-        HarnessBuilder { clock_start: DEFAULT_CLOCK_START, prepare: None, adapter: None }
+        HarnessBuilder { clock_start: DEFAULT_CLOCK_START, prepare: None, adapter: None, full_text_search: true }
     }
 
     /// 以預設設定啟動。
@@ -273,22 +288,28 @@ impl Harness {
         self.runtime.as_ref().expect("Runtime 尚未啟動").supervisor().tick().await;
     }
 
+    /// 下一次 `restart` 是否使用全文檢索（false 視同 FTS5 不可用）。
+    pub fn set_full_text_search(&mut self, enabled: bool) {
+        self.full_text_search = enabled;
+    }
+
     /// 模擬重啟：丟棄目前的 Runtime，保留資料目錄與 fake，重新建立。
     pub async fn restart(&mut self) {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown().await;
         }
-        let runtime = try_start_runtime(self.data_dir.path(), &self.ports()).await;
+        let runtime = try_start_runtime(self.data_dir.path(), &self.ports(), self.full_text_search).await;
         self.runtime = Some(runtime.unwrap_or_else(|e| panic!("Runtime 重啟失敗：{e}")));
     }
 }
 
-async fn try_start_runtime(data_dir: &Path, ports: &Ports) -> Result<RunningRuntime, RuntimeError> {
+async fn try_start_runtime(data_dir: &Path, ports: &Ports, full_text_search: bool) -> Result<RunningRuntime, RuntimeError> {
     let config = RuntimeConfig {
         data_dir: data_dir.to_path_buf(),
         // 埠 0 讓作業系統配置；每個 Harness 與每次重建都不會互相衝突
         bind: "127.0.0.1:0".parse().expect("固定位址"),
     };
     // 測試自己決定何時讓 Supervisor 動作（`Harness::supervise`），所以不啟動背景迴圈
-    Runtime::start_with(config, ports.clone(), RuntimeOptions { background_supervisor: false, ..RuntimeOptions::default() }).await
+    let options = RuntimeOptions { background_supervisor: false, full_text_search, ..RuntimeOptions::default() };
+    Runtime::start_with(config, ports.clone(), options).await
 }
