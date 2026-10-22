@@ -641,10 +641,15 @@ pub struct ReproductionAttempt {
 
 /// 檢查重現案例能否在這個 Profile 的環境中執行：與 Profile 旅程相同的檢查（每個自動化步驟都有程式斷言、persona 與
 /// 登入身分存在、秘密已宣告、瀏覽器操作只用於 web），並且至少有一個可自動化的步驟。
+///
+/// 案例由 Controller 提出、由 Runtime 執行，修復後還會在每次一般驗證中執行（AI-440），所以不能超出使用者發布的
+/// Profile（AI-391、AI-416）：命令與引用秘密的操作必須與 Profile 中某個操作完全相同；HTTP 與瀏覽器前往的網址
+/// 只能指向 Profile 已出現的來源（scheme、主機與埠）。
 pub fn check_case(definition: &ProfileDefinition, journey: &Journey) -> Result<(), ExplorationError> {
     if !journey.steps.iter().any(|s| !matches!(s.operation, Operation::Manual { .. })) {
         return Err(invalid("重現案例至少要有一個可自動化、有程式斷言的步驟；人工步驟無法證明產品行為"));
     }
+    check_case_boundary(definition, journey)?;
     // 案例的識別由 Runtime 指定：檢查時換成 Profile 中沒有的識別，以免與 Profile 旅程撞名
     let mut probe = journey.clone();
     probe.representative = false;
@@ -658,6 +663,78 @@ pub fn check_case(definition: &ProfileDefinition, journey: &Journey) -> Result<(
         vp::ProfileError::Invalid(message) => invalid(format!("重現案例無法在目前的 Verification Profile 中執行：{message}")),
         other => invalid(other.to_string()),
     })
+}
+
+/// 案例的信任邊界（R151 第 3 項）：只能重用使用者在 Profile 中定義過的命令、秘密用法與來源。
+fn check_case_boundary(definition: &ProfileDefinition, journey: &Journey) -> Result<(), ExplorationError> {
+    let published: Vec<&Operation> = definition
+        .doctor
+        .iter()
+        .chain(definition.readiness.as_ref().map(|r| &r.step))
+        .chain(&definition.setup)
+        .chain(definition.journeys.iter().flat_map(|j| &j.steps))
+        .map(|s| &s.operation)
+        .chain(&definition.teardown)
+        .collect();
+    let origins: Vec<String> = published.iter().filter_map(|o| operation_url(o)).filter_map(url_origin).collect();
+    for step in &journey.steps {
+        let operation = &step.operation;
+        if published.contains(&operation) {
+            continue;
+        }
+        if matches!(operation, Operation::Command { .. }) {
+            return Err(invalid(format!(
+                "重現案例的步驟「{}」執行的命令不在 Verification Profile 中；案例只能重用 Profile 中完全相同的命令",
+                step.key
+            )));
+        }
+        if !operation.secret_keys().is_empty() {
+            return Err(invalid(format!(
+                "重現案例的步驟「{}」引用了秘密；秘密只能用在與 Verification Profile 中完全相同的操作",
+                step.key
+            )));
+        }
+        if let Some(url) = operation_url(operation) {
+            if !url_origin(url).is_some_and(|origin| origins.contains(&origin)) {
+                return Err(invalid(format!(
+                    "重現案例的步驟「{}」的網址「{url}」不是 Verification Profile 中出現過的來源（scheme、主機與埠）",
+                    step.key
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// HTTP 請求與瀏覽器前往的網址。
+fn operation_url(operation: &Operation) -> Option<&str> {
+    match operation {
+        Operation::Http { url, .. } => Some(url),
+        Operation::Browser { action: vp::BrowserAction::Goto { url }, .. } => Some(url),
+        _ => None,
+    }
+}
+
+/// 網址的來源：小寫的 scheme 與主機加上埠（省略時補預設埠）。帶使用者資訊（`@`）或佔位字的來源無法確定實際連到哪裡，
+/// 視為沒有來源（只有與 Profile 完全相同的操作能使用）。
+fn url_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let scheme = scheme.to_ascii_lowercase();
+    let default_port: u16 = match scheme.as_str() {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+    if authority.is_empty() || authority.contains(['@', '{', '}']) {
+        return None;
+    }
+    // 最後一個「:」之後是埠；IPv6 位址（[…]）括號內的冒號不算
+    let (host, port) = match authority.rsplit_once(':').filter(|(_, port)| !port.contains(']')) {
+        Some((host, port)) => (host, port.parse::<u16>().ok()?),
+        None => (authority.as_str(), default_port),
+    };
+    Some(format!("{scheme}://{host}:{port}"))
 }
 
 /// 存放與執行用的案例：識別換成 `finding.<疑點>`，不是代表旅程。
