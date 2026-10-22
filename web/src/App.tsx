@@ -4,6 +4,7 @@ import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { BackupSettings } from "./BackupSettings";
+import { ConversationPage } from "./ConversationPage";
 import { ModelOverridesPanel } from "./ModelOverridesPanel";
 import { DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
@@ -18,8 +19,11 @@ import { createRuntimeClient, type AppClient, type HealthResponse, type PendingD
 import { TaskBoard } from "./TaskBoard";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、工作面板、裁定中心、成果與驗證或知識。 */
-type Opened = { view: "authorization" | "tasks" | "decisions" | "artifacts" | "knowledge"; workspace: Workspace };
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證或知識。 */
+type Opened = {
+  view: "authorization" | "conversation" | "tasks" | "decisions" | "artifacts" | "knowledge";
+  workspace: Workspace;
+};
 
 export function App() {
   const [client, setClient] = useState<AppClient | null>(null);
@@ -45,6 +49,7 @@ export function App() {
           <WorkspaceSidebar
             client={client}
             onSelect={(workspace) => setOpened({ view: "authorization", workspace })}
+            onOpenConversation={(workspace) => setOpened({ view: "conversation", workspace })}
             onOpenTasks={(workspace) => setOpened({ view: "tasks", workspace })}
             onOpenDecisions={(workspace) => {
               setOpened({ view: "decisions", workspace });
@@ -66,6 +71,7 @@ export function App() {
           {client && <RecoveryPanel client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "authorization" && <ModelOverridesPanel client={client} workspace={opened.workspace} />}
+          {client && opened?.view === "conversation" && <ConversationPage client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
           {client && opened?.view === "decisions" && (
             <DecisionCenter

@@ -1,6 +1,7 @@
 //! Agent Session：平台 Session、原生 Session 與程序身分分開保存；沿用、替換與對話紀錄匯入（票 15，issue §3.1～3.3）。
 //!
-//! 純邏輯、無 I/O。Session 的狀態只隨 Run 的命令改變（`crate::run::decide` 呼叫這裡的函式），由 Store 在同一個交易中套用。
+//! 純邏輯、無 I/O。Session 的狀態只隨 Run 的命令改變（`crate::run::decide` 與 Controller Run 的 `crate::conversation` 呼叫這裡的函式），
+//! 由 Store 在同一個交易中套用。
 //!
 //! 幾條貫穿全檔的規則：
 //! - **三種識別不混用**：`AgentSession::id` 是平台產生的穩定主鍵；`native_session_id` 是執行工具回報的原生識別，
@@ -210,9 +211,30 @@ pub fn session_id_for_run(run_id: &str) -> String {
     format!("ses_{}", run_id.strip_prefix("run_").unwrap_or(run_id))
 }
 
+/// Session 的歸屬：Worker Session 綁 Task，Controller Session 綁 conversation（票 16）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionOwner<'a> {
+    Task(&'a str),
+    Conversation(&'a str),
+}
+
+impl SessionOwner<'_> {
+    fn owns(&self, session: &AgentSession) -> bool {
+        match self {
+            SessionOwner::Task(task_id) => session.task_id.as_deref() == Some(*task_id),
+            SessionOwner::Conversation(conversation_id) => session.conversation_id.as_deref() == Some(*conversation_id),
+        }
+    }
+}
+
 /// 一個 Task 最近建立的 Session（`sessions` 依建立順序）。
 pub fn latest_for_task<'a>(sessions: &'a [AgentSession], task_id: &str) -> Option<&'a AgentSession> {
-    sessions.iter().rev().find(|s| s.task_id.as_deref() == Some(task_id))
+    latest_for(sessions, SessionOwner::Task(task_id))
+}
+
+/// 某個 Task 或 conversation 最近建立的 Session（`sessions` 依建立順序）。
+pub fn latest_for<'a>(sessions: &'a [AgentSession], owner: SessionOwner<'_>) -> Option<&'a AgentSession> {
+    sessions.iter().rev().find(|s| owner.owns(s))
 }
 
 // ---------------------------------------------------------------- 啟動時的決定
@@ -241,7 +263,17 @@ pub fn resume_candidate<'a>(
     profile_id: &str,
     working_dir: &str,
 ) -> Option<&'a AgentSession> {
-    let latest = latest_for_task(sessions, task_id)?;
+    resume_candidate_for(sessions, SessionOwner::Task(task_id), profile_id, working_dir)
+}
+
+/// 同 `resume_candidate`，但歸屬可以是 Task 或 conversation。
+pub fn resume_candidate_for<'a>(
+    sessions: &'a [AgentSession],
+    owner: SessionOwner<'_>,
+    profile_id: &str,
+    working_dir: &str,
+) -> Option<&'a AgentSession> {
+    let latest = latest_for(sessions, owner)?;
     incompatibility(latest, profile_id, working_dir).is_none().then_some(latest)
 }
 
@@ -274,7 +306,19 @@ pub fn plan_launch(
     working_dir: &str,
     check: Option<&ResumeCheck>,
 ) -> Result<SessionPlan, SessionBusy> {
-    let Some(latest) = latest_for_task(sessions, task_id) else {
+    plan_launch_for(sessions, run_id, SessionOwner::Task(task_id), profile_id, working_dir, check)
+}
+
+/// 同 `plan_launch`，但歸屬可以是 Task 或 conversation。
+pub fn plan_launch_for(
+    sessions: &[AgentSession],
+    run_id: &str,
+    owner: SessionOwner<'_>,
+    profile_id: &str,
+    working_dir: &str,
+    check: Option<&ResumeCheck>,
+) -> Result<SessionPlan, SessionBusy> {
+    let Some(latest) = latest_for(sessions, owner) else {
         return Ok(SessionPlan::Create { predecessor: None });
     };
     if let Some(driver) = latest.driver_run_id.as_ref().filter(|d| d.as_str() != run_id) {
@@ -328,7 +372,7 @@ impl SessionEdits {
 pub struct LaunchFacts<'a> {
     pub run_id: &'a str,
     pub workspace_id: &'a str,
-    pub task_id: &'a str,
+    pub owner: SessionOwner<'a>,
     pub profile_id: &'a str,
     pub working_dir: &'a str,
 }
@@ -382,13 +426,19 @@ pub fn apply_plan(
                     edits.push(old, event, payload, now);
                 }
             }
+            let (role, task_id, conversation_id) = match facts.owner {
+                SessionOwner::Task(task_id) => (AgentRole::Worker, Some(task_id.to_string()), None),
+                SessionOwner::Conversation(conversation_id) => {
+                    (AgentRole::Controller, None, Some(conversation_id.to_string()))
+                }
+            };
             let session = AgentSession {
                 id: id.clone(),
                 runtime_type: RUNTIME_CLAUDE_CODE.to_string(),
                 workspace_id: facts.workspace_id.to_string(),
-                role: AgentRole::Worker,
-                task_id: Some(facts.task_id.to_string()),
-                conversation_id: None,
+                role,
+                task_id,
+                conversation_id,
                 profile_id: facts.profile_id.to_string(),
                 working_directory: facts.working_dir.to_string(),
                 native_session_id: None,

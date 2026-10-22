@@ -30,6 +30,10 @@
 //!    再處理到期的清理：先持久化「清理中」，重新核對安全條件（仍是平台登記的 worktree、沒有未保存或歸屬不明的檔案），
 //!    符合才移除；失敗時記下原因、依退避有限重試，Task 仍是已完成。崩潰後停在清理中的登記重新核對後接續。
 //!
+//! 10. **Controller**（票 16）：在收事件之後處理 Controller 的輪次。啟動中的一輪以 command_id 找回原程序（找不到就中斷，
+//!     輸入退回待處理）；執行中的一輪收事件，程序結束時在一個交易中保存結果（輸入標為已處理、寫入回覆）；
+//!     最後喚起有待處理輸入、合併視窗（5 秒）已到期而且沒有一輪進行中的 conversation。沒有輸入就什麼都不做。
+//!
 //! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
 //! 由測試在想要的時刻呼叫 `tick`，搭配 fake Clock 就能完全決定性地重現任何時序。
 //!
@@ -54,16 +58,18 @@ use baton_api::{quota, LogSink, RunSettings};
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::AgentScope;
 use baton_domain::cleanup::{self, CleanupCommand, CleanupStatus, Inspection};
+use baton_domain::conversation::{BeginTurn, ControllerRun, ControllerRunStatus, TurnOutcome};
 use baton_domain::integration::{self, AdvanceResult, IntegrationCommand, IntegrationStatus, MergeResult};
 use baton_domain::lifecycle::{
     ExitReport, ExitTiming, LifecycleFile, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
     RUN_GONE_AFTER_EXIT_REASON,
 };
-use baton_domain::handoff::HandoffPhase;
+use baton_domain::handoff::{GateState, HandoffPhase};
 use baton_domain::quota::{LimitStatus, RateLimitSignal};
+use baton_domain::scheduler::{self, Capacity, Placement, SlotKind};
 use baton_domain::recovery::{self, AffectedRun, RecoveryCommand, RecoveryStatus, RunDisposition};
 use baton_domain::run::{
-    LaunchPayload, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
+    LaunchPayload, LEASE_DURATION_MS, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
 };
 use baton_domain::session::{
     self, ResumeCapability, ResumeCheck, SegmentAvailability, SegmentPlan, TranscriptEntry, TranscriptSegment,
@@ -74,7 +80,7 @@ use baton_ports::{
     AdapterEvent, AdvanceOutcome, AgentHandle, Capability, Liveness, MergeOutcome, Ports, ProcessIdentity, RunSpec,
     SessionRef, SpawnSpec, StopResult, WorktreeState,
 };
-use baton_store::{CleanupWork, ExecutingRun, HandoffWork, IntegrationWork, PendingLaunch, Store};
+use baton_store::{CleanupWork, ControllerWake, ExecutingRun, HandoffWork, IntegrationWork, PendingLaunch, Store};
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{watch, Mutex, Notify};
@@ -87,6 +93,11 @@ pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
 /// 受控停止的預設寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
 pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
+
+/// Controller 程序的 Agent 憑證環境變數：本票還沒有 Controller 憑證（`credential.run_id` 只能指向 Worker 的 Run），
+/// 但 Run 的 MCP 設定以 `${BATON_AGENT_TOKEN}` 參照它，未設定時 CLI 可能無法解析設定，所以給一個不是秘密的佔位值；
+/// 工具呼叫會被 Agent API 以未授權拒絕。票 17 簽發 Controller 憑證後取代。
+const CONTROLLER_TOKEN_PLACEHOLDER: &str = "controller-credential-not-issued";
 
 /// 背景迴圈沒有被喚醒時，最久多久檢查一次。
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(1);
@@ -117,6 +128,8 @@ pub struct Supervisor {
     last_errors: Mutex<HashMap<String, String>>,
     /// Adapter 回報過額度用盡的 Run：之後以失敗結束是突然限流，不是實作失敗（票 36）。
     quota_limited: Mutex<HashSet<String>>,
+    /// 已接上的 Controller Run 事件串流與這一輪累積的回覆（票 16）；Runtime 重建後是空的。
+    controller_streams: Mutex<HashMap<String, ControllerStream>>,
     /// 完全退出的時間參數與生命週期檔所在的資料目錄。
     exit_timing: ExitTiming,
     data_dir: PathBuf,
@@ -161,6 +174,7 @@ impl Supervisor {
             adopted: Mutex::new(HashSet::new()),
             last_errors: Mutex::new(HashMap::new()),
             quota_limited: Mutex::new(HashSet::new()),
+            controller_streams: Mutex::new(HashMap::new()),
             exit_timing: lifecycle.exit_timing,
             data_dir: lifecycle.data_dir,
             reopen_from: Mutex::new(lifecycle.reopen_from),
@@ -214,6 +228,7 @@ impl Supervisor {
             self.launch_pending().await;
         }
         let exited_into_handoff = self.pump_events().await;
+        self.drive_controllers().await;
         self.process_cancellations().await;
         self.check_leases().await;
         self.poll_quota().await;
@@ -381,20 +396,28 @@ impl Supervisor {
             }
         }
 
+        // Controller 的輪次與 Worker 同時停止，同樣受總上限約束（票 16）
+        let controllers = tokio::time::timeout_at(deadline, self.stop_controllers_for_exit(grace));
         // 到總上限仍沒有結果就不再等待（逾時的那些在 `finish_exit` 記為停止異常）
-        while let Ok(Some((item, result))) = tokio::time::timeout_at(deadline, stopping.next()).await {
-            let record = match result {
-                Ok(StopResult::StoppedGracefully) => self.finish_stopped(&item, RunStopOutcome::StoppedGracefully).await,
-                Ok(StopResult::ForceKilled) => self.finish_stopped(&item, RunStopOutcome::ForceKilled).await,
-                Ok(StopResult::StillAlive) => anomaly(
-                    &item,
-                    StopAnomaly::StillAlive,
-                    "終止程序樹之後仍有程序存活，無法確認停止；Run 保留寫入所有權".to_string(),
-                ),
-                Err(error) => anomaly(&item, StopAnomaly::StopFailed, format!("停止程序失敗：{error}")),
-            };
-            report.record(record);
-            self.save_progress(&report).await;
+        let workers = async {
+            while let Ok(Some((item, result))) = tokio::time::timeout_at(deadline, stopping.next()).await {
+                let record = match result {
+                    Ok(StopResult::StoppedGracefully) => self.finish_stopped(&item, RunStopOutcome::StoppedGracefully).await,
+                    Ok(StopResult::ForceKilled) => self.finish_stopped(&item, RunStopOutcome::ForceKilled).await,
+                    Ok(StopResult::StillAlive) => anomaly(
+                        &item,
+                        StopAnomaly::StillAlive,
+                        "終止程序樹之後仍有程序存活，無法確認停止；Run 保留寫入所有權".to_string(),
+                    ),
+                    Err(error) => anomaly(&item, StopAnomaly::StopFailed, format!("停止程序失敗：{error}")),
+                };
+                report.record(record);
+                self.save_progress(&report).await;
+            }
+        };
+        let (controllers, ()) = tokio::join!(controllers, workers);
+        if controllers.is_err() {
+            report.notes.push("到上限仍無法確認 Controller 的程序已停止".to_string());
         }
         self.finish_exit(report, total).await
     }
@@ -625,25 +648,25 @@ impl Supervisor {
         }
     }
 
-    /// 把 Run 回報的限流訊號或用量記為該 Run 帳號的額度觀測；沒有帳號的舊 Run（票 19 之前）略過。
-    async fn record_quota_event(&self, run: &Run, event: AdapterEvent) {
-        if run.profile_id.is_empty() {
+    /// 把 Run（含 Controller Run）回報的限流訊號或用量記為該帳號的額度觀測；沒有帳號的舊 Run（票 19 之前）略過。
+    async fn record_quota_event(&self, profile_id: &str, run_id: &str, event: AdapterEvent) {
+        if profile_id.is_empty() {
             return;
         }
         let now = self.ports.clock.now();
         let result = match event {
             AdapterEvent::RateLimited { window, status, used, reset_at_millis, raw } => {
                 let signal = RateLimitSignal { window, status, used, reset_at: reset_at_millis.map(Timestamp::from_millis), raw };
-                let observation = baton_domain::quota::observe_signal(&run.profile_id, &run.id, &signal, now);
+                let observation = baton_domain::quota::observe_signal(profile_id, run_id, &signal, now);
                 self.store.record_quota_signal(observation).await
             }
             AdapterEvent::UsageReported { tokens, raw } => {
-                self.store.record_quota_usage(run.profile_id.clone(), run.id.clone(), tokens, raw, now).await
+                self.store.record_quota_usage(profile_id.to_string(), run_id.to_string(), tokens, raw, now).await
             }
             _ => return,
         };
         if let Err(error) = result {
-            self.note(&format!("Run {} 的額度觀測沒有記下：{error}", run.id));
+            self.note(&format!("Run {run_id} 的額度觀測沒有記下：{error}"));
         }
     }
 
@@ -1189,7 +1212,7 @@ impl Supervisor {
                         if matches!(event, AdapterEvent::RateLimited { status: LimitStatus::Exhausted, .. }) {
                             self.quota_limited.lock().await.insert(run_id.clone());
                         }
-                        self.record_quota_event(&item.view.run, event).await;
+                        self.record_quota_event(&item.view.run.profile_id, &item.view.run.id, event).await;
                     }
                     // 訊息由後續的票處理（對話紀錄）
                     AdapterEvent::Transcript { position, line } => transcript.push(TranscriptEntry { position, line }),
@@ -1276,6 +1299,345 @@ impl Supervisor {
                 None
             }
         }
+    }
+
+    // ------------------------------------------------------------ Controller（票 16）
+
+    /// Controller 的輪次：核對啟動中的、收執行中的事件並保存結果，再喚起需要判斷的 conversation。
+    async fn drive_controllers(&self) {
+        // 無法寫入時不啟動也不保存：回執與結果寫不回去就會產生無法追溯的程序（票 26）
+        if self.store.storage_health().dispatch_halted {
+            return;
+        }
+        let executing = match self.store.executing_controller_runs().await {
+            Ok(executing) => executing,
+            Err(error) => return self.note(&format!("無法讀取進行中的 Controller Run：{error}")),
+        };
+        for run in executing {
+            match run.status {
+                ControllerRunStatus::Starting => self.recover_controller_launch(&run).await,
+                ControllerRunStatus::Running => self.pump_controller(&run).await,
+                _ => {}
+            }
+        }
+        self.wake_controllers().await;
+    }
+
+    /// Controller Run 的 `RunSpec`：全部來自持久化的 launch intent，所以重建後組出相同的啟動指令。
+    /// Controller 不綁 Task（`task_id` 為空）、在 Workspace 目錄執行；本票不簽發 Agent 憑證、不套用共同設定快照。
+    async fn controller_spec(&self, run: &ControllerRun) -> Result<RunSpec, String> {
+        Ok(RunSpec {
+            run_id: run.id.clone(),
+            task_id: String::new(),
+            command_id: run.command_id.clone(),
+            prompt: run.prompt.clone(),
+            working_dir: Some(run.working_dir.clone()),
+            config_dir: Some(self.config_dir_of(&run.profile_id).await?),
+            settings_dir: None,
+            model: run.model.clone(),
+            resume_native_session_id: run.resume_native_session_id.clone(),
+        })
+    }
+
+    /// 喚起：有待處理輸入、合併視窗已到期、沒有一輪進行中的 conversation，各啟動一輪。
+    async fn wake_controllers(&self) {
+        let now = self.ports.clock.now();
+        let wakes = match self.store.controller_wakes(now).await {
+            Ok(wakes) => wakes,
+            Err(error) => return self.note(&format!("無法讀取需要 Controller 判斷的對話：{error}")),
+        };
+        if wakes.is_empty() {
+            return;
+        }
+        let profiles = match self.store.list_profiles().await {
+            Ok(profiles) => profiles,
+            Err(error) => return self.note(&format!("無法讀取帳號 Profile：{error}")),
+        };
+        let settings = match self.store.scheduler_settings().await {
+            Ok(settings) => settings,
+            Err(error) => return self.note(&format!("無法讀取排程設定：{error}")),
+        };
+        let quota_used = match quota::current(&self.store, &*self.ports.quota_observer, now).await {
+            Ok(status) => quota::known_used(&status),
+            Err(error) => return self.note(&format!("無法取得額度觀測：{error}")),
+        };
+        // 額度門檻的遲滯（票 28）：paused／draining 的帳號也不接新的一輪
+        let quota_gates: HashMap<String, GateState> = match self.store.quota_gates().await {
+            Ok(gates) => gates.into_iter().map(|(id, gate)| (id, gate.state)).collect(),
+            Err(error) => return self.note(&format!("無法讀取額度門檻：{error}")),
+        };
+        for wake in wakes {
+            // Controller 不佔 Worker 的並行名額，但同樣只用核對無誤、額度未達門檻的帳號；可派時留在上一輪的帳號
+            let capacity =
+                Capacity { profiles: &profiles, settings: &settings, active_runs: &[], quota_used: &quota_used, quota_gates: &quota_gates, halt: None };
+            let profile_id =
+                match scheduler::place_preferring(&capacity, SlotKind::Handoff, wake.preferred_profile_id.as_deref()) {
+                    Placement::Place { profile_id } => profile_id,
+                    Placement::Wait(reasons) => {
+                        let reasons: Vec<String> = reasons.into_iter().map(|r| r.message).collect();
+                        self.note(&format!(
+                            "對話 {} 有待處理的輸入，但沒有可用的帳號：{}",
+                            wake.conversation_id,
+                            reasons.join("；")
+                        ));
+                        continue;
+                    }
+                };
+            let resume_check = match self.controller_resume_check(&wake, &profile_id).await {
+                Ok(check) => check,
+                Err(error) => {
+                    self.note(&format!("對話 {} 暫時無法決定 Session，稍後再喚起：{error}", wake.conversation_id));
+                    continue;
+                }
+            };
+            let (Some(run_id), Some(command_id)) = (new_prefixed_id("ctl"), new_command_id()) else {
+                return self.note("無法取得系統亂數，暫時不喚起 Controller");
+            };
+            let begin = BeginTurn {
+                run_id,
+                command_id,
+                profile_id,
+                working_dir: wake.working_dir.clone(),
+                model: wake.model.clone(),
+                resume_check,
+            };
+            // 喚起的邊界：launch intent、輸入標為處理中與 Session 的決定在同一個交易中持久化之後，才啟動程序
+            match self.store.begin_controller_run(&wake.conversation_id, begin, now).await {
+                Ok(run) => self.launch_controller(&run).await,
+                Err(error) => self.note(&format!("對話 {} 沒有喚起 Controller：{error}", wake.conversation_id)),
+            }
+        }
+    }
+
+    /// 對 conversation 最近的 Session 查驗接續能力（規則同 Worker 的 `resume_check`）。
+    async fn controller_resume_check(&self, wake: &ControllerWake, profile_id: &str) -> Result<Option<ResumeCheck>, String> {
+        let candidate = self
+            .store
+            .controller_session_candidate(&wake.workspace_id, &wake.conversation_id, profile_id, &wake.working_dir)
+            .await
+            .map_err(|e| format!("無法讀取 Session：{e}"))?;
+        let Some(candidate) = candidate else { return Ok(None) };
+        let Some(native_session_id) = candidate.native_session_id.clone() else { return Ok(None) };
+        let reference = SessionRef {
+            native_session_id,
+            config_dir: Some(self.config_dir_of(profile_id).await?),
+            working_dir: Some(wake.working_dir.clone()),
+        };
+        let capability = match self.ports.agent_adapter.resume_capability(&reference).await {
+            Ok(Capability::Resumable) => ResumeCapability::Resumable,
+            Ok(Capability::NotResumable) => ResumeCapability::NotResumable,
+            Ok(Capability::Unknown) => ResumeCapability::Unknown,
+            Err(error) => {
+                self.note(&format!("無法查驗 Controller Session {} 能否接續，視為未知：{error}", candidate.id));
+                ResumeCapability::Unknown
+            }
+        };
+        Ok(Some(ResumeCheck { session_id: candidate.id, capability }))
+    }
+
+    /// launch intent 已持久化：在交易外啟動程序並寫回回執（與 Worker 的 `launch` 相同的順序與查證）。
+    async fn launch_controller(&self, run: &ControllerRun) {
+        let spec = match self.controller_spec(run).await {
+            Ok(spec) => spec,
+            Err(reason) => return self.finish_controller(run, TurnOutcome::Failed { reason }).await,
+        };
+        if let Err(error) = self.ports.agent_adapter.prepare(&spec).await {
+            let reason = format!("無法準備 Controller Run 的啟動檔案：{error}");
+            return self.finish_controller(run, TurnOutcome::Failed { reason }).await;
+        }
+        let mut spawn = self.ports.agent_adapter.spawn_spec(&spec);
+        spawn.env.push((AGENT_TOKEN_ENV.to_string(), CONTROLLER_TOKEN_PLACEHOLDER.to_string()));
+        spawn.env.push((RUNTIME_URL_ENV.to_string(), self.runtime_url.clone()));
+        let lookup = spawn.clone();
+        let receipt = match self.ports.process_control.spawn(spawn).await {
+            Ok(receipt) => receipt,
+            // spawn 回報失敗不代表程序沒有啟動：先以 command_id 查證
+            Err(error) => match self.ports.process_control.find(&lookup).await {
+                Ok(Some(receipt)) => receipt,
+                Ok(None) => return self.finish_controller(run, TurnOutcome::Failed { reason: error.to_string() }).await,
+                Err(find_error) => {
+                    return self.note(&format!(
+                        "Controller Run {} 的 spawn 回報失敗（{error}），也無法以 command_id 查證（{find_error}），留待下次核對",
+                        run.id
+                    ));
+                }
+            },
+        };
+        let process = process_record(&receipt.identity);
+        if let Err(error) = self.store.record_controller_receipt(&run.id, process, self.ports.clock.now()).await {
+            self.note(&format!("Controller Run {} 的回執沒有寫回，下次以 command_id 核對：{error}", run.id));
+        }
+        self.adopted.lock().await.insert(run.id.clone());
+    }
+
+    /// 停在啟動中的一輪：上一次喚起在 spawn 前後中斷。以 command_id 找回原程序就補寫回執；
+    /// 找不到就中斷這一輪，輸入退回待處理（退避後重新交付，Prompt 會註明可能已部分處理）。
+    async fn recover_controller_launch(&self, run: &ControllerRun) {
+        let spec = match self.controller_spec(run).await {
+            Ok(spec) => spec,
+            Err(error) => return self.note(&format!("Controller Run {} 暫時無法核對程序，稍後重試：{error}", run.id)),
+        };
+        let spawn = self.ports.agent_adapter.spawn_spec(&spec);
+        match self.ports.process_control.find(&spawn).await {
+            Ok(Some(receipt)) => {
+                self.note(&format!(
+                    "Controller Run {} 以 command_id 找回原程序 {}，補寫回執，不重複啟動",
+                    run.id, receipt.identity.pid
+                ));
+                let process = process_record(&receipt.identity);
+                if let Err(error) = self.store.record_controller_receipt(&run.id, process, self.ports.clock.now()).await {
+                    self.note(&format!("Controller Run {} 的回執沒有寫回：{error}", run.id));
+                }
+                self.adopted.lock().await.insert(run.id.clone());
+            }
+            Ok(None) => {
+                let reason = "launch_outcome_unknown：找不到 command_id 對應的程序，輸入退回待處理".to_string();
+                self.finish_controller(run, TurnOutcome::Interrupted { reason }).await;
+            }
+            Err(error) => self.note(&format!("Controller Run {} 暫時無法核對程序，稍後重試：{error}", run.id)),
+        }
+    }
+
+    /// 收一輪 Controller 的事件；程序結束時保存結果（結果保存的邊界）。保存失敗時把結果留在記憶體，下一次 tick 重試。
+    /// 真實 Adapter 讀到 `Exited` 之前不會結束串流，所以不能等串流結束：串流結束、或超過 execution lease（60 秒）
+    /// 沒有任何事件時，向 ProcessControl 查證程序。確認不在之後，下一次 tick 再把串流讀乾淨一次（Adapter 可能還沒讀到
+    /// 最後寫出的結果），仍沒有結束事件才中斷這一輪、輸入退回待處理；不確定時不下結論。
+    async fn pump_controller(&self, run: &ControllerRun) {
+        let now = self.ports.clock.now();
+        let existing = self.controller_streams.lock().await.remove(&run.id);
+        let mut stream = match existing {
+            Some(stream) => stream,
+            None => {
+                let attached = match self.controller_spec(run).await {
+                    Ok(spec) => self.ports.agent_adapter.launch(spec).await.map_err(|e| e.to_string()),
+                    Err(error) => Err(error),
+                };
+                match attached {
+                    Ok(handle) => ControllerStream::new(self.ports.agent_adapter.events(&handle), now),
+                    Err(error) => return self.note(&format!("Controller Run {} 無法接上事件串流：{error}", run.id)),
+                }
+            }
+        };
+        let mut ended = false;
+        while stream.outcome.is_none() {
+            // 只處理目前已經到達的事件，不等待；之後的事件由下一次 tick 處理
+            let Some(next) = stream.events.next().now_or_never() else { break };
+            let Some(event) = next else {
+                ended = true;
+                break;
+            };
+            stream.quiet_since = now;
+            match event {
+                AdapterEvent::Started { native_session_id: Some(native_session_id) } => {
+                    if let Err(error) = self.store.bind_controller_native_session(&run.id, native_session_id, now).await {
+                        self.note(&format!("Controller Run {} 的原生 Session 沒有綁定：{error}", run.id));
+                    }
+                }
+                AdapterEvent::Message { text } => stream.reply.push(text),
+                AdapterEvent::Error { message } => {
+                    self.note(&format!("Controller Run {} 回報錯誤：{message}", run.id));
+                    stream.last_error = Some(message);
+                }
+                AdapterEvent::Exited { success } => {
+                    stream.outcome = Some(if success {
+                        TurnOutcome::Succeeded { reply: stream.reply.join("\n\n") }
+                    } else {
+                        let reason = stream.last_error.clone().unwrap_or_else(|| "程序以失敗結束".into());
+                        TurnOutcome::Failed { reason }
+                    });
+                }
+                event @ (AdapterEvent::RateLimited { .. } | AdapterEvent::UsageReported { .. }) => {
+                    self.record_quota_event(&run.profile_id, &run.id, event).await;
+                }
+                AdapterEvent::Heartbeat | AdapterEvent::Transcript { .. } | AdapterEvent::Started { native_session_id: None } => {}
+            }
+        }
+        if let Some(outcome) = stream.outcome.clone() {
+            match self.store.finish_controller_run(&run.id, outcome, self.ports.clock.now()).await {
+                Ok(_) => return,
+                Err(error) => self.note(&format!("Controller Run {} 的結果沒有保存，稍後重試：{error}", run.id)),
+            }
+        } else if stream.process_gone || ended {
+            // 程序確定不在而串流已讀乾淨（或已結束），仍沒有結束事件：結果不會再來，中斷這一輪
+            if stream.process_gone || self.controller_process_is_dead(run).await {
+                let reason = "結果沒有保存而程序已不在：輸入退回待處理".to_string();
+                return self.finish_controller(run, TurnOutcome::Interrupted { reason }).await;
+            }
+        } else if now >= stream.quiet_since.plus_millis(LEASE_DURATION_MS) {
+            // 存活中或無法確定時，再等一個 lease 才查證下一次
+            stream.quiet_since = now;
+            stream.process_gone = self.controller_process_is_dead(run).await;
+        }
+        self.controller_streams.lock().await.insert(run.id.clone(), stream);
+    }
+
+    /// 只有 ProcessControl 確認程序已不在才回傳 true；不確定時不下結論。
+    async fn controller_process_is_dead(&self, run: &ControllerRun) -> bool {
+        let Some(process) = run.process.as_ref() else { return false };
+        self.adopt_controller(run).await;
+        matches!(self.ports.process_control.inspect(&identity_of(process)).await, Ok(Liveness::Dead))
+    }
+
+    /// Runtime 重建後，ProcessControl 需要先「找回」程序才能 inspect／stop 它（同 `ensure_managed`）。
+    async fn adopt_controller(&self, run: &ControllerRun) {
+        if self.adopted.lock().await.contains(&run.id) {
+            return;
+        }
+        let Ok(spec) = self.controller_spec(run).await else { return };
+        let spawn = self.ports.agent_adapter.spawn_spec(&spec);
+        if self.ports.process_control.find(&spawn).await.is_ok() {
+            self.adopted.lock().await.insert(run.id.clone());
+        }
+    }
+
+    async fn finish_controller(&self, run: &ControllerRun, outcome: TurnOutcome) {
+        self.controller_streams.lock().await.remove(&run.id);
+        if let Err(error) = self.store.finish_controller_run(&run.id, outcome, self.ports.clock.now()).await {
+            self.note(&format!("Controller Run {} 的結束沒有寫入：{error}", run.id));
+        }
+    }
+
+    /// 完全退出：停下進行中的 Controller 輪次（同一個寬限期），確認停止的以中斷結束、輸入退回待處理，
+    /// 重新開啟後依待處理的輸入再喚起。無法確認停止的維持原狀並記日誌。
+    async fn stop_controllers_for_exit(&self, grace: Duration) {
+        let runs = match self.store.executing_controller_runs().await {
+            Ok(runs) => runs,
+            Err(error) => return self.note(&format!("完全退出：無法讀取進行中的 Controller Run：{error}")),
+        };
+        let stops = runs.into_iter().map(|run| async move {
+            let identity = match run.process.as_ref() {
+                Some(process) => {
+                    self.adopt_controller(&run).await;
+                    Some(identity_of(process))
+                }
+                // 回執還沒寫回：以 command_id 找回
+                None => {
+                    let found = match self.controller_spec(&run).await {
+                        Ok(spec) => self.ports.process_control.find(&self.ports.agent_adapter.spawn_spec(&spec)).await.ok(),
+                        Err(_) => None,
+                    };
+                    // 無法查證程序在不在：不下結論，維持原狀
+                    let Some(found) = found else {
+                        return self.note(&format!("完全退出：無法查證 Controller Run {} 的程序", run.id));
+                    };
+                    found.map(|receipt| receipt.identity)
+                }
+            };
+            let stopped = match identity {
+                None => true,
+                Some(identity) => matches!(
+                    self.ports.process_control.stop(&identity, grace).await,
+                    Ok(StopResult::StoppedGracefully | StopResult::ForceKilled)
+                ),
+            };
+            if stopped {
+                let reason = "stopped_for_exit：完全退出時停止，輸入退回待處理".to_string();
+                self.finish_controller(&run, TurnOutcome::Interrupted { reason }).await;
+            } else {
+                self.note(&format!("完全退出：無法確認 Controller Run {} 的程序已停止", run.id));
+            }
+        });
+        futures::future::join_all(stops).await;
     }
 
     // ------------------------------------------------------------ 驗證
@@ -1541,6 +1903,26 @@ impl Supervisor {
         if self.ports.process_control.find(&spec).await.is_ok() {
             self.adopted.lock().await.insert(run.id.clone());
         }
+    }
+}
+
+/// 一輪 Controller 的事件串流與累積的結果。
+struct ControllerStream {
+    events: BoxStream<'static, AdapterEvent>,
+    /// 這一輪的回覆文字（Adapter 的 `Message`），依到達順序。
+    reply: Vec<String>,
+    last_error: Option<String>,
+    /// 已收到結束事件、等待保存的結果。
+    outcome: Option<TurnOutcome>,
+    /// 最後一次收到事件（或查證程序）的時間；超過 execution lease 就查證程序。
+    quiet_since: Timestamp,
+    /// ProcessControl 已確認程序不在；下一次讀乾淨串流仍沒有結束事件就中斷這一輪。
+    process_gone: bool,
+}
+
+impl ControllerStream {
+    fn new(events: BoxStream<'static, AdapterEvent>, now: Timestamp) -> Self {
+        Self { events, reply: Vec::new(), last_error: None, outcome: None, quiet_since: now, process_gone: false }
     }
 }
 
