@@ -22,6 +22,7 @@ import type {
   RecoveryEvent,
   RecoveryStatusView,
   QuotaObservation,
+  RunContext,
   RunView,
   SchedulingOverview,
   SettingsVersionSummary,
@@ -494,6 +495,36 @@ export function verificationView(overrides: Partial<VerificationView> = {}): Ver
     automatic: true,
     records: [],
     integration: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的 context receipt：run_1 載入 Task 契約 v3 與一則決策，一則教訓因超出預算而省略。 */
+export function runContextView(overrides: Partial<RunContext> = {}): RunContext {
+  return {
+    receipt: {
+      run_id: "run_1",
+      task_id: "task_1",
+      built_at: CHECKED_AT,
+      budget_tokens: 8000,
+      used_tokens: 1234,
+      prompt_sha256: REPORT_SHA256,
+      items: [
+        { kind: "contract", ref_id: "task_1", version: 3, title: "部署", tokens: 120, status: "loaded", omitted_reason: null },
+        { kind: "decision", ref_id: "know_1", version: 1, title: "一律用 pnpm", tokens: 40, status: "loaded", omitted_reason: null },
+        { kind: "messages", ref_id: "run_1", version: null, title: "未讀訊息 2 則", tokens: 30, status: "loaded", omitted_reason: null },
+        {
+          kind: "lesson",
+          ref_id: "know_2",
+          version: 2,
+          title: "部署前先備份",
+          tokens: 4100,
+          status: "omitted",
+          omitted_reason: "budget_exceeded",
+        },
+      ],
+    },
+    prompt: "# Task 契約\n部署到正式環境",
     ...overrides,
   };
 }

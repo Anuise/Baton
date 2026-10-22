@@ -1043,6 +1043,37 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版以 Run 的 context 路徑讀取 context receipt 與實際 Prompt", async () => {
+    const context = { receipt: { run_id: "run_1", items: [] }, prompt: "完整 Prompt" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(context), { status: 200 }));
+
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).runContext("ws_1", "run 1");
+
+    expect(result).toEqual(context);
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/workspaces/ws_1/runs/run%201/context");
+  });
+
+  it("HTTP 版讀不到 context receipt（404）時，錯誤帶 Runtime 的代碼與說明", async () => {
+    const body = { error: "context_receipt_not_found", message: "這個 Run 沒有 context receipt" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 404 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .runContext("ws_1", "run_1")
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("這個 Run 沒有 context receipt");
+    expect(errorCode(error)).toBe("context_receipt_not_found");
+  });
+
+  it("Tauri 版以 run_context 指令讀取 context receipt", async () => {
+    const invoke = vi.fn(async () => ({}));
+
+    await createTauriClient(invoke as never).runContext("ws_1", "run_1");
+
+    expect(invoke).toHaveBeenCalledWith("run_context", { workspaceId: "ws_1", runId: "run_1" });
+  });
+
   it("HTTP 版讀取對話，並以 JSON 送出使用者訊息", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ turn: {}, busy: true }), { status: 201 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);

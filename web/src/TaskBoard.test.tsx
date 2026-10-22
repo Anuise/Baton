@@ -8,6 +8,7 @@ import {
   handoff,
   integrationEntry,
   REPORT_SHA256,
+  runContextView,
   schedulingOverview,
   verificationRecord,
   verificationView,
@@ -26,6 +27,7 @@ import {
   type IntegrationEntry,
   type MissingItem,
   type QueueEntry,
+  type RunContext,
   type RunStatus,
   type RunView,
   type TaskBoard as TaskBoardData,
@@ -171,6 +173,8 @@ function fakeClient(
     budgets?: BudgetView[];
     /** 省略時看板不帶 `handoffs` 欄位（舊版 Runtime）。 */
     handoffs?: Handoff[];
+    /** `runContext` 回傳的 context receipt。 */
+    context?: RunContext;
   } = {},
 ) {
   let goals = initial.goals ?? [goal("goal_1", "整理文件")];
@@ -268,6 +272,7 @@ function fakeClient(
       if (next.status === "cancelled") replace(current.task_id, { status: "ready" });
       return next;
     }),
+    runContext: vi.fn(async () => initial.context ?? runContextView()),
     taskVerification: vi.fn(async (_ws: string, id: string) => ({
       ...(initial.verification ?? verificationView()),
       task_id: id,
@@ -2116,5 +2121,81 @@ describe("交接狀態", () => {
     await renderBoard(fakeClient({ tasks: [runningTask()], runs: [run("run_1", "task_1", "running")], handoffs: [] }));
 
     expect(within(card("部署")).queryByRole("group", { name: "交接狀態" })).not.toBeInTheDocument();
+  });
+});
+
+describe("Context receipt", () => {
+  const runningTask = () => task("task_1", "部署", { status: "running", contract: filledContract("task_1") });
+  const receipt = () => within(card("部署")).getByRole("group", { name: "Context receipt" });
+
+  it("展開後才載入：顯示預算、依優先序的已載入項目、省略項目與原因，以及實際 Prompt 原文", async () => {
+    const client = fakeClient({ tasks: [runningTask()], runs: [run("run_1", "task_1", "running")] });
+    const user = await renderBoard(client);
+
+    expect(within(card("部署")).getByRole("group", { name: "Run 狀態" })).toContainElement(receipt());
+    expect(client.runContext).not.toHaveBeenCalled();
+
+    await user.click(within(receipt()).getByRole("button", { name: "Context receipt" }));
+
+    expect(await within(receipt()).findByText("已用 1234 / 8000 tokens")).toBeInTheDocument();
+    expect(client.runContext).toHaveBeenCalledWith("ws_1", "run_1");
+    const loaded = within(within(receipt()).getByRole("group", { name: "已載入項目" })).getAllByRole("listitem");
+    expect(loaded.map((item) => item.textContent)).toEqual([
+      "Task 契約：部署 v3（120 tokens）",
+      "決策：一律用 pnpm v1（40 tokens）",
+      "未讀訊息摘要：未讀訊息 2 則（30 tokens）",
+    ]);
+    const omitted = within(within(receipt()).getByRole("group", { name: "省略項目" })).getAllByRole("listitem");
+    expect(omitted.map((item) => item.textContent)).toEqual(["教訓：部署前先備份 v2（4100 tokens），超出預算"]);
+    expect(within(receipt()).getByText("實際 Prompt")).toBeInTheDocument();
+    expect(receipt().querySelector("pre")?.textContent).toBe("# Task 契約\n部署到正式環境");
+  });
+
+  it("沒有省略項目時不顯示省略清單；未知的省略原因原樣顯示", async () => {
+    const base = runContextView();
+    const allLoaded = runContextView({ receipt: { ...base.receipt, items: base.receipt.items.slice(0, 1) } });
+    const client = fakeClient({ tasks: [runningTask()], runs: [run("run_1", "task_1", "running")], context: allLoaded });
+    const user = await renderBoard(client);
+
+    await user.click(within(receipt()).getByRole("button", { name: "Context receipt" }));
+
+    expect(await within(receipt()).findByRole("group", { name: "已載入項目" })).toBeInTheDocument();
+    expect(within(receipt()).queryByRole("group", { name: "省略項目" })).not.toBeInTheDocument();
+
+    const unknownReason = runContextView({
+      receipt: {
+        ...base.receipt,
+        items: [{ kind: "evidence", ref_id: "art_1", version: null, title: "report.md", tokens: 900, status: "omitted", omitted_reason: "stale" }],
+      },
+    });
+    vi.mocked(client.runContext).mockResolvedValueOnce(unknownReason);
+    await user.click(within(receipt()).getByRole("button", { name: "Context receipt" }));
+    await user.click(within(receipt()).getByRole("button", { name: "Context receipt" }));
+
+    const omitted = await within(receipt()).findByRole("group", { name: "省略項目" });
+    expect(within(omitted).getByRole("listitem")).toHaveTextContent("證據：report.md（900 tokens），stale");
+  });
+
+  it("Context Builder 之前建立的 Run（404 context_receipt_not_found）顯示說明", async () => {
+    const client = fakeClient({ tasks: [runningTask()], runs: [run("run_1", "task_1", "running")] });
+    vi.mocked(client.runContext).mockRejectedValueOnce(
+      Object.assign(new Error("找不到 context receipt"), { code: "context_receipt_not_found" }),
+    );
+    const user = await renderBoard(client);
+
+    await user.click(within(receipt()).getByRole("button", { name: "Context receipt" }));
+
+    expect(await within(receipt()).findByText("這個 Run 沒有 context receipt（在 Context Builder 之前建立）")).toBeInTheDocument();
+    expect(within(receipt()).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("其他錯誤顯示 Runtime 的說明", async () => {
+    const client = fakeClient({ tasks: [runningTask()], runs: [run("run_1", "task_1", "running")] });
+    vi.mocked(client.runContext).mockRejectedValueOnce(Object.assign(new Error("Run 不存在"), { code: "run_not_found" }));
+    const user = await renderBoard(client);
+
+    await user.click(within(receipt()).getByRole("button", { name: "Context receipt" }));
+
+    expect(await within(receipt()).findByRole("alert")).toHaveTextContent("無法取得 context receipt：Run 不存在");
   });
 });
