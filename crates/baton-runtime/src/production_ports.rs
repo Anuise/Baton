@@ -50,6 +50,21 @@ impl QuotaObserver for Unavailable {
     }
 }
 
+impl LoginSession for Unavailable {
+    fn current_login(&self) -> Option<String> {
+        None
+    }
+}
+
+impl StartupRegistration for Unavailable {
+    fn is_registered(&self) -> PortResult<bool> {
+        Err(PortError::NotImplemented("StartupRegistration"))
+    }
+    fn set_registered(&self, _enabled: bool) -> PortResult<()> {
+        Err(PortError::NotImplemented("StartupRegistration"))
+    }
+}
+
 /// 本機檔案系統的 WorkspaceFs：worktree 的移除與未保存變更檢查由清理的票（票 21）補上，其餘是真實實作。
 pub struct LocalWorkspaceFs;
 
@@ -185,6 +200,8 @@ pub fn production_ports(data_dir: &Path) -> Ports {
         command_runner: Arc::new(LocalCommandRunner),
         user_settings: Arc::new(user_settings_source()),
         guardian_probe: Arc::new(GuardianInstanceProbe { data_dir: data_dir.to_path_buf() }),
+        login_session: unavailable.clone(),
+        startup_registration: unavailable.clone(),
     }
 }
 

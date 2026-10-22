@@ -3,6 +3,7 @@
 use baton_runtime::production_ports::production_ports;
 use baton_runtime::single_instance::InstanceGuard;
 use baton_domain::guardian::GUARDIAN_ATTEMPT_ENV;
+use baton_domain::login::{START_SOURCE_ENV, START_SOURCE_LOGIN};
 use baton_guardian::files::{self, InstanceRecord};
 use baton_runtime::{Runtime, RuntimeConfig, RuntimeOptions};
 
@@ -36,9 +37,10 @@ async fn run() -> Result<(), String> {
     if let Err(error) = files::write_instance(&files::runtime_instance_path(&config.data_dir), &instance) {
         eprintln!("無法記下 Runtime 的程序身分（監護將無法監看這個 Runtime）：{error}");
     }
-    // 監護拉起本程序時交付的嘗試識別（票 32）
+    // 監護拉起本程序時交付的嘗試識別（票 32）；登入啟動入口拉起時標明的啟動來源（票 33）
     let options = RuntimeOptions {
         guardian_attempt: std::env::var(GUARDIAN_ATTEMPT_ENV).ok().filter(|id| !id.is_empty()),
+        login_start: std::env::var(START_SOURCE_ENV).ok().as_deref() == Some(START_SOURCE_LOGIN),
         ..RuntimeOptions::default()
     };
     let runtime = Runtime::start_with(config.clone(), ports, options).await.map_err(|e| e.to_string())?;

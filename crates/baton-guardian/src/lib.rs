@@ -11,6 +11,7 @@
 
 pub mod files;
 pub mod host;
+pub mod launcher;
 pub mod process;
 
 use std::path::PathBuf;
@@ -30,6 +31,10 @@ pub trait RuntimeHost: Send {
     /// 啟動 Runtime，並交付這一次的嘗試識別（環境變數 `BATON_GUARDIAN_ATTEMPT`）。
     /// 只回報「程序有沒有啟動起來」；之後 Runtime 自己結束，由下一次 `runtime_running` 發現。
     async fn start_runtime(&mut self, attempt_id: &str) -> Result<(), String>;
+
+    /// 登入啟動入口啟動 Runtime（票 33）：不帶嘗試識別，改以環境變數 `BATON_START_SOURCE=login` 標明啟動來源。
+    /// 同樣只回報「程序有沒有啟動起來」；已有 Runtime 時新的程序會因單實例自行結束。
+    async fn start_runtime_at_login(&mut self) -> Result<(), String>;
 }
 
 /// 監護結束（不再重啟 Runtime）的原因。

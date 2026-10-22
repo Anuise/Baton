@@ -23,6 +23,7 @@ pub mod handoff;
 pub mod integration;
 pub mod knowledge;
 pub mod lifecycle;
+pub mod login;
 pub mod message;
 pub mod permission;
 pub mod platform;
