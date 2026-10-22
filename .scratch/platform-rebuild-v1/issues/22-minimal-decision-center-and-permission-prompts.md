@@ -1,6 +1,6 @@
 # 22: 最小裁定中心與權限提示轉接
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R029-22-impl，2026-10-22 16:10）
 Blocked by: 11, 06
 
 **What to build:** Agent 透過 request_decision 工具建立裁定請求；裁定分頁顯示待處理清單與單筆詳情（問題、原因、選項、建議、證據、阻擋範圍）；使用者經桌面憑證回答後，在同一交易保存 Decision、更新受影響 Task、追加喚醒 Outbox。依 spec D-08 實作 permission_prompt 工具：授權範圍內自動允許並記錄，範圍外建立裁定請求並回傳「等待裁定」。等待只阻擋受影響 Task。

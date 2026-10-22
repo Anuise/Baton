@@ -1,0 +1,22 @@
+[package]
+name = "baton-mcp-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Claude Code 以 stdio 啟動的 MCP 工具 shim：把工具呼叫轉送到 Runtime 的 Agent API
+[[bin]]
+name = "baton-mcp-shim"
+path = "src/main.rs"
+
+[dependencies]
+baton-domain = { path = "../baton-domain" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std"] }
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "net"] }

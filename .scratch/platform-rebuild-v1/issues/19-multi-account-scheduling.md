@@ -1,6 +1,6 @@
 # 19: 多帳號並行排程與容量
 
-Status: ready-for-agent
+Status: in_progress（Work-9，run R025-19-impl，2026-10-22 15:55）
 Blocked by: 10, 07
 
 **What to build:** Scheduler 依相依、優先序、能力、授權、帳號可用性與執行槽選擇派工：預設每帳號 2 個並行 Run、全域 6 個，帳號數 ≥3 時保留 1 個交接槽（spec D-14），設定頁可在「較高並行／保留交接容量」間切換。帳號頁顯示每個帳號的進行中 Run。

@@ -30,6 +30,7 @@ fn cmd_spec(command_id: &str, args: &[&str]) -> SpawnSpec {
         args: args.iter().map(|a| a.to_string()).collect(),
         working_dir: None,
         command_id: command_id.to_string(),
+        env: Vec::new(),
     }
 }
 
@@ -250,6 +251,7 @@ async fn spawn_of_missing_program_fails_without_leftovers() {
         args: vec![],
         working_dir: None,
         command_id: id.clone(),
+        env: Vec::new(),
     };
 
     assert!(control.spawn(spec.clone()).await.is_err());
@@ -278,4 +280,27 @@ async fn duplicate_command_id_is_rejected() {
     assert_eq!(job_pids(&id).len(), before, "重複 spawn 不應啟動新的程序");
     assert_eq!(control.inspect(&receipt.identity).await.unwrap(), Liveness::Alive);
     assert_eq!(control.stop(&receipt.identity, SHORT_GRACE).await.unwrap(), StopResult::ForceKilled);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn extra_environment_reaches_the_child_and_does_not_change_the_command_hash() {
+    let id = unique_id("env");
+    let _guard = JobGuard(id.clone());
+    let control = WindowsProcessControl::new();
+    let marker = std::env::temp_dir().join(format!("baton-{id}.txt"));
+    let script = format!("if defined BATON_TEST_ENV echo ok> {}", marker.display());
+    let mut spec = cmd_spec(&id, &["/c", &script]);
+    let plain_hash = command_hash(&spec);
+    spec.env = vec![("BATON_TEST_ENV".to_string(), "secret-value".to_string())];
+
+    let receipt = control.spawn(spec.clone()).await.unwrap();
+
+    assert_eq!(receipt.identity.command_hash, plain_hash, "環境變數不納入指令雜湊");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "子程序沒有看到額外的環境變數");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let _ = std::fs::remove_file(&marker);
+    assert!(!format!("{spec:?}").contains("secret-value"), "Debug 輸出不可含環境變數的值");
 }

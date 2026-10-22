@@ -11,10 +11,11 @@
 //!   `Alive` 續約、`Unknown` 不改變任何東西。沒有任何命令能只靠時間流逝就把 Run 判定為結束。
 //! - **程序退出不等於 Task 完成**：Run 成功只把 Task 推進到 `verifying`，失敗、中斷、取消都退回 `ready`。
 //!   `completed` 只能由後續票的驗證閘門設定。
-//! - **過期世代的回報不改變狀態**：Worker 回報（heartbeat、結束）都帶 lease 的世代，與目前不符就拒絕。
+//! - **過期世代的回報不改變狀態**：Worker 回報（heartbeat、進度、checkpoint、受阻、結束）都帶 lease 的世代，與目前不符就拒絕。
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::{BlockedNote, CheckpointNote, ProgressNote, ReportContent, ReportRecord};
 use crate::authorization::{self, AdmissionDenied};
 use crate::event::DomainEvent;
 use crate::task::{
@@ -33,6 +34,9 @@ pub const EVENT_RUN_FAILED: &str = "run_failed";
 pub const EVENT_RUN_INTERRUPTED: &str = "run_interrupted";
 pub const EVENT_RUN_CANCEL_REQUESTED: &str = "run_cancel_requested";
 pub const EVENT_RUN_CANCELLED: &str = "run_cancelled";
+pub const EVENT_RUN_PROGRESS_REPORTED: &str = "run_progress_reported";
+pub const EVENT_RUN_CHECKPOINT_SAVED: &str = "run_checkpoint_saved";
+pub const EVENT_RUN_BLOCKED_REPORTED: &str = "run_blocked_reported";
 
 /// 派工 Outbox 項目的種類：要求 Supervisor 啟動這個 Run 的程序。
 pub const OUTBOX_LAUNCH_RUN: &str = "launch_run";
@@ -184,12 +188,41 @@ pub struct LaunchPayload {
     pub working_dir: String,
 }
 
-/// 面板與 API 看到的一個 Run：Run 本身加上它的 lease。
+/// 面板與 API 看到的一個 Run：Run 本身加上它的 lease，以及 Worker 最新的進度、checkpoint 與受阻回報。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunView {
     #[serde(flatten)]
     pub run: Run,
     pub lease: Option<ExecutionLease>,
+    #[serde(default)]
+    pub latest_progress: Option<ProgressNote>,
+    #[serde(default)]
+    pub latest_checkpoint: Option<CheckpointNote>,
+    #[serde(default)]
+    pub blocked: Option<BlockedNote>,
+}
+
+impl RunView {
+    /// `reports` 依收到的順序排列；只採用這個 Run 已被接受的回報，同一種類以最後一筆為準。
+    pub fn new(run: Run, lease: Option<ExecutionLease>, reports: &[ReportRecord]) -> Self {
+        let mut view = Self { run, lease, latest_progress: None, latest_checkpoint: None, blocked: None };
+        for report in reports.iter().filter(|r| r.accepted && r.run_id == view.run.id) {
+            let at = report.received_at;
+            match &report.content {
+                ReportContent::Progress { summary } => {
+                    view.latest_progress = Some(ProgressNote { summary: summary.clone(), reported_at: at });
+                }
+                ReportContent::Checkpoint { summary, details } => {
+                    view.latest_checkpoint =
+                        Some(CheckpointNote { summary: summary.clone(), details: details.clone(), saved_at: at });
+                }
+                ReportContent::Blocked { reason } => {
+                    view.blocked = Some(BlockedNote { reason: reason.clone(), reported_at: at });
+                }
+            }
+        }
+        view
+    }
 }
 
 // ---------------------------------------------------------------- 命令
@@ -221,6 +254,8 @@ pub enum RunCommand {
     LaunchFailed { run_id: String, reason: String },
     /// Worker 的存活訊號：續約 lease。
     Heartbeat { run_id: String, generation: i64 },
+    /// Worker 回報進度、checkpoint 或受阻（Agent API）；同時續約 lease。受阻會讓 Task 進入 `blocked`。
+    Report { run_id: String, generation: i64, content: ReportContent },
     /// Worker 回報結束。
     Finish { run_id: String, generation: i64, outcome: RunOutcome },
     /// 確認程序已經不在（核對結果、啟動結果不明且找不到程序）。
@@ -241,6 +276,7 @@ impl RunCommand {
             | RunCommand::RecordReceipt { run_id, .. }
             | RunCommand::LaunchFailed { run_id, .. }
             | RunCommand::Heartbeat { run_id, .. }
+            | RunCommand::Report { run_id, .. }
             | RunCommand::Finish { run_id, .. }
             | RunCommand::Interrupt { run_id, .. }
             | RunCommand::ReconcileLease { run_id, .. }
@@ -261,6 +297,8 @@ pub struct RunChange {
     pub outbox: Option<OutboxItem>,
     /// 這個 Run 的派工 Outbox 項目已處理完畢。
     pub outbox_delivered: Option<String>,
+    /// 被接受的 Worker 回報（追加式稽核）。
+    pub report: Option<ReportRecord>,
     pub events: Vec<DomainEvent>,
 }
 
@@ -271,6 +309,7 @@ impl RunChange {
             || self.task.is_some()
             || self.outbox.is_some()
             || self.outbox_delivered.is_some()
+            || self.report.is_some()
             || !self.events.is_empty()
     }
 }
@@ -352,7 +391,7 @@ impl RunContext<'_> {
 
 /// 把一個 Run 與它的 lease 投影成對外看到的樣子。
 pub fn view_run(ctx: &RunContext<'_>, run: &Run) -> RunView {
-    RunView { run: run.clone(), lease: ctx.lease_of(&run.id).cloned() }
+    RunView::new(run.clone(), ctx.lease_of(&run.id).cloned(), &[])
 }
 
 /// 一個 Run 在判定過程中的可變副本；每個事件讓 Run 的版本加一。
@@ -431,7 +470,15 @@ impl<'a> Editing<'a> {
             task = Some(moved);
         }
         let outbox_delivered = matches!(from, RunStatus::Queued | RunStatus::Starting).then(|| self.run.id.clone());
-        Ok(RunChange { run: Some(self.run), lease: self.lease, task, outbox: None, outbox_delivered, events: self.events })
+        Ok(RunChange {
+            run: Some(self.run),
+            lease: self.lease,
+            task,
+            outbox: None,
+            outbox_delivered,
+            report: None,
+            events: self.events,
+        })
     }
 
     fn into_change(self) -> RunChange {
@@ -492,6 +539,48 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             edit.renew_lease();
             // 存活訊號很頻繁，只更新 lease，不追加事件
             Ok(RunChange { lease: edit.lease, ..RunChange::default() })
+        }
+        RunCommand::Report { generation, content, .. } => {
+            check_report(run, edit.lease.as_ref(), generation)?;
+            if run.status == RunStatus::Queued {
+                return Err(RunError::TransitionInvalid { from: run.status, to: RunStatus::Running });
+            }
+            edit.renew_lease();
+            let (event_type, payload) = match &content {
+                ReportContent::Progress { summary } => {
+                    (EVENT_RUN_PROGRESS_REPORTED, serde_json::json!({ "generation": generation, "summary": summary }))
+                }
+                // 細節只存在回報的稽核紀錄裡，事件只記摘要，避免事件表被大量文字撐大
+                ReportContent::Checkpoint { summary, .. } => {
+                    (EVENT_RUN_CHECKPOINT_SAVED, serde_json::json!({ "generation": generation, "summary": summary }))
+                }
+                ReportContent::Blocked { reason } => {
+                    (EVENT_RUN_BLOCKED_REPORTED, serde_json::json!({ "generation": generation, "reason": reason }))
+                }
+            };
+            edit.push(event_type, payload);
+            // 受阻：Task 從 running 進入 blocked；使用者已取消或已由別的路徑離開 running 的 Task 不動
+            let mut task = None;
+            if matches!(content, ReportContent::Blocked { .. }) {
+                if let Some(current) = ctx.task.task(&run.task_id).filter(|t| t.status == TaskStatus::Running) {
+                    let mut moved = current.clone();
+                    let mut versioned = Versioned { task: &mut moved, events: Vec::new(), now };
+                    versioned
+                        .change_status(TaskStatus::Blocked, event_type)
+                        .map_err(|_| RunError::TaskNotReady(current.status))?;
+                    edit.events.extend(versioned.events);
+                    task = Some(moved);
+                }
+            }
+            let report = ReportRecord {
+                workspace_id: run.workspace_id.clone(),
+                run_id: run.id.clone(),
+                generation,
+                accepted: true,
+                content,
+                received_at: now,
+            };
+            Ok(RunChange { task, report: Some(report), ..edit.into_change() })
         }
         RunCommand::Finish { generation, outcome, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
@@ -554,10 +643,15 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
     }
 }
 
-/// 回報必須來自目前的寫入所有者：Run 仍在執行、持有 lease，而且世代相符。
-fn check_report(run: &Run, lease: Option<&ExecutionLease>, generation: i64) -> Result<(), RunError> {
+/// Run 仍是目前的寫入所有者：尚未結束、持有 lease，而且世代與給定的世代（回報者憑證所屬）相符。
+pub fn is_current_writer(run: &Run, lease: Option<&ExecutionLease>, generation: i64) -> bool {
     let held = lease.is_some_and(|l| l.is_held() && l.generation == generation);
-    if run.status.is_terminal() || run.generation != generation || !held {
+    !run.status.is_terminal() && run.generation == generation && held
+}
+
+/// 回報必須來自目前的寫入所有者。
+fn check_report(run: &Run, lease: Option<&ExecutionLease>, generation: i64) -> Result<(), RunError> {
+    if !is_current_writer(run, lease, generation) {
         return Err(RunError::StaleReport);
     }
     Ok(())
@@ -667,6 +761,7 @@ fn dispatch(
         task: Some(moved),
         outbox: Some(outbox),
         outbox_delivered: None,
+        report: None,
         events: edit.events,
     })
 }
