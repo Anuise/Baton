@@ -1,0 +1,53 @@
+:root {
+  font-family: "Segoe UI", "Microsoft JhengHei UI", sans-serif;
+  color: #1f2328;
+  background: #f6f8fa;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.status-bar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 16px;
+  background: #fff;
+  border-bottom: 1px solid #d0d7de;
+  font-size: 13px;
+}
+
+.status::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #8c959f;
+}
+
+.status-running::before {
+  background: #1a7f37;
+}
+
+.status-offline::before {
+  background: #cf222e;
+}
+
+.status-reason {
+  color: #656d76;
+}
+
+.main {
+  flex: 1;
+  padding: 24px;
+}
