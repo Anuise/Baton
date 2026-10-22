@@ -238,4 +238,23 @@ describe("更新進度", () => {
 
     expect(client.installUpdate).toHaveBeenCalledTimes(1);
   });
+
+  it("看到準備套用後讀不到停止結果時，不以停止中讀到的舊結果自動安裝", async () => {
+    const client = fakeClient([inMaintenance(), stopped()], [inMaintenance({ phase: "ready" }), stopped()]);
+    render(<UpdateProgress client={client} maintenance={maintenance()} />);
+    await settle(500);
+    expect(screen.getByRole("dialog")).toHaveTextContent("工作已停止，正在備份資料…");
+
+    // 準備套用的那次輪詢讀不到停止進度
+    client.lifecycleStatus.mockRejectedValueOnce(new Error("connection refused"));
+    await settle(500);
+
+    expect(client.installUpdate).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent("無法確認工作是否都已停止：無法取得停止進度");
+
+    // 之後讀到最終的停止結果、沒有異常，才自動安裝
+    await settle(500);
+
+    expect(client.installUpdate).toHaveBeenCalledTimes(1);
+  });
 });

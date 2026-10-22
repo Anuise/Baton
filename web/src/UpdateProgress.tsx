@@ -25,14 +25,18 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
   const [maintenance, setMaintenance] = useState(initial);
   // null：還沒讀到停止進度
   const [lifecycle, setLifecycle] = useState<LifecycleStatus | null>(null);
+  // null：還沒讀到「看到準備套用之後」的停止結果；只有它能判斷有沒有停止異常
+  const [finalLifecycle, setFinalLifecycle] = useState<LifecycleStatus | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [install, setInstall] = useState<InstallState>({ state: "idle" });
   const autoInstalled = useRef(false);
+  // 一開始就是準備套用時，之後讀到的停止結果都是最終的
+  const readySeen = useRef(initial.phase === "ready");
 
   const phase = maintenance.phase;
-  const hasLifecycle = lifecycle !== null;
-  // 停止中要持續輪詢；準備套用時也要先讀到停止結果才能判斷有沒有停止異常。失敗或開始安裝後不再輪詢
-  const polling = install.state === "idle" && (phase === "stopping" || (phase === "ready" && !hasLifecycle));
+  const hasFinal = finalLifecycle !== null;
+  // 停止中要持續輪詢；準備套用時也要先讀到最終的停止結果才能判斷有沒有停止異常。失敗或開始安裝後不再輪詢
+  const polling = install.state === "idle" && (phase === "stopping" || (phase === "ready" && !hasFinal));
 
   useEffect(() => {
     if (!polling) return;
@@ -43,9 +47,12 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
         try {
           // 先讀維護再讀停止進度：看到「準備套用」時，之後讀到的停止結果一定是最終的
           const status = await client.updateStatus();
+          if (status.maintenance?.phase === "ready") readySeen.current = true;
+          const final = readySeen.current;
           const next = await client.lifecycleStatus().catch(() => null);
           if (cancelled) return;
           if (next) setLifecycle(next);
+          if (next && final) setFinalLifecycle(next);
           if (status.maintenance) setMaintenance(status.maintenance);
           setPollError(next ? null : "無法取得停止進度");
         } catch (error) {
@@ -70,8 +77,8 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
   }, [client]);
 
   const report = lifecycle?.exit ?? null;
-  const anomalies = report?.runs.filter((run) => run.outcome === "anomaly") ?? [];
-  const canAutoInstall = phase === "ready" && hasLifecycle && anomalies.length === 0;
+  const anomalies = finalLifecycle?.exit?.runs.filter((run) => run.outcome === "anomaly") ?? [];
+  const canAutoInstall = phase === "ready" && hasFinal && anomalies.length === 0;
 
   useEffect(() => {
     if (!canAutoInstall || autoInstalled.current) return;
@@ -89,8 +96,8 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
         : stopped
           ? "備份資料"
           : "停止執行中的工作";
-  // 準備套用卻讀不到停止結果：無法確認工作都已停止，交給使用者決定
-  const unconfirmed = phase === "ready" && !hasLifecycle && pollError !== null;
+  // 準備套用卻讀不到最終的停止結果：無法確認工作都已停止，交給使用者決定
+  const unconfirmed = phase === "ready" && !hasFinal && pollError !== null;
 
   return (
     <div className="exit-overlay">
