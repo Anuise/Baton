@@ -1,6 +1,6 @@
 # 07: 帳號 Profile 與首次啟動精靈
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R014-07-impl，2026-10-22 14:48）
 Blocked by: 05, 03
 
 **What to build:** 使用者可新增最多 8 個 account_profile（spec D-32），每個綁定獨立的 CLAUDE_CONFIG_DIR；首次啟動精靈依 spec D-20 檢查 Claude Code 是否在 PATH 與版本、Git for Windows、各 Profile 是否已登入，缺項只顯示官方指令與「重新檢查」，不代為安裝；精靈可在 App 開啟的終端機中以該 Profile 執行原生登入。新增後核對實際認證來源與帳號身分（環境變數或 credential helper 可能覆蓋），結果顯示於帳號頁。首次使用告知背景執行行為。
