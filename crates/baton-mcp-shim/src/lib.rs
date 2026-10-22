@@ -29,6 +29,10 @@ use baton_domain::external_operation::{
     KEY_MAX_CHARS, OPERATION_MAX_CHARS, REASON_MAX_CHARS as OPERATION_REASON_MAX_CHARS, RECEIPT_MAX_CHARS,
     REQUEST_MAX_BYTES, TARGET_MAX_CHARS, TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
 };
+use baton_domain::understanding::{
+    ItemStatus, Section, KEY_MAX_CHARS as UNDERSTANDING_KEY_MAX_CHARS, SOURCES_MAX as UNDERSTANDING_SOURCES_MAX,
+    TEXT_MAX_CHARS as UNDERSTANDING_TEXT_MAX_CHARS, TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING,
+};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -560,6 +564,48 @@ fn tool_definitions() -> Value {
                 "required": ["question", "reason", "options", "blocking"],
             },
         },
+        {
+            "name": TOOL_RECORD_UNDERSTANDING,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：建立或更新一項專案理解（Project Brief、Glossary 或 Project Map），以 section 與 key 識別，重複送出相同內容不會新增版本。每項附來源：Workspace 內的檔案（path，可附 line；Runtime 會讀取檔案、自行記下版本與查驗時間，找不到就拒絕），或外部來源（reference，必須附 version）。只有被來源支持的描述才能標 confirmed（沒有來源會被拒絕）；推測與未確認的關係標 hypothesis（預設），不知道的標 unknown；不再適用的標 retired。Glossary 會投影到 repo 的 GLOSSARY.md；投影檔被外部修改時 Baton 不覆寫，回應的 projections 會顯示 conflict。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "section": {
+                        "type": "string",
+                        "enum": Section::ALL.map(Section::as_str),
+                        "description": "brief（Project Brief：目標、使用者、成功條件、排除範圍、現況、外部整合、風險與限制）、glossary（名詞與定義）、map（Project Map：模組責任、介面、使用路徑、資料流、測試入口與關係，關係的 key 例如「Runtime → Store」）",
+                    },
+                    "key": { "type": "string", "maxLength": UNDERSTANDING_KEY_MAX_CHARS, "description": "文件內的名稱：Brief 的段落、Glossary 的名詞、Map 的模組或關係" },
+                    "text": { "type": "string", "maxLength": UNDERSTANDING_TEXT_MAX_CHARS, "description": "描述；unknown 時寫下哪裡未知（retired 可省略）" },
+                    "status": {
+                        "type": "string",
+                        "enum": ItemStatus::ALL.map(ItemStatus::as_str),
+                        "default": "hypothesis",
+                        "description": "confirmed 需要至少一個可查驗的來源；hypothesis（預設）、unknown、retired",
+                    },
+                    "sources": {
+                        "type": "array",
+                        "maxItems": UNDERSTANDING_SOURCES_MAX,
+                        "description": "來源；每個來源剛好提供 path 或 reference 其中一個",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Workspace 內的檔案相對路徑" },
+                                "line": { "type": "integer", "minimum": 1, "description": "行號（選填）" },
+                                "reference": { "type": "string", "description": "外部來源（網址、文件名稱）" },
+                                "version": { "type": "string", "description": "外部來源的版本（修訂、發布日期）；外部來源必填" },
+                            },
+                        },
+                    },
+                },
+                "required": ["section", "key"],
+            },
+        },
+        {
+            "name": TOOL_GET_PROJECT_UNDERSTANDING,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取這個 Workspace 目前的專案理解（Project Brief、Glossary、Project Map 的每一項、來源、版本與查驗時間；stale 表示來源檔案在查驗後改變，需要重新查驗）與投影檔狀態。沒有任何項目表示 Workspace 首次接入，請建立專案理解。",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
     ])
 }
 
@@ -591,6 +637,8 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_DISPATCH_TASK,
         TOOL_CANCEL_TASK,
         TOOL_PROPOSE_DECISION_REQUEST,
+        TOOL_RECORD_UNDERSTANDING,
+        TOOL_GET_PROJECT_UNDERSTANDING,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));

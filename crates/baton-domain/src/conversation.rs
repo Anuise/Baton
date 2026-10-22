@@ -588,7 +588,11 @@ pub fn build_prompt(
              你不直接執行指令、寫檔或資料庫，也不自己啟動 Worker；一律以 Baton 的工具（propose_task、update_task、\
              add_dependency、dispatch_task、cancel_task、propose_decision_request）提出變更，由 Runtime 驗證後執行。\n\
              邊釐清、邊調查：分清已確認的事項、假設與缺口，資訊不足的契約欄位標為 unknown，不要虛構需求；\
-             只以 propose_decision_request 問會阻擋下一步的關鍵問題並列出依賴答案的 Task，不依賴答案的研究可以先派出。\n",
+             只以 propose_decision_request 問會阻擋下一步的關鍵問題並列出依賴答案的 Task，不依賴答案的研究可以先派出。\n\
+             專案理解：先以 get_project_understanding 查看；Workspace 首次接入專案（還沒有任何項目）時，\
+             先從 repo 與文件找答案，以 record_understanding 逐項建立 Project Brief、Glossary 與 Project Map，之後持續維護。\
+             每項附來源（Workspace 內的檔案路徑，或附版本的外部來源）；只有被來源支持的描述才標為 confirmed，\
+             推測與未確認的關係標為 hypothesis，不知道的標為 unknown。\n",
         );
         if let Some(gap) = history_gap {
             prompt.push_str(&format!("\n注意：{gap}\n"));

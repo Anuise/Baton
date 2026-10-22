@@ -27,6 +27,7 @@ mod setup;
 mod shared_settings;
 mod tasks;
 mod timeline;
+mod understanding;
 mod verification;
 pub mod workdirs;
 mod workspaces;
@@ -50,6 +51,7 @@ use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECOR
 use baton_domain::guardian::GuardianStatus;
 use baton_domain::storage_health::StorageHealth;
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
+use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
 use baton_ports::{
@@ -107,6 +109,10 @@ pub use scheduling::{
     SchedulingSettingsView, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
 };
 pub use timeline::{metrics_path, timeline_path, MetricsResponse, ServerQuota, TimelineQuery, TimelineResponse};
+pub use understanding::{
+    projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, RecordUnderstandingResponse,
+    SourceView, UnderstandingItemView, UnderstandingView,
+};
 pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
 pub use shared_settings::{
     run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
@@ -202,6 +208,8 @@ pub struct ApiState {
     pub exit_timing: ExitTiming,
     /// 停止意圖持久化之後通知 Runtime 開始停止 Run（票 25）。
     pub exit_signal: Arc<Notify>,
+    /// 專案理解投影檔的比對與寫入一次只做一個（票 42）。
+    pub projection_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -253,6 +261,9 @@ pub fn router(state: ApiState) -> Router {
         .route(external_operations::EXTERNAL_OPERATIONS_ROUTE, get(external_operations::list))
         .route(timeline::TIMELINE_ROUTE, get(timeline::timeline))
         .route(timeline::METRICS_ROUTE, get(timeline::metrics))
+        .route(understanding::UNDERSTANDING_ROUTE, get(understanding::view))
+        .route(understanding::SYNC_ROUTE, post(understanding::sync))
+        .route(understanding::RECONCILE_ROUTE, post(understanding::reconcile))
         .route(LIFECYCLE_PATH, get(lifecycle::status))
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
@@ -304,6 +315,8 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_DISPATCH_TASK), post(controller::dispatch_task))
         .route(&tool_path(TOOL_CANCEL_TASK), post(controller::cancel_task))
         .route(&tool_path(TOOL_PROPOSE_DECISION_REQUEST), post(controller::propose_decision_request))
+        .route(&tool_path(TOOL_RECORD_UNDERSTANDING), post(understanding::record_understanding))
+        .route(&tool_path(TOOL_GET_PROJECT_UNDERSTANDING), post(understanding::get_project_understanding))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)
