@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use baton_domain::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -36,4 +38,16 @@ pub struct QuotaSample {
 #[async_trait]
 pub trait QuotaObserver: Send + Sync {
     async fn observe(&self, profile: &ProfileRef) -> PortResult<QuotaSample>;
+}
+
+/// 觀測一批帳號目前已知的用量比例（排程用）。觀測不到（Port 失敗、未知）的帳號不放進結果：
+/// 未知不當作 0，也不因此阻擋派工（額度觀測屬票 27）。
+pub async fn observe_quota(observer: &dyn QuotaObserver, profile_ids: &[String]) -> HashMap<String, f64> {
+    let mut known = HashMap::new();
+    for id in profile_ids {
+        if let Ok(QuotaSample { used: Some(used), .. }) = observer.observe(&ProfileRef(id.clone())).await {
+            known.insert(id.clone(), used);
+        }
+    }
+    known
 }

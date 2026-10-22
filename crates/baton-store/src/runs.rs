@@ -188,11 +188,11 @@ pub(crate) fn views(loaded: &Loaded) -> Vec<RunView> {
 
 const RUN_COLUMNS: &str = "id, workspace_id, task_id, status, version, generation, contract_version, \
      authorization_revision, command_id, pid, process_created_at, command_hash, cancel_requested_at, end_reason, \
-     created_at, updated_at, started_at, ended_at";
+     created_at, updated_at, started_at, ended_at, profile_id";
 const RUN_COLUMNS_QUALIFIED: &str = "r.id, r.workspace_id, r.task_id, r.status, r.version, r.generation, \
      r.contract_version, r.authorization_revision, r.command_id, r.pid, r.process_created_at, r.command_hash, \
-     r.cancel_requested_at, r.end_reason, r.created_at, r.updated_at, r.started_at, r.ended_at";
-const RUN_COLUMN_COUNT: usize = 18;
+     r.cancel_requested_at, r.end_reason, r.created_at, r.updated_at, r.started_at, r.ended_at, r.profile_id";
+const RUN_COLUMN_COUNT: usize = 19;
 
 const LEASE_COLUMNS: &str =
     "run_id, task_id, generation, acquired_at, last_heartbeat_at, expires_at, released_at, release_reason";
@@ -227,6 +227,8 @@ fn run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
         updated_at: Timestamp::from_millis(r.get(15)?),
         started_at: timestamp(16)?,
         ended_at: timestamp(17)?,
+        // 票 19 之前建立的 Run 沒有帳號
+        profile_id: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
     })
 }
 
@@ -249,6 +251,15 @@ pub(crate) fn load_runs(conn: &Connection, workspace_id: &str) -> rusqlite::Resu
     conn.prepare(&format!("SELECT {RUN_COLUMNS} FROM run WHERE workspace_id = ?1 ORDER BY rowid"))?
         .query_map([workspace_id], run_row)?
         .collect()
+}
+
+/// 全部 Workspace 中進行中（還沒結束）的 Run；容量是全域的，所以不分 Workspace。
+pub(crate) fn load_active_runs(conn: &Connection) -> rusqlite::Result<Vec<Run>> {
+    conn.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM run WHERE status IN ('queued', 'starting', 'running') ORDER BY rowid"
+    ))?
+    .query_map([], run_row)?
+    .collect()
 }
 
 pub(crate) fn load_leases(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<ExecutionLease>> {
@@ -279,7 +290,7 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
         let millis = |t: Option<Timestamp>| t.map(|t| t.as_millis());
         tx.execute(
             &format!(
-                "INSERT INTO run ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                "INSERT INTO run ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                  ON CONFLICT(id) DO UPDATE SET
                    status = excluded.status, version = excluded.version, command_id = excluded.command_id,
                    pid = excluded.pid, process_created_at = excluded.process_created_at,
@@ -306,6 +317,7 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
                 run.updated_at.as_millis(),
                 millis(run.started_at),
                 millis(run.ended_at),
+                run.profile_id,
             ],
         )?;
     }

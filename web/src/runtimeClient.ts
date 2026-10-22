@@ -304,6 +304,8 @@ export interface Run {
   workspace_id: string;
   task_id: string;
   status: RunStatus;
+  /** 這個 Run 使用的帳號 Profile（Scheduler 派工時選定）。 */
+  profile_id: string;
   version: number;
   /** 同一個 Task 的 Run 依序遞增，最新的是最大者。 */
   generation: number;
@@ -360,6 +362,38 @@ export type RunView = Run & {
   blocked: BlockedNote | null;
 };
 
+/** 不能派工（留在佇列）的原因類別；各自對應不同的處理方式。 */
+export type WaitCategory = "capacity" | "quota" | "authorization" | "dependency" | "state_unknown" | "account";
+
+/** 等待原因（對應 Rust 的 WaitReason）；`code` 是穩定的機器可讀代碼。 */
+export interface WaitReason {
+  category: WaitCategory;
+  code: string;
+  message: string;
+  profile_id?: string;
+}
+
+/** 派工回 202：沒有名額或條件不足，Task 留在佇列（對應 Rust 的 QueuedDispatch）。 */
+export interface QueuedDispatch {
+  queued: true;
+  task_id: string;
+  priority: number;
+  reasons: WaitReason[];
+}
+
+/** 派工的結果：已建立 Run，或排隊中。 */
+export type DispatchResult =
+  | { kind: "started"; run: RunView }
+  | { kind: "queued"; task_id: string; priority: number; reasons: WaitReason[] };
+
+/** Runtime 的派工回應以 `queued === true` 區分兩種結果。 */
+function toDispatchResult(body: RunView | QueuedDispatch): DispatchResult {
+  if ("queued" in body && body.queued === true) {
+    return { kind: "queued", task_id: body.task_id, priority: body.priority, reasons: body.reasons };
+  }
+  return { kind: "started", run: body as RunView };
+}
+
 export interface TaskBoard {
   workspace_id: string;
   goals: Goal[];
@@ -397,10 +431,83 @@ export interface TaskClient {
   checkTaskAdmission(workspaceId: string, taskId: string): Promise<AdmissionReport>;
   markTaskReady(workspaceId: string, taskId: string): Promise<TaskView>;
   cancelTask(workspaceId: string, taskId: string): Promise<TaskView>;
-  /** 對 ready 的 Task 派工：回傳 queued 的 Run（程序由 Supervisor 之後才啟動）。 */
-  dispatchTask(workspaceId: string, taskId: string): Promise<RunView>;
+  /** 對 ready 的 Task 派工：有名額回傳 queued 的 Run（程序由 Supervisor 之後才啟動），否則回傳排隊中與原因。 */
+  dispatchTask(workspaceId: string, taskId: string): Promise<DispatchResult>;
   /** 要求取消 Run；已啟動的 Run 要等程序確認停止才會變 cancelled。 */
   cancelRun(workspaceId: string, runId: string): Promise<RunView>;
+}
+
+/** 並行容量的預設：保留交接容量（預設）或較高並行。 */
+export type SchedulingMode = "reserve_handoff" | "higher_concurrency";
+
+export interface CapacityModeInfo {
+  mode: SchedulingMode;
+  label: string;
+  description: string;
+  per_account_limit: number;
+  global_limit: number;
+  handoff_reserve: number;
+}
+
+/** 目前生效的容量數字與使用情形（對應 Rust 的 CapacityView）。 */
+export interface CapacityView {
+  per_account_limit: number;
+  global_limit: number;
+  /** 實際保留的交接槽數；可用帳號不夠時為 0。 */
+  handoff_reserve: number;
+  /** 一般派工最多能佔用的全域名額（全域上限扣掉保留的交接槽）。 */
+  normal_limit: number;
+  running: number;
+  usable_accounts: number;
+}
+
+/** 帳號上一個進行中的 Run。 */
+export interface AccountRun {
+  run_id: string;
+  workspace_id: string;
+  task_id: string;
+  task_title: string;
+  status: RunStatus;
+  generation: number;
+  /** 已要求取消，但程序還沒確認停止。 */
+  cancel_requested: boolean;
+}
+
+export interface AccountScheduling {
+  profile_id: string;
+  name: string;
+  dispatchable: boolean;
+  blockers: ProfileBlocker[];
+  /** 已知的用量比例（0 到 1）；`null` 是尚未觀測，不是 0。 */
+  quota_used: number | null;
+  running: number;
+  limit: number;
+  runs: AccountRun[];
+}
+
+/** 佇列中等待名額的 Task；`position` 從 1 起。 */
+export interface QueueEntry {
+  workspace_id: string;
+  task_id: string;
+  title: string;
+  priority: number;
+  requested_at: number;
+  position: number;
+  reasons: WaitReason[];
+}
+
+/** 排程總覽（對應 Rust 的 SchedulingOverview）。 */
+export interface SchedulingOverview {
+  settings: { mode: SchedulingMode; mode_label: string; modes: CapacityModeInfo[] };
+  capacity: CapacityView;
+  accounts: AccountScheduling[];
+  queue: QueueEntry[];
+}
+
+/** 排程：總覽（容量、各帳號進行中的 Run、佇列）與容量預設切換。 */
+export interface SchedulingClient {
+  schedulingOverview(): Promise<SchedulingOverview>;
+  setSchedulingMode(mode: SchedulingMode): Promise<SchedulingOverview>;
 }
 
 /** 帳號 Profile 與首次啟動精靈；與其他用戶端分開，讓只關心帳號的畫面不必知道它們。 */
@@ -417,13 +524,14 @@ export interface AccountClient {
   acknowledgeBackgroundNotice(): Promise<SetupStatus>;
 }
 
-export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient & TaskClient & AccountClient;
+export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient & TaskClient & AccountClient & SchedulingClient;
 
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
 const WORKSPACES_PATH = "/api/v1/workspaces";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
+const SCHEDULING_PATH = "/api/v1/scheduling";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
@@ -523,7 +631,10 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     getSetup: () => send(SETUP_PATH),
     recheckSetup: () => send(`${SETUP_PATH}/recheck`, { method: "POST" }),
     acknowledgeBackgroundNotice: () => send(`${SETUP_PATH}/background-notice/acknowledge`, { method: "POST" }),
-    dispatchTask: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/dispatch`, { method: "POST" }),
+    dispatchTask: async (workspaceId, taskId) =>
+      toDispatchResult(await send<RunView | QueuedDispatch>(`${taskPath(workspaceId, taskId)}/dispatch`, { method: "POST" })),
+    schedulingOverview: () => send(SCHEDULING_PATH),
+    setSchedulingMode: (mode) => send(`${SCHEDULING_PATH}/settings`, { method: "PUT", body: { mode } }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   };
@@ -572,7 +683,10 @@ export function createTauriClient(invoke: Invoke): AppClient {
     getSetup: () => call<SetupStatus>("setup_status"),
     recheckSetup: () => call<SetupStatus>("setup_recheck"),
     acknowledgeBackgroundNotice: () => call<SetupStatus>("setup_acknowledge_notice"),
-    dispatchTask: (workspaceId, taskId) => call<RunView>("task_dispatch", { workspaceId, taskId }),
+    dispatchTask: async (workspaceId, taskId) =>
+      toDispatchResult(await call<RunView | QueuedDispatch>("task_dispatch", { workspaceId, taskId })),
+    schedulingOverview: () => call<SchedulingOverview>("scheduling_overview"),
+    setSchedulingMode: (mode) => call<SchedulingOverview>("scheduling_set_mode", { mode }),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
   };
 }

@@ -2,19 +2,22 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { TaskBoard } from "./TaskBoard";
+import { accountScheduling, schedulingOverview } from "./fixtures";
+import { TaskBoard, type TaskBoardClient } from "./TaskBoard";
 import {
   CONTRACT_FIELDS,
+  type AccountScheduling,
   type Capability,
   type ContractInput,
   type Goal,
   type MissingItem,
+  type QueueEntry,
   type RunStatus,
   type RunView,
   type TaskBoard as TaskBoardData,
-  type TaskClient,
   type TaskContract,
   type TaskView,
+  type WaitReason,
   type Workspace,
 } from "./runtimeClient";
 
@@ -96,6 +99,7 @@ function run(id: string, taskId: string, status: RunStatus, overrides: Partial<R
     workspace_id: workspace.id,
     task_id: taskId,
     status,
+    profile_id: "prof_1",
     version: 1,
     generation: 1,
     contract_version: 1,
@@ -117,17 +121,30 @@ function run(id: string, taskId: string, status: RunStatus, overrides: Partial<R
 }
 
 /** 以記憶體模擬 Runtime 的 Task 行為，讓測試只看使用者可見的流程。 */
-function fakeClient(initial: { goals?: Goal[]; tasks?: TaskView[]; runs?: RunView[]; history?: TaskContract[] } = {}) {
+function fakeClient(
+  initial: {
+    goals?: Goal[];
+    tasks?: TaskView[];
+    runs?: RunView[];
+    history?: TaskContract[];
+    accounts?: AccountScheduling[];
+    queue?: QueueEntry[];
+    /** 設定後，派工一律回「排隊中」並加入佇列（沒有名額）。 */
+    queueOnDispatch?: WaitReason[];
+  } = {},
+) {
   let goals = initial.goals ?? [goal("goal_1", "整理文件")];
   let tasks = initial.tasks ?? [];
   let runs = initial.runs ?? [];
+  let queue = initial.queue ?? [];
   const board = (): TaskBoardData => ({ workspace_id: workspace.id, goals, tasks, runs, capabilities: CAPABILITIES });
   const replace = (id: string, patch: Partial<TaskView>) => {
     tasks = tasks.map((t) => (t.id === id ? { ...t, ...patch } : t));
     return tasks.find((t) => t.id === id)!;
   };
-  const client: TaskClient = {
+  const client: TaskBoardClient = {
     getTaskBoard: vi.fn(async () => board()),
+    schedulingOverview: vi.fn(async () => schedulingOverview({ accounts: initial.accounts ?? [accountScheduling()], queue })),
     createGoal: vi.fn(async (_ws: string, title: string) => {
       const created = goal(`goal_${goals.length + 1}`, title);
       goals = [...goals, created];
@@ -168,10 +185,25 @@ function fakeClient(initial: { goals?: Goal[]; tasks?: TaskView[]; runs?: RunVie
     dispatchTask: vi.fn(async (_ws: string, id: string) => {
       const current = tasks.find((t) => t.id === id)!;
       if (current.status !== "ready") throw new Error("Task 不是 ready，不能派工");
+      if (initial.queueOnDispatch) {
+        queue = [
+          ...queue,
+          {
+            workspace_id: workspace.id,
+            task_id: id,
+            title: current.title,
+            priority: 0,
+            requested_at: T0,
+            position: queue.length + 1,
+            reasons: initial.queueOnDispatch,
+          },
+        ];
+        return { kind: "queued" as const, task_id: id, priority: 0, reasons: initial.queueOnDispatch };
+      }
       const created = run(`run_${runs.length + 1}`, id, "queued", { generation: runs.filter((r) => r.task_id === id).length + 1 });
       runs = [...runs, created];
       replace(id, { status: "running" });
-      return created;
+      return { kind: "started" as const, run: created };
     }),
     cancelRun: vi.fn(async (_ws: string, runId: string) => {
       const current = runs.find((r) => r.id === runId)!;
@@ -186,7 +218,7 @@ function fakeClient(initial: { goals?: Goal[]; tasks?: TaskView[]; runs?: RunVie
   return client;
 }
 
-async function renderBoard(client: TaskClient) {
+async function renderBoard(client: TaskBoardClient) {
   const user = userEvent.setup();
   render(<TaskBoard client={client} workspace={workspace} timeZone="UTC" />);
   await screen.findByRole("heading", { name: "工作面板：筆記" });
@@ -360,6 +392,136 @@ describe("派工與 Run", () => {
     expect(within(running).getByRole("group", { name: "Run 狀態" })).toHaveTextContent("排隊中");
     expect(within(running).queryByRole("button", { name: "派工" })).not.toBeInTheDocument();
     expect(within(running).getByRole("button", { name: "取消 Run" })).toBeInTheDocument();
+  });
+
+  it("Run 的狀態列顯示使用的帳號名稱（以 profile_id 對照總覽的帳號）", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "running" })],
+        runs: [run("run_1", "task_1", "running", { profile_id: "prof_2" })],
+        accounts: [accountScheduling(), accountScheduling({ profile_id: "prof_2", name: "備用帳號" })],
+      }),
+    );
+
+    expect(runStatus("部署")).toHaveTextContent("帳號 備用帳號");
+  });
+
+  it("帳號不在總覽（例如已封存）時退回顯示 profile_id", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "running" })],
+        runs: [run("run_1", "task_1", "running", { profile_id: "prof_gone" })],
+      }),
+    );
+
+    expect(runStatus("部署")).toHaveTextContent("帳號 prof_gone");
+  });
+
+  it("派工回傳排隊中時，卡片留在「可派工」，顯示排隊中與依類別分組的原因", async () => {
+    const client = fakeClient({
+      tasks: [readyTask()],
+      queueOnDispatch: [
+        { category: "capacity", code: "account_capacity_full", message: "主要帳號的並行名額已滿（2/2）", profile_id: "prof_1" },
+        { category: "capacity", code: "global_capacity_full", message: "全域並行名額已滿（6/6）" },
+        { category: "dependency", code: "dependencies_unfinished", message: "相依的 Task 尚未完成" },
+      ],
+    });
+    const user = await renderBoard(client);
+
+    await user.click(within(card("部署")).getByRole("button", { name: "派工" }));
+
+    const queued = await within(column("可派工（1）")).findByRole("group", { name: "排隊原因" });
+    expect(queued).toHaveTextContent("排隊中（第 1 位）");
+    const capacity = within(queued).getByText("名額已滿").closest("li")!;
+    expect(within(capacity).getByText("主要帳號的並行名額已滿（2/2）")).toBeInTheDocument();
+    expect(within(capacity).getByText("全域並行名額已滿（6/6）")).toBeInTheDocument();
+    const dependency = within(queued).getByText("相依").closest("li")!;
+    expect(within(dependency).getByText("相依的 Task 尚未完成")).toBeInTheDocument();
+    expect(within(queued).queryByText("額度")).not.toBeInTheDocument();
+  });
+
+  it("派工回傳排隊中但總覽讀不到時，仍顯示排隊中與原因", async () => {
+    const client = fakeClient({
+      tasks: [readyTask()],
+      queueOnDispatch: [{ category: "quota", code: "quota_near_limit", message: "主要帳號的額度接近上限" }],
+    });
+    const user = await renderBoard(client);
+    vi.mocked(client.schedulingOverview).mockRejectedValue(new Error("離線"));
+
+    await user.click(within(card("部署")).getByRole("button", { name: "派工" }));
+
+    const queued = await within(card("部署")).findByRole("group", { name: "排隊原因" });
+    expect(queued).toHaveTextContent("排隊中");
+    expect(queued).not.toHaveTextContent("第");
+    expect(within(queued).getByText("額度")).toBeInTheDocument();
+    expect(within(queued).getByText("主要帳號的額度接近上限")).toBeInTheDocument();
+  });
+
+  it("總覽的佇列中有這個 ready 的 Task 時，顯示「排隊中（第 N 位）」與原因；沒有的不顯示", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [readyTask("task_1", "部署"), readyTask("task_2", "測試"), readyTask("task_3", "發佈")],
+        queue: [
+          {
+            workspace_id: "ws_1",
+            task_id: "task_2",
+            title: "測試",
+            priority: 0,
+            requested_at: T0,
+            position: 3,
+            reasons: [{ category: "authorization", code: "capability_not_granted", message: "尚未授權建置與測試" }],
+          },
+        ],
+      }),
+    );
+
+    const queued = within(card("測試")).getByRole("group", { name: "排隊原因" });
+    expect(queued).toHaveTextContent("排隊中（第 3 位）");
+    expect(within(queued).getByText("授權")).toBeInTheDocument();
+    expect(within(queued).getByText("尚未授權建置與測試")).toBeInTheDocument();
+    expect(within(card("部署")).queryByRole("group", { name: "排隊原因" })).not.toBeInTheDocument();
+    expect(within(card("發佈")).queryByRole("group", { name: "排隊原因" })).not.toBeInTheDocument();
+  });
+
+  it("狀態不明與帳號類別各自分開標示", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [readyTask()],
+        queue: [
+          {
+            workspace_id: "ws_1",
+            task_id: "task_1",
+            title: "部署",
+            priority: 0,
+            requested_at: T0,
+            position: 1,
+            reasons: [
+              { category: "state_unknown", code: "profile_unverified", message: "備用帳號尚未核對" },
+              { category: "account", code: "no_account", message: "沒有可派工的帳號" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const queued = within(card("部署")).getByRole("group", { name: "排隊原因" });
+    expect(within(queued.querySelector("li")!).getByText("狀態不明")).toBeInTheDocument();
+    expect(within(queued).getByText("帳號")).toBeInTheDocument();
+    expect(within(queued).getByText("備用帳號尚未核對")).toBeInTheDocument();
+    expect(within(queued).getByText("沒有可派工的帳號")).toBeInTheDocument();
+  });
+
+  it("讀不到排程總覽時看板照常顯示，Run 狀態列改顯示 profile_id", async () => {
+    const client = fakeClient({
+      tasks: [task("task_1", "部署", { status: "running" })],
+      runs: [run("run_1", "task_1", "running")],
+    });
+    vi.mocked(client.schedulingOverview).mockRejectedValue(new Error("離線"));
+
+    await renderBoard(client);
+
+    expect(runStatus("部署")).toHaveTextContent("帳號 prof_1");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("非 ready 的卡片沒有「派工」", async () => {
@@ -609,7 +771,7 @@ describe("派工與 Run", () => {
 });
 
 describe("建立 Task 與契約編輯器", () => {
-  async function openCreate(client: TaskClient) {
+  async function openCreate(client: TaskBoardClient) {
     const user = await renderBoard(client);
     await user.click(screen.getByRole("button", { name: "建立 Task" }));
     return { user, form: screen.getByRole("region", { name: "建立 Task" }) };

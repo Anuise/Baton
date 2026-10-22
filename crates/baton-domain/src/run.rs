@@ -123,6 +123,8 @@ pub struct Run {
     pub id: String,
     pub workspace_id: String,
     pub task_id: String,
+    /// 這個 Run 使用的帳號（account_profile）；由 Scheduler 在派工時選定，之後不會改變（票 19）。
+    pub profile_id: String,
     pub status: RunStatus,
     /// 每個事件加一；事件的 `aggregate_version` 與它對應。
     pub version: i64,
@@ -244,8 +246,9 @@ pub enum ProcessObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunCommand {
-    /// 派工交易：建立 Run、取得 lease、寫入派工 Outbox，Task 進入 `running`。`run_id` 由呼叫端產生。
-    Dispatch { run_id: String, task_id: String },
+    /// 派工交易：建立 Run、取得 lease、寫入派工 Outbox，Task 進入 `running`。`run_id` 由呼叫端產生；
+    /// `profile_id` 是 Scheduler（`crate::scheduler`）在同一個交易中選定的帳號。
+    Dispatch { run_id: String, task_id: String, profile_id: String },
     /// Supervisor 在啟動程序之前先持久化 launch intent 與 command_id（`queued` → `starting`）。
     BeginLaunch { run_id: String, command_id: String },
     /// 啟動回執寫回（`starting` → `running`）；重複寫回同一個回執是冪等的。
@@ -490,8 +493,8 @@ impl<'a> Editing<'a> {
 pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Result<RunChange, RunError> {
     let workspace =
         ctx.task.workspace.ok_or_else(|| RunError::WorkspaceNotFound(ctx.task.workspace_id.to_string()))?;
-    if let RunCommand::Dispatch { run_id, task_id } = command {
-        return dispatch(ctx, workspace, run_id, task_id, now);
+    if let RunCommand::Dispatch { run_id, task_id, profile_id } = command {
+        return dispatch(ctx, workspace, run_id, task_id, profile_id, now);
     }
 
     let run = ctx.run(command.run_id())?;
@@ -657,14 +660,21 @@ fn check_report(run: &Run, lease: Option<&ExecutionLease>, generation: i64) -> R
     Ok(())
 }
 
-fn dispatch(
-    ctx: &RunContext<'_>,
-    workspace: &Workspace,
-    run_id: String,
-    task_id: String,
-    now: Timestamp,
-) -> Result<RunChange, RunError> {
-    let task = ctx.task.task(&task_id).ok_or_else(|| RunError::TaskNotFound(task_id.clone()))?;
+/// 派工前的檢查通過後，派工交易需要用到的事實。
+struct Checked<'a> {
+    task: &'a Task,
+    contract: &'a task::TaskContract,
+    admission: authorization::Admission,
+}
+
+/// 派工的前置檢查（與帳號、容量無關）：Task 必須是 `ready`、沒有人持有寫入所有權、准入檢查通過（授權可能在
+/// ready 之後被撤銷，AI-61）、相依都已完成。Scheduler 用同一個檢查決定「現在能不能派」或「為什麼要等」。
+pub fn check_dispatch(ctx: &RunContext<'_>, task_id: &str) -> Result<(), RunError> {
+    check_dispatch_inner(ctx, task_id).map(|_| ())
+}
+
+fn check_dispatch_inner<'a>(ctx: &'a RunContext<'a>, task_id: &str) -> Result<Checked<'a>, RunError> {
+    let task = ctx.task.task(task_id).ok_or_else(|| RunError::TaskNotFound(task_id.to_string()))?;
     if task.status != TaskStatus::Ready {
         return Err(RunError::TaskNotReady(task.status));
     }
@@ -672,7 +682,7 @@ fn dispatch(
     if let Some(held) = ctx.held_lease_of_task(&task.id) {
         return Err(RunError::ExecutionConflict { task_id: task.id.clone(), run_id: held.run_id.clone() });
     }
-    let contract = ctx.task.contract_of(task).ok_or_else(|| RunError::TaskNotFound(task_id.clone()))?;
+    let contract = ctx.task.contract_of(task).ok_or_else(|| RunError::TaskNotFound(task_id.to_string()))?;
     // 授權可能在 ready 之後被撤銷，所以派工時重新做完整的准入檢查（AI-61）
     let missing = task::admission_report(ctx.task, contract);
     if !missing.is_empty() {
@@ -696,12 +706,25 @@ fn dispatch(
     if !unfinished.is_empty() {
         return Err(RunError::DependenciesUnfinished(unfinished));
     }
+    Ok(Checked { task, contract, admission })
+}
+
+fn dispatch(
+    ctx: &RunContext<'_>,
+    workspace: &Workspace,
+    run_id: String,
+    task_id: String,
+    profile_id: String,
+    now: Timestamp,
+) -> Result<RunChange, RunError> {
+    let Checked { task, contract, admission } = check_dispatch_inner(ctx, &task_id)?;
 
     let generation = ctx.runs.iter().filter(|r| r.task_id == task.id).map(|r| r.generation).max().unwrap_or(0) + 1;
     let mut run = Run {
         id: run_id.clone(),
         workspace_id: ctx.task.workspace_id.to_string(),
         task_id: task.id.clone(),
+        profile_id: profile_id.clone(),
         status: RunStatus::Queued,
         version: 0,
         generation,
@@ -743,6 +766,7 @@ fn dispatch(
         EVENT_RUN_CREATED,
         serde_json::json!({
             "task_id": task.id,
+            "profile_id": profile_id,
             "generation": generation,
             "contract_version": task.contract_version,
             "authorization_revision": admission.authorization_revision,

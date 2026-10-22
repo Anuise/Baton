@@ -11,7 +11,8 @@ use std::time::Duration;
 use baton_api::{
     admission_check_path, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
-    task_path, task_ready_path, tasks_path,
+    task_path, task_ready_path, tasks_path, QueuedDispatch, SchedulingOverview, UpdateSchedulingSettingsRequest,
+    SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
     CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse,
     LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus, SummaryRequest, TaskBoard, TaskDetail,
@@ -21,10 +22,20 @@ use baton_api::{
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
 use baton_domain::run::RunView;
+use baton_domain::scheduler::CapacityMode;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
+
+/// 派工的結果：Scheduler 找到帳號與名額就建立 Run；否則排進佇列並回報原因。
+/// 序列化後與 Runtime 回應的 JSON 形狀相同（排隊中有 `queued: true`），Web UI 以它區分兩種結果。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum DispatchOutcome {
+    Queued(QueuedDispatch),
+    Started(Box<RunView>),
+}
 
 /// 一般請求等待回應的上限。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -224,9 +235,21 @@ impl RuntimeClient {
         self.send_json::<(), _>(reqwest::Method::POST, &task_cancel_path(workspace_id, task_id), None).await
     }
 
-    /// 對 ready 的 Task 派工：回傳 `queued` 的 Run（程序由 Supervisor 之後才啟動）；被拒絕時回傳 `ClientError::Rejected`。
-    pub async fn dispatch_task(&self, workspace_id: &str, task_id: &str) -> Result<RunView, ClientError> {
+    /// 對 ready 的 Task 派工：有帳號與名額就回傳 `queued` 的 Run（程序由 Supervisor 之後才啟動），
+    /// 否則排進佇列並回傳等待原因；Task 不能派（不是 ready、契約失效）時回傳 `ClientError::Rejected`。
+    pub async fn dispatch_task(&self, workspace_id: &str, task_id: &str) -> Result<DispatchOutcome, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &task_dispatch_path(workspace_id, task_id), None).await
+    }
+
+    /// 排程總覽：容量、各帳號進行中的 Run、佇列與等待原因。
+    pub async fn scheduling(&self) -> Result<SchedulingOverview, ClientError> {
+        self.get_json(SCHEDULING_PATH).await
+    }
+
+    /// 切換容量預設（較高並行／保留交接容量），回傳切換後的排程總覽。
+    pub async fn set_scheduling_mode(&self, mode: CapacityMode) -> Result<SchedulingOverview, ClientError> {
+        let request = UpdateSchedulingSettingsRequest { mode };
+        self.send_json(reqwest::Method::PUT, SCHEDULING_SETTINGS_PATH, Some(&request)).await
     }
 
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。

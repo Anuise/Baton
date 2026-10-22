@@ -40,7 +40,7 @@ async fn store_with_running_t1(dir: &Path) -> (Store, AgentScope) {
 }
 
 async fn dispatch(store: &Store, run_id: &str, task_id: &str) -> RunChange {
-    let command = RunCommand::Dispatch { run_id: run_id.into(), task_id: task_id.into() };
+    let command = RunCommand::Dispatch { run_id: run_id.into(), task_id: task_id.into(), profile_id: "p1".into() };
     store.apply_run_command("w1".into(), command, T1).await.unwrap()
 }
 
@@ -123,7 +123,7 @@ async fn the_same_message_id_in_another_workspace_is_a_different_message() {
         store.apply_task_command("w2".into(), task, T1).await.unwrap();
         store.apply_task_command("w2".into(), TaskCommand::MarkReady { task_id: id.into() }, T1).await.unwrap();
     }
-    let command = RunCommand::Dispatch { run_id: "r9".into(), task_id: "u1".into() };
+    let command = RunCommand::Dispatch { run_id: "r9".into(), task_id: "u1".into(), profile_id: "p1".into() };
     store.apply_run_command("w2".into(), command, T1).await.unwrap();
     let other = AgentScope { workspace_id: "w2".into(), run_id: "r9".into(), generation: 1 };
 
