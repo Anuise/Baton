@@ -4805,6 +4805,67 @@
 - 影響：多一張自動化票；Controller 的能力範圍擴大，需要維持 Workspace 範圍的隔離保證。
 - 審閱：未審
 
+### AI-492：Controller 以 Workspace 層級的保留地址 `controller` 收發訊息
+- 重要度：中
+- 時間／階段：2026-10-23，票 54 實作
+- 決策：Controller 沒有 Task，在訊息中以保留地址 `controller`（`baton_domain::message::CONTROLLER_ADDRESS`）表示。Controller 可以寄給自己 Workspace 的任何 Task；Worker 以 `to: ["controller"]` 寄給自己 Workspace 的 Controller，也可以回覆 Controller 寄給它的訊息。Controller 的收件匣屬於 Workspace，不屬於某一輪，下一輪讀得到上一輪沒讀的訊息。資料上以 migration 47 `controller_messages` 重建 `message`：寄件者是 Worker 的 Run 或 Controller 的一輪，以 CHECK 保證恰好一種。寄給 Controller 的交付另存 `message_controller_delivery`。API 形狀不變：`from_task_id` 與 `read_inbox` 的 `task_id` 在 Controller 時是 `controller`，未讀摘要寫「來自 Controller」。其他行為：
+  - Controller 用訊息改範圍時只忽略，不產生「給 Controller 的事件」。
+  - Worker 寄給 Controller 不會喚起它；改在 Controller 的系統提示要求每一輪開始時呼叫 `read_inbox`。
+  - Controller 的 Prompt 不附未讀摘要。
+- 理由：
+  - 收件匣跟著 Workspace，與 Worker 收件匣跟著 Task（交接後仍在）的設計一致。
+  - 保留地址讓 Worker 回覆 Controller 與回覆 Task 的方式相同，不必另開欄位或新工具。
+  - Task 識別一律是 Runtime 產生的 `task_…`，不會與 `controller` 衝突。
+  - 不喚起、不附摘要，是為了避免擴大事件迴圈與 Prompt 組裝的範圍。
+- 替代方案：
+  - 每一輪各自一個收件匣：沒讀完的訊息會隨一輪結束遺失。
+  - Worker 寄給 Controller 時產生工作事件並喚起 Controller：會增加喚起次數，也需要合併規則。
+  - 在 `message_delivery` 放入非 Task 的收件人：要拆掉它對 `task` 的外鍵。
+- 影響：
+  - 舊資料原樣搬入新的 `message`。
+  - Worker 的既有範圍沒有放寬：仍只讀得到寄給自己 Task 的訊息，只能回覆自己寄過或收到的訊息，別的 Workspace 寄不到。
+  - Controller 要主動讀收件匣，才會看到 Worker 的訊息。
+- 審閱：未審
+
+### AI-493：Controller 的 `accept_artifact` 不能取代確定性檢查；沒有檢查時以「跳過 Stage 或 Gate」送使用者裁定
+- 重要度：中
+- 時間／階段：2026-10-23，票 54 實作
+- 決策：
+  - 新增 Controller 專屬工具 `accept_artifact`（`{task_id, reason, note?}`），只在 Controller 的 Workspace 內查找 Task。不是 `verifying` 時回 409 `task_not_verifying`。
+  - 契約宣告了確定性檢查時回 409 `verification_gate_pending`：由 Runtime 執行檢查，全部通過才接受，不建立裁定請求。
+  - 沒有宣告檢查時，原本只能由使用者手動接受，Controller 接受等同略過驗證 Gate。因此以內建「必須送裁定」、Workspace 不能放寬的 `skip_stage_or_gate` 經 `ControllerGate` 判定。裁定對象綁定 Run、世代、契約版本與成果雜湊。
+  - 核准後走與桌面手動接受相同的接受交易（`AcceptManually`），驗證紀錄的 `method` 仍是 `manual`，`accepted_by` 記為 `decision:<請求>`。
+- 理由：
+  - 票 13 規定只有兩條路能完成驗證：確定性檢查全部通過，或使用者以桌面憑證接受。Controller 自行接受會繞過驗證 Gate（AI-488）。
+  - 經裁定接受，實際上仍是使用者的決定，所以沿用手動接受的紀錄與交易，不必改 schema。
+  - 「跳過 Gate」是決策權限表中最接近的既有事項，新增事項要同時改權限表 UI。
+- 替代方案：
+  - 新增事項「接受沒有確定性證據的成果」。
+  - 驗證紀錄新增 `controller` method：要重建 `task_verification`。
+  - 依 AC 的另一個選項，在 spec D-05 註記不提供。
+- 影響：
+  - 核准在套用前已用掉。若剛好此時 Run 世代、契約或 manifest 改變，接受交易會拒絕，Controller 要重新取得核准。
+  - 核准綁定成果雜湊，產出新的成果時需要重新裁定。
+- 審閱：未審
+
+### AI-494：Controller 版 `record_lesson_candidate` 必須指定來源 Task，並先經「把候選教訓提交給使用者」判定
+- 重要度：低
+- 時間／階段：2026-10-23，票 54 實作
+- 決策：
+  - Controller 呼叫 `record_lesson_candidate` 必須帶 `task_id`，指定這個 Workspace 內的來源 Task。缺少或 `scope` 為 `global` 時回 400 `knowledge_scope_invalid`；Task 不在這個 Workspace 時回 404 `task_not_found`，不寫入。範圍（`task`／`goal`／`workspace`）依那個 Task 解析。
+  - 來源記為 `KnowledgeSource::Controller { controller_run_id, task_id }`，知識分頁顯示「Controller（Run …，Task …）」。狀態一律是 `candidate`。
+  - 寫入前以 `submit_lesson_candidate` 經 `ControllerGate` 判定：內建可自主處理，Workspace 收窄為必須送裁定時回 `requires_decision`。核准綁定內容與範圍的雜湊。
+  - Worker 版不變：送 `task_id` 也被忽略。
+- 理由：
+  - 裁定請求與決策權限的稽核都以 Task 為目標（`decision_request.task_id` 必填）。
+  - 教訓本來就從某個 Task 的事件與證據得出，要求來源 Task 也與 Worker 版的「來源是這個 Run 的 Task」對稱。
+  - 決策權限表已有這個事項，Controller 的動作應依表判定（AI-227 不信任自報事項）。
+- 替代方案：
+  - `task_id` 可省略、只允許 Workspace 範圍：收窄為必須送裁定時沒有可掛的 Task。
+  - 不經權限表判定：Workspace 的收窄會失效。
+- 影響：Controller 不能提交沒有來源 Task 的 Workspace 層級教訓。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
