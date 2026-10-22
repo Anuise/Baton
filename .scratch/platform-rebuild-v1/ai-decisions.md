@@ -1765,6 +1765,51 @@
 - 影響：本票較早的 commit 訊息與 `.orchestration` 下的驗證紀錄（R067）提到的 AI-168～AI-176，以及第一次合併 commit 中的 AI-180～AI-189，都是改號前的編號。
 - 審閱：未審
 
+### AI-196：「准入」就是 Supervisor 持久化 launch intent 的交易；派工時記下的 revision 不算准入
+- 重要度：高
+- 時間／階段：2026-10-22，票 24 實作
+- 決策：R1-a 的「已持久化准入」定義為 `RunCommand::BeginLaunch`（launch intent 與 command_id 寫入、`queued` → `starting`）提交的那一刻。這個交易以**當下生效**的授權重新檢查 Task 目前契約需要的能力（`authorization::admit`），通過就把 Run 的 `authorization_revision` 改寫為當下的 revision，並記下新欄位 `admitted_at` 與 `settings_version`（migration 19 `run_admission`）。派工（`Dispatch`）仍照舊記下派工當時的 revision，但那只是排隊中的紀錄；排隊中、已有派工 Outbox 但尚未 `BeginLaunch` 的 Run 都算未准入。授權更新與 `BeginLaunch` 都經過 Store 的單一寫入佇列，兩者的先後以事件表的 `seq`（`authorization_confirmed` 對 `run_launch_started`／`run_admission_denied`）查驗。票 06 的 `check_admission` 依 AI-53 的要求改走寫入佇列（不寫任何東西），結果與授權更新依同一個順序排列。
+- 理由：票面明說「未准入者（即使已排隊或有 Outbox）用新版重新檢查」，所以派工不能是准入；AI-87 已把 Agent 憑證的簽發放在 `BeginLaunch` 之後、spawn 之前，准入放在同一點，程序一出生拿到的憑證與授權版本就一致。
+- 替代方案：派工即准入（排隊中的 Run 會沿用撤權前的授權，違反票面）；spawn 成功、回執寫回時才算准入（程序已經在跑，撤權時無法阻止它啟動）。
+- 影響：Run 多了 `admitted_at`、`settings_version` 兩欄（API 與 Web 型別同步）；票 24 之前已在執行的 Run 這兩欄是 NULL，沿用派工時記下的 revision。交接 successor（尚未實作）也必須經過同一個 `BeginLaunch` 准入，不能複製前任的 revision。
+- 審閱：未審
+
+### AI-197：准入被拒時 Run 以 interrupted 結束、Task 回 ready 並自動重新排隊
+- 重要度：中
+- 時間／階段：2026-10-22，票 24 實作
+- 決策：`BeginLaunch` 准入被拒時不寫 launch intent、不簽發憑證、不啟動程序；Run 從 `queued` 直接進入 `interrupted`（`RunStatus::allowed_next` 新增 `Queued → Interrupted`），`end_reason` 為 `admission_denied：<原因>`，事件 `run_admission_denied`（payload 帶 `code` 與當下的 `authorization_revision`），釋放寫入所有權、派工 Outbox 標為處理完畢；Task 只在仍是 `running` 時回到 `ready`，並在**同一個交易**中重新放進派工佇列（優先序 0）。排程照常判定，等待原因以「授權」類別顯示；使用者恢復授權後自動派出。Supervisor 看到 `BeginLaunch` 的結果不是 `starting` 就不 spawn。
+- 理由：票面要求未准入者「用新版重新檢查」，被拒的工作不是失敗，也不是使用者取消；放回佇列才能在面板上以既有的等待原因呈現「為什麼還沒跑」，與 AI-168（完全退出停下的 Run 重新排隊）一致。留在 `queued` 並每秒重試（像 `launch_halted` 那樣）會讓 Task 一直顯示「執行中」卻沒有程序，也看不到原因。
+- 替代方案：以 `cancelled` 結束（語意是使用者取消）；以 `failed` 結束且不重新排隊（AI-96 的失敗語意，使用者要手動重派）；Run 留在 `queued` 等授權恢復。
+- 影響：重新排隊不保留原本的優先序。Run 的狀態表多一條 `queued → interrupted`。
+- 審閱：未審
+
+### AI-198：已准入 Run 的權限提示依它准入時的 revision 判定（撤權與擴權都不影響它）
+- 重要度：高
+- 時間／階段：2026-10-22，票 24 實作
+- 決策：`permission_prompt` 改為以 Run 的 `authorization_revision`（准入時固定的版本）判定，不再看 Workspace 目前生效的 revision（`DecisionContext` 新增全部 revision）。所以撤權後已准入的 Run 仍會自動允許舊範圍內的操作；之後**擴大**授權也不會套用到已准入的 Run（它的提示照舊建立裁定請求）；准入時還沒有任何授權的 Run（契約不需要能力）之後即使確認了授權，它的提示一律範圍外。修改授權的影響說明同步改寫（原本寫「執行中的 Worker 下一次權限提示就依新授權判定」，與 R1-a 衝突）。票 22 的兩個情境測試原本先啟動 Run 再確認授權、期待自動允許，改為先確認授權再派工（新增 `two_running_tasks_under_dev_template`）。
+- 理由：ADR-0003 的 R1-a 寫明「撤銷前已准入的 Run 沿用舊授權與設定版本」「已准入 Run 的撤權沒有固定完成時間，使用者可另行暫停或取消」；權限提示正是授權實際生效的地方，若仍看目前的 revision，撤權就會立即作用在執行中的 Run，與 ADR 與票面的「沿用舊版本」矛盾，也讓「仍有 N 個 Run 沿用舊授權」失去意義。擴權不套用到已准入 Run 是同一條規則的另一面，且較保守。
+- 替代方案：撤權立即生效、擴權也立即生效（AI-183 原本的說法；違反 R1-a）；取兩個 revision 中較嚴格者（撤權立即生效，但不符合 ADR 已確認的取捨）。
+- 影響：使用者撤權後若要立刻止損，必須用授權畫面的暫停／取消入口；擴權後要讓執行中的工作受益，得等它的下一個 Run。AI-183 的「影響」中「執行中的 Worker 下一次權限提示就依新授權判定」不再成立。
+- 審閱：未審
+
+### AI-199：「沿用舊授權」的 Run 清單、暫停與取消入口的語意
+- 重要度：中
+- 時間／階段：2026-10-22，票 24 實作
+- 決策：(1) `GET …/authorization` 新增 `legacy_runs`：狀態為 `starting`／`running`、沿用的 revision 比目前舊、而且舊 revision 有目前已撤銷或縮小的能力（`authorization::revoked_capabilities`：整個移除、移除目標或增加限制；新增的能力不算）的 Run，附 Task 標題、revision、准入時間、`cancel_requested` 與 `revoked_capabilities`。只有擴權時不列入。授權畫面在清單非空時顯示「後續執行已停用，仍有 N 個 Run 沿用舊授權」。(2) 「暫停」= 既有的取消 Run（`POST …/runs/{id}/cancel`）：停止程序、Task 回到可派工但不自動重派，之後重新派工時依新授權准入；「取消」= 既有的取消 Task。沒有新增「暫停 Run」的狀態或端點。(3) 工作面板 `GET …/tasks` 新增 `authorization_revision`（目前生效的），Run 卡片在 Run 尚未結束、已准入且沿用的 revision 較舊時標示「沿用舊授權（revision X，目前 Y）」（擴權後的舊 Run 也會標示）。
+- 理由：票面只要求「相關 Run 的暫停／取消入口」；系統目前沒有 Run 層級的暫停，而「停止這個 Run、保留 Task 等之後依新授權再派」正是撤權情境下使用者要的暫停，重用既有端點不需要新的狀態機。清單只列保有已撤銷範圍的 Run，標題「後續執行已停用」才正確。
+- 替代方案：新增 Run 的暫停狀態（狀態機與 Supervisor 都要改）；「暫停」改為暫停整個 Workspace（影響其他 Task）；清單列出所有沿用舊 revision 的 Run（擴權時標題不成立）。
+- 影響：「暫停」後 Task 回到 ready 但不會自動重新排隊（沿用取消 Run 的既有行為，AI-66）。
+- 審閱：未審
+
+### AI-200：共同設定版本也在准入時固定；已准入 Run 的快照只能用那個版本
+- 重要度：中
+- 時間／階段：2026-10-22，票 24 實作
+- 決策：`BeginLaunch` 在同一個交易中記下 `settings_version`：Run 已有快照綁定（AI-113 的 `run_settings_snapshot`）就用綁定的版本，否則用最新採用的版本（沒有採用任何版本為 NULL）。`POST …/runs/{id}/settings-snapshot` 對已准入的 Run：省略版本時用 `settings_version`、指定其他版本回 409 `settings_snapshot_pinned`；准入時沒有任何版本的 Run 回 409 `shared_settings_not_adopted`（之後採用的版本不會套用到它）。尚未准入的 Run 維持原本的行為（預設最新、可指定）。准入交易不寫快照目錄，也不建立綁定列，因為目錄要在交易外寫檔；Supervisor 仍沒有在啟動時自動產生快照（AI-113 的範圍，屬 Adapter 票）。
+- 理由：票面要求「沿用原授權與設定版本」；把版本號固定在准入交易中，才能與授權得到同一個持久化順序。綁定表需要目錄路徑與內容雜湊，與交易外的檔案寫入耦合，所以只記版本號。
+- 替代方案：准入時直接寫快照目錄並綁定（交易中做檔案 I/O，或交易外寫檔後再補綁定，兩段之間崩潰會留下不一致）；不處理設定版本（只做到授權）。
+- 影響：Adapter 票接上快照時，要在 `BeginLaunch` 成功後以 Run 的 `settings_version` 產生快照。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

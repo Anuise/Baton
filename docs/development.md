@@ -103,7 +103,7 @@ revision 存在 append-only 的 `authorization_revision` 表（觸發器禁止�
 
 **授權撤銷與啟動准入順序（R1-a，票 24）**：Run 的「准入」是 Supervisor 持久化 launch intent 的那一個交易（`BeginLaunch`），不是派工。授權更新與准入都經過單一寫入佇列，所以兩者的先後就是持久化順序，事件表的 `authorization_confirmed` 與 `run_launch_started`／`run_admission_denied` 的 `seq` 可以查驗：
 
-- 准入時以**當下生效**的授權重新檢查 Task 契約需要的能力。通過就把 Run 的 `authorization_revision` 改寫為當下的 revision，並記下 `admitted_at` 與 `settings_version`（`run` 表的兩欄，migration 19 `run_admission`）（已綁定快照的 Run 用它的綁定，否則是最新採用的共同設定版本）；之後不再改變。
+- 准入時以**當下生效**的授權重新檢查 Task 契約需要的能力。通過就把 Run 的 `authorization_revision` 改寫為當下的 revision，並記下 `admitted_at` 與 `settings_version`（`run` 表的兩欄，migration 19 `run_admission`；設定版本取已綁定快照的版本，沒有綁定時取最新採用的共同設定版本）；之後不再改變。
 - 被拒（排隊中或已有派工 Outbox、但撤權發生在准入之前）：不寫 launch intent、不簽發憑證、不啟動程序；Run 以 `interrupted`（`end_reason` 以 `admission_denied` 開頭，事件 `run_admission_denied`）結束、釋放寫入所有權，Task 回到 `ready` 並在同一個交易中重新排隊，排程以「授權」類別顯示等待原因。
 - 已准入的 Run 沿用准入時的 revision：撤權不會停止它，權限提示也依它的 revision 判定（新增的範圍同樣不會套用到它）。恢復 Run、同一 Task 的新 Run 與其他工作一律在准入時取得新版，舊 Run 不能成為權限捷徑。
 - `GET …/authorization` 的 `legacy_runs` 列出「已准入、尚未結束、沿用較舊 revision，而且舊 revision 有目前已撤銷或縮小的能力」的 Run（`revoked_capabilities`、`cancel_requested`），授權畫面顯示「後續執行已停用，仍有 N 個 Run 沿用舊授權」與「暫停」（取消這個 Run，Task 回到可派工）／「取消」（取消 Task）入口；工作面板 `GET …/tasks` 帶目前的 `authorization_revision`，Run 卡片標示「沿用舊授權（revision X，目前 Y）」。
