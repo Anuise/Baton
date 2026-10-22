@@ -17,6 +17,7 @@ mod guards;
 mod knowledge;
 mod lifecycle;
 mod messages;
+mod exploration;
 mod profiles;
 pub mod quota;
 mod recovery;
@@ -130,6 +131,10 @@ pub use timeline::{metrics_path, timeline_path, MetricsResponse, ServerQuota, Ti
 pub use understanding::{
     projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, RecordUnderstandingResponse,
     SourceView, UnderstandingItemView, UnderstandingView,
+};
+pub use exploration::{
+    workspace_exploration_path, CharterView, DefineCharterResponse, ExplorationOverview, FindingView, ReproduceFindingResponse,
+    TriageFindingResponse,
 };
 pub use reviews::{
     reviews_path, AxisView, ClassifyFindingResponse, DeviationView, ResolveDeviationResponse, ReviewList, ReviewView,
