@@ -59,6 +59,8 @@ fn report(
         outcome,
         evidence,
         note: note.into(),
+        build: None,
+        basis_overturned: None,
     };
     let change = record_result(workflow, playbook, prior, input, format!("att_{}", prior.len()), recorder(), T0)?;
     prior.push(change.attempt.unwrap());
@@ -247,6 +249,8 @@ fn only_the_current_stage_at_the_current_revision_can_be_reported() {
         outcome: ClaimedOutcome::Passed,
         evidence: vec![],
         note: String::new(),
+        build: None,
+        basis_overturned: None,
     };
     let error = record_result(&workflow, &playbook, &[], input.clone(), "a".into(), recorder(), T0).unwrap_err();
     assert_eq!(error.code(), "stage_not_current");
@@ -335,7 +339,7 @@ fn the_last_stage_completes_the_workflow_and_stage_states_follow_the_attempts() 
     }
     assert_eq!(workflow.status, WorkflowStatus::Completed);
     assert!(stage_states(&workflow, &playbook, &prior).iter().all(|s| *s == StageState::Passed));
-    let input = StageResultInput { stage: "conclusion".into(), expected_revision: workflow.revision, outcome: ClaimedOutcome::Passed, evidence: vec![], note: String::new() };
+    let input = StageResultInput { stage: "conclusion".into(), expected_revision: workflow.revision, outcome: ClaimedOutcome::Passed, evidence: vec![], note: String::new(), build: None, basis_overturned: None };
     assert_eq!(record_result(&workflow, &playbook, &prior, input, "a".into(), recorder(), T0).unwrap_err().code(), "workflow_completed");
 }
 
@@ -449,3 +453,6 @@ fn reviewer_counts_are_only_for_review_checks_and_within_range() {
     let both = EvidenceInput { check: "review".into(), review_id: Some("rev_1".into()), artifact_id: Some("art".into()), ..Default::default() };
     assert_eq!(normalize_evidence(&[both]).unwrap_err().code(), "workflow_invalid");
 }
+
+#[path = "gate_tests.rs"]
+mod gate;

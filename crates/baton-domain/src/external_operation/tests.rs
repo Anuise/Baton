@@ -103,6 +103,7 @@ impl World {
             dependencies: &[],
             contracts: &[],
             decision_holds: &[],
+            assumptions: &[],
         };
         let ctx = ExternalContext {
             task: &task_ctx,

@@ -199,6 +199,7 @@ impl Supervisor {
                     let verifier = supervisor.clone();
                     tokio::spawn(async move {
                         verifier.verify_pending().await;
+                        verifier.revalidate_gates().await;
                         verifier.run_requested_verifications().await;
                         verifier.integrate_pending().await;
                         verifier.clean_pending().await;
@@ -214,6 +215,7 @@ impl Supervisor {
         self.supervise_once().await;
         let _serial = self.verify_lock.lock().await;
         self.verify_pending().await;
+        self.revalidate_gates().await;
         self.run_requested_verifications().await;
         self.integrate_pending().await;
         self.clean_pending().await;
@@ -1821,6 +1823,42 @@ impl Supervisor {
                 // 觀察之後狀態已經改變（例如使用者先手動接受）：這份結果已過期，不套用
                 Err(error) => self.note(&format!("Task {task_id} 的檢查結果沒有套用：{error}")),
             }
+        }
+    }
+
+    /// 重新查驗已通過的 Gate（票 50）；呼叫端負責持有 `verify_lock`。先在交易外觀察受驗目錄目前的 build（觀察失敗的目錄
+    /// 這次不比較），再由 Store 在一個交易中判定失效、退回 Stage、排入重驗的驗證要求並通知 Controller。
+    /// 排在執行驗證要求之前：這一輪排入的重驗會在同一輪執行。
+    async fn revalidate_gates(&self) {
+        let dirs = match self.store.gate_build_dirs().await {
+            Ok(dirs) => dirs,
+            Err(error) => return self.note(&format!("無法讀取要重新查驗的 Gate：{error}")),
+        };
+        let mut builds = baton_store::Builds::new();
+        for dir in dirs {
+            match self.ports.verification_driver.revision(std::path::Path::new(&dir)).await {
+                Ok(revision) => {
+                    builds.insert(dir, revision);
+                }
+                Err(error) => self.note(&format!("無法讀取 {dir} 目前的 build，這次不比較：{error}")),
+            }
+        }
+        match self.store.revalidate_gates(builds, self.ports.clock.now()).await {
+            Ok(done) => {
+                for workflow in done {
+                    self.note(&format!(
+                        "Workflow {} 的 Gate 失效、需要重驗：{}{}",
+                        workflow.workflow_id,
+                        workflow.stages.join("、"),
+                        if workflow.verification_requests.is_empty() {
+                            String::new()
+                        } else {
+                            format!("（已排入驗證要求 {}）", workflow.verification_requests.join("、"))
+                        }
+                    ));
+                }
+            }
+            Err(error) => self.note(&format!("無法重新查驗 Gate：{error}")),
         }
     }
 

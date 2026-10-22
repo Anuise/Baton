@@ -265,6 +265,7 @@ impl Runtime {
             app_version: options.app_version.clone(),
             updates: updates.clone(),
             projection_lock: Arc::default(),
+            verification_driver: ports.verification_driver.clone(),
         });
         let task = tokio::spawn(async move {
             let _store = store; // 與 serve 同生命週期：停止後才釋放資料庫連線

@@ -825,7 +825,7 @@ fn review_axis_schema(description: &str) -> Value {
 }
 
 /// propose_task 與 update_task 的契約欄位說明（六項最小契約，見 ADR-0011）。
-const CONTRACT_DESCRIPTION: &str = "六項最小契約：objective（目標）、inputs（輸入與依據）、scope（範圍與限制）、deliverables（預期成果）、done_criteria（完成與驗證條件）、blocker_handling（阻礙處理），每項是下列之一：{\"status\":\"filled\",\"text\":…,\"references\"?:[{\"kind\",\"target\",\"version\"}]}（已填寫）、{\"status\":\"not_applicable\",\"reason\":…}（不適用，必須附理由；objective、done_criteria 不可標不適用）、{\"status\":\"unknown\",\"note\"?:…}（未知，補足前無法派工）。另有 required_capabilities：這個 Task 需要的 Workspace 授權能力（字串陣列）。資訊不足時標 unknown，不要虛構。";
+const CONTRACT_DESCRIPTION: &str = "六項最小契約：objective（目標）、inputs（輸入與依據）、scope（範圍與限制）、deliverables（預期成果）、done_criteria（完成與驗證條件）、blocker_handling（阻礙處理），每項是下列之一：{\"status\":\"filled\",\"text\":…,\"references\"?:[{\"kind\",\"target\",\"version\"}]}（已填寫；引用的 kind 是 task_contract、goal、authorization，或 decision：依某個裁定請求的建議或答案進行，target 是請求識別、version 是 1）、{\"status\":\"not_applicable\",\"reason\":…}（不適用，必須附理由；objective、done_criteria 不可標不適用）、{\"status\":\"unknown\",\"note\"?:…}（未知，補足前無法派工）。另有 required_capabilities：這個 Task 需要的 Workspace 授權能力（字串陣列）。資訊不足時標 unknown，不要虛構。";
 
 /// 處理 `tools/call`：協定層的錯誤回 `Err`，Runtime 的結果（含失敗）一律包成 MCP 工具結果。
 async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value) -> Result<Value, (i64, String)> {

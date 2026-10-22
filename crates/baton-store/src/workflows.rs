@@ -4,6 +4,9 @@
 //! - Workflow 的每次變更在單一交易中完成：載入 Workflow、固定的 Playbook 版本與先前的 attempt → 查驗證據 →
 //!   Domain 判定 → 寫回 Workflow（以 revision 條件更新）、追加 attempt 與事件。
 //! - 證據由這裡在同一個交易中查驗（成果、裁定、成果接受、雙軸審查），不採信 Controller 自報。
+//! - Gate 失效與重驗（票 50）：build 由 Runtime 在交易外觀察（受驗目錄的 revision，[`Builds`]），通過時隨 attempt 保存；
+//!   [`Store::revalidate_gates`] 在一個交易中重新查驗所有未完成 Workflow 已通過的 Gate，失效時追加 `invalidated` attempt、
+//!   退回最早失效的 Stage，驗證證據失效時自動排入重驗的驗證要求，並以工作事件通知 Controller。
 
 use baton_domain::context::StageItem;
 use baton_domain::workdir::TaskKind;
@@ -15,6 +18,21 @@ use baton_domain::workflow::{
 use rusqlite::OptionalExtension;
 
 use super::*;
+
+/// Runtime 在交易外觀察到的 build：受驗目錄 → 它目前的 revision（不是 Git repo 時為 `None`）。
+/// 沒有出現在這裡的目錄視為觀察不到，不比較 build。
+pub type Builds = std::collections::HashMap<String, Option<String>>;
+
+/// 一個 Workflow 的 Gate 失效（給 Runtime 記錄日誌）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevalidatedWorkflow {
+    pub workspace_id: String,
+    pub workflow_id: String,
+    /// 失效的 Stage。
+    pub stages: Vec<String>,
+    /// 自動排入的重驗驗證要求。
+    pub verification_requests: Vec<String>,
+}
 
 /// 套用 Workflow 變更的失敗：Domain 拒絕、找不到綁定的 Goal／Task，或儲存層錯誤。
 #[derive(Debug, thiserror::Error)]
@@ -58,9 +76,9 @@ pub struct WorkflowDetail {
 const PLAYBOOK_COLUMNS: &str = "id, key, version, definition, content_hash, origin, created_at";
 const METHOD_COLUMNS: &str = "id, key, version, definition, content_hash, origin, created_at";
 const WORKFLOW_COLUMNS: &str = "w.id, w.workspace_id, w.goal_id, w.task_id, w.playbook_version_id, p.key, p.version, w.situation, \
-     w.route_reason, w.status, w.current_stage, w.blocked_reason, w.revision, w.created_by, w.created_at, w.updated_at";
+     w.route_reason, w.status, w.current_stage, w.blocked_reason, w.revision, w.created_by, w.created_at, w.updated_at, w.resume_stage";
 const ATTEMPT_COLUMNS: &str =
-    "id, workflow_id, stage_key, attempt, outcome, evidence, missing, note, recorded_by, profile_id, created_at";
+    "id, workflow_id, stage_key, attempt, outcome, evidence, missing, note, recorded_by, profile_id, created_at, build";
 
 fn unknown(index: usize, what: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, format!("未知的{what}").into())
@@ -114,6 +132,7 @@ fn workflow_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowInstance> {
         created_by: r.get(13)?,
         created_at: Timestamp::from_millis(r.get(14)?),
         updated_at: Timestamp::from_millis(r.get(15)?),
+        resume_stage: r.get(16)?,
     })
 }
 
@@ -131,6 +150,7 @@ fn attempt_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StageAttempt> {
         recorded_by: r.get(8)?,
         profile_id: r.get(9)?,
         created_at: Timestamp::from_millis(r.get(10)?),
+        build: r.get(11)?,
     })
 }
 
@@ -244,11 +264,33 @@ fn open_for_task(conn: &Connection, task_id: &str) -> rusqlite::Result<Option<Wo
     .optional()
 }
 
-/// 在交易中查驗一項證據。`workflow_task` 是 Workflow 綁定的 Task（審查必須審這個 Task）。
+/// 受驗目錄：Workflow 綁定的 Task 已登記的工作目錄，否則是 Workspace 目錄（與驗證要求相同，票 45）。
+fn subject_dir(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -> rusqlite::Result<String> {
+    if let Some(task_id) = task_id {
+        let workdir: Option<String> = conn
+            .query_row("SELECT path FROM task_workdir WHERE task_id = ?1 AND status = 'ready'", [task_id], |r| r.get(0))
+            .optional()?;
+        if let Some(dir) = workdir {
+            return Ok(dir);
+        }
+    }
+    conn.query_row("SELECT path FROM workspace WHERE id = ?1", [workspace_id], |r| r.get(0))
+}
+
+/// Workflow 的 Task 依據的假設已被推翻時的說明（票 50）。
+fn basis_overturned(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -> rusqlite::Result<Option<String>> {
+    let Some(task_id) = task_id else { return Ok(None) };
+    let loaded = super::tasks::load(conn, workspace_id)?;
+    Ok(loaded.ctx(workspace_id).overturned_basis(task_id))
+}
+
+/// 在交易中查驗一項證據。`workflow_task` 是 Workflow 綁定的 Task（審查必須審這個 Task）；`builds` 是 Runtime 觀察到的
+/// 目前 build（驗證證據的 build 必須是受驗目錄目前的 revision，票 50）。
 fn check_evidence(
     conn: &Connection,
     workspace_id: &str,
     workflow_task: Option<&str>,
+    builds: &Builds,
     evidence: Evidence,
 ) -> rusqlite::Result<CheckedEvidence> {
     let mut reviewers = None;
@@ -276,10 +318,20 @@ fn check_evidence(
         }
         EvidenceRef::TaskAccepted { task_id } => {
             let found: Option<i64> = conn
-                .query_row("SELECT 1 FROM task WHERE id = ?1 AND workspace_id = ?2", [task_id, workspace_id], |r| r.get(0))
+                .query_row(
+                    "SELECT contract_version FROM task WHERE id = ?1 AND workspace_id = ?2",
+                    [task_id, workspace_id],
+                    |r| r.get(0),
+                )
                 .optional()?;
+            // 成果接受必須依據目前的契約（完成條件）：契約改版後，舊契約下的接受不算數（票 50）
             let accepted: Option<i64> = conn
-                .query_row("SELECT 1 FROM task_verification WHERE task_id = ?1 AND outcome = 'passed'", [task_id], |r| r.get(0))
+                .query_row(
+                    "SELECT 1 FROM task_verification t JOIN task ON task.id = t.task_id
+                     WHERE t.task_id = ?1 AND t.outcome = 'passed' AND t.contract_version = task.contract_version",
+                    [task_id],
+                    |r| r.get(0),
+                )
                 .optional()?;
             match (found, accepted) {
                 (None, _) => EvidenceStatus::NotFound,
@@ -293,7 +345,7 @@ fn check_evidence(
             status
         }
         EvidenceRef::Verification { evidence_bundle_id } => {
-            super::verification_profiles::verification_evidence_status(conn, workspace_id, evidence_bundle_id)?
+            super::verification_profiles::verification_evidence_status(conn, workspace_id, evidence_bundle_id, builds)?
         }
     };
     Ok(CheckedEvidence { evidence, status, reviewers })
@@ -307,8 +359,8 @@ fn save_change(tx: &Transaction<'_>, change: &WorkflowChange, previous_revision:
             tx.execute(
                 "INSERT INTO workflow_instance
                     (id, workspace_id, goal_id, task_id, playbook_version_id, situation, route_reason, status, current_stage,
-                     blocked_reason, revision, created_by, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                     blocked_reason, revision, created_by, created_at, updated_at, resume_stage)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![
                     w.id,
                     w.workspace_id,
@@ -324,12 +376,14 @@ fn save_change(tx: &Transaction<'_>, change: &WorkflowChange, previous_revision:
                     w.created_by,
                     w.created_at.as_millis(),
                     w.updated_at.as_millis(),
+                    w.resume_stage,
                 ],
             )?;
         }
         Some(previous) => {
             let updated = tx.execute(
-                "UPDATE workflow_instance SET status = ?1, current_stage = ?2, blocked_reason = ?3, revision = ?4, updated_at = ?5
+                "UPDATE workflow_instance SET status = ?1, current_stage = ?2, blocked_reason = ?3, revision = ?4, updated_at = ?5,
+                    resume_stage = ?8
                  WHERE id = ?6 AND revision = ?7",
                 rusqlite::params![
                     w.status.as_str(),
@@ -339,35 +393,172 @@ fn save_change(tx: &Transaction<'_>, change: &WorkflowChange, previous_revision:
                     w.updated_at.as_millis(),
                     w.id,
                     previous,
+                    w.resume_stage,
                 ],
             )?;
             assert_eq!(updated, 1, "同一個交易中讀到的 revision 一定還在");
         }
     }
     if let Some(a) = &change.attempt {
-        tx.execute(
-            "INSERT INTO stage_attempt
-                (id, workflow_id, stage_key, attempt, outcome, evidence, missing, note, recorded_by, profile_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![
-                a.id,
-                a.workflow_id,
-                a.stage_key,
-                a.attempt,
-                a.outcome.as_str(),
-                serde_json::to_string(&a.evidence).expect("證據一定可以序列化"),
-                serde_json::to_string(&a.missing).expect("缺項一定可以序列化"),
-                a.note,
-                a.recorded_by,
-                a.profile_id,
-                a.created_at.as_millis(),
-            ],
-        )?;
+        insert_attempt(tx, a)?;
     }
     for event in &change.events {
         append_event(tx, event)?;
     }
     Ok(())
+}
+
+fn insert_attempt(tx: &Transaction<'_>, a: &StageAttempt) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO stage_attempt
+            (id, workflow_id, stage_key, attempt, outcome, evidence, missing, note, recorded_by, profile_id, created_at, build)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            a.id,
+            a.workflow_id,
+            a.stage_key,
+            a.attempt,
+            a.outcome.as_str(),
+            serde_json::to_string(&a.evidence).expect("證據一定可以序列化"),
+            serde_json::to_string(&a.missing).expect("缺項一定可以序列化"),
+            a.note,
+            a.recorded_by,
+            a.profile_id,
+            a.created_at.as_millis(),
+            a.build,
+        ],
+    )?;
+    Ok(())
+}
+
+/// 未完成的 Workflow（全部 Workspace），依建立順序。
+fn open_workflows(conn: &Connection) -> rusqlite::Result<Vec<WorkflowInstance>> {
+    conn.prepare(&format!(
+        "SELECT {WORKFLOW_COLUMNS} FROM workflow_instance w JOIN playbook_version p ON p.id = w.playbook_version_id
+         JOIN workspace ws ON ws.id = w.workspace_id
+         WHERE w.status <> 'completed' AND ws.status = 'active' ORDER BY w.created_at, w.rowid"
+    ))?
+    .query_map([], workflow_row)?
+    .collect()
+}
+
+/// 證據引用的 Evidence Bundle 的受驗目錄。
+fn bundle_dirs(conn: &Connection, workspace_id: &str, evidence: &[Evidence]) -> rusqlite::Result<Vec<String>> {
+    let mut dirs = Vec::new();
+    for item in evidence {
+        if let EvidenceRef::Verification { evidence_bundle_id } = &item.reference {
+            if let Some(bundle) = super::verification_profiles::bundle(conn, workspace_id, evidence_bundle_id)? {
+                dirs.push(bundle.subject_dir);
+            }
+        }
+    }
+    Ok(dirs)
+}
+
+/// 一個失效的驗證 Gate 的重驗：以原本那份 Bundle 的旅程，對同一個 Task 排入新的驗證要求（已經有排隊中的就不重複）。
+fn queue_reverification(
+    tx: &Transaction<'_>,
+    workflow: &WorkflowInstance,
+    passed: &StageAttempt,
+    id: String,
+    now: Timestamp,
+) -> rusqlite::Result<Option<String>> {
+    let mut journeys = Vec::new();
+    for item in &passed.evidence {
+        if let EvidenceRef::Verification { evidence_bundle_id } = &item.evidence.reference {
+            if let Some(bundle) = super::verification_profiles::bundle(tx, &workflow.workspace_id, evidence_bundle_id)? {
+                journeys.extend(super::verification_profiles::request_journeys(tx, &bundle.request_id)?);
+            }
+        }
+    }
+    let queued: Option<String> = tx
+        .query_row(
+            "SELECT id FROM verification_request WHERE workspace_id = ?1 AND task_id IS ?2 AND status = 'queued'",
+            rusqlite::params![workflow.workspace_id, workflow.task_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if queued.is_some() {
+        return Ok(queued);
+    }
+    let requested_by = format!("{}:gate_invalidated:{}", workflow::RECORDED_BY_RUNTIME, workflow.id);
+    super::verification_profiles::queue_reverification(tx, workflow, journeys, requested_by, id, now)
+}
+
+/// 重新查驗一個 Workflow 已通過的 Gate；失效時寫入並回傳摘要。
+fn revalidate_one(
+    tx: &Transaction<'_>,
+    workflow: WorkflowInstance,
+    builds: &Builds,
+    now: Timestamp,
+) -> rusqlite::Result<Option<RevalidatedWorkflow>> {
+    let playbook = load_playbook(tx, &workflow.playbook_version_id)?;
+    let attempts = load_attempts(tx, &workflow.id)?;
+    let passed: Vec<StageAttempt> = workflow::passed_attempts(&workflow, &playbook, &attempts).into_iter().cloned().collect();
+    if passed.is_empty() {
+        return Ok(None);
+    }
+    let task = workflow.task_id.as_deref();
+    let mut rechecked = Vec::new();
+    for attempt in &passed {
+        let evidence = attempt
+            .evidence
+            .iter()
+            .map(|e| check_evidence(tx, &workflow.workspace_id, task, builds, e.evidence.clone()))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rechecked.push((attempt.stage_key.clone(), evidence));
+    }
+    let dir = subject_dir(tx, &workflow.workspace_id, task)?;
+    let facts = workflow::GateFacts {
+        rechecked,
+        current_build: builds.get(&dir).cloned().flatten(),
+        basis_overturned: basis_overturned(tx, &workflow.workspace_id, task)?,
+    };
+    let Some(invalidation) = workflow::revalidate(&workflow, &playbook, &attempts, &facts, now) else { return Ok(None) };
+    let change = WorkflowChange { workflow: invalidation.workflow.clone(), attempt: None, events: vec![invalidation.event.clone()] };
+    save_change(tx, &change, Some(workflow.revision))?;
+    let mut requests = Vec::new();
+    let mut lines = Vec::new();
+    for attempt in &invalidation.attempts {
+        insert_attempt(tx, attempt)?;
+        let stage = playbook.definition.stage(&attempt.stage_key);
+        let title = stage.map_or(attempt.stage_key.clone(), |s| s.title.clone());
+        lines.push(format!("Stage「{title}」：{}", attempt.note));
+        let verifies = stage.is_some_and(|s| s.exit_checks.iter().any(|c| c.requires == workflow::EvidenceKind::Verification));
+        let previous = passed.iter().find(|p| p.stage_key == attempt.stage_key);
+        if let (true, Some(previous)) = (verifies, previous) {
+            if let Some(request) = queue_reverification(tx, &workflow, previous, format!("vreq_{}", attempt.id), now)? {
+                requests.push(request);
+            }
+        }
+    }
+    let target = task_title(tx, task)?.map(|t| format!("Task「{t}」")).unwrap_or_else(|| "Goal".to_string());
+    let back = invalidation
+        .workflow
+        .current_stage
+        .as_deref()
+        .and_then(|key| playbook.definition.stage(key))
+        .map(|s| format!("Workflow 目前在 Stage「{}」（revision {}）", s.title, invalidation.workflow.revision))
+        .unwrap_or_default();
+    let queued = if requests.is_empty() {
+        String::new()
+    } else {
+        format!("已自動排入重驗的驗證要求：{}，完成後以新的 Evidence Bundle 回報。", requests.join("、"))
+    };
+    let content = format!(
+        "Gate 失效，需要重驗（Workflow {}，{target}）：{}。{back}；請重新取得證據後以 record_stage_result 回報，\
+         其他仍有效的 Gate 會被沿用。{queued}",
+        workflow.id,
+        lines.join("；"),
+    );
+    let source = format!("{}:{}:{}", workflow::EVENT_GATE_INVALIDATED, workflow.id, invalidation.workflow.revision);
+    super::conversations::enqueue_notice(tx, &workflow.workspace_id, &source, &content, now)?;
+    Ok(Some(RevalidatedWorkflow {
+        workspace_id: workflow.workspace_id.clone(),
+        workflow_id: workflow.id.clone(),
+        stages: invalidation.attempts.iter().map(|a| a.stage_key.clone()).collect(),
+        verification_requests: requests,
+    }))
 }
 
 fn task_title(conn: &Connection, task_id: Option<&str>) -> rusqlite::Result<Option<String>> {
@@ -561,7 +752,64 @@ impl Store {
         outcome
     }
 
-    /// 以證據回報目前 Stage 的結果。記錄者是 Controller 的一輪（帳號由那一輪決定）。
+    /// 回報前 Runtime 要觀察 build 的目錄：Workflow 的受驗目錄，以及證據引用的 Evidence Bundle 的受驗目錄（票 50）。
+    /// 找不到 Workflow 時是空的（回報會因此被拒絕）。
+    pub async fn stage_result_build_dirs(
+        &self,
+        workspace_id: &str,
+        workflow_id: &str,
+        evidence: Vec<Evidence>,
+    ) -> StoreResult<Vec<String>> {
+        let (workspace_id, workflow_id) = (workspace_id.to_string(), workflow_id.to_string());
+        self.read(move |conn| {
+            let Some(workflow) = load_workflow(conn, &workspace_id, &workflow_id)? else { return Ok(Vec::new()) };
+            let mut dirs = vec![subject_dir(conn, &workspace_id, workflow.task_id.as_deref())?];
+            dirs.extend(bundle_dirs(conn, &workspace_id, &evidence)?);
+            dirs.sort();
+            dirs.dedup();
+            Ok(dirs)
+        })
+        .await
+    }
+
+    /// 重新查驗 Gate 前 Runtime 要觀察 build 的目錄：每個未完成 Workflow 的受驗目錄與已通過 Gate 引用的 Bundle 的受驗目錄。
+    pub async fn gate_build_dirs(&self) -> StoreResult<Vec<String>> {
+        self.read(|conn| {
+            let mut dirs = Vec::new();
+            for workflow in open_workflows(conn)? {
+                dirs.push(subject_dir(conn, &workflow.workspace_id, workflow.task_id.as_deref())?);
+                let playbook = load_playbook(conn, &workflow.playbook_version_id)?;
+                let attempts = load_attempts(conn, &workflow.id)?;
+                for passed in workflow::passed_attempts(&workflow, &playbook, &attempts) {
+                    let evidence: Vec<Evidence> = passed.evidence.iter().map(|e| e.evidence.clone()).collect();
+                    dirs.extend(bundle_dirs(conn, &workflow.workspace_id, &evidence)?);
+                }
+            }
+            dirs.sort();
+            dirs.dedup();
+            Ok(dirs)
+        })
+        .await
+    }
+
+    /// 重新查驗每個未完成 Workflow 已通過的 Gate（票 50）：證據不再有效、build 改變或 Task 依據的假設被推翻時 Gate 失效，
+    /// Workflow 退回最早失效的 Stage；驗證 Gate 失效時自動排入重驗的驗證要求，並以工作事件通知 Controller。
+    /// 全部在一個交易中完成。
+    pub async fn revalidate_gates(&self, builds: Builds, now: Timestamp) -> StoreResult<Vec<RevalidatedWorkflow>> {
+        self.write(move |tx| {
+            let mut done = Vec::new();
+            for workflow in open_workflows(tx)? {
+                if let Some(summary) = revalidate_one(tx, workflow, &builds, now)? {
+                    done.push(summary);
+                }
+            }
+            Ok(done)
+        })
+        .await
+    }
+
+    /// 以證據回報目前 Stage 的結果。記錄者是 Controller 的一輪（帳號由那一輪決定）。`builds` 是回報前觀察到的 build
+    /// （[`Store::stage_result_build_dirs`] 的目錄）：通過時隨 attempt 保存，驗證證據必須是目前的 build（票 50）。
     #[allow(clippy::too_many_arguments)]
     pub async fn record_stage_result(
         &self,
@@ -574,6 +822,7 @@ impl Store {
         note: String,
         controller_run_id: &str,
         attempt_id: String,
+        builds: Builds,
         now: Timestamp,
     ) -> Result<(StageAttempt, WorkflowDetail), WorkflowApplyError> {
         let (workspace_id, workflow_id, controller_run_id) =
@@ -585,15 +834,17 @@ impl Store {
                 };
                 let playbook = load_playbook(tx, &workflow.playbook_version_id)?;
                 let prior = load_attempts(tx, &workflow.id)?;
-                let checked =
-                    evidence
+                let task = workflow.task_id.as_deref();
+                let checked = evidence
                     .into_iter()
-                    .map(|e| check_evidence(tx, &workspace_id, workflow.task_id.as_deref(), e))
+                    .map(|e| check_evidence(tx, &workspace_id, task, &builds, e))
                     .collect::<rusqlite::Result<Vec<_>>>()?;
+                let build = builds.get(&subject_dir(tx, &workspace_id, task)?).cloned().flatten();
+                let basis_overturned = basis_overturned(tx, &workspace_id, task)?;
                 let profile_id: Option<String> = tx
                     .query_row("SELECT profile_id FROM controller_run WHERE id = ?1", [&controller_run_id], |r| r.get(0))
                     .optional()?;
-                let input = StageResultInput { stage, expected_revision, outcome, evidence: checked, note };
+                let input = StageResultInput { stage, expected_revision, outcome, evidence: checked, note, build, basis_overturned };
                 let recorder = Recorder { recorded_by: controller_run_id, profile_id };
                 let change = match workflow::record_result(&workflow, &playbook, &prior, input, attempt_id, recorder, now) {
                     Ok(change) => change,
