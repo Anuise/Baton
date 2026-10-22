@@ -28,6 +28,8 @@ pub const TOOL_GET_EXPLORATION: &str = "get_exploration";
 
 pub const CHARTER_AGGREGATE: &str = "exploration_charter";
 pub const FINDING_AGGREGATE: &str = "exploration_finding";
+/// 一次重現（驗證要求 × 疑點）：排入是第 1 版，結果是第 2 版。
+pub const ATTEMPT_AGGREGATE: &str = "exploration_attempt";
 pub const EVENT_CHARTER_DEFINED: &str = "exploration_charter_defined";
 pub const EVENT_FINDING_REPORTED: &str = "exploration_finding_reported";
 pub const EVENT_FINDING_STATUS_CHANGED: &str = "exploration_finding_status_changed";
@@ -594,6 +596,20 @@ impl AttemptOutcome {
             AttemptOutcome::RegressionPassed => "regression_passed",
         }
     }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        [
+            AttemptOutcome::Reproduced,
+            AttemptOutcome::NotReproduced,
+            AttemptOutcome::Inconclusive,
+            AttemptOutcome::FixVerified,
+            AttemptOutcome::StillFailing,
+            AttemptOutcome::Regressed,
+            AttemptOutcome::RegressionPassed,
+        ]
+        .into_iter()
+        .find(|o| o.as_str() == raw)
+    }
 }
 
 /// 一次重現的紀錄（排入驗證要求時建立，Bundle 寫入時補上結果；只追加、不可刪除）。
@@ -769,16 +785,21 @@ pub fn change_for(
     Some(FindingChange { status, exclusion: None, unverified_reason, case })
 }
 
+fn attempt_id(attempt: &ReproductionAttempt) -> String {
+    format!("{}/{}", attempt.request_id, attempt.finding_id)
+}
+
 /// 重現排入驗證要求的事件。
 pub fn requested_event(finding: &ExplorationFinding, attempt: &ReproductionAttempt) -> DomainEvent {
     DomainEvent {
-        aggregate_type: FINDING_AGGREGATE,
-        aggregate_id: finding.id.clone(),
-        aggregate_version: finding.version,
+        aggregate_type: ATTEMPT_AGGREGATE,
+        aggregate_id: attempt_id(attempt),
+        aggregate_version: 1,
         event_type: EVENT_REPRODUCTION_REQUESTED,
         occurred_at: attempt.created_at,
         payload: serde_json::json!({
             "workspace_id": finding.workspace_id,
+            "finding_id": finding.id,
             "request_id": attempt.request_id,
             "purpose": attempt.purpose,
             "requested_by": attempt.requested_by,
@@ -789,13 +810,14 @@ pub fn requested_event(finding: &ExplorationFinding, attempt: &ReproductionAttem
 /// 重現結果的事件。
 pub fn judged_event(finding: &ExplorationFinding, attempt: &ReproductionAttempt, judged: &JudgedAttempt, now: Timestamp) -> DomainEvent {
     DomainEvent {
-        aggregate_type: FINDING_AGGREGATE,
-        aggregate_id: finding.id.clone(),
-        aggregate_version: finding.version,
+        aggregate_type: ATTEMPT_AGGREGATE,
+        aggregate_id: attempt_id(attempt),
+        aggregate_version: 2,
         event_type: EVENT_REPRODUCTION_JUDGED,
         occurred_at: now,
         payload: serde_json::json!({
             "workspace_id": finding.workspace_id,
+            "finding_id": finding.id,
             "request_id": attempt.request_id,
             "purpose": attempt.purpose,
             "bundle_id": attempt.bundle_id,

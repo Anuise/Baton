@@ -66,6 +66,7 @@ fn inputs<'a>(task: &'a Task, knowledge: &'a [KnowledgeEntry]) -> ContextInputs<
         task,
         contract: CONTRACT,
         stage: None,
+        charter: None,
         handoff: None,
         checkpoint: None,
         knowledge,
@@ -350,4 +351,30 @@ fn the_current_workflow_stage_is_a_required_item_right_after_the_contract() {
     assert!(built.prompt.starts_with(&format!("{CONTRACT}{}", stage.text)), "{}", built.prompt);
     let item = &built.receipt.items[1];
     assert_eq!((item.kind, item.ref_id.as_str(), item.version, item.status), (ItemKind::Stage, "wf_1", Some(3), ItemStatus::Loaded));
+}
+
+#[test]
+fn an_exploration_charter_is_a_required_item_so_the_worker_knows_its_boundaries() {
+    let task = task();
+    let charter = crate::exploration::Charter {
+        id: "xch_1".into(),
+        workspace_id: task.workspace_id.clone(),
+        task_id: task.id.clone(),
+        version: 2,
+        area: "結帳流程".into(),
+        role: "一般顧客".into(),
+        goal: "找出金額計算錯誤".into(),
+        forbidden_side_effects: vec!["不得送出真實付款".into()],
+        max_steps: 40,
+        max_model_calls: 5,
+        defined_by: "crun_1".into(),
+        created_at: T0,
+    };
+    let mut tight = inputs(&task, &[]);
+    tight.charter = Some(&charter);
+    tight.budget_tokens = 1;
+    let built = build(&tight);
+    assert!(built.prompt.contains("不得送出真實付款"), "{}", built.prompt);
+    let item = &built.receipt.items[1];
+    assert_eq!((item.kind, item.ref_id.as_str(), item.version, item.status), (ItemKind::Charter, "xch_1", Some(2), ItemStatus::Loaded));
 }

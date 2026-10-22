@@ -707,7 +707,14 @@ pub fn build_prompt(
              Gate 失效與重驗：規格、build、Verification Profile 改變或假設被推翻時，Runtime 會讓受影響的 Gate 失效、\
              把 Workflow 退回該 Stage（工作事件會說明原因；驗證 Gate 會自動排入重驗），請以新的證據重新回報，舊的證據不會再算數；\
              其他仍有效的 Gate 會被沿用。照提問的建議先做某個 Task 時，在它的 inputs 以 kind 為 decision 的引用指向那個裁定請求；\
-             使用者的答案與建議不同時，這個 Task 不能派工、Gate 不能通過，請依答案更新契約。\n",
+             使用者的答案與建議不同時，這個 Task 不能派工、Gate 不能通過，請依答案更新契約。\n\
+             探索測試：派出探索 Task 前以 define_exploration_charter 定下章程（區域、角色、目標、禁止的副作用、步數與成本上限），\
+             Worker 以 report_exploration_finding 回報的一律是疑點（suspected），不是缺陷。排除環境、seed data、工具限制後，\
+             以 reproduce_exploration_finding 提出對應原症狀的重現案例（以產品行為斷言預期的行為）：Runtime 以代表旅程當對照執行，\
+             案例以產品行為斷言失敗才確認為缺陷，環境或授權問題不會被當成缺陷，無法重現的保留為未驗風險。\
+             以 triage_exploration_finding 排除（預期設計須經使用者裁定）、改為未驗風險或重新開啟；已確認的缺陷不能排除，\
+             修復後以同一個案例驗證，通過後自動納入正常回歸。重現的 Evidence Bundle 只用於診斷，不能當作 Stage 的驗證證據。\
+             以 get_exploration 查看章程、疑點與重現結果。\n",
         );
         if let Some(gap) = history_gap {
             prompt.push_str(&format!("\n注意：{gap}\n"));
