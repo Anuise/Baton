@@ -104,6 +104,14 @@ impl Supervisor {
 
     /// 讓佇列中等待的 Task 依序嘗試派出；回傳這次有沒有派出新的 Run。
     async fn schedule_queue(&self) -> bool {
+        match self.store.has_dispatch_requests().await {
+            Ok(true) => {}
+            Ok(false) => return false,
+            Err(error) => {
+                self.note(&format!("無法讀取派工佇列：{error}"));
+                return false;
+            }
+        }
         let profiles = match self.store.list_profiles().await {
             Ok(profiles) => profiles,
             Err(error) => {

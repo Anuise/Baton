@@ -196,6 +196,11 @@ impl Store {
         .await
     }
 
+    /// 佇列裡有沒有人在排隊（Supervisor 每次處理都先問，沒人排隊就不開寫入交易）。
+    pub async fn has_dispatch_requests(&self) -> StoreResult<bool> {
+        self.read(|conn| Ok(conn.query_row("SELECT EXISTS (SELECT 1 FROM dispatch_request)", [], |r| r.get(0))?)).await
+    }
+
     pub async fn scheduler_settings(&self) -> StoreResult<SchedulerSettings> {
         self.read(|conn| Ok(load_settings(conn)?)).await
     }
@@ -268,3 +273,6 @@ fn load_queue(conn: &Connection) -> rusqlite::Result<Vec<QueuedRequest>> {
     })?
     .collect()
 }
+
+#[cfg(test)]
+mod tests;
