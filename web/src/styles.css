@@ -1708,3 +1708,107 @@ body {
 .timeline-metrics [role="alert"] {
   color: #cf222e;
 }
+
+.workflow-page {
+  display: grid;
+  gap: 12px;
+}
+
+.workflow {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.workflow h3,
+.workflow p,
+.workflow-summary {
+  margin: 0;
+}
+
+.workflow-summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+}
+
+.workflow-summary dt {
+  color: #656d76;
+}
+
+.workflow-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.workflow-newer-version,
+.workflow-notice {
+  color: #9a6700;
+}
+
+.workflow [role="alert"] {
+  color: #cf222e;
+}
+
+.workflow-stages {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.workflow-stage {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.workflow-stage-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workflow-stage-title {
+  font-weight: 600;
+}
+
+.stage-current .workflow-stage-state {
+  color: #0969da;
+  font-weight: 600;
+}
+
+.stage-blocked .workflow-stage-state {
+  color: #cf222e;
+}
+
+.workflow-gate {
+  padding: 0 6px;
+  border-radius: 10px;
+  background: #fff8c5;
+  font-size: 12px;
+}
+
+.workflow-gate-locked,
+.workflow-attempt-recorder {
+  color: #656d76;
+}
+
+.workflow-stage-list,
+.workflow-attempts {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.workflow-attempt {
+  overflow-wrap: anywhere;
+}
+
+.workflow-skip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}

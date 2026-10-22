@@ -2135,6 +2135,129 @@ export interface UnderstandingClient {
   reconcileProjection(workspaceId: string, request: ReconcileProjectionRequest): Promise<UnderstandingView>;
 }
 
+/** Router 判斷的工作情境；ambiguous 是情境不明時先釐清。 */
+export type WorkflowSituation =
+  | "ambiguous"
+  | "feature"
+  | "defect"
+  | "migration"
+  | "performance"
+  | "investigation"
+  | "exploratory_testing";
+
+export type WorkflowStatus = "active" | "blocked" | "completed";
+
+/** decision：裁定 Gate；safety：安全 Gate。兩者都不能跳過。 */
+export type StageGate = "none" | "decision" | "safety";
+
+export type StageState = "pending" | "current" | "blocked" | "passed" | "skipped";
+
+/** 離開條件需要的證據種類。 */
+export type EvidenceKind = "artifact" | "decision" | "task_accepted";
+
+export interface ExitCheck {
+  key: string;
+  description: string;
+  requires: EvidenceKind;
+}
+
+/** Stage 未通過時的去向：重試、回到某個 Stage，或阻擋 Workflow。 */
+export type FailureRoute = { kind: "retry" } | { kind: "return_to"; stage: string } | { kind: "block" };
+
+export type StageAttemptOutcome = "passed" | "incomplete" | "blocked" | "failed" | "skipped";
+
+/** 一項證據與 Runtime 的查驗結果。 */
+export interface StageEvidence {
+  check: string;
+  kind: EvidenceKind;
+  artifact_id?: string;
+  decision_request_id?: string;
+  task_id?: string;
+  status: "valid" | "not_found" | "pending" | "not_accepted";
+}
+
+export interface MissingEvidence {
+  check: string;
+  reason: string;
+}
+
+export interface StageAttempt {
+  id: string;
+  workflow_id: string;
+  stage_key: string;
+  attempt: number;
+  outcome: StageAttemptOutcome;
+  evidence: StageEvidence[];
+  missing: MissingEvidence[];
+  note: string;
+  /** Controller 的 id，或使用者在桌面操作時的 "desktop"。 */
+  recorded_by: string;
+  profile_id: string | null;
+  created_at: number;
+}
+
+export interface StageView {
+  key: string;
+  title: string;
+  method?: string;
+  entry_conditions: string[];
+  expected_outputs: string[];
+  allowed_actions: string[];
+  budget: { max_attempts: number };
+  exit_checks: ExitCheck[];
+  failure_route: FailureRoute;
+  gate: StageGate;
+  state: StageState;
+  /** 依 attempt 遞增。 */
+  attempts: StageAttempt[];
+}
+
+export interface WorkflowView {
+  id: string;
+  workspace_id: string;
+  goal_id: string;
+  task_id: string | null;
+  task_title: string | null;
+  playbook_version_id: string;
+  playbook_key: string;
+  playbook_version: number;
+  playbook_title: string;
+  /** 這個 Playbook 目前的最新版本；大於 playbook_version 時 Workflow 仍維持原版本。 */
+  latest_playbook_version: number;
+  situation: WorkflowSituation;
+  route_reason: string;
+  status: WorkflowStatus;
+  /** 完成後為 null。 */
+  current_stage: string | null;
+  blocked_reason: string | null;
+  /** 跳過 Stage 時以 expected_revision 帶回核對。 */
+  revision: number;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  /** 依 Playbook 順序。 */
+  stages: StageView[];
+}
+
+export interface WorkflowList {
+  workspace_id: string;
+  /** 依建立時間，最新的在前。 */
+  workflows: WorkflowView[];
+}
+
+/** 使用者跳過目前 Stage；原因不能空白。 */
+export interface SkipStageRequest {
+  stage: string;
+  expected_revision: number;
+  reason: string;
+}
+
+/** Workflow 檢視與跳過 Stage（只有桌面憑證能用）。 */
+export interface WorkflowClient {
+  workflows(workspaceId: string): Promise<WorkflowList>;
+  skipStage(workspaceId: string, workflowId: string, request: SkipStageRequest): Promise<WorkflowView>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -2151,6 +2274,7 @@ export type AppClient = RuntimeClient &
   GuardClient &
   ObservabilityClient &
   UnderstandingClient &
+  WorkflowClient &
   ConversationClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
@@ -2385,6 +2509,9 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     syncUnderstanding: (workspaceId) => send(`${workspacePath(workspaceId)}/understanding/sync`, { method: "POST" }),
     reconcileProjection: (workspaceId, request) =>
       send(`${workspacePath(workspaceId)}/understanding/projections/reconcile`, { method: "POST", body: request }),
+    workflows: (workspaceId) => send(`${workspacePath(workspaceId)}/workflows`),
+    skipStage: (workspaceId, workflowId, request) =>
+      send(`${workspacePath(workspaceId)}/workflows/${encodeURIComponent(workflowId)}/skip`, { method: "POST", body: request }),
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
@@ -2522,6 +2649,9 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     syncUnderstanding: (workspaceId) => call<UnderstandingView>("workspace_understanding_sync", { workspaceId }),
     reconcileProjection: (workspaceId, request) =>
       call<UnderstandingView>("workspace_projection_reconcile", { workspaceId, request }),
+    workflows: (workspaceId) => call<WorkflowList>("workspace_workflows", { workspaceId }),
+    skipStage: (workspaceId, workflowId, request) =>
+      call<WorkflowView>("workflow_skip_stage", { workspaceId, workflowId, request }),
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),

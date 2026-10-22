@@ -19,6 +19,7 @@ use baton_api::{
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
     RecoveryStatusView, MetricsResponse, TimelineResponse, RunContextView,
     ReconcileRequest, UnderstandingView,
+    SkipStageRequest, WorkflowList, WorkflowView,
 };
 use baton_client::{
     ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, Connection, DispatchOutcome,
@@ -1100,6 +1101,29 @@ async fn workspace_projection_reconcile(
     link.client.reconcile_projection(&workspace_id, &request).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 的流程分頁：Workspace 的 Workflow（所選 Playbook、Stage、Gate 與 attempt 歷史）。
+#[tauri::command]
+async fn workspace_workflows(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<WorkflowList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.workflows(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的流程分頁：使用者附原因跳過目前 Stage（裁定與安全 Gate 由 Runtime 拒絕）。
+#[tauri::command]
+async fn workflow_skip_stage(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    workflow_id: String,
+    request: SkipStageRequest,
+) -> Result<WorkflowView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.skip_stage(&workspace_id, &workflow_id, &request).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 回報一次沒被 Guard 攔下的重犯。
 #[tauri::command]
 async fn knowledge_report_recurrence(
@@ -1197,7 +1221,9 @@ fn main() {
             workspace_metrics,
             workspace_understanding,
             workspace_understanding_sync,
-            workspace_projection_reconcile
+            workspace_projection_reconcile,
+            workspace_workflows,
+            workflow_skip_stage
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {

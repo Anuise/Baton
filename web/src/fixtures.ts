@@ -30,10 +30,14 @@ import type {
   SchedulingOverview,
   SettingsVersionSummary,
   SetupStatus,
+  StageAttempt,
+  StageView,
   TimelineEvent,
   UnderstandingItemView,
   UnderstandingView,
   ToolCheck,
+  WorkflowList,
+  WorkflowView,
   WorkspaceLifecycleView,
   VerificationRecord,
   VerificationView,
@@ -835,4 +839,112 @@ export function understandingView(overrides: Partial<UnderstandingView> = {}): U
     projections: [projection()],
     ...overrides,
   };
+}
+
+/** 測試用的 Stage 嘗試：Controller 以 prof_1 記錄的第 1 次「建立重現」，通過且附一個有效的產出物證據。 */
+export function stageAttempt(overrides: Partial<StageAttempt> = {}): StageAttempt {
+  return {
+    id: "att_1",
+    workflow_id: "wf_1",
+    stage_key: "reproduction",
+    attempt: 1,
+    outcome: "passed",
+    evidence: [{ check: "reproduction", kind: "artifact", artifact_id: "art_1", status: "valid" }],
+    missing: [],
+    note: "以單元測試重現匯出錯誤",
+    recorded_by: "ctl_1",
+    profile_id: "prof_1",
+    created_at: CHECKED_AT,
+    ...overrides,
+  };
+}
+
+/** 測試用的 Stage：沒有 Gate、尚未進行的「建立重現」，失敗時重試。 */
+export function stageView(overrides: Partial<StageView> = {}): StageView {
+  return {
+    key: "reproduction",
+    title: "建立重現",
+    method: "reproduction",
+    entry_conditions: ["已有症狀描述"],
+    expected_outputs: ["能捕捉原症狀的重現"],
+    allowed_actions: ["讀取程式碼", "撰寫測試"],
+    budget: { max_attempts: 3 },
+    exit_checks: [{ key: "reproduction", description: "能捕捉原症狀的重現", requires: "artifact" }],
+    failure_route: { kind: "retry" },
+    gate: "none",
+    state: "pending",
+    attempts: [],
+    ...overrides,
+  };
+}
+
+/**
+ * 測試用的 Workflow：缺陷處理第 1 版（已有第 2 版），綁定 task_1，進行中。
+ * 「建立重現」已通過、目前在「縮小範圍」、最後是需要裁定的「修正確認」。
+ */
+export function workflowView(overrides: Partial<WorkflowView> = {}): WorkflowView {
+  return {
+    id: "wf_1",
+    workspace_id: "ws_1",
+    goal_id: "goal_1",
+    task_id: "task_1",
+    task_title: "修正匯出錯誤",
+    playbook_version_id: "pbv_1",
+    playbook_key: "defect",
+    playbook_version: 1,
+    playbook_title: "缺陷處理",
+    latest_playbook_version: 2,
+    situation: "defect",
+    route_reason: "情境「缺陷處理」→ 缺陷處理（defect）第 1 版。Controller 的判斷：使用者回報匯出失敗",
+    status: "active",
+    current_stage: "minimization",
+    blocked_reason: null,
+    revision: 3,
+    created_by: "ctl_1",
+    created_at: CHECKED_AT,
+    updated_at: CHECKED_AT,
+    stages: [
+      stageView({
+        state: "passed",
+        attempts: [
+          stageAttempt({
+            outcome: "incomplete",
+            evidence: [],
+            missing: [{ check: "reproduction", reason: "缺少證據：能捕捉原症狀的重現" }],
+            note: "還沒有重現",
+          }),
+          stageAttempt({ id: "att_2", attempt: 2, created_at: CHECKED_AT + 60_000 }),
+        ],
+      }),
+      stageView({
+        key: "minimization",
+        title: "縮小範圍",
+        method: undefined,
+        entry_conditions: ["已有重現"],
+        expected_outputs: ["最小重現"],
+        allowed_actions: ["修改測試"],
+        budget: { max_attempts: 2 },
+        exit_checks: [{ key: "minimal", description: "最小重現", requires: "artifact" }],
+        failure_route: { kind: "return_to", stage: "reproduction" },
+        state: "current",
+      }),
+      stageView({
+        key: "fix_review",
+        title: "修正確認",
+        method: "review",
+        entry_conditions: ["已有修正"],
+        expected_outputs: ["使用者確認"],
+        allowed_actions: [],
+        budget: { max_attempts: 1 },
+        exit_checks: [{ key: "approved", description: "使用者同意修正", requires: "decision" }],
+        failure_route: { kind: "block" },
+        gate: "decision",
+      }),
+    ],
+    ...overrides,
+  };
+}
+
+export function workflowList(overrides: Partial<WorkflowList> = {}): WorkflowList {
+  return { workspace_id: "ws_1", workflows: [workflowView()], ...overrides };
 }
