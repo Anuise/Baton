@@ -50,6 +50,7 @@ import type {
   ToolCheck,
   UpdateStatusView,
   EvidenceBundle,
+  VerificationAttempt,
   VerificationOverview,
   VerificationProfileDefinition,
   VerificationProfileVersion,
@@ -1539,6 +1540,22 @@ export function explorationCharter(overrides: Partial<ExplorationCharter> = {}):
   };
 }
 
+/** 測試用的一次嘗試：第 1 次、以 prof_a 執行並完成，沒有承接。 */
+export function verificationAttempt(overrides: Partial<VerificationAttempt> = {}): VerificationAttempt {
+  return {
+    attempt: 1,
+    status: "completed",
+    judge_profile_id: "prof_a",
+    end_reason: null,
+    journeys: ["smoke"],
+    steps: [{ phase: "journey", journey: "smoke", key: "version", verdict: "passed", reason_code: "assertions_passed" }],
+    takeover: null,
+    started_at: CHECKED_AT,
+    ended_at: CHECKED_AT + 5_000,
+    ...overrides,
+  };
+}
+
 /** 測試用的重現案例旅程：對應原症狀的一條 HTTP 旅程。 */
 export function reproductionJourney(findingId: string): VerificationJourney {
   return {
@@ -1746,4 +1763,81 @@ export function explorationOverview(overrides: Partial<ExplorationOverview> = {}
     ],
     ...overrides,
   };
+}
+
+/**
+ * 測試用的交接 web Evidence Bundle：第 1 次嘗試（prof_a）完成「瀏覽商品」後，在「管理訂單」送出外部操作「退款」時
+ * 語意判斷的帳號限流而交接；第 2 次嘗試（prof_b）停止前一次的服務與 Session、沿用「瀏覽商品」，
+ * 結果未知的「退款」不重送，「管理訂單」因此證據不足。
+ */
+export function handoffEvidenceBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
+  return webEvidenceBundle({
+    id: "vbun_handoff",
+    journeys: [
+      {
+        key: "orders",
+        title: "管理訂單",
+        representative: true,
+        persona: "admin",
+        identity: "clerk",
+        verdict: "inconclusive",
+        reason_code: "external_outcome_unknown",
+      },
+      {
+        key: "browse",
+        title: "瀏覽商品",
+        representative: false,
+        persona: "shopper",
+        verdict: "passed",
+        reason_code: "all_steps_passed",
+      },
+    ],
+    steps: [
+      verificationStepRecord({ journey: "browse", key: "list", title: "商品列表", engine_code: undefined, output: "" }),
+      verificationStepRecord({
+        journey: "orders",
+        key: "refund",
+        title: "退款",
+        operation: "瀏覽器點擊「#refund」",
+        verdict: "inconclusive",
+        reason_code: "external_outcome_unknown",
+        engine_code: undefined,
+        assertions: [],
+        output: "",
+      }),
+    ],
+    verdict: "inconclusive",
+    reason_code: "external_outcome_unknown",
+    artifacts: [],
+    attempts: [
+      verificationAttempt({
+        status: "handed_off",
+        end_reason: "judge_rate_limited",
+        journeys: ["browse"],
+        steps: [
+          { phase: "journey", journey: "browse", key: "list", verdict: "passed", reason_code: "assertions_passed" },
+          { phase: "journey", journey: "orders", key: "open_orders", verdict: "passed", reason_code: "assertions_passed" },
+        ],
+      }),
+      verificationAttempt({
+        attempt: 2,
+        judge_profile_id: "prof_b",
+        journeys: ["orders"],
+        steps: [
+          { phase: "journey", journey: "orders", key: "refund", verdict: "inconclusive", reason_code: "external_outcome_unknown" },
+        ],
+        takeover: {
+          from_attempt: 1,
+          stopped_services: ["svc-1"],
+          closed_sessions: ["b2"],
+          problems: ["瀏覽器 Session b3 無法確認已關閉"],
+          reused_journeys: ["browse"],
+          not_resent: [{ journey: "orders", step: "refund", reason: "external_outcome_unknown", attempt: 1 }],
+        },
+        started_at: CHECKED_AT + 6_000,
+        ended_at: CHECKED_AT + 9_000,
+      }),
+    ],
+    ...overrides,
+  });
 }

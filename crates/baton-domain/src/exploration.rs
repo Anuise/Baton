@@ -845,6 +845,7 @@ pub fn incompatible_case(finding_id: &str, title: &str, problem: &str) -> Journe
                 instruction: format!("回歸案例無法在目前的 Profile 中執行，需要使用者處理：{problem}"),
             },
             assertions: Vec::new(),
+            external: false,
         }],
     }
 }

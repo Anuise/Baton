@@ -48,6 +48,7 @@ pub mod time;
 pub mod timeline;
 pub mod understanding;
 pub mod verification;
+pub mod verification_attempt;
 pub mod verification_profile;
 pub mod workdir;
 pub mod workflow;

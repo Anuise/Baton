@@ -20,6 +20,7 @@ fn http_step(key: &str, assertions: Vec<Assertion>) -> Step {
             timeout_ms: None,
         },
         assertions,
+        external: false,
     }
 }
 
@@ -145,6 +146,7 @@ fn bundle(journeys: Vec<JourneyResult>) -> EvidenceBundle {
             problems: Vec::new(),
         },
         artifacts: Vec::new(),
+        attempts: Vec::new(),
         started_at: now(),
         finished_at: now(),
     }
@@ -293,6 +295,7 @@ fn a_reproduction_case_must_run_in_the_profile_environment_with_an_automated_ass
         title: String::new(),
         operation: Operation::Manual { instruction: "看看".into() },
         assertions: Vec::new(),
+        external: false,
     }];
     assert!(matches!(check_case(&definition, &manual), Err(ExplorationError::Invalid(_))));
     let mut unknown_identity = journey("repro", false);
