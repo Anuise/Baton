@@ -87,3 +87,13 @@ pub(crate) async fn accept(
     state.store.apply_acceptance(id.clone(), command, new_id("ver")?, state.clock.now()).await?;
     Ok(Json(state.store.task_verification(&id, &task_id).await?))
 }
+
+// ---------------------------------------------------------------- Controller 工具：accept_artifact（票 54）
+
+/// Controller 接受一個 Task 的成果（spec D-05，仍受驗證 Gate 約束）。
+pub(crate) async fn accept_artifact(
+    State(_state): State<Arc<ApiState>>,
+    Extension(_record): Extension<CredentialRecord>,
+) -> Result<Json<VerificationView>, ApiError> {
+    Err(ApiError { status: StatusCode::NOT_IMPLEMENTED, code: "not_implemented", message: "尚未實作".to_string() })
+}
