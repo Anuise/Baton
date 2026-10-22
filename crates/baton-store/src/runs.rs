@@ -59,6 +59,10 @@ impl Store {
                     return Ok(Err(RunError::LaunchHalted));
                 }
                 let mut loaded = load(tx, &workspace_id)?;
+                // 派工是 Run 准入：載入要檢查的 Guard（票 38）
+                if matches!(command, RunCommand::Dispatch { .. }) {
+                    loaded.guards = super::guards::load_active_guards(tx, &workspace_id, now)?;
+                }
                 // 原生識別的命名空間不以 Workspace 為界：綁定前一併載入其他 Workspace 中綁定了同一個識別的 Session
                 if let RunCommand::BindNativeSession { native_session_id, .. } = &command {
                     let others = super::sessions::load_other_sessions_with_native(tx, &workspace_id, native_session_id)?;
@@ -160,7 +164,14 @@ pub(crate) fn decide_in(
 ) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
-    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, sessions: &loaded.sessions };
+    let ctx = RunContext {
+        task: &task_ctx,
+        runs: &loaded.runs,
+        leases: &loaded.leases,
+        workdirs: &loaded.workdirs,
+        guards: &loaded.guards,
+        sessions: &loaded.sessions,
+    };
     run::decide(&ctx, command, now)
 }
 

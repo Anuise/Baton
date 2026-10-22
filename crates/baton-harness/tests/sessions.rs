@@ -317,7 +317,10 @@ async fn the_first_launch_creates_a_session_that_binds_then_suspends_and_survive
     assert!(allocating["conversation_id"].is_null());
     assert_eq!(allocating["profile_id"], json!(accounts[0]), "帳號 = Run 的 Profile");
     assert_eq!(allocating["profile_id"], run["profile_id"]);
-    assert_eq!(allocating["working_directory"], json!(path), "工作目錄 = Workspace 路徑");
+    // 工作目錄 = 派工時固定給這個 Task 的目錄（票 20 起每個 Task 有自己的目錄，位於 Workspace 之下）
+    let launched_dir = launched_spec(&harness, &rid).working_dir.expect("Run 有工作目錄");
+    assert!(launched_dir.starts_with(&path), "{launched_dir}");
+    assert_eq!(allocating["working_directory"], json!(launched_dir), "工作目錄 = Run 啟動時的工作目錄");
     assert!(allocating["native_session_id"].is_null(), "綁定前沒有原生識別：{allocating}");
     assert_eq!(allocating["state"], "allocating", "{allocating}");
     assert!(allocating["state_reason"].is_null());
@@ -394,8 +397,9 @@ async fn a_retry_on_the_same_account_resumes_the_same_session_natively() {
     let expected_ref = SessionRef {
         native_session_id: "N1".into(),
         config_dir: first_spec.config_dir.clone(),
-        working_dir: Some(path.clone()),
+        working_dir: first_spec.working_dir.clone(),
     };
+    assert!(first_spec.working_dir.as_deref().is_some_and(|dir| dir.starts_with(&path)));
     assert!(expected_ref.config_dir.is_some(), "Run 有帳號的設定目錄");
     assert_eq!(harness.agent_adapter.capability_queries(), vec![expected_ref], "查驗帶帳號設定目錄與當初的工作目錄");
 

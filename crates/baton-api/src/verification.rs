@@ -50,7 +50,9 @@ fn rejected(error: AcceptanceError) -> ApiError {
         | AcceptanceError::RunStale { .. }
         | AcceptanceError::ContractStale { .. }
         | AcceptanceError::ManifestStale
-        | AcceptanceError::ResultsMismatch => StatusCode::CONFLICT,
+        | AcceptanceError::ResultsMismatch
+        | AcceptanceError::AlreadyQueuedForIntegration
+        | AcceptanceError::WorktreeMissing => StatusCode::CONFLICT,
     };
     ApiError { status, code: error.code(), message: error.to_string() }
 }

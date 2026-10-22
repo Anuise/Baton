@@ -438,7 +438,7 @@ async fn answering_a_decision_requests_a_backup() {
     harness.run_backups().await;
     assert_eq!(backup_status(&harness).await["backups"][0]["trigger"], "daily");
     let (status, answered) = harness
-        .send_json(Method::POST, &format!("{WORKSPACES}/{ws}/decisions/{request_id}/answer"), Some(json!({ "option_id": "wait" })))
+        .send_json(Method::POST, &format!("{WORKSPACES}/{ws}/decisions/{request_id}/answer"), Some(json!({ "option_id": "wait", "expected_revision": 1 })))
         .await;
     assert_eq!(status, StatusCode::OK, "{answered}");
     harness.run_backups().await;

@@ -30,9 +30,10 @@ async fn store_with_ready_task(dir: &Path) -> Store {
     store.apply_workspace_command(create, T1).await.unwrap();
     let goal = TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() };
     store.apply_task_command("w1".into(), goal, T1).await.unwrap();
-    let task = TaskCommand::CreateTask { id: "t1".into(), goal_id: "g1".into(), title: "t1".into(), contract: complete() };
+    let task = TaskCommand::CreateTask { id: "t1".into(), goal_id: "g1".into(), title: "t1".into(), kind: Default::default(), contract: complete() };
     store.apply_task_command("w1".into(), task, T1).await.unwrap();
     store.apply_task_command("w1".into(), TaskCommand::MarkReady { task_id: "t1".into() }, T1).await.unwrap();
+    crate::workdirs::register_ready(&store, "w1", "t1", T1).await;
     store
 }
 
@@ -61,7 +62,8 @@ async fn dispatch_persists_run_lease_outbox_and_task_together_and_survives_reope
 
     assert_eq!(pending.len(), 1);
     assert_eq!((pending[0].run.id.as_str(), pending[0].run.status), ("r1", RunStatus::Queued));
-    assert_eq!(pending[0].payload.working_dir, "C:\\work\\app");
+    assert_eq!(pending[0].payload.working_dir, r"C:\work\app\.baton\outputs\t1");
+    assert_eq!(board.workdirs[0].run_ids, vec!["r1".to_string()], "Run 與它執行的工作目錄關聯");
     assert_eq!(board.tasks[0].task.status, TaskStatus::Running);
     assert_eq!(board.runs.len(), 1);
     assert!(board.runs[0].lease.as_ref().is_some_and(|l| l.is_held()));

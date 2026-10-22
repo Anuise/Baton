@@ -2,10 +2,13 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::authorization::Capability;
+use crate::guard::{self, ActiveGuard, GuardRule};
+use crate::knowledge::{self, KnowledgeContent, KnowledgeKind, KnowledgeScope, KnowledgeSource, NewKnowledge};
 use crate::task::{
     ContractField, Dependency, Goal, TaskChange, TaskCommand, TaskContract,
 };
-use crate::workspace::{self, WorkspaceCommand};
+use crate::workdir::{self as wd, PrepareFailure, TaskKind};
+use crate::workspace::{self, Workspace, WorkspaceCommand};
 
 const T0: Timestamp = Timestamp::from_millis(1_000_000);
 
@@ -36,6 +39,8 @@ struct World {
     contracts: Vec<TaskContract>,
     runs: Vec<Run>,
     leases: Vec<ExecutionLease>,
+    workdirs: Vec<Workdir>,
+    guards: Vec<ActiveGuard>,
     sessions: Vec<AgentSession>,
     next_run: u32,
 }
@@ -52,6 +57,8 @@ impl World {
             contracts: vec![],
             runs: vec![],
             leases: vec![],
+            workdirs: vec![],
+            guards: vec![],
             sessions: vec![],
             next_run: 0,
         };
@@ -61,12 +68,24 @@ impl World {
                 id: (*id).into(),
                 goal_id: "g1".into(),
                 title: (*id).into(),
+                kind: TaskKind::Research,
                 contract: complete(vec![]),
             };
             world.task_command(create).unwrap();
             world.task_command(TaskCommand::MarkReady { task_id: (*id).into() }).unwrap();
+            world.prepare(id);
         }
         world
+    }
+
+    /// 登記 Task 的工作目錄為可用（Runtime 在交易外建立目錄後做的事）。
+    fn prepare(&mut self, task_id: &str) {
+        let plan = wd::plan(&self.workspace, self.task(task_id));
+        let base = plan.branch.as_ref().map(|_| "main".to_string());
+        let existing = self.workdirs.iter().find(|w| w.task_id == task_id).cloned();
+        let (workdir, _) = wd::record_prepared(existing.as_ref(), &plan, base, T0);
+        self.workdirs.retain(|w| w.task_id != task_id);
+        self.workdirs.push(workdir);
     }
 
     fn task_ctx(&self) -> TaskContext<'_> {
@@ -101,7 +120,18 @@ impl World {
 
     fn decide(&self, command: RunCommand, now: Timestamp) -> Result<RunChange, RunError> {
         let task = self.task_ctx();
-        decide(&RunContext { task: &task, runs: &self.runs, leases: &self.leases, sessions: &self.sessions }, command, now)
+        decide(
+            &RunContext {
+                task: &task,
+                runs: &self.runs,
+                leases: &self.leases,
+                workdirs: &self.workdirs,
+                guards: &self.guards,
+                sessions: &self.sessions,
+            },
+            command,
+            now,
+        )
     }
 
     /// 判定並套用；被拒絕時狀態完全不變。
@@ -210,10 +240,61 @@ fn dispatch_creates_queued_run_lease_and_outbox_and_moves_task_to_running() {
     let outbox = change.outbox.unwrap();
     assert_eq!((outbox.kind.as_str(), outbox.run_id.as_str()), (OUTBOX_LAUNCH_RUN, "r1"));
     assert!(outbox.payload.prompt.contains("整理資料"));
-    assert_eq!(outbox.payload.working_dir, "C:\\work\\app");
+    assert_eq!(outbox.payload.working_dir, r"C:\work\app\.baton\outputs\t1", "研究 Task 在自己的輸出目錄中執行");
     assert_eq!(world.task("t1").status, TaskStatus::Running);
     let types: Vec<_> = change.events.iter().map(|e| (e.aggregate_type, e.event_type)).collect();
     assert_eq!(types, vec![("run", EVENT_RUN_CREATED), ("task", "task_status_changed")]);
+}
+
+#[test]
+fn dispatch_waits_until_the_task_has_a_registered_ready_workdir() {
+    let mut world = World::new(&["t1"]);
+    world.workdirs.clear();
+
+    assert_eq!(world.dispatch("t1", T0), Err(RunError::WorkdirNotPrepared(WorkdirKind::OutputDir)));
+
+    // 準備失敗：不派工，原因就是登記的失敗原因
+    let plan = wd::plan(&world.workspace, world.task("t1"));
+    let (failed, _) = wd::record_failed(None, &plan, &PrepareFailure::Io("磁碟已滿".into()), T0);
+    world.workdirs.push(failed);
+    let refused = world.dispatch("t1", T0);
+    assert!(matches!(&refused, Err(RunError::WorkdirUnavailable(reason)) if reason.contains("磁碟已滿")), "{refused:?}");
+    assert!(world.runs.is_empty() && world.leases.is_empty(), "不可用時什麼都不建立");
+    assert_eq!(world.task("t1").status, TaskStatus::Ready);
+
+    world.prepare("t1");
+    assert!(world.dispatch("t1", T0).is_ok());
+}
+
+#[test]
+fn development_tasks_each_run_in_their_own_worktree_and_later_runs_reuse_it() {
+    let mut world = World::new(&[]);
+    for id in ["d1", "d2"] {
+        let create = TaskCommand::CreateTask {
+            id: id.into(),
+            goal_id: "g1".into(),
+            title: id.into(),
+            kind: TaskKind::Development,
+            contract: complete(vec![]),
+        };
+        world.task_command(create).unwrap();
+        world.task_command(TaskCommand::MarkReady { task_id: id.into() }).unwrap();
+        world.prepare(id);
+    }
+
+    let dispatch = |world: &mut World, run_id: &str, task_id: &str, now| {
+        let command = RunCommand::Dispatch { run_id: run_id.into(), task_id: task_id.into(), profile_id: "p1".into() };
+        world.step(command, now).unwrap().outbox.unwrap().payload.working_dir
+    };
+    assert_eq!(dispatch(&mut world, "r1", "d1", T0), r"C:\work\app\.baton\worktrees\d1");
+    assert_eq!(dispatch(&mut world, "r2", "d2", T0), r"C:\work\app\.baton\worktrees\d2");
+
+    // 第一個 Run 失敗後重新派工：同一個 Task 回到同一個 worktree（原生 Session 才接得回來）
+    world.step(begin("r1", "c1"), later(1)).unwrap();
+    world.step(RunCommand::RecordReceipt { run_id: "r1".into(), process: process(1) }, later(1)).unwrap();
+    let failed = RunOutcome::Failed { reason: "x".into() };
+    world.step(RunCommand::Finish { run_id: "r1".into(), generation: 1, outcome: failed }, later(2)).unwrap();
+    assert_eq!(dispatch(&mut world, "r3", "d1", later(3)), r"C:\work\app\.baton\worktrees\d1");
 }
 
 #[test]
@@ -243,6 +324,48 @@ fn dispatch_re_checks_admission_so_a_missing_capability_blocks_it() {
 
     assert!(matches!(result, Err(RunError::AdmissionDenied(ref missing)) if !missing.is_empty()), "{result:?}");
     assert_eq!(world.task("t1").status, TaskStatus::Ready, "被拒絕時 Task 不變");
+}
+
+/// 一個 Workspace 範圍的有效教訓轉成的 Guard。
+fn workspace_guard(id: &str, rule: GuardRule) -> ActiveGuard {
+    let content = KnowledgeContent::new(KnowledgeKind::Lesson, "部署要先備份", "", &[], &[], None).unwrap();
+    let new = NewKnowledge {
+        id: format!("lesson-{id}"),
+        kind: KnowledgeKind::Lesson,
+        scope: KnowledgeScope { kind: knowledge::ScopeKind::Workspace, workspace_id: Some("w1".into()), goal_id: None, task_id: None },
+        content,
+        source: KnowledgeSource::User,
+        valid_from: None,
+        valid_until: None,
+    };
+    let lesson = knowledge::create(new, None, T0).unwrap().entries.remove(0);
+    let guard = guard::create(id.into(), &lesson, rule, T0).unwrap().guard;
+    ActiveGuard { guard, lesson }
+}
+
+#[test]
+fn dispatch_runs_the_applicable_guards_and_a_violation_blocks_it_with_the_source_lesson() {
+    let mut world = World::new(&["t1"]);
+    world.guards.push(workspace_guard(
+        "g1",
+        GuardRule::Preflight { field: ContractFieldName::DoneCriteria, must_mention: "備份".into() },
+    ));
+
+    let result = world.dispatch("t1", T0);
+
+    let Err(RunError::GuardViolated(violations)) = &result else { panic!("{result:?}") };
+    assert_eq!(violations.len(), 1);
+    assert_eq!((violations[0].guard_id.as_str(), violations[0].lesson_title.as_str()), ("g1", "部署要先備份"));
+    assert_eq!(result.as_ref().unwrap_err().code(), "guard_violated");
+    assert!(world.runs.is_empty() && world.leases.is_empty(), "被 Guard 擋下時什麼都不寫");
+    assert_eq!(world.task("t1").status, TaskStatus::Ready);
+
+    // 符合規則的 Guard 不擋
+    world.guards[0] = workspace_guard(
+        "g1",
+        GuardRule::Preflight { field: ContractFieldName::DoneCriteria, must_mention: "五個".into() },
+    );
+    assert!(world.dispatch("t1", T0).is_ok());
 }
 
 #[test]

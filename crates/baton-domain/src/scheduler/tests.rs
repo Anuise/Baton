@@ -215,6 +215,7 @@ fn stop_intent_halts_every_placement_including_handoff_and_quota_recovery() {
         code: "runtime_stopping".into(),
         message: "停止中".into(),
         profile_id: None,
+        guard: None,
     };
     // 帳號都有空、額度也已恢復（低於門檻）：沒有停止意圖時派得出去
     let mut world = World::new(vec![usable("p1"), usable("p2")], CapacityMode::ReserveHandoff).with_quota("p1", 0.1);
@@ -754,6 +755,23 @@ fn authorization_gaps_found_by_the_admission_report_wait_with_one_reason_each() 
             (WaitCategory::Authorization, "capability_not_granted", None),
         ]
     );
+}
+
+#[test]
+fn a_guard_violation_waits_under_the_guard_category_with_its_source_lesson() {
+    let violation = crate::guard::GuardViolation {
+        guard_id: "g1".into(),
+        lesson_id: "k1".into(),
+        lesson_title: "部署要先備份".into(),
+        rule: crate::guard::GuardRule::RetryPolicy { max_failed_runs: 2 },
+        message: "已經失敗 2 次".into(),
+    };
+    let reasons = task_wait_reasons(&RunError::GuardViolated(vec![violation.clone()])).unwrap();
+
+    assert_eq!(summary(&reasons), [(WaitCategory::Guard, "guard_violated", None)]);
+    assert_eq!(reasons[0].guard, Some(violation.source()));
+    assert!(reasons[0].message.contains("已經失敗 2 次"), "{}", reasons[0].message);
+    assert!(reasons[0].message.contains("部署要先備份"), "{}", reasons[0].message);
 }
 
 #[test]

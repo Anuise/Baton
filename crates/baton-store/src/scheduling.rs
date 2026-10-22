@@ -13,6 +13,7 @@ use baton_domain::scheduler::{
     self, Capacity, CapacityMode, Evaluation, SchedulerSettings, SlotKind, WaitCategory, WaitReason,
 };
 
+use super::guards::{load_active_guards, record_prevented};
 use super::lifecycle::halt_for;
 use super::profiles::load_profiles;
 use super::runs::{load_active_runs, save, RunApplyError};
@@ -88,15 +89,23 @@ impl Store {
                 let settings = load_settings(tx)?;
                 if let Some(request) = &request {
                     // 先用目前狀態判定一次：不可能派的要求不進佇列
-                    let loaded = load(tx, &request.workspace_id)?;
+                    let mut loaded = load(tx, &request.workspace_id)?;
                     if loaded.workspace.is_none() {
                         return Ok(Err(RunError::WorkspaceNotFound(request.workspace_id.clone())));
                     }
+                    loaded.guards = load_active_guards(tx, &request.workspace_id, now)?;
                     let active = load_active_runs(tx)?;
                     let halt = halt_for(tx, loaded.workspace.as_ref(), &request.workspace_id)?;
                     let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
                     let task_ctx = loaded.ctx(&request.workspace_id);
-                    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, sessions: &loaded.sessions };
+                    let ctx = RunContext {
+                        task: &task_ctx,
+                        runs: &loaded.runs,
+                        leases: &loaded.leases,
+                        workdirs: &loaded.workdirs,
+                        guards: &loaded.guards,
+                        sessions: &loaded.sessions,
+                    };
                     if let Err(rejected) = scheduler::evaluate(&ctx, &capacity, &request.task_id, SlotKind::Normal) {
                         return Ok(Err(rejected));
                     }
@@ -110,13 +119,22 @@ impl Store {
 
                 let mut outcome = ScheduleOutcome::default();
                 for entry in load_queue(tx)? {
-                    let loaded = load(tx, &entry.workspace_id)?;
+                    let mut loaded = load(tx, &entry.workspace_id)?;
+                    // 派工是 Run 准入：檢查適用的 Guard（票 38）
+                    loaded.guards = load_active_guards(tx, &entry.workspace_id, now)?;
                     let active = load_active_runs(tx)?;
                     // 停止意圖或 Workspace 暫停：佇列重試與額度恢復都不派（票 25）
                     let halt = halt_for(tx, loaded.workspace.as_ref(), &entry.workspace_id)?;
                     let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
                     let task_ctx = loaded.ctx(&entry.workspace_id);
-                    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, sessions: &loaded.sessions };
+                    let ctx = RunContext {
+                        task: &task_ctx,
+                        runs: &loaded.runs,
+                        leases: &loaded.leases,
+                        workdirs: &loaded.workdirs,
+                        guards: &loaded.guards,
+                        sessions: &loaded.sessions,
+                    };
                     let waiting = |reasons| WaitingTask {
                         workspace_id: entry.workspace_id.clone(),
                         task_id: entry.task_id.clone(),
@@ -130,6 +148,7 @@ impl Store {
                                     code: "entropy_unavailable".to_string(),
                                     message: "無法取得系統亂數，暫時不能建立 Run".to_string(),
                                     profile_id: None,
+                                    guard: None,
                                 }]));
                                 continue;
                             };
@@ -154,7 +173,13 @@ impl Store {
                                 Err(rejected) => outcome.waiting.push(waiting(vec![failed_check(&rejected)])),
                             }
                         }
-                        Ok(Evaluation::Wait(reasons)) => outcome.waiting.push(waiting(reasons)),
+                        Ok(Evaluation::Wait(reasons)) => {
+                            // 被 Guard 擋下就是一次被攔下的重犯，記錄下來並追溯到來源教訓
+                            if let Some(task) = loaded.tasks.iter().find(|t| t.id == entry.task_id) {
+                                record_prevented(tx, task, &reasons, now)?;
+                            }
+                            outcome.waiting.push(waiting(reasons))
+                        }
                         // Task 已經不是 ready 或已不存在：不再排隊
                         Err(RunError::TaskNotReady(_) | RunError::TaskNotFound(_)) => {
                             tx.execute("DELETE FROM dispatch_request WHERE task_id = ?1", [&entry.task_id])?;
@@ -169,7 +194,11 @@ impl Store {
     }
 
     /// 排程總覽：容量設定、全部 Profile、進行中的 Run 與佇列（附各自目前的等待原因）。
-    pub async fn scheduling_snapshot(&self, quota_used: HashMap<String, f64>) -> StoreResult<SchedulingSnapshot> {
+    pub async fn scheduling_snapshot(
+        &self,
+        quota_used: HashMap<String, f64>,
+        now: Timestamp,
+    ) -> StoreResult<SchedulingSnapshot> {
         self.read(move |conn| {
             let profiles = load_profiles(conn)?;
             let settings = load_settings(conn)?;
@@ -184,11 +213,19 @@ impl Store {
 
             let mut queue = Vec::new();
             for entry in load_queue(conn)? {
-                let loaded = load(conn, &entry.workspace_id)?;
+                let mut loaded = load(conn, &entry.workspace_id)?;
+                loaded.guards = load_active_guards(conn, &entry.workspace_id, now)?;
                 let halt = halt_for(conn, loaded.workspace.as_ref(), &entry.workspace_id)?;
                 let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
                 let task_ctx = loaded.ctx(&entry.workspace_id);
-                let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, sessions: &loaded.sessions };
+                let ctx = RunContext {
+                    task: &task_ctx,
+                    runs: &loaded.runs,
+                    leases: &loaded.leases,
+                    workdirs: &loaded.workdirs,
+                    guards: &loaded.guards,
+                    sessions: &loaded.sessions,
+                };
                 let reasons = match scheduler::evaluate(&ctx, &capacity, &entry.task_id, SlotKind::Normal) {
                     // 現在就能派：只是還沒輪到排程處理，沒有需要使用者處理的原因
                     Ok(Evaluation::Dispatch { .. }) => Vec::new(),
@@ -240,6 +277,7 @@ fn failed_check(error: &RunError) -> WaitReason {
         code: error.code().to_string(),
         message: error.to_string(),
         profile_id: None,
+        guard: None,
     }
 }
 

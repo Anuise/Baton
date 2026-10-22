@@ -63,12 +63,15 @@ impl From<RunError> for TaskApiError {
             RunError::TaskNotReady(_)
             | RunError::AdmissionRejected(_)
             | RunError::DependenciesUnfinished(_)
+            | RunError::GuardViolated(_)
             | RunError::ExecutionConflict { .. }
             | RunError::TransitionInvalid { .. }
             | RunError::StaleReport
             | RunError::LeaseNotExpired
             | RunError::CancelNotRequested
             | RunError::LaunchHalted
+            | RunError::WorkdirNotPrepared(_)
+            | RunError::WorkdirUnavailable(_)
             | RunError::SessionBusy { .. } => StatusCode::CONFLICT,
         };
         Self::Plain(ApiError { status, code: error.code(), message: error.to_string() })
@@ -134,6 +137,10 @@ pub(crate) async fn dispatch(
             message: format!("請求內容不正確：{e}"),
         })?
     };
+    // 派工之前先準備 Task 的工作目錄（票 20）；不可用時登記原因，派工會排隊並顯示它
+    crate::workdirs::prepare(&state.store, &*state.workspace_fs, state.clock.now(), Some((id.clone(), task_id.clone())))
+        .await
+        .map_err(ApiError::from)?;
     let schedule = ScheduleRequest { workspace_id: id.clone(), task_id: task_id.clone(), priority: request.priority };
     let outcome = schedule_now(&state, Some(schedule)).await?;
     if let Some(started) = outcome.started.iter().find(|s| s.task_id == task_id) {

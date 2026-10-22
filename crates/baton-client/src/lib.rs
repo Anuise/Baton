@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use baton_api::{
     admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, authorization_path,
-    authorization_summary_path, decision_answer_path, decision_path, decisions_path, goals_path, run_cancel_path,
+    authorization_summary_path, decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path,
+    decision_path, decisions_path, goals_path, run_cancel_path, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
+    MergeResponse, UpdateAuthorityRequest, DECISIONS_BATCH_PATH,
     ArtifactList, ArtifactPreview, SHA256_HEADER,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_accept_path, task_path, task_ready_path, task_verification_path, tasks_path, workspace_lifecycle_path, workspace_resume_path, AcceptTaskRequest, LifecycleStatus,
@@ -24,10 +26,13 @@ use baton_api::{
     knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest,
     CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView, KnowledgeList, KnowledgeListQuery,
     KnowledgeReasonRequest, KNOWLEDGE_PATH,
+    guard_action_path, recurrences_path, CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList,
+    ReportRecurrenceRequest, GUARDS_PATH,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
     PLATFORM_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
 };
+use baton_domain::authority::AuthorityTable;
 use baton_domain::decision::DecisionView;
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
@@ -346,16 +351,50 @@ impl RuntimeClient {
         self.get_json(&decision_path(workspace_id, request_id)).await
     }
 
-    /// 提交正式裁定；同樣的答案重送是冪等的，不同的答案回傳 `ClientError::Rejected`（`decision_already_answered`）。
+    /// 處理一個裁定請求（六種處理方式之一）；同樣的處理重送是冪等的，不同的處理回傳 `ClientError::Rejected`
+    /// （`decision_already_answered`）。內容在檢視後變動回 `decision_revision_mismatch`，目標版本已變更回 `decision_superseded`。
     pub async fn decision_answer(
         &self,
         workspace_id: &str,
         request_id: &str,
-        option_id: &str,
-        note: Option<String>,
+        request: &AnswerRequest,
     ) -> Result<AnswerResult, ClientError> {
-        let request = AnswerRequest { option_id: option_id.to_string(), note };
-        self.send_json(reqwest::Method::POST, &decision_answer_path(workspace_id, request_id), Some(&request)).await
+        self.send_json(reqwest::Method::POST, &decision_answer_path(workspace_id, request_id), Some(request)).await
+    }
+
+    /// 批次處理：每一項各自保存，一項失敗不影響其他項。
+    pub async fn decisions_batch(&self, request: &BatchRequest) -> Result<BatchResponse, ClientError> {
+        self.send_json(reqwest::Method::POST, DECISIONS_BATCH_PATH, Some(request)).await
+    }
+
+    /// 把一個請求合併到另一個（由目標代為裁定）；回傳合併後的目標。
+    pub async fn decision_merge(
+        &self,
+        workspace_id: &str,
+        request_id: &str,
+        request: &MergeRequest,
+    ) -> Result<MergeResponse, ClientError> {
+        self.send_json(reqwest::Method::POST, &decision_merge_path(workspace_id, request_id), Some(request)).await
+    }
+
+    /// 把兩個請求互相連結。
+    pub async fn decision_link(&self, workspace_id: &str, request_id: &str, other_id: &str) -> Result<DecisionView, ClientError> {
+        let request = LinkRequest { other_id: other_id.to_string() };
+        self.send_json(reqwest::Method::POST, &decision_links_path(workspace_id, request_id), Some(&request)).await
+    }
+
+    /// Workspace 的決策權限表（spec D-15）。
+    pub async fn decision_authority(&self, workspace_id: &str) -> Result<AuthorityTable, ClientError> {
+        self.get_json(&decision_authority_path(workspace_id)).await
+    }
+
+    /// 取代 Workspace 的決策權限表；只能收窄，放寬回 `authority_widening_refused`。
+    pub async fn update_decision_authority(
+        &self,
+        workspace_id: &str,
+        request: &UpdateAuthorityRequest,
+    ) -> Result<AuthorityTable, ClientError> {
+        self.send_json(reqwest::Method::PUT, &decision_authority_path(workspace_id), Some(request)).await
     }
 
     /// 全域待處理裁定數（狀態列）。
@@ -487,6 +526,48 @@ impl RuntimeClient {
         request: &KnowledgeReasonRequest,
     ) -> Result<KnowledgeEntryView, ClientError> {
         self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "retire"), Some(request)).await
+    }
+
+    /// 知識分頁看得到的 Guard（來源教訓是全域或屬於這個 Workspace），附是否生效與成效（票 38）。
+    pub async fn list_guards(&self, workspace_id: Option<&str>) -> Result<GuardList, ClientError> {
+        let mut url = reqwest::Url::parse("http://localhost").expect("固定的 URL 一定合法");
+        url.set_path(GUARDS_PATH);
+        if let Some(workspace_id) = workspace_id {
+            url.query_pairs_mut().append_pair("workspace_id", workspace_id);
+        }
+        match url.query() {
+            Some(query) => self.get_json(&format!("{}?{query}", url.path())).await,
+            None => self.get_json(url.path()).await,
+        }
+    }
+
+    /// 把有效的已驗證教訓轉成 Guard（建立即啟用）。
+    pub async fn create_guard(&self, request: &CreateGuardRequest) -> Result<GuardView, ClientError> {
+        self.send_json(reqwest::Method::POST, GUARDS_PATH, Some(request)).await
+    }
+
+    /// 啟用 Guard（來源教訓必須仍有效）。
+    pub async fn enable_guard(&self, id: &str, request: &GuardRevisionRequest) -> Result<GuardView, ClientError> {
+        self.send_json(reqwest::Method::POST, &guard_action_path(id, "enable"), Some(request)).await
+    }
+
+    /// 停用 Guard。
+    pub async fn disable_guard(&self, id: &str, request: &GuardRevisionRequest) -> Result<GuardView, ClientError> {
+        self.send_json(reqwest::Method::POST, &guard_action_path(id, "disable"), Some(request)).await
+    }
+
+    /// 教訓的重犯事件（新到舊）。
+    pub async fn lesson_recurrences(&self, lesson_id: &str) -> Result<RecurrenceList, ClientError> {
+        self.get_json(&recurrences_path(lesson_id)).await
+    }
+
+    /// 回報一次沒被 Guard 攔下的重犯。
+    pub async fn report_recurrence(
+        &self,
+        lesson_id: &str,
+        request: &ReportRecurrenceRequest,
+    ) -> Result<baton_domain::guard::Recurrence, ClientError> {
+        self.send_json(reqwest::Method::POST, &recurrences_path(lesson_id), Some(request)).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {

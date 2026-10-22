@@ -9,18 +9,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    AcceptTaskRequest, AdmissionReport, ArtifactList, ArtifactPreview, AuthorizationView, ConfirmAuthorizationRequest,
-    BackupStatus, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview,
-    LifecycleStatus, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview,
-    SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceLifecycleView, WorkspaceList,
+    AcceptTaskRequest, AdmissionReport, AnswerRequest, ArtifactList, ArtifactPreview, AuthorizationView, BackupStatus,
+    BatchRequest, BatchResponse, ConfirmAuthorizationRequest, CreateProfileRequest, CreateTaskRequest,
+    CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus, LoginTerminalResponse, MergeRequest,
+    MergeResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus,
+    SummaryRequest, TaskBoard, TaskDetail, UpdateAuthorityRequest, WorkspaceLifecycleView, WorkspaceList,
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
+    CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOutcome, RuntimeClient};
 use baton_credential::DpapiProtector;
 use baton_store::{AnswerResult, DecisionList};
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
+use baton_domain::authority::AuthorityTable;
 use baton_domain::decision::DecisionView;
+use baton_domain::guard::Recurrence;
 use baton_domain::profile::ProfileView;
 use baton_domain::quota::PlanLimits;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
@@ -30,6 +34,7 @@ use baton_domain::verification::VerificationView;
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
+use baton_domain::workdir::TaskKind;
 use baton_domain::workspace::{ModelOverrides, Workspace};
 use base64::Engine;
 use serde::Serialize;
@@ -356,13 +361,14 @@ async fn task_create(
     workspace_id: String,
     goal_id: String,
     title: String,
+    kind: Option<TaskKind>,
     contract: Option<ContractContent>,
 ) -> Result<TaskView, String> {
     if let Err(reason) = link.ensure_started().await {
         return Err(reason.clone());
     }
     link.client
-        .create_task(&workspace_id, &CreateTaskRequest { goal_id, title, contract: contract.unwrap_or_default() })
+        .create_task(&workspace_id, &CreateTaskRequest { goal_id, title, kind: kind.unwrap_or_default(), contract: contract.unwrap_or_default() })
         .await.map_err(|e| e.to_string())
 }
 
@@ -561,19 +567,77 @@ async fn decision_detail(
     link.client.decision_detail(&workspace_id, &request_id).await.map_err(|e| e.to_string())
 }
 
-/// Web UI 提交正式裁定（只有桌面角色能做）。
+/// Web UI 處理一個裁定請求（只有桌面角色能做）。
 #[tauri::command]
 async fn decision_answer(
     link: State<'_, RuntimeLink>,
     workspace_id: String,
     request_id: String,
-    option_id: String,
-    note: Option<String>,
+    request: AnswerRequest,
 ) -> Result<AnswerResult, String> {
     if let Err(reason) = link.ensure_started().await {
         return Err(reason.clone());
     }
-    link.client.decision_answer(&workspace_id, &request_id, &option_id, note).await.map_err(|e| e.to_string())
+    link.client.decision_answer(&workspace_id, &request_id, &request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 批次處理裁定請求：每一項各自保存。
+#[tauri::command]
+async fn decisions_batch(link: State<'_, RuntimeLink>, request: BatchRequest) -> Result<BatchResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decisions_batch(&request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 把一個裁定請求合併到另一個。
+#[tauri::command]
+async fn decision_merge(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request_id: String,
+    request: MergeRequest,
+) -> Result<MergeResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_merge(&workspace_id, &request_id, &request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 把兩個裁定請求互相連結。
+#[tauri::command]
+async fn decision_link(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request_id: String,
+    other_id: String,
+) -> Result<DecisionView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_link(&workspace_id, &request_id, &other_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 讀取 Workspace 的決策權限表。
+#[tauri::command]
+async fn decision_authority(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<AuthorityTable, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.decision_authority(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 收窄 Workspace 的決策權限表。
+#[tauri::command]
+async fn decision_authority_update(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request: UpdateAuthorityRequest,
+) -> Result<AuthorityTable, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.update_decision_authority(&workspace_id, &request).await.map_err(|e| e.to_string())
 }
 
 /// 狀態列的全域待處理裁定數。
@@ -850,6 +914,64 @@ async fn knowledge_retire(
     link.client.retire_knowledge(&id, &request).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 知識分頁的 Guard 列表（票 38）。
+#[tauri::command]
+async fn guard_list(link: State<'_, RuntimeLink>, workspace_id: Option<String>) -> Result<GuardList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.list_guards(workspace_id.as_deref()).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 把教訓轉成 Guard（建立即啟用）。
+#[tauri::command]
+async fn guard_create(link: State<'_, RuntimeLink>, request: CreateGuardRequest) -> Result<GuardView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.create_guard(&request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 啟用 Guard。
+#[tauri::command]
+async fn guard_enable(link: State<'_, RuntimeLink>, id: String, expected_revision: i64) -> Result<GuardView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.enable_guard(&id, &GuardRevisionRequest { expected_revision }).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 停用 Guard。
+#[tauri::command]
+async fn guard_disable(link: State<'_, RuntimeLink>, id: String, expected_revision: i64) -> Result<GuardView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.disable_guard(&id, &GuardRevisionRequest { expected_revision }).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 查看教訓的重犯事件。
+#[tauri::command]
+async fn knowledge_recurrences(link: State<'_, RuntimeLink>, id: String) -> Result<RecurrenceList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.lesson_recurrences(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 回報一次沒被 Guard 攔下的重犯。
+#[tauri::command]
+async fn knowledge_report_recurrence(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    request: ReportRecurrenceRequest,
+) -> Result<Recurrence, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.report_recurrence(&id, &request).await.map_err(|e| e.to_string())
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
@@ -895,6 +1017,11 @@ fn main() {
             decision_list,
             decision_detail,
             decision_answer,
+            decisions_batch,
+            decision_merge,
+            decision_link,
+            decision_authority,
+            decision_authority_update,
             decisions_pending,
             artifact_list,
             artifact_preview,
@@ -911,7 +1038,13 @@ fn main() {
             knowledge_confirm,
             knowledge_correct,
             knowledge_revoke,
-            knowledge_retire
+            knowledge_retire,
+            guard_list,
+            guard_create,
+            guard_enable,
+            guard_disable,
+            knowledge_recurrences,
+            knowledge_report_recurrence
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {

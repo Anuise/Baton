@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、Guard 與重犯事件端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -10,6 +10,7 @@ mod authorization;
 mod backups;
 mod decisions;
 mod guard;
+mod guards;
 mod knowledge;
 mod lifecycle;
 mod messages;
@@ -22,6 +23,7 @@ mod setup;
 mod shared_settings;
 mod tasks;
 mod verification;
+pub mod workdirs;
 mod workspaces;
 
 use std::convert::Infallible;
@@ -34,8 +36,8 @@ use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::agent::{
-    TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
-    TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
+    TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
+    TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
@@ -47,9 +49,11 @@ use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
 
-pub use agent::{tool_path, DecisionRequested, PermissionResponse, ReportAck, TaskContractResponse};
+pub use agent::{tool_path, ControllerActionResponse, DecisionRequested, PermissionResponse, ReportAck, TaskContractResponse};
 pub use decisions::{
-    decision_answer_path, decision_path, decisions_path, AnswerRequest, PendingDecisions, PENDING_DECISIONS_PATH,
+    decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path, decision_path,
+    decisions_path, AnswerRequest, BatchItem, BatchItemResult, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
+    MergeResponse, PendingDecisions, UpdateAuthorityRequest, DECISIONS_BATCH_PATH, PENDING_DECISIONS_PATH,
 };
 pub use artifacts::{
     artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview, ArtifactRegistered,
@@ -67,6 +71,10 @@ pub use tasks::{
     TaskDetail, UpdateContractRequest,
 };
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
+pub use guards::{
+    guard_action_path, recurrences_path, CreateGuardRequest, GuardLesson, GuardList, GuardListQuery, GuardRevisionRequest,
+    GuardView, RecurrenceList, ReportRecurrenceRequest, GUARDS_PATH,
+};
 pub use knowledge::{
     knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest,
     KnowledgeDetail, KnowledgeEntryView, KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
@@ -90,6 +98,7 @@ pub use shared_settings::{
     RunSettings, RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH,
 };
+pub use workdirs::INTEGRATION_QUEUE_PATH;
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
 /// 健康端點路徑。
@@ -197,7 +206,11 @@ pub fn router(state: ApiState) -> Router {
         .route(decisions::DECISIONS_ROUTE, get(decisions::list))
         .route(decisions::DECISION_ROUTE, get(decisions::detail))
         .route(decisions::ANSWER_ROUTE, post(decisions::answer))
+        .route(decisions::MERGE_ROUTE, post(decisions::merge))
+        .route(decisions::LINKS_ROUTE, post(decisions::link))
+        .route(decisions::AUTHORITY_ROUTE, get(decisions::authority).put(decisions::update_authority))
         .route(PENDING_DECISIONS_PATH, get(decisions::pending))
+        .route(DECISIONS_BATCH_PATH, post(decisions::batch))
         .route(PROFILES_PATH, get(profiles::list).post(profiles::create))
         .route(profiles::VERIFY_ROUTE, post(profiles::verify))
         .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))
@@ -217,6 +230,7 @@ pub fn router(state: ApiState) -> Router {
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
         .route(lifecycle::WORKSPACE_RESUME_ROUTE, post(lifecycle::resume_workspace))
         .route(SCHEDULING_PATH, get(scheduling::view))
+        .route(INTEGRATION_QUEUE_PATH, get(workdirs::queue))
         .route(SCHEDULING_SETTINGS_PATH, axum::routing::put(scheduling::update_settings))
         .route(SHARED_SETTINGS_PATH, get(shared_settings::status))
         .route(SHARED_SETTINGS_PREVIEW_PATH, post(shared_settings::preview))
@@ -233,6 +247,10 @@ pub fn router(state: ApiState) -> Router {
         .route(knowledge::CORRECT_ROUTE, post(knowledge::correct))
         .route(knowledge::REVOKE_ROUTE, post(knowledge::revoke))
         .route(knowledge::RETIRE_ROUTE, post(knowledge::retire))
+        .route(GUARDS_PATH, get(guards::list).post(guards::create))
+        .route(guards::ENABLE_ROUTE, post(guards::enable))
+        .route(guards::DISABLE_ROUTE, post(guards::disable))
+        .route(guards::RECURRENCES_ROUTE, get(guards::recurrences).post(guards::report))
         // Agent API：只接受 Agent 憑證（guard 依路徑前綴決定所需角色）
         .route(&tool_path(TOOL_GET_TASK_CONTRACT), post(agent::get_task_contract))
         .route(&tool_path(TOOL_REPORT_PROGRESS), post(agent::report_progress))
@@ -240,6 +258,7 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_REPORT_BLOCKED), post(agent::report_blocked))
         .route(&tool_path(TOOL_REQUEST_DECISION), post(agent::request_decision))
         .route(&tool_path(TOOL_PERMISSION_PROMPT), post(agent::permission_prompt))
+        .route(&tool_path(TOOL_CONTROLLER_ACTION), post(agent::controller_action))
         .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
         .route(&tool_path(TOOL_SEND_MESSAGE), post(messages::send_message))
         .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))

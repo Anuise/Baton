@@ -6,13 +6,17 @@
 //!   並全部通過，或使用者以桌面憑證手動接受。
 //! - 成果接受交易同時校驗三件事：受驗的 Run 仍是該 Task 最新的世代、成果 manifest 與觀察當時相同、契約版本未變。
 //!   任何一項不符就拒絕，什麼都不寫；檢查未通過時 Task 回到 `ready`（可修正狀態），證據保存在驗證紀錄中。
+//! - 開發 Task（票 20）通過時還不算完成：同一個交易把平台分支排入整合佇列，Task 停在 `verifying`，
+//!   由整合佇列合併並通過整合驗證後才完成（見 `integration` 模組）。
 
 use serde::{Deserialize, Serialize};
 
 use crate::artifact::{self, Artifact, ArtifactDraft};
 use crate::event::DomainEvent;
+use crate::integration::{self, IntegrationEntry};
 use crate::run::{Run, RunStatus};
 use crate::task::{Task, TaskContext, TaskStatus, Versioned};
+use crate::workdir::{TaskKind, Workdir, WorkdirKind};
 use crate::workspace::WorkspaceStatus;
 use crate::Timestamp;
 
@@ -289,12 +293,20 @@ pub fn subject_run<'a>(runs: &'a [Run], task_id: &str) -> Option<&'a Run> {
     runs.iter().filter(|r| r.task_id == task_id).max_by_key(|r| r.generation).filter(|r| r.status == RunStatus::Succeeded)
 }
 
-/// 目前的接受基礎；Task 不是 `verifying` 或沒有受驗 Run 時為 `None`。
-pub fn current_basis(task: &Task, runs: &[Run], artifacts: &[Artifact]) -> Option<AcceptanceBasis> {
+/// 目前的接受基礎；Task 不是 `verifying`、沒有受驗 Run，或受驗 Run 已經排入整合（已接受過）時為 `None`。
+pub fn current_basis(
+    task: &Task,
+    runs: &[Run],
+    artifacts: &[Artifact],
+    integrations: &[IntegrationEntry],
+) -> Option<AcceptanceBasis> {
     if task.status != TaskStatus::Verifying {
         return None;
     }
     let run = subject_run(runs, &task.id)?;
+    if integration::has_entry_for_run(integrations, &run.id) {
+        return None;
+    }
     Some(AcceptanceBasis {
         run_id: run.id.clone(),
         generation: run.generation,
@@ -315,11 +327,18 @@ pub struct PendingCheck {
 
 /// 這個 Task 是否需要 Runtime 執行檢查：`verifying`、有受驗 Run，而且契約宣告了檢查，或契約版本已與 Run 不同。
 /// 沒有宣告任何檢查時回傳 `None`：只能由使用者手動接受。Workspace 已封存時也是 `None`：提交一定被拒絕。
-pub fn pending_check(ctx: &TaskContext<'_>, runs: &[Run], artifacts: &[Artifact], task: &Task) -> Option<PendingCheck> {
+/// 受驗 Run 已經排入整合（開發 Task 已通過）時也是 `None`：接下來由整合佇列處理。
+pub fn pending_check(
+    ctx: &TaskContext<'_>,
+    runs: &[Run],
+    artifacts: &[Artifact],
+    integrations: &[IntegrationEntry],
+    task: &Task,
+) -> Option<PendingCheck> {
     if ctx.workspace.is_none_or(|w| w.status == WorkspaceStatus::Archived) {
         return None;
     }
-    let basis = current_basis(task, runs, artifacts)?;
+    let basis = current_basis(task, runs, artifacts, integrations)?;
     let run = subject_run(runs, &task.id)?;
     let contract = ctx.contract_of(task)?;
     let mismatch = run.contract_version != task.contract_version;
@@ -417,6 +436,10 @@ pub struct AcceptanceContext<'a> {
     pub task: &'a TaskContext<'a>,
     pub runs: &'a [Run],
     pub artifacts: &'a [Artifact],
+    /// 平台登記的工作目錄：開發 Task 的整合項目取它的平台分支與整合目標（票 20）。
+    pub workdirs: &'a [Workdir],
+    /// Workspace 的整合項目：受驗 Run 已排入整合時不能再接受。
+    pub integrations: &'a [IntegrationEntry],
 }
 
 /// 接受交易的結果：Task 的新狀態、驗證紀錄與事件，在同一個交易中寫入。
@@ -424,6 +447,8 @@ pub struct AcceptanceContext<'a> {
 pub struct AcceptanceChange {
     pub task: Task,
     pub record: VerificationRecord,
+    /// 開發 Task 通過時排入整合佇列的項目（票 20）；此時 Task 仍是 `verifying`。
+    pub integration: Option<IntegrationEntry>,
     pub events: Vec<DomainEvent>,
 }
 
@@ -447,6 +472,10 @@ pub enum AcceptanceError {
     ResultsMismatch,
     #[error("附註最多 {NOTE_MAX_CHARS} 個字元")]
     NoteTooLong,
+    #[error("這個 Run 的成果已經接受並排入整合佇列，不能再接受一次")]
+    AlreadyQueuedForIntegration,
+    #[error("找不到這個開發 Task 登記的 worktree，無法排入整合佇列")]
+    WorktreeMissing,
 }
 
 impl AcceptanceError {
@@ -462,6 +491,8 @@ impl AcceptanceError {
             AcceptanceError::ManifestStale => "acceptance_manifest_stale",
             AcceptanceError::ResultsMismatch => "acceptance_results_mismatch",
             AcceptanceError::NoteTooLong => "acceptance_invalid",
+            AcceptanceError::AlreadyQueuedForIntegration => "acceptance_already_queued",
+            AcceptanceError::WorktreeMissing => "acceptance_worktree_missing",
         }
     }
 }
@@ -494,6 +525,9 @@ pub fn decide(
             expected: basis.run_id.clone(),
             current: subject_run(ctx.runs, &task.id).map(|r| r.id.clone()),
         })?;
+    if integration::has_entry_for_run(ctx.integrations, &run.id) {
+        return Err(AcceptanceError::AlreadyQueuedForIntegration);
+    }
     // 校驗二：契約版本與觀察當時相同
     if basis.contract_version != task.contract_version {
         return Err(AcceptanceError::ContractStale {
@@ -585,14 +619,33 @@ pub fn decide(
             "note": record.note,
         }),
     );
-    // 通過才完成；未通過回到 ready（可修正、可重新派工），證據留在驗證紀錄
-    let (to, reason) = match outcome {
-        VerificationOutcome::Passed => (TaskStatus::Completed, "verification_passed"),
-        VerificationOutcome::Failed => (TaskStatus::Ready, "verification_failed"),
+    // 通過才完成；未通過回到 ready（可修正、可重新派工），證據留在驗證紀錄。
+    // 開發 Task 通過時排入整合佇列、停在 verifying：未通過整合不能宣告完成（票 20）
+    let mut queued = None;
+    let transition = match outcome {
+        VerificationOutcome::Passed if task.kind == TaskKind::Development => {
+            let worktree = ctx
+                .workdirs
+                .iter()
+                .find(|w| w.task_id == task.id && w.kind == WorkdirKind::Worktree && w.is_ready())
+                .ok_or(AcceptanceError::WorktreeMissing)?;
+            let (Some(branch), Some(target)) = (worktree.branch.as_deref(), worktree.base_branch.as_deref()) else {
+                return Err(AcceptanceError::WorktreeMissing);
+            };
+            let id = format!("int_{}", record.id);
+            let (entry, event) = integration::enqueue(id, versioned.task, &run.id, run.generation, branch, target, now);
+            versioned.events.push(event);
+            queued = Some(entry);
+            None
+        }
+        VerificationOutcome::Passed => Some((TaskStatus::Completed, "verification_passed")),
+        VerificationOutcome::Failed => Some((TaskStatus::Ready, "verification_failed")),
     };
-    versioned.change_status(to, reason).map_err(|_| AcceptanceError::TaskNotVerifying(task.status))?;
+    if let Some((to, reason)) = transition {
+        versioned.change_status(to, reason).map_err(|_| AcceptanceError::TaskNotVerifying(task.status))?;
+    }
     let events = versioned.events;
-    Ok(AcceptanceChange { task: moved, record, events })
+    Ok(AcceptanceChange { task: moved, record, integration: queued, events })
 }
 
 // ---------------------------------------------------------------- 檢視
@@ -612,6 +665,8 @@ pub struct VerificationView {
     pub automatic: bool,
     /// 這個 Task 的歷次驗證紀錄，由舊到新。
     pub records: Vec<VerificationRecord>,
+    /// 這個 Task 最新的整合項目（開發 Task 通過驗證後才有，票 20）。
+    pub integration: Option<IntegrationEntry>,
 }
 
 pub fn view(
@@ -619,16 +674,18 @@ pub fn view(
     runs: &[Run],
     artifacts: &[Artifact],
     records: &[VerificationRecord],
+    integrations: &[IntegrationEntry],
     task: &Task,
 ) -> VerificationView {
     VerificationView {
         task_id: task.id.clone(),
         status: task.status,
-        basis: current_basis(task, runs, artifacts),
+        basis: current_basis(task, runs, artifacts, integrations),
         checks: ctx.contract_of(task).map(|c| c.content.verification_checks.clone()).unwrap_or_default(),
         artifacts: manifest_of(artifacts, &task.id),
-        automatic: pending_check(ctx, runs, artifacts, task).is_some(),
+        automatic: pending_check(ctx, runs, artifacts, integrations, task).is_some(),
         records: records.iter().filter(|r| r.task_id == task.id).cloned().collect(),
+        integration: integrations.iter().filter(|e| e.task_id == task.id).max_by_key(|e| e.seq).cloned(),
     }
 }
 

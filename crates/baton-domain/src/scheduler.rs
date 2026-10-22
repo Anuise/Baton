@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authorization::AdmissionDenied;
 use crate::event::DomainEvent;
+use crate::guard::GuardSource;
 use crate::profile::{self, AccountProfile, ProfileStatus};
 use crate::run::{self, Run, RunContext, RunError};
 use crate::task::MissingCode;
@@ -153,12 +154,16 @@ pub enum WaitCategory {
     Authorization,
     /// 相依的 Task 還沒完成。
     Dependency,
+    /// Task 的工作目錄（worktree 或輸出目錄）還沒準備好或不可用（票 20）。
+    Workdir,
     /// 帳號的狀態還不明（尚未核對、無法確認身分）。
     StateUnknown,
     /// 帳號本身不可用（未登入、認證被覆蓋、身分不符、已封存）或根本沒有帳號。
     Account,
     /// 完全退出的停止意圖生效中，或 Workspace 在完全退出後等待「繼續工作」（票 25）。
     Lifecycle,
+    /// 已啟用的 Guard 擋下（票 38）：依來源教訓修改契約，或在知識分頁停用該 Guard 後自動再試。
+    Guard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,19 +175,40 @@ pub struct WaitReason {
     /// 原因屬於某個帳號時的 Profile 識別。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
+    /// 被 Guard 擋下時，該 Guard 與它的來源教訓。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<GuardSource>,
 }
 
 fn reason(category: WaitCategory, code: &str, message: String, profile_id: Option<&str>) -> WaitReason {
-    WaitReason { category, code: code.to_string(), message, profile_id: profile_id.map(str::to_string) }
+    WaitReason { category, code: code.to_string(), message, profile_id: profile_id.map(str::to_string), guard: None }
 }
 
-/// Task 層級的等待原因（授權、相依）；其他派工錯誤（Task 不是 ready、已有寫入者、契約失效）不是「等一等就好」，
+/// Task 層級的等待原因（授權、相依、Guard、工作目錄）；其他派工錯誤（Task 不是 ready、已有寫入者、契約失效）不是「等一等就好」，
 /// 回傳 `None` 讓呼叫端照原樣拒絕。
 pub fn task_wait_reasons(error: &RunError) -> Option<Vec<WaitReason>> {
     let authorization = |code: &str, message: String| reason(WaitCategory::Authorization, code, message, None);
     match error {
         RunError::DependenciesUnfinished(_) => {
             Some(vec![reason(WaitCategory::Dependency, "dependencies_unfinished", error.to_string(), None)])
+        }
+        // 每個違反的 Guard 各一個原因，帶著來源教訓
+        RunError::GuardViolated(violations) => Some(
+            violations
+                .iter()
+                .map(|v| WaitReason {
+                    guard: Some(v.source()),
+                    ..reason(
+                        WaitCategory::Guard,
+                        "guard_violated",
+                        format!("{}（來源教訓「{}」）", v.message, v.lesson_title),
+                        None,
+                    )
+                })
+                .collect(),
+        ),
+        RunError::WorkdirNotPrepared(_) | RunError::WorkdirUnavailable(_) => {
+            Some(vec![reason(WaitCategory::Workdir, error.code(), error.to_string(), None)])
         }
         RunError::AdmissionRejected(
             denied @ (AdmissionDenied::AuthorizationUnconfirmed(_) | AdmissionDenied::CapabilityNotGranted { .. }),

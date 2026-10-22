@@ -1,6 +1,6 @@
 # 21: Worktree 完成後自動清理
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R083-21-impl，2026-10-22 18:34）
 Blocked by: 20
 
 **What to build:** 依 DR-20261021-02：Task 通過驗證、成果已整合、相關程序停止、無其他使用者、必要成果與證據已保存於 worktree 外時，自動移除平台登記的 worktree；未保存變更或歸屬不明檔案阻擋刪除。清理意圖持久化、失敗時有限重試並顯示原因；Task 完成與清理狀態分開顯示。暫停、交接、失敗、取消、完全退出不觸發清理。

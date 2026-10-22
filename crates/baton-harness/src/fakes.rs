@@ -410,15 +410,99 @@ pub enum ArtifactWritePoint {
 }
 
 /// 在暫存目錄中運作的 WorkspaceFs：成果寫入是真實的原子寫入（步驟與正式版相同），
-/// worktree 只在記憶體中追蹤（不依賴 git）。
+/// worktree 只在記憶體中追蹤（不依賴 git）：目錄是真的建立在暫存目錄中，Git 的狀態（哪些目錄是 repo、
+/// 簽出哪個分支、分支在哪個 commit、整合合併的結果）則由測試腳本化，並記錄每一次合併（票 20）。
 #[derive(Default)]
 pub struct FakeWorkspaceFs {
     worktrees: Mutex<HashSet<PathBuf>>,
     dirty: Mutex<HashSet<PathBuf>>,
     artifact_hang: Mutex<Option<ArtifactWritePoint>>,
+    git: Mutex<FakeGit>,
+}
+
+/// 腳本化的 Git 狀態。
+#[derive(Default)]
+struct FakeGit {
+    /// repo 頂層目錄 → 目前簽出的分支（detached HEAD 為 `None`）。
+    repos: HashMap<PathBuf, Option<String>>,
+    /// （repo、分支）→ 分支所在的 commit。
+    tips: HashMap<(PathBuf, String), String>,
+    /// worktree 目錄 → 簽出的分支。
+    worktree_branches: HashMap<PathBuf, String>,
+    /// 下一次（依序）建立 worktree 的失敗原因。
+    worktree_failures: VecDeque<String>,
+    /// 下一次（依序）合併的衝突內容。
+    merge_conflicts: VecDeque<String>,
+    /// 下一次合併在開始後停住，直到閘門放行（只生效一次）；永不放行就等同 Runtime 在合併中崩潰。
+    merge_hold: Option<Arc<tokio::sync::Notify>>,
+    merges: Vec<FakeMerge>,
+    commits: u32,
+}
+
+/// 一次整合合併的紀錄。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeMerge {
+    pub repo: PathBuf,
+    pub target_branch: String,
+    pub branch: String,
+    pub integration_dir: PathBuf,
+    /// 合併當時目標分支所在的 commit。
+    pub target_tip: String,
+    /// 合併結果；衝突時是 `None`。
+    pub commit: Option<String>,
 }
 
 impl FakeWorkspaceFs {
+    /// 把目錄當成 Git repo 的頂層，簽出 `branch`（分支在 commit `base`）。
+    pub fn init_repo(&self, path: &Path, branch: &str) {
+        let mut git = lock(&self.git);
+        git.repos.insert(path.to_path_buf(), Some(branch.to_string()));
+        git.tips.insert((path.to_path_buf(), branch.to_string()), "base".to_string());
+    }
+
+    /// repo 改為 detached HEAD。
+    pub fn detach_head(&self, path: &Path) {
+        lock(&self.git).repos.insert(path.to_path_buf(), None);
+    }
+
+    /// 分支目前所在的 commit。
+    pub fn branch_tip(&self, repo: &Path, branch: &str) -> Option<String> {
+        lock(&self.git).tips.get(&(repo.to_path_buf(), branch.to_string())).cloned()
+    }
+
+    /// 模擬整合期間有人更新了分支。
+    pub fn move_branch(&self, repo: &Path, branch: &str, commit: &str) {
+        lock(&self.git).tips.insert((repo.to_path_buf(), branch.to_string()), commit.to_string());
+    }
+
+    /// worktree 目錄簽出的分支。
+    pub fn worktree_branch(&self, target: &Path) -> Option<String> {
+        lock(&self.git).worktree_branches.get(target).cloned()
+    }
+
+    /// 下一次建立 worktree 以這個原因失敗（只生效一次）。
+    pub fn fail_next_worktree(&self, reason: &str) {
+        lock(&self.git).worktree_failures.push_back(reason.to_string());
+    }
+
+    /// 下一次合併發生衝突（只生效一次）。
+    pub fn conflict_next_merge(&self, detail: &str) {
+        lock(&self.git).merge_conflicts.push_back(detail.to_string());
+    }
+
+    /// 下一次合併在開始後停住，直到回傳的 `Notify` 被 `notify_one`（只生效一次）。
+    /// 不放行並丟棄呼叫端的 future，就等同 Runtime 在合併中崩潰。
+    pub fn hold_next_merge(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        lock(&self.git).merge_hold = Some(gate.clone());
+        gate
+    }
+
+    /// 至今的全部整合合併，依順序。
+    pub fn merges(&self) -> Vec<FakeMerge> {
+        lock(&self.git).merges.clone()
+    }
+
     pub fn mark_dirty(&self, target: &Path) {
         lock(&self.dirty).insert(target.to_path_buf());
     }
@@ -454,10 +538,94 @@ impl WorkspaceFs for FakeWorkspaceFs {
         tokio::fs::create_dir_all(path).await.map_err(|e| PortError::Failed(e.to_string()))
     }
 
-    async fn create_worktree(&self, _repo: &Path, _branch: &str, target: &Path) -> PortResult<()> {
+    async fn inspect_git(&self, path: &Path) -> PortResult<GitState> {
+        Ok(match lock(&self.git).repos.get(path) {
+            Some(branch) => GitState::Repository { branch: branch.clone() },
+            None => GitState::NotRepository,
+        })
+    }
+
+    async fn create_worktree(&self, repo: &Path, branch: &str, target: &Path) -> PortResult<()> {
+        {
+            let mut git = lock(&self.git);
+            if let Some(reason) = git.worktree_failures.pop_front() {
+                return Err(PortError::Failed(reason));
+            }
+            let Some(Some(head)) = git.repos.get(repo).cloned() else {
+                return Err(PortError::Failed(format!("{} 不是簽出分支的 Git repo", repo.display())));
+            };
+            // 新分支從 repo 目前的 HEAD 建立；已存在時沿用（冪等）
+            let key = (repo.to_path_buf(), branch.to_string());
+            if !git.tips.contains_key(&key) {
+                let base = git.tips.get(&(repo.to_path_buf(), head)).cloned().unwrap_or_else(|| "base".into());
+                git.tips.insert(key, base);
+            }
+            git.worktree_branches.insert(target.to_path_buf(), branch.to_string());
+        }
         tokio::fs::create_dir_all(target).await.map_err(|e| PortError::Failed(e.to_string()))?;
         lock(&self.worktrees).insert(target.to_path_buf());
         Ok(())
+    }
+
+    async fn merge_for_integration(
+        &self,
+        repo: &Path,
+        target_branch: &str,
+        branch: &str,
+        integration_dir: &Path,
+    ) -> PortResult<MergeOutcome> {
+        let gate = lock(&self.git).merge_hold.take();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        tokio::fs::create_dir_all(integration_dir).await.map_err(|e| PortError::Failed(e.to_string()))?;
+        let mut git = lock(&self.git);
+        let target_tip = git
+            .tips
+            .get(&(repo.to_path_buf(), target_branch.to_string()))
+            .cloned()
+            .ok_or_else(|| PortError::Failed(format!("找不到分支 {target_branch}")))?;
+        let conflict = git.merge_conflicts.pop_front();
+        let commit = match &conflict {
+            Some(_) => None,
+            None => {
+                git.commits += 1;
+                Some(format!("merge-{}", git.commits))
+            }
+        };
+        git.merges.push(FakeMerge {
+            repo: repo.to_path_buf(),
+            target_branch: target_branch.to_string(),
+            branch: branch.to_string(),
+            integration_dir: integration_dir.to_path_buf(),
+            target_tip: target_tip.clone(),
+            commit: commit.clone(),
+        });
+        Ok(match (conflict, commit) {
+            (Some(detail), _) => MergeOutcome::Conflict { detail },
+            (None, Some(commit)) => MergeOutcome::Merged { commit, target_tip },
+            (None, None) => unreachable!("沒有衝突一定有合併結果"),
+        })
+    }
+
+    async fn advance_branch(
+        &self,
+        repo: &Path,
+        target_branch: &str,
+        expected_tip: &str,
+        commit: &str,
+    ) -> PortResult<AdvanceOutcome> {
+        let mut git = lock(&self.git);
+        let key = (repo.to_path_buf(), target_branch.to_string());
+        let actual = git.tips.get(&key).cloned().unwrap_or_default();
+        Ok(if actual == commit {
+            AdvanceOutcome::Advanced
+        } else if actual != expected_tip {
+            AdvanceOutcome::TargetMoved { actual }
+        } else {
+            git.tips.insert(key, commit.to_string());
+            AdvanceOutcome::Advanced
+        })
     }
 
     async fn remove_worktree(&self, target: &Path) -> PortResult<()> {
@@ -585,6 +753,8 @@ impl UserSettingsSource for FakeUserSettings {
 #[derive(Default)]
 pub struct FakeCommandRunner {
     results: Mutex<HashMap<String, PortResultOf<CommandOutput>>>,
+    /// 只在某個工作目錄生效的結果（優先於 `results`），例如讓整合目錄中的檢查與 worktree 中的結果不同。
+    results_in: Mutex<HashMap<(String, PathBuf), PortResultOf<CommandOutput>>>,
     calls: Mutex<Vec<CommandRequest>>,
     hold: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
@@ -596,6 +766,12 @@ impl FakeCommandRunner {
     /// 這個程式之後每次執行都以 `code` 結束，輸出 `output`。
     pub fn script_exit(&self, program: &str, code: i32, output: &str) {
         lock(&self.results).insert(program.to_string(), Ok(CommandOutput::Exited { code, output: output.to_string() }));
+    }
+
+    /// 這個程式之後在 `dir` 執行時都以 `code` 結束（優先於 `script_exit`）。
+    pub fn script_exit_in(&self, program: &str, dir: &Path, code: i32, output: &str) {
+        let result = Ok(CommandOutput::Exited { code, output: output.to_string() });
+        lock(&self.results_in).insert((program.to_string(), dir.to_path_buf()), result);
     }
 
     /// 這個程式之後每次執行都逾時。
@@ -625,12 +801,13 @@ impl FakeCommandRunner {
 impl CommandRunner for FakeCommandRunner {
     async fn run(&self, request: CommandRequest) -> PortResult<CommandOutput> {
         let program = request.program.clone();
+        let in_dir = lock(&self.results_in).get(&(program.clone(), request.working_dir.clone())).cloned();
         lock(&self.calls).push(request);
         let gate = lock(&self.hold).take();
         if let Some(gate) = gate {
             gate.notified().await;
         }
-        match lock(&self.results).get(&program).cloned() {
+        match in_dir.or_else(|| lock(&self.results).get(&program).cloned()) {
             Some(Ok(output)) => Ok(output),
             Some(Err(reason)) => Err(PortError::Failed(reason)),
             None => Err(PortError::Failed(format!("找不到程式「{program}」"))),

@@ -10,11 +10,15 @@
 //! 4. **核對 lease**：lease 過期只是「該去看看」：向 ProcessControl 查證，確認死亡才中斷 Run，存活就續約，不確定就維持原狀。
 //! 5. **額度**：輪詢到期（每個帳號每 5 分鐘）的外部額度觀測器並重新推估（票 27）。
 //! 6. **排程**：前面幾步可能釋放了帳號與全域名額，於是讓佇列中等待的 Task 依優先序逐一嘗試派出（票 19）；
-//!    派出的 Run 在同一次 `tick` 就啟動。
+//!    派出的 Run 在同一次 `tick` 就啟動。派出之前先為排隊的 Task 準備工作目錄（worktree 或輸出目錄，票 20），
+//!    目錄不可用時不派工，等待原因就是登記的失敗原因。
 //! 7. **驗證**（票 13）：對 `verifying` 且契約宣告了確定性檢查的 Task 執行檢查，以成果接受交易提交結果；
 //!    交易會校驗 Run 世代、契約版本與成果 manifest，觀察之後狀態已經改變（例如使用者先手動接受）就被拒絕。
 //!    檢查可能很久（命令最多 10 分鐘），所以背景迴圈把這一步放在另一個工作裡執行，不擋住前六步；
 //!    測試呼叫的 `tick` 則等它做完。
+//! 8. **整合**（票 20）：在驗證之後、同一個工作中依序處理單一整合佇列，一次一個項目：先持久化「開始合併」，
+//!    在整合目錄合併、執行整合驗證，通過才把目標分支前移並讓 Task 完成。崩潰後停在合併或驗證的項目從合併重做，
+//!    停在前移的項目以同一個合併結果重試前移（前移是冪等的）。
 //!
 //! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
 //! 由測試在想要的時刻呼叫 `tick`，搭配 fake Clock 就能完全決定性地重現任何時序。
@@ -33,6 +37,7 @@ use std::time::Duration;
 use baton_api::{quota, LogSink, RunSettings};
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::AgentScope;
+use baton_domain::integration::{self, AdvanceResult, IntegrationCommand, IntegrationStatus, MergeResult};
 use baton_domain::lifecycle::{
     ExitReport, ExitTiming, LifecycleFile, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
     RUN_GONE_AFTER_EXIT_REASON,
@@ -47,9 +52,10 @@ use baton_domain::session::{
 use baton_domain::verification::AcceptanceCommand;
 use baton_domain::Timestamp;
 use baton_ports::{
-    AdapterEvent, AgentHandle, Capability, Liveness, Ports, ProcessIdentity, RunSpec, SessionRef, SpawnSpec, StopResult,
+    AdapterEvent, AdvanceOutcome, AgentHandle, Capability, Liveness, MergeOutcome, Ports, ProcessIdentity, RunSpec,
+    SessionRef, SpawnSpec, StopResult,
 };
-use baton_store::{ExecutingRun, PendingLaunch, Store};
+use baton_store::{ExecutingRun, IntegrationWork, PendingLaunch, Store};
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{watch, Mutex, Notify};
@@ -151,11 +157,12 @@ impl Supervisor {
                     _ = tokio::time::sleep(BACKGROUND_INTERVAL) => {}
                 }
                 supervisor.supervise_once().await;
-                // 驗證在另一個工作裡進行；上一輪還沒做完就不再開新的一輪
+                // 驗證與整合在另一個工作裡進行；上一輪還沒做完就不再開新的一輪
                 if let Ok(guard) = supervisor.verify_lock.clone().try_lock_owned() {
                     let verifier = supervisor.clone();
                     tokio::spawn(async move {
                         verifier.verify_pending().await;
+                        verifier.integrate_pending().await;
                         drop(guard);
                     });
                 }
@@ -163,11 +170,12 @@ impl Supervisor {
         })
     }
 
-    /// 處理目前所有待辦（含驗證）；每個步驟的失敗只記日誌，下一次 tick 會自然重試。
+    /// 處理目前所有待辦（含驗證與整合）；每個步驟的失敗只記日誌，下一次 tick 會自然重試。
     pub async fn tick(&self) {
         self.supervise_once().await;
         let _serial = self.verify_lock.lock().await;
         self.verify_pending().await;
+        self.integrate_pending().await;
     }
 
     /// 驗證以外的七個步驟。
@@ -458,6 +466,11 @@ impl Supervisor {
                 self.note(&format!("無法讀取派工佇列：{error}"));
                 return false;
             }
+        }
+        // 先為排隊的 Task 準備工作目錄；失敗只會被登記，派工判定會據此等待並顯示原因
+        let now = self.ports.clock.now();
+        if let Err(error) = baton_api::workdirs::prepare(&self.store, &*self.ports.workspace_fs, now, None).await {
+            self.note(&format!("無法準備 Task 的工作目錄：{error}"));
         }
         let quota = match quota::current(&self.store, &*self.ports.quota_observer, self.ports.clock.now()).await {
             Ok(status) => quota::known_used(&status),
@@ -818,6 +831,107 @@ impl Supervisor {
                 )),
                 // 觀察之後狀態已經改變（例如使用者先手動接受）：這份結果已過期，不套用
                 Err(error) => self.note(&format!("Task {task_id} 的檢查結果沒有套用：{error}")),
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 整合
+
+    /// 依序處理單一整合佇列，直到沒有可處理的項目；呼叫端負責持有 `verify_lock`（與驗證同一個工作，一次一個）。
+    /// 同一個項目沒有前進（例如寫入失敗）就停下來，下一次 tick 再試，不會空轉。
+    async fn integrate_pending(&self) {
+        let mut last: Option<(String, i64)> = None;
+        loop {
+            let work = match self.store.next_integration().await {
+                Ok(Some(work)) => work,
+                Ok(None) => return,
+                Err(error) => return self.note(&format!("無法讀取整合佇列：{error}")),
+            };
+            let key = (work.entry.id.clone(), work.entry.version);
+            if last.as_ref() == Some(&key) {
+                return;
+            }
+            last = Some(key);
+            self.integrate(work).await;
+        }
+    }
+
+    /// 處理一個整合項目到結束（或到某一步失敗為止）。
+    async fn integrate(&self, work: IntegrationWork) {
+        let id = work.entry.id.clone();
+        let repo = std::path::PathBuf::from(&work.workspace.path);
+        let mut entry = work.entry.clone();
+        if entry.status != IntegrationStatus::Advancing {
+            // 1. 先持久化「開始合併」；Task 已不在驗證中時項目直接以失敗結束
+            let Some(begun) = self.apply_integration(IntegrationCommand::BeginMerge { id: id.clone() }).await else { return };
+            if begun.status != IntegrationStatus::Merging {
+                return;
+            }
+            // 2. 在整合目錄合併（目標分支不動）
+            let dir = integration::integration_dir(&work.workspace);
+            let merged = self
+                .ports
+                .workspace_fs
+                .merge_for_integration(&repo, &begun.target_branch, &begun.branch, std::path::Path::new(&dir))
+                .await;
+            let result = match merged {
+                Ok(MergeOutcome::Merged { commit, target_tip }) => MergeResult::Merged { commit, target_tip },
+                Ok(MergeOutcome::Conflict { detail }) => MergeResult::Conflict { detail },
+                Err(error) => MergeResult::Error { reason: error.to_string() },
+            };
+            let Some(recorded) = self.apply_integration(IntegrationCommand::RecordMerge { id: id.clone(), result }).await
+            else {
+                return;
+            };
+            if recorded.status != IntegrationStatus::Verifying {
+                return;
+            }
+            // 3. 整合驗證：同一份確定性檢查，在合併後的整合目錄中執行
+            let subject = crate::verifier::Subject { working_dir: &dir, manifest: &work.manifest, artifacts: &work.artifacts };
+            let results = crate::verifier::run_checks_in(&self.ports, &self.artifacts_root, &work.checks, &subject).await;
+            let Some(checked) = self.apply_integration(IntegrationCommand::RecordChecks { id: id.clone(), results }).await
+            else {
+                return;
+            };
+            entry = checked;
+        }
+        if entry.status != IntegrationStatus::Advancing {
+            return;
+        }
+        // 4. 驗證通過：把目標分支前移到合併結果（冪等；崩潰後以同一個結果重試）
+        let (Some(commit), Some(tip)) = (entry.merge_commit.clone(), entry.target_tip.clone()) else { return };
+        let advanced = self.ports.workspace_fs.advance_branch(&repo, &entry.target_branch, &tip, &commit).await;
+        let result = match advanced {
+            Ok(AdvanceOutcome::Advanced) => AdvanceResult::Advanced,
+            Ok(AdvanceOutcome::TargetMoved { actual }) => AdvanceResult::TargetMoved { actual },
+            Ok(AdvanceOutcome::Blocked { detail }) => AdvanceResult::Blocked { detail },
+            Err(error) => AdvanceResult::Error { reason: error.to_string() },
+        };
+        self.apply_integration(IntegrationCommand::RecordAdvance { id, result }).await;
+    }
+
+    /// 套用一個整合命令並記錄結果；被拒絕或寫入失敗只記日誌（下一次 tick 以最新狀態重試）。
+    async fn apply_integration(&self, command: IntegrationCommand) -> Option<baton_domain::integration::IntegrationEntry> {
+        match self.store.apply_integration(command, self.ports.clock.now()).await {
+            Ok(change) => {
+                let entry = change.entry;
+                match (entry.status, &entry.failure) {
+                    (IntegrationStatus::Failed, Some(reason)) => {
+                        self.note(&format!("Task {} 未通過整合：{reason}", entry.task_id))
+                    }
+                    (IntegrationStatus::Integrated, _) => self.note(&format!(
+                        "Task {} 已整合到 {}（{}），Task 完成",
+                        entry.task_id,
+                        entry.target_branch,
+                        entry.merge_commit.as_deref().unwrap_or("")
+                    )),
+                    _ => {}
+                }
+                Some(entry)
+            }
+            Err(error) => {
+                self.note(&format!("整合項目的命令沒有套用：{error}"));
+                None
             }
         }
     }
