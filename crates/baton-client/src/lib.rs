@@ -12,7 +12,7 @@ use baton_api::{
     admission_check_path, artifact_content_path, conversation_messages_path, conversation_path, PostMessageRequest,
     PostedMessage, artifact_preview_path, artifacts_path, authorization_path,
     authorization_summary_path, decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path,
-    decision_path, decisions_path, goals_path, run_cancel_path, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
+    decision_path, decisions_path, goals_path, run_cancel_path, run_context_path, RunContextView, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
     MergeResponse, UpdateAuthorityRequest, DECISIONS_BATCH_PATH,
     ArtifactList, ArtifactPreview, SHA256_HEADER,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
@@ -330,6 +330,11 @@ impl RuntimeClient {
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。
     pub async fn cancel_run(&self, workspace_id: &str, run_id: &str) -> Result<RunView, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &run_cancel_path(workspace_id, run_id), None).await
+    }
+
+    /// Run 的 context receipt 與實際交給 Worker 的 Prompt（票 39）。
+    pub async fn run_context(&self, workspace_id: &str, run_id: &str) -> Result<RunContextView, ClientError> {
+        self.get_json(&run_context_path(workspace_id, run_id)).await
     }
 
     /// 生命週期總覽：Runtime 階段、完全退出的停止進度與異常、各 Workspace 的自動續跑設定與暫停狀態。

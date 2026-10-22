@@ -12,9 +12,10 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use baton_domain::context::ContextReceipt;
 use baton_domain::run::{RunCommand, RunError, RunView};
 use baton_domain::scheduler::WaitReason;
-use baton_store::{RunApplyError, ScheduleRequest};
+use baton_store::{ContextApplyError, RunApplyError, ScheduleRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::scheduling::schedule_now;
@@ -26,6 +27,7 @@ pub(crate) const DISPATCH_ROUTE: &str = "/api/v1/workspaces/{id}/tasks/{task_id}
 pub(crate) const RUNS_ROUTE: &str = "/api/v1/workspaces/{id}/runs";
 pub(crate) const RUN_ROUTE: &str = "/api/v1/workspaces/{id}/runs/{run_id}";
 pub(crate) const CANCEL_ROUTE: &str = "/api/v1/workspaces/{id}/runs/{run_id}/cancel";
+pub(crate) const CONTEXT_ROUTE: &str = "/api/v1/workspaces/{id}/runs/{run_id}/context";
 
 /// 路徑；Runtime 與用戶端共用。
 pub fn task_dispatch_path(workspace_id: &str, task_id: &str) -> String {
@@ -42,6 +44,10 @@ pub fn run_path(workspace_id: &str, run_id: &str) -> String {
 
 pub fn run_cancel_path(workspace_id: &str, run_id: &str) -> String {
     format!("{}/cancel", run_path(workspace_id, run_id))
+}
+
+pub fn run_context_path(workspace_id: &str, run_id: &str) -> String {
+    format!("{}/context", run_path(workspace_id, run_id))
 }
 
 /// Workspace 的全部 Run（含已結束），依建立順序。
@@ -178,6 +184,36 @@ pub(crate) async fn detail(
     UrlPath((id, run_id)): UrlPath<(String, String)>,
 ) -> Result<Json<RunView>, TaskApiError> {
     Ok(Json(state.store.run_detail(&id, &run_id).await?))
+}
+
+/// Run 的 context receipt 與實際交給 Worker 的 Prompt（票 39）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunContextView {
+    pub receipt: ContextReceipt,
+    pub prompt: String,
+}
+
+impl From<ContextApplyError> for TaskApiError {
+    fn from(error: ContextApplyError) -> Self {
+        match error {
+            ContextApplyError::RunNotFound(run_id) => RunError::RunNotFound(run_id).into(),
+            ContextApplyError::ReceiptNotFound(_) => Self::Plain(ApiError {
+                status: StatusCode::NOT_FOUND,
+                code: "context_receipt_not_found",
+                message: error.to_string(),
+            }),
+            ContextApplyError::Store(store) => Self::Plain(store.into()),
+        }
+    }
+}
+
+/// 派工時保存的 context receipt；在 Context Builder 之前建立的 Run 沒有（404 `context_receipt_not_found`）。
+pub(crate) async fn context(
+    State(state): State<Arc<ApiState>>,
+    UrlPath((id, run_id)): UrlPath<(String, String)>,
+) -> Result<Json<RunContextView>, TaskApiError> {
+    let (receipt, prompt) = state.store.run_context(&id, &run_id).await?;
+    Ok(Json(RunContextView { receipt, prompt }))
 }
 
 /// 要求取消 Run；已經結束或已經要求過取消的 Run 是冪等的（回 200 與目前狀態）。

@@ -410,6 +410,17 @@ fn entry_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<KnowledgeEntry> {
     })
 }
 
+/// 全域與指定 Workspace 中已驗證的決策與教訓（Context Builder 用；範圍與有效期間由 Domain 再判定）。
+pub(crate) fn load_verified_guidance(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<KnowledgeEntry>> {
+    conn.prepare(&format!(
+        "SELECT {ENTRY_COLUMNS} FROM knowledge_entry
+         WHERE (workspace_id IS NULL OR workspace_id = ?1) AND status = 'verified' AND kind IN ('decision', 'lesson')
+         ORDER BY rowid"
+    ))?
+    .query_map([workspace_id], entry_row)?
+    .collect()
+}
+
 pub(crate) fn load_entry(conn: &Connection, id: &str) -> rusqlite::Result<Option<KnowledgeEntry>> {
     conn.query_row(&format!("SELECT {ENTRY_COLUMNS} FROM knowledge_entry WHERE id = ?1"), [id], entry_row)
         .map(Some)
