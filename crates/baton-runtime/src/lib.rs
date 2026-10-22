@@ -21,7 +21,7 @@ use std::time::Duration;
 use baton_api::{ApiState, LogSink};
 use baton_domain::lifecycle::{self, ExitTiming, FileStopView, LifecycleFile};
 use baton_ports::Ports;
-use baton_store::{Store, StoreError};
+use baton_store::{Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
@@ -62,6 +62,8 @@ pub struct RuntimeOptions {
     /// 完全退出的停止流程結束後，再提供多久 API（讓 App 讀到最終的停止結果）才結束服務；
     /// `None` 表示不自行結束（測試 harness 用，由測試決定何時丟棄 Runtime）。
     pub exit_linger: Option<Duration>,
+    /// 是否嘗試使用全文檢索（spec D-26）。關閉時視同 FTS5 不可用：知識搜尋退回 LIKE 並標示降級（測試降級情境用）。
+    pub full_text_search: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -71,6 +73,7 @@ impl Default for RuntimeOptions {
             stop_grace: supervisor::DEFAULT_STOP_GRACE,
             exit_timing: ExitTiming::default(),
             exit_linger: Some(DEFAULT_EXIT_LINGER),
+            full_text_search: true,
         }
     }
 }
@@ -98,7 +101,8 @@ impl Runtime {
             return Err(RuntimeError::NotLoopback(config.bind));
         }
         let started_at = ports.clock.now();
-        let store = Store::open(&config.data_dir, started_at).await?;
+        let store_options = StoreOptions { full_text_search: options.full_text_search };
+        let store = Store::open_with(&config.data_dir, started_at, store_options).await?;
         let boot_count = store.record_boot(started_at).await?;
         let log = log::open_log(&config.data_dir, ports.clock.clone()).map_err(RuntimeError::Log)?;
 
@@ -112,6 +116,9 @@ impl Runtime {
         (log)(&format!("Runtime 啟動：第 {boot_count} 次，監聽 {addr}{}，桌面憑證已輪替", {
             addr_v6.map(|a| format!(" 與 {a}")).unwrap_or_default()
         }));
+        if store.search_mode() == baton_domain::knowledge::SearchMode::LikeFallback {
+            (log)("全文檢索（FTS5 + trigram）無法使用，知識搜尋已降級為逐筆 LIKE 比對");
+        }
 
         let reopen_from = reconcile_stop_intent(&store, &config.data_dir, options.exit_timing, &ports, &log).await?;
 

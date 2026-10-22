@@ -13,6 +13,8 @@ use baton_api::{
     CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus,
     LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus,
     SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceLifecycleView, WorkspaceList,
+    ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
+    KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOutcome, RuntimeClient};
 use baton_credential::DpapiProtector;
@@ -732,6 +734,94 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Web UI 知識分頁的列表或搜尋（`include_inactive` 為 false 時只列有效條目）。
+#[tauri::command]
+async fn knowledge_list(
+    link: State<'_, RuntimeLink>,
+    workspace_id: Option<String>,
+    q: Option<String>,
+    include_inactive: bool,
+) -> Result<KnowledgeList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    let query = KnowledgeListQuery { workspace_id, q, include_inactive };
+    link.client.list_knowledge(&query).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 建立知識條目（直接是已驗證）。
+#[tauri::command]
+async fn knowledge_create(
+    link: State<'_, RuntimeLink>,
+    request: CreateKnowledgeRequest,
+) -> Result<KnowledgeEntryView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.create_knowledge(&request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 查看條目的版本與變更歷史。
+#[tauri::command]
+async fn knowledge_detail(link: State<'_, RuntimeLink>, id: String) -> Result<KnowledgeDetail, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.knowledge_detail(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 確認候選教訓。
+#[tauri::command]
+async fn knowledge_confirm(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    request: ConfirmKnowledgeRequest,
+) -> Result<KnowledgeEntryView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.confirm_knowledge(&id, &request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 修正條目內容（追加新版本）。
+#[tauri::command]
+async fn knowledge_correct(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    request: CorrectKnowledgeRequest,
+) -> Result<KnowledgeEntryView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.correct_knowledge(&id, &request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 撤銷條目。
+#[tauri::command]
+async fn knowledge_revoke(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    request: KnowledgeReasonRequest,
+) -> Result<KnowledgeEntryView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.revoke_knowledge(&id, &request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 淘汰條目。
+#[tauri::command]
+async fn knowledge_retire(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    request: KnowledgeReasonRequest,
+) -> Result<KnowledgeEntryView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.retire_knowledge(&id, &request).await.map_err(|e| e.to_string())
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
@@ -784,7 +874,14 @@ fn main() {
             workspace_lifecycle_update,
             workspace_resume,
             app_quit,
-            profile_set_quota_limits
+            profile_set_quota_limits,
+            knowledge_list,
+            knowledge_create,
+            knowledge_detail,
+            knowledge_confirm,
+            knowledge_correct,
+            knowledge_revoke,
+            knowledge_retire
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {

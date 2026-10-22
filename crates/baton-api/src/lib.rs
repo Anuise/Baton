@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -9,6 +9,7 @@ mod artifacts;
 mod authorization;
 mod decisions;
 mod guard;
+mod knowledge;
 mod lifecycle;
 mod messages;
 mod profiles;
@@ -35,6 +36,7 @@ use baton_domain::agent::{
     TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
+use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
 use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, QuotaObserver, UserSettingsSource, WorkspaceFs};
@@ -62,6 +64,11 @@ pub use tasks::{
     TaskDetail, UpdateContractRequest,
 };
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
+pub use knowledge::{
+    knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest,
+    KnowledgeDetail, KnowledgeEntryView, KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
+    LessonCandidateRecorded, ScopeInput, KNOWLEDGE_PATH,
+};
 pub use lifecycle::{
     workspace_lifecycle_path, workspace_resume_path, LifecycleStatus, UpdateWorkspaceLifecycleRequest,
     WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
@@ -204,6 +211,12 @@ pub fn router(state: ApiState) -> Router {
         .route(artifacts::ARTIFACTS_ROUTE, get(artifacts::list))
         .route(artifacts::PREVIEW_ROUTE, get(artifacts::preview))
         .route(artifacts::CONTENT_ROUTE, get(artifacts::content))
+        .route(KNOWLEDGE_PATH, get(knowledge::list).post(knowledge::create))
+        .route(knowledge::ENTRY_ROUTE, get(knowledge::detail))
+        .route(knowledge::CONFIRM_ROUTE, post(knowledge::confirm))
+        .route(knowledge::CORRECT_ROUTE, post(knowledge::correct))
+        .route(knowledge::REVOKE_ROUTE, post(knowledge::revoke))
+        .route(knowledge::RETIRE_ROUTE, post(knowledge::retire))
         // Agent API：只接受 Agent 憑證（guard 依路徑前綴決定所需角色）
         .route(&tool_path(TOOL_GET_TASK_CONTRACT), post(agent::get_task_contract))
         .route(&tool_path(TOOL_REPORT_PROGRESS), post(agent::report_progress))
@@ -214,6 +227,8 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
         .route(&tool_path(TOOL_SEND_MESSAGE), post(messages::send_message))
         .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))
+        .route(&tool_path(TOOL_RECORD_LESSON_CANDIDATE), post(knowledge::record_lesson_candidate))
+        .route(&tool_path(TOOL_SEARCH_KNOWLEDGE), post(knowledge::search_knowledge))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)
