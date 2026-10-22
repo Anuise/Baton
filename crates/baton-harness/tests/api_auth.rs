@@ -416,3 +416,19 @@ async fn open_stream_does_not_block_restart_and_ends_when_runtime_stops() {
     let end = tokio::time::timeout(Duration::from_secs(5), async { while let Ok(Some(_)) = stream.chunk().await {} }).await;
     assert!(end.is_ok(), "串流在 Runtime 停止後仍未結束");
 }
+
+#[tokio::test]
+async fn runtime_refuses_to_start_on_a_non_loopback_address() {
+    use baton_domain::Timestamp;
+    use baton_harness::FakePorts;
+    use baton_runtime::{Runtime, RuntimeConfig, RuntimeError};
+
+    for bind in ["0.0.0.0:0", "192.168.1.5:0", "[::]:0"] {
+        let data_dir = tempfile::tempdir().unwrap();
+        let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: bind.parse().unwrap() };
+
+        let result = Runtime::start(config, FakePorts::new(Timestamp::from_millis(0)).to_ports()).await;
+
+        assert!(matches!(result, Err(RuntimeError::NotLoopback(_))), "{bind} 應被拒絕");
+    }
+}

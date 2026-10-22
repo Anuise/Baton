@@ -173,7 +173,6 @@ dependencies = [
  "baton-store",
  "futures",
  "serde",
- "serde_json",
  "tokio",
 ]
 
@@ -182,7 +181,10 @@ name = "baton-client"
 version = "0.1.0"
 dependencies = [
  "baton-api",
+ "baton-credential",
+ "baton-domain",
  "baton-harness",
+ "baton-ports",
  "reqwest 0.12.28",
  "thiserror 2.0.21",
  "tokio",
@@ -204,6 +206,7 @@ version = "0.1.0"
 dependencies = [
  "baton-api",
  "baton-client",
+ "baton-credential",
  "baton-domain",
  "tauri",
  "tauri-build",

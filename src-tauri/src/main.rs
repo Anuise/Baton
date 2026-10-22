@@ -3,12 +3,13 @@
 // release 版不顯示額外的主控台視窗
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::HealthResponse;
-use baton_client::{ensure_runtime, fetch_health, spawn_runtime_process, Connection};
+use baton_client::{ensure_runtime, spawn_runtime_process, Connection, RuntimeClient};
+use baton_credential::DpapiProtector;
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
 use tauri::{Manager, State};
 use tokio::sync::OnceCell;
@@ -20,7 +21,8 @@ const START_WAIT: Duration = Duration::from_secs(20);
 const RUNTIME_EXE: &str = "baton-runtime.exe";
 
 struct RuntimeLink {
-    addr: SocketAddr,
+    /// 每次呼叫都重新讀取 DPAPI 保護的桌面憑證；憑證只在殼內處理，不交給 Web UI
+    client: RuntimeClient,
     envs: Vec<(String, String)>,
     /// 啟動流程只做一次；結果（成功或失敗原因）供之後的健康查詢使用
     startup: OnceCell<Result<Connection, String>>,
@@ -34,7 +36,8 @@ impl RuntimeLink {
             (ENV_DATA_DIR.to_string(), config.data_dir.display().to_string()),
             (ENV_PORT.to_string(), config.bind.port().to_string()),
         ];
-        Ok(Self { addr: config.bind, envs, startup: OnceCell::new() })
+        let client = RuntimeClient::new(config.bind, config.data_dir, Arc::new(DpapiProtector));
+        Ok(Self { client, envs, startup: OnceCell::new() })
     }
 
     /// 連回既有的 Runtime，沒有就啟動一個；只會執行一次。
@@ -43,7 +46,7 @@ impl RuntimeLink {
             .get_or_init(|| async {
                 let exe = runtime_exe_path().map_err(|e| e.to_string())?;
                 ensure_runtime(
-                    self.addr,
+                    &self.client,
                     || spawn_runtime_process(&exe, &self.envs).map(drop),
                     START_WAIT,
                 )
@@ -66,7 +69,7 @@ async fn runtime_health(link: State<'_, RuntimeLink>) -> Result<HealthResponse, 
     if let Err(reason) = link.ensure_started().await {
         return Err(reason.clone());
     }
-    fetch_health(link.addr).await.map_err(|e| e.to_string())
+    link.client.health().await.map_err(|e| e.to_string())
 }
 
 fn main() {

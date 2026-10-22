@@ -12,5 +12,4 @@ baton-store = { path = "../baton-store" }
 axum = "0.8"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tokio = { version = "1", features = ["sync"] }

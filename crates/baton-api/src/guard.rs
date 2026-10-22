@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::auth::{hash_token, Role};
 
-use crate::ApiState;
+use crate::{ApiState, ErrorBody};
 
 /// 每個請求都必須帶的自訂標頭。跨網站請求帶自訂標頭會觸發 CORS 預檢，而預檢一律被拒絕。
 pub const CLIENT_HEADER: &str = "x-baton-client";
@@ -85,7 +85,8 @@ impl Denial {
 
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
-        (self.status(), Json(serde_json::json!({ "error": self.code(), "message": self.message() }))).into_response()
+        let body = ErrorBody { error: self.code().to_string(), message: self.message().to_string() };
+        (self.status(), Json(body)).into_response()
     }
 }
 

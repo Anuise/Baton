@@ -4,10 +4,13 @@
 //! 即使兩個 App 同時啟動，多出來的 Runtime 也會因取不到 mutex 而自行結束。
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::{HealthResponse, HEALTH_PATH};
+use baton_api::{ErrorBody, HealthResponse, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH};
+use baton_credential::CredentialFileError;
+use baton_ports::SecretProtector;
 
 /// 連線方式：連回既有的，或由本次呼叫啟動。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,47 +27,93 @@ pub enum ClientError {
     Spawn(std::io::Error),
     #[error("Runtime 在 {0:?} 內沒有就緒")]
     StartTimeout(Duration),
+    /// 讀不到或還原不了桌面憑證；此時不會送出任何請求。
+    #[error("無法取得桌面憑證：{0}")]
+    Credential(#[from] CredentialFileError),
+    /// Runtime 拒絕了請求（憑證無效、過期、角色不符等）；`code` 是 Runtime 回報的穩定代碼。
+    #[error("Runtime 拒絕連線（{code}）：{message}")]
+    Rejected { code: String, message: String },
 }
 
-/// 查詢 Runtime 的健康狀態。
-pub async fn fetch_health(addr: SocketAddr) -> Result<HealthResponse, ClientError> {
-    let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
-    // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_millis(300))
-        .build()
-        .map_err(unreachable)?
-        .get(format!("http://{addr}{HEALTH_PATH}"))
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(unreachable)?
-        .json()
-        .await
-        .map_err(unreachable)
+/// 桌面 App 對 Runtime 的用戶端：每次呼叫都重新讀取憑證檔並帶上 bearer 憑證與固定標頭。
+///
+/// 因為每次都讀檔，Runtime 重啟輪替憑證後不需要任何人工動作就會用新憑證連線；
+/// 驗證失敗時回報原因，不會改用免驗證的方式重試。
+pub struct RuntimeClient {
+    addr: SocketAddr,
+    data_dir: PathBuf,
+    protector: Arc<dyn SecretProtector>,
+}
+
+impl RuntimeClient {
+    pub fn new(addr: SocketAddr, data_dir: PathBuf, protector: Arc<dyn SecretProtector>) -> Self {
+        Self { addr, data_dir, protector }
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// 查詢 Runtime 的健康狀態。
+    pub async fn health(&self) -> Result<HealthResponse, ClientError> {
+        let token = baton_credential::read_desktop_credential(&self.data_dir, &*self.protector)?;
+        let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
+        // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
+        let response = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(300))
+            .build()
+            .map_err(unreachable)?
+            .get(format!("http://{}{HEALTH_PATH}", self.addr))
+            .bearer_auth(token)
+            .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            // reqwest 的錯誤訊息只含 URL（不含憑證，憑證在標頭裡）
+            .map_err(unreachable)?;
+
+        if response.status().is_success() {
+            return response.json().await.map_err(unreachable);
+        }
+        let status = response.status();
+        Err(match response.json::<ErrorBody>().await {
+            Ok(body) => ClientError::Rejected { code: body.error, message: body.message },
+            Err(_) => ClientError::Rejected { code: format!("http_{}", status.as_u16()), message: status.to_string() },
+        })
+    }
 }
 
 /// 確保 Runtime 可用：已在執行就連回，否則呼叫 `start` 啟動並等到就緒（最多 `wait`）。
+///
+/// Runtime 已在執行但拒絕憑證時，直接回報原因，不會再啟動另一個。
 pub async fn ensure_runtime(
-    addr: SocketAddr,
+    client: &RuntimeClient,
     start: impl FnOnce() -> std::io::Result<()>,
     wait: Duration,
 ) -> Result<(Connection, HealthResponse), ClientError> {
-    if let Ok(health) = fetch_health(addr).await {
-        return Ok((Connection::AlreadyRunning, health));
+    match client.health().await {
+        Ok(health) => return Ok((Connection::AlreadyRunning, health)),
+        Err(rejected @ ClientError::Rejected { .. }) => return Err(rejected),
+        Err(_) => {}
     }
 
     start().map_err(ClientError::Spawn)?;
 
     let deadline = tokio::time::Instant::now() + wait;
+    let mut stale_credential = None;
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Ok(health) = fetch_health(addr).await {
-            return Ok((Connection::Started, health));
+        match client.health().await {
+            Ok(health) => return Ok((Connection::Started, health)),
+            // 剛讀到的是啟動前的舊憑證：Runtime 在開始監聽前才換新憑證，下一輪重讀就會對
+            Err(ClientError::Rejected { code, message }) if code == "credential_invalid" => {
+                stale_credential = Some(ClientError::Rejected { code, message });
+            }
+            Err(rejected @ ClientError::Rejected { .. }) => return Err(rejected),
+            Err(_) => {}
         }
     }
-    Err(ClientError::StartTimeout(wait))
+    Err(stale_credential.unwrap_or(ClientError::StartTimeout(wait)))
 }
 
 /// 以脫離本程序的方式啟動 Runtime 執行檔；關閉 App 後 Runtime 仍會繼續執行。

@@ -2,9 +2,11 @@
 
 use std::cell::Cell;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::sync::Arc;
 use std::time::Duration;
 
-use baton_client::{ensure_runtime, ClientError, Connection};
+use baton_client::{ensure_runtime, ClientError, Connection, RuntimeClient};
+use baton_harness::fakes::FakeSecretProtector;
 use baton_harness::Harness;
 
 fn unused_local_addr() -> SocketAddr {
@@ -12,13 +14,20 @@ fn unused_local_addr() -> SocketAddr {
     listener.local_addr().unwrap()
 }
 
+/// 沒有任何 Runtime 的資料目錄：用戶端讀不到憑證，也連不上。
+fn offline_client() -> RuntimeClient {
+    let data_dir = std::env::temp_dir().join("baton-offline-test-no-such-data-dir");
+    RuntimeClient::new(unused_local_addr(), data_dir, Arc::new(FakeSecretProtector))
+}
+
 #[tokio::test]
 async fn connects_to_running_runtime_without_starting_another() {
     let harness = Harness::start().await;
     let started = Cell::new(0);
+    let client = RuntimeClient::new(harness.addr(), harness.data_dir().to_path_buf(), Arc::new(FakeSecretProtector));
 
     let (connection, health) = ensure_runtime(
-        harness.addr(),
+        &client,
         || {
             started.set(started.get() + 1);
             Ok(())
@@ -38,7 +47,7 @@ async fn starts_runtime_once_and_times_out_if_it_never_becomes_healthy() {
     let started = Cell::new(0);
 
     let result = ensure_runtime(
-        unused_local_addr(),
+        &offline_client(),
         || {
             started.set(started.get() + 1);
             Ok(())
@@ -54,7 +63,7 @@ async fn starts_runtime_once_and_times_out_if_it_never_becomes_healthy() {
 #[tokio::test]
 async fn reports_start_failure_without_waiting() {
     let result = ensure_runtime(
-        unused_local_addr(),
+        &offline_client(),
         || Err(std::io::Error::new(std::io::ErrorKind::NotFound, "找不到執行檔")),
         Duration::from_secs(30),
     )

@@ -43,6 +43,13 @@ pub struct HealthResponse {
     pub pid: u32,
 }
 
+/// 請求被拒絕時的回應內容；Runtime 與用戶端共用。`error` 是穩定的機器可讀代碼。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorBody {
+    pub error: String,
+    pub message: String,
+}
+
 /// Router 需要的執行期狀態。
 #[derive(Clone)]
 pub struct ApiState {

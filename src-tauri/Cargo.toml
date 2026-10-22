@@ -11,6 +11,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 baton-api = { path = "../crates/baton-api" }
 baton-client = { path = "../crates/baton-client" }
+baton-credential = { path = "../crates/baton-credential" }
 baton-domain = { path = "../crates/baton-domain" }
 tauri = { version = "2", features = [] }
 tokio = { version = "1", features = ["sync"] }
