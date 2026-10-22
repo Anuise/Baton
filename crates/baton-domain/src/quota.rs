@@ -317,7 +317,8 @@ pub fn observe_signal(profile_id: &str, run_id: &str, signal: &RateLimitSignal, 
     }
 }
 
-/// 依本機 Run 的用量推估一個視窗：視窗內累計 token ÷ 方案上限。沒有方案上限就算不出比例（未知）。
+/// 依本機 Run 的用量推估一個視窗：視窗內累計 token ÷ 方案上限。沒有方案上限、或視窗內沒有任何本機用量時
+/// 算不出比例（未知）。
 /// 重置時間是視窗內最早一筆用量滑出視窗的時間；視窗內沒有用量就沒有重置時間。
 pub fn estimate(
     profile_id: &str,
@@ -330,7 +331,8 @@ pub fn estimate(
     let counted: Vec<&UsageRecord> = usage.iter().filter(|u| u.reported_at > since && u.reported_at <= now).collect();
     let tokens: u64 = counted.iter().map(|u| u.tokens).sum();
     let limit = limits.for_window(window);
-    let used = limit.map(|limit| tokens as f64 / limit as f64);
+    // 視窗內沒有任何本機用量時沒有依據可以推估（其他裝置的用量看不到），是未知而不是 0
+    let used = limit.filter(|_| !counted.is_empty()).map(|limit| tokens as f64 / limit as f64);
     let raw_ref = match (counted.iter().map(|u| u.seq).min(), counted.iter().map(|u| u.seq).max()) {
         (Some(first), Some(last)) => format!("quota_usage:seq={first}..{last}"),
         _ => "quota_usage:none".to_string(),

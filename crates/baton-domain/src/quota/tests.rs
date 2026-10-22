@@ -77,9 +77,12 @@ fn estimate_divides_usage_inside_the_rolling_window_by_the_plan_limit() {
 }
 
 #[test]
-fn estimate_with_a_limit_but_no_local_usage_has_no_reset_time() {
+fn estimate_with_a_limit_but_no_local_usage_is_unknown_and_has_no_reset_time() {
     let estimate = estimate("p1", QuotaWindow::FiveHour, &[], &limits(Some(10_000), None), NOW);
-    assert_eq!(estimate.used, Some(0.0));
+    assert_eq!(estimate.used, None, "沒有本機用量就沒有推估的依據，不是 0");
+    assert_eq!(estimate.confidence, Confidence::Unknown);
+    assert_eq!(estimate.tokens, Some(0));
+    assert_eq!(estimate.limit_tokens, Some(10_000));
     assert_eq!(estimate.reset_at, None);
     assert_eq!(estimate.raw_ref, "quota_usage:none");
 }
