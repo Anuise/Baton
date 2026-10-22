@@ -9,20 +9,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview,
-    SHA256_HEADER, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
+    admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, authorization_path,
+    authorization_summary_path, decision_answer_path, decision_path, decisions_path, goals_path, run_cancel_path,
+    ArtifactList, ArtifactPreview, SHA256_HEADER,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_path, task_ready_path, tasks_path, workspace_lifecycle_path, workspace_resume_path, LifecycleStatus,
     QueuedDispatch, UpdateWorkspaceLifecycleRequest, WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
-    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AuthorizationView,
+    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
-    ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PlatformResponse, ProfileList,
+    ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
     RunSettingsSnapshot, SetupStatus, SharedSettingsStatus, SnapshotRequest, SummaryRequest, TaskBoard, TaskDetail,
-    UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, PROFILES_PATH,
-    SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH, SHARED_SETTINGS_PATH,
-    SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
+    UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
+    PLATFORM_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
+    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
 };
+use baton_domain::decision::DecisionView;
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
 use baton_domain::quota::PlanLimits;
@@ -33,6 +35,7 @@ use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
+use baton_store::{AnswerResult, DecisionList};
 
 /// 派工的結果：Scheduler 找到帳號與名額就建立 Run；否則排進佇列並回報原因。
 /// 序列化後與 Runtime 回應的 JSON 形狀相同（排隊中有 `queued: true`），Web UI 以它區分兩種結果。
@@ -302,6 +305,32 @@ impl RuntimeClient {
     /// 「繼續工作」：解除 Workspace 在完全退出後的暫停。
     pub async fn resume_workspace(&self, workspace_id: &str) -> Result<WorkspaceLifecycleView, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &workspace_resume_path(workspace_id), None).await
+    }
+
+    /// 裁定中心：Workspace 內的裁定請求（待處理優先）與待處理數。
+    pub async fn decision_list(&self, workspace_id: &str) -> Result<DecisionList, ClientError> {
+        self.get_json(&decisions_path(workspace_id)).await
+    }
+
+    pub async fn decision_detail(&self, workspace_id: &str, request_id: &str) -> Result<DecisionView, ClientError> {
+        self.get_json(&decision_path(workspace_id, request_id)).await
+    }
+
+    /// 提交正式裁定；同樣的答案重送是冪等的，不同的答案回傳 `ClientError::Rejected`（`decision_already_answered`）。
+    pub async fn decision_answer(
+        &self,
+        workspace_id: &str,
+        request_id: &str,
+        option_id: &str,
+        note: Option<String>,
+    ) -> Result<AnswerResult, ClientError> {
+        let request = AnswerRequest { option_id: option_id.to_string(), note };
+        self.send_json(reqwest::Method::POST, &decision_answer_path(workspace_id, request_id), Some(&request)).await
+    }
+
+    /// 全域待處理裁定數（狀態列）。
+    pub async fn pending_decisions(&self) -> Result<PendingDecisions, ClientError> {
+        self.get_json(PENDING_DECISIONS_PATH).await
     }
 
     /// 共同設定的目前狀態：已採用的版本與最新版本。

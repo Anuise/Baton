@@ -139,7 +139,9 @@ impl Store {
                                 profile_id: profile_id.clone(),
                             };
                             match run::decide(&ctx, command, now) {
-                                Ok(change) => {
+                                Ok(mut change) => {
+                                    // 與 apply_run_command 的派工相同：Prompt 附上收件 Task 的未讀訊息摘要（票 18）
+                                    super::messages::attach_unread_summary(tx, &mut change, now)?;
                                     let run_id = change.run.as_ref().map(|r| r.id.clone()).unwrap_or_default();
                                     save(tx, &change, now)?;
                                     outcome.started.push(StartedRun {

@@ -7,8 +7,10 @@
 mod agent;
 mod artifacts;
 mod authorization;
+mod decisions;
 mod guard;
 mod lifecycle;
+mod messages;
 mod profiles;
 pub mod quota;
 mod runs;
@@ -27,7 +29,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::lifecycle::ExitTiming;
-use baton_domain::agent::{TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT};
+use baton_domain::agent::{
+    TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
+    TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
+};
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
@@ -37,11 +42,15 @@ use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
 
-pub use agent::{tool_path, ReportAck, TaskContractResponse};
+pub use agent::{tool_path, DecisionRequested, PermissionResponse, ReportAck, TaskContractResponse};
+pub use decisions::{
+    decision_answer_path, decision_path, decisions_path, AnswerRequest, PendingDecisions, PENDING_DECISIONS_PATH,
+};
 pub use artifacts::{
     artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview, ArtifactRegistered,
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
+pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
     AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
@@ -161,6 +170,10 @@ pub fn router(state: ApiState) -> Router {
         .route(tasks::ADMISSION_ROUTE, post(tasks::admission_check))
         .route(tasks::READY_ROUTE, post(tasks::mark_ready))
         .route(tasks::CANCEL_ROUTE, post(tasks::cancel))
+        .route(decisions::DECISIONS_ROUTE, get(decisions::list))
+        .route(decisions::DECISION_ROUTE, get(decisions::detail))
+        .route(decisions::ANSWER_ROUTE, post(decisions::answer))
+        .route(PENDING_DECISIONS_PATH, get(decisions::pending))
         .route(PROFILES_PATH, get(profiles::list).post(profiles::create))
         .route(profiles::VERIFY_ROUTE, post(profiles::verify))
         .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))
@@ -192,7 +205,11 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_REPORT_PROGRESS), post(agent::report_progress))
         .route(&tool_path(TOOL_SAVE_CHECKPOINT), post(agent::save_checkpoint))
         .route(&tool_path(TOOL_REPORT_BLOCKED), post(agent::report_blocked))
+        .route(&tool_path(TOOL_REQUEST_DECISION), post(agent::request_decision))
+        .route(&tool_path(TOOL_PERMISSION_PROMPT), post(agent::permission_prompt))
         .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
+        .route(&tool_path(TOOL_SEND_MESSAGE), post(messages::send_message))
+        .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

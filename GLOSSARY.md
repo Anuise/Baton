@@ -67,6 +67,11 @@
 - **關係**：由 Runtime 中途中斷（或登記被拒）造成；不被當成成果、不自動刪除，在成果列表中顯示，讓恢復時可辨識；與 Task 狀態無關。
 - **避免使用**：orphan file、垃圾檔、temp file（暫存檔只指 `.partial`）。
 
+### Message（訊息）
+- **定義**：Worker 之間交換研究結果或協商介面的一則通知，含 `message_id`、`thread_id`、`correlation_id`、類型（`note`、`question`、`answer`、`result`）、寄件 Run 與收件 Task。每個收件 Task 各有一筆交付，狀態由 `pending`（已存入）→ `delivered`（出現在 Run 啟動的未讀摘要）→ `read`（用 `read_inbox` 取走全文）。
+- **關係**：屬於 Workspace；收件匣跟著 Task，交接後的新 Run 接得到前一個 Run 沒讀完的訊息；同一個 `message_id` 對同一個收件人只交付一次；Worker 自己拉取，Runtime 不在執行中途插話。訊息不能改變 Task 的歸屬或範圍，想這麼做的嘗試會被忽略並轉成給 Controller 的事件。
+- **避免使用**：notification、chat、broadcast、command（訊息不是指令，也不是 Controller 與使用者的對話；那是 conversation）。
+
 ### Account Profile
 - **定義**：一個 Claude Code 帳號及其獨立的原生登入與 Session 狀態，是額度管理的單位。
 - **關係**：每個 Run 綁定一個 Account Profile；額度觀測、並行上限與 draining 都以 Account Profile 為單位；各 Profile 之間不共用登入資料；共同設定以版本化快照提供，不直接共用。
@@ -149,6 +154,11 @@
 - **定義**：Decision Request 經人工正式裁定後產生的正式決策，保存權威來源、理由、適用範圍、有效期間與 supersedes（取代關係）。
 - **關係**：回應一個 Decision Request；影響受影響 Task 的狀態；被 Context Builder 載入 Run；被 Decision Map 引用而不重複保存；Agent 的建議與人工的 Decision 分開保存。
 - **避免使用**：ruling（動詞「裁定」可用，名詞統一用 Decision）、choice、approval。
+
+### Permission Prompt（權限提示）
+- **定義**：Worker 以非互動權限模式執行時，未預先允許的工具操作經 `permission_prompt` 工具送到 Runtime 的詢問。Runtime 依 Workspace 目前生效的授權判定：範圍內自動允許並記錄；範圍外（含無法歸類）建立一個 Decision Request 並回「等待裁定」。
+- **關係**：由 Worker 在 Run 中提出；對照 Workspace Authorization；範圍外的結果是 `kind = permission` 的 Decision Request，只阻擋提出提示的 Task；使用者回答「允許這一次」只是單次批准（由同一 Task 的同一操作消耗一次），不擴大 Workspace Authorization。
+- **避免使用**：permission request、approval（回答權限提示的結果仍是 Decision）。
 
 ### Lesson
 - **定義**：從事件與證據得出的教訓，保存觸發條件、根因或待驗假說、有效解法、禁用或重試限制、適用版本與重犯紀錄。狀態為「候選」或「已驗證」；候選須由使用者確認才升為已驗證。

@@ -15,13 +15,14 @@ use axum::http::StatusCode;
 use axum::{Extension, Json};
 use baton_domain::agent::{ReportContent, ReportError, ReportKind, AGENT_TOOLS_PREFIX};
 use baton_domain::auth::{AgentScope, CredentialRecord};
+use baton_domain::decision::{DecisionOption, DecisionOutcome, PermissionOutcome, RequestContent, Urgency};
 use baton_domain::run::RunError;
 use baton_domain::task::ContractContent;
 use baton_store::RunApplyError;
 use serde::{Deserialize, Serialize};
 
 use crate::authorization::bad_json;
-use crate::workspaces::ApiError;
+use crate::workspaces::{new_id, ApiError};
 use crate::ApiState;
 
 /// 路徑；Runtime、MCP shim 與測試共用。
@@ -200,4 +201,139 @@ pub(crate) async fn report_blocked(
     let Json(request) = body.map_err(bad_json)?;
     let scope = scope_of(&record, &request.claims)?;
     report(&state, scope, ReportContent::blocked(&request.reason)).await
+}
+
+// ---------------------------------------------------------------- 裁定請求與權限提示（票 22）
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RequestDecisionRequest {
+    question: String,
+    reason: String,
+    options: Vec<DecisionOption>,
+    #[serde(default)]
+    recommendation: Option<String>,
+    #[serde(default)]
+    evidence: Vec<String>,
+    #[serde(default)]
+    urgency: Option<Urgency>,
+    /// 期限（從現在起幾分鐘）；只用來標示逾期，逾時不代表同意。
+    #[serde(default)]
+    deadline_minutes: Option<i64>,
+    #[serde(flatten)]
+    claims: Claims,
+}
+
+/// `request_decision` 的回應：請求已交給使用者，Worker 應保存 checkpoint 並以 blocked 結束，或改做其他步驟。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionRequested {
+    pub decision_request_id: String,
+    pub status: String,
+    /// 同一個問題仍在等待時回到既有的請求（沒有重複建立）。
+    pub existing: bool,
+    pub message: String,
+}
+
+pub(crate) async fn request_decision(
+    State(state): State<Arc<ApiState>>,
+    Extension(record): Extension<CredentialRecord>,
+    body: Result<Json<RequestDecisionRequest>, JsonRejection>,
+) -> Result<Json<DecisionRequested>, ApiError> {
+    let Json(request) = body.map_err(bad_json)?;
+    let scope = scope_of(&record, &request.claims)?;
+    let content = RequestContent::new(
+        &request.question,
+        &request.reason,
+        request.options,
+        request.recommendation.as_deref(),
+        request.evidence,
+        request.urgency,
+        request.deadline_minutes,
+    )
+    .map_err(baton_store::DecisionApplyError::from)?;
+    let outcome = state.store.request_decision(&scope, new_id("decision")?, content, state.clock.now()).await?;
+    let DecisionOutcome::Requested { request_id, existing } = outcome else {
+        unreachable!("Request 命令只會得到 Requested 結果")
+    };
+    Ok(Json(DecisionRequested {
+        decision_request_id: request_id,
+        status: "waiting_decision".to_string(),
+        existing,
+        message: "已建立裁定請求，等待使用者裁定；只有受影響的工作會暫停。\
+                  請先保存 checkpoint，再以 report_blocked 結束，或改做不需要這項裁定的其他步驟。"
+            .to_string(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PermissionPromptRequest {
+    tool_name: String,
+    #[serde(default)]
+    input: serde_json::Value,
+    #[serde(flatten)]
+    claims: Claims,
+}
+
+/// `permission_prompt` 的回應，形狀遵循 Claude Code 的 `--permission-prompt-tool` 協定
+/// （`behavior`、`updatedInput`、`message`），另加 Baton 的說明欄位。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PermissionResponse {
+    /// `allow` 或 `deny`。
+    pub behavior: String,
+    #[serde(rename = "updatedInput", default, skip_serializing_if = "Option::is_none")]
+    pub updated_input: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// `auto_allowed`（授權範圍內）、`approved`（使用者允許這一次）、`waiting_decision`（等待裁定）、`denied`（使用者拒絕）。
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_revision: Option<i64>,
+}
+
+pub(crate) async fn permission_prompt(
+    State(state): State<Arc<ApiState>>,
+    Extension(record): Extension<CredentialRecord>,
+    body: Result<Json<PermissionPromptRequest>, JsonRejection>,
+) -> Result<Json<PermissionResponse>, ApiError> {
+    let Json(request) = body.map_err(bad_json)?;
+    let scope = scope_of(&record, &request.claims)?;
+    let input = if request.input.is_null() { serde_json::json!({}) } else { request.input };
+    let outcome = state
+        .store
+        .permission_prompt(&scope, new_id("decision")?, new_id("perm")?, request.tool_name, input.clone(), state.clock.now())
+        .await?;
+    let DecisionOutcome::Permission(outcome) = outcome else {
+        unreachable!("PermissionPrompt 命令只會得到 Permission 結果")
+    };
+    let response = |behavior: &str, status: &str| PermissionResponse {
+        behavior: behavior.to_string(),
+        updated_input: None,
+        message: None,
+        status: status.to_string(),
+        decision_request_id: None,
+        authorization_revision: None,
+    };
+    Ok(Json(match outcome {
+        PermissionOutcome::Allowed { revision, .. } => PermissionResponse {
+            updated_input: Some(input),
+            authorization_revision: Some(revision),
+            ..response("allow", "auto_allowed")
+        },
+        PermissionOutcome::Approved { request_id } => PermissionResponse {
+            updated_input: Some(input),
+            decision_request_id: Some(request_id),
+            ..response("allow", "approved")
+        },
+        PermissionOutcome::Waiting { request_id, message } => PermissionResponse {
+            message: Some(message),
+            decision_request_id: Some(request_id),
+            ..response("deny", "waiting_decision")
+        },
+        PermissionOutcome::Denied { request_id } => PermissionResponse {
+            message: Some("使用者已拒絕這個操作；請改用其他做法，或以 report_blocked 說明無法繼續的原因。".to_string()),
+            decision_request_id: Some(request_id),
+            ..response("deny", "denied")
+        },
+    }))
 }

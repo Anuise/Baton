@@ -6,10 +6,10 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`）、權限提示的歸類與授權判定（`permission.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔） |
 | `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`，以及 `write_readonly_files`：把一組檔案寫成唯讀目錄）、PlatformInfo、SecretProtector、ClaudeEnvironment、UserSettingsSource（唯讀讀取使用者平常使用的 Claude Code 設定，只有白名單內的三個檔案）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`） |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照與成果瀏覽）、`/api/v1/scheduling`、`/api/v1/lifecycle`、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、裁定請求／裁定／單次批准（`decisions.rs`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 設定快照與成果瀏覽）、`/api/v1/scheduling`、`/api/v1/lifecycle`、`/api/v1/decisions/pending`（與 `/api/v1/workspaces/{id}/decisions`）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`，含啟動時核對停止意圖與完全退出的執行者）、Supervisor（`supervisor.rs`，含完全退出的停止流程與重新開啟）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-mcp-shim` | MCP 工具 shim（`baton-mcp-shim.exe`）：Claude Code 以 stdio 啟動，把工具呼叫轉送到 Runtime 的 Agent API；只依賴 `baton-domain` |
@@ -199,11 +199,44 @@ Worker 不直接碰資料庫或管理 API：它的程序啟動時帶著一組**�
 
 **MCP shim**（`crates/baton-mcp-shim`）：手寫的 stdio JSON-RPC 2.0（逐行；stdout 只輸出協定訊息，日誌走 stderr），只依賴 `baton-domain`，不依賴 `baton-api` 或 Runtime。`serve(input, output, ShimConfig)` 可在程序內以任意讀寫串流測試。啟動時從環境變數讀 `BATON_AGENT_TOKEN`、`BATON_RUNTIME_URL`，缺少或空白時只印變數名稱並以 exit code 2 結束；輸出（含錯誤與 `Debug`）不含憑證。
 
+### 裁定中心與權限提示轉接
+
+Worker 需要使用者決定的事，以及超出授權範圍的操作，都變成**裁定請求**，集中在裁定中心等使用者回答。純邏輯在 `baton_domain::decision`（狀態機）與 `baton_domain::permission`（權限提示判定），持久化在 `baton-store` 的 `decisions.rs`，端點在 `baton-api` 的 `decisions.rs`（桌面）與 `agent.rs`（Agent 工具），UI 在 `web/src/DecisionCenter.tsx`。
+
+**四條不變條件**（每一條都有情境測試，`crates/baton-harness/tests/decisions.rs`）：
+
+1. **Agent 不能裁定**：回答只有桌面憑證的端點（`/api/v1/…`，Agent 憑證在 `guard` 就得到 403 `role_not_allowed`）；Agent API 沒有任何回答或批准的工具；`decision.decided_by` 在資料庫層 CHECK 為 `desktop`。
+2. **只阻擋受影響的 Task**：請求的 `blocking` 明列受影響的 Task，只有它們進入 `waiting_decision`；回答後只有仍在 `waiting_decision` 而且**沒有其他待處理請求也阻擋它**的 Task 回到 `ready`，並在同一個交易重新排進派工佇列（`dispatch_request`，優先序 0），由 Scheduler 自動派出新的 Run；舊 Run 還持有 execution lease 時留在佇列等待（原因 `execution_conflict`），舊 Run 結束後的下一次排程派出。其他 Task 從頭到尾不受影響。
+3. **逾時不是同意**：`deadline_minutes` 只讓 `overdue` 變成 `true`；沒有任何程式路徑會因時間流逝回答請求、放行權限提示或恢復 Task。
+4. **一次交易**：回答時，裁定、請求狀態、受影響 Task 的狀態與事件、重新排隊、喚醒 Outbox 在同一個交易提交。
+
+**Agent 工具**（`POST /agent/v1/tools/{工具}`，範圍取自憑證，只有仍持有 execution lease 的 Run 能呼叫；否則 409 `run_report_stale`）：
+
+| 工具 | 請求 | 行為 |
+| --- | --- | --- |
+| `request_decision` | `question`、`reason`、`options`（2–8 個 `{id, label, tradeoff?}`）、`recommendation?`、`evidence?`、`urgency?`（`low`／`normal`／`high`）、`deadline_minutes?` | 建立請求；Task（`running` 時）進入 `waiting_decision`，Run 不結束。回 `{decision_request_id, status: "waiting_decision", existing, message}`；同一個 Run 對同一個問題重複提出時回到既有請求。內容無效 400 `decision_invalid`，不寫入任何東西 |
+| `permission_prompt` | `tool_name`、`input`（Claude Code `--permission-prompt-tool` 協定） | 授權範圍內：回 `{behavior: "allow", updatedInput, status: "auto_allowed"}` 並追加稽核事件 `permission_auto_allowed`。範圍外：建立裁定請求（選項固定為 `allow_once`、`deny`）並回 `{behavior: "deny", message: "等待裁定…", status: "waiting_decision", decision_request_id}`。使用者已回答時，同一個 Task 的同一個操作消耗一次答案：`approved`（允許）或 `denied`（拒絕） |
+
+**權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-138）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 Workspace **目前生效的授權 revision**；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。Bash 指令以 bash 規則斷詞（去掉引號；引號不成對或反斜線緊接引號一律無法歸類），每個子命令只接受白名單內的旗標，任何其他旗標（例如 `git commit --amend`、`git diff --output=…`、`npm install --prefix …`、`cargo test --manifest-path …`）都無法歸類；`-g`、`--global=…`、`--location=global` 等全域安裝的各種寫法歸為「全域安裝」；指令參數中像路徑的字詞必須在 Workspace 內。路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`），含 `:`（替代資料流）的元件、只有點的元件、`\\?\` 裝置路徑一律範圍外，`GIT~1` 視同 `.git`。單次批准的規則見 AI-139。
+
+**桌面端點**（桌面憑證專用）：
+
+| 端點 | 用途 |
+| --- | --- |
+| `GET /api/v1/workspaces/{id}/decisions` | `{pending_count, decisions}`；待處理在前（緊急程度高者優先），已回答在後 |
+| `GET …/decisions/{request_id}` | 單筆詳情：問題、原因、選項與取捨、建議、證據、阻擋範圍（受影響的 Task 與狀態）、權限提示細節（工具、輸入、能力）、期限與 `overdue`、已回答時的裁定 |
+| `POST …/decisions/{request_id}/answer` | `{option_id, note?}`；200 回 `{decision, resumed_task_ids}`。同樣的答案重送是冪等的；不同的答案 409 `decision_already_answered`；未知選項 400 `decision_option_unknown`；找不到 404 `decision_not_found` |
+| `GET /api/v1/decisions/pending` | `{pending_count, by_workspace}`，給狀態列的「待裁定數」 |
+
+資料表（migration 15）：`decision_request`（只能由 `pending` 改成 `answered`）、`decision_request_block`、`decision`（追加式）、`decision_approval_use`（追加式）。回答時追加的喚醒 Outbox 項目種類是 `decision_wake:<請求識別>`，**目前沒有消費者**（Controller 的事件迴圈在後續的票）。事件：`decision_requested`、`decision_answered`、`permission_approval_used`（聚合 `decision_request`），以及自動允許的 `permission_auto_allowed`（每筆一個 `permission_audit` 聚合）。
+
+本票只做最小版本：沒有 `expected_revision`／過期標記、批次回答、相似請求合併、決策權限表的強制檢查（AI-143）。權限提示的 CLI 參數與回應格式相容性是 **Validation Required**（票 14，AI-144）。
+
 ### 多帳號並行排程與容量
 
 規則在 `baton_domain::scheduler`（純邏輯：事實 → 要派給誰或為什麼等），持久化在 `baton-store` 的 `scheduling.rs`，端點在 `baton-api` 的 `scheduling.rs` 與 `runs.rs`，佇列的定期重試在 `Supervisor::schedule_queue`。
 
-**一個派工要求怎麼處理**（`Store::schedule`，單一交易）：先用目前狀態判定一次，「不是等一等就好」的錯誤（Task 不是 ready、找不到、契約失效）原樣拒絕且什麼都不寫；否則記入 `dispatch_request` 佇列，再依「優先序高者先、同優先序先要求者先」逐一嘗試派出每個排隊中的 Task（每個 Task 各自判定，被相依擋住的不會擋住後面的）。派出 = 選帳號 + `RunCommand::Dispatch`；等待 = 留在佇列。Task 離開 `ready`（派出、取消、改契約）時 `save_task` 一併把它移出佇列。Run 失敗後 Task 回到 `ready`，**不會**自動重新排隊（沒有重試預算前不自動重派）。
+**一個派工要求怎麼處理**（`Store::schedule`，單一交易）：先用目前狀態判定一次，「不是等一等就好」的錯誤（Task 不是 ready、找不到、契約失效）原樣拒絕且什麼都不寫；否則記入 `dispatch_request` 佇列，再依「優先序高者先、同優先序先要求者先」逐一嘗試派出每個排隊中的 Task（每個 Task 各自判定，被相依擋住的不會擋住後面的）。派出 = 選帳號 + `RunCommand::Dispatch`；等待 = 留在佇列。Task 離開 `ready`（派出、取消、改契約）時 `save_task` 一併把它移出佇列。Run 失敗後 Task 回到 `ready`，**不會**自動重新排隊（沒有重試預算前不自動重派）；裁定後恢復的 Task 例外，回答時就重新排隊（AI-140）。
 
 **容量**（`CapacityMode`，設定頁切換，`PUT /api/v1/scheduling/settings`）：
 
@@ -319,7 +352,7 @@ Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 
 
 ### 桌面生命週期與完全退出
 
-規則在 `baton_domain::lifecycle`（純邏輯），持久化在 `baton-store` 的 `lifecycle.rs`（migration 14：`runtime_lifecycle`、`workspace_lifecycle`），端點在 `baton-api` 的 `lifecycle.rs`，停止流程與重新開啟在 `Supervisor`（`full_exit`、第一次 `tick` 的重新開啟）。對應 ADR-0001（DR-20261021-01）與 spec D-11、D-25。
+規則在 `baton_domain::lifecycle`（純邏輯），持久化在 `baton-store` 的 `lifecycle.rs`（migration 16：`runtime_lifecycle`、`workspace_lifecycle`），端點在 `baton-api` 的 `lifecycle.rs`，停止流程與重新開啟在 `Supervisor`（`full_exit`、第一次 `tick` 的重新開啟）。對應 ADR-0001（DR-20261021-01）與 spec D-11、D-25。
 
 **關窗不等於停止**：Runtime 是獨立程序。桌面殼關閉主視窗只會隱藏到系統匣；系統匣有狀態（每 3 秒更新）、「開啟 Baton」與「完全退出」。重開視窗以 `ensure_runtime` 連回同一個 Runtime，不會啟動第二個控制平面，也不會重複啟動 Worker。
 
@@ -504,7 +537,7 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - `harness.restart()`：模擬重啟。舊的 Runtime 被丟棄（原位址不再回應），資料目錄與全部 fake 都保留。
 - 完全退出：`POST /api/v1/lifecycle/exit` 之後以 `harness.wait_for_exit()` 等停止流程結束（Harness 的 Runtime 在退出後不會自行結束服務，由測試決定何時 `restart`）；`Harness::builder().exit_timing(..)` 縮短 30 + 10 秒的上限；`process_control.script_stop(identity, FakeStop::Result(..)／Hang／Fail(..))` 指定某個程序停不停得下來，`stop_graces()` 讀取每次停止收到的寬限期；`harness.lifecycle_file_path()` 是生命週期檔的位置。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`、`claude_env`：具體的 fake，可腳本化回應並讀取呼叫紀錄。`claude_env` 可設定 Claude Code／Git 是否存在與版本（`set_claude`、`set_git`、`fail_tool_probes`）、在某個設定目錄完成原生登入（`log_in`，會像真實的 Claude Code 一樣把登入資料寫進該目錄）、模擬環境變數覆蓋（`set_env_override`）、讓開啟登入終端機時順便登入（`script_terminal_login`），並記錄開啟過的終端機（`login_terminals`）。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；裁定中心與權限提示情境：`crates/baton-harness/tests/decisions.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`；多帳號排程情境：`crates/baton-harness/tests/scheduling.rs`；額度觀測情境：`crates/baton-harness/tests/quota.rs`；桌面生命週期與完全退出情境：`crates/baton-harness/tests/lifecycle.rs`，關窗與重開視窗連回同一個 Runtime：`crates/baton-client/tests/lifecycle_client.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 
