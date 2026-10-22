@@ -265,8 +265,47 @@ body {
 }
 
 .task-goal,
+.task-kind,
 .task-contract-version,
 .task-dependencies {
+  color: #656d76;
+}
+
+.task-workdir,
+.task-integration {
+  display: grid;
+  gap: 4px;
+  padding: 6px 8px;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
+.task-workdir-failed,
+.task-integration-failed {
+  background: #ffebe9;
+  border-color: #ff8182;
+}
+
+.task-integration ul,
+.integration-queue ol {
+  padding-left: 18px;
+}
+
+.integration-queue {
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.integration-queue ol {
+  margin: 4px 0 0;
+}
+
+.integration-queue p {
+  margin: 4px 0 0;
   color: #656d76;
 }
 

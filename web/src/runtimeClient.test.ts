@@ -151,7 +151,7 @@ describe("Runtime 用戶端", () => {
 
     await client.getTaskBoard("ws_1");
     await client.createGoal("ws_1", "第一個目標");
-    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", contract });
+    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", kind: "development", contract });
     await client.createTask("ws_1", { goalId: "goal_1", title: "空契約" });
     await client.getTask("ws_1", "task_1");
     await client.updateTaskContract("ws_1", "task_1", contract, "補上目標");
@@ -173,7 +173,7 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(3, `${base}/tasks`, {
       method: "POST",
       headers: json,
-      body: JSON.stringify({ goal_id: "goal_1", title: "寫文件", contract }),
+      body: JSON.stringify({ goal_id: "goal_1", title: "寫文件", kind: "development", contract }),
     });
     expect(fetchFn).toHaveBeenNthCalledWith(4, `${base}/tasks`, {
       method: "POST",
@@ -338,7 +338,7 @@ describe("Runtime 用戶端", () => {
 
     await client.getTaskBoard("ws_1");
     await client.createGoal("ws_1", "第一個目標");
-    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", contract });
+    await client.createTask("ws_1", { goalId: "goal_1", title: "寫文件", kind: "document", contract });
     await client.getTask("ws_1", "task_1");
     await client.updateTaskContract("ws_1", "task_1", contract, "補上目標");
     await client.addTaskDependency("ws_1", "task_1", "task_2");
@@ -354,6 +354,7 @@ describe("Runtime 用戶端", () => {
       workspaceId: "ws_1",
       goalId: "goal_1",
       title: "寫文件",
+      kind: "document",
       contract,
     });
     expect(invoke).toHaveBeenNthCalledWith(4, "task_detail", { workspaceId: "ws_1", taskId: "task_1" });

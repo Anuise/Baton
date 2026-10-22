@@ -2,7 +2,15 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { accountScheduling, REPORT_SHA256, schedulingOverview, verificationRecord, verificationView } from "./fixtures";
+import {
+  accountScheduling,
+  integrationEntry,
+  REPORT_SHA256,
+  schedulingOverview,
+  verificationRecord,
+  verificationView,
+  workdirView,
+} from "./fixtures";
 import { TaskBoard, type TaskBoardClient } from "./TaskBoard";
 import {
   CONTRACT_FIELDS,
@@ -10,6 +18,7 @@ import {
   type Capability,
   type ContractInput,
   type Goal,
+  type IntegrationEntry,
   type MissingItem,
   type QueueEntry,
   type RunStatus,
@@ -20,6 +29,7 @@ import {
   type VerificationRecord,
   type VerificationView,
   type WaitReason,
+  type WorkdirView,
   type Workspace,
 } from "./runtimeClient";
 
@@ -85,6 +95,7 @@ function task(id: string, title: string, overrides: Partial<TaskView> = {}): Tas
     workspace_id: workspace.id,
     goal_id: "goal_1",
     title,
+    kind: "research",
     status,
     version: 1,
     contract_version: c.version,
@@ -145,6 +156,8 @@ function fakeClient(
     verifications?: VerificationRecord[];
     /** `taskVerification` 回傳的驗證資料。 */
     verification?: VerificationView;
+    workdirs?: WorkdirView[];
+    integrations?: IntegrationEntry[];
   } = {},
 ) {
   let goals = initial.goals ?? [goal("goal_1", "整理文件")];
@@ -152,7 +165,16 @@ function fakeClient(
   let runs = initial.runs ?? [];
   let queue = initial.queue ?? [];
   let verifications = initial.verifications ?? [];
-  const board = (): TaskBoardData => ({ workspace_id: workspace.id, goals, tasks, runs, capabilities: CAPABILITIES, verifications });
+  const board = (): TaskBoardData => ({
+    workspace_id: workspace.id,
+    goals,
+    tasks,
+    runs,
+    capabilities: CAPABILITIES,
+    verifications,
+    workdirs: initial.workdirs ?? [],
+    integrations: initial.integrations ?? [],
+  });
   const replace = (id: string, patch: Partial<TaskView>) => {
     tasks = tasks.map((t) => (t.id === id ? { ...t, ...patch } : t));
     return tasks.find((t) => t.id === id)!;
@@ -165,9 +187,9 @@ function fakeClient(
       goals = [...goals, created];
       return created;
     }),
-    createTask: vi.fn(async (_ws: string, { goalId, title, contract: input }) => {
+    createTask: vi.fn(async (_ws: string, { goalId, title, kind, contract: input }) => {
       const id = `task_${tasks.length + 1}`;
-      const created = task(id, title, { goal_id: goalId, contract: contract(id, input as Partial<TaskContract>) });
+      const created = task(id, title, { goal_id: goalId, kind: kind ?? "research", contract: contract(id, input as Partial<TaskContract>) });
       tasks = [...tasks, created];
       return created;
     }),
@@ -823,7 +845,12 @@ describe("建立 Task 與契約編輯器", () => {
 
     await within(column("待處理（1）")).findByRole("article", { name: "寫文件" });
     expect(client.createGoal).not.toHaveBeenCalled();
-    expect(client.createTask).toHaveBeenCalledWith("ws_1", { goalId: "goal_1", title: "寫文件", contract: { required_capabilities: [] } });
+    expect(client.createTask).toHaveBeenCalledWith("ws_1", {
+      goalId: "goal_1",
+      title: "寫文件",
+      kind: "research",
+      contract: { required_capabilities: [] },
+    });
     expect(screen.queryByRole("region", { name: "建立 Task" })).not.toBeInTheDocument();
   });
 
@@ -888,6 +915,7 @@ describe("建立 Task 與契約編輯器", () => {
     expect(client.createTask).toHaveBeenCalledWith("ws_1", {
       goalId: "goal_1",
       title: "寫文件",
+      kind: "research",
       contract: {
         objective: {
           status: "filled",
@@ -1259,5 +1287,242 @@ describe("確定性檢查編輯", () => {
 
     await waitFor(() => expect(client.updateTaskContract).toHaveBeenCalled());
     expect(vi.mocked(client.updateTaskContract).mock.calls[0][2]).not.toHaveProperty("verification_checks");
+  });
+});
+
+describe("Task 種類、工作目錄與整合佇列", () => {
+  const devTask = (id = "task_1", title = "加登入頁", overrides: Partial<TaskView> = {}) =>
+    task(id, title, { kind: "development", status: "ready", contract: filledContract(id), ...overrides });
+  const workdir = (title: string) => within(card(title)).getByRole("group", { name: "工作目錄" });
+  const integration = (title: string) => within(card(title)).getByRole("group", { name: "整合狀態" });
+  const queueRegion = () => screen.getByRole("region", { name: "整合佇列" });
+
+  it("建立 Task 時種類預設「研究」，可改選「程式開發」並送出 kind；卡片顯示種類", async () => {
+    const client = fakeClient();
+    const user = await renderBoard(client);
+    await user.click(screen.getByRole("button", { name: "建立 Task" }));
+    const form = screen.getByRole("region", { name: "建立 Task" });
+
+    const kind = within(form).getByLabelText("種類");
+    expect(kind).toHaveDisplayValue("研究");
+    expect(within(kind).getAllByRole("option").map((o) => o.textContent)).toEqual(["研究", "程式開發", "文件"]);
+    await user.selectOptions(kind, "程式開發");
+    await user.type(within(form).getByLabelText("Task 標題"), "加登入頁");
+    await user.click(within(form).getByRole("button", { name: "建立" }));
+
+    const created = await within(column("待處理（1）")).findByRole("article", { name: "加登入頁" });
+    expect(client.createTask).toHaveBeenCalledWith("ws_1", expect.objectContaining({ kind: "development" }));
+    expect(within(created).getByText("種類：程式開發")).toBeInTheDocument();
+  });
+
+  it("編輯契約時沒有種類選擇", async () => {
+    const user = await renderBoard(fakeClient({ tasks: [task("task_1", "寫文件", { kind: "document" })] }));
+
+    expect(within(card("寫文件")).getByText("種類：文件")).toBeInTheDocument();
+    await user.click(within(card("寫文件")).getByRole("button", { name: "編輯契約" }));
+    expect(within(screen.getByRole("region", { name: "編輯契約：寫文件" })).queryByLabelText("種類")).not.toBeInTheDocument();
+  });
+
+  it("開發 Task 的卡片顯示 worktree：路徑、平台分支與整合目標、狀態與在其中執行過的 Run", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask("task_1", "加登入頁", { status: "running" }), task("task_2", "研究競品")],
+        runs: [
+          run("run_1", "task_1", "failed", { generation: 1 }),
+          run("run_2", "task_1", "running", { generation: 2 }),
+        ],
+        workdirs: [workdirView({ run_ids: ["run_1", "run_2"] })],
+      }),
+    );
+
+    const group = workdir("加登入頁");
+    expect(group).toHaveTextContent("Worktree：C:\\work\\app\\.baton\\worktrees\\task_1");
+    expect(group).toHaveTextContent("分支 baton/task_1 → 整合到 main");
+    expect(group).toHaveTextContent("已就緒");
+    expect(group).toHaveTextContent("在此目錄執行過的 Run：第 1 次、第 2 次");
+    expect(within(group).queryByRole("alert")).not.toBeInTheDocument();
+    // 還沒有工作目錄的 Task 不顯示這一區
+    expect(within(card("研究競品")).queryByRole("group", { name: "工作目錄" })).not.toBeInTheDocument();
+  });
+
+  it("研究 Task 的輸出目錄不顯示分支；尚未有 Run 時說明", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "研究競品", { status: "ready", contract: filledContract("task_1") })],
+        workdirs: [
+          workdirView({
+            kind: "output_dir",
+            path: "C:\\work\\app\\.baton\\outputs\\task_1",
+            branch: null,
+            base_branch: null,
+            run_ids: [],
+          }),
+        ],
+      }),
+    );
+
+    const group = workdir("研究競品");
+    expect(group).toHaveTextContent("輸出目錄：C:\\work\\app\\.baton\\outputs\\task_1");
+    expect(group).not.toHaveTextContent("分支");
+    expect(group).toHaveTextContent("尚未有 Run 在此目錄執行");
+  });
+
+  it("工作目錄準備失敗時醒目顯示原因（不會派工）", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask()],
+        workdirs: [
+          workdirView({
+            status: "failed",
+            path: "C:\\work\\notes\\.baton\\worktrees\\task_1",
+            branch: null,
+            base_branch: null,
+            failure: "Workspace 不是 Git repo，無法建立 worktree",
+            ready_at: null,
+            run_ids: [],
+          }),
+        ],
+      }),
+    );
+
+    const group = workdir("加登入頁");
+    expect(group).toHaveTextContent("準備失敗");
+    expect(within(group).getByRole("alert")).toHaveTextContent(
+      "工作目錄無法使用，不會派工：Workspace 不是 Git repo，無法建立 worktree",
+    );
+  });
+
+  it("等待原因有「工作目錄」類別時分開標示", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask()],
+        queue: [
+          {
+            workspace_id: "ws_1",
+            task_id: "task_1",
+            title: "加登入頁",
+            priority: 0,
+            requested_at: T0,
+            position: 1,
+            reasons: [{ category: "workdir", code: "workdir_unavailable", message: "Workspace 不是 Git repo" }],
+          },
+        ],
+      }),
+    );
+
+    const queued = within(card("加登入頁")).getByRole("group", { name: "排隊原因" });
+    const item = within(queued).getByText("工作目錄").closest("li")!;
+    expect(within(item).getByText("Workspace 不是 Git repo")).toBeInTheDocument();
+  });
+
+  it("開發 Task 通過驗證、等待整合時說明「成果已通過驗證，等待整合」，不顯示手動接受面板也不是已完成", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask("task_1", "加登入頁", { status: "verifying" })],
+        runs: [run("run_1", "task_1", "succeeded")],
+        verifications: [verificationRecord()],
+        integrations: [integrationEntry({ status: "verifying", started_at: T0 })],
+      }),
+    );
+
+    const group = integration("加登入頁");
+    expect(group).toHaveTextContent("成果已通過驗證，等待整合");
+    expect(group).toHaveTextContent("整合驗證中");
+    expect(group).toHaveTextContent("baton/task_1 → main");
+    expect(within(card("加登入頁")).queryByRole("group", { name: "成果驗證" })).not.toBeInTheDocument();
+    expect(card("加登入頁")).not.toHaveTextContent("已完成");
+  });
+
+  it("未通過整合：顯示原因與未通過的整合檢查", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask()],
+        integrations: [
+          integrationEntry({
+            status: "failed",
+            failure: "整合驗證未通過，目標分支未變更",
+            checks: [
+              {
+                check: { kind: "command", program: "cargo", args: ["test"], expected_exit_code: 0 },
+                status: "failed",
+                detail: "結束碼 101：1 個測試失敗",
+              },
+              { check: { kind: "file", path: "out/report.md", sha256: null }, status: "passed", detail: "檔案存在" },
+            ],
+            finished_at: T0,
+          }),
+        ],
+      }),
+    );
+
+    const group = integration("加登入頁");
+    expect(group).toHaveTextContent("未通過整合");
+    expect(group).toHaveTextContent("整合驗證未通過，目標分支未變更");
+    expect(group).toHaveTextContent("指令 cargo test（預期結束碼 0）：結束碼 101：1 個測試失敗");
+    expect(group).not.toHaveTextContent("out/report.md");
+  });
+
+  it("已整合：顯示合併 commit 前 8 碼；只看該 Task 最新的整合項目", async () => {
+    const merge = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask("task_1", "加登入頁", { status: "completed" })],
+        integrations: [
+          integrationEntry({ id: "int_1", seq: 1, status: "failed", failure: "合併衝突" }),
+          integrationEntry({ id: "int_2", seq: 2, run_id: "run_2", generation: 2, status: "integrated", merge_commit: merge }),
+        ],
+      }),
+    );
+
+    const group = integration("加登入頁");
+    expect(group).toHaveTextContent("已整合");
+    expect(group).toHaveTextContent("合併 commit a1b2c3d4");
+    expect(group).not.toHaveTextContent(merge);
+    expect(group).not.toHaveTextContent("合併衝突");
+  });
+
+  it("整合佇列依 seq 列出尚未結束的項目並標出處理中的一個；已整合與未通過的不列出", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask("task_1", "加登入頁"), devTask("task_2", "修 bug"), devTask("task_3", "改樣式"), devTask("task_4", "舊的")],
+        integrations: [
+          integrationEntry({ id: "int_4", seq: 4, task_id: "task_4", status: "integrated" }),
+          integrationEntry({ id: "int_7", seq: 7, task_id: "task_3", branch: "baton/task_3" }),
+          integrationEntry({ id: "int_5", seq: 5, task_id: "task_1", branch: "baton/task_1", status: "merging" }),
+          integrationEntry({ id: "int_6", seq: 6, task_id: "task_2", branch: "baton/task_2" }),
+          integrationEntry({ id: "int_3", seq: 3, task_id: "task_4", status: "failed" }),
+        ],
+      }),
+    );
+
+    const items = within(queueRegion()).getAllByRole("listitem");
+    expect(items).toHaveLength(3);
+    expect(items[0]).toHaveTextContent("加登入頁（baton/task_1 → main）：合併中");
+    expect(items[0]).toHaveTextContent("處理中");
+    expect(items[1]).toHaveTextContent("修 bug（baton/task_2 → main）：排隊等待整合");
+    expect(items[1]).not.toHaveTextContent("處理中");
+    expect(items[2]).toHaveTextContent("改樣式");
+    expect(queueRegion()).not.toHaveTextContent("舊的");
+  });
+
+  it("沒有等待整合的項目時說明", async () => {
+    await renderBoard(fakeClient({ tasks: [devTask()], integrations: [integrationEntry({ status: "integrated" })] }));
+
+    expect(queueRegion()).toHaveTextContent("沒有等待整合的項目");
+    expect(within(queueRegion()).queryByRole("listitem")).not.toBeInTheDocument();
+  });
+
+  it("檢視驗證時顯示這個 Task 最新的整合項目", async () => {
+    const user = await renderBoard(
+      fakeClient({
+        tasks: [devTask("task_1", "加登入頁", { status: "verifying" })],
+        verification: verificationView({ integration: integrationEntry({ status: "failed", failure: "合併衝突" }) }),
+      }),
+    );
+
+    const panel = within(card("加登入頁")).getByRole("group", { name: "成果驗證" });
+    await user.click(within(panel).getByRole("button", { name: "檢視驗證" }));
+
+    expect(await within(panel).findByText("最新整合項目：未通過整合（第 1 次 Run）")).toBeInTheDocument();
   });
 });
