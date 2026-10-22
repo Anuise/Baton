@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
-import type { HealthResponse, RuntimeClient } from "./runtimeClient";
+import { platformStatusLabel } from "./PlatformPage";
+import type { HealthResponse, PlatformResponse, RuntimeClient } from "./runtimeClient";
 
 type RuntimeStatus =
   | { state: "checking" }
@@ -14,9 +15,11 @@ interface Props {
   onHealth?: (health: HealthResponse | null) => void;
 }
 
-/** 頂部狀態列：目前只顯示 Runtime 狀態，其餘欄位由後續的票加入（spec D-21）。 */
+/** 頂部狀態列：目前顯示 Runtime 狀態與平台支援狀態，其餘欄位由後續的票加入（spec D-21）。 */
 export function StatusBar({ client, pollMs = 5000, onHealth }: Props) {
   const [status, setStatus] = useState<RuntimeStatus>({ state: "checking" });
+  // null：尚未取得或讀取失敗，顯示為「未知」，不影響 Runtime 狀態
+  const [platform, setPlatform] = useState<PlatformResponse | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -26,6 +29,8 @@ export function StatusBar({ client, pollMs = 5000, onHealth }: Props) {
         if (cancelled) return;
         setStatus({ state: "running", health });
         onHealth?.(health);
+        const platform = await client.getPlatform().catch(() => null);
+        if (!cancelled) setPlatform(platform);
       } catch (error) {
         if (cancelled) return;
         setStatus({ state: "offline", reason: error instanceof Error ? error.message : String(error) });
@@ -49,6 +54,11 @@ export function StatusBar({ client, pollMs = 5000, onHealth }: Props) {
           <span className="status status-offline">Runtime 未連線</span>
           <span className="status-reason">{status.reason}</span>
         </>
+      )}
+      {status.state === "running" && (
+        <span className={`status status-platform-${platform?.assessment.status ?? "unknown"}`}>
+          平台：{platformStatusLabel(platform?.assessment.status ?? "unknown")}
+        </span>
       )}
     </header>
   );

@@ -8,11 +8,16 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
+use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
+use baton_ports::{Clock, PlatformInfo};
 use serde::{Deserialize, Serialize};
 
 /// 健康端點路徑。
 pub const HEALTH_PATH: &str = "/api/v1/health";
+
+/// 平台狀態端點路徑。
+pub const PLATFORM_PATH: &str = "/api/v1/platform";
 
 /// 健康端點的回應內容；Runtime 與用戶端（App、測試 harness）共用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,16 +33,30 @@ pub struct HealthResponse {
     pub pid: u32,
 }
 
+/// 平台狀態端點的回應內容：診斷事實、支援判定與支援期限資料來源。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformResponse {
+    pub platform: PlatformSnapshot,
+    pub app_version: String,
+    pub assessment: PlatformAssessment,
+    /// 支援期限表的資料來源與查閱日期。
+    pub support_table_source: String,
+    pub support_table_checked_on: String,
+}
+
 /// Router 需要的執行期狀態。
 #[derive(Clone)]
 pub struct ApiState {
     pub boot_count: u64,
     pub started_at: Timestamp,
+    pub clock: Arc<dyn Clock>,
+    pub platform_info: Arc<dyn PlatformInfo>,
 }
 
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health))
+        .route(PLATFORM_PATH, get(platform_status))
         .with_state(Arc::new(state))
 }
 
@@ -49,5 +68,18 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<HealthResponse> {
         boot_count: state.boot_count,
         started_at: state.started_at,
         pid: std::process::id(),
+    })
+}
+
+/// 每次請求都以目前的時間重新判定，支援期限到期後不必重啟 Runtime。
+async fn platform_status(State(state): State<Arc<ApiState>>) -> Json<PlatformResponse> {
+    let snapshot = state.platform_info.snapshot();
+    let assessment = platform::assess(&snapshot, state.clock.now());
+    Json(PlatformResponse {
+        platform: snapshot,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        assessment,
+        support_table_source: platform::SUPPORT_TABLE_SOURCE.to_string(),
+        support_table_checked_on: platform::SUPPORT_TABLE_CHECKED_ON.to_string(),
     })
 }

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-use baton_api::{HealthResponse, HEALTH_PATH};
+use baton_api::{HealthResponse, PlatformResponse, HEALTH_PATH, PLATFORM_PATH};
 
 /// 連線方式：連回既有的，或由本次呼叫啟動。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,13 +28,22 @@ pub enum ClientError {
 
 /// 查詢 Runtime 的健康狀態。
 pub async fn fetch_health(addr: SocketAddr) -> Result<HealthResponse, ClientError> {
+    get_json(addr, HEALTH_PATH).await
+}
+
+/// 查詢 Runtime 的平台狀態。
+pub async fn fetch_platform(addr: SocketAddr) -> Result<PlatformResponse, ClientError> {
+    get_json(addr, PLATFORM_PATH).await
+}
+
+async fn get_json<T: serde::de::DeserializeOwned>(addr: SocketAddr, path: &str) -> Result<T, ClientError> {
     let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
     // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
     reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(300))
         .build()
         .map_err(unreachable)?
-        .get(format!("http://{addr}{HEALTH_PATH}"))
+        .get(format!("http://{addr}{path}"))
         .timeout(Duration::from_secs(2))
         .send()
         .await

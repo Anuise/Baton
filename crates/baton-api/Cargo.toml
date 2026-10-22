@@ -7,5 +7,6 @@ publish.workspace = true
 
 [dependencies]
 baton-domain = { path = "../baton-domain" }
+baton-ports = { path = "../baton-ports" }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }

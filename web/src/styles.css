@@ -43,6 +43,36 @@ body {
   background: #cf222e;
 }
 
+.status-platform-supported::before {
+  background: #1a7f37;
+}
+
+.status-platform-unsupported::before {
+  background: #bf8700;
+}
+
+.platform-warning {
+  padding: 8px 12px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  border-radius: 6px;
+}
+
+.platform-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+}
+
+.platform-facts dd {
+  margin: 0;
+}
+
+.platform-source {
+  color: #656d76;
+  font-size: 12px;
+}
+
 .status-reason {
   color: #656d76;
 }

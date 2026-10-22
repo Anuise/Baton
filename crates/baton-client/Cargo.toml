@@ -9,9 +9,11 @@ publish.workspace = true
 [dependencies]
 baton-api = { path = "../baton-api" }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
+baton-domain = { path = "../baton-domain" }
 baton-harness = { path = "../baton-harness" }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
