@@ -100,6 +100,9 @@ pub trait WorkspaceFs: Send + Sync {
     /// 清掉 Git 的 worktree 登記，再刪除 `trash`。冪等：`target` 已不存在時只收拾 Git 登記與 `trash` 的殘留。
     /// `target` 存在但不是 `repo` 登記的 worktree（或是主 checkout）時拒絕、不刪除任何檔案。不刪除分支。
     async fn remove_worktree(&self, repo: &Path, target: &Path, trash: &Path) -> PortResult<()>;
+    /// `repo` 中 `from` 到 `to` 之間變更的檔案（相對 repo 根目錄，`/` 分隔；改名時新舊路徑都列出），票 44。
+    /// 不是 Git repo 或任一個 revision 不存在是錯誤：呼叫端據此判定「無法證明不受影響」。
+    async fn changed_paths(&self, repo: &Path, from: &str, to: &str) -> PortResult<Vec<String>>;
     /// 先寫暫存、fsync、再原子改名（spec D-17）。
     ///
     /// 暫存檔就在目標旁邊，檔名是 [`partial_path`]；寫到一半中斷只會留下暫存檔，目標路徑要嘛不存在、要嘛內容完整。

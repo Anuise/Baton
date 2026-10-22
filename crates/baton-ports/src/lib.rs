@@ -25,8 +25,8 @@ pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, ToolProbe};
 pub use clock::Clock;
 pub use command::{CommandOutput, CommandRequest, CommandRunner};
 pub use git::{
-    git_advance_branch, git_create_worktree, git_inspect, git_inspect_worktree, git_merge_for_integration,
-    git_remove_worktree,
+    git_advance_branch, git_changed_paths, git_create_worktree, git_inspect, git_inspect_worktree,
+    git_merge_for_integration, git_remove_worktree,
 };
 pub use guardian::GuardianProbe;
 pub use login::{LoginSession, StartupRegistration};

@@ -129,6 +129,10 @@ impl WorkspaceFs for LocalWorkspaceFs {
         let (repo, target, trash) = (repo.to_path_buf(), target.to_path_buf(), trash.to_path_buf());
         blocking(move || git_remove_worktree(&repo, &target, &trash)).await
     }
+    async fn changed_paths(&self, repo: &Path, from: &str, to: &str) -> PortResult<Vec<String>> {
+        let (repo, from, to) = (repo.to_path_buf(), from.to_string(), to.to_string());
+        blocking(move || git_changed_paths(&repo, &from, &to)).await
+    }
     async fn write_artifact_atomic(&self, path: &Path, bytes: &[u8]) -> PortResult<()> {
         let (path, bytes) = (path.to_path_buf(), bytes.to_vec());
         blocking(move || write_file_atomic(&path, &bytes)).await

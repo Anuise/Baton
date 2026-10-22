@@ -491,6 +491,8 @@ struct FakeGit {
     removal_hold: Option<Arc<tokio::sync::Notify>>,
     /// 至今被要求移除的 worktree 目錄，依順序。
     removals: Vec<PathBuf>,
+    /// （repo、from、to）→ 兩個 revision 之間變更的檔案（票 44）；沒有腳本化的組合視為 revision 不存在。
+    diffs: HashMap<(PathBuf, String, String), Vec<String>>,
 }
 
 /// 一次整合合併的紀錄。
@@ -532,6 +534,13 @@ impl FakeWorkspaceFs {
     /// worktree 目錄簽出的分支。
     pub fn worktree_branch(&self, target: &Path) -> Option<String> {
         lock(&self.git).worktree_branches.get(target).cloned()
+    }
+
+    /// 腳本化 `repo` 中 `from` 到 `to` 之間變更的檔案（票 44）。
+    pub fn set_changed_paths(&self, repo: &Path, from: &str, to: &str, paths: &[&str]) {
+        lock(&self.git)
+            .diffs
+            .insert((repo.to_path_buf(), from.to_string(), to.to_string()), paths.iter().map(|p| p.to_string()).collect());
     }
 
     /// 下一次建立 worktree 以這個原因失敗（只生效一次）。
@@ -722,6 +731,20 @@ impl WorkspaceFs for FakeWorkspaceFs {
         };
         let unsaved = lock(&self.unsaved).get(target).cloned().unwrap_or_default();
         Ok(WorktreeState::Registered { branch: Some(branch), unsaved })
+    }
+
+    async fn changed_paths(&self, repo: &Path, from: &str, to: &str) -> PortResult<Vec<String>> {
+        let git = lock(&self.git);
+        if !git.repos.contains_key(repo) {
+            return Err(PortError::Failed(format!("{} 不是 Git repo", repo.display())));
+        }
+        if from == to {
+            return Ok(Vec::new());
+        }
+        git.diffs
+            .get(&(repo.to_path_buf(), from.to_string(), to.to_string()))
+            .cloned()
+            .ok_or_else(|| PortError::Failed(format!("{} 中找不到 revision {from} 或 {to}", repo.display())))
     }
 
     async fn remove_worktree(&self, repo: &Path, target: &Path, trash: &Path) -> PortResult<()> {

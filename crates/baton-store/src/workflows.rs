@@ -3,7 +3,7 @@
 //! - 方法與 Playbook 版本只追加（資料表以 trigger 禁止更新與刪除）；識別是 `<前綴>_<key>_v<版本>`。
 //! - Workflow 的每次變更在單一交易中完成：載入 Workflow、固定的 Playbook 版本與先前的 attempt → 查驗證據 →
 //!   Domain 判定 → 寫回 Workflow（以 revision 條件更新）、追加 attempt 與事件。
-//! - 證據由這裡在同一個交易中查驗（成果、裁定、成果接受），不採信 Controller 自報。
+//! - 證據由這裡在同一個交易中查驗（成果、裁定、成果接受、雙軸審查），不採信 Controller 自報。
 
 use baton_domain::context::StageItem;
 use baton_domain::workdir::TaskKind;
@@ -244,8 +244,14 @@ fn open_for_task(conn: &Connection, task_id: &str) -> rusqlite::Result<Option<Wo
     .optional()
 }
 
-/// 在交易中查驗一項證據。
-fn check_evidence(conn: &Connection, workspace_id: &str, evidence: Evidence) -> rusqlite::Result<CheckedEvidence> {
+/// 在交易中查驗一項證據。`workflow_task` 是 Workflow 綁定的 Task（審查必須審這個 Task）。
+fn check_evidence(
+    conn: &Connection,
+    workspace_id: &str,
+    workflow_task: Option<&str>,
+    evidence: Evidence,
+) -> rusqlite::Result<CheckedEvidence> {
+    let mut reviewers = None;
     let status = match &evidence.reference {
         EvidenceRef::Artifact { artifact_id } => {
             let found: Option<i64> = conn
@@ -281,8 +287,13 @@ fn check_evidence(conn: &Connection, workspace_id: &str, evidence: Evidence) -> 
                 (Some(_), Some(_)) => EvidenceStatus::Valid,
             }
         }
+        EvidenceRef::Review { review_id } => {
+            let (status, by) = super::reviews::check_review(conn, workspace_id, review_id, workflow_task)?;
+            reviewers = by;
+            status
+        }
     };
-    Ok(CheckedEvidence { evidence, status })
+    Ok(CheckedEvidence { evidence, status, reviewers })
 }
 
 /// 寫回 Workflow 的變更：新 Workflow 插入，既有的以先前的 revision 條件更新。
@@ -572,7 +583,10 @@ impl Store {
                 let playbook = load_playbook(tx, &workflow.playbook_version_id)?;
                 let prior = load_attempts(tx, &workflow.id)?;
                 let checked =
-                    evidence.into_iter().map(|e| check_evidence(tx, &workspace_id, e)).collect::<rusqlite::Result<Vec<_>>>()?;
+                    evidence
+                    .into_iter()
+                    .map(|e| check_evidence(tx, &workspace_id, workflow.task_id.as_deref(), e))
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
                 let profile_id: Option<String> = tx
                     .query_row("SELECT profile_id FROM controller_run WHERE id = ?1", [&controller_run_id], |r| r.get(0))
                     .optional()?;
