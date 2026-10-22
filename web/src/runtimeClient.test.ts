@@ -514,7 +514,7 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
-  it("HTTP 版讀取生命週期、完全退出、設定自動續跑與繼續工作", async () => {
+  it("HTTP 版讀取生命週期、完全退出、設定自動續跑與繼續工作、跨登入自動續跑與登入時自動啟動", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);
 
@@ -522,6 +522,8 @@ describe("Runtime 用戶端", () => {
     await client.requestFullExit();
     await client.updateWorkspaceLifecycle("ws_1", true);
     await client.resumeWorkspace("ws_1");
+    await client.updateWorkspaceLoginResume("ws_1", true);
+    await client.updateLoginStartup(true);
 
     expect(fetchFn.mock.calls).toEqual([
       ["/api/v1/lifecycle"],
@@ -535,6 +537,22 @@ describe("Runtime 用戶端", () => {
         },
       ],
       ["/api/v1/workspaces/ws_1/resume", { method: "POST" }],
+      [
+        "/api/v1/workspaces/ws_1/login-resume",
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ auto_resume_across_login: true }),
+        },
+      ],
+      [
+        "/api/v1/lifecycle/login-startup",
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ enabled: true }),
+        },
+      ],
     ]);
   });
 
@@ -544,6 +562,15 @@ describe("Runtime 用戶端", () => {
 
     await expect(createHttpClient(fetchFn as unknown as typeof fetch).resumeWorkspace("ws_1")).rejects.toThrow(
       "Runtime 正在完全退出，無法繼續工作",
+    );
+  });
+
+  it("HTTP 版登入啟動的 Windows 登記失敗時以 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "login_startup_registration_failed", message: "無法變更 Windows 的登入啟動登記：拒絕存取" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 500 }));
+
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).updateLoginStartup(true)).rejects.toThrow(
+      "無法變更 Windows 的登入啟動登記：拒絕存取",
     );
   });
 
@@ -568,6 +595,8 @@ describe("Runtime 用戶端", () => {
     await client.requestFullExit();
     await client.updateWorkspaceLifecycle("ws_1", true);
     await client.resumeWorkspace("ws_1");
+    await client.updateWorkspaceLoginResume("ws_1", true);
+    await client.updateLoginStartup(false);
     await client.quitApp();
 
     expect(invoke.mock.calls).toEqual([
@@ -575,6 +604,8 @@ describe("Runtime 用戶端", () => {
       ["lifecycle_exit"],
       ["workspace_lifecycle_update", { workspaceId: "ws_1", autoResumeAfterExit: true }],
       ["workspace_resume", { workspaceId: "ws_1" }],
+      ["workspace_login_resume_update", { workspaceId: "ws_1", autoResumeAcrossLogin: true }],
+      ["lifecycle_login_startup_update", { enabled: false }],
       ["app_quit"],
     ]);
   });

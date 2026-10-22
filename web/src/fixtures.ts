@@ -388,7 +388,9 @@ export function workspaceLifecycle(overrides: Partial<WorkspaceLifecycleView> = 
     workspace_id: "ws_1",
     name: "筆記",
     auto_resume_after_exit: false,
+    auto_resume_across_login: false,
     paused_since: null,
+    paused_by: null,
     awaiting_resume: false,
     ...overrides,
   };
@@ -418,7 +420,7 @@ export function exitRun(overrides: Partial<ExitRunResult> = {}): ExitRunResult {
   return { run_id: "run_1", workspace_id: "ws_1", task_id: "task_1", outcome: "pending", ...overrides };
 }
 
-/** 測試用的生命週期：預設 Runtime 運作中、沒有停止意圖、一個 Workspace。 */
+/** 測試用的生命週期：預設 Runtime 運作中、沒有停止意圖、登入時不自動啟動、一個 Workspace。 */
 export function lifecycleStatus(overrides: Partial<LifecycleStatus> = {}): LifecycleStatus {
   return {
     phase: "running",
@@ -426,6 +428,7 @@ export function lifecycleStatus(overrides: Partial<LifecycleStatus> = {}): Lifec
     timing: { stop_grace_ms: 30_000, kill_confirm_ms: 10_000 },
     exit: null,
     active_runs: 0,
+    login_startup: { enabled: false, registered: false },
     workspaces: [workspaceLifecycle()],
     ...overrides,
   };

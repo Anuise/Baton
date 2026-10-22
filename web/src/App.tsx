@@ -9,6 +9,7 @@ import { ModelOverridesPanel } from "./ModelOverridesPanel";
 import { DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
 import { KnowledgePage } from "./KnowledgePage";
+import { LoginStartupSettings } from "./LoginStartupSettings";
 import { PlatformPage } from "./PlatformPage";
 import { RecoveryPanel } from "./RecoveryPanel";
 import { SchedulingSettings } from "./SchedulingSettings";
@@ -66,6 +67,7 @@ export function App() {
           {client && <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <SchedulingSettings client={client} />}
+          {client && <LoginStartupSettings client={client} />}
           {client && <SharedSettingsPage client={client} />}
           {client && <BackupSettings client={client} />}
           {client && <RecoveryPanel client={client} />}
