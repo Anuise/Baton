@@ -1236,6 +1236,37 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版以 bundle 中的位置讀取證據 Artifact；沒有保存時保留錯誤代碼", async () => {
+    const content = {
+      bundle_id: "vbun/1",
+      index: 2,
+      kind: "screenshot",
+      name: "orders.png",
+      content_type: "image/png",
+      size_bytes: 3,
+      content_base64: "iVBO",
+    };
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(content), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "evidence_artifact_not_found", message: "這個證據沒有保存" }), {
+          status: 404,
+        }),
+      );
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    expect(await client.evidenceArtifact("ws_1", "vbun/1", 2)).toEqual(content);
+    const error = await client.evidenceArtifact("ws_1", "vbun_1", 0).catch((e: unknown) => e);
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/workspaces/ws_1/verification/bundles/vbun%2F1/artifacts/2"],
+      ["/api/v1/workspaces/ws_1/verification/bundles/vbun_1/artifacts/0"],
+    ]);
+    expect((error as Error).message).toBe("這個證據沒有保存");
+    expect(errorCode(error)).toBe("evidence_artifact_not_found");
+  });
+
   it("HTTP 版發布 Profile 被拒時保留 Runtime 的說明與錯誤代碼", async () => {
     const body = { error: "verification_profile_invalid", message: "Verification Profile 不正確：至少要有一條旅程" };
     const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 422 }));
@@ -1248,7 +1279,7 @@ describe("Runtime 用戶端", () => {
     expect(errorCode(error)).toBe("verification_profile_invalid");
   });
 
-  it("Tauri 版以指令與 camelCase 參數讀取驗證概況、發布 Profile、要求執行與讀取 Evidence Bundle", async () => {
+  it("Tauri 版以指令與 camelCase 參數讀取驗證概況、發布 Profile、要求執行、讀取 Evidence Bundle 與證據 Artifact", async () => {
     const invoke = vi.fn(async () => ({}));
     const client = createTauriClient(invoke as never);
     const definition = { interface: "cli_api" };
@@ -1258,12 +1289,14 @@ describe("Runtime 用戶端", () => {
     await client.publishVerificationProfile("ws_1", definition);
     await client.runVerification("ws_1", request);
     await client.evidenceBundle("ws_1", "vbun_1");
+    await client.evidenceArtifact("ws_1", "vbun_1", 3);
 
     expect(invoke.mock.calls).toEqual([
       ["workspace_verification", { workspaceId: "ws_1" }],
       ["verification_publish_profile", { workspaceId: "ws_1", definition }],
       ["verification_run", { workspaceId: "ws_1", request }],
       ["verification_bundle", { workspaceId: "ws_1", bundleId: "vbun_1" }],
+      ["verification_artifact", { workspaceId: "ws_1", bundleId: "vbun_1", index: 3 }],
     ]);
   });
 

@@ -9,8 +9,11 @@ import {
   verificationProfileVersion,
   verificationRequest,
   verificationStepRecord,
+  webEvidenceBundle,
+  webVerificationProfileDefinition,
 } from "./fixtures";
 import type {
+  EvidenceArtifactContent,
   PublishProfileResponse,
   RunVerificationRequest,
   VerificationOverview,
@@ -41,6 +44,17 @@ function fakeClient(overview: VerificationOverview = verificationOverview()) {
     ),
     runVerification: vi.fn(async (_workspaceId: string, _request: RunVerificationRequest) => verificationRequest()),
     evidenceBundle: vi.fn(async (_workspaceId: string, _bundleId: string) => evidenceBundle()),
+    evidenceArtifact: vi.fn(
+      async (_workspaceId: string, bundleId: string, index: number): Promise<EvidenceArtifactContent> => ({
+        bundle_id: bundleId,
+        index,
+        kind: "screenshot",
+        name: "open_orders.png",
+        content_type: "image/png",
+        size_bytes: 4,
+        content_base64: "iVBORw==",
+      }),
+    ),
   };
 }
 
@@ -264,6 +278,163 @@ describe("驗證", () => {
     expect(assertions).toHaveTextContent("HTTP 狀態碼為 200：不符合（實際：500）");
     expect(assertions).toHaveTextContent("JSON /ok 等於 true：不符合（實際：false）");
     expect(failed).toHaveTextContent("internal error");
+  });
+
+  const webOverview = () =>
+    verificationOverview({
+      profile: verificationProfileVersion({ definition: webVerificationProfileDefinition() }),
+      uncovered: [],
+      bundles: [webEvidenceBundle()],
+    });
+
+  it("web Profile 列出秘密參照（只有 key 與參照）、persona 與登入身分；CLI／API Profile 不顯示", async () => {
+    const { unmount } = renderPage(fakeClient(webOverview()));
+
+    const profile = await screen.findByRole("region", { name: "Verification Profile" });
+    expect(within(profile).getByRole("list", { name: "秘密參照" })).toHaveTextContent(
+      "clerk_password：env:SHOP_CLERK_PASSWORD",
+    );
+    expect(profile).toHaveTextContent("秘密的值不會顯示");
+    const personas = within(profile).getByRole("list", { name: "Persona" });
+    expect(personas).toHaveTextContent("店家管理員（admin）：管理商品與訂單");
+    expect(personas).toHaveTextContent("訪客（shopper）：沒有帳號的顧客");
+    expect(within(profile).getByRole("list", { name: "登入身分" })).toHaveTextContent(
+      "櫃台人員（clerk）：登入 2 個步驟，以「確認登入身分」核對身分",
+    );
+    unmount();
+
+    renderPage(fakeClient());
+    const cli = await screen.findByRole("region", { name: "Verification Profile" });
+    expect(within(cli).queryByRole("list", { name: "秘密參照" })).not.toBeInTheDocument();
+    expect(cli).not.toHaveTextContent("Persona");
+  });
+
+  it("web 旅程結果分開顯示 persona 與登入身分，沒有登入身分時顯示未登入；限流說明不是產品缺陷", async () => {
+    renderPage(fakeClient(webOverview()));
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_web" });
+    expect(card).toHaveTextContent("判定：證據不足 judge_rate_limited（模型限流，無法判定，不是產品缺陷）");
+    const journeys = within(card).getByRole("list", { name: "旅程結果" });
+    const orders = within(journeys).getByRole("listitem", { name: "管理訂單" });
+    expect(orders).toHaveTextContent("管理訂單（代表旅程）：證據不足 judge_rate_limited（模型限流，無法判定，不是產品缺陷）");
+    expect(within(orders).getByText("persona：店家管理員（admin）")).toBeInTheDocument();
+    expect(within(orders).getByText("登入身分：櫃台人員（clerk）")).toBeInTheDocument();
+    const browse = within(journeys).getByRole("listitem", { name: "瀏覽商品" });
+    expect(within(browse).getByText("persona：訪客（shopper）")).toBeInTheDocument();
+    expect(within(browse).getByText("登入身分：未登入")).toBeInTheDocument();
+  });
+
+  it("步驟顯示登入與身分核對階段；語意判斷顯示預期與理由，限流時是無法判定而不是不符合", async () => {
+    const user = userEvent.setup();
+    renderPage(fakeClient(webOverview()));
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_web" });
+    await user.click(within(card).getByText("步驟（4）"));
+
+    expect(within(card).getByRole("listitem", { name: "登入：輸入密碼" })).toHaveTextContent(
+      "登入（管理訂單）・輸入密碼：通過 assertions_passed",
+    );
+    expect(within(card).getByRole("listitem", { name: "身分核對：確認登入身分" })).toHaveTextContent(
+      "身分核對（管理訂單）・確認登入身分：通過",
+    );
+
+    const limited = within(card).getByRole("listitem", { name: "旅程：開啟訂單頁" });
+    expect(limited).toHaveTextContent(
+      "旅程（管理訂單）・開啟訂單頁：證據不足 judge_rate_limited（模型限流，無法判定，不是產品缺陷） 引擎代碼 model:rate_limited",
+    );
+    const limitedAssertions = within(limited).getByRole("list", { name: "斷言結果" });
+    expect(limitedAssertions).toHaveTextContent("網址包含「/orders」：符合（實際：http://127.0.0.1:3000/orders）");
+    expect(limitedAssertions).toHaveTextContent("語意判斷（預期：畫面列出今天的訂單）：無法判定（理由：模型限流，無法判定）");
+    expect(limitedAssertions).not.toHaveTextContent("不符合");
+
+    const browse = within(within(card).getByRole("listitem", { name: "旅程：商品列表" })).getByRole("list", {
+      name: "斷言結果",
+    });
+    expect(browse).toHaveTextContent("「#products」可見：符合（實際：可見）");
+    expect(browse).toHaveTextContent("語意判斷（預期：畫面列出商品）：符合（理由：畫面上有三項商品與價格）");
+  });
+
+  it("語意判斷做出判定但不符合時顯示不符合與理由", async () => {
+    const steps = [
+      verificationStepRecord({
+        key: "open_orders",
+        title: "開啟訂單頁",
+        verdict: "product_failure",
+        reason_code: "assertion_failed",
+        assertions: [
+          { assertion: { kind: "judge", expectation: "畫面列出今天的訂單" }, passed: false, actual: "畫面是空白的錯誤頁" },
+        ],
+      }),
+    ];
+    const user = userEvent.setup();
+    renderPage(fakeClient(verificationOverview({ bundles: [webEvidenceBundle({ steps })] })));
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_web" });
+    await user.click(within(card).getByText("步驟（1）"));
+    expect(within(card).getByRole("list", { name: "斷言結果" })).toHaveTextContent(
+      "語意判斷（預期：畫面列出今天的訂單）：不符合（理由：畫面是空白的錯誤頁）",
+    );
+  });
+
+  it("證據檔案：列出種類、旅程／步驟與大小；沒有保存的顯示原因且不能開啟；截圖可開啟、trace／錄影可下載", async () => {
+    const client = fakeClient(webOverview());
+    client.evidenceArtifact.mockResolvedValueOnce({
+      bundle_id: "vbun_web",
+      index: 2,
+      kind: "video",
+      name: "browse.webm",
+      content_type: "video/webm",
+      size_bytes: 4,
+      content_base64: "GkXf",
+    });
+    const user = userEvent.setup();
+    renderPage(client);
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_web" });
+    const files = within(card).getByRole("list", { name: "證據檔案" });
+
+    const trace = within(files).getByRole("listitem", { name: "trace：orders-trace.zip" });
+    expect(trace).toHaveTextContent("trace・orders-trace.zip・旅程：管理訂單");
+    expect(trace).toHaveTextContent("沒有保存：這個 Session 輸入過秘密，無法確認 trace／錄影已遮蔽");
+    expect(within(trace).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(trace).queryByRole("link")).not.toBeInTheDocument();
+
+    const video = within(files).getByRole("listitem", { name: "錄影：browse.webm" });
+    await user.click(within(video).getByRole("button", { name: "準備下載" }));
+    expect(client.evidenceArtifact).toHaveBeenLastCalledWith("ws_1", "vbun_web", 2);
+    const link = await within(video).findByRole("link", { name: "下載 browse.webm" });
+    expect(link).toHaveAttribute("href", "data:video/webm;base64,GkXf");
+    expect(link).toHaveAttribute("download", "browse.webm");
+
+    const shot = within(files).getByRole("listitem", { name: "截圖：open_orders.png" });
+    expect(shot).toHaveTextContent("截圖・open_orders.png・旅程：管理訂單／步驟：開啟訂單頁・2048 位元組");
+    expect(within(shot).queryByRole("img")).not.toBeInTheDocument();
+    await user.click(within(shot).getByRole("button", { name: "開啟截圖" }));
+    expect(client.evidenceArtifact).toHaveBeenLastCalledWith("ws_1", "vbun_web", 0);
+    expect(await within(shot).findByRole("img", { name: "截圖：open_orders.png" })).toHaveAttribute(
+      "src",
+      "data:image/png;base64,iVBORw==",
+    );
+    expect(client.evidenceArtifact).toHaveBeenCalledTimes(2);
+  });
+
+  it("證據檔案讀取失敗時顯示錯誤代碼；沒有 Artifact 的 Bundle 不顯示證據檔案", async () => {
+    const client = fakeClient(verificationOverview({ bundles: [webEvidenceBundle(), evidenceBundle()] }));
+    client.evidenceArtifact.mockRejectedValueOnce(
+      Object.assign(new Error("找不到這個證據"), { code: "evidence_artifact_not_found" }),
+    );
+    const user = userEvent.setup();
+    renderPage(client);
+
+    const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_web" });
+    const shot = within(card).getByRole("listitem", { name: "截圖：open_orders.png" });
+    await user.click(within(shot).getByRole("button", { name: "開啟截圖" }));
+    expect(await within(shot).findByRole("alert")).toHaveTextContent(
+      "無法讀取：找不到這個證據（evidence_artifact_not_found）",
+    );
+    expect(within(shot).queryByRole("img")).not.toBeInTheDocument();
+
+    expect(within(region("Evidence Bundle vbun_1")).queryByRole("list", { name: "證據檔案" })).not.toBeInTheDocument();
   });
 
   it("讀取失敗時顯示原因", async () => {

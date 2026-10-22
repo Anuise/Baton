@@ -2042,3 +2042,40 @@ body {
   font-size: 12px;
   white-space: pre-wrap;
 }
+
+/* 語意判斷沒有做出判定（例如模型限流）：不是產品缺陷，不用失敗的紅色 */
+.assertion-undecided {
+  color: #57606a;
+}
+
+.verification-reason {
+  color: #656d76;
+}
+
+.verification-journey-actor {
+  color: #656d76;
+}
+
+.verification-artifacts ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.verification-artifact {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.verification-artifact img {
+  max-width: 100%;
+  border: 1px solid #d0d7de;
+}
+
+.verification-artifact-withheld {
+  color: #9a6700;
+}
