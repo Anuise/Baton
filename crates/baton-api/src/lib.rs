@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、成果接受與驗證端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、備份狀態端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點、知識與教訓端點、Guard 與重犯事件端點、生命週期（完全退出、自動續跑、繼續工作）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
@@ -10,6 +10,7 @@ mod authorization;
 mod backups;
 mod decisions;
 mod guard;
+mod guards;
 mod knowledge;
 mod lifecycle;
 mod messages;
@@ -66,6 +67,10 @@ pub use tasks::{
     TaskDetail, UpdateContractRequest,
 };
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
+pub use guards::{
+    guard_action_path, recurrences_path, CreateGuardRequest, GuardLesson, GuardList, GuardListQuery, GuardRevisionRequest,
+    GuardView, RecurrenceList, ReportRecurrenceRequest, GUARDS_PATH,
+};
 pub use knowledge::{
     knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest,
     KnowledgeDetail, KnowledgeEntryView, KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
@@ -229,6 +234,10 @@ pub fn router(state: ApiState) -> Router {
         .route(knowledge::CORRECT_ROUTE, post(knowledge::correct))
         .route(knowledge::REVOKE_ROUTE, post(knowledge::revoke))
         .route(knowledge::RETIRE_ROUTE, post(knowledge::retire))
+        .route(GUARDS_PATH, get(guards::list).post(guards::create))
+        .route(guards::ENABLE_ROUTE, post(guards::enable))
+        .route(guards::DISABLE_ROUTE, post(guards::disable))
+        .route(guards::RECURRENCES_ROUTE, get(guards::recurrences).post(guards::report))
         // Agent API：只接受 Agent 憑證（guard 依路徑前綴決定所需角色）
         .route(&tool_path(TOOL_GET_TASK_CONTRACT), post(agent::get_task_contract))
         .route(&tool_path(TOOL_REPORT_PROGRESS), post(agent::report_progress))

@@ -24,6 +24,8 @@ use baton_api::{
     knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest,
     CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView, KnowledgeList, KnowledgeListQuery,
     KnowledgeReasonRequest, KNOWLEDGE_PATH,
+    guard_action_path, recurrences_path, CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList,
+    ReportRecurrenceRequest, GUARDS_PATH,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
     PLATFORM_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
@@ -487,6 +489,48 @@ impl RuntimeClient {
         request: &KnowledgeReasonRequest,
     ) -> Result<KnowledgeEntryView, ClientError> {
         self.send_json(reqwest::Method::POST, &knowledge_action_path(id, "retire"), Some(request)).await
+    }
+
+    /// 知識分頁看得到的 Guard（來源教訓是全域或屬於這個 Workspace），附是否生效與成效（票 38）。
+    pub async fn list_guards(&self, workspace_id: Option<&str>) -> Result<GuardList, ClientError> {
+        let mut url = reqwest::Url::parse("http://localhost").expect("固定的 URL 一定合法");
+        url.set_path(GUARDS_PATH);
+        if let Some(workspace_id) = workspace_id {
+            url.query_pairs_mut().append_pair("workspace_id", workspace_id);
+        }
+        match url.query() {
+            Some(query) => self.get_json(&format!("{}?{query}", url.path())).await,
+            None => self.get_json(url.path()).await,
+        }
+    }
+
+    /// 把有效的已驗證教訓轉成 Guard（建立即啟用）。
+    pub async fn create_guard(&self, request: &CreateGuardRequest) -> Result<GuardView, ClientError> {
+        self.send_json(reqwest::Method::POST, GUARDS_PATH, Some(request)).await
+    }
+
+    /// 啟用 Guard（來源教訓必須仍有效）。
+    pub async fn enable_guard(&self, id: &str, request: &GuardRevisionRequest) -> Result<GuardView, ClientError> {
+        self.send_json(reqwest::Method::POST, &guard_action_path(id, "enable"), Some(request)).await
+    }
+
+    /// 停用 Guard。
+    pub async fn disable_guard(&self, id: &str, request: &GuardRevisionRequest) -> Result<GuardView, ClientError> {
+        self.send_json(reqwest::Method::POST, &guard_action_path(id, "disable"), Some(request)).await
+    }
+
+    /// 教訓的重犯事件（新到舊）。
+    pub async fn lesson_recurrences(&self, lesson_id: &str) -> Result<RecurrenceList, ClientError> {
+        self.get_json(&recurrences_path(lesson_id)).await
+    }
+
+    /// 回報一次沒被 Guard 攔下的重犯。
+    pub async fn report_recurrence(
+        &self,
+        lesson_id: &str,
+        request: &ReportRecurrenceRequest,
+    ) -> Result<baton_domain::guard::Recurrence, ClientError> {
+        self.send_json(reqwest::Method::POST, &recurrences_path(lesson_id), Some(request)).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {

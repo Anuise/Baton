@@ -440,6 +440,7 @@ pub fn dispatch_halt(state: &LifecycleState, workspace: &WorkspaceLifecycle, wor
             code: "runtime_stopping".to_string(),
             message: "Runtime 正在完全退出（或已退出、尚未重新開啟），不啟動新的 Run".to_string(),
             profile_id: None,
+            guard: None,
         });
     }
     workspace.paused_since.map(|_| WaitReason {
@@ -447,6 +448,7 @@ pub fn dispatch_halt(state: &LifecycleState, workspace: &WorkspaceLifecycle, wor
         code: "awaiting_resume".to_string(),
         message: format!("Workspace「{workspace_name}」在完全退出後等待「繼續工作」"),
         profile_id: None,
+        guard: None,
     })
 }
 
