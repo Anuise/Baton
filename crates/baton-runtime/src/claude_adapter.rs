@@ -71,6 +71,12 @@ impl ClaudeCodeAdapter {
         Self::new("claude".to_string(), shim, data_dir, inherited)
     }
 
+    /// 讀取 stream 檔案的間隔（測試用較短的間隔）。
+    pub fn with_poll(mut self, poll: Duration) -> Self {
+        self.poll = poll;
+        self
+    }
+
     pub fn run_dir(&self, run_id: &str) -> PathBuf {
         self.runs_dir.join(run_id)
     }
