@@ -3151,6 +3151,60 @@
 - 影響：用本票較早的分支（migration 33 是 `controller_handoff`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R113）提到的 AI-327～AI-331 是改號前的編號，分別對應現在的 AI-344～AI-348。
 - 審閱：未審
 
+### AI-350：「跨登入」以登入識別比較判斷，手動開 App 也適用；識別取不到時不自動續跑
+- 重要度：高
+- 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
+- 決策：Runtime 每次啟動都在 `runtime_boot.login_session` 記下目前 Windows 登入工作階段的識別，與上一次啟動比較：不同就是「跨登入啟動」（`new_login`），依各 Workspace 的「跨登入自動續跑」暫停或續跑；相同（重開 App、監護重啟）或第一次啟動不做任何事；這一次或上一次的識別取不到就是無法核對（`login_unverified`），每個使用中的 Workspace 都暫停、不論設定。不論 Runtime 是登入啟動入口拉起還是使用者手動開 App 啟動，判斷都一樣。Windows 上的識別是 `LsaGetLogonSessionData` 的登入時間（LogonTime）加終端機工作階段識別，不只用 token 的 AuthenticationId LUID。停止意圖生效時不做任何跨登入處置（完全退出優先，見 AI-352）。
+- 理由：ADR-0007 的「跨登入自動續跑」是針對「跨了一次登入」這件事，不是針對啟動方式；若只看啟動來源，登入自啟動關閉時手動開 App 就會讓所有 Workspace 直接續跑，設定形同虛設，而且登入啟動與手動開 App 同時發生時，結果會取決於誰先取得單實例鎖。以識別比較則兩者結果相同。LUID 在重新開機後從小數字重新配發，可能與上次相同，會把重開機誤判為同一次登入。「啟動來源或停止意圖無法核對時不自動續跑」（ADR-0007）對應到識別取不到時全部暫停。
+- 替代方案：(1) 只有登入啟動入口啟動的 Runtime 才套用跨登入設定：簡單，但手動開 App 會繞過設定、競態結果不確定。(2) 以開機時間判斷：登出再登入（不重開機）判斷不出來，且系統時間調整會造成誤差。(3) 只用 LUID：重開機後可能重複。
+- 影響：重新開機或登出再登入後，沒有開啟跨登入自動續跑的 Workspace 一律等「繼續工作」（即使使用者是手動開 App）。由本票之前版本升級的資料庫，上一次啟動沒有識別，第一次啟動會被視為無法核對而暫停全部 Workspace 一次。以系統管理員提升權限執行時 token 屬於另一個連結工作階段，可能被判為跨登入（Validation Required，已記在開發指南）。
+- 審閱：未審
+
+### AI-351：跨登入暫停沿用 Workspace 的暫停機制並記下原因；完全退出後重新開啟只解除完全退出造成的暫停
+- 重要度：中
+- 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
+- 決策：跨登入時暫停的是「沒有開啟跨登入自動續跑的每個使用中 Workspace」（不論是否有進行中的工作），與 DR-01 完全退出的暫停相同：`paused_since` 有值、派工等待原因 `lifecycle`／`awaiting_resume`、使用者按「繼續工作」解除。`workspace_lifecycle` 新增 `paused_by`（`full_exit`、`new_login`、`login_unverified`），等待原因與 UI 依它說明；既有的暫停資料（migration 時）與沒有原因的列都視為 `full_exit`。跨登入處置只會新增暫停、不解除既有的暫停。同時修改票 25 的重新開啟：「完全退出後自動續跑」只解除 `full_exit` 造成的暫停，跨登入造成的暫停照樣等「繼續工作」。
+- 理由：沿用同一個暫停狀態，派工阻擋（`dispatch_halt`、`launch_halted`）、「繼續工作」端點與 UI 都不必另做一套；記下原因才能讓兩個設定不互相誤用（例如 B 開了完全退出後自動續跑、沒開跨登入，跨登入暫停後又完全退出再開啟時，不應被前者解除）。
+- 替代方案：(1) 只暫停有未完成工作的 Workspace：對沒有工作的 Workspace 較少打擾，但與 DR-01 的行為不一致，而且「哪些算未完成工作」要另訂規則。(2) 另一個獨立的暫停欄位：兩種暫停要分別解除，UI 與阻擋判定都要處理兩個狀態。
+- 影響：重新登入後沒有工作的 Workspace 也需要按一次「繼續工作」，新派的工作才會出去。改動了票 25 的 `reopen` 規則（只影響跨登入暫停的 Workspace，既有測試行為不變）。
+- 審閱：未審
+
+### AI-352：登入啟動入口是監護執行檔的 `--login` 模式，之後接著當監護；登入啟動的 Runtime 遇停止意圖不提供服務
+- 重要度：中
+- 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
+- 決策：HKCU Run 登記的命令列是 `"<安裝資料夾>\baton-guardian.exe" --login --data-dir "<資料目錄（絕對路徑）>" --port <埠>`。啟動入口先讀生命週期檔，有完全退出的停止意圖、維護抑制或檔案讀不懂就直接結束（不開資料庫、不寫任何監護檔）；否則已有 Runtime 就不再啟動，沒有就以 `BATON_START_SOURCE=login` 啟動 `baton-runtime.exe`；之後有 Runtime 可監看就由同一個程序接著當監護（監護的單實例鎖照舊）。登入啟動只啟動背景的 Runtime 與監護，不開 App 視窗。登入啟動的 Runtime 與監護拉起的相同：資料庫的停止意圖仍生效（生命週期檔沒寫成的情形）時不提供服務、記下正常結束，並把停止意圖補回生命週期檔。`RuntimeHost` 新增必要方法 `start_runtime_at_login`。
+- 理由：spec D-25 已說 launcher 可與監護同一個執行檔；登入後本來就需要監護，合成一個程序最省。Run 機碼無法設定環境變數，所以資料目錄與埠以命令列帶入。資料庫停止意圖的檢查放在 Runtime，launcher 才能維持「不開資料庫」。登入時開視窗會打擾使用者，背景工作也不需要視窗；使用者隨時可手動開 App 連回同一個 Runtime。
+- 替代方案：(1) 另做一個 launcher 執行檔：多一個要安裝與更新的檔案。(2) 登入時開 App 並縮到系統匣：可以看到系統匣狀態，但要讓桌面殼也處理生命週期檔與抑制判斷。
+- 影響：登入啟動後沒有系統匣圖示，要手動開 App 才看得到狀態。登入啟動被抑制時 Runtime 仍會先記一次啟動、輪替桌面憑證才結束（沿用票 32 監護路徑的既有行為）。
+- 審閱：未審
+
+### AI-353：「登入時自動啟動」偏好存在控制資料庫，Windows 的登記跟著偏好；先登記成功才保存
+- 重要度：中
+- 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
+- 決策：偏好存在 `login_startup`（只有一列，預設關閉），Windows 的 HKCU Run 值 `Baton` 跟著它。`PUT /api/v1/lifecycle/login-startup` 先改 Windows 的登記，成功才保存偏好；登記失敗回 500 `login_startup_registration_failed`，偏好不變。Runtime 每次啟動時比對登記與偏好（值存在且命令列完全相同才算已登記），不一致就補正（被刪掉就補回、殘留就移除）；失敗只記日誌，設定頁以 `registered` 顯示登記狀態。完全退出不改變偏好、不移除登記（停止抑制另存於生命週期檔，ADR-0007「保留原自啟動偏好」）。
+- 理由：控制資料庫是唯一的狀態來源，顯示與備份都有依據；先登記再保存，才不會出現「設定顯示開啟、Windows 卻沒有登記」的不一致。安裝位置、資料目錄或埠改變時，啟動時的比對會自動把命令列更新成目前的值。
+- 替代方案：(1) 以登記是否存在當作偏好：不需要資料表，但無法區分「使用者關閉」與「登記被外部刪掉」，也無法補回。(2) 先保存再登記、失敗再回滾：要多處理回滾失敗。
+- 影響：多個資料目錄（或多個安裝）共用同一個值名稱 `Baton`，同時開啟時後啟動的那個會覆寫前一個的登記。解除安裝時移除登記屬於票 34（spec D-19）。
+- 審閱：未審
+
+### AI-354：跨登入的 API、事件與 migration 35 的形狀
+- 重要度：低
+- 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
+- 決策：`GET /api/v1/lifecycle` 加 `login_startup: { enabled, registered }`（`registered` 查不到為 `null`），各 Workspace 加 `auto_resume_across_login` 與 `paused_by`；新端點 `PUT /api/v1/lifecycle/login-startup`（`{ "enabled": bool }`）與 `PUT /api/v1/workspaces/{id}/login-resume`（`{ "auto_resume_across_login": bool }`），不擴充既有的 `PUT /api/v1/workspaces/{id}/lifecycle`。事件：`login_startup` 聚合的 `login_startup_changed`，`workspace_lifecycle` 聚合的 `workspace_login_resume_changed`、`workspace_paused_by_login`。migration 35 `cross_login_startup`：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`（預設 0）與 `paused_by`（既有的暫停填 `full_exit`）、`login_startup` 表。兩個 Workspace 設定是同一列的兩個獨立欄位，各有自己的端點、事件與 UI 勾選框。桌面殼新增 `workspace_login_resume_update`、`lifecycle_login_startup_update` 指令。
+- 理由：獨立端點讓兩項設定的保存與顯示完全分開（驗收條件），既有的用戶端也不必改請求格式。
+- 替代方案：既有 PUT 改成兩個選填欄位：端點較少，但兩個設定共用一個請求，容易一起被改到。
+- 影響：Web UI 在「完全退出後自動續跑」之外另有「跨登入自動續跑」勾選框，設定區新增「登入 Windows 時自動啟動 Baton」。
+- 審閱：未審
+
+### AI-355：Harness 以單實例模型模擬「登入啟動與手動開 App 同時發生」
+- 重要度：低
+- 時間／階段：2026-10-22，票 33 實作（run R110-33-impl）
+- 決策：Harness 的程序內 Runtime 改為遵守單實例：已有 Runtime 時，監護或登入啟動入口再啟動的 Runtime 視為取不到單實例鎖而立即結束（不開資料庫、不覆蓋現有的 Runtime）。新增 `sign_in_again`（結束同一次登入的 Runtime 與監護、換新的登入識別）、`windows_login_startup`（有登記才執行啟動入口，之後有 Runtime 就接著當監護）、`open_app_during_next_login_start`（啟動入口啟動 Runtime 的同一刻，App 的 Runtime 先取得鎖）。fake 新增 `FakeLoginSession`、`FakeStartupRegistration`。另以真實執行檔測試兩者同時啟動時只有一個 Runtime 在服務、啟動次數為 1。
+- 理由：真實環境的單一控制平面由具名 mutex 保證；harness 原本在已有 Runtime 時會直接覆蓋，無法重現競態。
+- 替代方案：只靠真實程序測試：涵蓋單實例本身，但看不到跨登入處置只做一次等控制資料庫的結果。
+- 影響：監護的既有情境測試行為不變（監護在啟動前都會先確認沒有 Runtime）。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
