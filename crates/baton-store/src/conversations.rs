@@ -3,10 +3,12 @@
 //! 規則都在 Domain（`baton_domain::conversation`）；這裡只做「在同一個交易中載入目前狀態 → 交給 Domain 判定 →
 //! 寫入 conversation、turn、Controller Run、Session 與事件」，以及給 Supervisor 與「對話」分頁的唯讀查詢。
 //! Worker 的成果或阻礙在產生 Run 事件的同一個交易中成為工作事件（`enqueue_work_events`），所以不會遺失。
+//! 票 30：喚起時在同一個交易中載入重建背景（已做成的決策、進行中 Task 的檢查點），沒有可用帳號時記下等待原因。
 
 use baton_domain::conversation::{
-    self, BeginTurn, ControllerRun, ControllerRunStatus, Conversation, ConversationChange, ConversationError,
-    ConversationState, ConversationTurn, ConversationView, TurnKind, TurnOutcome, TurnStatus, WakePlan,
+    self, BeginTurn, CheckpointNote, ControllerBackground, ControllerHandoff, ControllerRun, ControllerRunStatus,
+    ControllerWait, Conversation, ConversationChange, ConversationError, ConversationState, ConversationTurn,
+    ConversationView, DecisionNote, TurnKind, TurnOutcome, TurnStatus, WakePlan,
 };
 use baton_domain::run::{self, ProcessRecord, RunChange};
 use baton_domain::session::{self, AgentSession, SessionOwner};
@@ -42,6 +44,8 @@ pub struct ControllerWake {
     pub model: Option<String>,
     /// 這個 conversation 最近的 Session 的帳號：可派時優先留在它，才能原生接續。
     pub preferred_profile_id: Option<String>,
+    /// 最近的一輪：換帳號時記為交接的來源（票 30）。
+    pub previous_run_id: Option<String>,
 }
 
 impl Store {
@@ -129,6 +133,7 @@ impl Store {
                     working_dir: workspace.path.clone(),
                     model: workspace.model_overrides.model_for(AgentRole::Controller).map(str::to_string),
                     preferred_profile_id: preferred,
+                    previous_run_id: state.latest_run.as_ref().map(|r| r.id.clone()),
                 });
             }
             Ok(wakes)
@@ -173,7 +178,8 @@ impl Store {
                     return Ok(Err(ConversationError::LaunchHalted));
                 }
                 let sessions = load_sessions(tx, &workspace_id)?;
-                match conversation::begin_turn(&state, &sessions, begin, now) {
+                let background = load_background(tx, &workspace_id)?;
+                match conversation::begin_turn(&state, &sessions, &background, begin, now) {
                     Err(rejected) => Ok(Err(rejected)),
                     Ok(change) => {
                         save(tx, &change)?;
@@ -183,6 +189,25 @@ impl Store {
             })
             .await?;
         Ok(result?)
+    }
+
+    /// 沒有可用帳號喚起 Controller：記下等待原因（原因沒變時不寫入）。conversation 不存在時什麼都不做。
+    pub async fn record_controller_wait(
+        &self,
+        conversation_id: &str,
+        code: String,
+        message: String,
+        now: Timestamp,
+    ) -> StoreResult<()> {
+        let conversation_id = conversation_id.to_string();
+        self.write(move |tx| {
+            let Some(state) = load_state(tx, &conversation_id)? else { return Ok(()) };
+            if let Some(change) = conversation::wait_for_account(&state, &code, &message, now) {
+                save(tx, &change)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// 尚未結束（starting、running）的 Controller Run（跨 Workspace，依建立順序）。
@@ -291,11 +316,59 @@ pub(crate) fn enqueue_work_events(tx: &Transaction<'_>, change: &RunChange, now:
     Ok(())
 }
 
+// ---------------------------------------------------------------- 重建背景（票 30）
+
+/// 新的（含替代的）Controller Session 重建背景：Workspace 最近做成的決策，以及尚未結束的 Task 最近一筆被接受的檢查點。
+fn load_background(conn: &Connection, workspace_id: &str) -> rusqlite::Result<ControllerBackground> {
+    let mut decisions = conn
+        .prepare(
+            "SELECT r.question, r.options, d.action, d.option_id, d.note FROM decision d
+             JOIN decision_request r ON r.id = d.request_id
+             WHERE r.workspace_id = ?1 ORDER BY d.decided_at DESC, d.rowid DESC LIMIT ?2",
+        )?
+        .query_map(rusqlite::params![workspace_id, conversation::BACKGROUND_DECISIONS_LIMIT as i64], |r| {
+            let options: String = r.get(1)?;
+            let action: String = r.get(2)?;
+            let option_id: Option<String> = r.get(3)?;
+            // 選項名稱從請求的選項清單找；找不到時退回選項識別或處理方式
+            let label = option_id.as_ref().and_then(|id| {
+                let options: serde_json::Value = serde_json::from_str(&options).ok()?;
+                let found = options.as_array()?.iter().find(|o| o["id"].as_str() == Some(id.as_str()))?;
+                found["label"].as_str().map(str::to_string)
+            });
+            Ok(DecisionNote { question: r.get(0)?, choice: label.or(option_id).unwrap_or(action), note: r.get(4)? })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    decisions.reverse();
+    let mut checkpoints = conn
+        .prepare(
+            "SELECT t.id, t.title, a.content FROM agent_report a
+             JOIN run ON run.id = a.run_id JOIN task t ON t.id = run.task_id
+             WHERE a.seq IN (SELECT MAX(a2.seq) FROM agent_report a2 JOIN run r2 ON r2.id = a2.run_id
+                             WHERE a2.workspace_id = ?1 AND a2.kind = 'checkpoint' AND a2.accepted = 1
+                             GROUP BY r2.task_id)
+               AND t.status NOT IN ('completed', 'cancelled')
+             ORDER BY a.seq DESC LIMIT ?2",
+        )?
+        .query_map(rusqlite::params![workspace_id, conversation::BACKGROUND_CHECKPOINTS_LIMIT as i64], |r| {
+            let content: baton_domain::agent::ReportContent = json_column(2, &r.get::<_, String>(2)?)?;
+            let summary = match content {
+                baton_domain::agent::ReportContent::Checkpoint { summary, .. } => summary,
+                _ => String::new(),
+            };
+            Ok(CheckpointNote { task_id: r.get(0)?, task_title: r.get(1)?, summary })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    checkpoints.reverse();
+    Ok(ControllerBackground { decisions, checkpoints })
+}
+
 // ---------------------------------------------------------------- 讀寫
 
 const RUN_COLUMNS: &str = "id, conversation_id, workspace_id, profile_id, status, version, command_id, prompt, working_dir, \
      model, input_turn_ids, agent_session_id, resume_native_session_id, native_session_id, pid, process_created_at, \
-     command_hash, end_reason, created_at, updated_at, started_at, ended_at";
+     command_hash, end_reason, created_at, updated_at, started_at, ended_at, \
+     handoff_from_run_id, handoff_from_profile_id, handoff_reason";
 
 const TURN_COLUMNS: &str =
     "id, conversation_id, seq, kind, status, content, controller_run_id, attempts, source, created_at, processed_at";
@@ -316,14 +389,21 @@ fn load_state_of_workspace(conn: &Connection, workspace_id: &str) -> rusqlite::R
 fn load_state(conn: &Connection, conversation_id: &str) -> rusqlite::Result<Option<ConversationState>> {
     let conversation = conn
         .query_row(
-            "SELECT id, workspace_id, version, created_at FROM conversation WHERE id = ?1",
+            "SELECT id, workspace_id, version, created_at, wait_code, wait_message, wait_since FROM conversation WHERE id = ?1",
             [conversation_id],
             |r| {
+                let waiting = match (r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?, r.get::<_, Option<i64>>(6)?) {
+                    (Some(code), Some(message), Some(since)) => {
+                        Some(ControllerWait { code, message, since: Timestamp::from_millis(since) })
+                    }
+                    _ => None,
+                };
                 Ok(Conversation {
                     id: r.get(0)?,
                     workspace_id: r.get(1)?,
                     version: r.get(2)?,
                     created_at: Timestamp::from_millis(r.get(3)?),
+                    waiting,
                 })
             },
         )
@@ -410,16 +490,33 @@ fn run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ControllerRun> {
         updated_at: Timestamp::from_millis(r.get(19)?),
         started_at: r.get::<_, Option<i64>>(20)?.map(Timestamp::from_millis),
         ended_at: r.get::<_, Option<i64>>(21)?.map(Timestamp::from_millis),
+        handoff: match (r.get::<_, Option<String>>(23)?, r.get::<_, Option<String>>(24)?) {
+            (Some(from_profile_id), Some(reason)) => {
+                Some(ControllerHandoff { from_run_id: r.get(22)?, from_profile_id, reason })
+            }
+            _ => None,
+        },
     })
 }
 
 /// 把 Domain 的結果寫進同一個交易。順序依外鍵：conversation → Session → Controller Run → turn → 事件。
 fn save(tx: &Transaction<'_>, change: &ConversationChange) -> rusqlite::Result<()> {
     if let Some(conversation) = &change.conversation {
+        let waiting = conversation.waiting.as_ref();
         tx.execute(
-            "INSERT INTO conversation (id, workspace_id, version, created_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET version = excluded.version",
-            rusqlite::params![conversation.id, conversation.workspace_id, conversation.version, conversation.created_at.as_millis()],
+            "INSERT INTO conversation (id, workspace_id, version, created_at, wait_code, wait_message, wait_since)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET version = excluded.version, wait_code = excluded.wait_code,
+               wait_message = excluded.wait_message, wait_since = excluded.wait_since",
+            rusqlite::params![
+                conversation.id,
+                conversation.workspace_id,
+                conversation.version,
+                conversation.created_at.as_millis(),
+                waiting.map(|w| w.code.as_str()),
+                waiting.map(|w| w.message.as_str()),
+                waiting.map(|w| w.since.as_millis()),
+            ],
         )?;
     }
     for session in &change.sessions {
@@ -434,7 +531,8 @@ fn save(tx: &Transaction<'_>, change: &ConversationChange) -> rusqlite::Result<(
         tx.execute(
             &format!(
                 "INSERT INTO controller_run ({RUN_COLUMNS}) VALUES
-                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                    (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+                     ?23, ?24, ?25)
                  ON CONFLICT(id) DO UPDATE SET
                    status = excluded.status, version = excluded.version, native_session_id = excluded.native_session_id,
                    pid = excluded.pid, process_created_at = excluded.process_created_at, command_hash = excluded.command_hash,
@@ -464,6 +562,9 @@ fn save(tx: &Transaction<'_>, change: &ConversationChange) -> rusqlite::Result<(
                 run.updated_at.as_millis(),
                 millis(run.started_at),
                 millis(run.ended_at),
+                run.handoff.as_ref().and_then(|h| h.from_run_id.as_deref()),
+                run.handoff.as_ref().map(|h| h.from_profile_id.as_str()),
+                run.handoff.as_ref().map(|h| h.reason.as_str()),
             ],
         )?;
     }

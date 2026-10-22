@@ -1141,6 +1141,17 @@ const MIGRATIONS: &[Migration] = &[
         );
         CREATE INDEX conversation_turn_pending ON conversation_turn (conversation_id) WHERE status = 'pending';",
     },
+    // 票 30（第 31 個 migration）：Controller 跨帳號交接。conversation 記下沒有可用帳號時的等待原因（下一輪開始時清除）；
+    // controller_run 記下承接換帳號的那一輪的來源帳號、上一輪與原因
+    Migration {
+        name: "controller_handoff",
+        sql: "ALTER TABLE conversation ADD COLUMN wait_code TEXT;
+        ALTER TABLE conversation ADD COLUMN wait_message TEXT;
+        ALTER TABLE conversation ADD COLUMN wait_since INTEGER;
+        ALTER TABLE controller_run ADD COLUMN handoff_from_run_id TEXT REFERENCES controller_run (id);
+        ALTER TABLE controller_run ADD COLUMN handoff_from_profile_id TEXT;
+        ALTER TABLE controller_run ADD COLUMN handoff_reason TEXT;",
+    },
 ];
 
 /// 開啟 Store 的選項；預設值就是正式執行的行為。
