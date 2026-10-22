@@ -54,7 +54,7 @@ MSYS_NO_PATHCONV=1 env $CLEAN \
 
 1. 讀票：`issues/` 中 `Status: ready-for-agent`、而且 `Blocked by:` 列出的票都已 `completed` 的票，就是可派的 frontier。依編號由小到大選。〔AI-11〕
 2. 認領：把票面改成 `Status: in_progress`，並記錄帳號、run 編號與時間。建立 worktree。
-3. 實作 run：派一個 Worker（`claude -p`）。指示中要附上 spec 路徑、票路徑、執行方式檔、ai-decisions.md，並要求 Worker 以 TDD 方式實作、commit 到該票的分支，遇到不明確之處自行決定並寫進 ai-decisions.md。
+3. 實作 run：派一個 Worker（`claude -p`）。指示中要附上 spec 路徑、票路徑、執行方式檔、ai-decisions.md，並要求 Worker 以 TDD 方式實作、commit 到該票的分支；Worker 可以自行開 subagent 平行處理票內彼此獨立的部分，同時最多 3 個〔使用者指定，見 AI-52〕，遇到不明確之處自行決定並寫進 ai-decisions.md。
 4. 驗證 run：派一個**不同的** `claude -p` run 做唯讀驗證；可以用同一個帳號，但必須是新的 run。驗證者逐條核對票的驗收條件並跑測試，產出通過或不通過的結論與證據。〔AI-12〕
 5. 通過就合併回整合分支，勾選票面的驗收條件，改成 `Status: completed`；不通過就派新的修正 run。每張票最多修正 3 次，超過就改成 `Status: blocked`，寫明原因後跳到下一張。〔AI-13〕
 6. 帳號撞牆時，CLI 會依 watchdog 設定自行等待，最多 5 小時；超過 5 小時 run 會失敗結束。失敗的 run 不計入修正次數，換一個帳號、以新的 run 接手。〔AI-14〕
