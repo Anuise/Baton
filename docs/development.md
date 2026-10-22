@@ -96,7 +96,7 @@ Workspace API（桌面憑證才能使用）：`GET /api/v1/workspaces`（含已�
 | --- | --- |
 | `GET /api/v1/workspaces/{id}/authorization` | 目前生效的 revision、歷史、範本（目標資源已代入該 Workspace 目錄）、能力清單、風險說明 |
 | `POST /api/v1/workspaces/{id}/authorization/summary` | 確認前的摘要（預覽，不保存）；含「可信程式以目前 Windows 使用者身分執行」的風險。已有生效的授權時另有 `changes`：相對於目前 revision 新增／移除的能力、目標與限制，`expands`（是否擴大授權）與 `impact`（影響說明） |
-| `PUT /api/v1/workspaces/{id}/authorization` | 確認並保存：新內容回 201 與新的 revision（含來源與時間）；內容與目前相同回 200；需要承認風險時必須帶 `acknowledged_risk: true`；修改既有授權而且擴大（新增能力、目標或移除限制）時必須帶 `acknowledged_expansion: true`，否則 400 `authorization_expansion_not_acknowledged`（第一次確認與縮小授權不需要，AI-162） |
+| `PUT /api/v1/workspaces/{id}/authorization` | 確認並保存：新內容回 201 與新的 revision（含來源與時間）；內容與目前相同回 200；需要承認風險時必須帶 `acknowledged_risk: true`；修改既有授權而且擴大（新增能力、目標或移除限制）時必須帶 `acknowledged_expansion: true`，否則 400 `authorization_expansion_not_acknowledged`（第一次確認與縮小授權不需要，AI-171） |
 | `POST /api/v1/workspaces/{id}/admission-check` | Run 的准入檢查：`{ "required_capabilities": [...] }`；未確認回 409 `authorization_unconfirmed`，缺少能力回 409 `capability_not_granted` |
 
 revision 存在 append-only 的 `authorization_revision` 表（觸發器禁止更新與刪除），並在同一交易追加 `authorization_confirmed` 事件（聚合版本 = revision 編號）。准入判定 `authorization::admit` 由 `admission-check` 端點與派工交易（`RunCommand::Dispatch`）共用，不另寫准入邏輯。
@@ -220,7 +220,7 @@ Worker 需要使用者決定的事，以及超出授權範圍的操作，都變�
 
 **權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-138）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 Workspace **目前生效的授權 revision**；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。Bash 指令以 bash 規則斷詞（去掉引號；引號不成對或反斜線緊接引號一律無法歸類），每個子命令只接受白名單內的旗標，任何其他旗標（例如 `git commit --amend`、`git diff --output=…`、`npm install --prefix …`、`cargo test --manifest-path …`）都無法歸類；`-g`、`--global=…`、`--location=global` 等全域安裝的各種寫法歸為「全域安裝」；指令參數中像路徑的字詞必須在 Workspace 內。路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`），含 `:`（替代資料流）的元件、只有點的元件、`\\?\` 裝置路徑一律範圍外，`GIT~1` 視同 `.git`。單次批准的規則見 AI-139。
 
-**單次批准（E1，票 23）**（`baton_domain::approval`，細節與取捨見 AI-159～AI-161）：權限提示的請求建立時就算好它綁定的**單一邏輯操作**——操作識別（工具名稱，Bash 另加程式與子命令，例如 `Bash:git push`）、目標資源（檔案路徑、網址，或指令中非旗標的參數）、重要參數（其餘輸入與旗標）、要求雜湊（工具名稱與輸入的 SHA-256）、成果版本（提出請求的 Task 已登記成果的最新版本，`名稱@版本`）；Claude Code 附上的 `description` 說明欄位不列入。「允許本次操作」只綁 Task，不綁 Run 或帳號，所以恢復後換帳號、換 Run 的 Worker 可以沿用；Worker 再次提示時**逐項核對**，任何一項不同就不消耗批准、改建新的請求，並在回應與新請求的 `permission.rejected_approval` 說明哪一項變了。批准用過一次就失效；之後再提出同一個操作時，Runtime 看不到上一次的結果，新的請求帶 `permission.prior_use`、建議拒絕、選項改為「已查證，允許再執行一次」，要求使用者先查證。單次批准從不改變 Workspace 授權；要永久放行得走「修改 Workspace 授權」（摘要的 `changes` 與 `acknowledged_expansion`），修改授權不會回答裁定請求。
+**單次批准（E1，票 23）**（`baton_domain::approval`，細節與取捨見 AI-168～AI-170）：權限提示的請求建立時就算好它綁定的**單一邏輯操作**——操作識別（工具名稱，Bash 另加程式與子命令，例如 `Bash:git push`）、目標資源（檔案路徑、網址，或指令中非旗標的參數）、重要參數（其餘輸入與旗標）、要求雜湊（工具名稱與輸入的 SHA-256）、成果版本（提出請求的 Task 已登記成果的最新版本，`名稱@版本`）；Claude Code 附上的 `description` 說明欄位不列入。「允許本次操作」只綁 Task，不綁 Run 或帳號，所以恢復後換帳號、換 Run 的 Worker 可以沿用；Worker 再次提示時**逐項核對**，任何一項不同就不消耗批准、改建新的請求，並在回應與新請求的 `permission.rejected_approval` 說明哪一項變了。批准用過一次就失效；之後再提出同一個操作時，Runtime 看不到上一次的結果，新的請求帶 `permission.prior_use`、建議拒絕、選項改為「已查證，允許再執行一次」，要求使用者先查證。單次批准從不改變 Workspace 授權；要永久放行得走「修改 Workspace 授權」（摘要的 `changes` 與 `acknowledged_expansion`），修改授權不會回答裁定請求。
 
 **桌面端點**（桌面憑證專用）：
 
