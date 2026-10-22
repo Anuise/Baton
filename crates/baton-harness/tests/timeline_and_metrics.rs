@@ -337,7 +337,7 @@ async fn filtering_the_timeline_by_task_keeps_every_event_of_that_task_in_commit
 
     // 恢復事件屬於整個 Runtime：未過濾時同樣在，關聯到它處置過的研究 Task
     let crash = &all[position(&all, "runtime_crash_detected")];
-    assert_eq!(crash.task_ids, [research.clone()]);
+    assert_eq!(crash.task_ids, std::slice::from_ref(&research));
     assert!(all.iter().all(|e| e.occurred_at >= CLOCK_START), "時間以 UTC 毫秒存放");
 }
 

@@ -91,16 +91,13 @@ async fn each_dispatch_goes_to_the_least_loaded_account_and_the_association_is_p
     let store = store_with_ready_tasks(dir.path(), &["t1", "t2", "t3"]).await;
     add_profile(&store, "p1").await;
     add_profile(&store, "p2").await;
-    // 三次排程共用同一個 id 產生器，Run 識別才不會重複
-    let mut next = 0;
+    // 每次排程給不同的 Run 識別，才不會重複
     let mut started = Vec::new();
-    for task in ["t1", "t2", "t3"] {
-        let first = next;
+    for (index, task) in ["t1", "t2", "t3"].into_iter().enumerate() {
         let outcome = store
-            .schedule(request(task, 0), HashMap::new(), T2, move || Some(format!("run_{}", first + 1)))
+            .schedule(request(task, 0), HashMap::new(), T2, move || Some(format!("run_{}", index + 1)))
             .await
             .unwrap();
-        next += 1;
         assert!(outcome.waiting.is_empty(), "{outcome:?}");
         started.extend(outcome.started.into_iter().map(|s| (s.task_id, s.profile_id)));
     }

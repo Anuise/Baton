@@ -184,13 +184,16 @@ pub struct LoginStartupRun {
     pub guards: bool,
 }
 
+/// 監護查詢 Runtime 前執行一次的動作，參數是資料目錄。
+type ProbeHook = Box<dyn FnOnce(&Path) + Send>;
+
 /// 監護與程序內 Runtime 之間的腳本與紀錄。
 #[derive(Default)]
 struct GuardianScript {
     /// 下一次監護啟動 Runtime 時，程序啟動了卻在匯入監護日誌之前就結束。
     fail_next_start_early: bool,
     /// 下一次監護查詢 Runtime 是否在執行時，先執行這個動作（重現「寫下日誌之後、最後核對之前」的競態）。
-    on_next_probe: Option<Box<dyn FnOnce(&Path) + Send>>,
+    on_next_probe: Option<ProbeHook>,
     starts: Vec<GuardianStart>,
     /// 下一次登入啟動入口啟動 Runtime 的同一刻，使用者也手動開了 App（票 33 的競態）。
     app_opens_during_next_login_start: bool,

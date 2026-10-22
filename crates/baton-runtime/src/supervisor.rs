@@ -9,7 +9,7 @@
 //! 3. **取消**：對要求取消的 Run 停止整個程序樹；確認停止之後才完成取消、釋放寫入所有權。
 //! 4. **核對 lease**：lease 過期只是「該去看看」：向 ProcessControl 查證，確認死亡才中斷 Run，存活就續約，不確定就維持原狀。
 //! 5. **額度**：輪詢到期（每個帳號每 5 分鐘）的外部額度觀測器並重新推估（票 27）。
-//! 5½. **交接**（票 28）：依最新的額度判斷推進帳號門檻；draining 帳號上執行中的 Run 建立交接（已選定承接帳號），
+//!    5½. **交接**（票 28）：依最新的額度判斷推進帳號門檻；draining 帳號上執行中的 Run 建立交接（已選定承接帳號），
 //!    在安全邊界（舊 Worker 保存了 checkpoint 或等滿上限）先持久化 `stopping` 再要求舊程序停止，**確認停止**（或程序自行結束）
 //!    之後以單一交易結束舊 Run、建立 successor Run 並把世代轉給它；停不下來就留在 `stopping`，successor 不會被建立。
 //!    每個 phase 都先持久化，Runtime 在任何一點重建後都從持久化的 phase 繼續。
@@ -151,6 +151,8 @@ pub struct LifecycleSettings {
 }
 
 impl Supervisor {
+    // 參數都是 Runtime 組好、各自獨立的相依，只有 `baton-runtime` 啟動時一個呼叫端；為此另包參數結構只是搬移欄位
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Store,
         ports: Ports,

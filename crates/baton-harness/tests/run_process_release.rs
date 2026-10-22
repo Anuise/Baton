@@ -100,7 +100,7 @@ async fn a_worker_that_exits_ends_its_run_only_after_the_whole_process_tree_is_r
     harness.process_control.set_release_result(StopResult::StillAlive);
     harness.agent_adapter.emit(&rid, AdapterEvent::Exited { success: true });
     harness.supervise().await;
-    assert_eq!(harness.process_control.release_calls(), [identity.clone()]);
+    assert_eq!(harness.process_control.release_calls(), std::slice::from_ref(&identity));
     assert_eq!(run_status(&harness, &ws, &rid).await, "running", "程序樹還沒清空就不能結束 Run");
     assert_eq!(task_status(&harness, &ws, &tid).await, "running");
 
@@ -122,7 +122,7 @@ async fn an_expired_lease_with_a_dead_root_is_concluded_only_after_the_leftovers
     harness.process_control.script_liveness(&identity, Liveness::Dead);
     harness.process_control.set_release_result(StopResult::StillAlive);
     harness.supervise().await;
-    assert_eq!(harness.process_control.release_calls(), [identity.clone()]);
+    assert_eq!(harness.process_control.release_calls(), std::slice::from_ref(&identity));
     let unsure = run_view(&harness, &ws, &rid).await;
     assert_eq!(unsure["status"], "running", "{unsure}");
     assert!(unsure["lease"]["released_at"].is_null());

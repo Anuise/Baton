@@ -292,7 +292,7 @@ async fn answering_resumes_only_the_affected_task_and_appends_a_wake_item_in_the
     // 受影響的 Task 回到 ready 並重新排進派工佇列；無關的 Task 從頭到尾沒被動過
     assert_eq!(task_status(&harness, &p.ws, &p.a).await, "ready");
     assert_eq!(task_status(&harness, &p.ws, &p.b).await, "running");
-    assert_eq!(queued_task_ids(&harness).await, [p.a.clone()]);
+    assert_eq!(queued_task_ids(&harness).await, std::slice::from_ref(&p.a));
 
     // 不需要任何人再派工：Supervisor 下一次處理就派出新的 Run
     harness.supervise().await;
@@ -383,7 +383,7 @@ async fn a_task_stays_waiting_until_every_request_blocking_it_is_answered() {
     let (_, two) = answer(&harness, &p.ws, &second, "wait").await;
     assert_eq!(two["resumed_task_ids"], json!([p.a]));
     assert_eq!(task_status(&harness, &p.ws, &p.a).await, "ready");
-    assert_eq!(queued_task_ids(&harness).await, [p.a.clone()], "全部回答之後才重新排隊");
+    assert_eq!(queued_task_ids(&harness).await, std::slice::from_ref(&p.a), "全部回答之後才重新排隊");
 }
 
 #[tokio::test]

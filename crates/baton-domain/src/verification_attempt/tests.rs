@@ -165,7 +165,7 @@ fn an_external_operation_that_was_started_is_never_resent() {
         AttemptStatus::Interrupted,
         vec![build("c1"), done("checkout", "cart"), JournalEntry::ExternalStarted { journey: "checkout".into(), step: "pay".into() }],
     );
-    let JourneyPlan::NotResent { attempt: from, step, reason, steps, .. } = plan_journey(&checkout(), &[unknown.clone()], Some("c1"), Some("revision:c1"))
+    let JourneyPlan::NotResent { attempt: from, step, reason, steps, .. } = plan_journey(&checkout(), std::slice::from_ref(&unknown), Some("c1"), Some("revision:c1"))
     else {
         panic!("結果未知的外部操作不能重送");
     };

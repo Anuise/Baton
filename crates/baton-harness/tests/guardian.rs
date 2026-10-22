@@ -167,7 +167,7 @@ async fn killing_the_runtime_after_the_window_closes_lets_the_guardian_restart_i
     harness.supervise().await;
 
     // 完整恢復核對：受控停止身分已確認的舊程序、以新 Run 恢復；不另扣一次
-    assert_eq!(harness.process_control.stop_calls(), [old_identity.clone()]);
+    assert_eq!(harness.process_control.stop_calls(), std::slice::from_ref(&old_identity));
     let stopped = run_view(&harness, &ws, &old).await;
     assert_eq!((stopped["status"].as_str(), stopped["end_reason"].as_str()), (Some("interrupted"), Some("stopped_by_crash_recovery")));
     let runs = runs_of(&harness, &ws, &tid).await;

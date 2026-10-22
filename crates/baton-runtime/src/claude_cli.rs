@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(resolve_program("claude", &[npm.clone(), native.clone()]), Some("claude".to_string()));
         // 只有批次檔：第一個找到的完整路徑
         assert_eq!(resolve_program("claude", &[empty.clone(), npm.clone(), scoop.clone()]), full(npm.join("claude.cmd")));
-        assert_eq!(resolve_program("claude", &[scoop.clone()]), full(scoop.join("claude.bat")));
+        assert_eq!(resolve_program("claude", std::slice::from_ref(&scoop)), full(scoop.join("claude.bat")));
         assert_eq!(resolve_program("claude", &[empty]), None);
         assert!(is_batch_file(r"C:\npm\CLAUDE.CMD") && is_batch_file("x.bat") && !is_batch_file("claude"));
     }

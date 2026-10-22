@@ -215,10 +215,10 @@ fn the_overall_verdict_puts_product_failures_first_then_blocked_prerequisites() 
     let passed = JourneyResult { key: "a".into(), title: String::new(), representative: true, persona: None, identity: None, verdict: Verdict::Passed, reason_code: String::new() };
     let failed = JourneyResult { verdict: Verdict::ProductFailure, reason_code: "assertion_failed".into(), ..passed.clone() };
     let teardown_failed = record(Phase::Teardown, None, "t", Verdict::EnvironmentBlocked);
-    assert_eq!(aggregate(&[teardown_failed.clone()], &[passed.clone()]).0, Verdict::Passed);
+    assert_eq!(aggregate(std::slice::from_ref(&teardown_failed), std::slice::from_ref(&passed)).0, Verdict::Passed);
     assert_eq!(aggregate(&[], &[]).0, Verdict::Inconclusive);
     let doctor = record(Phase::Doctor, None, "d", Verdict::EnvironmentBlocked);
-    assert_eq!(aggregate(&[doctor.clone()], &[]).0, Verdict::EnvironmentBlocked);
+    assert_eq!(aggregate(std::slice::from_ref(&doctor), &[]).0, Verdict::EnvironmentBlocked);
     assert_eq!(aggregate(&[doctor], &[passed.clone(), failed]).0, Verdict::ProductFailure);
     let auth = JourneyResult { verdict: Verdict::AuthBlocked, ..passed.clone() };
     assert_eq!(aggregate(&[], &[passed, auth]).0, Verdict::AuthBlocked);

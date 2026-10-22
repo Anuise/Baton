@@ -245,8 +245,7 @@ impl World {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|p| p["key"] == "investigation")
-            .last()
+            .rfind(|p| p["key"] == "investigation")
             .unwrap()["definition"]
             .clone();
         let mut only = playbook["stages"][0].clone();

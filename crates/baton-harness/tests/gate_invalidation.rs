@@ -118,7 +118,7 @@ impl World {
         let (status, catalog) = self.h().send_json(Method::GET, PLAYBOOKS, None).await;
         assert_eq!(status, StatusCode::OK, "{catalog}");
         let mut playbook =
-            catalog["playbooks"].as_array().unwrap().iter().filter(|p| p["key"] == "investigation").last().unwrap()["definition"].clone();
+            catalog["playbooks"].as_array().unwrap().iter().rfind(|p| p["key"] == "investigation").unwrap()["definition"].clone();
         let base = playbook["stages"][0].clone();
         let stage = |key: &str, title: &str, gate: &str, requires: &str| {
             let mut stage = base.clone();
@@ -488,7 +488,7 @@ async fn verification_and_acceptance_evidence_must_belong_to_the_task_the_workfl
     // 兩個 Stage：真實介面驗證（Evidence Bundle）→ 整合（成果接受）
     let (_, catalog) = w.h().send_json(Method::GET, PLAYBOOKS, None).await;
     let mut playbook =
-        catalog["playbooks"].as_array().unwrap().iter().filter(|p| p["key"] == "investigation").last().unwrap()["definition"].clone();
+        catalog["playbooks"].as_array().unwrap().iter().rfind(|p| p["key"] == "investigation").unwrap()["definition"].clone();
     let stage = |key: &str, requires: &str| {
         let mut stage = playbook["stages"][0].clone();
         stage["key"] = json!(key);

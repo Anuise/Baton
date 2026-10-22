@@ -128,7 +128,7 @@ async fn queue(harness: &Harness) -> Value {
 }
 
 fn entry_of<'a>(queue: &'a Value, tid: &str) -> &'a Value {
-    queue["entries"].as_array().unwrap().iter().filter(|e| e["task_id"] == tid).last().expect("Task 應該有整合項目")
+    queue["entries"].as_array().unwrap().iter().rfind(|e| e["task_id"] == tid).expect("Task 應該有整合項目")
 }
 
 fn worktree_path(dir: &Path, tid: &str) -> String {

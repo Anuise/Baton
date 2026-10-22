@@ -471,7 +471,7 @@ async fn the_judge_only_uses_accounts_below_the_quota_gate_and_without_any_only_
     w.h().supervise().await;
     let bundle = w.verify().await;
     assert_eq!(bundle["verdict"], "passed", "{bundle}");
-    assert_eq!(w.judge_accounts(), [b.clone()]);
+    assert_eq!(w.judge_accounts(), std::slice::from_ref(&b));
     assert_eq!(bundle["attempts"][0]["judge_profile_id"], b.as_str());
 
     // 兩個帳號都受限：不呼叫模型；不需要模型的旅程照常驗證，需要的保持未完成（不是通過也不是缺陷）
