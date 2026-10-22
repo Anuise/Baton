@@ -376,8 +376,8 @@ struct FakeGit {
     worktree_failures: VecDeque<String>,
     /// 下一次（依序）合併的衝突內容。
     merge_conflicts: VecDeque<String>,
-    /// 下一次合併停住不回來（模擬 Runtime 在合併中崩潰，只生效一次）。
-    merge_hang: bool,
+    /// 下一次合併在開始後停住，直到閘門放行（只生效一次）；永不放行就等同 Runtime 在合併中崩潰。
+    merge_hold: Option<Arc<tokio::sync::Notify>>,
     merges: Vec<FakeMerge>,
     commits: u32,
 }
@@ -433,9 +433,12 @@ impl FakeWorkspaceFs {
         lock(&self.git).merge_conflicts.push_back(detail.to_string());
     }
 
-    /// 下一次合併停住不回來（呼叫端的 future 被丟棄即等同 Runtime 崩潰）。
-    pub fn hang_next_merge(&self) {
-        lock(&self.git).merge_hang = true;
+    /// 下一次合併在開始後停住，直到回傳的 `Notify` 被 `notify_one`（只生效一次）。
+    /// 不放行並丟棄呼叫端的 future，就等同 Runtime 在合併中崩潰。
+    pub fn hold_next_merge(&self) -> Arc<tokio::sync::Notify> {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        lock(&self.git).merge_hold = Some(gate.clone());
+        gate
     }
 
     /// 至今的全部整合合併，依順序。
@@ -514,9 +517,9 @@ impl WorkspaceFs for FakeWorkspaceFs {
         branch: &str,
         integration_dir: &Path,
     ) -> PortResult<MergeOutcome> {
-        let hang = std::mem::take(&mut lock(&self.git).merge_hang);
-        if hang {
-            std::future::pending::<()>().await;
+        let gate = lock(&self.git).merge_hold.take();
+        if let Some(gate) = gate {
+            gate.notified().await;
         }
         tokio::fs::create_dir_all(integration_dir).await.map_err(|e| PortError::Failed(e.to_string()))?;
         let mut git = lock(&self.git);
