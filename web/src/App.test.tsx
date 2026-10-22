@@ -11,6 +11,7 @@ import {
   lifecycleStatus,
   metricsResponse,
   reviewList,
+  verificationOverview,
   understandingView,
   workflowList,
 } from "./fixtures";
@@ -66,6 +67,7 @@ const client = {
   syncUnderstanding: vi.fn(async () => understandingView()),
   workflows: vi.fn(async () => workflowList()),
   reviews: vi.fn(async () => reviewList()),
+  verificationOverview: vi.fn(async () => verificationOverview()),
   getConversation: vi.fn(async () => conversationView()),
   updateStatus: vi.fn(async () => availableUpdateStatus()),
   applyUpdate: vi.fn(),
@@ -217,6 +219,20 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "流程 筆記" }));
     expect(await screen.findByRole("heading", { name: "流程：筆記" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "審查與設計偏離：筆記" })).not.toBeInTheDocument();
+  });
+
+  it("可從 Workspace 清單開啟驗證，並切回其他檢視", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "驗證 筆記" }));
+    expect(await screen.findByRole("heading", { name: "驗證：筆記" })).toBeInTheDocument();
+    expect(client.verificationOverview).toHaveBeenCalledWith("ws_1");
+    expect(await screen.findByRole("heading", { name: "Evidence Bundle vbun_1" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "流程 筆記" }));
+    expect(await screen.findByRole("heading", { name: "流程：筆記" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "驗證：筆記" })).not.toBeInTheDocument();
   });
 
   it("可從 Workspace 清單開啟對話，並切回其他檢視", async () => {

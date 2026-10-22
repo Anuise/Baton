@@ -30,6 +30,7 @@ mod timeline;
 mod updates;
 mod understanding;
 mod verification;
+mod verification_profiles;
 pub mod workdirs;
 mod reviews;
 mod workflows;
@@ -58,6 +59,7 @@ use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UN
 use baton_domain::review::{
     TOOL_CLASSIFY_FINDING, TOOL_GET_REVIEWS, TOOL_REPORT_DESIGN_DEVIATION, TOOL_RESOLVE_DESIGN_DEVIATION, TOOL_SUBMIT_REVIEW,
 };
+use baton_domain::verification_profile::{TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION};
 use baton_domain::workflow::{TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
@@ -133,6 +135,10 @@ pub use reviews::{
     reviews_path, AxisView, ClassifyFindingResponse, DeviationView, ResolveDeviationResponse, ReviewList, ReviewView,
 };
 pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
+pub use verification_profiles::{
+    evidence_bundle_path, verification_profile_path, verification_runs_path, workspace_verification_path,
+    PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
+};
 pub use workflows::{
     workflow_skip_path, workflows_path, PlaybookCatalog, PlaybookSummary, PublishPlaybookResponse, SkipStageRequest,
     StageResultResponse, StageView, WorkflowList, WorkflowView, WorkflowsForController, PLAYBOOKS_PATH,
@@ -298,6 +304,10 @@ pub fn router(state: ApiState) -> Router {
         .route(workflows::WORKFLOWS_ROUTE, get(workflows::list))
         .route(workflows::SKIP_ROUTE, post(workflows::skip))
         .route(reviews::REVIEWS_ROUTE, get(reviews::list))
+        .route(verification_profiles::VERIFICATION_ROUTE, get(verification_profiles::overview))
+        .route(verification_profiles::PROFILE_ROUTE, post(verification_profiles::publish))
+        .route(verification_profiles::RUNS_ROUTE, post(verification_profiles::run))
+        .route(verification_profiles::BUNDLE_ROUTE, get(verification_profiles::bundle))
         .route(LIFECYCLE_PATH, get(lifecycle::status))
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
@@ -364,6 +374,8 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_CLASSIFY_FINDING), post(reviews::classify_review_finding))
         .route(&tool_path(TOOL_RESOLVE_DESIGN_DEVIATION), post(reviews::resolve_design_deviation))
         .route(&tool_path(TOOL_GET_REVIEWS), post(reviews::get_reviews))
+        .route(&tool_path(TOOL_RUN_VERIFICATION), post(verification_profiles::run_verification))
+        .route(&tool_path(TOOL_GET_VERIFICATION), post(verification_profiles::get_verification))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

@@ -249,6 +249,7 @@ pub fn production_ports(data_dir: &Path, port: u16) -> Ports {
             Some(source) => Arc::new(source),
             None => unavailable.clone(),
         },
+        verification_driver: Arc::new(crate::verification_driver::LocalVerificationDriver::default()),
     }
 }
 

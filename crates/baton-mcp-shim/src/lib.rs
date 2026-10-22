@@ -46,6 +46,7 @@ use baton_domain::workflow::{
     Situation, EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
     TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
 };
+use baton_domain::verification_profile::{TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -639,7 +640,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_RECORD_STAGE_RESULT,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：以證據回報目前 Stage 的結果。Runtime 依證據判定，不接受只有文字的「做完了」：outcome=passed 時每項 exit check 都要有經 Runtime 查驗的證據（artifact_id 是已登記的成果、decision_request_id 是已回答的裁定、task_id 是已通過成果接受的 Task、review_id 是非作者 reviewer 提交且 Standards 與 Spec 兩軸都通過的審查；審查類 exit check 每一軸需要足夠數量的不同 reviewer，作者自己的摘要不算），否則記為 incomplete（缺證據，留在原 Stage）或 blocked（裁定尚未回答，或缺少獨立 reviewer 時 Gate 保持關閉）。failed 與 blocked 需要在 note 說明原因；failed 依 failure_route 處理，累計失敗達預算時 Workflow 被阻擋。只能回報目前 Stage（已通過的 Stage 不重跑，stage_not_current），必須帶讀到的 revision（不同時回 workflow_revision_mismatch，請重新讀取）。跳過 Stage 只能由使用者在桌面進行。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：以證據回報目前 Stage 的結果。Runtime 依證據判定，不接受只有文字的「做完了」：outcome=passed 時每項 exit check 都要有經 Runtime 查驗的證據（artifact_id 是已登記的成果、decision_request_id 是已回答的裁定、task_id 是已通過成果接受的 Task、review_id 是非作者 reviewer 提交且 Standards 與 Spec 兩軸都通過的審查、evidence_bundle_id 是判定為 passed 且依據目前 Profile 版本與需求版本的 Evidence Bundle；審查類 exit check 每一軸需要足夠數量的不同 reviewer，作者自己的摘要不算），否則記為 incomplete（缺證據，留在原 Stage）或 blocked（裁定尚未回答，或缺少獨立 reviewer 時 Gate 保持關閉）。failed 與 blocked 需要在 note 說明原因；failed 依 failure_route 處理，累計失敗達預算時 Workflow 被阻擋。只能回報目前 Stage（已通過的 Stage 不重跑，stage_not_current），必須帶讀到的 revision（不同時回 workflow_revision_mismatch，請重新讀取）。跳過 Stage 只能由使用者在桌面進行。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -654,7 +655,7 @@ fn tool_definitions() -> Value {
                     "evidence": {
                         "type": "array",
                         "maxItems": WORKFLOW_EVIDENCE_MAX,
-                        "description": "證據；每項指明 exit check，並剛好提供 artifact_id、decision_request_id、task_id 或 review_id 其中一個",
+                        "description": "證據；每項指明 exit check，並剛好提供 artifact_id、decision_request_id、task_id、review_id 或 evidence_bundle_id 其中一個",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -666,6 +667,7 @@ fn tool_definitions() -> Value {
                                     "type": "string",
                                     "description": "非作者 reviewer 提交、兩軸都通過的雙軸審查（submit_review）；每一軸需要 exit check 要求數量的不同 reviewer，不足時 Gate 保持關閉（blocked）",
                                 },
+                                "evidence_bundle_id": { "type": "string", "description": "判定為 passed 的 Evidence Bundle（見 get_verification）" },
                             },
                             "required": ["check"],
                         },
@@ -767,6 +769,26 @@ fn tool_definitions() -> Value {
                 },
             },
         },
+        {
+            "name": TOOL_RUN_VERIFICATION,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：依這個 Workspace 的 Verification Profile 排入一次 CLI／API 驗證，由 Runtime 執行（build 識別、doctor、啟動、就緒、資料準備、旅程、清理），結果以 get_verification 查看。每個步驟的判定是 passed、product_failure（產品缺陷）、inconclusive（證據不足）、environment_blocked（環境阻礙）、auth_blocked（授權阻礙）、budget_exhausted（預算用盡）或 automation_unsupported（無法自動化）其中之一，只有 passed 是通過。Profile 版本還沒被證明可用時，這次驗證一定包含代表旅程。判定為 passed 的 Evidence Bundle 可作為 record_stage_result 的 evidence_bundle_id 證據。回應是驗證要求（含 id、固定的 Profile 版本、要執行的 journeys、status）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "受驗的 Task（選填；在它的工作目錄中驗證並綁定它的契約版本，沒給時在 Workspace 目錄中驗證）" },
+                    "journeys": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "要執行的旅程 key（選填；空的或沒給時執行全部旅程）",
+                    },
+                },
+            },
+        },
+        {
+            "name": TOOL_GET_VERIFICATION,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取這個 Workspace 的驗證概況：目前的 Verification Profile 版本（旅程、Feature Map）與是否已被證明可用（proven_by 為 null 表示這個版本還沒實際跑過並通過代表旅程）、未覆蓋範圍、驗證要求與 Evidence Bundle（每個步驟的判定：passed、product_failure、inconclusive、environment_blocked、auth_blocked、budget_exhausted、automation_unsupported，只有 passed 是通過）。Profile 只有使用者能在桌面發布；沒有 Profile 時請使用者建立。",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
     ])
 }
 
@@ -840,6 +862,8 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_CLASSIFY_FINDING,
         TOOL_RESOLVE_DESIGN_DEVIATION,
         TOOL_GET_REVIEWS,
+        TOOL_RUN_VERIFICATION,
+        TOOL_GET_VERIFICATION,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));

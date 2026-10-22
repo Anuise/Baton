@@ -292,6 +292,9 @@ fn check_evidence(
             reviewers = by;
             status
         }
+        EvidenceRef::Verification { evidence_bundle_id } => {
+            super::verification_profiles::verification_evidence_status(conn, workspace_id, evidence_bundle_id)?
+        }
     };
     Ok(CheckedEvidence { evidence, status, reviewers })
 }

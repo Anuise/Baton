@@ -44,6 +44,12 @@ import type {
   UnderstandingView,
   ToolCheck,
   UpdateStatusView,
+  EvidenceBundle,
+  VerificationOverview,
+  VerificationProfileDefinition,
+  VerificationProfileVersion,
+  VerificationRequest,
+  VerificationStepRecord,
   WorkflowList,
   WorkflowView,
   WorkspaceLifecycleView,
@@ -1159,6 +1165,158 @@ export function reviewList(overrides: Partial<ReviewList> = {}): ReviewList {
       }),
       deviationView(),
     ],
+    ...overrides,
+  };
+}
+
+/**
+ * 測試用的 Profile 內容：代表旅程「冒煙測試」與一般旅程「匯出報表」；
+ * Feature Map 的「匯入」沒有旅程，另宣告「圖形介面」不在自動驗證範圍內。
+ */
+export function verificationProfileDefinition(
+  overrides: Partial<VerificationProfileDefinition> = {},
+): VerificationProfileDefinition {
+  return {
+    interface: "cli_api",
+    doctor: [],
+    setup: [],
+    journeys: [
+      {
+        key: "smoke",
+        title: "冒煙測試",
+        representative: true,
+        steps: [
+          {
+            key: "version",
+            title: "顯示版本",
+            operation: { kind: "command", program: "tool", args: ["--version"] },
+            assertions: [{ kind: "exit_code", equals: 0 }],
+          },
+        ],
+      },
+      {
+        key: "export_flow",
+        title: "匯出報表",
+        representative: false,
+        steps: [
+          {
+            key: "export",
+            title: "匯出",
+            operation: { kind: "http", method: "POST", url: "http://127.0.0.1:8080/export", headers: [] },
+            assertions: [
+              { kind: "status", equals: 200 },
+              { kind: "json_equals", pointer: "/ok", value: true },
+            ],
+          },
+        ],
+      },
+    ],
+    teardown: [],
+    evidence: { output_max_chars: 4000, redact: [] },
+    budget: { max_operations: 200 },
+    feature_map: [
+      { key: "cli", title: "命令列", criterion: "可以顯示版本", journeys: ["smoke"] },
+      { key: "export", title: "匯出", criterion: "可以匯出報表", journeys: ["export_flow"] },
+      { key: "import", title: "匯入", criterion: "可以匯入資料", journeys: [] },
+    ],
+    uncovered: [{ area: "圖形介面", reason: "CLI／API Adapter 不涵蓋" }],
+    ...overrides,
+  };
+}
+
+/** 測試用的 Profile 版本：第 2 版。 */
+export function verificationProfileVersion(overrides: Partial<VerificationProfileVersion> = {}): VerificationProfileVersion {
+  return {
+    id: "vprof_2",
+    workspace_id: "ws_1",
+    version: 2,
+    definition: verificationProfileDefinition(),
+    content_hash: "hash_2",
+    published_by: "a1b2c3d4e5f6a7b8",
+    created_at: CHECKED_AT,
+    ...overrides,
+  };
+}
+
+/** 測試用的步驟紀錄：冒煙測試中通過的「顯示版本」。 */
+export function verificationStepRecord(overrides: Partial<VerificationStepRecord> = {}): VerificationStepRecord {
+  return {
+    phase: "journey",
+    journey: "smoke",
+    key: "version",
+    title: "顯示版本",
+    operation: "執行「tool --version」",
+    verdict: "passed",
+    reason_code: "assertions_passed",
+    engine_code: "exit:0",
+    assertions: [{ assertion: { kind: "exit_code", equals: 0 }, passed: true, actual: "0" }],
+    output: "tool 1.2.3",
+    attempts: 1,
+    ...overrides,
+  };
+}
+
+/** 測試用的 Evidence Bundle：Task task_1 契約第 3 版、Profile 第 2 版，只執行代表旅程並通過。 */
+export function evidenceBundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
+  return {
+    id: "vbun_1",
+    workspace_id: "ws_1",
+    request_id: "vreq_1",
+    task_id: "task_1",
+    run_id: "run_1",
+    generation: 1,
+    requirement_version: 3,
+    profile_version_id: "vprof_2",
+    profile_version: 2,
+    candidate_revision: "abc1234",
+    build: "tool 1.2.3",
+    subject_dir: "C:\\work\\notes",
+    journeys: [{ key: "smoke", title: "冒煙測試", representative: true, verdict: "passed", reason_code: "all_steps_passed" }],
+    steps: [verificationStepRecord()],
+    verdict: "passed",
+    reason_code: "all_journeys_passed",
+    covered_features: ["cli"],
+    uncovered: [
+      { feature: "import", area: "匯入", reason: "Feature Map 中沒有驗證這個功能的旅程" },
+      { area: "圖形介面", reason: "CLI／API Adapter 不涵蓋" },
+      { feature: "export", area: "匯出", reason: "這次驗證沒有執行對應的旅程" },
+    ],
+    cleanup: { state_dir: "C:\\data\\verification\\vreq_1", state_dir_removed: true, problems: [] },
+    started_at: CHECKED_AT,
+    finished_at: CHECKED_AT + 5_000,
+    ...overrides,
+  };
+}
+
+/** 測試用的驗證要求：使用者剛排入、尚未執行。 */
+export function verificationRequest(overrides: Partial<VerificationRequest> = {}): VerificationRequest {
+  return {
+    id: "vreq_2",
+    workspace_id: "ws_1",
+    task_id: null,
+    profile_version_id: "vprof_2",
+    profile_version: 2,
+    journeys: ["smoke", "export_flow"],
+    requested_by: "desktop",
+    status: "queued",
+    bundle_id: null,
+    created_at: CHECKED_AT,
+    ...overrides,
+  };
+}
+
+/** 測試用的驗證概況：第 2 版已由 vbun_1 證明可用。 */
+export function verificationOverview(overrides: Partial<VerificationOverview> = {}): VerificationOverview {
+  return {
+    workspace_id: "ws_1",
+    profile: verificationProfileVersion(),
+    proven_by: "vbun_1",
+    uncovered: [
+      { feature: "import", area: "匯入", reason: "Feature Map 中沒有驗證這個功能的旅程" },
+      { area: "圖形介面", reason: "CLI／API Adapter 不涵蓋" },
+    ],
+    requests: [],
+    bundles: [evidenceBundle()],
     ...overrides,
   };
 }

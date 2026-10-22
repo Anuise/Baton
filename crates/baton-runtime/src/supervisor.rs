@@ -199,6 +199,7 @@ impl Supervisor {
                     let verifier = supervisor.clone();
                     tokio::spawn(async move {
                         verifier.verify_pending().await;
+                        verifier.run_requested_verifications().await;
                         verifier.integrate_pending().await;
                         verifier.clean_pending().await;
                         drop(guard);
@@ -213,6 +214,7 @@ impl Supervisor {
         self.supervise_once().await;
         let _serial = self.verify_lock.lock().await;
         self.verify_pending().await;
+        self.run_requested_verifications().await;
         self.integrate_pending().await;
         self.clean_pending().await;
     }
@@ -1818,6 +1820,28 @@ impl Supervisor {
                 )),
                 // 觀察之後狀態已經改變（例如使用者先手動接受）：這份結果已過期，不套用
                 Err(error) => self.note(&format!("Task {task_id} 的檢查結果沒有套用：{error}")),
+            }
+        }
+    }
+
+    /// 依 Verification Profile 執行等待中的驗證要求（票 45），保存 Evidence Bundle；呼叫端負責持有 `verify_lock`。
+    /// Runtime 在執行途中當掉時沒有任何紀錄，要求仍是 queued，下一次重新執行（狀態目錄重新準備，不猜測結果）。
+    async fn run_requested_verifications(&self) {
+        let pending = match self.store.pending_verification_runs().await {
+            Ok(pending) => pending,
+            Err(error) => return self.note(&format!("無法讀取等待執行的驗證要求：{error}")),
+        };
+        for item in pending {
+            let Some(bundle_id) = new_prefixed_id("evb") else {
+                self.note("無法取得系統亂數，驗證稍後重試");
+                continue;
+            };
+            let bundle = crate::verification_adapter::execute(&self.ports, &self.data_dir, &item, bundle_id).await;
+            let (request_id, verdict) = (item.request.id.clone(), bundle.verdict);
+            match self.store.record_evidence_bundle(bundle).await {
+                Ok(true) => self.note(&format!("驗證要求 {request_id} 完成：{}", verdict.as_str())),
+                Ok(false) => self.note(&format!("驗證要求 {request_id} 已經完成過，這次的結果不保存")),
+                Err(error) => self.note(&format!("驗證要求 {request_id} 的 Evidence Bundle 沒有保存：{error}")),
             }
         }
     }

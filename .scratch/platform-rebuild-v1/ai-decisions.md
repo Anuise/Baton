@@ -3546,7 +3546,102 @@
 - 影響：無行為差異。
 - 審閱：未審
 
-### AI-391：作者以被審的 Task 認定，reviewer 必須是另一個 Task 的 Worker，也不能沿用作者的 Session
+### AI-391：Verification Profile 只有使用者能從桌面發布；Controller 只能要求驗證與讀取結果
+- 重要度：高
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：Profile（含 Feature Map 與斷言）只能經桌面管理 API `POST …/verification/profile` 發布，發布者記為桌面憑證指紋。Controller 只有 `run_verification` 與 `get_verification` 兩個工具；需要修改 Profile 時以 `propose_decision_request` 向使用者提出。Worker 不能要求驗證（`controller_only`）。
+- 理由：Profile 決定「怎麼驗收」，Feature Map 直接對應驗收準則；spec D-15 把「修改完成條件或驗收標準」列為必須送裁定的事項。讓 Agent 能改斷言，就能把驗證改鬆來讓自己的成果通過（也是票 50 要防的情況）。
+- 替代方案：Controller 以工具發布 Profile，版本與發布者照樣留下。較自動，但 Agent 可以自行放寬驗收。
+- 影響：每個 Workspace 的第一份 Profile 要由使用者在「驗證」頁以 JSON 撰寫；Controller 的角色說明已告知這條規則。
+- 審閱：未審
+
+### AI-392：驗證結果不直接改變 Task 狀態，而是作為 Stage 的 `verification` 證據
+- 重要度：中
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：Evidence Bundle 不接進票 13 的成果接受（Task 的 `verifying → completed` 仍只看契約的確定性檢查或使用者手動接受）。新增 exit check 證據種類 `verification`（`record_stage_result` 的 `evidence_bundle_id`）。Bundle 只有同時滿足以下條件才有效：判定為 `passed`、依據的是 Workspace 目前的 Profile 版本、綁定 Task 時那個 Task 的契約版本與驗證當時相同。否則查驗結果是新的 `not_passed`。內建 Playbook 的內容不變（仍以成果作為證據），使用者可以發布要求 `verification` 的 Playbook 新版本。
+- 理由：票 43 已把「真實介面驗證」定為 Stage／Gate，接在 Gate 上不必改動成果接受交易、整合佇列與預算這些已經穩定的路徑。版本條件讓舊 Profile 或舊需求下的通過不會被沿用，這也是票 50 的前置條件。
+- 替代方案：把 Profile 旅程加進 Task 契約，成果接受時一起執行。需要修改契約格式與接受交易，而且與票 13、20、36 的行為交織，風險高。
+- 影響：只有走 Playbook 的工作會被 Bundle 擋住；內建「功能開發」的真實介面驗證 Stage 目前仍接受成果作為證據，要等使用者（或後續的票）發布新版本才改用 `verification`。
+- 審閱：未審
+
+### AI-393：verdict、reason_code 與 engine_code 的區分及判定規則
+- 重要度：中
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：
+  - 三個欄位：`verdict` 是票面的七種判定；`reason_code` 是更細的原因（`assertion_failed`、`doctor_failed`、`not_ready`、`setup_failed`、`endpoint_unreachable`、`operation_not_started`、`http_unauthorized`、`http_forbidden`、`operation_timed_out`、`operation_terminated`、`manual_step`、`operation_budget_exhausted`、`not_executed`、`blocked_by_prerequisite` 等）；來源引擎的原始代碼另存為 `engine_code`（`exit:1`、`http:404`、`timeout`）。
+  - 判定規則：只有旅程中的斷言不符才是 `product_failure`。build、doctor、就緒、資料準備的斷言不符是 `environment_blocked`，找不到程式或連不上也是。401／403 是 `auth_blocked`，除非該步驟的斷言明確預期這個狀態碼。逾時與被終止是 `inconclusive`。`manual` 步驟是 `automation_unsupported`。
+  - 預算以操作次數計：含就緒重試，不含 teardown 與人工步驟，預設 200 次。用盡後的步驟記為 `budget_exhausted`。
+  - 整份判定的優先順序：有旅程是產品缺陷就是 `product_failure`；否則由第一個受阻的前置步驟決定；再否則由第一條沒通過的旅程決定；沒有任何旅程時是 `inconclusive`。旅程中一步沒通過，之後的步驟不執行（`not_executed`），旅程不會被拼成通過。
+- 理由：票面列出的七個值就是 verdict；「reason_code」若也只有這七個值會與 verdict 重複，細分的原因對使用者排查更有用。前置階段失敗屬於環境問題，不能算成產品缺陷。
+- 替代方案：reason_code 也用這七個值，另加 detail 文字。資訊重複，而且機器無法分辨失敗的原因。
+- 影響：web Adapter（票 46）與交接（票 49）沿用同一組 verdict 與 reason_code 的命名方式。
+- 審閱：未審
+
+### AI-394：「新 Profile 至少實際跑過一條代表旅程」以 `proven_by` 表達，未覆蓋範圍分三種來源
+- 重要度：中
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：
+  - 發布條件：Profile 至少要有一條 `representative` 旅程，代表旅程至少有一個可自動化的步驟；每個自動化步驟至少要有一個程式斷言（只執行操作不算驗證）。
+  - `proven_by`：某個版本只有在出現一份代表旅程 `passed` 的 Bundle 之後才算已證明可用，概況以 `proven_by` 顯示那份 Bundle。版本未證明時，任何驗證要求都會自動加入代表旅程。發布新版本後要重新證明。
+  - 未覆蓋範圍有三種來源：Feature Map 中沒有旅程的功能、Profile 明確宣告的 `uncovered`、這次驗證沒有執行到對應旅程的功能。前兩種顯示在概況，三種都記在每份 Bundle。
+  - 實際執行：正式 Port 在測試中對本機真實的 HTTP 服務與作業系統 shell 跑過代表旅程（`verification_real_adapter.rs`）。
+- 理由：讓「跑過」是 Runtime 查驗得到的事實，不是勾選框；新版本的斷言可能寫錯，必須重新證明。
+- 替代方案：發布時同步執行代表旅程，失敗就拒絕發布。這會讓發布依賴受驗環境當下是否可用，而且發布 API 要等待長時間的操作。
+- 影響：Profile 剛發布時 `proven_by` 是 null，UI 會明確提示這個版本還不能當作驗證證據。由於 Stage 證據要求 Bundle 為 passed，而未證明的版本一定會跑代表旅程，未證明版本的 Bundle 不可能被當作有效證據。
+- 審閱：未審
+
+### AI-395：清理範圍以「本次驗證的狀態目錄與它啟動的服務」界定；teardown 與清理一定執行
+- 重要度：中
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：
+  - 隔離方式：每個驗證要求有專屬的狀態目錄 `<資料目錄>\verification\<驗證要求>`，以佔位字 `{{state_dir}}` 交給操作；`{{run_id}}` 是驗證要求識別。Profile 應把測試資料寫在這個目錄，或用這個識別標記測試資料。
+  - 清理順序：不論判定為何，依序執行 teardown、停止本次啟動的服務、移除本次的狀態目錄，不碰其他驗證的目錄與受驗專案的檔案。
+  - 失敗處理：teardown 或清理失敗只記在 Bundle 的 `cleanup.problems`，不改變判定。證據存在控制資料庫的 Evidence Bundle（只追加、不可修改），不放在狀態目錄。
+  - 執行方式：驗證由 Supervisor 在驗證工作中依序執行。中途當掉時要求仍是 `queued`，重啟後重新執行，並先清空同一個要求留下的狀態目錄。
+  - 服務程序：以子程序啟動，停止時只終止直接啟動的那個程序，不放進 Job Object，與票 13 的驗證命令相同。
+- 理由：「只移除本 Run 的狀態」需要一個可以機械判斷的界線；以驗證要求為單位的目錄加上識別，最容易保證不誤刪。
+- 替代方案：讓 teardown 自行負責全部清理。Runtime 無法確認清理範圍，也無法保證失敗時的清理。
+- 影響：服務自己再開的子孫程序，以及 Runtime 當掉時仍在執行的服務，不保證會被終止（Runtime 正常結束時會隨之終止）。Profile 必須使用佔位字，才能讓應用程式本身的資料與其他驗證隔離。未實作帳號權限參照與秘密參照，測試權杖只能以 `evidence.redact` 遮蔽（秘密參照屬於票 46）。
+- 審閱：未審
+
+### AI-396：build 識別、candidate revision 與需求版本的取得方式
+- 重要度：低
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：candidate revision 是受驗目錄的 `git rev-parse --verify HEAD`（不是 Git repo 時為 null）。build 是 Profile 的 `build` 命令輸出的最後一行；沒有設定時是 `revision:<HEAD>`；命令失敗則判定為 `environment_blocked`（`build_unidentified`）。需求版本是受驗 Task 執行時的契約版本，同時記下 Task 最新的 Run 與世代。受驗目錄是 Task 已登記的工作目錄，沒有 Task 或沒有工作目錄時是 Workspace 目錄。
+- 理由：CLI／API 專案沒有統一的 build 號；讓專案自己宣告，並以 revision 作為預設。
+- 替代方案：計算受驗目錄的檔案雜湊作為 build。成本高，而且不一定等於實際被執行的產物。
+- 影響：worktree 中未提交的變更不會反映在 revision 上。
+- 審閱：未審
+
+### AI-397：新增 `VerificationDriver` Port，不重用 CommandRunner 或 ProcessControl
+- 重要度：低
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：CLI／API Adapter 的全部副作用集中在一個新 Port：命令、HTTP、啟動與停止服務、就緒重試的等待、Git HEAD、狀態目錄的建立與移除。正式實作的命令沿用票 13 的 `LocalCommandRunner`；HTTP 使用 reqwest，不跟隨轉址，本文最多保留開頭 256 KB。fake 依「程式＋引數」或「方法＋網址」腳本化回應，等待時推進 fake 時鐘。
+- 理由：Port 必須讓驗證的 fake 能依引數分別回應，而且等待不能用真實的 sleep。ProcessControl 是為 Claude Run 與 Job Object 設計的，接受驗證服務會影響既有的程序核對。
+- 替代方案：擴充既有的 CommandRunner 與 ProcessControl。會改動多個票共用的介面與 fake。
+- 影響：harness 可以用 `HarnessBuilder::verification_driver` 換上正式實作，對真實服務做情境測試。
+- 審閱：未審
+
+### AI-398：驗證的資料形狀、API、錯誤碼、migration 40 與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：
+  - migration 40：`verification_profiles` 建立三張表。`verification_profile_version` 以 Workspace 與版本識別，只追加。`verification_request` 的狀態只有 `queued` 與 `completed`。`evidence_bundle` 的內容存成 JSON，只追加。
+  - 桌面 API：
+    - `GET /api/v1/workspaces/{id}/verification`：概況，最近 20 個要求與 20 份 Bundle。
+    - `POST …/verification/profile`
+    - `POST …/verification/runs`
+    - `GET …/verification/bundles/{bundle_id}`
+  - Controller 工具：`run_verification`、`get_verification`。
+  - 錯誤碼：`verification_profile_invalid`、`verification_profile_not_found`、`verification_request_invalid`、`evidence_bundle_not_found`。
+  - 介面範圍：`interface` 只有 `cli_api`；web 屬於票 46。
+  - UI：在側欄每個 Workspace 的「驗證」。
+- 理由：沿用票 42、43 的模式，即 Controller 工具加上桌面檢視 API 與側欄入口。
+- 替代方案：把驗證結果放進「成果與驗證」分頁的 Task 詳細面板。沒有綁定 Task 的驗證會沒有地方顯示。
+- 影響：與同時進行的票整合時，migration 與 AI 編號可能需要順延。
+- 審閱：未審
+
+### AI-399：作者以被審的 Task 認定，reviewer 必須是另一個 Task 的 Worker，也不能沿用作者的 Session
 - 重要度：高
 - 時間／階段：2026-10-23，票 44 實作
 - 決策：「作者」是被審的 Task：它的每一個 Run，以及這些 Run 用過的平台 Session、原生 Session、接續的原生 Session。reviewer 必須是另一個 Task 的 Worker Run（`submit_review` 是 Worker 工具），而且它的 Session 不能與作者的任何 Session 重疊；否則回 403 `reviewer_is_author`，資料表另有 `reviewer_task_id <> subject_task_id` 的 CHECK。Controller 不能提交審查（`worker_only`），它的評估不取代審查。這條規則不分風險高低一律適用。reviewer 的身分（計算人數用）也是 Task。
@@ -3555,7 +3650,7 @@
 - 影響：Controller 要另建審查用的 Task 並派出 Worker 擔任 reviewer；同一個 reviewer Task 交多份審查只算一位。
 - 審閱：未審
 
-### AI-392：「修正後可證明不受影響」以 Runtime 的 Git 變更與審查時記錄的範圍判定，一次沿用一軸
+### AI-400：「修正後可證明不受影響」以 Runtime 的 Git 變更與審查時記錄的範圍判定，一次沿用一軸
 - 重要度：高
 - 時間／階段：2026-10-23，票 44 實作
 - 決策：每一軸記錄審過的範圍（`paths`）。新的審查可以對某一軸指定 `reuse_from` 沿用先前審查的同一軸，Runtime 只在下列條件都成立時接受：同一個被審 Task；先前那一軸已通過（沒有 finding，或全部經使用者同意駁回）；輸入未變（Spec 軸的規格版本、Standards 軸的規範來源相同）；先前記錄了 `paths`；而且 Runtime 以 Workspace 的 Git（新的 Port `WorkspaceFs::changed_paths`，正式版 `git diff --name-only --no-renames`）算出兩個 candidate 之間變更的檔案都不在那些 `paths` 內（不分大小寫、目錄含其下所有檔案、`.` 是整個 repo）。算不出變更（不是 Git repo、revision 不存在）一律拒絕（`review_reuse_rejected`）。沿用的軸照抄原本的摘要與範圍，並記原本的 reviewer。
@@ -3564,7 +3659,7 @@
 - 影響：不是 Git repo 的 Workspace 無法沿用審查，修正後一律重審；審查沒有記錄 `paths` 的軸之後也不能沿用。
 - 審閱：未審
 
-### AI-393：「高風險工作」由 Playbook 的審查 Gate 表達；人數依每一軸實際審查的 reviewer 計算
+### AI-401：「高風險工作」由 Playbook 的審查 Gate 表達；人數依每一軸實際審查的 reviewer 計算
 - 重要度：中
 - 時間／階段：2026-10-23，票 44 實作
 - 決策：新增 exit check 證據種類 `review`（`review_id`）與選填的 `reviewers`（每一軸需要幾位不同的非作者 reviewer，預設 1，上限 5，只能用在 `review`）。帶有審查 Gate 的工作就是需要獨立審查的高風險工作；使用者可以發布把人數調高的 Playbook 新版本。內建功能開發 Playbook 的「獨立審查」由「登記成果」改為 `review`（既有資料庫在 Runtime 啟動時會追加新的內建版本，進行中的 Workflow 不受影響）；其他六個 Playbook 不變。人數以兩軸各自「實際審查的 reviewer」計算，取較少的一軸：沿用別人的一軸不算自己審過那一軸。
@@ -3573,7 +3668,7 @@
 - 影響：遷移、缺陷等其他開發流程目前沒有審查 Gate，需要時由使用者發布新版本加上；票 43 的情境測試中「獨立審查」改為提交雙軸審查。
 - 審閱：未審
 
-### AI-394：缺少 reviewer 時 Gate 記為 blocked；審查未通過、過期或審錯 Task 時記為 incomplete
+### AI-402：缺少 reviewer 時 Gate 記為 blocked；審查未通過、過期或審錯 Task 時記為 incomplete
 - 重要度：中
 - 時間／階段：2026-10-23，票 44 實作
 - 決策：審查 exit check 的有效審查人數不足時：如果引用的審查都有效、只是人數不夠（包含完全沒有引用審查），這次 attempt 記 `blocked`，Workflow 阻擋，原因是「缺少非作者 reviewer 的雙軸審查：每一軸需要 N 位，目前 K 位」；如果引用的審查有未解決的 finding（`not_passed`）、已過期（`stale`）、審的不是這個 Workflow 的 Task（`other_subject`）或不存在，記 `incomplete`。兩者都不前進，也都不扣 Stage 預算。
@@ -3582,7 +3677,7 @@
 - 影響：補上足夠的有效審查後，以 passed 再回報即可解除阻擋（同票 43 的裁定 Gate）。
 - 審閱：未審
 
-### AI-395：finding 三種分類；駁回與需裁定都經「駁回 review finding」事項送裁定，使用者回答後由 Controller 再呼叫一次套用
+### AI-403：finding 三種分類；駁回與需裁定都經「駁回 review finding」事項送裁定，使用者回答後由 Controller 再呼叫一次套用
 - 重要度：中
 - 時間／階段：2026-10-23，票 44 實作
 - 決策：`classify_review_finding` 的分類是 `fix`（修正，決策權限表 `classify_finding_as_fix`，預設自主，Workspace 可收窄）、`dismiss`（具理由駁回）與 `needs_decision`（Controller 無法判斷）。後兩者都依 `dismiss_review_finding` 送裁定（核准即駁回、不核准即修正），finding 標為 `awaiting_decision` 並回 `requires_decision`；使用者回答後 Controller 以相同內容再呼叫一次，消耗這次核准：核准 → `dismissed`（記裁定請求與裁定者 `desktop`），不核准 → `fix`。每次分類都要附理由（`reason`，可另附 `evidence`）。只有 `dismissed` 算解決，且是終態；`fix` 要等新的 candidate 重新審查。為了讓核准只對這一項 finding 有效，`ActionContent` 新增選填的操作對象 `subject`，指定時裁定的指紋是「事項:Task:對象」。
@@ -3591,7 +3686,7 @@
 - 影響：送裁定時被審 Task 如果正在執行，會依既有規則進入 `waiting_decision`（票 35 的行為）。
 - 審閱：未審
 
-### AI-396：規格版本是被審 Task 的契約版本；審查過期的兩種情況
+### AI-404：規格版本是被審 Task 的契約版本；審查過期的兩種情況
 - 重要度：中
 - 時間／階段：2026-10-23，票 44 實作
 - 決策：審查的 `spec_version` 必須是被審 Task 提交當下的契約版本，否則拒絕（`review_spec_outdated`）。之後 Task 的契約改版，或同一個 Task 有了對較新 candidate 的審查，舊審查就過期（Gate 查驗為 `stale`，視圖顯示 `stale_reason`），過期的審查保留但不能開啟 Gate。base／candidate revision 是 reviewer 填的字串（不能含空白、不能以 `-` 開頭），Runtime 不另外核對它們是否等於分支的最新 commit。
@@ -3600,22 +3695,36 @@
 - 影響：reviewer 若填錯 candidate，Runtime 不會發現；但修正後的新審查一定會讓舊審查過期。
 - 審閱：未審
 
-### AI-397：Design Package 是已登記的成果；接受偏離經使用者裁定後由 Runtime 追加設計的新版本
+### AI-405：Design Package 是已登記的成果；接受偏離經使用者裁定後由 Runtime 追加設計的新版本
 - 重要度：中
 - 時間／階段：2026-10-23，票 44 實作
-- 決策：Design Package 以已登記的成果表示，設計版本就是成果版本。Worker 以 `report_design_deviation` 回報偏離：對照的版本必須是目前的最新版本（否則 `design_outdated`），保存偏離、原因、受影響契約與接受後的完整設計（`proposed_design`，最多 10 萬字元，存在控制資料庫）。Controller 以 `resolve_design_deviation` 處理：拒絕可自主；接受依 `accept_design_deviation` 送裁定（同 AI-395 的再呼叫模式），核准後 Runtime 把提議的設計寫成新檔案，在同一個交易中替同一個成果追加下一個版本（產生者記為回報偏離的 Run），並記下接受者（`desktop`）、裁定請求與新的設計版本；設計在回報後已有新版本時拒絕接受。之後派出的 Worker 由 Context Builder 的證據索引拿到最新版本。「反覆結構偏離需回到設計階段」本票不自動判定。
+- 決策：Design Package 以已登記的成果表示，設計版本就是成果版本。Worker 以 `report_design_deviation` 回報偏離：對照的版本必須是目前的最新版本（否則 `design_outdated`），保存偏離、原因、受影響契約與接受後的完整設計（`proposed_design`，最多 10 萬字元，存在控制資料庫）。Controller 以 `resolve_design_deviation` 處理：拒絕可自主；接受依 `accept_design_deviation` 送裁定（同 AI-403 的再呼叫模式），核准後 Runtime 把提議的設計寫成新檔案，在同一個交易中替同一個成果追加下一個版本（產生者記為回報偏離的 Run），並記下接受者（`desktop`）、裁定請求與新的設計版本；設計在回報後已有新版本時拒絕接受。之後派出的 Worker 由 Context Builder 的證據索引拿到最新版本。「反覆結構偏離需回到設計階段」本票不自動判定。
 - 理由：成果已有不可覆寫的版本與 Context 的載入機制，「更新同一份設計及其版本、再交給下一位 Worker」可以直接沿用，不必另建設計資料表。提議的設計先存在資料庫而不是先寫成成果，未接受前就不會被下一位 Worker 當成目前的設計。
 - 替代方案：另建 `design_package` 與版本表；或要 Worker 先登記新版本再申請接受（未接受的版本會先成為「最新」）。
 - 影響：設計的新版本出現在原本成果所屬的 Task 之下；反覆偏離目前只能由 Controller 自行判斷是否退回設計 Stage。
 - 審閱：未審
 
-### AI-398：審查與設計偏離的資料形狀、API、錯誤碼、migration 40 與 UI 位置
+### AI-406：審查與設計偏離的資料形狀、API、錯誤碼、migration 41 與 UI 位置
 - 重要度：低
 - 時間／階段：2026-10-23，票 44 實作
-- 決策：migration 40 `reviews_and_deviations` 建立 `review`（只追加；兩軸以 JSON 欄位保存）、`review_finding`（駁回後不可改）與 `design_deviation`（接受或拒絕後不可改；接受必須有裁定、接受者與新設計版本）。Worker 工具 `submit_review`、`report_design_deviation`；Controller 工具 `classify_review_finding`、`resolve_design_deviation`、`get_reviews`；桌面 `GET /api/v1/workspaces/{id}/reviews`。錯誤碼 `review_invalid`、`reviewer_is_author`、`review_spec_outdated`、`review_reuse_rejected`、`review_not_found`、`finding_not_found`、`finding_resolved`、`deviation_not_found`、`deviation_resolved`、`design_not_found`、`design_outdated`。Workflow 的證據查驗新增狀態 `not_passed`、`stale`、`other_subject`。UI 是側欄每個 Workspace 的「審查」（唯讀，兩軸分開顯示），桌面殼指令 `workspace_reviews`；裁定沿用裁定中心。Controller 的角色說明加入審查與偏離的做法。
+- 決策：migration 41 `reviews_and_deviations` 建立 `review`（只追加；兩軸以 JSON 欄位保存）、`review_finding`（駁回後不可改）與 `design_deviation`（接受或拒絕後不可改；接受必須有裁定、接受者與新設計版本）。Worker 工具 `submit_review`、`report_design_deviation`；Controller 工具 `classify_review_finding`、`resolve_design_deviation`、`get_reviews`；桌面 `GET /api/v1/workspaces/{id}/reviews`。錯誤碼 `review_invalid`、`reviewer_is_author`、`review_spec_outdated`、`review_reuse_rejected`、`review_not_found`、`finding_not_found`、`finding_resolved`、`deviation_not_found`、`deviation_resolved`、`design_not_found`、`design_outdated`。Workflow 的證據查驗新增狀態 `not_passed`、`stale`、`other_subject`。UI 是側欄每個 Workspace 的「審查」（唯讀，兩軸分開顯示），桌面殼指令 `workspace_reviews`；裁定沿用裁定中心。Controller 的角色說明加入審查與偏離的做法。
 - 理由：沿用票 42、43 的模式（Worker／Controller 工具 + 桌面檢視 API + 側欄入口）。
 - 替代方案：把審查放進流程視圖的 Stage 詳細。一份審查可能被多個 attempt 引用、也可能不屬於任何 Workflow，獨立一頁較清楚。
 - 影響：與同時進行的票整合時，migration 編號與 AI 編號可能需要順延。
+- 審閱：未審
+
+### AI-407：票 44 整合 rebuild/v1（票 45）：`reviews_and_deviations` 順延為第 41 個 migration、AI 編號改為 AI-399～AI-406；兩票的證據種類並存
+- 重要度：中
+- 時間／階段：2026-10-23，票 44 整合（R135-44-integrate）
+- 決策：
+  - 票 45 先合併進整合分支，佔用了第 40 個 migration（`verification_profiles`）與 AI-391～AI-398。本票的 migration 改排在 `verification_profiles` 之後成為第 41 個；AI 決策改編為 AI-399～AI-406，移到票 45 條目之後，條目間的互相引用一併改號，AI-406 標題與內容的「migration 40」改為 41。自動合併時 AI-406 的 `- 審閱：` 行被併掉，已補回。
+  - `EvidenceStatus::NotPassed` 兩票都新增，序列化同為 `not_passed`，合併成一個變體並保留兩種意義（審查還有未解決的 finding；Evidence Bundle 未通過或版本已改變）。Gate 的判定不受影響：審查證據由 `review_shortfall` 處理，其他證據才走 `not_passed` 的驗證說明。
+  - 證據輸入同時接受 `review_id` 與 `evidence_bundle_id`，仍須剛好提供五種識別其中一個；工具說明與 Controller 角色說明兩段都保留。
+  - 工具總數 26 + 5（票 44）+ 2（票 45）= 33，`CONTROLLER_TOOLS` 11 + 3 + 2 = 16，測試斷言同步更新。
+  - Web 的檢視、側欄按鈕、桌面殼指令、fixture 與樣式兩邊都保留，側欄依「流程、審查、驗證」排列。
+- 理由：已合併的 migration 順序不能改變，否則既有資料庫的 `schema_migrations` 會對不上。兩票的變更彼此獨立，保留兩邊的行為即可。
+- 替代方案：替驗證另取一個狀態名稱（例如 `verification_not_passed`）。會改到整合分支已有的 API 輸出，沒有必要。
+- 影響：無行為差異；`pnpm test`、`pnpm build` 通過。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

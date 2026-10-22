@@ -21,6 +21,7 @@ use baton_api::{
     ReconcileRequest, UnderstandingView,
     SkipStageRequest, WorkflowList, WorkflowView,
     ReviewList,
+    PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
 };
 use baton_client::{
     ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, ClientError, Connection,
@@ -40,6 +41,7 @@ use baton_domain::lifecycle::LifecyclePhase;
 use baton_domain::maintenance::{MaintenanceKind, MaintenancePhase};
 use baton_domain::run::RunView;
 use baton_domain::verification::VerificationView;
+use baton_domain::verification_profile::{EvidenceBundle, ProfileDefinition, VerificationRequest};
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
@@ -1229,6 +1231,57 @@ async fn workflow_skip_stage(
     link.client.skip_stage(&workspace_id, &workflow_id, &request).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 的驗證分頁：Verification Profile、是否已被證明可用、未覆蓋範圍、最近的要求與 Evidence Bundle。
+#[tauri::command]
+async fn workspace_verification(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+) -> Result<VerificationOverviewView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.verification_overview(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的驗證分頁：使用者發布 Verification Profile 的新版本（只有使用者能從桌面發布）。
+#[tauri::command]
+async fn verification_publish_profile(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    definition: ProfileDefinition,
+) -> Result<PublishProfileResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.publish_verification_profile(&workspace_id, &definition).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的驗證分頁：使用者要求執行驗證（Runtime 排入後由 Supervisor 執行）。
+#[tauri::command]
+async fn verification_run(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request: RunVerificationRequest,
+) -> Result<VerificationRequest, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.run_verification(&workspace_id, &request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的驗證分頁：讀取一份 Evidence Bundle。
+#[tauri::command]
+async fn verification_bundle(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    bundle_id: String,
+) -> Result<EvidenceBundle, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.evidence_bundle(&workspace_id, &bundle_id).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 回報一次沒被 Guard 攔下的重犯。
 #[tauri::command]
 async fn knowledge_report_recurrence(
@@ -1332,7 +1385,11 @@ fn main() {
             workspace_projection_reconcile,
             workspace_workflows,
             workflow_skip_stage,
-            workspace_reviews
+            workspace_reviews,
+            workspace_verification,
+            verification_publish_profile,
+            verification_run,
+            verification_bundle
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {

@@ -75,3 +75,10 @@
 
 ## 20. Stage 預算用盡後可被 Controller 直接解除（票 43）
 - Stage 失敗次數用盡預算而被阻擋後，Controller 附上有效證據回報 passed 即可通過並解除阻擋；spec 把「預算用盡後的下一步」列為必須送裁定。改為預算用盡後只能經使用者裁定解除。
+
+## 21. 驗證證據的歸屬與排程（票 45）
+- Stage 查驗 `verification` 證據時（`verification_evidence_status`）不比對 Bundle 的 `task_id` 是否為 Workflow 綁定的 Task；`task_accepted` 證據同樣沒有比對。改為只接受綁定 Task 的證據。
+- 驗證要求與整合佇列共用 `verify_lock` 依序執行，長時間驗證會延後整合。
+
+## 22. 變更路徑比對（票 44）
+- 檔名含 `"`、`\` 或控制字元時，git 即使設 `core.quotepath=false` 仍會加引號，`touches` 比對會漏判而把受影響的審查軸當成可沿用；改用 `git diff -z`。

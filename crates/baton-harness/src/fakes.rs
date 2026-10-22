@@ -1362,12 +1362,15 @@ pub struct FakePorts {
     pub login_session: Arc<FakeLoginSession>,
     pub startup_registration: Arc<FakeStartupRegistration>,
     pub update_source: Arc<FakeUpdateSource>,
+    pub verification_driver: Arc<FakeVerificationDriver>,
 }
 
 impl FakePorts {
     pub fn new(clock_start: Timestamp) -> Self {
+        let clock = Arc::new(FakeClock::new(clock_start));
         Self {
-            clock: Arc::new(FakeClock::new(clock_start)),
+            verification_driver: Arc::new(FakeVerificationDriver::new(clock.clone())),
+            clock,
             process_control: Arc::default(),
             agent_adapter: Arc::default(),
             quota_observer: Arc::default(),
@@ -1401,6 +1404,171 @@ impl FakePorts {
             login_session: self.login_session.clone(),
             startup_registration: self.startup_registration.clone(),
             update_source: self.update_source.clone(),
+            verification_driver: self.verification_driver.clone(),
+        }
+    }
+}
+
+/// 腳本化的 CLI／API 驗證 Adapter 的 Port（票 45）。
+///
+/// - 命令與 HTTP 的結果依序取用；只剩最後一個時之後每次都相同（例如就緒條件先失敗兩次再成功）。
+///   命令先找「程式 + 引數」完全相同的腳本，再找只有程式名稱的腳本；沒有設定的命令視為找不到程式，
+///   沒有設定的 HTTP 端點視為連不上。
+/// - 等待（就緒重試的間隔）推進 fake 時鐘，不真的等待。
+/// - 狀態目錄是暫存目錄下的真實目錄，測試可以直接檢查它是否還在。
+/// - 記錄每一個操作（`operations`），讓測試斷言 teardown、服務停止等外部行為。
+pub struct FakeVerificationDriver {
+    clock: Arc<FakeClock>,
+    commands: Mutex<HashMap<String, VecDeque<PortResultOf<CommandOutput>>>>,
+    http: Mutex<HashMap<(String, String), VecDeque<HttpOutcome>>>,
+    revisions: Mutex<HashMap<PathBuf, String>>,
+    service_failures: Mutex<HashMap<String, String>>,
+    running: Mutex<HashSet<String>>,
+    next_service: AtomicU32,
+    operations: Mutex<Vec<String>>,
+    http_requests: Mutex<Vec<HttpRequest>>,
+}
+
+impl FakeVerificationDriver {
+    pub fn new(clock: Arc<FakeClock>) -> Self {
+        Self {
+            clock,
+            commands: Mutex::default(),
+            http: Mutex::default(),
+            revisions: Mutex::default(),
+            service_failures: Mutex::default(),
+            running: Mutex::default(),
+            next_service: AtomicU32::new(1),
+            operations: Mutex::default(),
+            http_requests: Mutex::default(),
+        }
+    }
+
+    fn command_key(program: &str, args: &[&str]) -> String {
+        std::iter::once(program).chain(args.iter().copied()).collect::<Vec<_>>().join(" ")
+    }
+
+    /// 這個命令（`args` 空的時候是這個程式的任何引數）依序以這些結果結束。
+    pub fn script_command(&self, program: &str, args: &[&str], outputs: Vec<CommandOutput>) {
+        let key = Self::command_key(program, args);
+        lock(&self.commands).insert(key, outputs.into_iter().map(Ok).collect());
+    }
+
+    /// 這個命令每次都以 `code` 結束、輸出 `output`。
+    pub fn script_exit(&self, program: &str, args: &[&str], code: i32, output: &str) {
+        self.script_command(program, args, vec![CommandOutput::Exited { code, output: output.to_string() }]);
+    }
+
+    /// 這個命令每次都無法啟動。
+    pub fn script_start_failure(&self, program: &str, args: &[&str], reason: &str) {
+        lock(&self.commands).insert(Self::command_key(program, args), VecDeque::from([Err(reason.to_string())]));
+    }
+
+    /// 這個端點依序回應這些結果。
+    pub fn script_http(&self, method: &str, url: &str, outcomes: Vec<HttpOutcome>) {
+        lock(&self.http).insert((method.to_string(), url.to_string()), outcomes.into());
+    }
+
+    /// 這個端點每次都以 `status` 與 `body` 回應。
+    pub fn script_response(&self, method: &str, url: &str, status: u16, body: &str) {
+        self.script_http(method, url, vec![HttpOutcome::Responded { status, body: body.to_string() }]);
+    }
+
+    pub fn set_revision(&self, dir: &Path, commit: &str) {
+        lock(&self.revisions).insert(dir.to_path_buf(), commit.to_string());
+    }
+
+    /// 這個程式之後無法以服務啟動。
+    pub fn fail_service(&self, program: &str, reason: &str) {
+        lock(&self.service_failures).insert(program.to_string(), reason.to_string());
+    }
+
+    /// 目前還在執行的服務。
+    pub fn running_services(&self) -> Vec<String> {
+        let mut running: Vec<String> = lock(&self.running).iter().cloned().collect();
+        running.sort();
+        running
+    }
+
+    /// 至今的全部操作，依順序（例如 `command ledger add`、`http POST http://…`、`start ledger serve`、`stop svc-1`）。
+    pub fn operations(&self) -> Vec<String> {
+        lock(&self.operations).clone()
+    }
+
+    /// 至今送出的全部 HTTP 請求（含標頭與本文）。
+    pub fn http_requests(&self) -> Vec<HttpRequest> {
+        lock(&self.http_requests).clone()
+    }
+
+    fn next<T: Clone>(queue: &mut VecDeque<T>) -> Option<T> {
+        if queue.len() > 1 { queue.pop_front() } else { queue.front().cloned() }
+    }
+}
+
+#[async_trait]
+impl VerificationDriver for FakeVerificationDriver {
+    async fn run_command(&self, request: CommandRequest) -> PortResult<CommandOutput> {
+        let args: Vec<&str> = request.args.iter().map(String::as_str).collect();
+        let exact = Self::command_key(&request.program, &args);
+        lock(&self.operations).push(format!("command {exact}"));
+        let mut commands = lock(&self.commands);
+        let scripted = match commands.get_mut(&exact) {
+            Some(queue) => Self::next(queue),
+            None => commands.get_mut(&request.program).and_then(Self::next),
+        };
+        match scripted {
+            Some(Ok(output)) => Ok(output),
+            Some(Err(reason)) => Err(PortError::Failed(reason)),
+            None => Err(PortError::Failed(format!("找不到程式「{}」", request.program))),
+        }
+    }
+
+    async fn send_http(&self, request: HttpRequest) -> PortResult<HttpOutcome> {
+        lock(&self.operations).push(format!("http {} {}", request.method, request.url));
+        let key = (request.method.clone(), request.url.clone());
+        lock(&self.http_requests).push(request);
+        let outcome = lock(&self.http).get_mut(&key).and_then(Self::next);
+        Ok(outcome.unwrap_or(HttpOutcome::Unreachable { reason: "連線被拒（沒有服務在這個位址）".into() }))
+    }
+
+    async fn start_service(&self, request: ServiceRequest) -> PortResult<ServiceHandle> {
+        let line = std::iter::once(request.program.as_str()).chain(request.args.iter().map(String::as_str)).collect::<Vec<_>>();
+        lock(&self.operations).push(format!("start {}", line.join(" ")));
+        if let Some(reason) = lock(&self.service_failures).get(&request.program).cloned() {
+            return Err(PortError::Failed(reason));
+        }
+        let id = format!("svc-{}", self.next_service.fetch_add(1, Ordering::SeqCst));
+        lock(&self.running).insert(id.clone());
+        Ok(ServiceHandle(id))
+    }
+
+    async fn stop_service(&self, handle: &ServiceHandle) -> PortResult<()> {
+        lock(&self.operations).push(format!("stop {}", handle.0));
+        lock(&self.running).remove(&handle.0);
+        Ok(())
+    }
+
+    async fn pause(&self, duration: Duration) {
+        self.clock.advance_millis(duration.as_millis() as i64);
+    }
+
+    async fn revision(&self, dir: &Path) -> PortResult<Option<String>> {
+        Ok(lock(&self.revisions).get(dir).cloned())
+    }
+
+    async fn prepare_state_dir(&self, dir: &Path) -> PortResult<()> {
+        lock(&self.operations).push(format!("prepare {}", dir.display()));
+        if dir.exists() {
+            std::fs::remove_dir_all(dir).map_err(|e| PortError::Failed(e.to_string()))?;
+        }
+        std::fs::create_dir_all(dir).map_err(|e| PortError::Failed(e.to_string()))
+    }
+
+    async fn remove_state_dir(&self, dir: &Path) -> PortResult<()> {
+        lock(&self.operations).push(format!("remove {}", dir.display()));
+        match std::fs::remove_dir_all(dir) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(PortError::Failed(error.to_string())),
+            _ => Ok(()),
         }
     }
 }

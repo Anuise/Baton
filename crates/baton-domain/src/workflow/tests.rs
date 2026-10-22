@@ -77,6 +77,7 @@ fn pass(workflow: &WorkflowInstance, playbook: &PlaybookVersion, prior: &mut Vec
                 EvidenceKind::Decision => EvidenceRef::Decision { decision_request_id: "dr".into() },
                 EvidenceKind::TaskAccepted => EvidenceRef::TaskAccepted { task_id: "task".into() },
                 EvidenceKind::Review => EvidenceRef::Review { review_id: "rev".into() },
+                EvidenceKind::Verification => EvidenceRef::Verification { evidence_bundle_id: "evb".into() },
             };
             let reviewers = (c.requires == EvidenceKind::Review)
                 .then(|| AxisReviewers { standards: "t_reviewer".into(), spec: "t_reviewer".into() });

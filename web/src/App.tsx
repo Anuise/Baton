@@ -23,10 +23,11 @@ import { TimelinePage } from "./TimelinePage";
 import { UpdateNotice } from "./UpdateNotice";
 import { UpdateSettings } from "./UpdateSettings";
 import { ReviewPage } from "./ReviewPage";
+import { VerificationPage } from "./VerificationPage";
 import { WorkflowPage } from "./WorkflowPage";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線、專案理解、流程或審查。 */
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線、專案理解、流程、審查或驗證。 */
 type Opened = {
   view:
     | "authorization"
@@ -38,7 +39,8 @@ type Opened = {
     | "timeline"
     | "understanding"
     | "workflows"
-    | "reviews";
+    | "reviews"
+    | "verification";
   workspace: Workspace;
 };
 
@@ -79,6 +81,7 @@ export function App() {
             onOpenUnderstanding={(workspace) => setOpened({ view: "understanding", workspace })}
             onOpenWorkflows={(workspace) => setOpened({ view: "workflows", workspace })}
             onOpenReviews={(workspace) => setOpened({ view: "reviews", workspace })}
+            onOpenVerification={(workspace) => setOpened({ view: "verification", workspace })}
           />
         )}
         <main className="main">
@@ -121,6 +124,10 @@ export function App() {
           )}
           {client && opened?.view === "reviews" && (
             <ReviewPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 正在編輯的 Profile 與訊息 */}
+          {client && opened?.view === "verification" && (
+            <VerificationPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
           )}
           {client && <PlatformPage client={client} />}
         </main>

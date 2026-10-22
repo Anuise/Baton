@@ -213,6 +213,8 @@ pub enum EvidenceKind {
     TaskAccepted,
     /// 非作者 reviewer 的雙軸審查（票 44）：兩軸都通過、對照目前的規格版本、是這個 Task 最新 candidate 的審查。
     Review,
+    /// 判定為 passed、而且依據目前 Profile 版本與需求版本的 Evidence Bundle（票 45）。
+    Verification,
 }
 
 /// 離開 Stage 前必須滿足的一項檢查。
@@ -651,6 +653,7 @@ pub enum EvidenceRef {
     Decision { decision_request_id: String },
     TaskAccepted { task_id: String },
     Review { review_id: String },
+    Verification { evidence_bundle_id: String },
 }
 
 impl EvidenceRef {
@@ -660,6 +663,7 @@ impl EvidenceRef {
             EvidenceRef::Decision { .. } => EvidenceKind::Decision,
             EvidenceRef::TaskAccepted { .. } => EvidenceKind::TaskAccepted,
             EvidenceRef::Review { .. } => EvidenceKind::Review,
+            EvidenceRef::Verification { .. } => EvidenceKind::Verification,
         }
     }
 }
@@ -676,6 +680,8 @@ pub struct EvidenceInput {
     pub task_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_bundle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -697,7 +703,7 @@ pub enum EvidenceStatus {
     Pending,
     /// Task 還沒有通過成果接受。
     NotAccepted,
-    /// 審查還有未解決的 finding（任一軸）。
+    /// 審查還有未解決的 finding（任一軸）；或 Evidence Bundle 的判定不是 passed，或它依據的 Profile 版本、需求版本已經不是目前的版本（票 45）。
     NotPassed,
     /// 審查已過期：規格版本改變，或已有對較新 candidate 的審查。
     Stale,
@@ -740,14 +746,16 @@ pub fn normalize_evidence(inputs: &[EvidenceInput]) -> Result<Vec<Evidence>, Wor
                 present(&input.decision_request_id),
                 present(&input.task_id),
                 present(&input.review_id),
+                present(&input.evidence_bundle_id),
             ) {
-                (Some(artifact_id), None, None, None) => EvidenceRef::Artifact { artifact_id },
-                (None, Some(decision_request_id), None, None) => EvidenceRef::Decision { decision_request_id },
-                (None, None, Some(task_id), None) => EvidenceRef::TaskAccepted { task_id },
-                (None, None, None, Some(review_id)) => EvidenceRef::Review { review_id },
+                (Some(artifact_id), None, None, None, None) => EvidenceRef::Artifact { artifact_id },
+                (None, Some(decision_request_id), None, None, None) => EvidenceRef::Decision { decision_request_id },
+                (None, None, Some(task_id), None, None) => EvidenceRef::TaskAccepted { task_id },
+                (None, None, None, Some(review_id), None) => EvidenceRef::Review { review_id },
+                (None, None, None, None, Some(evidence_bundle_id)) => EvidenceRef::Verification { evidence_bundle_id },
                 _ => {
                     return Err(invalid(format!(
-                        "evidence {check} 必須剛好提供 artifact_id、decision_request_id、task_id 或 review_id 其中一個"
+                        "evidence {check} 必須剛好提供 artifact_id、decision_request_id、task_id、review_id 或 evidence_bundle_id 其中一個"
                     )))
                 }
             };
@@ -971,6 +979,8 @@ fn evaluate(stage: &StageDefinition, evidence: &[CheckedEvidence]) -> (AttemptOu
             "裁定還沒有回答".to_string()
         } else if offered.iter().any(|e| e.status == EvidenceStatus::NotAccepted) {
             "Task 還沒有通過成果接受".to_string()
+        } else if offered.iter().any(|e| e.status == EvidenceStatus::NotPassed) {
+            "驗證沒有通過（證據不足、環境或授權阻礙都不算通過），或依據的 Profile、需求版本已經改變".to_string()
         } else {
             "引用的證據在這個 Workspace 中不存在".to_string()
         };

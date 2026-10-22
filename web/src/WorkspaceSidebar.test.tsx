@@ -520,6 +520,30 @@ describe("左側 Workspace 清單", () => {
     expect(onOpenWorkflows).not.toHaveBeenCalled();
   });
 
+  it("每個 Workspace 都有「驗證」入口，不會觸發成果與驗證或流程", async () => {
+    const onSelect = vi.fn();
+    const onOpenArtifacts = vi.fn();
+    const onOpenWorkflows = vi.fn();
+    const onOpenVerification = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenArtifacts={onOpenArtifacts}
+        onOpenWorkflows={onOpenWorkflows}
+        onOpenVerification={onOpenVerification}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "驗證 筆記" }));
+
+    expect(onOpenVerification).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenArtifacts).not.toHaveBeenCalled();
+    expect(onOpenWorkflows).not.toHaveBeenCalled();
+  });
+
   it("每個 Workspace 都有「對話」入口，不會觸發其他檢視", async () => {
     const onSelect = vi.fn();
     const onOpenTasks = vi.fn();

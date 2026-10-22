@@ -2430,6 +2430,220 @@ export interface ReviewClient {
   reviews(workspaceId: string): Promise<ReviewList>;
 }
 
+/** 驗證的一個操作（對應 Rust 的 Operation）：Adapter 只執行並回報觀察，不做判定。 */
+export type VerificationOperation =
+  | { kind: "command"; program: string; args?: string[]; timeout_ms?: number }
+  | {
+      kind: "http";
+      method: string;
+      url: string;
+      headers?: { name: string; value: string }[];
+      body?: string;
+      timeout_ms?: number;
+    }
+  /** 需要人工判斷的步驟；CLI／API Adapter 判定為 automation_unsupported。 */
+  | { kind: "manual"; instruction: string };
+
+/** 程式斷言（對應 Rust 的 Assertion）。 */
+export type VerificationAssertion =
+  | { kind: "exit_code"; equals: number }
+  | { kind: "status"; equals: number }
+  | { kind: "contains"; text: string }
+  | { kind: "not_contains"; text: string }
+  | { kind: "json_equals"; pointer: string; value: unknown };
+
+export interface VerificationStep {
+  key: string;
+  title: string;
+  operation: VerificationOperation;
+  assertions: VerificationAssertion[];
+}
+
+export interface VerificationJourney {
+  key: string;
+  title: string;
+  /** 代表旅程：新 Profile 版本要實際跑過並通過它才算可用。 */
+  representative: boolean;
+  steps: VerificationStep[];
+}
+
+/** Feature Map 的一項；journeys 空的就是未覆蓋。 */
+export interface VerificationFeature {
+  key: string;
+  title: string;
+  /** 驗收準則。 */
+  criterion: string;
+  journeys: string[];
+}
+
+/** Verification Profile 的內容（對應 Rust 的 ProfileDefinition）。 */
+export interface VerificationProfileDefinition {
+  interface: "cli_api";
+  build?: { program: string; args: string[] };
+  doctor: VerificationStep[];
+  start?: { program: string; args: string[] };
+  readiness?: { step: VerificationStep; attempts: number; interval_ms: number };
+  setup: VerificationStep[];
+  journeys: VerificationJourney[];
+  teardown: VerificationOperation[];
+  evidence: { output_max_chars: number; redact: string[] };
+  budget: { max_operations: number };
+  feature_map: VerificationFeature[];
+  /** 明確宣告不在自動驗證範圍內的部分。 */
+  uncovered: { area: string; reason: string }[];
+}
+
+/** Profile 的一個不可變版本（對應 Rust 的 ProfileVersion）。 */
+export interface VerificationProfileVersion {
+  id: string;
+  workspace_id: string;
+  version: number;
+  definition: VerificationProfileDefinition;
+  content_hash: string;
+  /** 發布者：桌面憑證的指紋。 */
+  published_by: string;
+  created_at: number;
+}
+
+/** 一項未覆蓋的範圍；明確宣告的範圍沒有 feature。 */
+export interface UncoveredItem {
+  feature?: string;
+  area: string;
+  reason: string;
+}
+
+/** 七種判定；只有 passed 是通過。 */
+export type VerificationVerdict =
+  | "passed"
+  | "product_failure"
+  | "inconclusive"
+  | "environment_blocked"
+  | "auth_blocked"
+  | "budget_exhausted"
+  | "automation_unsupported";
+
+export type VerificationPhase = "build" | "doctor" | "start" | "readiness" | "setup" | "journey" | "teardown";
+
+export interface VerificationAssertionResult {
+  assertion: VerificationAssertion;
+  passed: boolean;
+  /** 實際觀察到的值（已遮蔽）。 */
+  actual: string;
+}
+
+/** 一個步驟的紀錄（對應 Rust 的 StepRecord）。 */
+export interface VerificationStepRecord {
+  phase: VerificationPhase;
+  journey?: string;
+  key: string;
+  title: string;
+  /** 操作描述（已遮蔽）。 */
+  operation: string;
+  verdict: VerificationVerdict;
+  /** 更細的機器可讀原因，例如 assertion_failed。 */
+  reason_code: string;
+  /** 來源引擎的原始代碼，例如 exit:1、http:404、timeout。 */
+  engine_code?: string;
+  assertions: VerificationAssertionResult[];
+  /** 輸出或回應本文的結尾（已遮蔽）。 */
+  output: string;
+  /** 實際執行的次數（就緒條件可能重試）。 */
+  attempts: number;
+}
+
+export interface VerificationJourneyResult {
+  key: string;
+  title: string;
+  representative: boolean;
+  verdict: VerificationVerdict;
+  reason_code: string;
+}
+
+/** 清理結果：只移除本次驗證的狀態，證據保留。 */
+export interface VerificationCleanup {
+  state_dir: string;
+  state_dir_removed: boolean;
+  /** 沒有啟動服務時省略。 */
+  service_stopped?: boolean;
+  problems: string[];
+}
+
+/** 驗證的證據集合（對應 Rust 的 EvidenceBundle）：綁定 build、candidate revision、需求與 Profile 版本。 */
+export interface EvidenceBundle {
+  id: string;
+  workspace_id: string;
+  request_id: string;
+  task_id: string | null;
+  run_id: string | null;
+  generation: number | null;
+  /** 受驗 Task 驗證當時的契約版本。 */
+  requirement_version: number | null;
+  profile_version_id: string;
+  profile_version: number;
+  candidate_revision: string | null;
+  build: string | null;
+  subject_dir: string;
+  journeys: VerificationJourneyResult[];
+  steps: VerificationStepRecord[];
+  verdict: VerificationVerdict;
+  reason_code: string;
+  covered_features: string[];
+  uncovered: UncoveredItem[];
+  cleanup: VerificationCleanup;
+  started_at: number;
+  finished_at: number;
+}
+
+/** 一次驗證的要求（對應 Rust 的 VerificationRequest）。 */
+export interface VerificationRequest {
+  id: string;
+  workspace_id: string;
+  task_id: string | null;
+  profile_version_id: string;
+  profile_version: number;
+  journeys: string[];
+  /** desktop 或 Controller 那一輪的 Run 識別。 */
+  requested_by: string;
+  status: "queued" | "completed";
+  bundle_id: string | null;
+  created_at: number;
+}
+
+/** Workspace 的驗證概況（對應 Rust 的 VerificationOverviewView）。 */
+export interface VerificationOverview {
+  workspace_id: string;
+  /** 還沒有 Profile 時為 null。 */
+  profile: VerificationProfileVersion | null;
+  /** 證明最新版本可用的 Evidence Bundle；null 表示還沒有實際跑過並通過代表旅程。 */
+  proven_by: string | null;
+  uncovered: UncoveredItem[];
+  /** 新的在前。 */
+  requests: VerificationRequest[];
+  /** 新的在前。 */
+  bundles: EvidenceBundle[];
+}
+
+/** created 為 false 表示內容與最新版本相同，沒有新增版本。 */
+export interface PublishProfileResponse {
+  profile: VerificationProfileVersion;
+  created: boolean;
+}
+
+/** 要求執行驗證；journeys 空的時候執行全部旅程。 */
+export interface RunVerificationRequest {
+  task_id?: string;
+  journeys: string[];
+}
+
+/** Verification Profile 與 CLI／API 驗證（Profile 只有使用者能從桌面發布）。 */
+export interface VerificationProfileClient {
+  verificationOverview(workspaceId: string): Promise<VerificationOverview>;
+  /** definition 是使用者編輯的 JSON；內容由 Runtime 檢查，不正確時回 verification_profile_invalid。 */
+  publishVerificationProfile(workspaceId: string, definition: unknown): Promise<PublishProfileResponse>;
+  runVerification(workspaceId: string, request: RunVerificationRequest): Promise<VerificationRequest>;
+  evidenceBundle(workspaceId: string, bundleId: string): Promise<EvidenceBundle>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -2448,6 +2662,7 @@ export type AppClient = RuntimeClient &
   UnderstandingClient &
   WorkflowClient &
   ReviewClient &
+  VerificationProfileClient &
   ConversationClient &
   UpdateClient;
 
@@ -2694,6 +2909,13 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     skipStage: (workspaceId, workflowId, request) =>
       send(`${workspacePath(workspaceId)}/workflows/${encodeURIComponent(workflowId)}/skip`, { method: "POST", body: request }),
     reviews: (workspaceId) => send(`${workspacePath(workspaceId)}/reviews`),
+    verificationOverview: (workspaceId) => send(`${workspacePath(workspaceId)}/verification`),
+    publishVerificationProfile: (workspaceId, definition) =>
+      send(`${workspacePath(workspaceId)}/verification/profile`, { method: "POST", body: definition }),
+    runVerification: (workspaceId, request) =>
+      send(`${workspacePath(workspaceId)}/verification/runs`, { method: "POST", body: request }),
+    evidenceBundle: (workspaceId, bundleId) =>
+      send(`${workspacePath(workspaceId)}/verification/bundles/${encodeURIComponent(bundleId)}`),
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
@@ -2838,6 +3060,11 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     skipStage: (workspaceId, workflowId, request) =>
       call<WorkflowView>("workflow_skip_stage", { workspaceId, workflowId, request }),
     reviews: (workspaceId) => call<ReviewList>("workspace_reviews", { workspaceId }),
+    verificationOverview: (workspaceId) => call<VerificationOverview>("workspace_verification", { workspaceId }),
+    publishVerificationProfile: (workspaceId, definition) =>
+      call<PublishProfileResponse>("verification_publish_profile", { workspaceId, definition }),
+    runVerification: (workspaceId, request) => call<VerificationRequest>("verification_run", { workspaceId, request }),
+    evidenceBundle: (workspaceId, bundleId) => call<EvidenceBundle>("verification_bundle", { workspaceId, bundleId }),
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),
