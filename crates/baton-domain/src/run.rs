@@ -12,6 +12,9 @@
 //! - **程序退出不等於 Task 完成**：Run 成功只把 Task 推進到 `verifying`，失敗、中斷、取消都退回 `ready`。
 //!   `completed` 只能由後續票的驗證閘門設定。
 //! - **過期世代的回報不改變狀態**：Worker 回報（heartbeat、進度、checkpoint、受阻、結束）都帶 lease 的世代，與目前不符就拒絕。
+//! - **准入 = launch intent 持久化（R1-a，票 24）**：派工只建立排隊中的 Run；`BeginLaunch` 的交易才以「這一刻生效」的
+//!   授權重新檢查並固定授權 revision 與共同設定版本。授權更新與 `BeginLaunch` 都經過 Store 的單一寫入佇列，
+//!   所以兩者的先後就是持久化順序：先准入的沿用舊版，排隊中或有 Outbox 但尚未准入的一律用新版。
 
 use serde::{Deserialize, Serialize};
 
@@ -39,14 +42,15 @@ pub const EVENT_RUN_CANCELLED: &str = "run_cancelled";
 pub const EVENT_RUN_PROGRESS_REPORTED: &str = "run_progress_reported";
 pub const EVENT_RUN_CHECKPOINT_SAVED: &str = "run_checkpoint_saved";
 pub const EVENT_RUN_BLOCKED_REPORTED: &str = "run_blocked_reported";
+/// 啟動准入被拒（授權在派工之後被撤銷或縮小）：Run 沒有啟動就結束（票 24）。
+pub const EVENT_RUN_ADMISSION_DENIED: &str = "run_admission_denied";
+/// 准入被拒的結束原因前綴。
+pub const ADMISSION_DENIED_REASON: &str = "admission_denied";
 pub const EVENT_RUN_NATIVE_SESSION_BOUND: &str = "run_native_session_bound";
 pub const EVENT_RUN_NATIVE_SESSION_CONFLICT: &str = "run_native_session_conflict";
 
 /// 派工 Outbox 項目的種類：要求 Supervisor 啟動這個 Run 的程序。
 pub const OUTBOX_LAUNCH_RUN: &str = "launch_run";
-
-/// 寫入 launch intent 時准入已不成立（授權被撤銷、Workspace 被封存）的 Run 結束原因前綴（票 26）。
-pub const LAUNCH_ADMISSION_DENIED: &str = "launch_admission_denied";
 
 /// Worker 的存活訊號間隔（spec D-31）。
 pub const HEARTBEAT_INTERVAL_MS: i64 = 15_000;
@@ -103,8 +107,8 @@ impl RunStatus {
     pub fn allowed_next(self) -> &'static [RunStatus] {
         use RunStatus::*;
         match self {
-            // queued → failed：寫入 launch intent 時准入已不成立，從未啟動程序（票 26）
-            Queued => &[Starting, Failed, Cancelled],
+            // 准入被拒時沒有程序，直接中斷（票 24）
+            Queued => &[Starting, Interrupted, Cancelled],
             Starting => &[Running, Failed, Interrupted, Cancelled],
             Running => &[Succeeded, Failed, Interrupted, Cancelled],
             Succeeded | Failed | Interrupted | Cancelled => &[],
@@ -138,9 +142,16 @@ pub struct Run {
     pub version: i64,
     /// 這個 Run 取得寫入所有權時的世代：同一個 Task 的 Run 依序遞增。
     pub generation: i64,
-    /// 派工當下生效的契約版本與授權 revision（沒有任何授權時為 `None`）。
+    /// 派工當下生效的契約版本與授權 revision（沒有任何授權時為 `None`）。准入（`BeginLaunch`）時授權 revision
+    /// 改寫為准入當下生效的版本，之後不再改變：已准入的 Run 沿用它（R1-a）。
     pub contract_version: i64,
     pub authorization_revision: Option<i64>,
+    /// 准入時間（launch intent 持久化的那一刻）；`None` 代表尚未准入，或是票 24 之前建立的 Run。
+    #[serde(default)]
+    pub admitted_at: Option<Timestamp>,
+    /// 准入時固定的共同設定版本（S3）；沒有採用任何版本或尚未准入為 `None`。
+    #[serde(default)]
+    pub settings_version: Option<i64>,
     /// launch intent：Supervisor 啟動程序之前先持久化；Runtime 重建後以它找回原程序。
     pub command_id: Option<String>,
     /// 啟動回執（程序身分）；回執寫入前為 `None`。
@@ -416,6 +427,8 @@ pub struct RunContext<'a> {
     pub task: &'a TaskContext<'a>,
     pub runs: &'a [Run],
     pub leases: &'a [ExecutionLease],
+    /// 這一刻准入的 Run 會固定使用的共同設定版本（沒有採用任何版本為 `None`）；只有 `BeginLaunch` 使用。
+    pub settings_version: Option<i64>,
     /// Workspace 內平台登記的工作目錄（票 20）；派工只認已可用的目錄。
     pub workdirs: &'a [Workdir],
     /// Run 准入時要檢查的 Guard（Store 已篩出「啟用且來源教訓現在有效」者；範圍由 `guard::violations` 判定）。
@@ -549,24 +562,26 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             if run.status == RunStatus::Starting && run.command_id.as_deref() == Some(command_id.as_str()) {
                 return Ok(RunChange::default());
             }
-            // 准入：程序啟動前最後一次檢查授權（GLOSSARY「准入」）。派工之後授權被撤銷或 Workspace 被封存，
-            // 就不寫入 launch intent、不啟動程序，Run 以失敗結束，Outbox 視為處理完畢（票 26）
+            if run.status != RunStatus::Queued {
+                return Err(RunError::TransitionInvalid { from: run.status, to: RunStatus::Starting });
+            }
+            // 准入：以這一刻生效的授權重新檢查（R1-a）。被拒時不寫 launch intent，Run 沒有程序就結束
             let admission = match admit_at_launch(ctx, run) {
                 Ok(admission) => admission,
-                Err(denied) if run.status == RunStatus::Queued => {
-                    let reason = format!("{LAUNCH_ADMISSION_DENIED}：{denied}");
-                    return edit.finish(RunStatus::Failed, EVENT_RUN_FAILED, &reason, TaskStatus::Ready);
-                }
-                Err(denied) => return Err(denied.into()),
+                Err(denied) => return deny_admission(edit, &denied, ctx.task.authorization.map(|a| a.revision)),
             };
             edit.change_status(RunStatus::Starting)?;
             edit.run.command_id = Some(command_id.clone());
+            edit.run.authorization_revision = admission.authorization_revision;
+            edit.run.settings_version = ctx.settings_version;
+            edit.run.admitted_at = Some(now);
             edit.renew_lease();
             edit.push(
                 EVENT_RUN_LAUNCH_STARTED,
                 serde_json::json!({
                     "command_id": command_id,
                     "authorization_revision": admission.authorization_revision,
+                    "settings_version": ctx.settings_version,
                 }),
             );
             Ok(edit.into_change())
@@ -729,15 +744,8 @@ pub fn is_current_writer(run: &Run, lease: Option<&ExecutionLease>, generation: 
     !run.status.is_terminal() && run.generation == generation && held
 }
 
-/// 回報必須來自目前的寫入所有者。
-fn check_report(run: &Run, lease: Option<&ExecutionLease>, generation: i64) -> Result<(), RunError> {
-    if !is_current_writer(run, lease, generation) {
-        return Err(RunError::StaleReport);
-    }
-    Ok(())
-}
-
-/// 寫入 launch intent 時的准入：以目前生效的授權重新檢查這個 Task 契約需要的能力。
+/// 啟動准入：Run 的 Task 目前契約需要的能力，必須被這一刻生效的授權涵蓋（Workspace 也必須仍在使用中）。
+/// 派工時記下的 revision 不算數：排隊中或有 Outbox 的 Run 都還沒准入（R1-a）。
 fn admit_at_launch(ctx: &RunContext<'_>, run: &Run) -> Result<authorization::Admission, AdmissionDenied> {
     let required = ctx
         .task
@@ -746,6 +754,25 @@ fn admit_at_launch(ctx: &RunContext<'_>, run: &Run) -> Result<authorization::Adm
         .map(|contract| contract.content.required_capabilities.as_slice())
         .unwrap_or_default();
     authorization::admit(ctx.task.workspace_id, ctx.task.workspace, ctx.task.authorization, required)
+}
+
+/// 准入被拒：Run 以 `interrupted` 結束、釋放寫入所有權、Task 回到 `ready`（Store 在同一交易中重新排隊）。
+fn deny_admission(edit: Editing<'_>, denied: &AdmissionDenied, current: Option<i64>) -> Result<RunChange, RunError> {
+    let reason = format!("{ADMISSION_DENIED_REASON}：{denied}");
+    let mut change = edit.finish(RunStatus::Interrupted, EVENT_RUN_ADMISSION_DENIED, &reason, TaskStatus::Ready)?;
+    if let Some(event) = change.events.iter_mut().find(|e| e.event_type == EVENT_RUN_ADMISSION_DENIED) {
+        event.payload["code"] = serde_json::json!(denied.code());
+        event.payload["authorization_revision"] = serde_json::json!(current);
+    }
+    Ok(change)
+}
+
+/// 回報必須來自目前的寫入所有者。
+fn check_report(run: &Run, lease: Option<&ExecutionLease>, generation: i64) -> Result<(), RunError> {
+    if !is_current_writer(run, lease, generation) {
+        return Err(RunError::StaleReport);
+    }
+    Ok(())
 }
 
 /// 派工前的檢查通過後，派工交易需要用到的事實。
@@ -831,6 +858,8 @@ fn dispatch(
         generation,
         contract_version: task.contract_version,
         authorization_revision: admission.authorization_revision,
+        admitted_at: None,
+        settings_version: None,
         command_id: None,
         process: None,
         cancel_requested_at: None,
@@ -892,6 +921,45 @@ fn dispatch(
         report: None,
         events: edit.events,
     })
+}
+
+/// 已准入、尚未結束、仍沿用舊授權 revision 的 Run：舊 revision 有、目前 revision 已撤銷或縮小的能力，
+/// 它仍然保有，新准入的 Run 不再取得（R1-a）。撤權沒有固定完成時間，使用者可以自行暫停或取消它（票 24）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LegacyRun {
+    pub run_id: String,
+    pub task_id: String,
+    pub task_title: String,
+    pub status: RunStatus,
+    /// 這個 Run 沿用的 revision（比目前生效的舊）。
+    pub authorization_revision: i64,
+    pub admitted_at: Option<Timestamp>,
+    /// 已要求停止，正在等程序確認停止。
+    pub cancel_requested: bool,
+    pub revoked_capabilities: Vec<authorization::Capability>,
+}
+
+/// 找出沿用舊授權、而且保有已撤銷範圍的 Run；`revisions` 由舊到新，最後一個是目前生效的。依建立順序。
+pub fn legacy_runs(runs: &[Run], tasks: &[Task], revisions: &[authorization::AuthorizationRevision]) -> Vec<LegacyRun> {
+    let Some(current) = revisions.last() else { return Vec::new() };
+    runs.iter()
+        .filter(|r| matches!(r.status, RunStatus::Starting | RunStatus::Running))
+        .filter_map(|run| {
+            let number = run.authorization_revision.filter(|n| *n < current.revision)?;
+            let admitted = revisions.iter().find(|r| r.revision == number)?;
+            let revoked = authorization::revoked_capabilities(admitted, current);
+            (!revoked.is_empty()).then(|| LegacyRun {
+                run_id: run.id.clone(),
+                task_id: run.task_id.clone(),
+                task_title: tasks.iter().find(|t| t.id == run.task_id).map_or_else(|| run.task_id.clone(), |t| t.title.clone()),
+                status: run.status,
+                authorization_revision: number,
+                admitted_at: run.admitted_at,
+                cancel_requested: run.cancel_requested_at.is_some(),
+                revoked_capabilities: revoked,
+            })
+        })
+        .collect()
 }
 
 /// 給 Worker 的最小提示：標題與六項契約（Context Builder 由後續的票加入，屆時取代這個函式）。

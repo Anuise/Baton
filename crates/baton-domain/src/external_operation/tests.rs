@@ -46,6 +46,8 @@ fn run(id: &str, task_id: &str, generation: i64) -> Run {
         generation,
         contract_version: 1,
         authorization_revision: None,
+        admitted_at: Some(T0),
+        settings_version: None,
         command_id: Some(format!("cmd-{id}")),
         process: None,
         native_session_id: None,

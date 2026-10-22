@@ -127,6 +127,8 @@ function run(id: string, taskId: string, status: RunStatus, overrides: Partial<R
     generation: 1,
     contract_version: 1,
     authorization_revision: null,
+    admitted_at: null,
+    settings_version: null,
     command_id: null,
     process: null,
     cancel_requested_at: null,
@@ -157,6 +159,8 @@ function fakeClient(
     verifications?: VerificationRecord[];
     /** `taskVerification` 回傳的驗證資料。 */
     verification?: VerificationView;
+    /** 看板回報的 Workspace 目前授權 revision；省略為 null（尚未確認）。 */
+    authorizationRevision?: number;
     workdirs?: WorkdirView[];
     integrations?: IntegrationEntry[];
   } = {},
@@ -173,6 +177,7 @@ function fakeClient(
     runs,
     capabilities: CAPABILITIES,
     verifications,
+    authorization_revision: initial.authorizationRevision ?? null,
     workdirs: initial.workdirs ?? [],
     integrations: initial.integrations ?? [],
   });
@@ -883,6 +888,34 @@ describe("派工與 Run", () => {
     );
 
     expect(within(card("部署")).queryByText("取消中，等待程序停止…")).not.toBeInTheDocument();
+  });
+
+  it("已准入且沿用較舊授權 revision 的進行中 Run 標示「沿用舊授權」", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "running" })],
+        runs: [run("run_1", "task_1", "running", { admitted_at: T0, authorization_revision: 1 })],
+        authorizationRevision: 2,
+      }),
+    );
+
+    expect(runStatus("部署")).toHaveTextContent("沿用舊授權（revision 1，目前 2）");
+  });
+
+  it.each<[string, Partial<RunView>, RunStatus]>([
+    ["revision 與目前相同", { admitted_at: T0, authorization_revision: 2 }, "running"],
+    ["尚未准入", { admitted_at: null, authorization_revision: 1 }, "running"],
+    ["Run 已結束", { admitted_at: T0, authorization_revision: 1 }, "succeeded"],
+  ])("%s時不標示沿用舊授權", async (_case, overrides, status) => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "running" })],
+        runs: [run("run_1", "task_1", status, overrides)],
+        authorizationRevision: 2,
+      }),
+    );
+
+    expect(runStatus("部署")).not.toHaveTextContent("沿用舊授權");
   });
 
   it("派工被拒絕時顯示 Runtime 的說明並重新載入看板", async () => {

@@ -156,12 +156,13 @@ pub(crate) fn resolve_by_decision(
         [&decision.request_id],
         |r| r.get(0),
     )?;
-    if linked == 0 {
+    // 查證請求只能以「接受選項」作答（`DecisionRequest::allowed_actions`），所以一定帶選項
+    let Some(option_id) = decision.option_id.clone().filter(|_| linked > 0) else {
         return Ok(());
-    }
+    };
     let command = ExternalCommand::Verified {
         request_id: decision.request_id.clone(),
-        option_id: decision.option_id.clone(),
+        option_id,
         note: decision.note.clone(),
     };
     let _ = apply_in(tx, workspace_id, command, now)?;

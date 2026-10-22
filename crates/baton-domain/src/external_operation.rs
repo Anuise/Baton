@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::decision::{self, DecisionKind, DecisionOption, DecisionRequest, DecisionStatus, Urgency};
+use crate::decision::{self, DecisionKind, DecisionOption, DecisionRequest, DecisionStatus, DecisionTarget, Urgency};
 use crate::event::DomainEvent;
 use crate::run::{self, ExecutionLease, Run};
 use crate::task::{Task, TaskContext, TaskStatus, Versioned};
@@ -552,7 +552,7 @@ fn mark_unknown(
     let now = edit.now;
     let task_id = edit.operation.task_id.clone();
     let task = ctx.task.task(&task_id).ok_or_else(|| ExternalOperationError::TaskNotFound(task_id.clone()))?;
-    let request = unknown_request(&edit.operation, &reason, now);
+    let mut request = unknown_request(&edit.operation, task.contract_version, &reason, now);
     edit.operation.status = OperationStatus::Unknown;
     edit.operation.unknown_reason = Some(reason.clone());
     edit.operation.decision_request_id = Some(request.id.clone());
@@ -560,7 +560,7 @@ fn mark_unknown(
         EVENT_EXTERNAL_OPERATION_RESULT_UNKNOWN,
         serde_json::json!({ "run_id": edit.operation.run_id, "reason": reason, "decision_request_id": request.id }),
     );
-    change.events.push(decision::requested_event(&request, now));
+    change.events.push(decision::requested_event(&mut request, &[], now));
     // 同一個交易中可能已經有這個 Task 的新狀態（同一個 Run 的多個操作）
     let current = change.tasks.iter().find(|t| t.id == task.id).cloned().unwrap_or_else(|| task.clone());
     if let Some(moved) = hold_task(&current, now, &mut change.events) {
@@ -589,13 +589,13 @@ pub fn unknown_request_id(operation: &ExternalOperation) -> String {
     format!("decision_{}_a{}", operation.id, operation.attempt)
 }
 
-fn unknown_request(operation: &ExternalOperation, reason: &str, now: Timestamp) -> DecisionRequest {
+fn unknown_request(operation: &ExternalOperation, task_contract_version: i64, reason: &str, now: Timestamp) -> DecisionRequest {
     DecisionRequest {
         id: unknown_request_id(operation),
         workspace_id: operation.workspace_id.clone(),
         run_id: operation.run_id.clone(),
         task_id: operation.task_id.clone(),
-        // 資料庫的種類只有 agent／permission；這個請求由 Runtime 代 Worker 提出，與外部操作的關聯記在操作上
+        // 資料庫的種類沒有外部操作；這個請求由 Runtime 代 Worker 提出，與外部操作的關聯記在操作上（`external_operation_id`）
         kind: DecisionKind::Agent,
         status: DecisionStatus::Pending,
         question: format!(
@@ -628,8 +628,18 @@ fn unknown_request(operation: &ExternalOperation, reason: &str, now: Timestamp) 
         urgency: Urgency::High,
         deadline_at: None,
         permission: None,
+        authority: None,
+        external_operation_id: Some(operation.id.clone()),
         blocking: vec![operation.task_id.clone()],
+        target: DecisionTarget { task_id: operation.task_id.clone(), contract_version: task_contract_version, authorization_revision: None },
+        revision: 1,
+        event_version: 0,
+        deferred_until: None,
+        merged_into: None,
+        status_reason: None,
+        links: Vec::new(),
         created_at: now,
+        updated_at: now,
     }
 }
 

@@ -1,3 +1,4 @@
+use baton_domain::decision::{DecisionAction, Resolution};
 use baton_domain::external_operation::{OPTION_VERIFIED_DONE, OPTION_VERIFIED_NOT_DONE};
 use baton_domain::run::{ProcessRecord, RunCommand};
 use baton_domain::task::{ContractContent, ContractField, TaskCommand, TaskStatus};
@@ -23,6 +24,23 @@ fn complete() -> ContractContent {
         required_capabilities: vec![],
         verification_checks: vec![],
     }
+}
+
+/// 以桌面身分接受查證選項（帶目前的內容版本）。
+async fn verify(
+    store: &Store,
+    request_id: &str,
+    option: &str,
+    note: Option<&str>,
+) -> Result<crate::AnswerResult, crate::DecisionApplyError> {
+    let revision = store.decision_detail("w1", request_id, T2).await.unwrap().revision;
+    let resolution = Resolution {
+        action: DecisionAction::Accept,
+        option_id: Some(option.into()),
+        note: note.map(str::to_string),
+        defer_minutes: None,
+    };
+    store.answer_decision("w1", request_id, revision, resolution, None, T2).await
 }
 
 /// 一個 Workspace，兩個 Task（t1、t2）各有一個 running 的 Run（r1、r2，世代 1）。
@@ -94,7 +112,7 @@ async fn answering_verified_done_closes_the_operation_and_resumes_the_task_toget
     assert_eq!(task_status(&store, "t1").await, TaskStatus::WaitingDecision);
     store.apply_run_command("w1".into(), RunCommand::Interrupt { run_id: "r1".into(), reason: "x".into() }, T2).await.unwrap();
 
-    let answer = store.answer_decision("w1", &request_id, OPTION_VERIFIED_DONE.into(), Some("看過紀錄".into()), T2).await.unwrap();
+    let answer = verify(&store, &request_id, OPTION_VERIFIED_DONE, Some("看過紀錄")).await.unwrap();
 
     assert_eq!(answer.resumed_task_ids, vec!["t1".to_string()]);
     let operation = store.external_operations("w1").await.unwrap().remove(0);
@@ -110,7 +128,7 @@ async fn answering_verified_not_done_lets_the_next_run_try_again() {
     store.apply_run_command("w1".into(), RunCommand::Interrupt { run_id: "r1".into(), reason: "x".into() }, T2).await.unwrap();
     let request_id = store.external_operations("w1").await.unwrap()[0].decision_request_id.clone().unwrap();
 
-    store.answer_decision("w1", &request_id, OPTION_VERIFIED_NOT_DONE.into(), None, T2).await.unwrap();
+    verify(&store, &request_id, OPTION_VERIFIED_NOT_DONE, None).await.unwrap();
     let operation = store.external_operations("w1").await.unwrap().remove(0);
 
     assert_eq!(operation.status, OperationStatus::Failed);
@@ -134,7 +152,7 @@ async fn another_task_hitting_an_unknown_operation_joins_the_same_decision() {
     let blocked: Vec<&str> = decision.blocking.iter().map(|b| b.task_id.as_str()).collect();
     assert_eq!(blocked, vec!["t1", "t2"]);
     assert_eq!(task_status(&store, "t2").await, TaskStatus::WaitingDecision);
-    let answer = store.answer_decision("w1", &request_id, OPTION_VERIFIED_DONE.into(), None, T2).await.unwrap();
+    let answer = verify(&store, &request_id, OPTION_VERIFIED_DONE, None).await.unwrap();
     assert_eq!(answer.resumed_task_ids, vec!["t1".to_string(), "t2".to_string()]);
 }
 

@@ -46,7 +46,7 @@ mod verification;
 mod workdirs;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
-pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, PendingByWorkspace};
+pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
 pub use external_operations::ExternalApplyError;
 pub use guards::{GuardApplyError, GuardOverview};
 pub use health::classify as storage_fault_of;
@@ -716,7 +716,135 @@ const MIGRATIONS: &[Migration] = &[
             ON integration_entry ((status IN ('merging', 'verifying', 'advancing')))
             WHERE status IN ('merging', 'verifying', 'advancing');",
     },
-    // 外部操作（票 26）：冪等鍵在 Workspace 內唯一；結果未知時引用為它建立的裁定請求。
+    // 完整裁定中心（票 35，第 22 個 migration）：裁定請求加上目標版本、內容版本、延後、合併與過期，裁定加上處理方式與批次識別。
+    // SQLite 不能修改既有的 CHECK 約束，所以重建票 22 的四張表：這四張表只互相參照、沒有其他表參照它們，
+    // 先建新表、搬資料、由子到父刪除舊表，再改名（外鍵參照會隨改名更新）。既有請求的目標版本取該 Task 目前的契約版本
+    // （權限提示另取 Workspace 目前的授權 revision）
+    Migration {
+        name: "decision_center_full",
+        sql: "CREATE TABLE decision_request_next (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            run_id TEXT NOT NULL REFERENCES run (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            kind TEXT NOT NULL CHECK (kind IN ('agent', 'permission', 'authority')),
+            status TEXT NOT NULL CHECK (status IN ('pending', 'answered', 'superseded', 'merged')),
+            question TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            options TEXT NOT NULL CHECK (json_valid(options)),
+            recommendation TEXT,
+            evidence TEXT NOT NULL CHECK (json_valid(evidence)),
+            urgency TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
+            deadline_at INTEGER,
+            permission TEXT CHECK (permission IS NULL OR json_valid(permission)),
+            authority TEXT CHECK (authority IS NULL OR json_valid(authority)),
+            target_task_id TEXT NOT NULL REFERENCES task (id),
+            target_contract_version INTEGER NOT NULL,
+            target_authorization_revision INTEGER,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            deferred_until INTEGER,
+            merged_into TEXT REFERENCES decision_request_next (id),
+            status_reason TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            CHECK ((status = 'merged') = (merged_into IS NOT NULL))
+        );
+        INSERT INTO decision_request_next
+            (id, workspace_id, run_id, task_id, kind, status, question, reason, options, recommendation, evidence, urgency,
+             deadline_at, permission, authority, target_task_id, target_contract_version, target_authorization_revision,
+             revision, deferred_until, merged_into, status_reason, created_at, updated_at)
+        SELECT r.id, r.workspace_id, r.run_id, r.task_id, r.kind, r.status, r.question, r.reason, r.options,
+               r.recommendation, r.evidence, r.urgency, r.deadline_at, r.permission, NULL, r.task_id,
+               (SELECT t.contract_version FROM task t WHERE t.id = r.task_id),
+               CASE r.kind WHEN 'permission' THEN
+                   (SELECT MAX(a.revision) FROM authorization_revision a WHERE a.workspace_id = r.workspace_id) END,
+               CASE r.status WHEN 'pending' THEN 1 ELSE 2 END, NULL, NULL, NULL, r.created_at, r.created_at
+        FROM decision_request r ORDER BY r.rowid;
+        CREATE TABLE decision_request_block_next (
+            request_id TEXT NOT NULL REFERENCES decision_request_next (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            PRIMARY KEY (request_id, task_id)
+        );
+        INSERT INTO decision_request_block_next (request_id, task_id)
+        SELECT request_id, task_id FROM decision_request_block ORDER BY rowid;
+        CREATE TABLE decision_next (
+            request_id TEXT PRIMARY KEY REFERENCES decision_request_next (id),
+            action TEXT NOT NULL CHECK (action IN ('accept', 'modify', 'answer', 'investigate', 'reject')),
+            option_id TEXT,
+            note TEXT,
+            decided_by TEXT NOT NULL CHECK (decided_by = 'desktop'),
+            batch_id TEXT,
+            decided_at INTEGER NOT NULL,
+            CHECK ((action IN ('accept', 'modify')) = (option_id IS NOT NULL)),
+            CHECK (action NOT IN ('modify', 'answer', 'investigate') OR note IS NOT NULL)
+        );
+        INSERT INTO decision_next (request_id, action, option_id, note, decided_by, batch_id, decided_at)
+        SELECT request_id, 'accept', option_id, note, decided_by, NULL, decided_at FROM decision ORDER BY rowid;
+        CREATE TABLE decision_approval_use_next (
+            request_id TEXT PRIMARY KEY REFERENCES decision_next (request_id),
+            run_id TEXT NOT NULL REFERENCES run (id),
+            used_at INTEGER NOT NULL
+        );
+        INSERT INTO decision_approval_use_next (request_id, run_id, used_at)
+        SELECT request_id, run_id, used_at FROM decision_approval_use ORDER BY rowid;
+        DROP TABLE decision_approval_use;
+        DROP TABLE decision;
+        DROP TABLE decision_request_block;
+        DROP TABLE decision_request;
+        ALTER TABLE decision_request_next RENAME TO decision_request;
+        ALTER TABLE decision_request_block_next RENAME TO decision_request_block;
+        ALTER TABLE decision_next RENAME TO decision;
+        ALTER TABLE decision_approval_use_next RENAME TO decision_approval_use;
+        CREATE INDEX decision_request_workspace ON decision_request (workspace_id, status);
+        CREATE INDEX decision_request_block_task ON decision_request_block (task_id);
+        -- 只有待處理的請求能變動，而且只能改可變欄位、內容版本只增不減；結束的狀態不能再改
+        CREATE TRIGGER decision_request_guard BEFORE UPDATE ON decision_request
+        WHEN NOT (OLD.status = 'pending' AND NEW.revision > OLD.revision AND NEW.id = OLD.id
+                  AND NEW.workspace_id = OLD.workspace_id AND NEW.run_id = OLD.run_id AND NEW.task_id = OLD.task_id
+                  AND NEW.kind = OLD.kind AND NEW.question = OLD.question AND NEW.reason = OLD.reason
+                  AND NEW.options = OLD.options AND NEW.target_task_id = OLD.target_task_id
+                  AND NEW.target_contract_version = OLD.target_contract_version
+                  AND NEW.target_authorization_revision IS OLD.target_authorization_revision
+                  AND NEW.created_at = OLD.created_at)
+        BEGIN SELECT RAISE(ABORT, 'decision_request 只有待處理時能變動，且只能改狀態、延後、合併與原因'); END;
+        CREATE TRIGGER decision_request_no_delete BEFORE DELETE ON decision_request
+        BEGIN SELECT RAISE(ABORT, 'decision_request 不可刪除'); END;
+        CREATE TRIGGER decision_request_block_no_delete BEFORE DELETE ON decision_request_block
+        BEGIN SELECT RAISE(ABORT, 'decision_request_block 不可刪除'); END;
+        CREATE TRIGGER decision_no_update BEFORE UPDATE ON decision
+        BEGIN SELECT RAISE(ABORT, 'decision 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER decision_no_delete BEFORE DELETE ON decision
+        BEGIN SELECT RAISE(ABORT, 'decision 是追加式資料表，不可刪除'); END;
+        CREATE TRIGGER decision_approval_use_no_update BEFORE UPDATE ON decision_approval_use
+        BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER decision_approval_use_no_delete BEFORE DELETE ON decision_approval_use
+        BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可刪除'); END;
+        -- 相似或手動連結的請求（雙向，較小的識別在前）
+        CREATE TABLE decision_request_link (
+            request_id TEXT NOT NULL REFERENCES decision_request (id),
+            linked_id TEXT NOT NULL REFERENCES decision_request (id),
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (request_id, linked_id),
+            CHECK (request_id < linked_id)
+        );
+        CREATE TRIGGER decision_request_link_no_delete BEFORE DELETE ON decision_request_link
+        BEGIN SELECT RAISE(ABORT, 'decision_request_link 不可刪除'); END;
+        -- Workspace 的決策權限表設定（spec D-15）：只保存被收窄的事項
+        CREATE TABLE decision_authority_policy (
+            workspace_id TEXT PRIMARY KEY REFERENCES workspace (id),
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            narrowed TEXT NOT NULL CHECK (json_valid(narrowed)),
+            updated_at INTEGER NOT NULL
+        );",
+    },
+    // 啟動准入（票 24，第 23 個 migration，R1-a）：准入時間與准入時固定的共同設定版本。准入時 `authorization_revision`
+    // 改寫為准入當下生效的 revision；票 24 之前的 Run 兩欄都是 NULL（派工時記下的 revision 照舊）
+    Migration {
+        name: "run_admission",
+        sql: "ALTER TABLE run ADD COLUMN admitted_at INTEGER;
+        ALTER TABLE run ADD COLUMN settings_version INTEGER;",
+    },
+    // 外部操作（票 26，第 24 個 migration）：冪等鍵在 Workspace 內唯一；結果未知時引用為它建立的裁定請求。
     // storage_probe 只有一列：寫入故障之後 Supervisor 以它試寫，確認資料庫恢復可寫
     Migration {
         name: "external_operation",
@@ -1068,6 +1196,7 @@ impl Store {
 
     /// Run 的准入檢查：依目前生效的授權判定 `required` 能力是否都已授權。
     /// 通過時回傳這次依據的授權 revision；被拒絕時回傳原因。
+    /// 走寫入佇列（不寫任何東西）：結果與授權更新依同一個持久化順序排列，不會讀到佇列中尚未提交的舊狀態（票 24）。
     pub async fn check_admission(
         &self,
         workspace_id: &str,
@@ -1075,7 +1204,7 @@ impl Store {
     ) -> Result<Admission, AdmissionCheckError> {
         let workspace_id = workspace_id.to_string();
         let verdict = self
-            .read(move |conn| {
+            .write(move |conn| {
                 let workspace = load_workspaces(conn)?.into_iter().find(|w| w.id == workspace_id);
                 let current = load_authorization_revisions(conn, &workspace_id)?.pop();
                 Ok(authorization::admit(&workspace_id, workspace.as_ref(), current.as_ref(), &required))

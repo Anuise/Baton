@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Router;
 use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT};
 use baton_domain::agent::{
-    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT,
+    AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT,
     TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT,
     TOOL_SEND_MESSAGE,
 };
@@ -123,7 +123,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_thirteen_tools_with_their_required_fields() {
+async fn tools_list_has_the_fourteen_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -137,6 +137,7 @@ async fn tools_list_has_the_thirteen_tools_with_their_required_fields() {
             TOOL_REPORT_BLOCKED,
             TOOL_REQUEST_DECISION,
             TOOL_PERMISSION_PROMPT,
+            TOOL_CONTROLLER_ACTION,
             TOOL_SEND_MESSAGE,
             TOOL_READ_INBOX,
             TOOL_REGISTER_ARTIFACT,
@@ -160,6 +161,10 @@ async fn tools_list_has_the_thirteen_tools_with_their_required_fields() {
     let record = schema(TOOL_RECORD_EXTERNAL_OPERATION_RESULT);
     assert_eq!(record["required"], json!(["idempotency_key", "result"]));
     assert_eq!(record["properties"]["result"]["enum"], json!(["succeeded", "failed", "unknown"]));
+
+    let action = schema(TOOL_CONTROLLER_ACTION);
+    assert_eq!(action["required"], json!(["matter", "summary", "reason"]));
+    assert!(action["properties"]["matter"]["enum"].as_array().unwrap().contains(&json!("modify_done_criteria")));
 
     let decision = schema(TOOL_REQUEST_DECISION);
     assert_eq!(decision["required"], json!(["question", "reason", "options"]));

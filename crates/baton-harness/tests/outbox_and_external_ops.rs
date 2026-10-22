@@ -139,9 +139,21 @@ async fn record(harness: &Harness, rid: &str, body: Value) -> (StatusCode, Value
     harness.call_tool(&token, TOOL_RECORD_EXTERNAL_OPERATION_RESULT, body).await
 }
 
-async fn answer(harness: &Harness, ws: &str, request_id: &str, option: &str) -> Value {
+async fn decision(harness: &Harness, ws: &str, request_id: &str) -> Value {
+    let (status, decision) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/decisions/{request_id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{decision}");
+    decision
+}
+
+/// 以使用者看到的內容版本處理裁定請求（票 35 起 `expected_revision` 必填）。
+async fn try_answer(harness: &Harness, ws: &str, request_id: &str, mut body: Value) -> (StatusCode, Value) {
+    body["expected_revision"] = decision(harness, ws, request_id).await["revision"].clone();
     let path = format!("{WORKSPACES}/{ws}/decisions/{request_id}/answer");
-    let (status, body) = harness.send_json(Method::POST, &path, Some(json!({ "option_id": option }))).await;
+    harness.send_json(Method::POST, &path, Some(body)).await
+}
+
+async fn answer(harness: &Harness, ws: &str, request_id: &str, option: &str) -> Value {
+    let (status, body) = try_answer(harness, ws, request_id, json!({ "action": "accept", "option_id": option })).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body
 }
@@ -220,8 +232,9 @@ async fn a_run_whose_authorization_is_revoked_before_launch_ends_without_startin
     harness.supervise().await;
 
     let run = run_view(&harness, &ws, &rid).await;
-    assert_eq!(status_of(&run), "failed", "{run}");
-    assert!(run["end_reason"].as_str().unwrap().starts_with("launch_admission_denied"), "{run}");
+    // 准入被拒的結束方式沿用票 24（R1-a）：interrupted、admission_denied（票 26 整合，AI-261）
+    assert_eq!(status_of(&run), "interrupted", "{run}");
+    assert!(run["end_reason"].as_str().unwrap().starts_with("admission_denied"), "{run}");
     assert!(run["command_id"].is_null(), "沒有寫入 launch intent");
     assert_eq!(harness.process_control.spawn_count(), 0, "准入不成立就不啟動程序");
     assert!(harness.agent_credential(&rid).is_none(), "也沒有簽發 Agent 憑證給任何程序");
@@ -328,6 +341,47 @@ async fn an_unknown_result_from_the_worker_blocks_its_task_while_independent_tas
     let second_run = latest_run(&harness, &ws, &deploy).await;
     let (_, retried) = begin(&harness, &second_run, "deploy-1").await;
     assert_eq!((retried["status"].as_str(), retried["attempt"].as_i64()), (Some("proceed"), Some(2)), "{retried}");
+}
+
+#[tokio::test]
+async fn an_unknown_operation_can_only_be_closed_by_verifying_whether_it_took_effect() {
+    let harness = harness().await;
+    let (ws, goal) = setup(&harness).await;
+    let deploy = ready_task(&harness, &ws, &goal, "部署", &[]).await;
+    let rid = dispatch_ok(&harness, &ws, &deploy).await;
+    harness.supervise().await;
+    begin(&harness, &rid, "deploy-1").await;
+    let (_, recorded) =
+        record(&harness, &rid, json!({ "idempotency_key": "deploy-1", "result": "unknown", "reason": "部署 API 逾時" })).await;
+    let request_id = recorded["decision_request_id"].as_str().unwrap().to_string();
+
+    // 裁定中心只提供「接受查證選項」與「延後」
+    assert_eq!(decision(&harness, &ws, &request_id).await["allowed_actions"], json!(["accept", "defer"]));
+    // 其他處理方式會讓請求結案、操作卻停在結果未知：一律拒絕，單筆與批次都一樣
+    for body in [
+        json!({ "action": "reject" }),
+        json!({ "action": "answer", "note": "應該好了" }),
+        json!({ "action": "investigate", "note": "去查部署紀錄" }),
+        json!({ "action": "modify", "option_id": OPTION_VERIFIED_DONE, "note": "條件" }),
+    ] {
+        let (status, refused) = try_answer(&harness, &ws, &request_id, body.clone()).await;
+        assert_eq!((status, error_code(&refused)), (StatusCode::BAD_REQUEST, "decision_action_not_allowed"), "{body}：{refused}");
+    }
+    let revision = decision(&harness, &ws, &request_id).await["revision"].clone();
+    let item = json!({ "workspace_id": ws, "request_id": request_id, "expected_revision": revision, "action": "reject" });
+    let (status, batch) = harness.send_json(Method::POST, "/api/v1/decisions/batch", Some(json!({ "items": [item] }))).await;
+    assert_eq!(status, StatusCode::OK, "{batch}");
+    assert_eq!((&batch["results"][0]["ok"], &batch["results"][0]["error"]), (&json!(false), &json!("decision_action_not_allowed")));
+    // 延後：請求仍待處理，Task 仍等待
+    let (status, deferred) = try_answer(&harness, &ws, &request_id, json!({ "action": "defer" })).await;
+    assert_eq!(status, StatusCode::OK, "{deferred}");
+    assert_eq!(decision(&harness, &ws, &request_id).await["status"], "pending");
+    assert_eq!(external_operations(&harness, &ws).await[0]["status"], "unknown");
+    assert_eq!(task_status(&harness, &ws, &deploy).await, "waiting_decision");
+
+    // 查證之後才結案
+    answer(&harness, &ws, &request_id, OPTION_VERIFIED_DONE).await;
+    assert_eq!(external_operations(&harness, &ws).await[0]["status"], "succeeded");
 }
 
 #[tokio::test]

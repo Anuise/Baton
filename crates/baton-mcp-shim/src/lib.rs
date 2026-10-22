@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use baton_domain::agent::{
     AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, DETAILS_MAX_BYTES, REASON_MAX_CHARS, RUNTIME_URL_ENV, SUMMARY_MAX_CHARS,
-    TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
+    TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS,
     TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
+use baton_domain::authority::Matter;
 use baton_domain::message::{
     MessageKind, BODY_MAX_BYTES, ID_MAX_CHARS, INBOX_DEFAULT_LIMIT, INBOX_MAX_LIMIT, MAX_RECIPIENTS, SUBJECT_MAX_CHARS,
 };
@@ -233,6 +234,26 @@ fn tool_definitions() -> Value {
             },
         },
         {
+            "name": TOOL_CONTROLLER_ACTION,
+            "description": "Controller 在處理決策權限表列出的事項前先呼叫（這個工具本身不執行任何動作）。回 allowed：可以自主處理；回 requires_decision：這個事項必須由使用者裁定，動作被拒絕並已建立裁定請求，等待裁定、不要自行執行或繞過；回 approved：使用者已核准這一次（用過即失效，conditions 是使用者的條件）；回 denied：使用者沒有核准；回 human_only：只能由使用者發起。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "matter": {
+                        "type": "string",
+                        "enum": Matter::ALL.iter().map(|m| m.as_str()).collect::<Vec<_>>(),
+                        "description": "決策權限表中的事項",
+                    },
+                    "task_id": { "type": "string", "description": "動作的目標 Task；省略時是你自己的 Task" },
+                    "summary": { "type": "string", "description": "要做什麼（一句話）" },
+                    "reason": { "type": "string", "description": "為什麼要這麼做" },
+                    "evidence": { "type": "array", "items": { "type": "string" }, "description": "支持判斷的證據" },
+                    "urgency": { "type": "string", "enum": ["low", "normal", "high"], "description": "急迫程度" },
+                },
+                "required": ["matter", "summary", "reason"],
+            },
+        },
+        {
             "name": TOOL_SEND_MESSAGE,
             "description": "寄訊息給同一個 Workspace 的其他 Task（收件人用 task id）。收件人要到下次讀取收件匣時才看得到，Runtime 不會中途插話；訊息不能改變任何 Task 的契約、範圍或歸屬；重送同一個 message_id 只會交付一次。",
             "inputSchema": {
@@ -420,6 +441,7 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_REPORT_BLOCKED,
         TOOL_REQUEST_DECISION,
         TOOL_PERMISSION_PROMPT,
+        TOOL_CONTROLLER_ACTION,
         TOOL_SEND_MESSAGE,
         TOOL_READ_INBOX,
         TOOL_REGISTER_ARTIFACT,
