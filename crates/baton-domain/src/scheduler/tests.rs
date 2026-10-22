@@ -37,7 +37,7 @@ fn created(id: &str, expected: Option<&str>) -> AccountProfile {
 
 fn verified(profile: AccountProfile, report: AuthReport) -> AccountProfile {
     let id = profile.id.clone();
-    profile::decide(std::slice::from_ref(&profile), ProfileCommand::RecordVerification { id, report }, T1)
+    profile::decide(std::slice::from_ref(&profile), ProfileCommand::RecordVerification { id, report, cli_version: Some("2.1.307 (Claude Code)".into()) }, T1)
         .unwrap()
         .profile
 }
@@ -113,6 +113,7 @@ fn run(id: &str, profile_id: &str, status: RunStatus) -> Run {
         updated_at: T0,
         started_at: None,
         ended_at: None,
+        native_session_id: None,
     }
 }
 

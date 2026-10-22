@@ -12,6 +12,7 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::Json;
 use baton_domain::profile::{self, AccountProfile, ProfileCommand, ProfileError, ProfileStatus, ProfileView};
+use baton_ports::ToolProbe;
 use baton_store::{ProfileApplyError, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -124,10 +125,13 @@ pub(crate) async fn verify_profile(state: &ApiState, profile: &AccountProfile) -
         code: "profile_check_failed",
         message: format!("無法核對 Profile「{}」的登入狀態：{error}", profile.name),
     })?;
-    state
-        .store
-        .apply_profile_command(ProfileCommand::RecordVerification { id: profile.id.clone(), report }, state.clock.now())
-        .await?;
+    // 同時記下 Claude Code 的版本；取不到時記為未知，由 Domain 阻擋派工（票 14）
+    let cli_version = match state.claude_env.probe_claude().await {
+        Ok(ToolProbe::Found { version_output }) => version_output,
+        Ok(ToolProbe::NotFound) | Err(_) => None,
+    };
+    let command = ProfileCommand::RecordVerification { id: profile.id.clone(), report, cli_version };
+    state.store.apply_profile_command(command, state.clock.now()).await?;
     Ok(())
 }
 

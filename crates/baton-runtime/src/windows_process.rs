@@ -3,7 +3,7 @@
 //! - Job 具名 `Local\Baton-Run-{command_id}`：Runtime 重啟後可用 `find` 以 OpenJobObject 找回。
 //! - 不設 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`：關閉 Job handle（含 Runtime 崩潰）不會殺掉程序。
 //! - 子孫程序預設繼承 Job 成員資格（本實作不允許 breakaway），所以 `stop` 能終止整棵程序樹。
-//! - 程序的 stdin/stdout/stderr 先導向 NUL；串流解析屬於後續的票。
+//! - 程序的 stdin/stdout/stderr 依 `SpawnSpec` 導向檔案，未指定時導向 NUL。
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -20,7 +20,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, SYNCHRONIZE,
+    CreateFileW, CREATE_ALWAYS, FILE_CREATION_DISPOSITION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
@@ -150,14 +151,15 @@ fn command_line(spec: &SpawnSpec) -> Vec<u16> {
     cmd
 }
 
-/// 環境變數區塊：Runtime 自己的環境加上 `spec.env`（同名以 `spec.env` 為準）。
-/// 沒有額外變數時回傳 `None`，讓子程序直接繼承。
+/// 環境變數區塊：Runtime 自己的環境去掉 `spec.env_remove`，再加上 `spec.env`（同名以 `spec.env` 為準）。
+/// 沒有額外變數也沒有要移除的變數時回傳 `None`，讓子程序直接繼承。
 fn environment_block(spec: &SpawnSpec) -> Option<Vec<u16>> {
-    if spec.env.is_empty() {
+    if spec.env.is_empty() && spec.env_remove.is_empty() {
         return None;
     }
     let mut vars: Vec<(String, String)> = std::env::vars_os()
         .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+        .filter(|(k, _)| !spec.env_remove.iter().any(|name| name.eq_ignore_ascii_case(k)))
         .filter(|(k, _)| !spec.env.iter().any(|(name, _)| name.eq_ignore_ascii_case(k)))
         .collect();
     vars.extend(spec.env.iter().cloned());
@@ -170,6 +172,29 @@ fn environment_block(spec: &SpawnSpec) -> Option<Vec<u16>> {
     }
     block.push(0);
     Some(block)
+}
+
+/// 以可繼承的 handle 開啟檔案（或 NUL）作為子程序的標準輸入輸出。
+/// 共用模式允許其他程序在子程序寫入期間讀取、寫入或刪除。
+fn open_std_handle(
+    path: &str,
+    access: u32,
+    disposition: FILE_CREATION_DISPOSITION,
+    security: &SECURITY_ATTRIBUTES,
+) -> PortResult<OwnedHandle> {
+    // SAFETY：路徑為 NUL 結尾的字串，security 指向有效結構。
+    let raw = unsafe {
+        CreateFileW(
+            wide(path).as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            security,
+            disposition,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    OwnedHandle::from_raw(raw).ok_or_else(|| last_error(&format!("開啟 {path} 失敗")))
 }
 
 /// 程序建立時間（Unix epoch 毫秒）。
@@ -293,29 +318,27 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
         lpSecurityDescriptor: std::ptr::null_mut(),
         bInheritHandle: 1,
     };
-    // SAFETY：路徑為 NUL 結尾的字串，security 指向有效結構。
-    let nul = unsafe {
-        CreateFileW(
-            wide("NUL").as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            &security,
-            OPEN_EXISTING,
-            0,
-            std::ptr::null_mut(),
-        )
+    // 檔案在確認 Job 不重複之後才開啟：重複的 spawn 不會覆寫執行中程序的輸出檔。
+    // 失敗時直接回傳，Job 尚無程序，handle 關閉後即消失。
+    let stdin = open_std_handle(spec.stdin_file.as_deref().unwrap_or("NUL"), GENERIC_READ, OPEN_EXISTING, &security)?;
+    let open_output = |path: Option<&str>| match path {
+        Some(path) => open_std_handle(path, GENERIC_WRITE, CREATE_ALWAYS, &security),
+        None => open_std_handle("NUL", GENERIC_WRITE, OPEN_EXISTING, &security),
     };
-    let Some(nul) = OwnedHandle::from_raw(nul) else {
-        return Err(last_error("開啟 NUL 失敗"));
+    let stdout = open_output(spec.stdout_file.as_deref())?;
+    // stdout 與 stderr 指向同一個檔案時共用 handle：兩個 handle 各有檔案位置，會互相覆寫。
+    let stderr = match (&spec.stdout_file, &spec.stderr_file) {
+        (Some(out), Some(err)) if out.eq_ignore_ascii_case(err) => None,
+        _ => Some(open_output(spec.stderr_file.as_deref())?),
     };
 
     // SAFETY：全零是 STARTUPINFOW 的有效初始值，之後設定必要欄位。
     let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
     startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = nul.0;
-    startup.hStdOutput = nul.0;
-    startup.hStdError = nul.0;
+    startup.hStdInput = stdin.0;
+    startup.hStdOutput = stdout.0;
+    startup.hStdError = stderr.as_ref().unwrap_or(&stdout).0;
     // SAFETY：全零是 PROCESS_INFORMATION 的有效初始值，由 CreateProcessW 填寫。
     let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let mut cmd = command_line(spec);

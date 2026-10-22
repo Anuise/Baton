@@ -24,7 +24,7 @@ use crate::event::DomainEvent;
 use crate::task::{
     self, ContractContent, ContractField, ContractFieldName, MissingItem, Task, TaskContext, TaskStatus, Versioned,
 };
-use crate::workspace::Workspace;
+use crate::workspace::{AgentRole, Workspace};
 use crate::Timestamp;
 
 pub const RUN_AGGREGATE: &str = "run";
@@ -44,6 +44,8 @@ pub const EVENT_RUN_BLOCKED_REPORTED: &str = "run_blocked_reported";
 pub const EVENT_RUN_ADMISSION_DENIED: &str = "run_admission_denied";
 /// 准入被拒的結束原因前綴。
 pub const ADMISSION_DENIED_REASON: &str = "admission_denied";
+pub const EVENT_RUN_NATIVE_SESSION_BOUND: &str = "run_native_session_bound";
+pub const EVENT_RUN_NATIVE_SESSION_CONFLICT: &str = "run_native_session_conflict";
 
 /// 派工 Outbox 項目的種類：要求 Supervisor 啟動這個 Run 的程序。
 pub const OUTBOX_LAUNCH_RUN: &str = "launch_run";
@@ -159,6 +161,9 @@ pub struct Run {
     pub updated_at: Timestamp,
     pub started_at: Option<Timestamp>,
     pub ended_at: Option<Timestamp>,
+    /// Adapter 首次回報的原生 Session 識別；綁定後不會被改成別的 Session。
+    #[serde(default)]
+    pub native_session_id: Option<String>,
 }
 
 /// execution lease：Task 的寫入所有權。
@@ -203,6 +208,9 @@ pub struct LaunchPayload {
     pub prompt: String,
     /// Worker 的工作目錄（目前是 Workspace 目錄；worktree 由票 20 加入）。
     pub working_dir: String,
+    /// 派工當下 Workspace 對 Worker 角色的模型覆寫（spec D-30）；`None` 表示沿用帳號的預設模型。
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// 面板與 API 看到的一個 Run：Run 本身加上它的 lease，以及 Worker 最新的進度、checkpoint 與受阻回報。
@@ -274,6 +282,8 @@ pub enum RunCommand {
     Heartbeat { run_id: String, generation: i64 },
     /// Worker 回報進度、checkpoint 或受阻（Agent API）；同時續約 lease。受阻會讓 Task 進入 `blocked`。
     Report { run_id: String, generation: i64, content: ReportContent },
+    /// Adapter 回報了原生 Session 識別：第一次就綁定；之後相同是冪等的，不同則只記錄衝突、不改綁定。
+    BindNativeSession { run_id: String, generation: i64, native_session_id: String },
     /// Worker 回報結束。
     Finish { run_id: String, generation: i64, outcome: RunOutcome },
     /// 確認程序已經不在（核對結果、啟動結果不明且找不到程序）。
@@ -295,6 +305,7 @@ impl RunCommand {
             | RunCommand::LaunchFailed { run_id, .. }
             | RunCommand::Heartbeat { run_id, .. }
             | RunCommand::Report { run_id, .. }
+            | RunCommand::BindNativeSession { run_id, .. }
             | RunCommand::Finish { run_id, .. }
             | RunCommand::Interrupt { run_id, .. }
             | RunCommand::ReconcileLease { run_id, .. }
@@ -623,6 +634,23 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             };
             Ok(RunChange { task, report: Some(report), ..edit.into_change() })
         }
+        RunCommand::BindNativeSession { generation, native_session_id, .. } => {
+            check_report(run, edit.lease.as_ref(), generation)?;
+            match &run.native_session_id {
+                Some(bound) if *bound == native_session_id => Ok(RunChange::default()),
+                Some(bound) => {
+                    // 條件綁定：已綁定的 Session 不會被靜默改指；衝突留下事件供查核
+                    let payload = serde_json::json!({ "bound": bound, "reported": native_session_id });
+                    edit.push(EVENT_RUN_NATIVE_SESSION_CONFLICT, payload);
+                    Ok(edit.into_change())
+                }
+                None => {
+                    edit.push(EVENT_RUN_NATIVE_SESSION_BOUND, serde_json::json!({ "native_session_id": native_session_id }));
+                    edit.run.native_session_id = Some(native_session_id);
+                    Ok(edit.into_change())
+                }
+            }
+        }
         RunCommand::Finish { generation, outcome, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
             match outcome {
@@ -801,6 +829,7 @@ fn dispatch(
         updated_at: now,
         started_at: None,
         ended_at: None,
+        native_session_id: None,
     };
     let lease = ExecutionLease {
         run_id: run_id.clone(),
@@ -819,6 +848,7 @@ fn dispatch(
             task_id: task.id.clone(),
             prompt: render_prompt(&task.title, &contract.content),
             working_dir: workspace.path.clone(),
+            model: workspace.model_overrides.model_for(AgentRole::Worker).map(str::to_string),
         },
         created_at: now,
         delivered_at: None,

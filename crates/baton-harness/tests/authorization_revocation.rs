@@ -378,12 +378,13 @@ async fn an_admitted_run_keeps_its_settings_version_while_runs_admitted_later_us
 
     assert_eq!(run_view(&harness, &ws, &admitted).await["settings_version"], 1);
     assert_eq!(run_view(&harness, &ws, &queued).await["settings_version"], 2);
+    // Supervisor 啟動時已用准入時固定的版本產生快照（票 14），之後只回傳同一個綁定
     let (status, pinned) = snapshot(&harness, &ws, &admitted, json!({})).await;
-    assert_eq!((status, pinned["version"].clone()), (StatusCode::CREATED, json!(1)), "{pinned}");
+    assert_eq!((status, pinned["version"].clone()), (StatusCode::OK, json!(1)), "{pinned}");
     let (status, refused) = snapshot(&harness, &ws, &queued, json!({ "version": 1 })).await;
     assert_eq!((status, refused["error"].clone()), (StatusCode::CONFLICT, json!("settings_snapshot_pinned")), "{refused}");
     let (status, newer) = snapshot(&harness, &ws, &queued, json!({})).await;
-    assert_eq!((status, newer["version"].clone()), (StatusCode::CREATED, json!(2)), "{newer}");
+    assert_eq!((status, newer["version"].clone()), (StatusCode::OK, json!(2)), "{newer}");
 }
 
 async fn snapshot(harness: &Harness, ws: &str, rid: &str, body: Value) -> (StatusCode, Value) {

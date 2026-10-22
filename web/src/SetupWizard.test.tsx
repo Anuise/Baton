@@ -79,6 +79,7 @@ describe("首次啟動精靈", () => {
         source_detail: null,
         account: null,
         config_dir_matches: true,
+        cli_version: "2.1.307 (Claude Code)",
       },
       dispatchable: false,
       blockers: [{ code: "profile_not_logged_in", message: "尚未登入；請在終端機完成原生登入後按「重新核對」" }],
