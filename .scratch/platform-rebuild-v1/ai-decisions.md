@@ -1243,6 +1243,186 @@
 - 影響：測試失敗時的 backtrace 只有函式名稱、沒有行號；每次建置都是非增量，第一次編譯時間不變、反覆修改時較慢。
 - 審閱：未審
 
+### AI-138：權限提示的判定是保守的詞法判定；範圍外或看不懂一律建立裁定請求
+- 重要度：高
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：`permission_prompt` 先把「工具名稱＋輸入」歸類成 Workspace 授權的能力（`baton_domain::permission`），再對照**目前生效（最新）的授權 revision**：(1) 檔案工具（Read／Glob／Grep／LS → 讀取；Edit／MultiEdit／Write／NotebookEdit → 編輯）的路徑必須落在該能力的授權目標目錄內（詞法正規化：不分大小寫、斜線方向、`.`／`..`；相對路徑以 Workspace 目錄為基準；`..` 逃出根目錄、`~` 開頭、UNC 與其他磁碟都算範圍外），寫入 `.git` 一律範圍外（授權限制「不修改 Git 歷史」）；(2) WebFetch 只允許公開 http／https（本機、內網、IPv6 字面位址都算範圍外），WebSearch 需要「讀取公開網頁」；(3) Bash 只認一小張白名單（`cargo`／`npm`／`pnpm`／`yarn`／`pytest`／`go`／`dotnet` 的建置、測試、安裝子命令，`git status|diff|log|show`、`git add|commit`、`git push`），含任何 shell 組合語法（`; & | < > \` $ ( ) { } * ?`、換行）的指令、未知子命令、不認得的程式一律無法歸類；指令以 bash 規則斷詞（去掉引號；引號不成對、反斜線緊接引號一律無法歸類；判斷旗標前去掉反斜線，所以 `'--amend'`、`\-\-amend` 都認得），**每個子命令只接受白名單內的旗標**，其他旗標一律無法歸類——例如 `git commit --amend|--fixup|--squash|-C|--reset-author`、`git diff|log|status --output|-o`、`git -C …`、`git push --force` 與 `+分支`／`:分支` refspec、`npm|pnpm|yarn|bun --prefix|-C|--dir`、`cargo --manifest-path|-Z|--config|--target-dir`；帶值旗標的值不可以 `-` 開頭；`-g`、`--global`、`--global=…`、`-g=…`、`--location=global`、`--location global` 一律歸為「全域安裝」（`--global=false` 也是，保守處理）；指令參數中像路徑的字詞（含 `/`、`\`、磁碟代號或以 `.`、`~` 開頭）必須在 Workspace 目錄內（檔案能力則對照授權目錄），否則範圍外；(4) 未知工具、缺少必要欄位、尚未確認任何授權，全部範圍外；(5) 路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`）；只剩點與空白的元件、磁碟代號以外含 `:` 的元件（NTFS 替代資料流，例如 `.git::$INDEX_ALLOCATION`）、`\\?\`／`\\.\` 裝置路徑都視為無法正規化而算範圍外；8.3 短檔名 `GIT~n` 視同 `.git`。範圍外建立裁定請求並回「等待裁定」，不是回傳錯誤。（第 (3) 項的旗標白名單與第 (5) 項由修正 run R041 依驗證報告 R038 補上。）
+- 理由：D-08 要求「授權範圍內自動允許並記錄，範圍外建立裁定請求」，而且 Worker 可能被提示注入；把「看不懂」當成範圍外才不會讓組合指令（`cargo test && curl … | sh`）借白名單前綴溜進去。用最新 revision 而不是 Run 准入時的 revision，是因為使用者收窄授權後，仍在跑的 Worker 不應該繼續沿用舊的寬鬆授權。
+- 替代方案：真的解析 shell 語法（Windows 的 cmd、PowerShell、bash 語法都不同，錯一個就是漏洞）；用 Run 准入時固定的 revision（擴權安全、收權不安全）；把無法歸類的操作直接拒絕而不問使用者（Worker 卡住且使用者看不到任何東西）。
+- 影響：保守的代價是 Worker 常用的 `cargo test 2>&1 | tail`、`ls`、`cat`、`curl` 這類指令每次都會變成裁定請求；使用者可用「允許這一次」，或日後把常見指令加進白名單／在 Adapter 的預先允許清單（票 14）列出。詞法判定不解析符號連結，授權目錄內指向外部的連結不會在這裡被攔下（Workspace 目錄本來就不是安全邊界，ADR-0002）。Adapter 預先允許的工具清單與 `--permission-prompt-tool` 參數屬票 14，這裡只定義 Runtime 端的判定。
+- 審閱：未審
+
+### AI-139：範圍外的權限提示只有兩個選項；「允許這一次」是單次批准，且由同一 Task 的同一操作消耗一次
+- 重要度：高
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：權限提示建立的裁定請求固定兩個選項 `allow_once`（允許這一次）與 `deny`（拒絕），**沒有**「永遠允許」或「擴大授權」選項；高風險能力或無法歸類的操作建議 `deny`，其餘不給建議。使用者回答之後，**同一個 Task** 再次提出**同一個操作**（工具名稱＋輸入的指紋相同）時，這次提示消耗那個批准：`allow_once` → 回 allow（`status: approved`），`deny` → 回 deny（`status: denied`），消耗紀錄存在追加式的 `decision_approval_use`，每個請求最多消耗一次；消耗之後再提示同一個操作要重新裁定。同一個 Task 對同一個操作在請求仍待處理時重複提示，回到既有請求（不重複建立）。
+- 理由：回答權限提示若沒有人消耗答案，Task 恢復後 Worker 會再被問到一次、無限循環；單次批准對應 spec 的「E1 單次批准」，也維持「Agent 不能擴大授權」。把 `deny` 也消耗一次，讓 Worker 能得到明確的拒絕理由，而不是又被無限期擱置。
+- 替代方案：回答後永遠記住（等於偷偷擴大授權，且沒有失效機制）；只記錄答案、不消耗（Worker 無法得知結果）；批准綁 Run 而不是 Task（Task 恢復後一定是新的 Run，批准會永遠用不到）。
+- 影響：批准以 Task 為界，Task 取消後批准自然失效；擴大 Workspace 授權仍只能由使用者在授權設定頁做。使用者想永久放行某類操作要去改授權。
+- 審閱：未審
+
+### AI-140：裁定請求對 Task 與 Run 的影響：只有 `running` 的 Task 進入 `waiting_decision`，Run 不結束；恢復條件是「沒有其他待處理請求」
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：(1) 請求建立時，只有提出請求的 Run 所屬的 Task 在 `running` 時才轉成 `waiting_decision`（`blocking` 欄位記下受影響的 Task，Agent 提出的請求目前永遠只有那一個 Task）；Task 已是別的狀態（例如 `blocked`）時請求照常建立，Task 不動。(2) **Run 不因此結束**（與 AI-90 的 `report_blocked` 一致）：Worker 依 D-08 保存 checkpoint 後自行結束，或繼續做不需要這項裁定的事；Run 結束時 Task 不在 `running`，所以不會被拉到 `verifying` 或 `ready`。(3) 回答時，每個 `blocking` 的 Task 只有在「仍是 `waiting_decision`，而且沒有任何其他待處理請求也阻擋它」時才回到 `ready`；已取消或已離開 `waiting_decision` 的 Task 不動。(4) 只有仍是 execution lease 持有者的 Run 能提出請求（沿用 `is_current_writer`），已結束或被接替的 Run 提出請求回 409 `run_report_stale`，不建立任何東西。(5) 回到 `ready` 的 Task 在**同一個交易**重新排進派工佇列（`dispatch_request`，優先序 0、`requested_at` 是裁定時間；已在佇列中的保留原位置），之後由 Scheduler 派出：Supervisor 每次處理都會排程佇列，回答的 API 也會立刻叫醒 Supervisor。舊 Run 若還活著、還持有 execution lease，排程判定為 `execution_conflict`，Task 留在佇列（等待原因歸「狀態不明」）而不是被丟掉；舊 Run 結束後的下一次排程派出新的 Run。不必有人再按派工。
+- 理由：D-08／使用者故事 55 的「恢復排程」＝Task 回到 `ready` 並交回 Scheduler，而不是由裁定直接啟動程序（程序只能由 Supervisor 啟動，I3；准入與容量檢查仍由 Scheduler 做）。票 19 的 Scheduler 只處理佇列內的 Task、派出時就移出佇列，所以只把 Task 改成 `ready` 不會被自動派出，必須重新排隊（原本「由票 19 的 Scheduler 看到 `ready` 後處理」的前提與實作不符，由修正 run R041 依驗證報告 R038 改正）。多個請求阻擋同一個 Task 時只回答其中一個就恢復，會讓 Worker 帶著未解決的問題重新開工。
+- 替代方案：裁定時直接派工（繞過准入與容量檢查）；Run 提出請求時一併結束 Run（Worker 要做收尾，Domain 沒有「Worker 自述結束」的路徑）；每個請求獨立恢復 Task（上述問題）；讓 Scheduler 自動派出所有 `ready` 的 Task（會讓失敗的 Run 無限重派，違反 AI-96）。
+- 影響：`waiting_decision` 的 Task 在使用者沒有回答之前不會有任何出口（取消除外）；回答之後自動恢復，是 AI-96「Task 回到 `ready` 不會自動重新排隊」的唯一例外。原本派工的優先序沒有保存，恢復時一律用預設值 0。Controller 專屬的 `propose_decision_request`（可阻擋多個 Task）屬票 16、17，Domain 的 `blocking` 已經是清單，不需要改資料模型。
+- 審閱：未審
+
+### AI-141：逾時不是同意——期限只標示「已逾期」，沒有任何因時間而發生的狀態變化
+- 重要度：高
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：`request_decision` 可帶 `deadline_minutes`（1 分鐘到 30 天，從 Runtime 的 Clock 起算，存成 UTC 時間）；請求的投影帶 `overdue`（待處理且現在超過期限）。**沒有任何命令或背景處理會因為時間流逝而回答請求、放行權限提示或讓 Task 恢復**；逾期後使用者仍可回答，回答才會恢復 Task。權限提示建立的請求沒有期限。測試涵蓋：推進 fake Clock 數天、重啟 Runtime、再次 supervise，請求仍是 pending、Task 仍是 `waiting_decision`；同一個權限提示放三天後仍回「等待裁定」。
+- 理由：使用者故事 55「我的沉默不會變成授權」是安全邊界，不是可調參數；把「逾期」做成純顯示欄位，可以保證沒有程式路徑能把時間當成同意。
+- 替代方案：逾期自動採用建議選項或自動拒絕（前者是沉默即同意；後者會讓 Task 無人知曉地失敗，也需要新的狀態）；逾期把請求標為 expired（spec 的 expired／superseded 屬完整裁定中心，見 AI-143）。
+- 影響：Agent 看不到使用者的期限壓力以外的任何回饋；使用者錯過的請求會一直留在待處理清單（以緊急程度與建立時間排序，逾期者有標示）。
+- 審閱：未審
+
+### AI-142：裁定的資料結構、交易邊界與喚醒 Outbox
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：(1) migration 15（`decision_request_and_decision`，排在票 18 的 `message_and_delivery`（migration 14）之後）新增 `decision_request`（只能從 `pending` 改成 `answered`，其餘欄位由觸發器鎖住、不可刪除）、`decision_request_block`（阻擋範圍）、`decision`（追加式，`decided_by` 以 CHECK 限定為 `desktop`，所以連程式寫錯也寫不進非桌面的裁定）、`decision_approval_use`（追加式）。(2) 回答在**同一個交易**寫入裁定、請求狀態、受影響 Task 的狀態與事件、喚醒 Outbox。(3) 喚醒 Outbox 的 `kind` 是 `decision_wake:<請求識別>`（Outbox 的唯一鍵是 `(kind, run_id)`，同一個 Run 可以提出多個請求，所以種類帶上請求識別；沒有改既有資料表），`run_id` 是提出請求的 Run，內容有 Workspace、請求、選項、阻擋的與實際恢復的 Task。**本票沒有消費者**：Controller 的事件迴圈（票 16 之後）會讀它，`delivered_at` 保持空白。(4) 事件：請求聚合 `decision_request`（v1 `decision_requested`、v2 `decision_answered`、v3 `permission_approval_used`），自動允許的權限提示每筆一個獨立聚合 `permission_audit`（`permission_auto_allowed`，內容含 Run、Task、工具、摘要、能力與授權 revision；不節流）。(5) 回答同樣的選項重送是冪等的（200、不再追加任何東西）；不同的選項回 409 `decision_already_answered`；未知選項 400 `decision_option_unknown`；請求內容無效 400 `decision_invalid`。
+- 理由：「裁定已存、Task 還卡住」的中間狀態不能被觀察到（驗收條件）；不改 Outbox 的唯一鍵可避免與同時進行的票互相衝突；稽核事件與狀態變更同交易才能保證記錄與實際行為一致。
+- 替代方案：用新的 `wake` 資料表（多一張沒有消費者的表）；重建 Outbox 表移除唯一鍵（動到其他票也在使用的表）；自動允許只記日誌（日誌可被輪替、不在備份範圍，也不能和 Run 關聯查詢）。
+- 影響：自動允許每次都追加事件，讀取密集的 Worker 會讓事件表成長較快，需要之後的清理／彙總策略（與事件表清理一併處理）；`decision_wake` 項目在 Controller 票實作前會累積。
+- 審閱：未審
+
+### AI-143：本票的裁定中心只做最小版本，其餘留給「裁定中心完整功能」
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：本票做：Agent 以 `request_decision` 提出、權限提示轉接、待處理清單與單筆詳情、單筆回答、受影響 Task 恢復、喚醒 Outbox、狀態列與導覽的待處理數。**不做**（spec 第三階段的完整裁定中心）：`expected_revision` 校驗與 `superseded`／過期標記、批次回答、相似請求合併或互相連結、`goal_revision`、決策權限表（D-15）的強制檢查、Decision 的適用範圍／有效期間／supersedes、Controller 專屬的 `propose_decision_request`。選項限制：2–8 個、識別限英數字與底線連字號；問題 500、原因 1000、選項名稱 200、取捨 500、證據最多 10 項各 500 字元、備註 1000 字元。Agent 工具另外去重：同一個 Run 對同一個問題在仍待處理時重複提出，回到既有請求並標示 `existing: true`。
+- 理由：票面與 spec 第 214 行都限定第一階段只需「建立請求、顯示、單筆回答、喚醒工作」；長度與選項數量的上限避免 Agent 用超大內容塞滿裁定畫面。
+- 替代方案：一次做完整裁定中心（範圍遠超出本票，且依賴尚未存在的 Goal revision、Context Builder）。
+- 影響：Decision 目前只保存「選了哪個選項與備註」，Context Builder（票 15、28）要載入決策時從 `decision` 與請求讀取；完整版會在同一組資料表上追加欄位或新表，不需要重建。
+- 審閱：未審
+
+### AI-144：Agent 工具與權限提示回應的形狀（遵循 Claude Code 的 permission-prompt 協定，待票 14 驗證）
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作
+- 決策：新增兩個 Agent 工具：`request_decision`（欄位 `question`、`reason`、`options[{id,label,tradeoff?}]`、`recommendation?`、`evidence?`、`urgency?`、`deadline_minutes?`；回 `{decision_request_id, status: "waiting_decision", existing, message}`）與 `permission_prompt`（欄位 `tool_name`、`input`，可另帶 `tool_use_id`；回 `{behavior: "allow"|"deny", updatedInput?, message?, status, decision_request_id?, authorization_revision?}`）。回應遵循 Claude Code `--permission-prompt-tool` 的形狀（`behavior`／`updatedInput`／`message`），允許時原樣帶回輸入；等待裁定與拒絕都是 HTTP 200 的 `behavior: "deny"`（MCP 結果不是 `isError`），`status` 區分 `auto_allowed`、`approved`、`waiting_decision`、`denied`。Agent API 沒有任何回答或批准的工具；桌面 API 一律在 `/api/v1/` 下，Agent 憑證被 guard 擋成 403 `role_not_allowed`。桌面端點：`GET workspaces/{id}/decisions`、`GET …/decisions/{rid}`、`POST …/decisions/{rid}/answer`（`{option_id, note?}`）、全域 `GET /api/v1/decisions/pending`。
+- 理由：沿用已知協定可讓票 14 的 Adapter 直接把 `permission_prompt` 指給 `--permission-prompt-tool`；`deny` 不用 `isError` 是因為它是正常的協定回覆，不是工具故障。
+- 替代方案：自訂回應格式再由 shim 轉換（多一層轉換就多一處可能不一致）。
+- 影響：**Validation Required（票 14，以真實 Claude Code 驗證）**：(a) CLI 是否接受 `behavior` 之外的額外欄位、是否要求 `updatedInput` 一定存在；(b) 收到 `deny` 的 Worker 是否真的能繼續做其他步驟而不重試相同操作；(c) 被阻擋的權限提示是否需要 `tool_use_id` 才能對應。若與協定衝突，只需要修改 `PermissionResponse` 的序列化，Domain 判定不受影響。前端的 Tauri 指令名稱（`decision_list`／`decision_detail`／`decision_answer`／`decisions_pending`）與 HTTP 路徑一一對應。
+- 審閱：未審
+
+### AI-145：票 22 整合 rebuild/v1（票 12、08、27）：migration 與 AI 編號順延、衝突合併方式
+- 重要度：低
+- 時間／階段：2026-10-22，票 22 實作（修正 run R041）
+- 決策：整合分支在本票開發期間先後併入票 12（`artifact`，migration 11）、票 08（`shared_settings_version`，migration 12）與票 27（`quota`，migration 13），所以票 22 的 migration `decision_request_and_decision` 由第 11 個順延為第 14 個，排在最後；彼此互不參照。票 22 的 AI 編號由 AI-103～AI-109 順延為 AI-138～AI-144，修正 run 新增的條目是 AI-145、AI-146；內容不變，開發指南的引用同步改號；整合分支既有條目不動。其餘衝突一律兩邊都保留：API 路由、Tauri 指令、MCP 工具清單（共 7 個）、`AppClient` 的各組用戶端、側欄入口（「裁定」與「成果與驗證」並列）、開發指南的 crate 表與測試清單。
+- 理由：不可修改整合分支已有的 migration 與 AI 條目；這幾張票的功能彼此獨立。
+- 替代方案：合併 migration（已套用的開發資料庫會漏掉其中一部分）。
+- 影響：無行為變更。
+- 審閱：未審
+
+### AI-146：修正 R038 的判斷：以 bash 斷詞、旗標白名單擴及全部指令、指令參數的路徑檢查、恢復時的優先序
+- 重要度：中
+- 時間／階段：2026-10-22，票 22 實作（修正 run R041）
+- 決策：(1) 權限提示的指令以 **bash** 規則斷詞（Claude Code 在 Windows 上的 Bash 工具由 Git Bash 執行）；各 shell 解讀不一致的寫法（反斜線緊接引號、引號不成對）一律無法歸類，而不是猜一種解讀。(2) 驗證報告只點名 git、npm 家族、cargo；同樣的「旗標白名單」也套用到 pip、pytest、tsc、vitest、jest、go、dotnet，因為它們有同類的旗標（`go build -o`、`tsc --outDir`、`pip --target`）。(3) 指令參數裡像路徑的字詞必須在 Workspace 目錄內（`pytest C:\other`、`npm install ../外部套件`）；commit 訊息、測試篩選這類自由文字旗標的值不檢查。(4) 寫入時 `GIT~n`（`.git` 的 8.3 短檔名）視同 `.git`。(5) 裁定後重新排隊的優先序一律是 0（原本派工的優先序沒有保存；要保存得在 `run` 或 Task 加欄位，超出本次修正）。(6) AI-138、AI-140 是本票自己尚未審閱的條目，依驗證報告的要求直接修正內容並註明來源，不另開取代條目。
+- 理由：保守判定的原則（AI-138）是「看不懂就問」；只修報告點名的旗標，同類的繞過仍會存在。
+- 替代方案：只修報告點名的項目（其他工具有一樣的漏洞）；自行完整解析 bash、cmd、PowerShell 語法（錯一個就是漏洞）；保存原本派工的優先序（要改資料表）。
+- 影響：白名單外的常用旗標（例如 `git log --format=…`、`pnpm --filter web test`、`cargo +nightly`）現在也會變成裁定請求；使用者可「允許這一次」，常用的再逐步加進白名單。
+- 審閱：未審
+
+### AI-147：票 22 整合 rebuild/v1（票 18）：migration 第 15 版、AI 編號再順延、MCP 工具合成 9 個
+- 重要度：低
+- 時間／階段：2026-10-22，票 22 整合（run R053-22-integrate）
+- 決策：整合分支先併入票 18，佔用了 migration 14（`message_and_delivery`）與 AI-128～AI-134，另有 AI-137；所以票 22 的 migration `decision_request_and_decision` 由第 14 個順延為第 15 個，排在最後，兩者互不參照、都會套用。票 22 的 AI-128～AI-136 順延為 AI-138～AI-146（內容只改編號與 migration 序號），開發指南的引用同步改號；整合分支既有條目不動。其餘衝突一律兩邊都保留：Domain 的工具常數與模組、Store 的模組與匯出、API 路由（`request_decision`、`permission_prompt`、`send_message`、`read_inbox` 並存）、MCP shim 的工具定義與已知工具清單（共 9 個），shim 情境測試兩邊的 schema 斷言與轉送測試都保留，工具數的斷言由 7 改為 9（測試名稱改為 `tools_list_has_the_nine_tools_with_their_required_fields`）。
+- 理由：不可修改整合分支已有的 migration 與 AI 條目；兩張票的功能彼此獨立。
+- 替代方案：合併 migration（已套用的開發資料庫會漏掉其中一部分）；把票 22 的條目放在 AI-135、AI-136 的空號（整合分支跳過這兩號的原因不明，且本票有 9 個條目放不下）。
+- 影響：無行為變更。
+- 審閱：未審
+
+### AI-148：真實 Claude Code Adapter 的啟動參數：不載入任何設定檔來源、權限經 permission_prompt、Prompt 經標準輸入
+- 重要度：高
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：Worker 以 `claude -p --output-format stream-json --verbose --setting-sources "" --strict-mcp-config --mcp-config <Run 的 mcp.json> [<快照的 mcp.json>] --allowedTools mcp__baton --permission-prompt-tool mcp__baton__permission_prompt [--settings …] [--append-system-prompt-file …] [--model …]` 啟動。Prompt 寫成 Run 目錄的 `prompt.md` 經標準輸入交付。權限模式維持 CLI 預設（不使用 `bypassPermissions`），只預先允許 Baton 自己的 MCP 工具，其餘需要核准的操作經票 22 的 `permission_prompt` 交給 Runtime 判定。執行檔是 `claude`（CreateProcessW 依 PATH 找 `claude.exe`），MCP shim 是與 Runtime 同目錄的 `baton-mcp-shim.exe`。
+- 理由：`--setting-sources ""` 讓使用者層與 Workspace 內的 `.claude\settings*.json` 都不載入。實測 `project,local` 時 Workspace 設定的 `defaultMode: acceptEdits` 會生效，而 P3 授權下 Worker 可以寫這些檔案（票 22 驗證 R052 的意見），等於 Worker 能改自己的權限；設定改為只來自 Run 的唯讀快照（D-09）。`--strict-mcp-config` 讓 Worker 只看到 Baton 的 shim 與快照中的共同 MCP 伺服器（D-05）。Prompt 經標準輸入可避開 Windows 指令列長度上限，也不會出現在程序清單。全部參數已在 Claude Code 2.1.307 實測（見 AI-156）。
+- 替代方案：`--setting-sources project,local`（Worker 可藉 Workspace 設定放寬權限）；`--bare`（會改變認證來源的讀取方式）；`bypassPermissions`（違反 D-08）。npm 安裝的 `claude.cmd` 不能直接以 CreateProcessW 啟動，目前不支援，需要時改為經 `cmd.exe` 或解析實際路徑。
+- 影響：repo 自己的 `.claude\settings.json`（hooks、權限、環境變數）對 Worker 不生效；需要的設定要放進共同設定。
+- 審閱：未審
+
+### AI-149：啟動 Worker 前移除繼承的 `ANTHROPIC*`、`CLAUDE*` 環境變數
+- 重要度：高
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：Runtime 啟動時記下繼承到的環境變數名稱；啟動 Worker 前移除名稱以 `ANTHROPIC` 或 `CLAUDE` 開頭（不分大小寫）的全部變數，只保留 `CLAUDE_CODE_GIT_BASH_PATH`，再設定 `CLAUDE_CONFIG_DIR` 為 Run 帳號 Profile 的目錄。移除以新增的 `SpawnSpec.env_remove` 交給 ProcessControl，憑證以 `env` 交付，都不進指令列或 `command_hash`。
+- 理由：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_OAUTH_TOKEN`、`CLAUDE_CODE_USE_BEDROCK／VERTEX`、`ANTHROPIC_BASE_URL` 等都會讓實際帳號與 Profile 脫鉤；Runtime 若是從 Claude Code session 中啟動，還會繼承 `CLAUDECODE` 等巢狀標記。比照 AI-02 以前綴清除最不容易漏；Git Bash 路徑只影響 Windows 上找 Bash，與認證無關。
+- 替代方案：只移除明列的變數（新版本加入的認證變數會漏掉）；清空整個環境（會失去 PATH、USERPROFILE 等必要變數）。
+- 影響：使用者若以環境變數調整 Claude Code 行為（例如 `CLAUDE_CODE_MAX_OUTPUT_TOKENS`），對 Worker 不生效；需要時應改放共同設定或擴充保留清單。
+- 審閱：未審
+
+### AI-150：CLI 輸出寫入 Run 目錄的檔案，Adapter 追蹤檔案取得事件
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：ProcessControl 依新增的 `SpawnSpec.stdin_file`／`stdout_file`／`stderr_file`，把 `claude` 的標準輸出寫入 `<資料目錄>\runs\<run_id>\stream.jsonl`、標準錯誤寫入 `stderr.log`（share read/write/delete）。Adapter 的事件串流每 250 毫秒讀取檔案新內容並逐行解析，有新輸出就送一次 `Heartbeat`。Runtime 重建後重新接上同一個檔案，從頭重播。
+- 理由：程序由 Job Object 管理，Runtime 結束或當掉時程序繼續執行（D-10；關閉 Job handle 不殺程序），管線在 Runtime 重建後無法接回，檔案可以。重播的 Session 綁定是冪等的，heartbeat 只會續約 lease，過期後仍由 ProcessControl 查證存活。
+- 替代方案：具名管線（重建後無法取回已寫出的內容）；持久化已處理的位移（多一份狀態，目前沒有必要）。
+- 影響：重建後重播會重送限流與用量事件，票 27 的觀測會多記一次同一筆用量（推估偏高、偏保守）；stream 檔案隨 Run 保留在資料目錄，目前沒有清理流程。
+- 審閱：未審
+
+### AI-151：stream-json 事件對應：限流訊號、用量與錯誤
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：`system/init` → `Started`（`session_id`）；`assistant` 的文字區塊 → `Message`。`rate_limit_event`：`status` 的 `allowed`／`allowed_warning`／`rejected` 對應票 27 的 `Allowed`／`Warning`／`Exhausted`（其他狀態不轉換），屬於 `rateLimitType` 的視窗（不認識的視窗為 `None`），`used` 取 `utilization`，沒有時取 `unifiedWindows` 中該視窗的值；`unifiedWindows` 的其他視窗以 `Allowed` 加已用比例各送一個訊號。`result`：有 `usage` 時先送 `UsageReported`，`tokens` = 輸入 + 輸出 + 快取建立（快取讀取不計，採用 AI-121 的建議）；`is_error` 為 false 且 `subtype` 為 `success` 才是成功，否則先送新增的 `AdapterEvent::Error`（`result` 文字，500 字元內）再送 `Exited { success: false }`。不是 JSON 的行送 `Error`。Supervisor 以最後一個錯誤作為 Run 的失敗原因。`resume_capability` 一律回報 `Unknown`。
+- 理由：實測 2.1.307 的未登入與不存在的模型，`result` 都是 `subtype: success` 但 `is_error: true`，只看 `subtype` 會誤判。`unifiedWindows` 同時帶兩個視窗的已用比例，送出後票 27 才能判定「觀測完整」（AI-124）；非主要視窗的狀態 CLI 沒有說，以已用比例為準。快取讀取的 token 很多（實測一次 17140）但計費與額度權重遠低於其他類別，計入會讓推估嚴重偏高。
+- 替代方案：只送主要視窗（另一個視窗永遠只有推估）；`tokens` 計入快取讀取。
+- 影響：撞到限制時的實際形狀尚未實測（`docs/adapter-contract.md`）；resume 屬後續票。
+- 審閱：未審
+
+### AI-152：原生 Session 的條件綁定：不同的 Session 只記錄衝突，不改綁定也不結束 Run
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：Run 新增 `native_session_id`。`BindNativeSession` 需要目前寫入所有者的世代；沒有綁定時綁定並記 `run_native_session_bound`；相同時沒有任何變動；不同時保留原綁定並記 `run_native_session_conflict`（含兩個識別），Run 照常執行。
+- 理由：票面要求「不靜默改指其他原生 Session」。衝突在同一個 `claude -p` 程序內不該發生，若發生代表 CLI 行為改變，應留下可查證的紀錄；直接讓 Run 失敗會中斷可能仍正常的工作，是否要處置交給 Session resume 與交接的票決定。
+- 替代方案：衝突即讓 Run 失敗（較保守，但沒有證據顯示工作本身有問題）；靜默忽略（違反票面）。
+- 影響：UI 目前不顯示衝突事件，只能從事件表查看。
+- 審閱：未審
+
+### AI-153：Claude Code 最低版本固定為 2.1.307，版本記在 Profile 核對中，未知也阻擋
+- 重要度：高
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：新增 `baton_domain::claude_code`，最低版本 `MIN_SUPPORTED_VERSION = 2.1.307`（真實 Adapter 契約實測通過的版本）。首次啟動精靈的 `MIN_CLAUDE_CODE_VERSION` 改由它導出（原暫定 2.1.0）。核對 Profile 時同時執行 `claude --version` 並記入 `verification.cli_version`；低於最低版本是 `cli_version_unsupported`（帳號問題），找不到 Claude Code、取不到或看不懂版本是 `cli_version_unknown`（狀態不明），兩者都阻擋該 Profile 的派工並顯示原因。票 14 之前的核對沒有版本，需要重新核對。
+- 理由：spec D-20 規定最低版本在 Adapter 驗證時固定；D-08 要求以版本探測決定能力、不支援時阻擋並說明，不假設支援。只有 2.1.307 實際驗證過 Adapter 用到的旗標與事件格式。CLI 是本機唯一一份，但「派工會不會成功」以 Profile 為單位判定與顯示，所以放在 Profile 的核對結果裡。
+- 替代方案：最低版本設 2.1.0（未驗證 2.1.0～2.1.306 是否支援全部旗標）；每次啟動 Run 時探測版本（每個 Run 多一次程序啟動，且無法在派工前顯示原因）。
+- 影響：既有的 Profile 在重新核對前都不能派工；CLI 降版後要重新核對才會被阻擋。
+- 審閱：未審
+
+### AI-154：設定快照在啟動前自動准入與核對，API 與 Supervisor 共用並依 Run 序列化
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：新增 `baton_api::RunSettings`（取代 `materialize_run_settings`），API 的快照端點與 Supervisor 共用同一個實例，每個 Run 一把鎖。Supervisor 在 launch intent 持久化之後、簽發憑證之前取得快照：尚未綁定就以最新版本建立；已綁定就核對目錄中的檔案（含 `manifest.json`）與版本渲染結果完全相同。核對失敗以 `LaunchFailed`（`settings_snapshot_mismatch…`）結束 Run，不啟動程序；API 再要求已綁定的快照也做同樣核對，不一致回 409 `settings_snapshot_mismatch`。還沒有採用任何共同設定版本時，Run 不帶共同設定啟動。
+- 理由：回應票 14 的主控意見（票 08 驗證 R040）：同一 Run 並行要求不同版本時共用 staging 目錄、已綁定的 Run 不核對目錄。D-09 要求「無法維持時阻擋並顯示，不宣稱固定成功」。尚未採用共同設定時阻擋，會讓還沒完成首次精靈匯入步驟的使用者完全無法派工；Profile 目錄本身只有登入狀態，加上 `--setting-sources ""`，不帶共同設定執行的風險可接受。
+- 替代方案：未採用共同設定時阻擋派工（較嚴格）；核對失敗時以版本內容重寫目錄（可能掩蓋竄改，也與唯讀目錄的寫入規則衝突）。
+- 影響：鎖只在單一 Runtime 實例內有效（Runtime 本身是單實例）；Run 啟動後快照被改動不會被偵測。
+- 審閱：未審
+
+### AI-155：模型依 Workspace 角色覆寫的資料形狀與生效時機
+- 重要度：低
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：Workspace 新增 `model_overrides { controller, worker, reviewer }`（`null` = 不覆寫），以 `PUT /api/v1/workspaces/{id}/model-overrides` 整組取代；名稱去除空白後只允許英數字與 `. _ - : [ ] @ /`、最長 100 字元。派工時把 Worker 角色的模型固定進派工 Outbox（`LaunchPayload.model`），只影響之後派出的 Run。Controller 與 Reviewer 的覆寫先保存，由各自的票使用。UI 放在 Workspace「授權設定」畫面下方。
+- 理由：spec D-30。模型名稱會成為 `--model` 的引數，限制字元避免被當成其他旗標或夾帶參數；在派工時固定讓 Runtime 重建後組出相同的啟動指令。
+- 替代方案：在 Run 啟動時才讀取 Workspace 的覆寫（重建後可能組出不同指令）；放進共同設定（共同設定是全域的，不能依 Workspace 區分）。
+- 影響：migration `model_overrides_and_native_session` 新增 `workspace.model_overrides` 與 `run.native_session_id`（序號見 AI-157）。
+- 審閱：未審
+
+### AI-156：真實 Adapter 契約以 Work-3 實際執行，並把輸出錄進 repo 作為 replay 對象；AI-144 的三個問題已實測
+- 重要度：中
+- 時間／階段：2026-10-22，票 14 實作
+- 決策：契約測試有三種對象：fake、replay（真實 Adapter 讀取真實 CLI 錄下的 stream-json）、live（`#[ignore]`，手動）。本票以 Work-3（`BATON_LIVE_PROFILE_DIR=C:\Users\User\.claude-Work-3`、模型 `haiku`）實際執行 live（最後一次 5/5 通過，另有權限轉接 1/1），把兩個情境的輸出錄成 `crates/baton-harness/tests/fixtures/claude-2.1.307-*.jsonl`（路徑中的使用者名稱改成範例值）。權限轉接以本機假 Agent API 驗證 AI-144：(a) CLI 接受 `behavior` 以外的欄位，`deny` 不需要 `updatedInput`；(b) 收到 `deny` 的 Worker 沒有重試同一個操作並正常結束；(c) CLI 會帶 `tool_use_id`，Runtime 不需要它也能運作。結果記錄在 `docs/adapter-contract.md`。
+- 理由：票面要求真實 Adapter 的結果記錄 CLI 版本；只有 fake 的契約無法發現 fake 與真實不一致（例如 `is_error` 與 `subtype` 的關係）。replay 讓每次 `cargo test` 都以真實輸出驗證解析器，不需要登入。執行前以 usage.py 確認 Work-3 額度足夠，未使用 Work-0；每次請求都極短。
+- 替代方案：不執行 live、只寫說明（無法得知真實的錯誤輸出形狀與權限協定）。
+- 影響：CLI 升版後需要依 `docs/adapter-contract.md` 重新執行 live 並更新錄製檔；`allow` 是否可省略 `updatedInput` 仍未實測（Runtime 一律帶上）。
+- 審閱：未審
+
+### AI-157：票 14 整合 rebuild/v1（票 27、18、22）：AdapterEvent 合併、migration 第 16 版、AI 編號順延
+- 重要度：低
+- 時間／階段：2026-10-22，票 14 實作（整合 rebuild/v1）
+- 決策：整合分支已併入票 27（migration 13 `quota`）、票 18（14 `message_and_delivery`）與票 22（15 `decision_request_and_decision`），所以本票的 migration `model_overrides_and_native_session` 由第 13 個順延為第 16 個，排在最後。本票原本以 AI-121～AI-129 追加的條目與整合分支的編號重複，改為 AI-148～AI-157（內容依整合後的實作更新）。`AdapterEvent` 採用票 27 的 `RateLimited { window, status, used, reset_at_millis, raw }` 與 `UsageReported`，保留本票新增的 `Error`；Supervisor 同時處理額度事件與原生 Session 綁定。前端 `App.tsx` 同時保留模型設定面板與票 22 的裁定中心。
+- 理由：不可修改整合分支已有的 migration 與 AI 條目；功能彼此獨立。
+- 替代方案：合併 migration（已套用的開發資料庫會漏掉其中一部分）。
+- 影響：用本票分支建過的開發資料庫（第 13 個 migration 是本票的）與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

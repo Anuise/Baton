@@ -96,4 +96,47 @@ describe("頂部狀態列", () => {
     expect(screen.getByText("平台：未知")).toBeInTheDocument();
     expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
   });
+
+  it("顯示待裁定數，並在輪詢時更新", async () => {
+    const client = {
+      ...clientReturning("ok"),
+      pendingDecisions: vi
+        .fn()
+        .mockResolvedValueOnce({ pending_count: 2, by_workspace: [{ workspace_id: "ws_1", pending_count: 2 }] })
+        .mockResolvedValue({ pending_count: 0, by_workspace: [] }),
+    };
+    render(<StatusBar client={client} pollMs={5000} />);
+
+    await settle();
+    expect(screen.getByText("待裁定：2")).toBeInTheDocument();
+
+    await settle(5000);
+    expect(screen.getByText("待裁定：0")).toBeInTheDocument();
+  });
+
+  it("讀不到待裁定數時不顯示該欄位，也不影響 Runtime 狀態", async () => {
+    const client = { ...clientReturning("ok"), pendingDecisions: vi.fn(async () => Promise.reject(new Error("boom"))) };
+    render(<StatusBar client={client} pollMs={5000} />);
+
+    await settle();
+
+    expect(screen.queryByText(/待裁定/)).not.toBeInTheDocument();
+    expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+  });
+
+  it("refreshKey 改變時立即重新讀取待裁定數", async () => {
+    const pendingDecisions = vi
+      .fn()
+      .mockResolvedValueOnce({ pending_count: 1, by_workspace: [] })
+      .mockResolvedValue({ pending_count: 0, by_workspace: [] });
+    const client = { ...clientReturning("ok"), pendingDecisions };
+    const { rerender } = render(<StatusBar client={client} pollMs={60000} refreshKey={0} />);
+    await settle();
+    expect(screen.getByText("待裁定：1")).toBeInTheDocument();
+
+    rerender(<StatusBar client={client} pollMs={60000} refreshKey={1} />);
+    await settle();
+
+    expect(screen.getByText("待裁定：0")).toBeInTheDocument();
+  });
 });

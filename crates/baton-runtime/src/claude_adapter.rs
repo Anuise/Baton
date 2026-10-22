@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use baton_domain::agent::{mcp_config_json, MCP_SERVER_NAME};
+use baton_domain::agent::{mcp_config_json, MCP_SERVER_NAME, TOOL_PERMISSION_PROMPT};
 use baton_domain::quota::{LimitStatus, QuotaWindow};
 use baton_domain::shared_settings::{INSTRUCTIONS_FILE, MCP_FILE, SETTINGS_FILE};
 use baton_ports::{
@@ -105,8 +105,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if let Some(shared_mcp) = snapshot(MCP_FILE) {
             args.push(shared_mcp);
         }
-        // Baton 的工具不需要逐次核准；其他工具的權限由後續的權限轉接處理（spec D-08）
+        // Baton 的工具不需要逐次核准；其他需要核准的操作經 permission_prompt 工具轉給 Runtime 判定（spec D-08）
         args.extend(["--allowedTools".to_string(), format!("mcp__{MCP_SERVER_NAME}")]);
+        args.extend(["--permission-prompt-tool".to_string(), format!("mcp__{MCP_SERVER_NAME}__{TOOL_PERMISSION_PROMPT}")]);
         if let Some(settings) = snapshot(SETTINGS_FILE) {
             args.extend(["--settings".to_string(), settings]);
         }
@@ -456,6 +457,7 @@ mod tests {
         let mcp = data.path().join(RUNS_DIR).join("run_1").join(RUN_MCP_FILE);
         assert_eq!(value_after(&spec.args, "--mcp-config"), Some(mcp.to_string_lossy().as_ref()));
         assert_eq!(value_after(&spec.args, "--allowedTools"), Some("mcp__baton"));
+        assert_eq!(value_after(&spec.args, "--permission-prompt-tool"), Some("mcp__baton__permission_prompt"));
         for absent in ["--settings", "--append-system-prompt-file", "--model", "--dangerously-skip-permissions"] {
             assert!(!spec.args.contains(&absent.to_string()), "{absent}：{:?}", spec.args);
         }

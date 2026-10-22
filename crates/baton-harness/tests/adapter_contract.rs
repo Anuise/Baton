@@ -394,4 +394,69 @@ mod live {
             .expect("沒有 system/init");
         assert_eq!(init["permissionMode"], "default", "Workspace 內的設定檔不可改變 Worker 的權限模式：{init}");
     }
+
+    /// 權限轉接（spec D-08、AI-144）：需要核准的工具經 `--permission-prompt-tool` 送到 Baton 的 `permission_prompt`，
+    /// 以本機的假 Agent API 回覆「等待裁定」（`behavior: deny` 加上 Baton 的說明欄位），確認 CLI 接受這個回應形狀、
+    /// 工具確實沒有執行，而且 Worker 不重試同一個操作就結束。
+    #[tokio::test]
+    #[ignore = "需要已登入的 Claude Code；設定 BATON_LIVE_PROFILE_DIR 與 BATON_LIVE_SHIM，見 docs/adapter-contract.md"]
+    async fn live_claude_code_routes_permission_prompts_to_baton_and_honours_a_deny() {
+        use axum::extract::{Path as UrlPath, State};
+        use axum::Json;
+        use std::sync::Mutex;
+        type Calls = Arc<Mutex<Vec<(String, serde_json::Value)>>>;
+
+        async fn tool(
+            State(calls): State<Calls>,
+            UrlPath(name): UrlPath<String>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            calls.lock().unwrap().push((name.clone(), body));
+            Json(match name.as_str() {
+                "permission_prompt" => serde_json::json!({
+                    "behavior": "deny",
+                    "message": "這個操作超出授權，已建立裁定請求；請保存 checkpoint 後改做其他步驟或以 blocked 結束",
+                    "status": "waiting_decision",
+                    "decision_request_id": "decision_contract",
+                }),
+                _ => serde_json::json!({ "ok": true }),
+            })
+        }
+
+        std::env::var("BATON_LIVE_SHIM").expect("這個測試需要真的 shim：請設定 BATON_LIVE_SHIM");
+        let calls: Calls = Arc::default();
+        let app = axum::Router::new().route("/agent/v1/tools/{name}", axum::routing::post(tool)).with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let live = live().await;
+        let work = live.data_dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let marker = work.join("baton-permission-check.txt");
+        let mut spec = contract_spec(&unique("perm"), Scenario::Completes, live.model.clone(), Some(live.config_dir.clone()), &work);
+        spec.prompt = format!(
+            "請用 Bash 工具執行這個指令：echo checked > \"{}\"。如果工具被拒絕，不要重試、也不要改用其他工具，直接回覆 DENIED 並結束。",
+            marker.display()
+        );
+        let adapter = &live.subject.adapter;
+        adapter.prepare(&spec).await.unwrap();
+        let mut spawn = adapter.spawn_spec(&spec);
+        spawn.env.push(("BATON_AGENT_TOKEN".into(), "contract-test-token".into()));
+        spawn.env.push(("BATON_RUNTIME_URL".into(), url));
+        let receipt = live.subject.process_control.spawn(spawn).await.expect("無法啟動 claude");
+        let events = collect(&**adapter, spec.clone()).await;
+        live.subject.process_control.stop(&receipt.identity, Duration::from_secs(10)).await.ok();
+        eprintln!("事件：{events:?}");
+
+        let prompts: Vec<serde_json::Value> =
+            calls.lock().unwrap().iter().filter(|(name, _)| name == "permission_prompt").map(|(_, body)| body.clone()).collect();
+        eprintln!("permission_prompt 收到：{prompts:#?}");
+        assert!(!prompts.is_empty(), "需要核准的 Bash 應經 permission_prompt 送到 Baton");
+        assert_eq!(prompts[0]["tool_name"], "Bash", "{prompts:?}");
+        assert!(prompts[0]["input"]["command"].as_str().is_some_and(|c| c.contains("baton-permission-check")), "{prompts:?}");
+        assert!(!marker.exists(), "被拒絕的工具不可執行");
+        assert_eq!(prompts.len(), 1, "收到 deny 後不重試同一個操作：{prompts:?}");
+        assert_ends_with_one_exit(&events, true);
+    }
 }

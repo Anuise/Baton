@@ -205,6 +205,28 @@ describe("左側 Workspace 清單", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it("每個 Workspace 都有「裁定」入口，不會觸發授權設定", async () => {
+    const onSelect = vi.fn();
+    const onOpenDecisions = vi.fn();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} onSelect={onSelect} onOpenDecisions={onOpenDecisions} />);
+
+    await user.click(await screen.findByRole("button", { name: "裁定 筆記" }));
+
+    expect(onOpenDecisions).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("有待裁定時在該 Workspace 顯示數量徽章，沒有時不顯示", async () => {
+    const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "專案", path: "D:\proj" })]);
+    render(<WorkspaceSidebar client={client} pendingDecisions={{ ws_1: 3, ws_2: 0 }} />);
+
+    await screen.findByText("專案");
+
+    expect(screen.getAllByText(/待裁定/)).toHaveLength(1);
+    expect(screen.getByText("待裁定 3")).toBeInTheDocument();
+  });
+
   it("每個 Workspace 都有「成果與驗證」入口，不會觸發授權設定或工作面板", async () => {
     const onSelect = vi.fn();
     const onOpenTasks = vi.fn();

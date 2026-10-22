@@ -526,6 +526,160 @@ body {
   max-width: 360px;
 }
 
+.status-decisions-pending::before {
+  background: #bf8700;
+}
+
+.decision-badge {
+  align-self: center;
+  padding: 0 8px;
+  border-radius: 10px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  font-size: 12px;
+}
+
+.decision-center {
+  margin-top: 16px;
+}
+
+.decision-center h2,
+.decision-center h3,
+.decision-center h4 {
+  margin: 8px 0;
+}
+
+.decision-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.decision-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-list li {
+  margin-bottom: 6px;
+}
+
+.decision-list li button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px;
+  text-align: left;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.decision-selected button {
+  border-color: #0969da;
+}
+
+.decision-task,
+.decision-meta,
+.decision-detail-meta,
+.decision-empty,
+.decision-deadline {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.decision-urgency-high {
+  color: #cf222e;
+  font-weight: 600;
+}
+
+.decision-overdue {
+  color: #9a6700;
+  font-weight: 600;
+}
+
+.decision-detail {
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.decision-permission {
+  padding: 8px 12px;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.decision-permission dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0;
+}
+
+.decision-permission dd {
+  margin: 0;
+}
+
+.decision-permission pre {
+  overflow: auto;
+}
+
+.decision-scope-note {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.decision-form fieldset {
+  margin: 8px 0;
+}
+
+.decision-option {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.decision-recommended {
+  padding: 0 6px;
+  border-radius: 10px;
+  background: #dafbe1;
+  border: 1px solid #1a7f37;
+  font-size: 12px;
+}
+
+.decision-tradeoff {
+  flex-basis: 100%;
+  margin-left: 24px;
+  color: #656d76;
+  font-size: 12px;
+}
+
+.decision-form textarea {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin-bottom: 8px;
+}
+
+.decision-form [role="alert"] {
+  color: #cf222e;
+}
+
 .artifacts-page {
   display: grid;
   gap: 12px;
