@@ -15,7 +15,10 @@ use axum::http::StatusCode;
 use axum::{Extension, Json};
 use baton_domain::agent::{ReportContent, ReportError, ReportKind, AGENT_TOOLS_PREFIX};
 use baton_domain::auth::{AgentScope, CredentialRecord};
-use baton_domain::decision::{DecisionOption, DecisionOutcome, PermissionOutcome, RequestContent, Urgency};
+use baton_domain::authority::{Authority, Matter};
+use baton_domain::decision::{
+    ActionContent, ControllerOutcome, DecisionOption, DecisionOutcome, PermissionOutcome, RequestContent, Urgency,
+};
 use baton_domain::run::RunError;
 use baton_domain::task::ContractContent;
 use baton_store::RunApplyError;
@@ -330,5 +333,106 @@ pub(crate) async fn permission_prompt(
             decision_request_id: Some(request_id),
             ..response("deny", "denied")
         },
+    }))
+}
+
+// ---------------------------------------------------------------- Controller 動作與決策權限表（票 35）
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ControllerActionRequest {
+    matter: Matter,
+    /// 目標 Task（同一個 Workspace）；省略時是呼叫者 Run 的 Task。
+    #[serde(default)]
+    task_id: Option<String>,
+    summary: String,
+    reason: String,
+    #[serde(default)]
+    evidence: Vec<String>,
+    #[serde(default)]
+    urgency: Option<Urgency>,
+    #[serde(flatten)]
+    claims: Claims,
+}
+
+/// `controller_action` 的回應。工具本身**不執行**任何動作：`allowed`／`approved` 才表示 Controller 可以接著做，
+/// `requires_decision` 表示動作被拒絕、已轉成裁定請求。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerActionResponse {
+    /// `allowed`、`requires_decision`、`approved`、`denied`、`human_only`。
+    pub status: String,
+    pub matter: Matter,
+    /// 這個 Workspace 目前生效的權限等級。
+    pub authority: Authority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing: Option<bool>,
+    /// 使用者以「修改條件」核准時的條件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<String>,
+    pub message: String,
+}
+
+pub(crate) async fn controller_action(
+    State(state): State<Arc<ApiState>>,
+    Extension(record): Extension<CredentialRecord>,
+    body: Result<Json<ControllerActionRequest>, JsonRejection>,
+) -> Result<Json<ControllerActionResponse>, ApiError> {
+    let Json(request) = body.map_err(bad_json)?;
+    let scope = scope_of(&record, &request.claims)?;
+    let content = ActionContent::new(
+        request.matter,
+        request.task_id.as_deref(),
+        &request.summary,
+        &request.reason,
+        request.evidence,
+        request.urgency,
+    )
+    .map_err(baton_store::DecisionApplyError::from)?;
+    let outcome = state
+        .store
+        .controller_action(&scope, new_id("decision")?, new_id("authz")?, content, state.clock.now())
+        .await?;
+    let DecisionOutcome::Controller { matter, authority, outcome } = outcome else {
+        unreachable!("ControllerAction 命令只會得到 Controller 結果")
+    };
+    let response = |status: &str, message: &str| ControllerActionResponse {
+        status: status.to_string(),
+        matter,
+        authority,
+        decision_request_id: None,
+        existing: None,
+        conditions: None,
+        message: message.to_string(),
+    };
+    Ok(Json(match outcome {
+        ControllerOutcome::Allowed => response("allowed", "依決策權限表，這個事項可以自主處理。"),
+        ControllerOutcome::RequiresDecision { request_id, existing } => ControllerActionResponse {
+            decision_request_id: Some(request_id),
+            existing: Some(existing),
+            ..response(
+                "requires_decision",
+                "依決策權限表，這個事項必須由使用者裁定：動作沒有執行，已建立裁定請求。                 請等待裁定結果，不要自行執行或改用其他方式繞過；可以先做不需要這項裁定的其他工作。",
+            )
+        },
+        ControllerOutcome::Approved { request_id, conditions } => ControllerActionResponse {
+            decision_request_id: Some(request_id),
+            conditions,
+            ..response("approved", "使用者已核准這一次；這次呼叫已用掉這個核准，下一次同樣的動作要重新裁定。")
+        },
+        ControllerOutcome::Denied { request_id, note } => ControllerActionResponse {
+            decision_request_id: Some(request_id),
+            ..response(
+                "denied",
+                &match note {
+                    Some(note) => format!("使用者沒有核准這個動作：{note}"),
+                    None => "使用者沒有核准這個動作；請改用其他做法。".to_string(),
+                },
+            )
+        },
+        ControllerOutcome::HumanOnly => response(
+            "human_only",
+            "這個事項只能由使用者從對應介面（恢復介面）發起，Controller 不能提出，也不會建立裁定請求。",
+        ),
     }))
 }

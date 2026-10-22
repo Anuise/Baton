@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use baton_api::{
     admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, authorization_path,
-    authorization_summary_path, decision_answer_path, decision_path, decisions_path, goals_path, run_cancel_path,
+    authorization_summary_path, decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path,
+    decision_path, decisions_path, goals_path, run_cancel_path, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
+    MergeResponse, UpdateAuthorityRequest, DECISIONS_BATCH_PATH,
     ArtifactList, ArtifactPreview, SHA256_HEADER,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_accept_path, task_path, task_ready_path, task_verification_path, tasks_path, AcceptTaskRequest, QueuedDispatch,
@@ -26,6 +28,7 @@ use baton_api::{
     PLATFORM_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
 };
+use baton_domain::authority::AuthorityTable;
 use baton_domain::decision::DecisionView;
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
@@ -309,16 +312,50 @@ impl RuntimeClient {
         self.get_json(&decision_path(workspace_id, request_id)).await
     }
 
-    /// 提交正式裁定；同樣的答案重送是冪等的，不同的答案回傳 `ClientError::Rejected`（`decision_already_answered`）。
+    /// 處理一個裁定請求（六種處理方式之一）；同樣的處理重送是冪等的，不同的處理回傳 `ClientError::Rejected`
+    /// （`decision_already_answered`）。內容在檢視後變動回 `decision_revision_mismatch`，目標版本已變更回 `decision_superseded`。
     pub async fn decision_answer(
         &self,
         workspace_id: &str,
         request_id: &str,
-        option_id: &str,
-        note: Option<String>,
+        request: &AnswerRequest,
     ) -> Result<AnswerResult, ClientError> {
-        let request = AnswerRequest { option_id: option_id.to_string(), note };
-        self.send_json(reqwest::Method::POST, &decision_answer_path(workspace_id, request_id), Some(&request)).await
+        self.send_json(reqwest::Method::POST, &decision_answer_path(workspace_id, request_id), Some(request)).await
+    }
+
+    /// 批次處理：每一項各自保存，一項失敗不影響其他項。
+    pub async fn decisions_batch(&self, request: &BatchRequest) -> Result<BatchResponse, ClientError> {
+        self.send_json(reqwest::Method::POST, DECISIONS_BATCH_PATH, Some(request)).await
+    }
+
+    /// 把一個請求合併到另一個（由目標代為裁定）；回傳合併後的目標。
+    pub async fn decision_merge(
+        &self,
+        workspace_id: &str,
+        request_id: &str,
+        request: &MergeRequest,
+    ) -> Result<MergeResponse, ClientError> {
+        self.send_json(reqwest::Method::POST, &decision_merge_path(workspace_id, request_id), Some(request)).await
+    }
+
+    /// 把兩個請求互相連結。
+    pub async fn decision_link(&self, workspace_id: &str, request_id: &str, other_id: &str) -> Result<DecisionView, ClientError> {
+        let request = LinkRequest { other_id: other_id.to_string() };
+        self.send_json(reqwest::Method::POST, &decision_links_path(workspace_id, request_id), Some(&request)).await
+    }
+
+    /// Workspace 的決策權限表（spec D-15）。
+    pub async fn decision_authority(&self, workspace_id: &str) -> Result<AuthorityTable, ClientError> {
+        self.get_json(&decision_authority_path(workspace_id)).await
+    }
+
+    /// 取代 Workspace 的決策權限表；只能收窄，放寬回 `authority_widening_refused`。
+    pub async fn update_decision_authority(
+        &self,
+        workspace_id: &str,
+        request: &UpdateAuthorityRequest,
+    ) -> Result<AuthorityTable, ClientError> {
+        self.send_json(reqwest::Method::PUT, &decision_authority_path(workspace_id), Some(request)).await
     }
 
     /// 全域待處理裁定數（狀態列）。
