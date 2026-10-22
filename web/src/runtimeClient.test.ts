@@ -319,6 +319,36 @@ describe("Runtime 用戶端", () => {
     expect(invoke.mock.calls).toEqual([["backup_status"]]);
   });
 
+  it("HTTP 版讀取崩潰恢復狀態並重新嘗試恢復", async () => {
+    const status = { event: null, max_attempts: 3, can_retry: false, blocking: null };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(status), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    expect(await client.recoveryStatus()).toEqual(status);
+    await client.retryRecovery();
+
+    expect(fetchFn.mock.calls).toEqual([["/api/v1/recovery"], ["/api/v1/recovery/retry", { method: "POST" }]]);
+  });
+
+  it("HTTP 版重新嘗試恢復被拒時保留 Runtime 的錯誤代碼", async () => {
+    const body = { error: "recovery_not_exhausted", message: "恢復額度尚未用盡" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch).retryRecovery().catch((e: unknown) => e);
+
+    expect(errorCode(error)).toBe("recovery_not_exhausted");
+  });
+
+  it("Tauri 版透過 recovery_status 與 recovery_retry 指令操作崩潰恢復", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.recoveryStatus();
+    await client.retryRecovery();
+
+    expect(invoke.mock.calls).toEqual([["recovery_status"], ["recovery_retry"]]);
+  });
+
   it("HTTP 版設定方案上限：PUT 到 Profile 的 quota-limits，未設定的視窗送 null", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);

@@ -2520,16 +2520,79 @@
 - 替代方案：無（編號規則已定）；准入被拒也可算基礎設施重試，但那會讓撤銷授權消耗預算。
 - 影響：用本票分支建過的開發資料庫，`retry_budgets` 記在第 23、25 或 26 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-238～AI-243、AI-253～AI-259、AI-263～AI-269 與 migration 23、25、26 是改號前的編號。
 - 審閱：未審
-### AI-280：Controller Run 存在獨立的 `controller_run` 表，只綁 conversation 與 Workspace
+### AI-280：以「前一次啟動有沒有正常結束」判定意外崩潰；harness 的 `restart` 是正常結束，另有 `crash_restart`
+- 重要度：高
+- 時間／階段：2026-10-22，票 31 實作
+- 決策：`runtime_boot` 加上 `ended_cleanly_at`（migration 第 28 個 `crash_recovery`；既有的啟動紀錄在升級時一律視為正常結束）。`RunningRuntime::shutdown()` 是有秩序的停止，會記下正常結束；新增的 `RunningRuntime::kill()`、程序被終止或當掉都不會。Runtime 啟動時（停止意圖核對之後、任何程序副作用之前），前一次啟動沒有正常結束、而且沒有停止意圖，就判定為意外終止並建立或沿用恢復事件。完全退出的停止意圖優先（走票 25 的重新開啟）。harness 的 `restart()` 沿用 `shutdown()`（正常重啟，行為與票 31 之前完全相同）；模擬崩潰改用新增的 `crash_restart()`。正式執行檔目前只有完全退出（有停止意圖）一種正常結束方式，主控台的 Ctrl-C 與程序被終止都算意外終止。不區分「同一次 Windows 登入」與跨登入（DR-05 限定同次登入；跨登入的語意屬於票 33）。
+- 理由：DR-05 需要分辨「意外終止」與「有秩序的停止」，持久化的正常結束標記是最直接、可在任何邊界中斷後正確判讀的訊號（沒寫到就當意外，偏保守）。既有 25 個情境測試檔、57 處 `restart()` 模擬的是「Runtime 重建後以 command_id 找回原程序、不重複啟動」（票 10、26）；若一律視為崩潰，恢復會停止舊程序並另派新 Run，等於改寫那些已驗收的行為，超出本票範圍。
+- 替代方案：(a) 只要不是完全退出後的啟動就一律視為崩潰：要改寫大量既有測試，也讓「Runtime 重建後找回原程序」這條已驗收的路徑失去意義。(b) 以 Runtime 的 heartbeat 檔或監護日誌判斷：監護是票 32 的範圍。
+- 影響：日後若新增其他有秩序停止 Runtime 的路徑（例如更新流程），要呼叫 `shutdown()` 才不會在下次啟動觸發崩潰恢復。重開機後由登入自啟動拉起的 Runtime 目前也會被判定為崩潰並恢復；舊程序那時已不在，停止會立即回報已停止，Task 以新 Run 恢復（票 33 若要不同處理需另行調整）。
+- 審閱：未審
+
+### AI-281：一次恢復嘗試的內容與「處置完成」的條件
+- 重要度：高
+- 時間／階段：2026-10-22，票 31 實作
+- 決策：Supervisor 的 `tick` 在任何啟動之前處理恢復事件。一次嘗試依序：(1) 持久化嘗試（輪次、序號、嘗試識別），寫不進去就不開始；(2) 只核對啟動中的 Run（以 command_id 找回就補寫回執，確定沒有程序的照舊以 `launch_outcome_unknown` 中斷、不自動重派），並收下已到達的 Adapter 事件（保存證據，已自行結束的 Run 正常結束）；(3) 對每個尚未結束、有程序身分的 Run 並行呼叫 `ProcessControl::stop(identity, 30 秒)`；確認停止的 Run 以 `interrupted`（`stopped_by_crash_recovery`）結束，Task 退回 `ready` 並重新排隊（與完全退出共用 `stop_run_and_requeue`），由排程以新 Run 恢復，新 Run 照常經過准入（授權、共同設定版本）、相依與 Guard，原生 Session 依票 15 決定沿用或替換；崩潰前已要求取消的 Run 完成取消，Task 回到 `ready` 但不重新排隊。(4) 全部確認停止才算處置完成、進入穩定觀察；任何一個 `StillAlive`、停止呼叫失敗，或啟動中而無法查證的 Run，都讓這次嘗試失敗，那些 Run 保留寫入所有權、不建立新 Run。排隊中（尚未啟動、沒有程序）的 Run 不停止，恢復門檻打開後照常准入與啟動。
+- 理由：ADR-0005 要求「受控停止身分已確認的舊程序、確認 writer 停止後以新 Run 恢復、重新檢查授權與設定」，並明確拒絕「存活 Run 直接接管」。讓 Task 回到排程，就由既有的准入交易重新檢查授權與設定，不必另寫一套。只要有一個 writer 無法確認停止，就不能宣稱恢復完成。
+- 替代方案：(a) 只停止無法確認停止以外的 Run、部分成功也進入觀察：無法確認停止的工作就永遠卡住，也不計入三次額度。(b) 依序停止：多個 Run 時最長要等 N × 30 秒。
+- 影響：恢復會中斷仍正常執行的舊 Worker，重做最近檢查點之後的工作（ADR-0005 已接受的後果）。恢復嘗試的停止握著 Supervisor 的 tick 鎖；嘗試中按「完全退出」時，停止流程要等這次停止結束（最多約 30 秒，仍在 40 秒總上限內）。
+- 審閱：未審
+
+### AI-282：退避期限的起算點、退避中與嘗試中重建的處理
+- 重要度：中
+- 時間／階段：2026-10-22，票 31 實作
+- 決策：退避期限從「失敗被記下的時刻」起算並持久化在 `next_attempt_at`：嘗試中或觀察中崩潰時是下一次 Runtime 啟動的時刻；嘗試本身失敗（無法確認停止）時是失敗的時刻。退避中重建 Runtime（不論是否正常結束）不計次、不改期限。Runtime 啟動時若有進行中的嘗試，不論前一次是否正常結束，一律把那次嘗試記為失敗（做那次嘗試的 Runtime 已不在）。觀察中的正常重啟不打斷觀察；觀察中的崩潰則讓那次嘗試失敗、沿用原事件與已用次數。
+- 理由：崩潰的真實時刻無從得知，只有下次啟動才觀察得到；以持久化的期限判斷，重建多少次都不會跳過退避。
+- 替代方案：以上一次嘗試的開始時間起算：嘗試本身拖得久（例如 30 秒的停止寬限）時，實際等待會短於 30 秒。
+- 影響：票 32 的監護在啟動 Runtime 前就計次，屆時「嘗試開始」的時刻改由監護日誌提供，期限計算要與監護一致。
+- 審閱：未審
+
+### AI-283：恢復門檻擋住的範圍與等待原因
+- 重要度：高
+- 時間／階段：2026-10-22，票 31 實作
+- 決策：恢復事件在 `waiting`（含退避）、`attempting`、`exhausted` 時，`halt_for`／`launch_halted_in` 擋住所有 Workspace 的派工、啟動程序（launch intent）、工作目錄準備與 worktree 清理；Supervisor 也在這段期間略過啟動與排程。`observing` 與 `succeeded` 不擋。等待原因沿用 `lifecycle` 類別，代碼 `crash_recovery_pending`／`crash_recovery_exhausted`，不新增類別。用盡之後，無法確認停止的舊程序不再被要求停止，繼續持有寫入所有權。
+- 理由：第一次嘗試完成前派出新 Run，可能在舊 writer 還沒停下時就產生第二個 writer；ADR-0006 也要求用盡後「不恢復工作也不派工」。穩定觀察就是在觀察恢復出來的新 Run，必須能派工。沿用 `lifecycle` 類別免得 UI 與 API 的類別清單變動。
+- 替代方案：只擋受影響的 Workspace：崩潰影響的是整個 Runtime，無關的 Workspace 也可能受同一個故障影響。
+- 影響：用盡期間整個平台停止派新工作，直到使用者按「重新嘗試恢復」。
+- 審閱：未審
+
+### AI-284：「重新嘗試恢復」的語意
+- 重要度：中
+- 時間／階段：2026-10-22，票 31 實作
+- 決策：只在 `exhausted` 時接受（`POST /api/v1/recovery/retry`，桌面憑證）；同一事件輪次加一、本輪已用次數歸零、立即可以做新輪次的第一次嘗試（沒有退避）。舊輪次的嘗試全部保留，以 `(round, seq)` 區分。不是用盡時回 409 `recovery_not_exhausted`，沒有任何事件時回 409 `no_recovery_event`。成功（`succeeded`）之後再崩潰建立新的恢復事件。
+- 理由：ADR-0005「使用者明確要求後才建立新輪次並保留歷史」；spec D-15 規定這項只能由人工從恢復介面發起（Agent 憑證進不了 `/api/v1`）。
+- 替代方案：重試時建立新事件：歷史分散在兩個事件裡，介面較難呈現同一次故障的經過。
+- 影響：無。
+- 審閱：未審
+
+### AI-285：恢復事件的資料形狀、API 與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-22，票 31 實作
+- 決策：`recovery_event`（每個事件一列：輪次、狀態、本輪已用次數、偵測時間、退避期限、觀察期滿、最後失敗原因、結束時間、版本）與 `recovery_attempt`（嘗試識別、輪次、序號 `CHECK (seq BETWEEN 1 AND 3)`、`UNIQUE (event_id, round, seq)`、結果、失敗原因、受影響工作 JSON）；只處理最新的事件。Domain 事件寫在 `recovery_event` 聚合。`GET /api/v1/recovery` 回傳最新事件、`max_attempts`、`can_retry`、`blocking`。Web UI 新增 `RecoveryPanel`（放在主欄的備份設定之下，與其他全域面板並列），頂部狀態列在事件未結束時顯示「恢復中（n/3）」或「恢復額度用盡」（spec D-21）。
+- 理由：資料表的限制讓「同一輪第四次」在儲存層就不可能發生；受影響工作以 JSON 存在嘗試上，只供顯示。App 目前沒有分頁，全域面板都直接列在主欄。
+- 替代方案：把嘗試存成事件列上的 JSON：失去資料表層級的序號限制。
+- 影響：票 32 匯入監護日誌時可用嘗試識別去重。
+- 審閱：未審
+
+### AI-286：票 31 整合 rebuild/v1（票 36）：migration 順延為第 28 個、AI 編號改為 AI-280～AI-285
+- 重要度：低
+- 時間／階段：2026-10-22，票 31 實作（run R095-31-impl 結束前合併整合分支）
+- 決策：實作期間整合分支併入票 36（第 27 個 migration `retry_budgets`，AI-273～AI-279）。本票的 `crash_recovery` 順延為第 28 個、排在 `retry_budgets` 之後；兩者沒有共用的資料表，都會套用。本票條目原本寫成 AI-273～AI-278，改為 AI-280～AI-285 並移到 AI-279 之後，條目內的 migration 編號同步改為 28；整合分支的條目逐字未動。衝突合併：Supervisor 的 import 同時保留票 36 的 `LimitStatus` 與本票的 `recovery`；開發指南目錄表以整合分支的敘述為底，再補上本票的 `recovery.rs` 與 `/api/v1/recovery`。崩潰恢復把 Run 以 `interrupted`（`stopped_by_crash_recovery`）結束，依 D-16 與票 36 的 AI-273「恢復不計入」，不計入任何預算。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：本票較早的 commit 中條目編號寫 AI-273～AI-278、migration 是第 27 個，是改號前的編號；用本票分支（本次合併前）建過的開發資料庫，`crash_recovery` 記在第 27 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-287：Controller Run 存在獨立的 `controller_run` 表，只綁 conversation 與 Workspace
 - 重要度：高
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
-- 決策：Controller 的每一輪是 `controller_run` 表中的一筆（migration 27），只綁 conversation 與 Workspace，不綁 Task、不取得 execution lease、不改變任何 Task 狀態，也不出現在 Run 列表與工作面板。它沿用 Worker Run 的做法：launch intent（command_id 與 Prompt）先持久化再 spawn、以 command_id 找回程序、程序身分 = PID + 建立時間 + 指令雜湊、完全退出時一起停止。Session 沿用票 15 的 `agent_session`（`role = controller`、`conversation_id` 有值、`task_id` 為空），沿用／替換規則相同（`session::plan_launch_for`）。
+- 決策：Controller 的每一輪是 `controller_run` 表中的一筆（第 29 個 migration），只綁 conversation 與 Workspace，不綁 Task、不取得 execution lease、不改變任何 Task 狀態，也不出現在 Run 列表與工作面板。它沿用 Worker Run 的做法：launch intent（command_id 與 Prompt）先持久化再 spawn、以 command_id 找回程序、程序身分 = PID + 建立時間 + 指令雜湊、完全退出時一起停止。Session 沿用票 15 的 `agent_session`（`role = controller`、`conversation_id` 有值、`task_id` 為空），沿用／替換規則相同（`session::plan_launch_for`）。
 - 理由：GLOSSARY 定義「Controller Run 可只綁 conversation 與 Workspace」，但 `run.task_id` 是 NOT NULL、`execution_lease` 與 Run 的結束都綁在 Task 上；改成可空要重建 `run` 表並牽動排程、驗證、整合、清理等大量 Task 綁定邏輯。
 - 替代方案：(a) 把 `run.task_id` 改為可空，讓 Controller Run 與 Worker Run 同表；(b) 每個 conversation 建一個隱藏的 Controller Task。(a) 改動面太大，(b) 會讓 Task 的狀態機與面板都要特例處理。
 - 影響：票 30（Controller 交接）、票 31（崩潰恢復）、票 41（時間線）要把 `controller_run` 一併納入；`agent_session` 的 `run_ids` 只列 Worker Run，Controller Run 在對話 API 的 `runs`。
 - 審閱：未審
 
-### AI-281：每個 Workspace 一個 conversation，第一則使用者訊息時建立；工作事件只在已有 conversation 時排入
+### AI-288：每個 Workspace 一個 conversation，第一則使用者訊息時建立；工作事件只在已有 conversation 時排入
 - 重要度：中
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：conversation 的識別由 Workspace 導出（`conv_<workspace>`），使用者第一次在「對話」分頁送出訊息時建立。Worker 的成果或阻礙只在該 Workspace 已有 conversation 時才成為工作事件；沒有 conversation 的 Workspace（只用工作面板手動派工）不會產生 Controller 輪次。
@@ -2538,7 +2601,7 @@
 - 影響：先手動派工、之後才開始對話的使用者，對話開始之前的 Worker 結果不會出現在對話中。
 - 審閱：未審
 
-### AI-282：工作事件只取 Run 成功、失敗與回報受阻
+### AI-289：工作事件只取 Run 成功、失敗與回報受阻
 - 重要度：中
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：「Worker 成果或阻礙」對應 Run 的 `run_succeeded`、`run_failed`（含啟動失敗）與 `run_blocked_reported`，在產生該事件的同一個交易中（`runs::save`）成為工作事件；同一個事件來源（事件種類 + Run + 聚合版本）只會成為一個輸入。中斷、取消、准入被拒、驗證與整合結果不喚醒 Controller。
@@ -2547,7 +2610,7 @@
 - 影響：需要 Controller 介入的其他事件（例如驗證不通過）日後要在對應的交易中加入同樣的排入。
 - 審閱：未審
 
-### AI-283：「先處理使用者訊息再處理工作事件」分成兩輪；合併視窗從第一則待處理輸入起算
+### AI-290：「先處理使用者訊息再處理工作事件」分成兩輪；合併視窗從第一則待處理輸入起算
 - 重要度：中
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：每一輪的輸入是「全部待處理的使用者訊息（依到達順序）」；沒有待處理的使用者訊息時才是「全部待處理的工作事件」，兩種輸入不同輪。5 秒合併視窗從最早一則待處理輸入的到達時間起算，之後到達的輸入不延長視窗；已過期（例如等上一輪結束）就立即喚起。
@@ -2556,16 +2619,16 @@
 - 影響：使用者在 Controller 忙碌時持續送訊息，工作事件會一直排在後面；每次有兩種輸入同時待處理時多用一輪。
 - 審閱：未審
 
-### AI-284：中斷或失敗的一輪：輸入退回待處理，退避後重新交付並註明可能已部分處理
+### AI-291：中斷或失敗的一輪：輸入退回待處理，退避後重新交付並註明可能已部分處理
 - 重要度：中
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：一輪以中斷（啟動結果不明、結果沒有保存而程序已不在、完全退出時停止）或失敗（程序以失敗結束、啟動失敗）結束時，它的輸入在同一個交易中退回待處理，`attempts` 保留累計。重新交付從上一輪結束起退避 1、2、4… 分鐘、上限 10 分鐘，Prompt 在這些輸入下註明「可能已部分處理，請先核對目前狀態，不要重複已完成的動作」。不設次數上限，也不轉成裁定。
 - 理由：「未完成事件可找回」要求輸入不能遺失；Controller 不直接寫資料、動作都經 Runtime 工具，重送的風險由提示與工具端的冪等處理；退避避免帳號壞掉時每秒重試。
 - 替代方案：沿用 D-16 基礎設施重試 5 次，用完建立裁定請求。
-- 影響：帳號長期無法使用時每 10 分鐘會有一次失敗的輪次（在 claude 開始對話前失敗的不耗額度）；無可用帳號時根本不喚起（見 AI-286）。
+- 影響：帳號長期無法使用時每 10 分鐘會有一次失敗的輪次（在 claude 開始對話前失敗的不耗額度）；無可用帳號時根本不喚起（見 AI-293）。
 - 審閱：未審
 
-### AI-285：回覆在記憶體累積、程序結束時一次保存；重建後沒有結束事件時查證程序
+### AI-292：回覆在記憶體累積、程序結束時一次保存；重建後沒有結束事件時查證程序
 - 重要度：中
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：一輪的回覆是 Adapter `Message` 文字依序以空行串接，收到 `Exited` 後在「結果保存」交易中一次寫入（輸入標為已處理、回覆成為一則 turn、Session 暫停）。保存失敗時結果留在記憶體、下一次 tick 重試。Runtime 重建後重新接上的串流若沒有結束事件，就向 ProcessControl 查證，確認程序已不在才以中斷結束；不確定時維持原狀。Controller 的原生對話紀錄（transcript）本票不匯入，回覆以 conversation_turn 保存。
@@ -2574,7 +2637,7 @@
 - 影響：Controller 的完整原生對話紀錄目前只在原生 Session 中；日後需要稽核時再補匯入。
 - 審閱：未審
 
-### AI-286：Controller 的帳號：核對無誤、額度未達門檻、優先上一輪的帳號；不佔 Worker 的並行名額
+### AI-293：Controller 的帳號：核對無誤、額度未達門檻、優先上一輪的帳號；不佔 Worker 的並行名額
 - 重要度：中
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：喚起時以 `scheduler::place_preferring` 選帳號，但不計入任何進行中的 Run（Controller 不佔 D-14 的每帳號與全域名額），所以只看帳號是否核對無誤、推估用量是否未達 75% 停止派工門檻；上一輪的帳號可用時優先留在它，才能原生接續。沒有可用帳號時輸入維持待處理、只記日誌。完全退出的停止意圖生效或 Workspace 暫停時不喚起。
@@ -2583,7 +2646,7 @@
 - 影響：Controller 與 Worker 同時使用同一帳號時，實際並行數會比 D-14 的上限多一個。沒有可用帳號時 UI 的等待原因留給票 30。
 - 審閱：未審
 
-### AI-287：本票不簽發 Controller 憑證、不套用共同設定快照；`record_lesson_candidate` 維持開放
+### AI-294：本票不簽發 Controller 憑證、不套用共同設定快照；`record_lesson_candidate` 維持開放
 - 重要度：中
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：Controller 程序的 `BATON_AGENT_TOKEN` 是不是秘密的佔位值 `controller-credential-not-issued`（Run 的 MCP 設定以 `${BATON_AGENT_TOKEN}` 參照，未設定可能讓 CLI 無法解析設定），工具呼叫會被 Agent API 拒絕；也不為 Controller Run 寫共同設定快照（`settings_dir` 為空）。票 37 的 AI-161 提到的 `record_lesson_candidate`：本票維持開放給所有 Agent 憑證，等票 17 簽發 Controller 憑證時再收窄到 Controller。
@@ -2592,7 +2655,7 @@
 - 影響：票 17 需要為 Controller Run 簽發憑證（擴充 `credential` 的關聯或另建表），並決定 Controller 是否套用共同設定快照。
 - 審閱：未審
 
-### AI-288：Controller Prompt 的形狀
+### AI-295：Controller Prompt 的形狀
 - 重要度：低
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：Prompt 與 launch intent 一起持久化。沿用原生 Session（`--resume`）時只有「本輪要處理的使用者訊息／工作事件」區段；新的或替代的 Session 另附角色說明、替代 Session 的紀錄缺口說明，以及最近 40 則已處理的對話（標明「只作為背景，不要重新執行」）。本票不附決策、檢查點與教訓。
@@ -2601,7 +2664,7 @@
 - 影響：很長的對話在替代 Session 只看得到最近 40 則。
 - 審閱：未審
 
-### AI-289：完全退出時停止 Controller 的輪次，但不列入停止報告
+### AI-296：完全退出時停止 Controller 的輪次，但不列入停止報告
 - 重要度：低
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：完全退出的停止流程與 Worker 同時、以同一個寬限期停止進行中的 Controller 輪次，確認停止的以中斷結束、輸入退回待處理，重新開啟後再喚起；無法確認停止的維持原狀、只記日誌。停止報告（`RunStopRecord` 綁 Task）不列 Controller Run。
@@ -2610,7 +2673,7 @@
 - 影響：退出畫面看不到 Controller 的停止結果。
 - 審閱：未審
 
-### AI-290：對話的識別、上限與端點
+### AI-297：對話的識別、上限與端點
 - 重要度：低
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
 - 決策：`conversation_id = conv_<workspace 識別去掉 ws_>`、turn 識別 `turn_<…>_<seq>`、Controller Run 識別 `ctl_` 加 96 位元亂數；使用者訊息去掉前後空白、上限 20000 字元。端點：`GET /api/v1/workspaces/{id}/conversation`、`POST /api/v1/workspaces/{id}/conversation/messages`（201，回傳 turn 與 busy），送出訊息不會同步喚起 Controller；Tauri 指令 `conversation_view`、`conversation_send_message`。
@@ -2619,13 +2682,13 @@
 - 影響：無。
 - 審閱：未審
 
-### AI-291：票 16 整合 rebuild/v1（票 36）：migration 順延為第 28 個、AI 編號順延為 AI-280～AI-290
+### AI-298：票 16 整合 rebuild/v1（票 36、31）：migration 順延為第 29 個、AI 編號改為 AI-287～AI-298
 - 重要度：低
-- 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
-- 決策：整合分支併入票 36（第 27 個 migration `retry_budgets`；AI-273～AI-279）。本票的 `conversation_and_controller_run` 順延為第 28 個、排在 `retry_budgets` 之後；兩者沒有共用的資料表，都會套用。本票條目 AI-273～AI-283 順延為 AI-280～AI-290，接在 AI-279 之後，條目內引用本票編號之處改為現行編號（AI-277 中的「見 AI-279」→ AI-284 中的「見 AI-286」）。衝突合併：Supervisor 同時保留票 36 的 `quota_limited`（突然限流判定）與本票的 `controller_streams`，Worker 事件中的額度訊號先記下突然限流、再以帳號與 Run 識別記錄額度觀測（本票把 `record_quota_event` 改為接受帳號與 Run 識別，Controller Run 共用）；開發指南目錄表以整合分支的敘述為底補上本票的 `conversation.rs`、`conversations.rs`，並把本票章節的 migration 編號改為 28；前端 fixtures 同時保留兩邊新增的匯入與測試資料。
+- 時間／階段：2026-10-22，票 16 實作（run R093-16-impl 整合票 36；修正 run R102-16-fix 整合票 31）
+- 決策：(1) 整合分支先後併入票 36（第 27 個 migration `retry_budgets`，AI-273～AI-279）與票 31（第 28 個 `crash_recovery`，AI-280～AI-286）。本票的 `conversation_and_controller_run` 順延為第 29 個、排在 `crash_recovery` 之後；彼此沒有共用的資料表，都會套用。migration 註解、開發指南的本票章節與 AI-287 中的序號改為 29。(2) 本票條目原本寫成 AI-273～AI-283、後改 AI-280～AI-290，現改為 AI-287～AI-297，移到 AI-286 之後，條目內引用本票編號之處一併更新（AI-291 中的「見 AI-293」）；整合分支的條目逐字未動。本票第一次整合時寫的整合條目（原 AI-291）由這一條取代。(3) 衝突合併：Supervisor 同時保留票 36 的 `quota_limited`（突然限流判定）與本票的 `controller_streams`，Worker 事件中的額度訊號先記下突然限流、再以帳號與 Run 識別記錄額度觀測（本票把 `record_quota_event` 改為接受帳號與 Run 識別，Controller Run 共用）；Supervisor 的 import 同時保留本票的 `scheduler` 與票 31 的 `recovery`；開發指南目錄表以整合分支的敘述為底補上本票的 `conversation.rs`、`conversations.rs`；前端 `runtimeClient.ts` 與 `styles.css` 兩邊新增的型別與樣式都保留（`AppClient` 同時含 `RecoveryClient` 與 `ConversationClient`），fixtures 同時保留兩邊新增的匯入與測試資料。
 - 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
 - 替代方案：無（編號規則已定）。
-- 影響：用本票分支（本次合併前）建過的開發資料庫，`conversation_and_controller_run` 記在第 27 版，與整合後的編號不一致，需要刪除重建。
+- 影響：用本票分支（本次合併前）建過的開發資料庫，`conversation_and_controller_run` 記在第 27 或 28 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-273～AI-291 與 migration 27、28 是改號前的編號。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

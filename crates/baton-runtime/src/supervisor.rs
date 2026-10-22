@@ -35,6 +35,12 @@
 //!   逾時終止程序樹並確認（spec D-11，總上限 40 秒）；無法確認停止的記為停止異常。期間握住 tick 的鎖，不會有任何啟動。
 //! - **重新開啟**：Runtime 啟動時若停止意圖仍生效，第一次 `tick` 先核對（找回啟動中的程序、查證上次沒能確認停止的程序），
 //!   再解除停止意圖，依各 Workspace 的「完全退出後自動續跑」設定續跑或等「繼續工作」。
+//!
+//! 以及崩潰恢復（票 31）：Runtime 啟動時若判定上次意外終止，就有一個未結束的恢復事件。`tick` 在任何啟動之前先處理它：
+//! 退避期滿就開始一次嘗試——先持久化嘗試序號，再盤點核對（找回啟動中的程序、收下已到達的回報），
+//! 受控停止身分已確認的舊程序，確認停止後 Run 結束、Task 重新排隊，由排程以新 Run 恢復（重新經過授權、設定與相依檢查）。
+//! 任何一個舊程序無法確認停止，這次嘗試就失敗（不建立新 Run，不會有第二個 writer）。恢復尚未完成或額度用盡時不啟動也不派工；
+//! 處置完成後穩定觀察 10 分鐘，期滿才持久化成功。
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -53,6 +59,7 @@ use baton_domain::lifecycle::{
 };
 use baton_domain::quota::{LimitStatus, RateLimitSignal};
 use baton_domain::scheduler::{self, Capacity, Placement, SlotKind};
+use baton_domain::recovery::{self, AffectedRun, RecoveryCommand, RecoveryStatus, RunDisposition};
 use baton_domain::run::{
     LaunchPayload, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
 };
@@ -206,14 +213,26 @@ impl Supervisor {
         let _serial = self.tick_lock.lock().await;
         self.check_storage().await;
         self.reopen_if_pending().await;
-        self.launch_pending().await;
+        self.recover_after_crash().await;
+        // 崩潰恢復尚未完成或額度用盡：不啟動、不派工（Store 的准入也會擋，這裡先略過免得每次都被拒絕）
+        let recovering = self.recovery_halts_dispatch().await;
+        if !recovering {
+            self.launch_pending().await;
+        }
         self.pump_events().await;
         self.drive_controllers().await;
         self.process_cancellations().await;
         self.check_leases().await;
         self.poll_quota().await;
-        if self.schedule_queue().await {
+        if !recovering && self.schedule_queue().await {
             self.launch_pending().await;
+        }
+    }
+
+    /// 記下這一次啟動正常結束（Runtime 有秩序地停止服務時呼叫）；失敗只記日誌，下次啟動會保守地視為意外終止。
+    pub async fn mark_clean_shutdown(&self) {
+        if let Err(error) = self.store.mark_clean_shutdown(self.ports.clock.now()).await {
+            self.note(&format!("無法記下正常結束：{error}"));
         }
     }
 
@@ -460,6 +479,152 @@ impl Supervisor {
             record.message = Some(format!("程序已停止，但無法寫入 Run 的結束：{error}"));
         }
         record
+    }
+
+    // ------------------------------------------------------------ 崩潰恢復（票 31）
+
+    /// 恢復是否擋住啟動與派工；讀不到恢復事件時保守地視為擋住。
+    async fn recovery_halts_dispatch(&self) -> bool {
+        match self.store.recovery_event().await {
+            Ok(event) => recovery::launch_halted(event.as_ref()),
+            Err(error) => {
+                self.note(&format!("無法讀取恢復事件，這次不啟動也不派工：{error}"));
+                true
+            }
+        }
+    }
+
+    /// 處理未結束的恢復事件：觀察期滿就持久化成功；等待中且退避期滿就做一次嘗試。
+    async fn recover_after_crash(&self) {
+        let event = match self.store.recovery_event().await {
+            Ok(Some(event)) => event,
+            Ok(None) => return,
+            Err(error) => return self.note(&format!("無法讀取恢復事件：{error}")),
+        };
+        let now = self.ports.clock.now();
+        match event.status {
+            RecoveryStatus::Observing if event.observe_until.is_some_and(|until| now >= until) => {
+                match self.store.apply_recovery(RecoveryCommand::Observe, now).await {
+                    Ok(done) if done.status == RecoveryStatus::Succeeded => {
+                        self.note(&format!("恢復事件 {} 已穩定 10 分鐘，恢復成功", done.id))
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.note(&format!("恢復事件 {} 的成功沒有寫入，下次再試：{error}", event.id)),
+                }
+            }
+            RecoveryStatus::Waiting if event.next_attempt_at.is_none_or(|at| now >= at) => self.attempt_recovery().await,
+            _ => {}
+        }
+    }
+
+    /// 一次完整的恢復嘗試。嘗試序號持久化之前不碰任何程序；中途當掉時，下次啟動會把這次嘗試記為失敗。
+    async fn attempt_recovery(&self) {
+        // 無法寫入或停止意圖生效（完全退出優先）時不開始
+        if self.store.storage_health().dispatch_halted {
+            return;
+        }
+        match self.store.lifecycle_state().await {
+            Ok(state) if !state.stop_intent_active() => {}
+            Ok(_) => return,
+            Err(error) => return self.note(&format!("無法讀取停止意圖，恢復嘗試稍後再開始：{error}")),
+        }
+        let Some(attempt_id) = new_prefixed_id("rcv") else {
+            return self.note("無法取得系統亂數，恢復嘗試稍後再開始");
+        };
+        // 1. 先持久化事件與嘗試序號；無法保存就不開始
+        let begin = RecoveryCommand::Begin { attempt_id };
+        let event = match self.store.apply_recovery(begin, self.ports.clock.now()).await {
+            Ok(event) => event,
+            Err(error) => return self.note(&format!("恢復嘗試沒有開始（無法保存嘗試序號）：{error}")),
+        };
+        self.note(&format!(
+            "恢復事件 {} 第 {} 輪第 {}/{} 次嘗試開始",
+            event.id,
+            event.round,
+            event.attempts_used,
+            recovery::MAX_ATTEMPTS
+        ));
+        // 2. 盤點並核對：以 command_id 找回啟動中（回執未寫回）的程序，收下已到達的回報（保存證據；已自行結束的 Run 正常結束）
+        self.reconcile_starting().await;
+        self.pump_events().await;
+        // 3. 受控停止身分已確認的舊程序；確認停止才讓 Task 重新排隊
+        let (affected, failure) = self.stop_old_writers().await;
+        // 4. 記下結果：全部確認停止就進入穩定觀察，否則這次嘗試失敗（退避或用盡）
+        let command = match &failure {
+            None => RecoveryCommand::Complete { affected },
+            Some(reason) => RecoveryCommand::Fail { reason: reason.clone(), affected },
+        };
+        match self.store.apply_recovery(command, self.ports.clock.now()).await {
+            Ok(event) => match event.status {
+                RecoveryStatus::Observing => self.note(&format!("恢復事件 {} 的處置完成，開始穩定觀察 10 分鐘", event.id)),
+                RecoveryStatus::Exhausted => self.note(&format!(
+                    "恢復事件 {} 三次嘗試都沒有成功，停止自動恢復與派工，等使用者從恢復介面重新嘗試：{}",
+                    event.id,
+                    failure.unwrap_or_default()
+                )),
+                _ => self.note(&format!("恢復事件 {} 的這次嘗試失敗，退避後再試：{}", event.id, failure.unwrap_or_default())),
+            },
+            Err(error) => self.note(&format!("恢復嘗試的結果沒有寫入：{error}")),
+        }
+    }
+
+    /// 只核對啟動中的 Run（不啟動排隊中的 Run）：找到原程序就補寫回執，確定沒有就中斷（不自動重新啟動）。
+    async fn reconcile_starting(&self) {
+        let pending = match self.store.pending_launches().await {
+            Ok(pending) => pending,
+            Err(error) => return self.note(&format!("無法讀取派工 Outbox：{error}")),
+        };
+        for item in pending.into_iter().filter(|item| item.run.status == RunStatus::Starting) {
+            self.recover_launch(item).await;
+        }
+    }
+
+    /// 受控停止所有尚未結束、已啟動的舊程序（同時進行，各自有寬限期）。回傳每個 Run 的處置，以及有無法確認停止時的失敗原因。
+    async fn stop_old_writers(&self) -> (Vec<AffectedRun>, Option<String>) {
+        let executing = match self.store.executing_runs().await {
+            Ok(executing) => executing,
+            Err(error) => return (Vec::new(), Some(format!("無法讀取執行中的 Run：{error}"))),
+        };
+        let mut affected = Vec::new();
+        let mut stopping = FuturesUnordered::new();
+        for item in executing {
+            let run = item.view.run.clone();
+            let Some(process) = run.process.as_ref() else {
+                // 啟動中、而且這次無法以 command_id 查證：不能證明沒有程序，保留寫入所有權
+                let message = "啟動結果不明，無法以 command_id 查證程序；保留寫入所有權".to_string();
+                affected.push(affected_of(&run, RunDisposition::Unconfirmed, Some(message)));
+                continue;
+            };
+            self.ensure_managed(&item).await;
+            let identity = identity_of(process);
+            let process_control = self.ports.process_control.clone();
+            let grace = self.stop_grace;
+            stopping.push(async move {
+                let result = process_control.stop(&identity, grace).await;
+                (run, result)
+            });
+        }
+        while let Some((run, result)) = stopping.next().await {
+            let unconfirmed = |message: String| affected_of(&run, RunDisposition::Unconfirmed, Some(message));
+            let record = match result {
+                Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
+                    self.streams.lock().await.remove(&run.id);
+                    match self.store.stop_run_for_recovery(&run.workspace_id, &run.id, self.ports.clock.now()).await {
+                        Ok(change) if change.run.as_ref().is_some_and(|r| r.status == RunStatus::Cancelled) => {
+                            affected_of(&run, RunDisposition::Cancelled, None)
+                        }
+                        Ok(_) => affected_of(&run, RunDisposition::Requeued, None),
+                        Err(error) => unconfirmed(format!("程序已停止，但無法寫入 Run 的結束：{error}")),
+                    }
+                }
+                Ok(StopResult::StillAlive) => unconfirmed("終止程序樹之後仍有程序存活；保留寫入所有權".to_string()),
+                Err(error) => unconfirmed(format!("停止程序失敗：{error}；保留寫入所有權")),
+            };
+            affected.push(record);
+        }
+        let unconfirmed = affected.iter().filter(|a| a.disposition == RunDisposition::Unconfirmed).count();
+        let failure = (unconfirmed > 0).then(|| format!("{unconfirmed} 個舊程序無法確認停止，沒有以新 Run 恢復它們的工作"));
+        (affected, failure)
     }
 
     // ------------------------------------------------------------ 額度
@@ -1507,6 +1672,16 @@ fn inspection_of(state: WorktreeState) -> Inspection {
     }
 }
 
+fn affected_of(run: &Run, disposition: RunDisposition, message: Option<String>) -> AffectedRun {
+    AffectedRun {
+        run_id: run.id.clone(),
+        workspace_id: run.workspace_id.clone(),
+        task_id: run.task_id.clone(),
+        disposition,
+        message,
+    }
+}
+
 fn anomaly(item: &PendingLaunch, kind: StopAnomaly, message: String) -> RunStopRecord {
     RunStopRecord {
         outcome: RunStopOutcome::Anomaly,
@@ -1542,7 +1717,7 @@ fn new_run_id() -> Option<String> {
     new_prefixed_id("run")
 }
 
-fn new_prefixed_id(prefix: &str) -> Option<String> {
+pub(crate) fn new_prefixed_id(prefix: &str) -> Option<String> {
     let mut entropy = [0u8; 12];
     getrandom::fill(&mut entropy).ok()?;
     let hex: String = entropy.iter().map(|b| format!("{b:02x}")).collect();

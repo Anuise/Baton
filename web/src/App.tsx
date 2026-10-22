@@ -10,6 +10,7 @@ import { DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
 import { KnowledgePage } from "./KnowledgePage";
 import { PlatformPage } from "./PlatformPage";
+import { RecoveryPanel } from "./RecoveryPanel";
 import { SchedulingSettings } from "./SchedulingSettings";
 import { SetupWizard } from "./SetupWizard";
 import { SharedSettingsPage } from "./SharedSettingsPage";
@@ -67,6 +68,7 @@ export function App() {
           {client && <SchedulingSettings client={client} />}
           {client && <SharedSettingsPage client={client} />}
           {client && <BackupSettings client={client} />}
+          {client && <RecoveryPanel client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "authorization" && <ModelOverridesPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "conversation" && <ConversationPage client={client} workspace={opened.workspace} />}

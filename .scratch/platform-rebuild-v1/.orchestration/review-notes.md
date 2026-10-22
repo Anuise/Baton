@@ -48,3 +48,9 @@
 ## 12. 票 36 的小問題
 - `crates/baton-store/src/scheduling.rs:286-289` 的 `backoff_budget` 插在 `failed_check` 的 doc 註解與函式之間，註解錯掛。
 - 驗證不完整時立即重驗，兩次重驗可能數秒內用完（AI-274 的取捨）；評估是否加入短暫延遲。
+
+## 13. 崩潰判定的邊界（票 31，AI-280）
+- 正式執行檔在 Ctrl-C 或 `wait()` 結束時不呼叫 `shutdown()`，主控台 Ctrl-C、程序被終止、重開機後自啟動都會被判為崩潰並觸發恢復；確認票 33 是否處理跨登入情境，並評估 Ctrl-C 是否應走正常結束。
+
+## 14. 交接時程序樹確認（票 28，AI-283）
+- Worker 自行結束時收到 `Exited` 就轉移，未先用 ProcessControl 確認整個程序樹結束；程序樹殘留子程序時可能短暫出現第二個 writer。轉移前先 `inspect`。
