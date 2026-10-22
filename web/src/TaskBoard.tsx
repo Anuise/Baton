@@ -7,18 +7,34 @@ import type {
   MissingItem,
   RunStatus,
   RunView,
+  SchedulingClient,
+  SchedulingOverview,
   TaskBoard as TaskBoardData,
   TaskClient,
   TaskContract,
   TaskStatus,
   TaskView,
+  WaitCategory,
+  WaitReason,
   Workspace,
 } from "./runtimeClient";
 
-type ViewState = { state: "loading" } | { state: "ready"; board: TaskBoardData } | { state: "failed"; reason: string };
+/** 排程總覽讀不到時是 null：看板照常顯示，只是沒有排隊順位與帳號名稱。 */
+type ViewState =
+  | { state: "loading" }
+  | { state: "ready"; board: TaskBoardData; overview: SchedulingOverview | null }
+  | { state: "failed"; reason: string };
+
+/** 派工後回傳排隊中：還沒出現在排程總覽的佇列之前，先顯示 Runtime 回報的原因。 */
+interface QueuedNotice {
+  taskId: string;
+  reasons: WaitReason[];
+}
+
+export type TaskBoardClient = TaskClient & Pick<SchedulingClient, "schedulingOverview">;
 
 interface Props {
-  client: TaskClient;
+  client: TaskBoardClient;
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
@@ -36,7 +52,7 @@ const COLUMNS: [TaskStatus, string][] = [
   ["cancelled", "已取消"],
 ];
 
-const RUN_STATUS_LABELS: Record<RunStatus, string> = {
+export const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   queued: "排隊中",
   starting: "啟動中",
   running: "執行中",
@@ -45,6 +61,15 @@ const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   interrupted: "中斷",
   cancelled: "已取消",
 };
+
+const WAIT_CATEGORY_LABELS: [WaitCategory, string][] = [
+  ["capacity", "名額已滿"],
+  ["quota", "額度"],
+  ["authorization", "授權"],
+  ["dependency", "相依"],
+  ["state_unknown", "狀態不明"],
+  ["account", "帳號"],
+];
 
 /** Run 仍在進行（尚未結束）。 */
 const isRunActive = (status: RunStatus) => status === "queued" || status === "starting" || status === "running";
@@ -69,6 +94,26 @@ function missingKind(item: MissingItem): string | null {
   return null;
 }
 
+/** 最新 Run 使用的帳號名稱；總覽讀不到或帳號已封存時退回 Profile 識別。 */
+function accountNameOf(overview: SchedulingOverview | null, runs: RunView[], taskId: string): string | null {
+  const run = latestRun(runs, taskId);
+  if (run === null) return null;
+  return overview?.accounts.find((account) => account.profile_id === run.profile_id)?.name ?? run.profile_id;
+}
+
+/** ready 的 Task 在佇列中時的排隊資訊：優先用排程總覽的順位與原因，其次是剛派工時回報的原因。 */
+function queuedInfo(
+  overview: SchedulingOverview | null,
+  notice: QueuedNotice | null,
+  task: TaskView,
+): { position: number | null; reasons: WaitReason[] } | null {
+  if (task.status !== "ready") return null;
+  const entry = overview?.queue.find((e) => e.task_id === task.id);
+  if (entry) return { position: entry.position, reasons: entry.reasons };
+  if (notice?.taskId === task.id) return { position: null, reasons: notice.reasons };
+  return null;
+}
+
 /**
  * 工作面板：依狀態分欄顯示 Workspace 內的 Task，建立 Task、編輯六項最小派工契約、
  * 標記為可派工。缺少的項目直接列在 pending 的卡片上。
@@ -77,10 +122,18 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
   const [loaded, setLoaded] = useState<ViewState>({ state: "loading" });
   const [panel, setPanel] = useState<{ kind: "create" } | { kind: "edit"; task: TaskView } | null>(null);
   const [cardError, setCardError] = useState<{ taskId: string; message: string } | null>(null);
+  const [queuedNotice, setQueuedNotice] = useState<QueuedNotice | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setLoaded({ state: "ready", board: await client.getTaskBoard(workspace.id) });
+      const [board, overview] = await Promise.all([
+        client.getTaskBoard(workspace.id),
+        // 排程總覽只補充排隊與帳號資訊，讀不到不影響看板
+        Promise.resolve()
+          .then(() => client.schedulingOverview())
+          .catch(() => null),
+      ]);
+      setLoaded({ state: "ready", board, overview });
     } catch (e) {
       setLoaded({ state: "failed", reason: reasonOf(e) });
     }
@@ -90,6 +143,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
     setLoaded({ state: "loading" });
     setPanel(null);
     setCardError(null);
+    setQueuedNotice(null);
     void load();
   }, [load]);
 
@@ -101,12 +155,13 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
       </section>
     );
   }
-  const { board } = loaded;
+  const { board, overview } = loaded;
   const titleOf = (taskId: string) => board.tasks.find((t) => t.id === taskId)?.title ?? taskId;
 
   /** 執行卡片上的操作：失敗時把 Runtime 的說明顯示在該卡片上；無論成敗都重新載入看板。 */
   const act = async (task: TaskView, action: () => Promise<unknown>): Promise<boolean> => {
     setCardError(null);
+    setQueuedNotice(null);
     let ok = true;
     try {
       await action();
@@ -163,11 +218,18 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   titleOf={titleOf}
                   others={board.tasks.filter((t) => t.id !== task.id)}
                   run={latestRun(board.runs, task.id)}
+                  accountName={accountNameOf(overview, board.runs, task.id)}
+                  queued={queuedInfo(overview, queuedNotice, task)}
                   timeZone={timeZone}
                   error={cardError?.taskId === task.id ? cardError.message : null}
                   onReady={() => void act(task, () => client.markTaskReady(workspace.id, task.id))}
                   onCancel={() => void act(task, () => client.cancelTask(workspace.id, task.id))}
-                  onDispatch={() => void act(task, () => client.dispatchTask(workspace.id, task.id))}
+                  onDispatch={() =>
+                    void act(task, async () => {
+                      const result = await client.dispatchTask(workspace.id, task.id);
+                      if (result.kind === "queued") setQueuedNotice({ taskId: task.id, reasons: result.reasons });
+                    })
+                  }
                   onCancelRun={(runId) => void act(task, () => client.cancelRun(workspace.id, runId))}
                   onEdit={() => setPanel({ kind: "edit", task })}
                   onAddDependency={(dependsOn) => act(task, () => client.addTaskDependency(workspace.id, task.id, dependsOn))}
@@ -191,6 +253,10 @@ interface CardProps {
   others: TaskView[];
   /** 這個 Task 最新的 Run；從未派工過為 null。 */
   run: RunView | null;
+  /** 最新 Run 使用的帳號名稱。 */
+  accountName: string | null;
+  /** 在佇列中等待名額時的順位（未知為 null）與原因；不在佇列為 null。 */
+  queued: { position: number | null; reasons: WaitReason[] } | null;
   timeZone?: string;
   error: string | null;
   onReady: () => void;
@@ -203,7 +269,7 @@ interface CardProps {
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -256,7 +322,9 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
         </div>
       )}
 
-      {run && <RunStatusLine run={run} timeZone={timeZone} />}
+      {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
+
+      {run && <RunStatusLine run={run} accountName={accountName} timeZone={timeZone} />}
 
       <div className="task-actions">
         {task.status === "ready" && (
@@ -336,12 +404,41 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   );
 }
 
-/** 最新 Run 的狀態列：狀態、程序 pid、結束原因、lease 最後心跳；已要求取消時說明正在等程序停止。 */
-function RunStatusLine({ run, timeZone }: { run: RunView; timeZone?: string }) {
+/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號）。 */
+function QueuedStatus({ position, reasons }: { position: number | null; reasons: WaitReason[] }) {
+  return (
+    <div className="task-queued" role="group" aria-label="排隊原因">
+      <p>
+        <strong>{position === null ? "排隊中" : `排隊中（第 ${position} 位）`}</strong>
+      </p>
+      {reasons.length === 0 && <p>等待排程處理</p>}
+      <ul>
+        {WAIT_CATEGORY_LABELS.map(([category, label]) => {
+          const inCategory = reasons.filter((reason) => reason.category === category);
+          if (inCategory.length === 0) return null;
+          return (
+            <li key={category}>
+              <strong>{label}</strong>
+              <ul>
+                {inCategory.map((reason, index) => (
+                  <li key={`${reason.code}-${reason.profile_id ?? index}`}>{reason.message}</li>
+                ))}
+              </ul>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** 最新 Run 的狀態列：狀態、使用的帳號、程序 pid、結束原因、lease 最後心跳；已要求取消時說明正在等程序停止。 */
+function RunStatusLine({ run, accountName, timeZone }: { run: RunView; accountName: string | null; timeZone?: string }) {
   return (
     <div className="task-run" role="group" aria-label="Run 狀態">
       <p>
         Run（第 {run.generation} 次）：<strong>{RUN_STATUS_LABELS[run.status]}</strong>
+        {accountName && `，帳號 ${accountName}`}
         {run.process && `，程序 pid ${run.process.pid}`}
       </p>
       {run.end_reason && <p>結束原因：{run.end_reason}</p>}
