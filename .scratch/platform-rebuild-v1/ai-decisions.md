@@ -2944,6 +2944,51 @@
 - 影響：用本票較早的分支（migration 31 是 `handoff_waiting_resource`）建過的開發資料庫需要刪除重建。
 - 審閱：未審
 
+### AI-327：Controller 交接沿用 issue §5.2 的四個 phase，但不另建紀錄表：安全邊界是一輪的結束，交接記在承接的那一輪上
+- 重要度：高
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：Controller 的「同一交接協議」對應如下。(1) 要求：下一輪的帳號由排程另選（上一個 Controller Session 的帳號 paused／draining 或無法使用）；進行中的一輪所在帳號進入 draining 時，只有以 `SlotKind::Handoff` 找得到承接帳號才繼續，否則留在原帳號。(2) 安全邊界：讓這一輪自己結束，從帳號進入 draining（門檻的 `since`）或這一輪開始（取較晚者）起最多等 `CHECKPOINT_WAIT_MS`（2 分鐘），之後先查證程序、仍存活才以 `stop_grace` 要求停止。(3) 轉移：確認停止後，下一次 tick 把串流讀乾淨仍沒有結果才以 `interrupted`、`handed_off：…` 結束（輸入退回待處理、不退避），同一次 tick 的喚起在承接帳號上以新的 Controller Session（`account_changed`）開始下一輪；停不下來就維持原狀、下一次再要求。(4) 確認：承接的那一輪保存了結果。承接的那一輪在 `controller_run` 記下 `handoff`（上一輪、來源帳號、原因），conversation 追加 `controller_handoff_transferred`／`controller_handoff_confirmed` 事件。
+- 理由：Controller 的一輪很短而且不持有 execution lease，最自然的安全邊界就是一輪結束；B1（同一 conversation 最多一輪未結束）已保證不會有兩個 Controller 同時執行，successor 不必與舊 Run 在同一個交易中建立。等待時間與停止寬限沿用票 28，行為與 Worker 一致；只有確認停止才轉移，沿用「不確定不下結論」。
+- 替代方案：(a) 沿用票 28 的 `handoff` 表（`task_id`、`from_run_id` 以外鍵綁 Worker 的 Run 與 Task，要重建表）；(b) 為 Controller 另建 phase 表（四個 phase 都能從 `controller_run` 與門檻狀態推得，多一張表只增加同步成本）；(c) draining 時立即停止進行中的一輪（可能丟掉一輪已做的判斷）。
+- 影響：等待與停止的時點只依持久化的門檻與 Controller Run，Runtime 在任何一點重建後重新判定（停止是冪等的）。從 draining 到承接的一輪開始最長約 2 分鐘 + 30 秒寬限 + 一次 tick；2 分鐘同 AI-288 屬 **Validation Required**。時間線（票 41）可以從 `controller_run.handoff` 與 conversation 事件取得 Controller 的交接。
+- 審閱：未審
+
+### AI-328：沒有保存結果的一輪，帳號受限時一律以 `handed_off` 結束、不退避
+- 重要度：中
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：一輪以失敗結束或確認程序已不在（AI-311 的存活核對）而沒有結果時，若這一輪收到過 CLI 的額度用盡訊號（`RateLimited` 的 `exhausted`），或帳號門檻（先依最新額度推進）是 draining，就以 `TurnOutcome::HandedOff` 結束：Controller Run `interrupted`、`end_reason` = `handed_off：<原本的原因>`、事件 `controller_run_handed_off`，輸入退回待處理；`plan_wake` 在上一輪是交接時不套用 AI-303 的退避，下一輪立即在其他帳號上交付，Prompt 仍註明「可能已部分處理」。成功的結果照常保存；完全退出時停止的一輪、啟動結果不明的一輪仍是一般的中斷。
+- 理由：突然限流、為交接而停止、以及停止途中 Runtime 當掉後被存活核對找回的一輪，原因都在帳號而不是 Controller；一律走同一條路，重建後不必記得「剛才是在交接」（記憶體中的串流會遺失）。門檻已擋住那個帳號，不退避也不會在同一個帳號上反覆重試。`end_reason` 以 `handed_off` 開頭判斷，沿用 `controller_run` 既有的 CHECK（不必重建表加新狀態）。
+- 替代方案：新增 `handed_off` 狀態（要重建 `controller_run`）；突然限流照 AI-303 退避 1 分鐘（全部帳號受限之外沒有理由多等）。
+- 影響：Controller 帳號撞到上限時，輸入通常在同一次 tick 就交給承接帳號。沒有承接帳號時同樣不退避，但喚起找不到帳號、只記下等待原因（AI-330），不會啟動程序。
+- 審閱：未審
+
+### AI-329：新的（含替代的）Controller Session 從對話、最近 20 筆決策與進行中 Task 的檢查點摘要重建
+- 重要度：中
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：Store 在喚起的同一個交易中載入 `ControllerBackground`：Workspace 最近 20 筆已做成的決策（`decision` + `decision_request`：問題 → 選定選項的名稱，沒有選項時是處理方式，附備註），以及狀態不是 completed／cancelled 的 Task 各自最近一筆被接受的檢查點摘要（最多 20 筆，不含細節）。不沿用原生 Session 的 Prompt 在 AI-307 的角色說明、紀錄缺口與最近 40 則對話之後附上這兩段，都標明「只作為背景」；沿用原生 Session 時不附。這一條取代 AI-307 的「本票不附決策、檢查點」，教訓仍不附。
+- 理由：票 30「從持久化對話、決策與檢查點重建」；換帳號一定換原生 Session，新的 Session 沒有先前的脈絡。只附摘要與筆數上限，避免 Prompt 隨 Workspace 成長無限變大；完整的脈絡組裝屬於票 39（Context Builder）。
+- 替代方案：只在換帳號時附（其他原因換 Session 時同樣缺脈絡）；附檢查點細節（最多 64 KB／筆，太大）。
+- 影響：每一輪新的 Session 的 Prompt 多出最多 40 行背景。票 39 可以取代這兩段的組裝方式。
+- 審閱：未審
+
+### AI-330：沒有可用帳號時，等待原因記在 conversation 上；只在輸入已到期卻沒有喚起時顯示
+- 重要度：中
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：喚起時排程回 `Placement::Wait`，Supervisor 以第一個原因的代碼與全部原因的訊息（以「；」串接）寫入 conversation 的 `wait_code`／`wait_message`／`wait_since`（事件 `conversation_controller_waiting`；代碼與訊息都沒變時不寫入，改變時保留開始等待的時間），下一輪開始時在同一個交易中清除。對話 API 的 `waiting` 只在 `plan_wake` 為「現在該喚醒」時回傳（忙碌、合併視窗內、沒有輸入時都是 `null`）。等待期間每次 tick 重新嘗試喚起（只讀，不啟動程序），不採票 29 的「重置後 1 分鐘／退避」重新評估時間。
+- 理由：驗收要求「UI 顯示等待原因」；寫進資料庫才能在 Runtime 重建後、而且不必讓 API 重算排程就顯示。Controller 喚起只需要讀帳號與門檻，沒有啟動成本，帳號一恢復就立即回應使用者比等到重評時間合理。只在到期時顯示，可避免原因在 Workspace 暫停等其他情況下過期仍被顯示。
+- 替代方案：API 每次即時重算排程（API 要依賴額度觀測器）；沿用票 29 的 `waiting_resource` 與重新評估時間（Controller 沒有 Task 狀態可放，且會延遲回應）。
+- 影響：訊息中含用量百分比，額度輪詢改變百分比時會再寫一次等待事件（最多每 5 分鐘一次）。
+- 審閱：未審
+
+### AI-331：Controller 交接的資料形狀、API 與 migration 33
+- 重要度：低
+- 時間／階段：2026-10-22，票 30 實作（run R108-30-impl）
+- 決策：第 33 個 migration `controller_handoff`（整合票 32、29 後由第 31 個順延）：`conversation` 加 `wait_code`、`wait_message`、`wait_since`；`controller_run` 加 `handoff_from_run_id`（參照 `controller_run`）、`handoff_from_profile_id`、`handoff_reason`。交接原因代碼：上一個帳號門檻 draining → `quota_draining`、paused 或用量 ≥75% → `quota_near_limit`、其他 → `account_unavailable`。API：`GET /api/v1/workspaces/{id}/conversation` 的 `waiting`（`{ code, message, since }` 或 `null`）與 `runs[].handoff`（`{ from_run_id, from_profile_id, reason }` 或 `null`）。事件：`controller_run_handed_off`、`conversation_controller_waiting`、`controller_handoff_transferred`、`controller_handoff_confirmed`。Web UI：對話分頁顯示等待原因（等待時不顯示預計喚醒時間），Controller 回覆與進行中的一輪旁標示交接來源、原因與「已確認」，被交接出去的一輪標示「已交接」。
+- 理由：沿用既有表加欄，不重建；換過帳號後新的 Session 在承接帳號上，之後的輪次留在那裡原生接續，不另設「換回原帳號」的規則。
+- 替代方案：無。
+- 影響：被交接出去而沒有產生回覆的一輪，在對話分頁只看得到承接那一輪的交接標示（頁面沒有 Controller Run 列表）。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
