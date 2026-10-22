@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 import { formatTimestamp } from "./time";
-import type { ConversationClient, ConversationTurn, ConversationTurnStatus, ConversationView, Workspace } from "./runtimeClient";
+import type {
+  ControllerRun,
+  ConversationClient,
+  ConversationTurn,
+  ConversationTurnStatus,
+  ConversationView,
+  Workspace,
+} from "./runtimeClient";
 
 /** 定期重新讀取對話的間隔：Controller 的回覆與輸入狀態由 Runtime 推進。 */
 export const CONVERSATION_REFRESH_INTERVAL_MS = 3000;
@@ -25,6 +32,13 @@ const STATUS_LABELS: Record<ConversationTurnStatus, string> = {
   pending: "已收到／待處理",
   processing: "處理中",
   processed: "已處理",
+};
+
+/** 交接原因的中文；未知代碼直接顯示代碼。 */
+const HANDOFF_REASON_LABELS: Record<string, string> = {
+  quota_draining: "帳號接近上限",
+  quota_near_limit: "帳號達停止派工門檻",
+  account_unavailable: "帳號無法使用",
 };
 
 function reasonOf(error: unknown): string {
@@ -98,9 +112,15 @@ export function ConversationPage({ client, workspace, timeZone, pollMs = CONVERS
       {view && view.busy && (
         <p className="conversation-busy" role="status">
           Controller 正在處理上一輪，新訊息會在本輪結束後依序處理
+          {view.active_run && <RunNotes run={view.active_run} />}
         </p>
       )}
-      {view && !view.busy && view.next_wake_at !== null && (
+      {view && view.waiting !== null && (
+        <p className="conversation-waiting" role="status">
+          Controller 等待可用帳號：{view.waiting.message}（自 {formatTimestamp(view.waiting.since, timeZone)} 起等待，訊息已保存）
+        </p>
+      )}
+      {view && !view.busy && view.waiting === null && view.next_wake_at !== null && (
         <p className="conversation-wake" role="status">
           待處理的輸入預計於 {formatTimestamp(view.next_wake_at, timeZone)} 交給 Controller
         </p>
@@ -109,7 +129,12 @@ export function ConversationPage({ client, workspace, timeZone, pollMs = CONVERS
       {view && view.turns.length > 0 && (
         <ol className="conversation-turns">
           {view.turns.map((turn) => (
-            <TurnItem key={turn.id} turn={turn} timeZone={timeZone} />
+            <TurnItem
+              key={turn.id}
+              turn={turn}
+              run={turn.kind === "controller_reply" ? view.runs.find((run) => run.id === turn.controller_run_id) : undefined}
+              timeZone={timeZone}
+            />
           ))}
         </ol>
       )}
@@ -127,8 +152,23 @@ export function ConversationPage({ client, workspace, timeZone, pollMs = CONVERS
   );
 }
 
-/** 一筆輸入或回覆；工作事件以系統通知的樣式顯示，使用者訊息附上處理狀態。 */
-function TurnItem({ turn, timeZone }: { turn: ConversationTurn; timeZone?: string }) {
+/** Controller Run 的交接標示：換帳號後的第一輪顯示交接來源與原因，被交接出去的一輪顯示「已交接」。 */
+function RunNotes({ run }: { run: ControllerRun }) {
+  return (
+    <>
+      {run.handoff && (
+        <span className="conversation-status">
+          已從帳號 {run.handoff.from_profile_id} 交接（{HANDOFF_REASON_LABELS[run.handoff.reason] ?? run.handoff.reason}）
+        </span>
+      )}
+      {run.handoff && run.status === "succeeded" && <span className="conversation-status">已確認</span>}
+      {run.end_reason?.startsWith("handed_off") && <span className="conversation-status">已交接</span>}
+    </>
+  );
+}
+
+/** 一筆輸入或回覆；工作事件以系統通知的樣式顯示，使用者訊息附上處理狀態，Controller 回覆附上該輪的交接標示。 */
+function TurnItem({ turn, run, timeZone }: { turn: ConversationTurn; run?: ControllerRun; timeZone?: string }) {
   const label = KIND_LABELS[turn.kind];
   return (
     <li className={`conversation-turn conversation-${turn.kind}`} aria-label={`${label} #${turn.seq}`}>
@@ -142,6 +182,7 @@ function TurnItem({ turn, timeZone }: { turn: ConversationTurn; timeZone?: strin
         {turn.kind === "user_message" && turn.attempts > 1 && (
           <span className="conversation-status">重新交付（第 {turn.attempts} 次）</span>
         )}
+        {run && <RunNotes run={run} />}
       </p>
       <p className="conversation-content">{turn.content}</p>
     </li>

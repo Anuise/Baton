@@ -13,10 +13,16 @@
 //!   兩者之間中斷時，Controller Run 以中斷結束（`interrupt`），輸入退回待處理，下一輪重新交付並註明可能已部分處理。
 //! - **conversation 與 Session 分開**：Controller 換原生 Session 時 conversation 不變；替代 Session 的 Prompt
 //!   附上已處理的對話作為背景（明示不要重新執行），只有待處理的輸入列為本輪的指示，所以不會重複執行。
+//! - **跨帳號交接（票 30）**：Controller 的一輪很短，安全邊界就是一輪的結束。帳號進入 draining 時，進行中的一輪
+//!   最多再等 `CHECKPOINT_WAIT_MS`（而且已有承接帳號）才被要求停止；確認停止、或一輪因額度沒有保存結果就結束時，
+//!   以 `handed_off` 結束（輸入退回待處理、不退避），下一輪在承接帳號上以新的 Controller Session 執行，
+//!   Prompt 從保存的對話、決策與檢查點重建。承接的那一輪記下 `handoff`（來源帳號與原因），保存結果即為確認。
+//!   沒有可用帳號時輸入維持待處理，conversation 記下等待原因（`waiting`）供 UI 顯示。
 
 use serde::{Deserialize, Serialize};
 
 use crate::event::DomainEvent;
+use crate::handoff::{GateState, CHECKPOINT_WAIT_MS, HANDED_OFF_REASON};
 use crate::run::ProcessRecord;
 use crate::session::{self, AgentSession, BindOutcome, LaunchFacts, ResumeCheck, SessionEdits, SessionOwner};
 use crate::Timestamp;
@@ -36,6 +42,15 @@ pub const EVENT_CONTROLLER_RUN_NATIVE_SESSION_CONFLICT: &str = "controller_run_n
 pub const EVENT_CONTROLLER_RUN_SUCCEEDED: &str = "controller_run_succeeded";
 pub const EVENT_CONTROLLER_RUN_FAILED: &str = "controller_run_failed";
 pub const EVENT_CONTROLLER_RUN_INTERRUPTED: &str = "controller_run_interrupted";
+pub const EVENT_CONTROLLER_RUN_HANDED_OFF: &str = "controller_run_handed_off";
+pub const EVENT_CONVERSATION_CONTROLLER_WAITING: &str = "conversation_controller_waiting";
+pub const EVENT_CONTROLLER_HANDOFF_TRANSFERRED: &str = "controller_handoff_transferred";
+pub const EVENT_CONTROLLER_HANDOFF_CONFIRMED: &str = "controller_handoff_confirmed";
+
+/// Controller 換帳號的原因代碼（票 30）。
+pub const HANDOFF_QUOTA_DRAINING: &str = "quota_draining";
+pub const HANDOFF_QUOTA_NEAR_LIMIT: &str = "quota_near_limit";
+pub const HANDOFF_ACCOUNT_UNAVAILABLE: &str = "account_unavailable";
 
 /// Controller 事件合併視窗（spec D-31）。
 pub const MERGE_WINDOW_MS: i64 = 5_000;
@@ -46,6 +61,9 @@ pub const RETRY_BACKOFF_MAX_MS: i64 = 600_000;
 pub const MAX_MESSAGE_CHARS: usize = 20_000;
 /// 替代 Session 的 Prompt 最多附上的已處理對話則數（最近的）。
 pub const HISTORY_LIMIT: usize = 40;
+/// 新的（含替代的）Session 重建背景時最多附上的決策與檢查點筆數（最近的，票 30）。
+pub const BACKGROUND_DECISIONS_LIMIT: usize = 20;
+pub const BACKGROUND_CHECKPOINTS_LIMIT: usize = 20;
 
 // ---------------------------------------------------------------- 實體
 
@@ -57,6 +75,51 @@ pub struct Conversation {
     /// 每個事件加一；事件的 `aggregate_version` 與它對應。
     pub version: i64,
     pub created_at: Timestamp,
+    /// 有到期的待處理輸入、但沒有可用帳號喚起 Controller 時的等待原因；下一輪開始時清除（票 30）。
+    pub waiting: Option<ControllerWait>,
+}
+
+/// Controller 等待可用帳號的原因（排程的等待原因，票 30）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerWait {
+    pub code: String,
+    pub message: String,
+    /// 開始等待的時間（原因改變時不重設）。
+    pub since: Timestamp,
+}
+
+/// 這一輪是 Controller 換帳號後的第一輪（票 30）：不在上一個 Controller Session 的帳號上執行。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerHandoff {
+    /// 上一輪（被交接出去或在舊帳號上結束的那一輪）。
+    pub from_run_id: Option<String>,
+    pub from_profile_id: String,
+    /// `HANDOFF_QUOTA_DRAINING`、`HANDOFF_QUOTA_NEAR_LIMIT` 或 `HANDOFF_ACCOUNT_UNAVAILABLE`。
+    pub reason: String,
+}
+
+/// 新的（含替代的）Controller Session 重建背景用的持久化狀態，由 Store 在喚起的交易中載入（票 30）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControllerBackground {
+    /// 已做成的決策，依時間（最近的在後）。
+    pub decisions: Vec<DecisionNote>,
+    /// 尚未結束的 Task 最近一筆被接受的檢查點，依保存時間。
+    pub checkpoints: Vec<CheckpointNote>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionNote {
+    pub question: String,
+    /// 選定的選項名稱；沒有選項的處理方式（回答、調查、拒絕）為處理方式代碼。
+    pub choice: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointNote {
+    pub task_id: String,
+    pub task_title: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -212,6 +275,15 @@ pub struct ControllerRun {
     pub updated_at: Timestamp,
     pub started_at: Option<Timestamp>,
     pub ended_at: Option<Timestamp>,
+    /// 這一輪承接了 Controller 的換帳號時的來源與原因（票 30）。
+    pub handoff: Option<ControllerHandoff>,
+}
+
+impl ControllerRun {
+    /// 這一輪是被交接出去而結束的（輸入已退回待處理，不退避）。
+    pub fn was_handed_off(&self) -> bool {
+        self.end_reason.as_deref().is_some_and(|r| r.starts_with(HANDED_OFF_REASON))
+    }
 }
 
 /// 決定一個 conversation 下一步需要的狀態（全部由 Store 在同一個交易中載入）。
@@ -244,6 +316,8 @@ pub struct ConversationView {
     pub active_run: Option<ControllerRun>,
     /// 不忙碌且有待處理輸入時，預計喚醒 Controller 的時間（已到期而尚未喚醒時是現在）。
     pub next_wake_at: Option<Timestamp>,
+    /// 已到期卻沒有可用帳號喚起 Controller 時的等待原因（票 30）。
+    pub waiting: Option<ControllerWait>,
     /// 依 `seq`。
     pub turns: Vec<ConversationTurn>,
     /// 全部 Controller Run，依建立順序。
@@ -253,12 +327,13 @@ pub struct ConversationView {
 impl ConversationView {
     pub fn of(state: Option<&ConversationState>, runs: Vec<ControllerRun>, now: Timestamp) -> Self {
         let Some(state) = state else {
-            return Self { conversation_id: None, busy: false, active_run: None, next_wake_at: None, turns: Vec::new(), runs };
+            let (busy, active_run, next_wake_at, waiting, turns) = (false, None, None, None, Vec::new());
+            return Self { conversation_id: None, busy, active_run, next_wake_at, waiting, turns, runs };
         };
-        let next_wake_at = match plan_wake(state, now) {
-            WakePlan::Wait { due_at } => Some(due_at),
-            WakePlan::Wake { .. } => Some(now),
-            WakePlan::Idle | WakePlan::Busy { .. } => None,
+        let (next_wake_at, waiting) = match plan_wake(state, now) {
+            WakePlan::Wait { due_at } => (Some(due_at), None),
+            WakePlan::Wake { .. } => (Some(now), state.conversation.waiting.clone()),
+            WakePlan::Idle | WakePlan::Busy { .. } => (None, None),
         };
         let active_run = state.active_run().cloned();
         Self {
@@ -266,6 +341,7 @@ impl ConversationView {
             busy: active_run.is_some(),
             active_run,
             next_wake_at,
+            waiting,
             turns: state.turns.clone(),
             runs,
         }
@@ -381,6 +457,7 @@ pub fn start(workspace_id: &str, now: Timestamp) -> ConversationState {
             workspace_id: workspace_id.to_string(),
             version: 0,
             created_at: now,
+            waiting: None,
         },
         turns: Vec::new(),
         latest_run: None,
@@ -468,9 +545,11 @@ pub fn plan_wake(state: &ConversationState, now: Timestamp) -> WakePlan {
     let batch = if users.is_empty() { pending } else { users };
     // 合併視窗從第一則待處理的輸入開始算
     let mut due_at = Timestamp::from_millis(first.as_millis() + MERGE_WINDOW_MS);
-    // 先前沒有完成的輸入：從上一輪結束起退避，避免一直失敗時反覆喚醒
+    // 先前沒有完成的輸入：從上一輪結束起退避，避免一直失敗時反覆喚醒。
+    // 上一輪是被交接出去的不退避：原因在帳號，額度門檻已擋住那個帳號，下一輪立即在承接帳號上執行
     let retried = batch.iter().map(|t| t.attempts).max().unwrap_or(0);
-    if let Some(ended_at) = state.latest_run.as_ref().and_then(|r| r.ended_at).filter(|_| retried > 0) {
+    let previous = state.latest_run.as_ref().filter(|r| !r.was_handed_off());
+    if let Some(ended_at) = previous.and_then(|r| r.ended_at).filter(|_| retried > 0) {
         due_at = due_at.max(Timestamp::from_millis(ended_at.as_millis() + retry_backoff_ms(retried)));
     }
     if now < due_at {
@@ -490,6 +569,8 @@ pub struct BeginTurn {
     pub model: Option<String>,
     /// Supervisor 對候選 Session 查驗接續能力的結果（`session::resume_candidate_for`）。
     pub resume_check: Option<ResumeCheck>,
+    /// 這一輪不在上一個 Controller Session 的帳號上執行時，換帳號的來源與原因（票 30）。
+    pub handoff: Option<ControllerHandoff>,
 }
 
 /// 喚起：在同一個交易中建立 Controller Run 的 launch intent、把這一輪的輸入標為處理中、決定沿用或替換 Session，
@@ -497,6 +578,7 @@ pub struct BeginTurn {
 pub fn begin_turn(
     state: &ConversationState,
     sessions: &[AgentSession],
+    background: &ControllerBackground,
     begin: BeginTurn,
     now: Timestamp,
 ) -> Result<ConversationChange, ConversationError> {
@@ -533,7 +615,7 @@ pub fn begin_turn(
             ..turn.clone()
         })
         .collect();
-    let prompt = build_prompt(state, &inputs, resume_native.is_some(), history_gap.as_deref());
+    let prompt = build_prompt(state, &inputs, resume_native.is_some(), history_gap.as_deref(), background);
     let run = ControllerRun {
         id: begin.run_id.clone(),
         conversation_id: conversation.id.clone(),
@@ -555,6 +637,7 @@ pub fn begin_turn(
         updated_at: now,
         started_at: None,
         ended_at: None,
+        handoff: begin.handoff.clone(),
     };
     let payload = serde_json::json!({
         "conversation_id": conversation.id,
@@ -567,18 +650,34 @@ pub fn begin_turn(
     change.run_event(run, EVENT_CONTROLLER_RUN_LAUNCH_STARTED, payload, now);
     let payload = serde_json::json!({ "controller_run_id": begin.run_id, "input_turn_ids": input_turn_ids });
     change.conversation_event(conversation, EVENT_CONVERSATION_INPUTS_DISPATCHED, payload, now);
+    if let Some(handoff) = &begin.handoff {
+        let payload = serde_json::json!({
+            "from_run_id": handoff.from_run_id,
+            "from_profile_id": handoff.from_profile_id,
+            "to_run_id": begin.run_id,
+            "to_profile_id": begin.profile_id,
+            "to_session_id": session_id,
+            "reason": handoff.reason,
+        });
+        change.conversation_event(conversation, EVENT_CONTROLLER_HANDOFF_TRANSFERRED, payload, now);
+    }
+    // 喚起了就不再等待帳號
+    if let Some(conversation) = change.conversation.as_mut() {
+        conversation.waiting = None;
+    }
     change.turns = inputs;
     change.absorb_sessions(edits);
     Ok(change)
 }
 
 /// 組出這一輪的 Prompt。沿用原生 Session 時只需要本輪的輸入；新的（含替代的）Session 沒有先前的原生對話，
-/// 附上角色說明與已處理的對話作為背景，並明示背景不要重新執行。
+/// 附上角色說明、已處理的對話、已做成的決策與進行中 Task 的檢查點作為背景，並明示背景不要重新執行。
 pub fn build_prompt(
     state: &ConversationState,
     inputs: &[ConversationTurn],
     resuming: bool,
     history_gap: Option<&str>,
+    background: &ControllerBackground,
 ) -> String {
     let mut prompt = String::new();
     if !resuming {
@@ -603,6 +702,20 @@ pub fn build_prompt(
             }
             for turn in &history[skipped..] {
                 prompt.push_str(&format!("- {}：{}\n", speaker(turn.kind), turn.content));
+            }
+        }
+        if !background.decisions.is_empty() {
+            prompt.push_str("\n## 已做成的決策（使用者在裁定中心的決定，只作為背景）\n\n");
+            for decision in &background.decisions {
+                let note = decision.note.as_deref().map(|n| format!("（備註：{n}）")).unwrap_or_default();
+                prompt.push_str(&format!("- {} → {}{note}\n", decision.question, decision.choice));
+            }
+        }
+        if !background.checkpoints.is_empty() {
+            prompt.push_str("\n## 進行中 Task 的最近檢查點（只作為背景）\n\n");
+            for checkpoint in &background.checkpoints {
+                let (title, id, summary) = (&checkpoint.task_title, &checkpoint.task_id, &checkpoint.summary);
+                prompt.push_str(&format!("- Task「{title}」（{id}）：{summary}\n"));
             }
         }
     }
@@ -694,6 +807,56 @@ pub enum TurnOutcome {
     Failed { reason: String },
     /// 程序不在了、啟動結果不明或被停止，結果沒有保存：輸入退回待處理。
     Interrupted { reason: String },
+    /// 帳號接近上限或限流而沒有保存結果（票 30）：以 `handed_off` 中斷，輸入退回待處理且不退避，
+    /// 下一輪在承接帳號上執行。
+    HandedOff { reason: String },
+}
+
+impl TurnOutcome {
+    /// 一輪沒有保存結果就結束、而它的帳號已在 draining 或這一輪收到過額度用盡的訊號時，視為交接（票 30）：
+    /// 原因在帳號，不是 Controller 的問題。成功的結果照常保存。
+    pub fn handed_off_if(self, account_limited: bool) -> TurnOutcome {
+        match self {
+            TurnOutcome::Failed { reason } | TurnOutcome::Interrupted { reason } if account_limited => {
+                TurnOutcome::HandedOff { reason }
+            }
+            other => other,
+        }
+    }
+}
+
+/// 進行中的一輪是否該為交接而停止（票 30）：帳號在 draining，而且從進入 draining（或這一輪開始，取較晚者）
+/// 已等滿 `CHECKPOINT_WAIT_MS`，讓這一輪有機會自己結束。是否已有承接帳號由 Supervisor 另外確認。
+pub fn handoff_stop_due(run: &ControllerRun, gate: GateState, draining_since: Timestamp, now: Timestamp) -> bool {
+    let started = run.started_at.unwrap_or(run.created_at);
+    gate == GateState::Draining && now >= draining_since.max(started).plus_millis(CHECKPOINT_WAIT_MS)
+}
+
+/// 下一輪換到別的帳號時的原因：依上一個 Controller Session 帳號目前的門檻與用量。
+pub fn handoff_reason_for(gate: GateState, used: Option<f64>) -> &'static str {
+    match gate {
+        GateState::Draining => HANDOFF_QUOTA_DRAINING,
+        GateState::Paused => HANDOFF_QUOTA_NEAR_LIMIT,
+        GateState::Open if used.is_some_and(|u| u >= crate::scheduler::QUOTA_STOP_DISPATCH_RATIO) => HANDOFF_QUOTA_NEAR_LIMIT,
+        GateState::Open => HANDOFF_ACCOUNT_UNAVAILABLE,
+    }
+}
+
+/// 沒有可用帳號喚起 Controller：記下等待原因。原因與目前記下的相同時沒有變動（回傳 `None`，不寫入）；
+/// 已在等待時保留開始等待的時間。
+pub fn wait_for_account(state: &ConversationState, code: &str, message: &str, now: Timestamp) -> Option<ConversationChange> {
+    let current = state.conversation.waiting.as_ref();
+    if current.is_some_and(|w| w.code == code && w.message == message) {
+        return None;
+    }
+    let since = current.map_or(now, |w| w.since);
+    let mut change = ConversationChange::default();
+    let payload = serde_json::json!({ "code": code, "message": message });
+    change.conversation_event(&state.conversation, EVENT_CONVERSATION_CONTROLLER_WAITING, payload, now);
+    if let Some(conversation) = change.conversation.as_mut() {
+        conversation.waiting = Some(ControllerWait { code: code.to_string(), message: message.to_string(), since });
+    }
+    Some(change)
 }
 
 /// 結果保存：在同一個交易中結束 Controller Run、更新這一輪的輸入、寫入回覆並釋放 Session。
@@ -738,9 +901,18 @@ pub fn finish(
                     processed_at: Some(now),
                 });
             }
+            // 承接換帳號的這一輪保存了結果：交接確認
+            if let Some(handoff) = &run.handoff {
+                let payload = serde_json::json!({
+                    "controller_run_id": run.id,
+                    "from_profile_id": handoff.from_profile_id,
+                    "to_profile_id": run.profile_id,
+                });
+                change.conversation_event(&state.conversation, EVENT_CONTROLLER_HANDOFF_CONFIRMED, payload, now);
+            }
             (ControllerRunStatus::Succeeded, EVENT_CONTROLLER_RUN_SUCCEEDED, "exited_successfully".to_string())
         }
-        TurnOutcome::Failed { reason } | TurnOutcome::Interrupted { reason } => {
+        TurnOutcome::Failed { reason } | TurnOutcome::Interrupted { reason } | TurnOutcome::HandedOff { reason } => {
             change.turns = held
                 .iter()
                 .map(|t| ConversationTurn { status: TurnStatus::Pending, controller_run_id: None, ..(*t).clone() })
@@ -749,6 +921,11 @@ pub fn finish(
             change.conversation_event(&state.conversation, EVENT_CONVERSATION_INPUTS_RELEASED, payload, now);
             match &outcome {
                 TurnOutcome::Failed { .. } => (ControllerRunStatus::Failed, EVENT_CONTROLLER_RUN_FAILED, reason.clone()),
+                TurnOutcome::HandedOff { .. } => (
+                    ControllerRunStatus::Interrupted,
+                    EVENT_CONTROLLER_RUN_HANDED_OFF,
+                    format!("{HANDED_OFF_REASON}：{reason}"),
+                ),
                 _ => (ControllerRunStatus::Interrupted, EVENT_CONTROLLER_RUN_INTERRUPTED, reason.clone()),
             }
         }
