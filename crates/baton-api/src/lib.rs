@@ -1,12 +1,15 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! 目前有健康狀態、平台狀態、Workspace 與帳號 Profile 管理端點、首次啟動精靈與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
 
 mod guard;
+mod profiles;
+mod setup;
 mod workspaces;
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -15,13 +18,15 @@ use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
-use baton_ports::{Clock, PlatformInfo, WorkspaceFs};
+use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, WorkspaceFs};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
+pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
+pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
 /// 健康端點路徑。
@@ -75,9 +80,12 @@ pub struct ApiState {
     /// Runtime 實際監聽的埠；Host 標頭必須帶這個埠。
     pub allowed_port: u16,
     pub store: Store,
+    /// Runtime 的資料目錄；Profile 的原生設定目錄建立在其下。
+    pub data_dir: PathBuf,
     pub clock: Arc<dyn Clock>,
     pub platform_info: Arc<dyn PlatformInfo>,
     pub workspace_fs: Arc<dyn WorkspaceFs>,
+    pub claude_env: Arc<dyn ClaudeEnvironment>,
     pub log: LogSink,
     /// Runtime 開始停止時變成 `true`；長連線（串流）據此結束，優雅停止才不會被它們卡住。
     pub shutdown: watch::Receiver<bool>,
@@ -91,6 +99,13 @@ pub fn router(state: ApiState) -> Router {
         .route(EVENTS_PATH, get(events))
         .route(WORKSPACES_PATH, get(workspaces::list).post(workspaces::create))
         .route(workspaces::ARCHIVE_ROUTE, post(workspaces::archive))
+        .route(PROFILES_PATH, get(profiles::list).post(profiles::create))
+        .route(profiles::VERIFY_ROUTE, post(profiles::verify))
+        .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))
+        .route(profiles::ARCHIVE_ROUTE, post(profiles::archive))
+        .route(SETUP_PATH, get(setup::status))
+        .route(SETUP_RECHECK_PATH, post(setup::recheck))
+        .route(SETUP_ACK_PATH, post(setup::acknowledge_background_notice))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

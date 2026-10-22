@@ -3,6 +3,7 @@
 //! `Runtime::start` 以程序內方式啟動完整 Runtime（真實 Store、真實 HTTP API），
 //! 所有外部副作用都經由注入的 `Ports`。正式執行檔與測試 harness 共用這個入口。
 
+pub mod claude_cli;
 pub mod credentials;
 pub mod log;
 pub mod production_ports;
@@ -73,9 +74,11 @@ impl Runtime {
             started_at,
             allowed_port: addr.port(),
             store: store.clone(),
+            data_dir: config.data_dir.clone(),
             clock: ports.clock.clone(),
             platform_info: ports.platform_info.clone(),
             workspace_fs: ports.workspace_fs.clone(),
+            claude_env: ports.claude_env.clone(),
             log,
             shutdown: stop_rx.clone(),
         });

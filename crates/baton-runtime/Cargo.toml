@@ -19,7 +19,9 @@ async-trait = "0.1"
 futures = "0.3"
 getrandom = "0.3"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "process", "time", "fs"] }
 axum = "0.8"
 
 [target.'cfg(windows)'.dependencies]
