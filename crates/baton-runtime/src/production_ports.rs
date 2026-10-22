@@ -94,9 +94,14 @@ impl WorkspaceFs for LocalWorkspaceFs {
 /// 組出正式執行用的 Port 組合。
 pub fn production_ports() -> Ports {
     let unavailable = Arc::new(Unavailable);
+    // Windows 上使用真實的 Job Object 實作；其他平台維持尚未實作
+    #[cfg(windows)]
+    let process_control: Arc<dyn ProcessControl> = Arc::new(crate::windows_process::WindowsProcessControl::new());
+    #[cfg(not(windows))]
+    let process_control: Arc<dyn ProcessControl> = unavailable.clone();
     Ports {
         clock: Arc::new(SystemClock),
-        process_control: unavailable.clone(),
+        process_control,
         agent_adapter: unavailable.clone(),
         quota_observer: unavailable.clone(),
         workspace_fs: Arc::new(LocalWorkspaceFs),
