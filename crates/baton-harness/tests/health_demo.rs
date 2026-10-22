@@ -140,10 +140,12 @@ async fn every_port_can_be_driven_through_its_fake() {
 
     // PlatformInfo
     harness.platform_info.set(PlatformSnapshot {
-        os_build: "26200".into(),
+        os_family: OsFamily::Windows11,
+        os_build: "26300".into(),
+        feature_version: "26H2".into(),
         edition: "Pro".into(),
         native_arch: "x64".into(),
-        support_status: SupportStatus::Supported,
+        process_arch: "x64".into(),
     });
-    assert_eq!(ports.platform_info.snapshot().os_build, "26200");
+    assert_eq!(ports.platform_info.snapshot().os_build, "26300");
 }

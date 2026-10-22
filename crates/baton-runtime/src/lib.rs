@@ -5,6 +5,7 @@
 
 pub mod production_ports;
 pub mod single_instance;
+pub mod windows_platform;
 
 use std::net::SocketAddr;
 
@@ -38,7 +39,12 @@ impl Runtime {
             .map_err(|e| RuntimeError::Bind(config.bind, e))?;
         let addr = listener.local_addr().map_err(|e| RuntimeError::Bind(config.bind, e))?;
 
-        let app = baton_api::router(ApiState { boot_count, started_at });
+        let app = baton_api::router(ApiState {
+            boot_count,
+            started_at,
+            clock: ports.clock.clone(),
+            platform_info: ports.platform_info.clone(),
+        });
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             let _store = store; // 與 serve 同生命週期：停止後才釋放資料庫連線

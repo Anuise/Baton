@@ -1,20 +1,6 @@
-use serde::{Deserialize, Serialize};
+//! PlatformInfo Port：回報平台事實；支援狀態由 Domain 的 `platform::assess` 判定。
 
-/// 平台支援狀態（spec DR-08，判斷規則由票 03 實作）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SupportStatus {
-    Supported,
-    Unsupported,
-    Unknown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlatformSnapshot {
-    pub os_build: String,
-    pub edition: String,
-    pub native_arch: String,
-    pub support_status: SupportStatus,
-}
+pub use baton_domain::platform::{OsFamily, PlatformSnapshot};
 
 pub trait PlatformInfo: Send + Sync {
     fn snapshot(&self) -> PlatformSnapshot;
