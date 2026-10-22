@@ -37,6 +37,7 @@
 | R033-18-verify | 18 | verify | Work-3 | 2026-10-22 16:23 | 2026-10-22 16:27 | PASS（基底早於票 19，需整合後重驗） |
 | R034-25-impl | 25 | impl | Work-9 | 2026-10-22 16:25 | | |
 | R035-27-impl | 27 | impl | Work-9 | 2026-10-22 16:25 | | |
-| R036-12-integrate | 12 | integrate | Work-8 | 2026-10-22 16:25 | | |
+| R036-12-integrate | 12 | integrate | Work-8 | 2026-10-22 16:25 | 2026-10-22 16:32 | DONE（8784a6b..8ad83ab） |
 | R037-18-integrate | 18 | integrate | Work-3 | 2026-10-22 16:27 | | |
 | R038-22-verify | 22 | verify | Work-8 | 2026-10-22 16:31 | | |
+| R039-12-verify | 12 | verify | Work-8 | 2026-10-22 16:32 | | |
