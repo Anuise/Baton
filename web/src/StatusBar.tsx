@@ -28,7 +28,10 @@ interface Props {
   refreshKey?: number;
 }
 
-/** 頂部狀態列：目前顯示 Runtime 狀態與平台支援狀態，其餘欄位由後續的票加入（spec D-21）。 */
+/** 監護不在、Runtime 又沒有附訊息時的降級提示。 */
+const GUARDIAN_UNAVAILABLE_FALLBACK = "工作繼續，自動重啟保護不可用";
+
+/** 頂部狀態列（spec D-21）：Runtime 狀態、平台支援狀態、待裁定數、恢復事件、監護狀態與儲存故障。 */
 export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshKey }: Props) {
   const [status, setStatus] = useState<RuntimeStatus>({ state: "checking" });
   // null：尚未取得或讀取失敗，顯示為「未知」，不影響 Runtime 狀態
@@ -95,6 +98,15 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
           {recovery.event.status === "exhausted"
             ? "恢復額度用盡"
             : `恢復中（${recovery.event.attempts_used}/${recovery.max_attempts}）`}
+        </span>
+      )}
+      {/* 監護狀態固定顯示（spec D-21）；未知（含舊版 Runtime 沒有欄位）不顯示，避免誤報 */}
+      {status.state === "running" && status.health.guardian?.state === "active" && (
+        <span className="status status-guardian-active">監護：運作中</span>
+      )}
+      {status.state === "running" && status.health.guardian?.state === "unavailable" && (
+        <span className="status status-guardian-unavailable" role="alert">
+          {status.health.guardian.message ?? GUARDIAN_UNAVAILABLE_FALLBACK}
         </span>
       )}
       {status.state === "running" && status.health.storage?.dispatch_halted && (

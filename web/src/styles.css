@@ -718,6 +718,23 @@ body {
   background: #bf8700;
 }
 
+/* 監護程序：運作中為綠色；不在時工作繼續但沒有自動重啟保護，以紅色醒目提示 */
+.status-guardian-active::before {
+  background: #1a7f37;
+}
+
+.status-guardian-unavailable {
+  padding: 2px 8px;
+  color: #82071e;
+  background: #ffebe9;
+  border: 1px solid #cf222e;
+  border-radius: 6px;
+}
+
+.status-guardian-unavailable::before {
+  background: #cf222e;
+}
+
 /* 控制資料庫寫不進去、新派工已停止：獨占狀態列一整行 */
 .status-bar:has(.status-storage-fault) {
   flex-wrap: wrap;
