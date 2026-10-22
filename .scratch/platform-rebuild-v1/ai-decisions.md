@@ -1513,7 +1513,115 @@
 - 影響：以本票分支（先前任一次整合後）建立過的開發資料庫，`schema_migrations` 中 `knowledge` 的版本號與整合後不一致，需刪除重建。
 - 審閱：未審
 
-### AI-168：備份存放在資料目錄的 `backups/`，成果以雜湊命名的副本共用；不新增 migration
+### AI-168：完全退出停下的 Run 以 interrupted 結束，Task 退回 ready 並自動重新排隊；停不下來的保留寫入所有權
+- 重要度：高
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：程序確認停止（`StoppedGracefully`／`ForceKilled`）或根本沒有程序（`queued`、啟動中但以 command_id 找不到）的 Run，以 `interrupted`（`end_reason = stopped_by_full_exit`）結束並釋放寫入所有權；Task 只在仍是 `running` 時退回 `ready`（`blocked`、`verifying` 等不動），並在**同一個交易**中重新放進派工佇列（優先序 0，原本的優先序已不存在）。使用者先前已要求取消的 Run 則完成取消（Task 不重新排隊）。`StillAlive`、停止呼叫失敗、到總上限仍沒有結果的記為停止異常，Run 維持 `running` 並保留 lease。重新開啟核對時，這些 Run 的程序若確定已不在，以 `process_gone_after_full_exit` 中斷、Task 回 `ready` 但**不**自動重新排隊；仍存活的維持原狀（不會再啟動第二個 Worker）。
+- 理由：票面要求「完全退出不會把 Task 標為取消或完成」與「重開後 A 的合格工作自動恢復」，被退出停下的工作必須有恢復的入口；放回佇列後，「續跑」就只是解除暫停，由排程照常判定授權、相依、帳號與容量（即「合格」）。這和 AI-96「Run 失敗不自動重新排隊」不衝突：退出不是失敗，而是使用者明確要求的暫停。停不下來的程序若釋放 lease，續跑時會產生第二個寫入者（使用者故事 43）。查證後才知道已不在的程序，結果不明（它可能已完成部分工作），依 AI-67 的原則交給使用者重新派工。
+- 替代方案：退出時把 Run 標為 `cancelled`（語意上是使用者取消，且 AI-66 會讓人誤以為 Task 被放棄）；不重新排隊，續跑時再掃描「被退出停下的 Task」（需要另外記錄哪些 Task 屬於這一類，且會和使用者的手動派工打架）；停止異常也釋放 lease（可能兩個寫入者）。
+- 影響：被停下的 Task 在重新開啟前一直排隊、等待原因是 `runtime_stopping`；停止異常的 Task 在核對前保持 `running`。重新排隊不保留原本的優先序。
+- 審閱：未審
+
+### AI-169：停止意圖的保存方式與阻擋點：單列狀態加各 Workspace 暫停，擋在 Scheduler 與 launch intent
+- 重要度：高
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：停止意圖存在單列表 `runtime_lifecycle`（`phase` = `running`／`stopping`／`stopped`、`version`、最近一次停止報告 JSON），`stopping` 與 `stopped` 都算停止意圖生效，直到重新開啟。要求退出的同一個交易中，把每個使用中的 Workspace 標為暫停（`workspace_lifecycle.paused_since`）。阻擋點只有兩個：（1）Scheduler 的 `Capacity.halt`（`lifecycle::dispatch_halt`），`place` 一看到就回等待，所以佇列重試、額度恢復後的派工、API 的新派工要求與未來的交接（票 28 以 `SlotKind::Handoff` 呼叫同一個 `place`）都被擋；（2）寫入 launch intent（`BeginLaunch`）的交易再檢查一次（`RunError::LaunchHalted`），擋住停止意圖寫入前就已派出、還沒啟動的 Run。等待原因新增第七類 `lifecycle`（`runtime_stopping`、`awaiting_resume`）。上次退出後尚未重新開啟（`stopped`）時再按「完全退出」，視為新的退出要求（版本加一），停止中則冪等。
+- 理由：ADR-0001 要求「排程、Outbox 與 supervisor 啟動路徑都必須檢查停止意圖，不能只停排程器」；把檢查放在所有派工都會經過的 `place` 與所有啟動都會經過的 `BeginLaunch`，新加入的路徑（交接、重試預算）不必各自記得檢查。暫停在退出時就寫入，重新開啟只需要決定「誰解除」，不必回頭推算哪些 Workspace 受影響。
+- 替代方案：只在 Supervisor 背景迴圈檢查（API 派工、未來的交接會漏掉）；不記錄 Workspace 暫停、重新開啟時才逐一判定（重新開啟前新增的 Workspace 會被誤判，且「繼續工作」沒有可以清除的狀態）；把停止意圖放進 `RunContext`（要改動所有建構點，與排程等待原因的呈現脫節）。
+- 影響：交接（票 28）與重試預算（票 36）只要經過 `scheduler::place`／`evaluate` 就自動遵守停止意圖；若另闢直接呼叫 `RunCommand::Dispatch` 的路徑，必須先呼叫 `lifecycle::dispatch_halt`。
+- 審閱：未審
+
+### AI-170：重新開啟的流程：先核對再解除；資料庫與生命週期檔取保守者；以版本防止清掉新的退出要求
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：Runtime 啟動時讀資料庫與 `<資料目錄>\lifecycle.json`：只有檔案有停止意圖、或檔案存在卻讀不懂（毀損）都視為停止，並把停止意圖補記進資料庫（同時暫停每個使用中的 Workspace、記一筆說明）；只有資料庫有時把它鏡像回檔案。停止意圖仍生效時，Supervisor 的第一次 `tick` 先核對（處理啟動中的 Run：以 command_id 找回或中斷；對每個有程序身分的 Run 不論 lease 是否過期都 `inspect`，`Dead` 才中斷），再以「啟動時看到的生命週期版本」做條件式重新開啟：版本已改變（核對期間使用者又按了完全退出）就不重新開啟。重新開啟後把檔案改寫為沒有停止抑制。
+- 理由：spec D-25「兩者不一致時採較保守者」；票面「重新開啟先核對，再依設定續跑」。核對放在 Supervisor 的同一把鎖裡，與一般處理不會交錯；版本比對避免「剛重新開啟的 Runtime 把使用者新的停止意圖清掉」。
+- 替代方案：重新開啟在 `Runtime::start` 內同步完成（測試無法決定核對時機，且啟動會被慢的 `inspect` 卡住）；檔案毀損時忽略檔案（可能在使用者要求停止後被 launcher 自動啟動）。
+- 影響：Runtime 啟動到第一次處理之間（正式執行約 1 秒），API 仍回報停止意圖生效、「繼續工作」回 409。重新開啟時寫檔失敗只記日誌：下次啟動時會再被視為停止（較保守），使用者需要再次重新開啟。
+- 審閱：未審
+
+### AI-171：「保存並停止」的通知方式：Agent 回報的回應帶 `stop_requested`，強制力仍靠程序樹終止
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：停止意圖生效後，`report_progress`、`save_checkpoint`、`report_blocked` 的成功回應帶 `stop_requested: true`（平常是 `false`），Worker 據此保存 checkpoint 並結束。Runtime 不另外對程序送出任何訊號；停止流程對每個 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`：寬限期內等程序自行結束，逾時以 Job Object 終止整棵程序樹（AI-72）。
+- 理由：`claude -p` 執行中沒有可靠的輸入管道（stdin 在啟動時就導向 NUL，AI-72），送主控台中斷訊號需要與 Worker 共用主控台，且 Windows 上無法對特定程序樹可靠地送 Ctrl+C。回報的回應是 Worker 本來就會定期呼叫的管道，不需要新的工具或協定。
+- 替代方案：新增 `should_stop` 工具讓 Worker 輪詢（Worker 要記得呼叫，提示也要改）；送 `CTRL_BREAK_EVENT`（需要 `CREATE_NEW_PROCESS_GROUP` 與主控台，Validation Required 的範圍更大）。
+- 影響：Worker 在寬限期內沒有回報就收不到通知，只能被終止；Context Builder（票 39）與真實 Adapter（票 14）的 Worker 提示需要寫明「回應出現 `stop_requested` 時保存 checkpoint 並結束」。30 秒是否足夠屬 Validation Required。
+- 審閱：未審
+
+### AI-172：40 秒上限的實作與停止流程結束後的收尾
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：全部 Run 的 `stop` 並行執行，寬限期 30 秒（ProcessControl 在之後 10 秒內終止並確認，AI-72 的既有行為），Runtime 另以 `寬限期 + 確認上限 = 40 秒` 的真實時間作為安全網：到時還沒回來的停止記為停止異常 `stop_unconfirmed`。停止期限（`deadline_at`）以 Clock 記在停止報告中。停止流程期間握住 Supervisor 的 tick 鎖。結束後 Runtime 再提供 API 5 秒（讓 App 讀到最終結果）才結束服務；測試 harness 不自行結束（`exit_linger: None`），以 `exit_timing` 縮短上限測試卡住的情境。
+- 理由：spec D-11 的總上限是 40 秒；ProcessControl 的 `stop` 本身就有上限，但 Port 的實作可能卡住（例如 Windows API 沒有回應），Runtime 不能把有界性完全交給 Port。App 每 0.5 秒輪詢，5 秒足以讀到結果；Runtime 若永遠不結束，App 當掉時會留下無主的 Runtime。
+- 替代方案：停止依序執行（N 個 Run 會變成 N × 40 秒）；Runtime 停止流程結束立即結束服務（App 讀不到停止異常）。
+- 影響：從按下「完全退出」到 Runtime 結束最長約 45 秒；第 40 秒才回來的 `ForceKilled` 若剛好晚於安全網，會被記為 `stop_unconfirmed`（保守）。
+- 審閱：未審
+
+### AI-173：桌面殼：關窗隱藏到系統匣、完全退出由 Web UI 顯示進度，殼有 60 秒後備
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：關閉主視窗改為隱藏（`prevent_close` + `hide`），App 留在系統匣；系統匣選單有停用的狀態項目（每 3 秒以 `GET /api/v1/lifecycle` 更新：運作中與進行中 Run 數、完全退出中、已停止、無法連線）、「開啟 Baton」（左鍵點圖示亦同）與「完全退出」。「完全退出」顯示主視窗並對 Web UI 發 `baton://full-exit-requested`；Web UI 呼叫 `lifecycle_exit`、每 0.5 秒輪詢並顯示每個 Run 的停止結果與期限倒數；沒有停止異常約 1 秒後自動 `app_quit`，有異常則列出並等使用者按「關閉 Baton」；輪詢時 Runtime 已結束也視為完成。要求退出本身失敗時顯示原因與「重試」「返回」，不自動結束 App。殼在按下後 60 秒若 App 仍未結束，自行送出完全退出（冪等）再結束 App。HTTP 版用戶端（瀏覽器開發用）的 `app_quit` 與事件監聽是 no-op。
+- 理由：票面要求「系統匣提供狀態、重新開啟與完全退出」「顯示停止進度與異常」；有異常時自動關閉會讓使用者看不到「哪些程序可能還在背景」。後備避免 Web UI 卡住時 App 永遠不結束；在系統匣按「完全退出」本身就是停止意圖，所以後備也送出退出要求。
+- 替代方案：殼在 Rust 端自己輪詢並以原生對話框顯示進度（與 Web UI 的狀態呈現重複）；有異常也自動結束 App（異常只留在下次開啟才看得到）。
+- 影響：沒有單一執行個體機制，App 隱藏在系統匣時再執行一次執行檔會開出第二個 App（兩者連同一個 Runtime，不會有第二個 Runtime 或 Worker）；可在後續票加入 `tauri-plugin-single-instance`。系統匣與關窗行為只有編譯與元件測試，Windows 上的實際操作屬 Validation Required（已寫入 `docs/development.md`，建議列入票 51）。
+- 審閱：未審
+
+### AI-174：生命週期 API、資料表與事件的形狀
+- 重要度：低
+- 時間／階段：2026-10-22，票 25 實作
+- 決策：端點：`GET /api/v1/lifecycle`（階段、`stop_intent_active`、時間參數、進行中或最近一次的停止報告、進行中 Run 數、各使用中 Workspace 的 `auto_resume_after_exit`／`paused_since`／`awaiting_resume`）、`POST /api/v1/lifecycle/exit`（202）、`PUT /api/v1/workspaces/{id}/lifecycle`（`{ auto_resume_after_exit }`）、`POST /api/v1/workspaces/{id}/resume`（停止意圖生效時 409 `stop_intent_active`）。停止報告的每個 Run：`outcome` = `pending`／`not_started`／`stopped_gracefully`／`force_killed`／`anomaly`，異常再帶 `anomaly` = `still_alive`／`stop_failed`／`stop_unconfirmed` 與說明。migration 16：`runtime_lifecycle`（單列）與 `workspace_lifecycle`（沒有列的 Workspace 等同預設：自動續跑關閉、未暫停）。事件：`full_exit_requested`、`full_exit_completed`（含異常清單）、`runtime_reopened`（含續跑與等待的 Workspace）、`workspace_paused_by_exit`、`workspace_resumed`、`workspace_auto_resume_changed`；停止進度的逐筆更新不追加事件。UI：Workspace 清單每列有「完全退出後自動續跑」勾選與暫停中的「繼續工作」，等待原因第七類標籤為「完全退出」。
+- 理由：一個總覽端點同時供系統匣、退出進度與 Workspace 清單使用；進度更新很頻繁，事件只記開始、結束與重新開啟。
+- 替代方案：把 Workspace 設定放進 `Workspace` 本身（要改 Workspace 狀態機、API 與既有測試）；停止進度用 SSE（事件串流目前還沒有實際事件，輪詢已足夠）。
+- 影響：migration 若與平行開發的票衝突，依 AI-75／AI-86 的方式順延（整合時已順延為第 18 個，見 AI-175、AI-176、AI-178、AI-179）。「跨登入自動續跑」（使用者故事 17 的另一個設定）屬票 33，屆時加在同一張 `workspace_lifecycle` 表。
+- 審閱：未審
+
+### AI-175：票 25 整合 rebuild/v1（票 12、08）：migration 與 AI 編號順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 實作（合併 rebuild/v1）
+- 決策：(1) 整合分支已有 `artifact`（第 11 版）與 `shared_settings_version`（第 12 版），本票的 `lifecycle` migration 順延為第 13 版；三者沒有共用資料表。(2) 本票原本的 AI-103～AI-109 與整合分支的票 12、08 條目重號，順延為 AI-121～AI-127（內文沒有互相引用，只把 AI-127 的 migration 編號改為 13）；整合分支的條目沒有改動。(3) `baton-api`、`baton-client`、Tauri 殼、Web UI 與 `docs/development.md` 兩邊新增的端點、指令、型別、樣式與段落全部保留（生命週期與成果、共同設定並存）。
+- 理由：已發布的 migration 不可修改，順延尚未合併的本票版本（與 AI-86、AI-117 相同做法）。
+- 替代方案：把本票的 migration 插在前面（會改動整合分支已有的版本號，不可行）。
+- 影響：開發中的本機資料庫若套用過本票舊版本號的 migration，需要重建。
+- 審閱：未審
+
+### AI-176：票 25 再次整合 rebuild/v1（票 27）：migration 第 14 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 修正 run R049（合併 rebuild/v1）
+- 決策：(1) 整合分支已先合併票 27，其 migration `quota` 是第 13 版，本票的 `lifecycle` 順延為第 14 版（排在 `quota` 之後；兩者沒有共用資料表）。(2) 本票條目原本的 AI-121～AI-128 與票 27 的 AI-121～AI-127 重號，順延為 AI-128～AI-135，移到票 27 條目之後；條目內的交互引用（AI-127 中的「見 AI-128」→ AI-134 中的「見 AI-135、AI-136」）與 migration 編號（AI-134 的 13 → 14、`docs/development.md`）同步更新，記錄歷史編號的敘述（AI-135）保留原文。原 AI-127、AI-128 缺少的審閱行與空行在順延時補上。(3) 其餘衝突兩邊都保留：Supervisor 同時有生命週期（重新開啟、完全退出）與額度輪詢、Adapter 額度事件；`baton-api`、`baton-client`、`baton-domain`、`baton-store` 的模組與匯出、Tauri 指令（`app_quit` 與 `profile_set_quota_limits`）、開發指南的 crate 表與情境測試清單合併為同時描述兩張票。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-175 同）。
+- 替代方案：把兩個 migration 合併成一個（會改動整合分支已有的第 13 版）。
+- 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 13 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-177：完全退出的 40 秒從要求退出時算起；生命週期檔在回應前寫入，等 Supervisor 的鎖也有上限
+- 重要度：高
+- 時間／階段：2026-10-22，票 25 修正 run R049（驗證 R047 未通過）
+- 決策：修正 AI-172「停止流程期間握住 tick 鎖」造成的延遲：(1) `POST /api/v1/lifecycle/exit` 持久化資料庫後、回應 202 前就把停止意圖寫進生命週期檔（寫入失敗只記日誌，停止流程開始時再鏡像一次並把失敗記在停止報告的 notes）。(2) 停止流程的期限改由停止報告持久化的 `deadline_at` 減去 Clock 的目前時間換算成真實時間，等 tick 鎖的時間也算在內。(3) Supervisor 增加「完全退出進行中」的旗標；處理取消時呼叫 `ProcessControl::stop` 以 `select!` 同時等這個旗標，一看到就放棄等待並讓出 tick 鎖，該 Run 由停止流程再要求停止一次（同一個寬限期、共用總上限）。(4) 其他握鎖的處理卡住（例如 Port 的 spawn 不回來）時，等鎖以期限為上限；到期限仍拿不到鎖就**不**要求任何程序停止（不能在另一個處理進行中停止程序或結束 Run），把全部尚未結束的 Run 記為 `stop_unconfirmed`、保留寫入所有權，退出照常進入 `stopped`。
+- 理由：驗收條件要求退出在 40 秒內結束；取消中的 `stop` 最長 30 + 10 秒且依序處理，Port 卡住時更永遠不結束，桌面殼的 60 秒後備會先關掉 App，使用者看不到停止異常。spec D-25 要求停止意圖先寫入資料庫與生命週期檔再開始停止，不應排在鎖後面。讓出鎖而不是不握鎖，是因為停止流程仍需要與 `launch_pending` 互斥：否則可能把啟動中的 Run 結束後，那個 spawn 才完成。
+- 替代方案：處理取消時完全不握 tick 鎖、改在背景任務停止程序（現有情境測試依賴「一次 `supervise` 就確認取消」的確定性，改動面大）；停止流程完全不拿 tick 鎖（啟動中的 Run 會有競態）；只把等鎖加上逾時、不讓出（取消卡住時其他 Run 一個都沒被要求停止）。
+- 影響：從按下「完全退出」到停止流程結束最長 40 秒（加上資料庫寫入），Runtime 結束仍再加 5 秒。被讓出的取消在停止流程中可能收到第二次 `stop`（Port 的 `stop` 必須可重複呼叫且可中途放棄；Windows 實作是輪詢 Job 內的程序數再 `TerminateJobObject`，放棄等待不留下半套狀態，重複呼叫沒有副作用）。Clock 被調整時，期限以持久化值為準（Clock 已過期限則不再等待，全部記為無法確認）。
+- 審閱：未審
+
+### AI-178：票 25 第三次整合 rebuild/v1（票 18、22）：migration 第 16 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 修正 run R049（合併 rebuild/v1）
+- 決策：(1) 整合分支在本次修正期間先後併入票 18（`message_and_delivery`，migration 14）與票 22（`decision_request_and_decision`，migration 15），本票的 `lifecycle` 順延為第 16 版，排在最後；彼此沒有共用資料表。(2) 整合分支已用到 AI-147（AI-135、AI-136 空號，依規則不回填），本票條目原本的 AI-128～AI-137 順延為 AI-148～AI-157，移到票 22 條目之後；條目內的交互引用（AI-154 的「見 AI-155、AI-156、AI-158」、AI-156 的「與 AI-155 同」、AI-157 的「修正 AI-152」）與 migration 編號（AI-154、`docs/development.md` 改為 16）同步更新，記錄歷史編號的敘述（AI-155、AI-156 的決策內文）保留原文。(3) 其餘衝突兩邊都保留：`baton-api`／`baton-domain`／`baton-store` 的模組與匯出、`RuntimeClient` 的生命週期與裁定方法、Tauri 的型別匯入；Web UI 的 `AppClient`（HTTP 與 Tauri 兩種實作）同時有生命週期與裁定方法，`App` 同時掛上 `ExitProgress` 與 `DecisionCenter`，`WorkspaceSidebar` 採票 22 的參數（含裁定入口）並保留自動續跑說明，`styles.css` 兩邊新增的區塊依序並存，元件測試兩邊都保留；開發指南的 crate 表與情境測試清單合併為同時描述三張票。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-175、AI-176 同）。
+- 替代方案：把本票條目放進 AI-135、AI-136 的空號（會與條目順序脫節，且其他平行的票也可能想用）。
+- 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 13 或 14 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-179：票 25 第四次整合 rebuild/v1（票 13、37）：migration 第 18 版、AI 編號再順延、Supervisor 同時有生命週期與驗證
+- 重要度：中
+- 時間／階段：2026-10-22，票 25 整合 run R063-25-integrate
+- 決策：(1) 整合分支先後併入票 13（`task_verification`，migration 16）與票 37（`knowledge`，migration 17），本票的 `lifecycle` 順延為第 18 版，排在最後；三者沒有共用資料表，都會套用。整合途中 rebuild/v1 又併入票 37，所以分兩次合併：第一次（只含票 13）的合併 commit 暫時把本票編成 migration 17、AI-159～AI-170，第二次合併後才定為下面的編號。(2) 整合分支已用到 AI-167（票 13 的 AI-148～AI-158、票 37 的 AI-159～AI-167），本票條目原本的 AI-148～AI-158 順延為 AI-168～AI-178，移到票 37 條目之後；條目內的交互引用（AI-174 的「見 AI-175、AI-176、AI-178、AI-179」與 migration 編號 18、AI-176 的「與 AI-175 同」、AI-177 的「修正 AI-172」、AI-178 理由中的「AI-175、AI-176」）與 `docs/development.md` 的 migration 編號同步更新；記錄歷史編號的敘述（AI-175、AI-176、AI-178 的決策內文）保留原文。程式碼與票面沒有引用這些編號。(3) 其餘衝突兩邊都保留：`Supervisor::new` 同時接收成果根目錄（票 13）與 `LifecycleSettings`（本票）；`supervise_once` 先做重新開啟再做原本的六個步驟（註解改為「七個步驟」），驗證仍是最後一步（開發指南改為「第 8 步」）；`RuntimeOptions` 與測試 harness 同時有 `exit_timing`／`exit_linger`（本票）與 `full_text_search`（票 37），`try_start_runtime` 兩個參數都接；`baton-api`／`baton-domain`／`baton-store` 的模組與匯出、`baton-client` 與 Tauri 的型別匯入與指令（生命週期、`app_quit`、知識）、Web UI `AppClient` 的 HTTP／Tauri 實作（生命週期與驗證方法）、`App.tsx`（`ExitProgress` 與 `KnowledgePage`）、`fixtures.ts`、`App.test.tsx` 的假用戶端（工作面板加 `verifications: []`，並保留生命週期方法）、開發指南的 crate 表、章節與情境測試清單都合併為同時描述三張票。`lifecycle_client` 測試的契約補上票 13 新增的必填欄位 `verification_checks: vec![]`（斷言不變）。(4) 停止意圖生效期間不阻擋確定性檢查：驗證不是新 Run，不在票 25「新派工、交接與重試」的阻擋範圍；Runtime 結束時驗證命令隨 `kill_on_drop` 終止，重新開啟後依票 13 的規則重新執行檢查（AI-153）。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-117、AI-119、AI-175、AI-176、AI-178 同）。
+- 替代方案：停止意圖生效時也暫停驗證（屬新行為，超出整合範圍；需要時另開票）。
+- 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 16 或 17 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-180：備份存放在資料目錄的 `backups/`，成果以雜湊命名的副本共用；不新增 migration
 - 重要度：中
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：每份備份是 `backups/<13 位數毫秒>-<觸發原因>/`，內含 Online Backup API 的快照 `control.sqlite` 與 `manifest.json`（觸發原因、時間、schema 版本、快照雜湊、快照中登記的全部成果版本）；成果檔案複製成 `backups/blobs/<SHA-256>`，多份備份共用；最新一次演練結果寫在 `backups/drill.json`。備份清單與演練紀錄都只存在檔案系統，不進控制資料庫，所以本票沒有 migration。備份引擎放在 `baton-store`（需要 SQLite 連線），直接用 `std::fs`，不經 WorkspaceFs Port。
@@ -1522,7 +1630,7 @@
 - 影響：備份目錄可直接整個複製到別處保存；harness 以真實檔案系統驗證。成果副本只在內容雜湊相符時沿用，損毀的副本會在下一次備份時以成果檔案重寫。
 - 審閱：未審
 
-### AI-169：備份不含任何憑證與登入資料：只備份控制資料庫與成果，並清空 `credential` 表
+### AI-181：備份不含任何憑證與登入資料：只備份控制資料庫與成果，並清空 `credential` 表
 - 重要度：高
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：備份只包含控制資料庫快照與被登記的成果檔案。Profile 的原生設定目錄（`profiles/`，含 `.credentials.json`）、DPAPI 保護的桌面憑證檔（`auth/`）、Run 設定快照（`run-settings/`）與日誌都不在備份內。快照中的 `credential` 表（token 雜湊與範圍）在快照上清空並 VACUUM，被刪除的內容不殘留在空閒頁面。情境測試逐位元組掃描備份目錄，確認原生登入 token、登入檔內容、桌面與 Agent 憑證的原文與雜湊、憑證檔內容都不存在。
@@ -1531,7 +1639,7 @@
 - 影響：還原後每個 Profile 都要重新核對；若原本的 Profile 目錄不見了，需要重新登入。舊 Run 的 Agent 憑證在還原後一律 401。
 - 審閱：未審
 
-### AI-170：還原只寫入空目錄；備份當下尚未結束的 Run 在還原時一律結束，派工佇列保留
+### AI-182：還原只寫入空目錄；備份當下尚未結束的 Run 在還原時一律結束，派工佇列保留
 - 重要度：高
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：`restore_backup`（與 `baton-runtime restore <備份目錄> <目標資料目錄>`）只接受空目錄或不存在的目標。資料庫完整時，還原會套用 migration，再把狀態是 starting／running 的 Run 以 `Interrupt` 標為中斷（原因以 `restored_from_backup` 開頭）、queued 的 Run 以 `RequestCancel` 取消（Domain 的狀態機不允許 queued → interrupted，沿用既有的「尚未啟動立即取消」）；兩者都釋放寫入所有權、Outbox 視為處理完畢、Task 回到 ready。派工佇列（`dispatch_request`）不動。
@@ -1540,7 +1648,7 @@
 - 影響：還原後 Runtime 啟動時，排隊中的 Task 會照常被 Scheduler 派出新的 Run；還原時被取消的 queued Run，事件原因是 `cancelled_before_launch`，看不出是還原造成的（Run 的數量記在演練結果的 `interrupted_runs`）。
 - 審閱：未審
 
-### AI-171：觸發規則的解讀：每日 = 距上一份滿 24 小時；每個正式裁定都是「重要裁定」；一小時合併 = 距上一份滿一小時才執行
+### AI-183：觸發規則的解讀：每日 = 距上一份滿 24 小時；每個正式裁定都是「重要裁定」；一小時合併 = 距上一份滿一小時才執行
 - 重要度：中
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：每日備份在距離上一份備份（不論原因）滿 24 小時時建立。每個正式裁定（`POST …/decisions/{id}/answer` 成功，含權限提示的裁定與冪等重送）都要求一次備份；距離上一份備份已滿一小時就在下一次處理時立刻備份，否則等到滿一小時，期間的要求合併成一份。Stage 完成也走同一個入口（`BackupScheduler::request_milestone_backup`），但 Stage 在第四階段才有，目前沒有呼叫端。待處理的要求只存在記憶體。背景迴圈每分鐘檢查一次。
@@ -1549,7 +1657,7 @@
 - 影響：Runtime 在要求後一小時內重啟，那次裁定最晚要等到下一次每日備份才被備份。
 - 審閱：未審
 
-### AI-172：保留規則的解讀：7 個有備份的 UTC 日子與 4 個有備份的週各留最新一份，另留最新一份 migration 前備份
+### AI-184：保留規則的解讀：7 個有備份的 UTC 日子與 4 個有備份的週各留最新一份，另留最新一份 migration 前備份
 - 重要度：中
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：每次備份後套用保留規則：由新到舊，最近 7 個「有備份的 UTC 日子」各留當天最新的一份（每日），最近 4 個「有備份的週」（UTC，星期一開始）各留該週最新的一份（每週），另外永遠留下最新一份 migration 前的備份；其餘刪除，沒有被保留備份引用的成果副本一起刪除。同一天的多份備份（例如每日與重要裁定）只留最新那份。
@@ -1558,7 +1666,7 @@
 - 影響：備份總數最多約 12 份（7＋4，與 migration 前那份可能重疊）。同一天較早的重要裁定備份會被當天較晚的備份取代。
 - 審閱：未審
 
-### AI-173：migration 前的備份失敗時不套用 migration，Runtime 拒絕啟動
+### AI-185：migration 前的備份失敗時不套用 migration，Runtime 拒絕啟動
 - 重要度：中
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：`Store::open` 發現既有資料庫需要套用 migration（已套用版本 > 0 且 < 程式支援的版本）時，先以寫入連線建立 migration 前的備份；備份失敗就回報 `StoreError::PreMigrationBackup`，不套用任何 migration，Runtime 啟動失敗。新建的資料庫與已是最新版本的資料庫不備份；比程式新的資料庫照舊由 `IncompatibleSchema` 處理。
@@ -1567,7 +1675,7 @@
 - 影響：磁碟空間不足時，新版程式在使用者騰出空間之前無法啟動。
 - 審閱：未審
 
-### AI-174：還原演練的做法：第一份備份後立即演練、之後每週；演練最新備份；結果只保留最新一次
+### AI-186：還原演練的做法：第一份備份後立即演練、之後每週；演練最新備份；結果只保留最新一次
 - 重要度：低
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：演練從沒做過、或上次演練已滿 7 天時進行（所以第一份備份之後的第一次處理就會演練）。演練把最新的備份還原到 `backups/.drill/`（與正式資料目錄隔離，前後都整個刪除），核對五項：還原（快照雜湊與 manifest 相符）、`integrity_check`、`foreign_key_check`、成果檔案大小與雜湊、資料庫登記的成果版本與 manifest 一一對應；任何一項沒過就是不通過。結果寫進 `drill.json`，只保留最新一次，設定頁顯示。成果檔案在備份時已缺少或損毀，備份照常完成，由演練回報成果雜湊不一致。
@@ -1576,7 +1684,7 @@
 - 影響：每週會有一次完整複製最新備份的 I/O；演練歷史看不到。
 - 審閱：未審
 
-### AI-175：「備份期間暫停成果清理」目前沒有可暫停的對象；異地副本與還原 UI 不在本票
+### AI-187：「備份期間暫停成果清理」目前沒有可暫停的對象；異地副本與還原 UI 不在本票
 - 重要度：低
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：目前沒有任何會刪除成果檔案的機制（票 12 明定未登記檔案不自動刪除），所以本票沒有實作暫停的開關；備份排程本身以互斥鎖依序進行，保留規則刪除舊備份時不會與備份或演練並行。日後新增成果清理時，必須與 `BackupScheduler::tick` 互斥。spec D-18 的「使用者另外指定的額外備份目錄」沒有列在票面，本票不做；還原只有 `baton-runtime restore` 指令，設定頁只顯示狀態，沒有操作按鈕。
@@ -1585,13 +1693,22 @@
 - 影響：使用者需要在命令列還原；做成果清理的票要記得處理與備份的互斥。
 - 審閱：未審
 
-### AI-176：票 40 整合 rebuild/v1（票 22、13、37）：AI 編號順延為 AI-168～AI-175
+### AI-188：票 40 整合 rebuild/v1（票 22、13、37）：AI 編號順延為 AI-168～AI-175
 - 重要度：低
 - 時間／階段：2026-10-22，票 40 實作
 - 決策：實作期間 rebuild/v1 先後合入票 22（AI-138～AI-147）、票 13（AI-148～AI-158）與票 37（AI-159～AI-167），本票的八個條目改為 AI-168～AI-175，內容不變，放在 AI-167 之後。本票沒有 migration，所以沒有 migration 版本需要順延；整合票 22 後把裁定中心的正式裁定接上備份要求（AI-171）；整合票 37 後 `RuntimeOptions` 同時有 `background_backup` 與 `full_text_search`。
 - 理由：AI 編號只能往後追加，並行的票先合入的保留原編號。
 - 替代方案：保留原編號（會與已合入的條目重複）。
-- 影響：本票較早的 commit 訊息中提到的 AI-148～AI-155 指的是改號前的編號。
+- 影響：本票較早的 commit 訊息中提到的 AI-148～AI-155 指的是改號前的編號。第二次整合（R070-40-integrate）後本票條目再順延為 AI-180～AI-188，本條目內的編號是當時的編號（見 AI-189）。
+- 審閱：未審
+
+### AI-189：票 40 整合 rebuild/v1（票 25）：AI 編號再順延為 AI-180～AI-188；Runtime 同時有備份排程與完全退出
+- 重要度：中
+- 時間／階段：2026-10-22，票 40 整合（R070-40-integrate）
+- 決策：(1) 整合分支併入票 25（`lifecycle`，migration 18；AI-168～AI-179），本票條目原本的 AI-168～AI-176 順延為 AI-180～AI-188，移到 AI-179 之後，內容不變；條目內的交互引用改成新編號，AI-188（原 AI-176）記錄的是第一次整合當時的編號，保留原文並加註。本票沒有 migration，不需順延；整合分支的 18 個 migration 都會套用，migration 前備份照舊在既有資料庫需要升級時觸發。程式碼、開發指南與票面都沒有引用這些編號。(2) 衝突兩邊都保留：`RuntimeOptions` 同時有 `background_backup`（本票）與 `exit_timing`／`exit_linger`（票 25），`RunningRuntime` 同時持有備份排程（`backups`、`backing_up`）與完全退出的執行者（`exiting`、`exits`），`shutdown`／`Drop` 兩者都收尾；測試 harness 同時關閉 Supervisor 與備份的背景迴圈並傳入退出時間參數，`run_backups`、`request_milestone_backup`、`backups_dir` 與 `lifecycle_file_path`、`wait_for_exit` 並存；`baton-api`／`baton-domain` 的模組說明、Tauri 的 `baton_api` 匯入、`fixtures.ts`（備份摘要、演練結果與生命週期）都合併；開發指南的 crate 表以整合分支的列為準，再加回本票的 `backup.rs`、`/api/v1/backups` 與 `baton-runtime restore`，「備份與還原演練」與「桌面生命週期與完全退出」兩節並存。(3) 備份的背景迴圈與其他背景工作一樣監聽同一個停止訊號，完全退出結束服務時隨之結束；完全退出期間不另外暫停備份。本次只整合、不新增行為。
+- 理由：已進入整合分支的條目編號不可改動，順延尚未合併的本票（與 AI-179 同）。備份不建立 Run，也不啟動外部程序，不在票 25「新派工、交接與重試」的阻擋範圍。
+- 替代方案：停止意圖生效時也暫停備份（屬新行為，超出整合範圍；需要時另開票）。
+- 影響：本票較早的 commit 訊息與 `.orchestration` 下的驗證紀錄（R067）提到的 AI-168～AI-176 指的是改號前的編號。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

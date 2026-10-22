@@ -13,7 +13,8 @@ use baton_api::{
     authorization_summary_path, decision_answer_path, decision_path, decisions_path, goals_path, run_cancel_path,
     ArtifactList, ArtifactPreview, SHA256_HEADER,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
-    quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_accept_path, task_path, task_ready_path, task_verification_path, tasks_path, AcceptTaskRequest, QueuedDispatch,
+    quota::plan_limits_path, run_settings_snapshot_path, shared_settings_version_path, task_accept_path, task_path, task_ready_path, task_verification_path, tasks_path, workspace_lifecycle_path, workspace_resume_path, AcceptTaskRequest, LifecycleStatus,
+    QueuedDispatch, UpdateWorkspaceLifecycleRequest, WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     BackupStatus, BACKUPS_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
@@ -304,6 +305,31 @@ impl RuntimeClient {
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。
     pub async fn cancel_run(&self, workspace_id: &str, run_id: &str) -> Result<RunView, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &run_cancel_path(workspace_id, run_id), None).await
+    }
+
+    /// 生命週期總覽：Runtime 階段、完全退出的停止進度與異常、各 Workspace 的自動續跑設定與暫停狀態。
+    pub async fn lifecycle(&self) -> Result<LifecycleStatus, ClientError> {
+        self.get_json(LIFECYCLE_PATH).await
+    }
+
+    /// 完全退出：Runtime 持久化停止意圖後立即回應，停止進度之後以 `lifecycle` 查詢；重複要求是冪等的。
+    pub async fn request_exit(&self) -> Result<LifecycleStatus, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, LIFECYCLE_EXIT_PATH, None).await
+    }
+
+    /// 變更 Workspace 的「完全退出後自動續跑」（只影響下次重新開啟）。
+    pub async fn set_workspace_auto_resume(
+        &self,
+        workspace_id: &str,
+        auto_resume_after_exit: bool,
+    ) -> Result<WorkspaceLifecycleView, ClientError> {
+        let request = UpdateWorkspaceLifecycleRequest { auto_resume_after_exit };
+        self.send_json(reqwest::Method::PUT, &workspace_lifecycle_path(workspace_id), Some(&request)).await
+    }
+
+    /// 「繼續工作」：解除 Workspace 在完全退出後的暫停。
+    pub async fn resume_workspace(&self, workspace_id: &str) -> Result<WorkspaceLifecycleView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &workspace_resume_path(workspace_id), None).await
     }
 
     /// 裁定中心：Workspace 內的裁定請求（待處理優先）與待處理數。

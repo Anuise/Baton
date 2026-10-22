@@ -515,6 +515,108 @@ body {
   max-width: 360px;
 }
 
+.workspace-paused {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 8px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  border-radius: 6px;
+}
+
+.workspace-auto-resume {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.workspace-auto-resume-hint {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.exit-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(31 35 40 / 50%);
+}
+
+.exit-progress {
+  display: grid;
+  gap: 12px;
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  padding: 16px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.exit-progress h2,
+.exit-progress p {
+  margin: 0;
+}
+
+.exit-phase {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.exit-runs,
+.exit-notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.exit-run {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid #d0d7de;
+  overflow-wrap: anywhere;
+}
+
+.exit-run-anomaly strong,
+.exit-progress [role="alert"] {
+  color: #cf222e;
+}
+
+.exit-notes {
+  color: #656d76;
+}
+
+.exit-anomalies {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #ffebe9;
+  border: 1px solid #ff818266;
+  border-radius: 6px;
+}
+
+.exit-anomalies ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.exit-anomalies button {
+  justify-self: start;
+}
+
+.exit-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .status-decisions-pending::before {
   background: #bf8700;
 }

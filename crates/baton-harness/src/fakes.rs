@@ -53,6 +53,17 @@ pub enum HangPoint {
     AfterSpawn,
 }
 
+/// 某個程序被要求停止時的腳本化行為。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FakeStop {
+    /// 回傳這個結果（`StillAlive` 時程序仍存活）。
+    Result(StopResult),
+    /// 停止的呼叫永遠不回來（模擬卡住的停止）。
+    Hang,
+    /// 停止的呼叫失敗。
+    Fail(String),
+}
+
 /// 可腳本化存活狀態的程序控制；不會真的啟動任何程序。
 pub struct FakeProcessControl {
     next_pid: AtomicU32,
@@ -64,7 +75,9 @@ struct ProcessState {
     liveness: HashMap<ProcessIdentity, Liveness>,
     by_command: HashMap<String, ProcessIdentity>,
     stop_result: StopResult,
+    stop_scripts: HashMap<ProcessIdentity, FakeStop>,
     stop_calls: Vec<ProcessIdentity>,
+    stop_graces: Vec<Duration>,
     inspect_count: usize,
     hang: Option<HangPoint>,
     fail_spawn: Option<String>,
@@ -79,7 +92,9 @@ impl Default for FakeProcessControl {
                 liveness: HashMap::new(),
                 by_command: HashMap::new(),
                 stop_result: StopResult::StoppedGracefully,
+                stop_scripts: HashMap::new(),
                 stop_calls: Vec::new(),
+                stop_graces: Vec::new(),
                 inspect_count: 0,
                 hang: None,
                 fail_spawn: None,
@@ -95,6 +110,16 @@ impl FakeProcessControl {
 
     pub fn set_stop_result(&self, result: StopResult) {
         lock(&self.state).stop_result = result;
+    }
+
+    /// 指定某個程序被要求停止時的行為（優先於 `set_stop_result`）。
+    pub fn script_stop(&self, identity: &ProcessIdentity, behavior: FakeStop) {
+        lock(&self.state).stop_scripts.insert(identity.clone(), behavior);
+    }
+
+    /// 每次 `stop` 收到的寬限期，依呼叫順序。
+    pub fn stop_graces(&self) -> Vec<Duration> {
+        lock(&self.state).stop_graces.clone()
     }
 
     /// 下一次 `spawn` 在指定的點永遠不回來（只生效一次）。
@@ -179,14 +204,23 @@ impl ProcessControl for FakeProcessControl {
         Ok(state.liveness.get(identity).copied().unwrap_or(Liveness::Dead))
     }
 
-    async fn stop(&self, identity: &ProcessIdentity, _grace: Duration) -> PortResult<StopResult> {
-        let mut state = lock(&self.state);
-        state.stop_calls.push(identity.clone());
-        let result = state.stop_result;
-        if result != StopResult::StillAlive {
-            state.liveness.insert(identity.clone(), Liveness::Dead);
+    async fn stop(&self, identity: &ProcessIdentity, grace: Duration) -> PortResult<StopResult> {
+        let behavior = {
+            let mut state = lock(&self.state);
+            state.stop_calls.push(identity.clone());
+            state.stop_graces.push(grace);
+            state.stop_scripts.get(identity).cloned().unwrap_or(FakeStop::Result(state.stop_result))
+        };
+        match behavior {
+            FakeStop::Hang => std::future::pending().await,
+            FakeStop::Fail(reason) => Err(PortError::Failed(reason)),
+            FakeStop::Result(result) => {
+                if result != StopResult::StillAlive {
+                    lock(&self.state).liveness.insert(identity.clone(), Liveness::Dead);
+                }
+                Ok(result)
+            }
         }
-        Ok(result)
     }
 }
 

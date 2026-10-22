@@ -1,4 +1,5 @@
 //! 桌面殼：啟動時連回或啟動 Runtime，並把健康狀態提供給 Web UI。
+//! 關閉視窗只隱藏到系統匣（Runtime 繼續工作）；系統匣提供狀態、重新開啟與「完全退出」。
 
 // release 版不顯示額外的主控台視窗
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -9,9 +10,9 @@ use std::time::Duration;
 
 use baton_api::{
     AcceptTaskRequest, AdmissionReport, ArtifactList, ArtifactPreview, AuthorizationView, ConfirmAuthorizationRequest,
-    CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview, LoginTerminalResponse,
-    PendingDecisions, BackupStatus, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus, SummaryRequest,
-    TaskBoard, TaskDetail, WorkspaceList,
+    BackupStatus, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview,
+    LifecycleStatus, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview,
+    SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceLifecycleView, WorkspaceList,
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
 };
@@ -23,6 +24,7 @@ use baton_domain::decision::DecisionView;
 use baton_domain::profile::ProfileView;
 use baton_domain::quota::PlanLimits;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
+use baton_domain::lifecycle::LifecyclePhase;
 use baton_domain::run::RunView;
 use baton_domain::verification::VerificationView;
 use baton_domain::scheduler::CapacityMode;
@@ -31,11 +33,26 @@ use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use base64::Engine;
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tokio::sync::OnceCell;
 
 /// 等待 Runtime 就緒的上限。
 const START_WAIT: Duration = Duration::from_secs(20);
+
+/// 主視窗的標籤（tauri.conf.json 未指定時預設為 `main`）。
+const MAIN_WINDOW: &str = "main";
+
+/// 系統匣「完全退出」通知 Web UI 的事件；Web UI 收到後呼叫 `lifecycle_exit`、顯示停止進度，最後呼叫 `app_quit`。
+const FULL_EXIT_EVENT: &str = "baton://full-exit-requested";
+
+/// 系統匣狀態文字的更新間隔。
+const TRAY_POLL: Duration = Duration::from_secs(3);
+
+/// 後備：按下「完全退出」後若這麼久 App 仍未結束（Web UI 沒反應），殼自行要求退出並結束 App。
+/// Runtime 端的停止流程上限是 40 秒（spec D-11），再留 20 秒給 Web UI 顯示結果。
+const FULL_EXIT_FALLBACK: Duration = Duration::from_secs(60);
 
 /// Runtime 執行檔與桌面殼放在同一個資料夾。
 const RUNTIME_EXE: &str = "baton-runtime.exe";
@@ -598,6 +615,134 @@ async fn artifact_download(
     })
 }
 
+/// Web UI 讀取生命週期總覽：Runtime 階段、完全退出的停止進度與異常、各 Workspace 的自動續跑設定。
+#[tauri::command]
+async fn lifecycle_status(link: State<'_, RuntimeLink>) -> Result<LifecycleStatus, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.lifecycle().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 要求完全退出：Runtime 持久化停止意圖後立即回應，停止進度之後以 `lifecycle_status` 查詢。
+#[tauri::command]
+async fn lifecycle_exit(link: State<'_, RuntimeLink>) -> Result<LifecycleStatus, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.request_exit().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 變更 Workspace 的「完全退出後自動續跑」（只影響下次重新開啟）。
+#[tauri::command]
+async fn workspace_lifecycle_update(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    auto_resume_after_exit: bool,
+) -> Result<WorkspaceLifecycleView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.set_workspace_auto_resume(&workspace_id, auto_resume_after_exit).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的「繼續工作」：解除 Workspace 在完全退出後的暫停。
+#[tauri::command]
+async fn workspace_resume(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+) -> Result<WorkspaceLifecycleView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.resume_workspace(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// 完全退出流程的最後一步：真正結束 App（關閉視窗只會隱藏到系統匣）。
+#[tauri::command]
+fn app_quit(app: AppHandle) {
+    app.exit(0);
+}
+
+/// 顯示並聚焦主視窗（從系統匣重新開啟）。
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// 系統匣的「完全退出」：打開主視窗讓 Web UI 接手停止流程並顯示進度。
+fn request_full_exit(app: &AppHandle) {
+    show_main_window(app);
+    let _ = app.emit_to(MAIN_WINDOW, FULL_EXIT_EVENT, ());
+    // 後備：Web UI 沒反應時也不能無限等。使用者在系統匣按下「完全退出」本身就是停止意圖，
+    // 所以逾時後殼自己送出完全退出（Runtime 端是冪等的，Web UI 已送過也無妨）再結束 App。
+    // Runtime 的停止流程與 App 是否在世無關，結束 App 不會中斷它。
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(FULL_EXIT_FALLBACK).await;
+        let _ = handle.state::<RuntimeLink>().client.request_exit().await;
+        handle.exit(0);
+    });
+}
+
+/// 系統匣狀態項目的文字。
+fn tray_status_text(status: Result<LifecycleStatus, String>) -> String {
+    match status {
+        Ok(status) => match status.phase {
+            LifecyclePhase::Running => format!("Runtime 運作中（進行中 Run：{}）", status.active_runs),
+            LifecyclePhase::Stopping => format!("完全退出中…（進行中 Run：{}）", status.active_runs),
+            LifecyclePhase::Stopped => "Runtime 已停止".to_string(),
+        },
+        Err(_) => "Runtime 無法連線".to_string(),
+    }
+}
+
+/// 建立系統匣：狀態（停用，只顯示）、開啟 Baton、完全退出；左鍵點圖示等同開啟 Baton。
+fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let status = MenuItem::with_id(app, "status", "Runtime 連線中…", false, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "開啟 Baton", true, None::<&str>)?;
+    let full_exit = MenuItem::with_id(app, "full_exit", "完全退出", true, None::<&str>)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&status, &separator, &open, &full_exit])?;
+
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Baton")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => show_main_window(app),
+            "full_exit" => request_full_exit(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                show_main_window(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+
+    // 背景迴圈定期更新狀態文字；先等啟動流程結束，避免啟動途中誤報無法連線
+    let handle = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        let link = handle.state::<RuntimeLink>();
+        loop {
+            let result = match link.ensure_started().await {
+                Ok(_) => link.client.lifecycle().await.map_err(|e| e.to_string()),
+                Err(reason) => Err(reason.clone()),
+            };
+            let _ = status.set_text(tray_status_text(result));
+            tokio::time::sleep(TRAY_POLL).await;
+        }
+    });
+    Ok(())
+}
+
 /// Web UI 知識分頁的列表或搜尋（`include_inactive` 為 false 時只列有效條目）。
 #[tauri::command]
 async fn knowledge_list(
@@ -734,6 +879,11 @@ fn main() {
             artifact_list,
             artifact_preview,
             artifact_download,
+            lifecycle_status,
+            lifecycle_exit,
+            workspace_lifecycle_update,
+            workspace_resume,
+            app_quit,
             profile_set_quota_limits,
             knowledge_list,
             knowledge_create,
@@ -743,7 +893,17 @@ fn main() {
             knowledge_revoke,
             knowledge_retire
         ])
+        // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == MAIN_WINDOW {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
+            setup_tray(app)?;
             // 不等 Web UI 來問：App 一開啟就連回或啟動 Runtime
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
