@@ -695,8 +695,12 @@ pub fn build_prompt(
              每項附來源（Workspace 內的檔案路徑，或附版本的外部來源）；只有被來源支持的描述才標為 confirmed，\
              推測與未確認的關係標為 hypothesis，不知道的標為 unknown。\n\
              工作方法：開始一項工作時以 start_workflow 依情境（功能、缺陷、調查等）選 Playbook，研究與文件工作不套用開發流程；\
-             以 record_stage_result 附證據（已登記的成果、已回答的裁定、已通過接受的 Task）回報目前 Stage，只有文字不會推進；\
-             以 get_workflows 查看進度。已完成的 Stage 不要重跑，從目前 Stage 接續。\n",
+             以 record_stage_result 附證據（已登記的成果、已回答的裁定、已通過接受的 Task、雙軸審查）回報目前 Stage，只有文字不會推進；\
+             以 get_workflows 查看進度。已完成的 Stage 不要重跑，從目前 Stage 接續。\n\
+             審查：需要獨立審查時，派另一個 Task 的 Worker 擔任 reviewer，以 submit_review 分開提交 Standards 與 Spec 兩軸\
+             （作者不能審查自己的工作，你的評估也不能取代審查）；以 classify_review_finding 依證據把 finding 分類為修正、駁回或需裁定\
+             （駁回與需裁定由使用者裁定）；Worker 回報偏離設計時以 resolve_design_deviation 處理（接受須經使用者裁定）；\
+             以 get_reviews 查看審查與偏離。\n",
         );
         if let Some(gap) = history_gap {
             prompt.push_str(&format!("\n注意：{gap}\n"));
