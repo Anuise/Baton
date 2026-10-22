@@ -1,4 +1,11 @@
-import type { AccountProfile, PlatformResponse, SetupStatus, ToolCheck } from "./runtimeClient";
+import type {
+  AccountProfile,
+  ImportPreview,
+  PlatformResponse,
+  SettingsVersionSummary,
+  SetupStatus,
+  ToolCheck,
+} from "./runtimeClient";
 
 /** 測試用的平台狀態：Windows 11 26H2 Pro x64，正式支援。 */
 export const supportedPlatform: PlatformResponse = {
@@ -94,6 +101,50 @@ export function setupStatus(overrides: Partial<SetupStatus> = {}): SetupStatus {
     profile_limit: 8,
     background_notice: { text: "關閉視窗後，Baton 會在背景繼續執行已派出的工作。", acknowledged_at: null },
     ready: true,
+    ...overrides,
+  };
+}
+
+/** 測試用的已採用共同設定版本摘要。 */
+export function settingsVersionSummary(overrides: Partial<SettingsVersionSummary> = {}): SettingsVersionSummary {
+  return {
+    version: 1,
+    content_hash: "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    adopted_at: CHECKED_AT,
+    counts: { preferences: 3, instructions: 1, hooks: 2, mcp_servers: 1, plugins: 4 },
+    exclusion_count: 2,
+    ...overrides,
+  };
+}
+
+/** 測試用的匯入預覽：找到設定檔與指示檔、排除兩項、有一筆新增與一筆變更。 */
+export function importPreview(overrides: Partial<ImportPreview> = {}): ImportPreview {
+  return {
+    candidate_hash: "f0e1d2c3b4a5968778695a4b3c2d1e0f",
+    sources: [
+      { kind: "settings", path: "C:\\Users\\me\\.claude\\settings.json", found: true, sha256: "aa11" },
+      { kind: "instructions", path: "C:\\Users\\me\\.claude\\CLAUDE.md", found: false, sha256: null },
+      { kind: "user_state", path: "C:\\Users\\me\\.claude.json", found: true, sha256: "bb22" },
+    ],
+    exclusions: [
+      { source: "user_state", item: "oauthAccount", reason: "login_related" },
+      { source: "settings", item: "env.MY_API_KEY", reason: "secret_key" },
+    ],
+    bundle: {
+      preferences: { model: "opus", theme: "dark" },
+      instructions: null,
+      hooks: {},
+      mcp_servers: {},
+      plugins: {},
+      marketplaces: {},
+    },
+    base_version: 1,
+    diff: [
+      { category: "preferences", key: "theme", change: "added", before: null, after: "dark" },
+      { category: "preferences", key: "model", change: "changed", before: "sonnet", after: "opus" },
+      { category: "mcp", key: "docs", change: "removed", before: { command: "docs-server" }, after: null },
+    ],
+    changed: true,
     ...overrides,
   };
 }

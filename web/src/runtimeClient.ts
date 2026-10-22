@@ -393,13 +393,116 @@ export interface AccountClient {
   acknowledgeBackgroundNotice(): Promise<SetupStatus>;
 }
 
-export type AppClient = RuntimeClient & WorkspaceClient & AuthorizationClient & TaskClient & AccountClient;
+/** 共同設定的來源種類（對應 Rust 的 SourceKind）。 */
+export type SettingsSourceKind = "settings" | "instructions" | "user_state";
+
+/** 一個來源檔的讀取結果；只有路徑與雜湊，不含內容。 */
+export interface SourceReport {
+  kind: SettingsSourceKind;
+  path: string;
+  found: boolean;
+  sha256: string | null;
+}
+
+/** 沒有被匯入的項目與原因；永遠不含值。 */
+export interface SettingsExclusion {
+  source: SettingsSourceKind;
+  item: string;
+  reason: "login_related" | "secret_key" | "secret_value";
+}
+
+export type SettingsCategory = "preferences" | "instructions" | "hooks" | "mcp" | "plugins";
+
+export interface SettingsDiffEntry {
+  category: SettingsCategory;
+  key: string;
+  change: "added" | "removed" | "changed";
+  before: unknown;
+  after: unknown;
+}
+
+/** 一個共同設定版本的內容。 */
+export interface SettingsBundle {
+  preferences: Record<string, unknown>;
+  instructions: string | null;
+  hooks: Record<string, unknown>;
+  mcp_servers: Record<string, unknown>;
+  plugins: Record<string, unknown>;
+  marketplaces: Record<string, unknown>;
+}
+
+export interface SettingsBundleCounts {
+  preferences: number;
+  instructions: number;
+  hooks: number;
+  mcp_servers: number;
+  plugins: number;
+}
+
+export interface SettingsVersionSummary {
+  version: number;
+  content_hash: string;
+  adopted_at: number;
+  counts: SettingsBundleCounts;
+  exclusion_count: number;
+}
+
+/** 已採用的共同設定版本（不可變）；`versions` 由舊到新。 */
+export interface SharedSettingsStatus {
+  current: SettingsVersionSummary | null;
+  versions: SettingsVersionSummary[];
+}
+
+/** 預覽匯入：不保存任何東西；採用時要帶回 `candidate_hash`。 */
+export interface ImportPreview {
+  candidate_hash: string;
+  sources: SourceReport[];
+  exclusions: SettingsExclusion[];
+  bundle: SettingsBundle;
+  base_version: number | null;
+  diff: SettingsDiffEntry[];
+  changed: boolean;
+}
+
+export interface SettingsVersion {
+  version: number;
+  content_hash: string;
+  bundle: SettingsBundle;
+  sources: SourceReport[];
+  exclusions: SettingsExclusion[];
+  adopted_at: number;
+}
+
+/** 共同設定：唯讀匯入使用者平常的 Claude Code 設定，採用後建立不可變版本。 */
+export interface SharedSettingsClient {
+  getSharedSettingsStatus(): Promise<SharedSettingsStatus>;
+  previewSharedSettings(): Promise<ImportPreview>;
+  /** 採用預覽的內容；來源在預覽後改變時以 `settings_source_changed` 拒絕。 */
+  adoptSharedSettings(expectedHash: string): Promise<SettingsVersion>;
+  getSharedSettingsVersion(version: number): Promise<SettingsVersion>;
+}
+
+export type AppClient = RuntimeClient &
+  WorkspaceClient &
+  AuthorizationClient &
+  TaskClient &
+  AccountClient &
+  SharedSettingsClient;
+
+/** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
+export function errorCode(error: unknown): string | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === "string") return code;
+  const message = error instanceof Error ? error.message : String(error);
+  return /^Runtime 拒絕連線（([a-z0-9_]+)）/.exec(message)?.[1] ?? null;
+}
 
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
 const WORKSPACES_PATH = "/api/v1/workspaces";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
+const SHARED_SETTINGS_PATH = "/api/v1/shared-settings";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
@@ -408,8 +511,9 @@ const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(works
 export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
   /** 非 2xx 時優先採用 Runtime 回報的說明（`{ error, message }`），沒有才退回狀態碼。 */
   const failure = async (response: Response) => {
-    const body = (await response.json().catch(() => null)) as { message?: string } | null;
-    return new Error(body?.message ?? `Runtime 回應 ${response.status}`);
+    const body = (await response.json().catch(() => null)) as { error?: string; message?: string } | null;
+    // 穩定代碼掛在 `code`，讓畫面能辨識特定情況（例如 settings_source_changed）
+    return Object.assign(new Error(body?.message ?? `Runtime 回應 ${response.status}`), { code: body?.error });
   };
   /** Task 相關端點共用：有 body 時以 JSON 送出（`undefined` 欄位不會出現在 JSON 裡）。 */
   const send = async <T>(path: string, request?: { method: string; body?: unknown }): Promise<T> => {
@@ -499,6 +603,11 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     getSetup: () => send(SETUP_PATH),
     recheckSetup: () => send(`${SETUP_PATH}/recheck`, { method: "POST" }),
     acknowledgeBackgroundNotice: () => send(`${SETUP_PATH}/background-notice/acknowledge`, { method: "POST" }),
+    getSharedSettingsStatus: () => send(SHARED_SETTINGS_PATH),
+    previewSharedSettings: () => send(`${SHARED_SETTINGS_PATH}/import-preview`, { method: "POST" }),
+    adoptSharedSettings: (expectedHash) =>
+      send(`${SHARED_SETTINGS_PATH}/adopt`, { method: "POST", body: { expected_hash: expectedHash } }),
+    getSharedSettingsVersion: (version) => send(`${SHARED_SETTINGS_PATH}/versions/${version}`),
     dispatchTask: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/dispatch`, { method: "POST" }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
@@ -548,6 +657,10 @@ export function createTauriClient(invoke: Invoke): AppClient {
     getSetup: () => call<SetupStatus>("setup_status"),
     recheckSetup: () => call<SetupStatus>("setup_recheck"),
     acknowledgeBackgroundNotice: () => call<SetupStatus>("setup_acknowledge_notice"),
+    getSharedSettingsStatus: () => call<SharedSettingsStatus>("shared_settings_status"),
+    previewSharedSettings: () => call<ImportPreview>("shared_settings_preview"),
+    adoptSharedSettings: (expectedHash) => call<SettingsVersion>("shared_settings_adopt", { expectedHash }),
+    getSharedSettingsVersion: (version) => call<SettingsVersion>("shared_settings_version", { version }),
     dispatchTask: (workspaceId, taskId) => call<RunView>("task_dispatch", { workspaceId, taskId }),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
   };

@@ -4,6 +4,7 @@ import { AccountsPage } from "./AccountsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { PlatformPage } from "./PlatformPage";
 import { SetupWizard } from "./SetupWizard";
+import { SharedSettingsPage } from "./SharedSettingsPage";
 import { StatusBar } from "./StatusBar";
 import { createRuntimeClient, type AppClient, type HealthResponse, type Workspace } from "./runtimeClient";
 import { TaskBoard } from "./TaskBoard";
@@ -40,6 +41,7 @@ export function App() {
           <h1>{health?.product ?? ""}</h1>
           {client && <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
+          {client && <SharedSettingsPage client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
           {client && <PlatformPage client={client} />}

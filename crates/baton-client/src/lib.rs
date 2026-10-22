@@ -11,16 +11,19 @@ use std::time::Duration;
 use baton_api::{
     admission_check_path, authorization_path, authorization_summary_path, goals_path, run_cancel_path,
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
-    task_path, task_ready_path, tasks_path,
-    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
-    CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse,
-    LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus, SummaryRequest, TaskBoard, TaskDetail,
+    run_settings_snapshot_path, shared_settings_version_path, task_path, task_ready_path, tasks_path,
+    AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AuthorizationView,
+    ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
+    ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PlatformResponse, ProfileList,
+    RunSettingsSnapshot, SetupStatus, SharedSettingsStatus, SnapshotRequest, SummaryRequest, TaskBoard, TaskDetail,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, PROFILES_PATH,
-    SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, WORKSPACES_PATH,
+    SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH, SHARED_SETTINGS_PATH,
+    SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
 };
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
 use baton_domain::run::RunView;
+use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
@@ -232,6 +235,38 @@ impl RuntimeClient {
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。
     pub async fn cancel_run(&self, workspace_id: &str, run_id: &str) -> Result<RunView, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &run_cancel_path(workspace_id, run_id), None).await
+    }
+
+    /// 共同設定的目前狀態：已採用的版本與最新版本。
+    pub async fn shared_settings(&self) -> Result<SharedSettingsStatus, ClientError> {
+        self.get_json(SHARED_SETTINGS_PATH).await
+    }
+
+    /// 預覽匯入：來源、排除項目與相對於目前版本的差異（不保存任何東西）。
+    pub async fn preview_settings_import(&self) -> Result<ImportPreview, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, SHARED_SETTINGS_PREVIEW_PATH, None).await
+    }
+
+    /// 採用預覽的內容成為新版本；來源在預覽後改變時回傳 `ClientError::Rejected`（`settings_source_changed`）。
+    pub async fn adopt_settings(&self, expected_hash: &str) -> Result<SettingsVersion, ClientError> {
+        let request = AdoptRequest { expected_hash: expected_hash.to_string() };
+        self.send_json(reqwest::Method::POST, SHARED_SETTINGS_ADOPT_PATH, Some(&request)).await
+    }
+
+    /// 讀取單一共同設定版本（含完整內容）。
+    pub async fn settings_version(&self, version: i64) -> Result<SettingsVersion, ClientError> {
+        self.get_json(&shared_settings_version_path(version)).await
+    }
+
+    /// 為 Run 產生唯讀設定快照；`version` 省略時使用最新版本，Run 已綁定版本時回傳同一個綁定。
+    pub async fn run_settings_snapshot(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+        version: Option<i64>,
+    ) -> Result<RunSettingsSnapshot, ClientError> {
+        let request = SnapshotRequest { version };
+        self.send_json(reqwest::Method::POST, &run_settings_snapshot_path(workspace_id, run_id), Some(&request)).await
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {

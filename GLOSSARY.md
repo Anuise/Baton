@@ -57,6 +57,26 @@
 - **關係**：每個 Run 綁定一個 Account Profile；額度觀測、並行上限與 draining 都以 Account Profile 為單位；各 Profile 之間不共用登入資料；共同設定以版本化快照提供，不直接共用。
 - **避免使用**：account（單說 account 容易與應用程式測試帳號混淆）、user、seat、token。
 
+### 共同設定（Shared Settings）
+- **定義**：所有 Account Profile 的 Agent 共用的行為基準，從使用者平常使用的 Claude Code 設定匯入，分偏好、指示、hooks、MCP 伺服器、plugins 與市集五類。不含任何登入資料；登入與 Session 狀態只留在各 Account Profile 自己的設定目錄。
+- **關係**：只讀白名單來源（`settings.json`、`CLAUDE.md`、`.claude.json` 的 `mcpServers`），絕不改寫使用者的原始設定；經匯入候選預覽、使用者採用後才成為設定版本；各 Account Profile 不直接共用它，Run 只使用自己准入的設定快照。
+- **避免使用**：global settings、user settings（那是使用者原本的設定檔，是匯入的來源，不是共同設定）、config、profile 設定、同步（本平台只單向匯入，不回寫）。
+
+### 設定版本（Settings Version）
+- **定義**：使用者採用匯入候選時建立的共同設定版本，編號從 1 連續遞增，含內容、內容雜湊、來源指紋、排除清單與採用時間。建立後不可變。
+- **關係**：每次採用都建立新版本，即使內容與前一版相同；舊版本內容永不改變；Run 以設定快照固定使用某一版本，之後採用的新版本不影響已准入的 Run；交接與恢復產生的新 Run 重新檢查新版。
+- **避免使用**：revision（授權的確認版本稱 revision，兩者獨立編號）、設定檔版本、覆寫、更新（版本只會新增，不會被更新）。
+
+### 匯入候選（Import Candidate）
+- **定義**：從來源檔讀出、尚未採用的共同設定預覽：候選內容、內容雜湊（`candidate_hash`）、來源指紋、與目前版本的差異，以及沒有被匯入的項目與原因（排除清單，不含值）。不寫入任何地方。
+- **關係**：採用時必須帶預覽的 `candidate_hash`，來源在預覽後改變就拒絕，讓使用者採用的一定是他看過的內容；採用後成為設定版本。登入相關與看起來像秘密的內容在這一步被排除，秘密辨識是啟發式規則，不保證完全涵蓋。
+- **避免使用**：draft、pending settings、匯入結果（泛稱，預覽之後才有「採用」的動作時不夠精確）。
+
+### 設定快照（Run Settings Snapshot）
+- **定義**：某個設定版本渲染成 Run 專屬的唯讀設定目錄（`<資料目錄>\run-settings\<run_id>\`：`settings.json`、`mcp.json`、`CLAUDE.md`、`manifest.json`），內容與版本雜湊一致，`manifest.json` 記錄每個檔案的 SHA-256。
+- **關係**：屬於一個 Run，第一次產生時綁定版本且不再改變；Run 啟動時以設定參數傳給 Claude Code，避免熱重載改變已准入的 Run（此效果仍待實測）；在 Windows 上以檔案唯讀屬性保護，不是安全邊界。
+- **避免使用**：checkpoint（Run 的進度保存，另有專義）、備份、副本、config dump。
+
 ---
 
 ## 二、角色

@@ -335,3 +335,16 @@ fn snapshot_of_an_empty_bundle_has_only_a_manifest_and_rendering_is_deterministi
     assert_eq!(snapshot_files(&version), files);
     assert_eq!(bundle_from_snapshot_files(&[]).unwrap(), SettingsBundle::default());
 }
+
+#[test]
+fn secrets_glued_to_cjk_text_or_flags_are_still_detected() {
+    for secret in [
+        "備忘：ghp_abcdefghijklmnopqrstuvwxyz0123",
+        "金鑰sk-ant-api03-abcdefghijklmnop",
+        "--key=sk-ant-api03-abcdefghijklmnop",
+        "備忘password=hunter2hunter2",
+    ] {
+        assert!(secrets::contains_secret_value(secret), "{secret} 應被偵測");
+    }
+    assert!(!secrets::contains_secret_value("備忘：下一步 token=1"), "短值不算");
+}

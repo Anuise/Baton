@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use baton_api::{
     AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest, CreateProfileRequest, CreateTaskRequest,
-    CreateWorkspaceRequest, HealthResponse, LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus,
-    SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
+    CreateWorkspaceRequest, HealthResponse, ImportPreview, LoginTerminalResponse, PlatformResponse, ProfileList,
+    SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, RuntimeClient};
 use baton_credential::DpapiProtector;
@@ -18,6 +18,7 @@ use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
 use baton_domain::profile::ProfileView;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
 use baton_domain::run::RunView;
+use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use tauri::{Manager, State};
@@ -172,6 +173,42 @@ async fn profile_archive(link: State<'_, RuntimeLink>, id: String) -> Result<Pro
         return Err(reason.clone());
     }
     link.client.archive_profile(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 取得共同設定的目前狀態（已採用的版本）。
+#[tauri::command]
+async fn shared_settings_status(link: State<'_, RuntimeLink>) -> Result<SharedSettingsStatus, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.shared_settings().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 預覽匯入使用者既有的 Claude Code 設定（不保存、不改寫來源）。
+#[tauri::command]
+async fn shared_settings_preview(link: State<'_, RuntimeLink>) -> Result<ImportPreview, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.preview_settings_import().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 採用預覽的內容成為新版本；`expected_hash` 為預覽回傳的候選雜湊。
+#[tauri::command]
+async fn shared_settings_adopt(link: State<'_, RuntimeLink>, expected_hash: String) -> Result<SettingsVersion, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.adopt_settings(&expected_hash).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 讀取單一共同設定版本。
+#[tauri::command]
+async fn shared_settings_version(link: State<'_, RuntimeLink>, version: i64) -> Result<SettingsVersion, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.settings_version(version).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 取得首次啟動精靈的狀態。
@@ -405,6 +442,10 @@ fn main() {
             profile_verify,
             profile_login_terminal,
             profile_archive,
+            shared_settings_status,
+            shared_settings_preview,
+            shared_settings_adopt,
+            shared_settings_version,
             setup_status,
             setup_recheck,
             setup_acknowledge_notice,

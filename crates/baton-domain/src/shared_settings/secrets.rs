@@ -30,7 +30,7 @@ pub(super) fn is_secret_key(key: &str) -> bool {
     if NAMES.iter().any(|name| normalized.contains(name)) {
         return true;
     }
-    normalized.match_indices("token").any(|(at, _)| normalized[at + "token".len()..].chars().next() != Some('s'))
+    normalized.match_indices("token").any(|(at, _)| !normalized[at + "token".len()..].starts_with('s'))
 }
 
 /// `settings.json` 的 `env` 中會改變認證來源的變數（AI-78：覆蓋會讓 Profile 的原生登入失效）。
@@ -69,15 +69,16 @@ pub(crate) fn contains_secret_value(text: &str) -> bool {
 }
 
 fn word_looks_secret(word: &str) -> bool {
-    // 例如 `--key=sk-ant-…`：整個字、以及每個 `=` 之後的部分都要檢查
-    let tails = std::iter::once(word).chain(word.match_indices('=').map(|(at, _)| &word[at + 1..]));
-    for tail in tails {
-        if known_token_shape(tail.trim_start_matches(|c: char| !c.is_alphanumeric())) {
-            return true;
-        }
+    // 金鑰可能緊貼在中文或其他字元之後（例如「備忘：ghp_…」、`--key=sk-ant-…`），
+    // 所以在每個「前一個字元不是英數、底線或連字號」的位置都檢查一次
+    let boundary = |at: usize| word[..at].chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+    if word.char_indices().any(|(at, _)| boundary(at) && known_token_shape(&word[at..])) {
+        return true;
     }
-    if let Some((key, value)) = word.split_once('=') {
-        let key = key.trim_matches('-');
+    // `名稱=值`：名稱取等號前連續的英數、底線、連字號、點
+    if let Some((before, value)) = word.split_once('=') {
+        let key_start = before.rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))).map_or(0, |i| i + before[i..].chars().next().map_or(1, char::len_utf8));
+        let key = before[key_start..].trim_matches('-');
         if is_secret_key(key) && value.chars().count() >= 6 && !is_reference(value) {
             return true;
         }
