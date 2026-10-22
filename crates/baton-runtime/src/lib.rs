@@ -14,6 +14,8 @@ pub mod supervisor;
 pub mod verifier;
 pub mod windows_platform;
 #[cfg(windows)]
+pub mod windows_login;
+#[cfg(windows)]
 pub mod windows_process;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};

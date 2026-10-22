@@ -1,6 +1,7 @@
 //! Runtime 正式執行檔。
 
-use baton_runtime::production_ports::production_ports;
+use baton_ports::Clock;
+use baton_runtime::production_ports::{production_ports, SystemClock};
 use baton_runtime::single_instance::InstanceGuard;
 use baton_domain::guardian::GUARDIAN_ATTEMPT_ENV;
 use baton_domain::login::{START_SOURCE_ENV, START_SOURCE_LOGIN};
@@ -31,7 +32,7 @@ async fn run() -> Result<(), String> {
         return Ok(());
     };
 
-    let ports = production_ports(&config.data_dir);
+    let ports = production_ports(&config.data_dir, config.bind.port());
     // 記下本程序的身分，監護據此確認「是這個 Runtime 結束了」（票 32）
     let instance = InstanceRecord { pid: std::process::id(), recorded_at: ports.clock.now() };
     if let Err(error) = files::write_instance(&files::runtime_instance_path(&config.data_dir), &instance) {
@@ -59,7 +60,7 @@ fn restore(args: &[String]) -> Result<(), String> {
     let [backup_dir, target] = args else {
         return Err("用法：baton-runtime restore <備份目錄> <目標資料目錄>".into());
     };
-    let now = production_ports(target.as_ref()).clock.now();
+    let now = SystemClock.now();
     let report = baton_store::backup::restore_backup(backup_dir.as_ref(), target.as_ref(), now).map_err(|e| e.to_string())?;
     for check in &report.checks {
         println!("{} {:?}：{}", if check.passed { "通過" } else { "失敗" }, check.kind, check.detail);
