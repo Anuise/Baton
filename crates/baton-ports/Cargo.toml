@@ -9,5 +9,6 @@ publish.workspace = true
 baton-domain = { path = "../baton-domain" }
 async-trait = "0.1"
 futures = "0.3"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

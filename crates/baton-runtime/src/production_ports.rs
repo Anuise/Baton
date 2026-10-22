@@ -30,6 +30,9 @@ impl ProcessControl for Unavailable {
     async fn spawn(&self, _spec: SpawnSpec) -> PortResult<Receipt> {
         Err(PortError::NotImplemented("ProcessControl"))
     }
+    async fn find(&self, _spec: &SpawnSpec) -> PortResult<Option<Receipt>> {
+        Err(PortError::NotImplemented("ProcessControl"))
+    }
     async fn inspect(&self, _identity: &ProcessIdentity) -> PortResult<Liveness> {
         Err(PortError::NotImplemented("ProcessControl"))
     }
@@ -40,6 +43,14 @@ impl ProcessControl for Unavailable {
 
 #[async_trait]
 impl AgentAdapter for Unavailable {
+    fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        SpawnSpec {
+            program: String::new(),
+            args: Vec::new(),
+            working_dir: spec.working_dir.clone(),
+            command_id: spec.command_id.clone(),
+        }
+    }
     async fn launch(&self, _spec: RunSpec) -> PortResult<AgentHandle> {
         Err(PortError::NotImplemented("AgentAdapter"))
     }

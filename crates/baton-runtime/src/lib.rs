@@ -8,6 +8,8 @@ pub mod log;
 pub mod production_ports;
 pub mod single_instance;
 pub mod windows_platform;
+#[cfg(windows)]
+pub mod windows_process;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 

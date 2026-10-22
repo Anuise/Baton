@@ -11,6 +11,22 @@ pub struct SpawnSpec {
     pub program: String,
     pub args: Vec<String>,
     pub working_dir: Option<String>,
+    /// 這次啟動的識別：Supervisor 在啟動前先持久化，ProcessControl 以它標記受管的程序，
+    /// Runtime 重建後可用 `find` 找回原執行，不重複啟動（spec D-10）。
+    pub command_id: String,
+}
+
+/// 啟動指令雜湊（SHA-256，十六進位小寫）：program 與每個引數以 NUL 分隔後計算。
+/// 不含 `command_id` 與工作目錄，所以同一個指令永遠得到同一個雜湊。
+pub fn command_hash(spec: &SpawnSpec) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(spec.program.as_bytes());
+    for arg in &spec.args {
+        hasher.update([0u8]);
+        hasher.update(arg.as_bytes());
+    }
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// 程序身分 = PID + 建立時間 + 啟動指令雜湊（spec D-10），避免 PID 重用誤判。
@@ -43,7 +59,11 @@ pub enum StopResult {
 
 #[async_trait]
 pub trait ProcessControl: Send + Sync {
+    /// 啟動程序（放進該 Run 專屬的 Job Object）並回傳回執；回傳之前程序就已被標記為 `spec.command_id`。
     async fn spawn(&self, spec: SpawnSpec) -> PortResult<Receipt>;
+    /// 以 `spec.command_id` 找回先前啟動、仍在受管的程序；沒有（從未啟動，或已全部結束）回傳 `None`。
+    /// 回傳 `Some` 同時代表 ProcessControl 之後可以對該身分 `inspect` 與 `stop`（Runtime 重建後的接續）。
+    async fn find(&self, spec: &SpawnSpec) -> PortResult<Option<Receipt>>;
     async fn inspect(&self, identity: &ProcessIdentity) -> PortResult<Liveness>;
     async fn stop(&self, identity: &ProcessIdentity, grace: Duration) -> PortResult<StopResult>;
 }

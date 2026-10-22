@@ -3,10 +3,11 @@
 //! 每個 fake 都可由測試腳本化（設定回應、事件、存活狀態），並記錄被呼叫的方式，
 //! 讓測試能斷言「沒有第二次 spawn」這類外部行為。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -43,6 +44,15 @@ impl Clock for FakeClock {
     }
 }
 
+/// 模擬 Runtime 在 `spawn` 前後的某一點當掉：到了那一點就永遠不回來（呼叫端的 future 被丟棄即等同崩潰）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HangPoint {
+    /// 程序尚未啟動。
+    BeforeSpawn,
+    /// 程序已啟動並登記，但回執沒有交還給呼叫端。
+    AfterSpawn,
+}
+
 /// 可腳本化存活狀態的程序控制；不會真的啟動任何程序。
 pub struct FakeProcessControl {
     next_pid: AtomicU32,
@@ -52,7 +62,11 @@ pub struct FakeProcessControl {
 struct ProcessState {
     spawned: Vec<SpawnSpec>,
     liveness: HashMap<ProcessIdentity, Liveness>,
+    by_command: HashMap<String, ProcessIdentity>,
     stop_result: StopResult,
+    stop_calls: Vec<ProcessIdentity>,
+    inspect_count: usize,
+    hang: Option<HangPoint>,
 }
 
 impl Default for FakeProcessControl {
@@ -62,7 +76,11 @@ impl Default for FakeProcessControl {
             state: Mutex::new(ProcessState {
                 spawned: Vec::new(),
                 liveness: HashMap::new(),
+                by_command: HashMap::new(),
                 stop_result: StopResult::StoppedGracefully,
+                stop_calls: Vec::new(),
+                inspect_count: 0,
+                hang: None,
             }),
         }
     }
@@ -77,6 +95,11 @@ impl FakeProcessControl {
         lock(&self.state).stop_result = result;
     }
 
+    /// 下一次 `spawn` 在指定的點永遠不回來（只生效一次）。
+    pub fn hang_next_spawn_at(&self, point: HangPoint) {
+        lock(&self.state).hang = Some(point);
+    }
+
     pub fn spawn_count(&self) -> usize {
         lock(&self.state).spawned.len()
     }
@@ -84,29 +107,71 @@ impl FakeProcessControl {
     pub fn spawned(&self) -> Vec<SpawnSpec> {
         lock(&self.state).spawned.clone()
     }
+
+    /// 被要求停止的程序身分，依呼叫順序。
+    pub fn stop_calls(&self) -> Vec<ProcessIdentity> {
+        lock(&self.state).stop_calls.clone()
+    }
+
+    pub fn inspect_count(&self) -> usize {
+        lock(&self.state).inspect_count
+    }
+
+    /// 某個 command_id 啟動出來的程序身分。
+    pub fn identity_of(&self, command_id: &str) -> Option<ProcessIdentity> {
+        lock(&self.state).by_command.get(command_id).cloned()
+    }
+
+    fn take_hang(&self, point: HangPoint) -> bool {
+        let mut state = lock(&self.state);
+        if state.hang == Some(point) {
+            state.hang = None;
+            return true;
+        }
+        false
+    }
 }
 
 #[async_trait]
 impl ProcessControl for FakeProcessControl {
     async fn spawn(&self, spec: SpawnSpec) -> PortResult<Receipt> {
+        if self.take_hang(HangPoint::BeforeSpawn) {
+            std::future::pending::<()>().await;
+        }
         let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
-        let identity = ProcessIdentity {
-            pid,
-            created_at_millis: i64::from(pid),
-            command_hash: format!("{}:{}", spec.program, spec.args.join(" ")),
-        };
-        let mut state = lock(&self.state);
-        state.spawned.push(spec);
-        state.liveness.insert(identity.clone(), Liveness::Alive);
+        let identity =
+            ProcessIdentity { pid, created_at_millis: i64::from(pid), command_hash: command_hash(&spec) };
+        {
+            let mut state = lock(&self.state);
+            state.by_command.insert(spec.command_id.clone(), identity.clone());
+            state.spawned.push(spec);
+            state.liveness.insert(identity.clone(), Liveness::Alive);
+        }
+        if self.take_hang(HangPoint::AfterSpawn) {
+            std::future::pending::<()>().await;
+        }
         Ok(Receipt { identity })
     }
 
+    /// 與正式版一致：程序已經全部結束就找不到。
+    async fn find(&self, spec: &SpawnSpec) -> PortResult<Option<Receipt>> {
+        let state = lock(&self.state);
+        Ok(state
+            .by_command
+            .get(&spec.command_id)
+            .filter(|identity| state.liveness.get(*identity).copied().unwrap_or(Liveness::Dead) != Liveness::Dead)
+            .map(|identity| Receipt { identity: identity.clone() }))
+    }
+
     async fn inspect(&self, identity: &ProcessIdentity) -> PortResult<Liveness> {
-        Ok(lock(&self.state).liveness.get(identity).copied().unwrap_or(Liveness::Dead))
+        let mut state = lock(&self.state);
+        state.inspect_count += 1;
+        Ok(state.liveness.get(identity).copied().unwrap_or(Liveness::Dead))
     }
 
     async fn stop(&self, identity: &ProcessIdentity, _grace: Duration) -> PortResult<StopResult> {
         let mut state = lock(&self.state);
+        state.stop_calls.push(identity.clone());
         let result = state.stop_result;
         if result != StopResult::StillAlive {
             state.liveness.insert(identity.clone(), Liveness::Dead);
@@ -115,13 +180,26 @@ impl ProcessControl for FakeProcessControl {
     }
 }
 
-/// 以 run_id 為鍵、事件腳本化的 Agent Adapter。
+/// 單一 Run 的事件管道：測試隨時 `emit`，Supervisor 隨時取用；Runtime 重建後再接上同一條管道，沒取走的事件還在。
+#[derive(Default)]
+struct EventChannel {
+    queue: VecDeque<AdapterEvent>,
+    waker: Option<Waker>,
+    /// 已經交出 `Exited`：之後串流結束。
+    ended: bool,
+}
+
+type SharedChannel = Arc<Mutex<EventChannel>>;
+
+/// 以 run_id 為鍵、事件可腳本化也可即時推送的 Agent Adapter。
 pub struct FakeAgentAdapter {
     state: Mutex<AdapterState>,
 }
 
 struct AdapterState {
-    scripts: HashMap<String, Vec<AdapterEvent>>,
+    channels: HashMap<String, SharedChannel>,
+    /// 下一個（尚未見過的）Run 一啟動就會自動推送的事件，先進先出。
+    next_scripts: VecDeque<Vec<AdapterEvent>>,
     launched: Vec<RunSpec>,
     capability: Capability,
 }
@@ -130,7 +208,8 @@ impl Default for FakeAgentAdapter {
     fn default() -> Self {
         Self {
             state: Mutex::new(AdapterState {
-                scripts: HashMap::new(),
+                channels: HashMap::new(),
+                next_scripts: VecDeque::new(),
                 launched: Vec::new(),
                 capability: Capability::Resumable,
             }),
@@ -139,14 +218,37 @@ impl Default for FakeAgentAdapter {
 }
 
 impl FakeAgentAdapter {
+    fn channel(&self, run_id: &str) -> SharedChannel {
+        lock(&self.state).channels.entry(run_id.to_string()).or_default().clone()
+    }
+
+    /// 事先放入某個 run 的事件（run_id 已知時使用）。
     pub fn script_events(&self, run_id: &str, events: Vec<AdapterEvent>) {
-        lock(&self.state).scripts.insert(run_id.to_string(), events);
+        for event in events {
+            self.emit(run_id, event);
+        }
+    }
+
+    /// 下一個被啟動的 Run 一啟動就收到這些事件（Run 識別由 Runtime 產生，測試事先不知道）。
+    pub fn script_next_run(&self, events: Vec<AdapterEvent>) {
+        lock(&self.state).next_scripts.push_back(events);
+    }
+
+    /// 即時推送一個事件給某個 Run。
+    pub fn emit(&self, run_id: &str, event: AdapterEvent) {
+        let channel = self.channel(run_id);
+        let mut channel = lock(&channel);
+        channel.queue.push_back(event);
+        if let Some(waker) = channel.waker.take() {
+            waker.wake();
+        }
     }
 
     pub fn set_capability(&self, capability: Capability) {
         lock(&self.state).capability = capability;
     }
 
+    /// 每次 `launch`（含 Runtime 重建後的重新接上）收到的 RunSpec。
     pub fn launched(&self) -> Vec<RunSpec> {
         lock(&self.state).launched.clone()
     }
@@ -154,15 +256,44 @@ impl FakeAgentAdapter {
 
 #[async_trait]
 impl AgentAdapter for FakeAgentAdapter {
+    fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        SpawnSpec {
+            program: "fake-agent".into(),
+            args: vec![spec.run_id.clone()],
+            working_dir: spec.working_dir.clone(),
+            command_id: spec.command_id.clone(),
+        }
+    }
+
     async fn launch(&self, spec: RunSpec) -> PortResult<AgentHandle> {
         let handle = AgentHandle(spec.run_id.clone());
+        let first_time = !lock(&self.state).launched.iter().any(|s| s.run_id == spec.run_id);
+        let script = if first_time { lock(&self.state).next_scripts.pop_front() } else { None };
         lock(&self.state).launched.push(spec);
+        if let Some(events) = script {
+            self.script_events(&handle.0, events);
+        }
         Ok(handle)
     }
 
     fn events(&self, handle: &AgentHandle) -> BoxStream<'static, AdapterEvent> {
-        let events = lock(&self.state).scripts.get(&handle.0).cloned().unwrap_or_default();
-        Box::pin(futures::stream::iter(events))
+        let channel = self.channel(&handle.0);
+        Box::pin(futures::stream::poll_fn(move |cx| {
+            let mut channel = lock(&channel);
+            if channel.ended {
+                return Poll::Ready(None);
+            }
+            match channel.queue.pop_front() {
+                Some(event) => {
+                    channel.ended = matches!(event, AdapterEvent::Exited { .. });
+                    Poll::Ready(Some(event))
+                }
+                None => {
+                    channel.waker = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            }
+        }))
     }
 
     async fn resume_capability(&self, _session: &SessionRef) -> PortResult<Capability> {
