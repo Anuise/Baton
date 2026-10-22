@@ -41,6 +41,9 @@ pub const EVENT_RUN_BLOCKED_REPORTED: &str = "run_blocked_reported";
 /// 派工 Outbox 項目的種類：要求 Supervisor 啟動這個 Run 的程序。
 pub const OUTBOX_LAUNCH_RUN: &str = "launch_run";
 
+/// 寫入 launch intent 時准入已不成立（授權被撤銷、Workspace 被封存）的 Run 結束原因前綴（票 26）。
+pub const LAUNCH_ADMISSION_DENIED: &str = "launch_admission_denied";
+
 /// Worker 的存活訊號間隔（spec D-31）。
 pub const HEARTBEAT_INTERVAL_MS: i64 = 15_000;
 /// lease 的有效期間（spec D-31）；每次 heartbeat 或核對確認存活就從當下重新計算。
@@ -96,7 +99,8 @@ impl RunStatus {
     pub fn allowed_next(self) -> &'static [RunStatus] {
         use RunStatus::*;
         match self {
-            Queued => &[Starting, Cancelled],
+            // queued → failed：寫入 launch intent 時准入已不成立，從未啟動程序（票 26）
+            Queued => &[Starting, Failed, Cancelled],
             Starting => &[Running, Failed, Interrupted, Cancelled],
             Running => &[Succeeded, Failed, Interrupted, Cancelled],
             Succeeded | Failed | Interrupted | Cancelled => &[],
@@ -508,10 +512,26 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             if run.status == RunStatus::Starting && run.command_id.as_deref() == Some(command_id.as_str()) {
                 return Ok(RunChange::default());
             }
+            // 准入：程序啟動前最後一次檢查授權（GLOSSARY「准入」）。派工之後授權被撤銷或 Workspace 被封存，
+            // 就不寫入 launch intent、不啟動程序，Run 以失敗結束，Outbox 視為處理完畢（票 26）
+            let admission = match admit_at_launch(ctx, run) {
+                Ok(admission) => admission,
+                Err(denied) if run.status == RunStatus::Queued => {
+                    let reason = format!("{LAUNCH_ADMISSION_DENIED}：{denied}");
+                    return edit.finish(RunStatus::Failed, EVENT_RUN_FAILED, &reason, TaskStatus::Ready);
+                }
+                Err(denied) => return Err(denied.into()),
+            };
             edit.change_status(RunStatus::Starting)?;
             edit.run.command_id = Some(command_id.clone());
             edit.renew_lease();
-            edit.push(EVENT_RUN_LAUNCH_STARTED, serde_json::json!({ "command_id": command_id }));
+            edit.push(
+                EVENT_RUN_LAUNCH_STARTED,
+                serde_json::json!({
+                    "command_id": command_id,
+                    "authorization_revision": admission.authorization_revision,
+                }),
+            );
             Ok(edit.into_change())
         }
         RunCommand::RecordReceipt { process, .. } => {
@@ -661,6 +681,17 @@ fn check_report(run: &Run, lease: Option<&ExecutionLease>, generation: i64) -> R
         return Err(RunError::StaleReport);
     }
     Ok(())
+}
+
+/// 寫入 launch intent 時的准入：以目前生效的授權重新檢查這個 Task 契約需要的能力。
+fn admit_at_launch(ctx: &RunContext<'_>, run: &Run) -> Result<authorization::Admission, AdmissionDenied> {
+    let required = ctx
+        .task
+        .task(&run.task_id)
+        .and_then(|task| ctx.task.contract_of(task))
+        .map(|contract| contract.content.required_capabilities.as_slice())
+        .unwrap_or_default();
+    authorization::admit(ctx.task.workspace_id, ctx.task.workspace, ctx.task.authorization, required)
 }
 
 /// 派工前的檢查通過後，派工交易需要用到的事實。

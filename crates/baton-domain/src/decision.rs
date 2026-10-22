@@ -524,15 +524,9 @@ pub fn decide(ctx: &DecisionContext<'_>, command: DecisionCommand, now: Timestam
     }
 }
 
-/// 建立請求、讓 Run 的 Task 進入 `waiting_decision`（只有 `running` 的 Task 會轉換）。
-fn open_request(
-    request: DecisionRequest,
-    task: &Task,
-    now: Timestamp,
-    outcome: DecisionOutcome,
-) -> Result<DecisionChange, DecisionError> {
-    let mut change = DecisionChange::new(outcome);
-    change.events.push(event(
+/// 請求建立的事件（請求聚合的第 1 版）；外部操作結果未知時由 Runtime 建立的請求也用它（票 26）。
+pub fn requested_event(request: &DecisionRequest, now: Timestamp) -> DomainEvent {
+    event(
         DECISION_AGGREGATE,
         &request.id,
         1,
@@ -545,7 +539,18 @@ fn open_request(
             "question": request.question,
             "blocking": request.blocking,
         }),
-    ));
+    )
+}
+
+/// 建立請求、讓 Run 的 Task 進入 `waiting_decision`（只有 `running` 的 Task 會轉換）。
+fn open_request(
+    request: DecisionRequest,
+    task: &Task,
+    now: Timestamp,
+    outcome: DecisionOutcome,
+) -> Result<DecisionChange, DecisionError> {
+    let mut change = DecisionChange::new(outcome);
+    change.events.push(requested_event(&request, now));
     if task.status == TaskStatus::Running {
         let mut moved = task.clone();
         let mut versioned = Versioned { task: &mut moved, events: Vec::new(), now };
