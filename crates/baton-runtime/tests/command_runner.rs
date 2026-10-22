@@ -1,6 +1,8 @@
 //! 正式版驗證命令執行器（票 13）以真實程序測試：結束碼、輸出、工作目錄、找不到程式與逾時。
 #![cfg(windows)]
 
+mod support;
+
 use std::time::Duration;
 
 use baton_ports::{CommandOutput, CommandRequest, CommandRunner};
@@ -50,4 +52,6 @@ async fn a_command_that_runs_past_the_timeout_is_stopped() {
 
     assert!(matches!(output, CommandOutput::TimedOut { .. }), "{output:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
+    // 被終止的程序要真的結束，才放得掉它的工作目錄
+    support::remove_temp_dir(dir).await;
 }
