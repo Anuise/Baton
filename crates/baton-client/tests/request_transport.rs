@@ -1,16 +1,19 @@
-//! App 以 0.5 秒輪詢 Runtime：同一個 RuntimeClient 的連續請求要重用連線，不是每次都重新建立 HTTP 用戶端與連線。
+//! RuntimeClient 的傳輸行為，以一個最小的 HTTP/1.1 伺服器代替 Runtime：
+//! - App 以 0.5 秒輪詢 Runtime：同一個 RuntimeClient 的連續請求要重用連線。
+//! - 派工會在 Runtime 端同步準備工作目錄（正式版是 `git worktree add`），不能套用一般請求的 2 秒上限。
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use baton_client::{ClientError, RuntimeClient};
+use baton_client::{ClientError, DispatchOutcome, RuntimeClient};
 use baton_credential::write_desktop_credential;
 use baton_harness::fakes::FakeSecretProtector;
 
-/// 只回 401 的最小 HTTP/1.1 伺服器（保持連線），記下接受了幾條連線。
-fn keep_alive_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+/// 對每個請求都等 `delay` 之後回 `status` 與 `body` 的伺服器（保持連線），記下接受了幾條連線。
+fn fake_runtime(delay: Duration, status: &'static str, body: &'static str) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -32,9 +35,9 @@ fn keep_alive_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
                     }
                     let end = buffer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
                     buffer.drain(..end);
-                    let body = r#"{"error":"credential_invalid","message":"測試"}"#;
+                    std::thread::sleep(delay);
                     let response = format!(
-                        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                         body.len()
                     );
                     if stream.write_all(response.as_bytes()).is_err() {
@@ -47,12 +50,17 @@ fn keep_alive_server() -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     (addr, accepted)
 }
 
+fn client_of(addr: std::net::SocketAddr, data_dir: &std::path::Path) -> RuntimeClient {
+    write_desktop_credential(data_dir, &FakeSecretProtector, &"a".repeat(64)).unwrap();
+    RuntimeClient::new(addr, data_dir.to_path_buf(), Arc::new(FakeSecretProtector))
+}
+
 #[tokio::test]
 async fn consecutive_requests_from_one_client_reuse_the_connection() {
-    let (addr, accepted) = keep_alive_server();
+    let body = r#"{"error":"credential_invalid","message":"測試"}"#;
+    let (addr, accepted) = fake_runtime(Duration::ZERO, "401 Unauthorized", body);
     let data_dir = tempfile::tempdir().unwrap();
-    write_desktop_credential(data_dir.path(), &FakeSecretProtector, &"a".repeat(64)).unwrap();
-    let client = RuntimeClient::new(addr, data_dir.path().to_path_buf(), Arc::new(FakeSecretProtector));
+    let client = client_of(addr, data_dir.path());
 
     for _ in 0..3 {
         let error = client.health().await.unwrap_err();
@@ -60,4 +68,17 @@ async fn consecutive_requests_from_one_client_reuse_the_connection() {
     }
 
     assert_eq!(accepted.load(Ordering::SeqCst), 1, "三次請求應共用同一條連線");
+}
+
+#[tokio::test]
+async fn dispatch_waits_beyond_the_plain_request_limit_while_the_runtime_prepares_the_workdir() {
+    // 負載高或 repo 大時，Runtime 準備工作目錄（建立 worktree、寫入並 fsync `.baton/.gitignore`）超過 2 秒
+    let body = r#"{"queued":true,"task_id":"task_1","priority":0,"reasons":[]}"#;
+    let (addr, _) = fake_runtime(Duration::from_millis(2_500), "202 Accepted", body);
+    let data_dir = tempfile::tempdir().unwrap();
+    let client = client_of(addr, data_dir.path());
+
+    let outcome = client.dispatch_task("ws_1", "task_1").await;
+
+    assert!(matches!(outcome, Ok(DispatchOutcome::Queued(_))), "派工不應在 Runtime 回應前就被當成連不上：{outcome:?}");
 }

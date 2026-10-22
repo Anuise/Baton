@@ -79,7 +79,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 /// 同意更新的請求要先下載並驗證安裝程式（票 34），等待回應的上限。
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-/// 需要在本機執行 `claude`、`git` 的請求（核對登入、精靈檢查）等待回應的上限。
+/// 需要在本機執行 `claude`、`git` 的請求（核對登入、精靈檢查、派工前準備工作目錄）等待回應的上限。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 下載到的成果內容，以及 Runtime 以 `X-Baton-Sha256` 回報的雜湊（Runtime 已與 manifest 核對過）。
@@ -296,7 +296,10 @@ impl RuntimeClient {
     /// 對 ready 的 Task 派工：有帳號與名額就回傳 `queued` 的 Run（程序由 Supervisor 之後才啟動），
     /// 否則排進佇列並回傳等待原因；Task 不能派（不是 ready、契約失效）時回傳 `ClientError::Rejected`。
     pub async fn dispatch_task(&self, workspace_id: &str, task_id: &str) -> Result<DispatchOutcome, ClientError> {
-        self.send_json::<(), _>(reqwest::Method::POST, &task_dispatch_path(workspace_id, task_id), None).await
+        // Runtime 在回應前同步準備工作目錄（`git worktree add`、寫入並 fsync），不適用一般請求的 2 秒上限；
+        // 逾時只代表 App 不再等，Runtime 端的派工照樣完成，App 會誤報連不上
+        self.send_json_within::<(), _>(reqwest::Method::POST, &task_dispatch_path(workspace_id, task_id), None, PROBE_TIMEOUT)
+            .await
     }
 
     /// 一個 Task 的驗證狀況：接受基礎、宣告的檢查、成果 manifest 與歷次驗證紀錄。
