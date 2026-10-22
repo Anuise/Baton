@@ -15,12 +15,14 @@ use baton_api::{
     SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceLifecycleView, WorkspaceList,
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
+    CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOutcome, RuntimeClient};
 use baton_credential::DpapiProtector;
 use baton_store::{AnswerResult, DecisionList};
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
 use baton_domain::decision::DecisionView;
+use baton_domain::guard::Recurrence;
 use baton_domain::profile::ProfileView;
 use baton_domain::quota::PlanLimits;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
@@ -30,7 +32,7 @@ use baton_domain::verification::VerificationView;
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
-use baton_domain::workspace::Workspace;
+use baton_domain::workspace::{ModelOverrides, Workspace};
 use base64::Engine;
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -151,6 +153,19 @@ async fn workspace_archive(link: State<'_, RuntimeLink>, id: String) -> Result<W
         return Err(reason.clone());
     }
     link.client.archive_workspace(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 設定 Workspace 依角色的模型覆寫（只影響之後派出的 Run）。
+#[tauri::command]
+async fn workspace_set_model_overrides(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    overrides: ModelOverrides,
+) -> Result<Workspace, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.set_model_overrides(&id, &overrides).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 列出帳號 Profile 與可派工判定。
@@ -837,6 +852,64 @@ async fn knowledge_retire(
     link.client.retire_knowledge(&id, &request).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 知識分頁的 Guard 列表（票 38）。
+#[tauri::command]
+async fn guard_list(link: State<'_, RuntimeLink>, workspace_id: Option<String>) -> Result<GuardList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.list_guards(workspace_id.as_deref()).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 把教訓轉成 Guard（建立即啟用）。
+#[tauri::command]
+async fn guard_create(link: State<'_, RuntimeLink>, request: CreateGuardRequest) -> Result<GuardView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.create_guard(&request).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 啟用 Guard。
+#[tauri::command]
+async fn guard_enable(link: State<'_, RuntimeLink>, id: String, expected_revision: i64) -> Result<GuardView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.enable_guard(&id, &GuardRevisionRequest { expected_revision }).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 停用 Guard。
+#[tauri::command]
+async fn guard_disable(link: State<'_, RuntimeLink>, id: String, expected_revision: i64) -> Result<GuardView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.disable_guard(&id, &GuardRevisionRequest { expected_revision }).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 查看教訓的重犯事件。
+#[tauri::command]
+async fn knowledge_recurrences(link: State<'_, RuntimeLink>, id: String) -> Result<RecurrenceList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.lesson_recurrences(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 回報一次沒被 Guard 攔下的重犯。
+#[tauri::command]
+async fn knowledge_report_recurrence(
+    link: State<'_, RuntimeLink>,
+    id: String,
+    request: ReportRecurrenceRequest,
+) -> Result<Recurrence, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.report_recurrence(&id, &request).await.map_err(|e| e.to_string())
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
@@ -847,6 +920,7 @@ fn main() {
             workspace_list,
             workspace_create,
             workspace_archive,
+            workspace_set_model_overrides,
             profile_list,
             profile_create,
             profile_verify,
@@ -897,7 +971,13 @@ fn main() {
             knowledge_confirm,
             knowledge_correct,
             knowledge_revoke,
-            knowledge_retire
+            knowledge_retire,
+            guard_list,
+            guard_create,
+            guard_enable,
+            guard_disable,
+            knowledge_recurrences,
+            knowledge_report_recurrence
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {

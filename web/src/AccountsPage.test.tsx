@@ -57,6 +57,7 @@ const overridden = profile({
     source_detail: "ANTHROPIC_API_KEY",
     account: null,
     config_dir_matches: true,
+    cli_version: "2.1.307 (Claude Code)",
   },
   dispatchable: false,
   blockers: [
@@ -95,6 +96,37 @@ describe("帳號頁", () => {
     expect(within(item).getByText(/API key（ANTHROPIC_API_KEY）/, { selector: ".profile-source" })).toBeInTheDocument();
     expect(within(item).getByRole("alert")).toHaveTextContent("已阻擋派工");
     expect(within(item).queryByText("可派工")).not.toBeInTheDocument();
+  });
+
+  it("核對結果顯示 Claude Code 版本；版本過舊時照常顯示後端的阻擋原因，取不到版本時不顯示版本", async () => {
+    const outdated = profile({
+      id: "prof_5",
+      name: "舊版",
+      verification: { ...profile().verification!, cli_version: "2.0.5 (Claude Code)" },
+      dispatchable: false,
+      blockers: [
+        {
+          code: "cli_version_unsupported",
+          message: "Claude Code 版本 2.0.5 低於支援的最低版本 2.1.307，已阻擋派工；請更新 Claude Code 後重新核對",
+        },
+      ],
+    });
+    const unknown = profile({
+      id: "prof_6",
+      name: "不明版本",
+      verification: { ...profile().verification!, cli_version: null },
+      dispatchable: false,
+      blockers: [{ code: "cli_version_unknown", message: "核對時沒有取得 Claude Code 的版本，已阻擋派工" }],
+    });
+
+    render(<AccountsPage client={fakeClient([outdated, unknown])} />);
+
+    const item = (await screen.findByText("舊版")).closest("li")!;
+    expect(within(item).getByText(/Claude Code 版本：2\.0\.5 \(Claude Code\)/, { selector: ".profile-source" })).toBeInTheDocument();
+    expect(within(item).getByRole("alert")).toHaveTextContent("低於支援的最低版本");
+    const unknownItem = screen.getByText("不明版本").closest("li")!;
+    expect(within(unknownItem).getByText(/原生登入/, { selector: ".profile-source" })).not.toHaveTextContent("Claude Code 版本：");
+    expect(within(unknownItem).getByRole("alert")).toHaveTextContent("沒有取得 Claude Code 的版本");
   });
 
   it("身分不符與尚未核對都顯示各自的阻擋原因", async () => {

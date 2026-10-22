@@ -63,6 +63,14 @@ export interface Workspace {
   version: number;
   created_at: number;
   archived_at: number | null;
+  model_overrides: ModelOverrides;
+}
+
+/** 依角色的模型覆寫（對應 Rust 的 ModelOverrides，spec D-30）；`null` 表示沿用帳號的 Claude Code 預設模型。 */
+export interface ModelOverrides {
+  controller: string | null;
+  worker: string | null;
+  reviewer: string | null;
 }
 
 export interface WorkspaceList {
@@ -177,6 +185,8 @@ export interface ProfileVerification {
   source_detail: string | null;
   account: string | null;
   config_dir_matches: boolean;
+  /** 核對當下 `claude --version` 的輸出；取不到時為 `null`。 */
+  cli_version: string | null;
 }
 
 export interface ProfileBlocker {
@@ -298,6 +308,8 @@ export interface WorkspaceClient {
   listWorkspaces(): Promise<WorkspaceList>;
   createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace>;
   archiveWorkspace(id: string): Promise<Workspace>;
+  /** 整組取代依角色的模型覆寫；只影響之後派出的 Run。 */
+  setModelOverrides(id: string, overrides: ModelOverrides): Promise<Workspace>;
 }
 
 /** Workspace 授權：讀取、確認前的摘要、確認並保存（產生新的 revision）。 */
@@ -547,7 +559,8 @@ export type WaitCategory =
   | "dependency"
   | "state_unknown"
   | "account"
-  | "lifecycle";
+  | "lifecycle"
+  | "guard";
 
 /** 等待原因（對應 Rust 的 WaitReason）；`code` 是穩定的機器可讀代碼。 */
 export interface WaitReason {
@@ -555,6 +568,8 @@ export interface WaitReason {
   code: string;
   message: string;
   profile_id?: string;
+  /** 只有 Guard 擋下（`guard_violated`）時才有：擋下的 Guard 與它的來源教訓。 */
+  guard?: { guard_id: string; lesson_id: string; lesson_title: string };
 }
 
 /** 派工回 202：沒有名額或條件不足，Task 留在佇列（對應 Rust 的 QueuedDispatch）。 */
@@ -894,6 +909,86 @@ export interface KnowledgeClient {
   correctKnowledge(id: string, request: CorrectKnowledgeRequest): Promise<KnowledgeEntryView>;
   revokeKnowledge(id: string, request: KnowledgeReasonRequest): Promise<KnowledgeEntryView>;
   retireKnowledge(id: string, request: KnowledgeReasonRequest): Promise<KnowledgeEntryView>;
+}
+
+/** Guard 規則（對應 Rust 的 GuardRule）：啟動前檢查、工具限制、重試政策。 */
+export type GuardRule =
+  /** 契約欄位必須提到 `must_mention`（不分大小寫）。 */
+  | { kind: "preflight"; field: ContractFieldName; must_mention: string }
+  /** Task 不得要求該能力。 */
+  | { kind: "tool_restriction"; capability: Capability }
+  /** 同一份契約失敗 `max_failed_runs` 次（1–20）後不再派工。 */
+  | { kind: "retry_policy"; max_failed_runs: number };
+
+export type GuardStatus = "enabled" | "disabled";
+
+/** Guard 與來源教訓、生效狀態與成效（對應 Rust 的 GuardView）；時間是 UTC 毫秒。 */
+export interface GuardView {
+  id: string;
+  lesson_id: string;
+  rule: GuardRule;
+  status: GuardStatus;
+  revision: number;
+  created_at: number;
+  updated_at: number;
+  lesson: { id: string; title: string; status: KnowledgeStatus; effective: boolean; scope: KnowledgeScope };
+  /** 啟用且來源教訓現在有效。 */
+  active: boolean;
+  /** 不生效的原因；生效中為 null。 */
+  inactive_reason: string | null;
+  /** 規則的中文說明，直接顯示。 */
+  description: string;
+  /** 攔下的重犯次數。 */
+  prevented_count: number;
+  last_prevented_at: number | null;
+  /** Guard 建立之後、沒被攔下而由使用者回報的重犯次數。 */
+  reported_count: number;
+}
+
+export interface GuardList {
+  guards: GuardView[];
+}
+
+export interface CreateGuardRequest {
+  lesson_id: string;
+  rule: GuardRule;
+}
+
+/** 重犯事件：被 Guard 攔下，或沒被攔下而由使用者回報。 */
+export interface Recurrence {
+  id: string;
+  lesson_id: string;
+  guard_id: string | null;
+  workspace_id: string | null;
+  task_id: string | null;
+  contract_version: number | null;
+  kind: "prevented" | "reported";
+  message: string;
+  occurred_at: number;
+}
+
+export interface RecurrenceList {
+  /** 由新到舊。 */
+  recurrences: Recurrence[];
+}
+
+export interface ReportRecurrenceRequest {
+  note: string;
+  workspace_id?: string;
+  task_id?: string;
+}
+
+/** Guard 與重犯事件（只有桌面憑證能用）。 */
+export interface GuardClient {
+  /** `workspaceId` 省略時只列全域教訓的 Guard。 */
+  listGuards(workspaceId?: string): Promise<GuardList>;
+  /** 從有效的已驗證教訓建立 Guard；建立即啟用。 */
+  createGuard(request: CreateGuardRequest): Promise<GuardView>;
+  enableGuard(id: string, expectedRevision: number): Promise<GuardView>;
+  disableGuard(id: string, expectedRevision: number): Promise<GuardView>;
+  listRecurrences(lessonId: string): Promise<RecurrenceList>;
+  /** 回報一次沒被攔下的重犯。 */
+  reportRecurrence(lessonId: string, request: ReportRecurrenceRequest): Promise<Recurrence>;
 }
 
 /** 並行容量的預設：保留交接容量（預設）或較高並行。 */
@@ -1260,7 +1355,8 @@ export type AppClient = RuntimeClient &
   ArtifactClient &
   SharedSettingsClient &
   BackupClient &
-  KnowledgeClient;
+  KnowledgeClient &
+  GuardClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
 export function errorCode(error: unknown): string | null {
@@ -1291,6 +1387,8 @@ const artifactVersionPath = (workspaceId: string, artifactId: string, version: n
   `${workspacePath(workspaceId)}/artifacts/${encodeURIComponent(artifactId)}/versions/${version}`;
 const KNOWLEDGE_PATH = "/api/v1/knowledge";
 const knowledgePath = (id: string) => `${KNOWLEDGE_PATH}/${encodeURIComponent(id)}`;
+const GUARDS_PATH = "/api/v1/guards";
+const guardPath = (id: string) => `${GUARDS_PATH}/${encodeURIComponent(id)}`;
 
 /** 列表查詢字串：未指定的 workspace_id 與空白的 q 不送出。 */
 function knowledgeListPath({ workspaceId, q, includeInactive }: KnowledgeListQuery): string {
@@ -1353,6 +1451,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       if (!response.ok) throw await failure(response);
       return (await response.json()) as Workspace;
     },
+    setModelOverrides: (id, overrides) =>
+      send(`${workspacePath(id)}/model-overrides`, { method: "PUT", body: overrides }),
     async getAuthorization(workspaceId) {
       const response = await fetchFn(authorizationPath(workspaceId));
       if (!response.ok) throw await failure(response);
@@ -1452,6 +1552,16 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     correctKnowledge: (id, request) => send(`${knowledgePath(id)}/correct`, { method: "POST", body: request }),
     revokeKnowledge: (id, request) => send(`${knowledgePath(id)}/revoke`, { method: "POST", body: request }),
     retireKnowledge: (id, request) => send(`${knowledgePath(id)}/retire`, { method: "POST", body: request }),
+    listGuards: (workspaceId) =>
+      send(workspaceId === undefined ? GUARDS_PATH : `${GUARDS_PATH}?workspace_id=${encodeURIComponent(workspaceId)}`),
+    createGuard: (request) => send(GUARDS_PATH, { method: "POST", body: request }),
+    enableGuard: (id, expectedRevision) =>
+      send(`${guardPath(id)}/enable`, { method: "POST", body: { expected_revision: expectedRevision } }),
+    disableGuard: (id, expectedRevision) =>
+      send(`${guardPath(id)}/disable`, { method: "POST", body: { expected_revision: expectedRevision } }),
+    listRecurrences: (lessonId) => send(`${knowledgePath(lessonId)}/recurrences`),
+    reportRecurrence: (lessonId, request) =>
+      send(`${knowledgePath(lessonId)}/recurrences`, { method: "POST", body: request }),
   };
 }
 
@@ -1476,6 +1586,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     listWorkspaces: () => call<WorkspaceList>("workspace_list"),
     createWorkspace: ({ path, name }) => call<Workspace>("workspace_create", { path, name }),
     archiveWorkspace: (id) => call<Workspace>("workspace_archive", { id }),
+    setModelOverrides: (id, overrides) => call<Workspace>("workspace_set_model_overrides", { id, overrides }),
     getAuthorization: (id) => call<AuthorizationView>("workspace_authorization", { id }),
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
     confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion }) =>
@@ -1559,6 +1670,12 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     correctKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_correct", { id, request }),
     revokeKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_revoke", { id, request }),
     retireKnowledge: (id, request) => call<KnowledgeEntryView>("knowledge_retire", { id, request }),
+    listGuards: (workspaceId) => call<GuardList>("guard_list", { workspaceId }),
+    createGuard: (request) => call<GuardView>("guard_create", { request }),
+    enableGuard: (id, expectedRevision) => call<GuardView>("guard_enable", { id, expectedRevision }),
+    disableGuard: (id, expectedRevision) => call<GuardView>("guard_disable", { id, expectedRevision }),
+    listRecurrences: (id) => call<RecurrenceList>("knowledge_recurrences", { id }),
+    reportRecurrence: (id, request) => call<Recurrence>("knowledge_report_recurrence", { id, request }),
   };
 }
 

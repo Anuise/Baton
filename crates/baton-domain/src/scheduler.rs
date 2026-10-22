@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::authorization::AdmissionDenied;
 use crate::event::DomainEvent;
+use crate::guard::GuardSource;
 use crate::profile::{self, AccountProfile, ProfileStatus};
 use crate::run::{self, Run, RunContext, RunError};
 use crate::task::MissingCode;
@@ -159,6 +160,8 @@ pub enum WaitCategory {
     Account,
     /// 完全退出的停止意圖生效中，或 Workspace 在完全退出後等待「繼續工作」（票 25）。
     Lifecycle,
+    /// 已啟用的 Guard 擋下（票 38）：依來源教訓修改契約，或在知識分頁停用該 Guard 後自動再試。
+    Guard,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,13 +173,16 @@ pub struct WaitReason {
     /// 原因屬於某個帳號時的 Profile 識別。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
+    /// 被 Guard 擋下時，該 Guard 與它的來源教訓。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<GuardSource>,
 }
 
 fn reason(category: WaitCategory, code: &str, message: String, profile_id: Option<&str>) -> WaitReason {
-    WaitReason { category, code: code.to_string(), message, profile_id: profile_id.map(str::to_string) }
+    WaitReason { category, code: code.to_string(), message, profile_id: profile_id.map(str::to_string), guard: None }
 }
 
-/// Task 層級的等待原因（授權、相依）；其他派工錯誤（Task 不是 ready、已有寫入者、契約失效）不是「等一等就好」，
+/// Task 層級的等待原因（授權、相依、Guard）；其他派工錯誤（Task 不是 ready、已有寫入者、契約失效）不是「等一等就好」，
 /// 回傳 `None` 讓呼叫端照原樣拒絕。
 pub fn task_wait_reasons(error: &RunError) -> Option<Vec<WaitReason>> {
     let authorization = |code: &str, message: String| reason(WaitCategory::Authorization, code, message, None);
@@ -184,6 +190,21 @@ pub fn task_wait_reasons(error: &RunError) -> Option<Vec<WaitReason>> {
         RunError::DependenciesUnfinished(_) => {
             Some(vec![reason(WaitCategory::Dependency, "dependencies_unfinished", error.to_string(), None)])
         }
+        // 每個違反的 Guard 各一個原因，帶著來源教訓
+        RunError::GuardViolated(violations) => Some(
+            violations
+                .iter()
+                .map(|v| WaitReason {
+                    guard: Some(v.source()),
+                    ..reason(
+                        WaitCategory::Guard,
+                        "guard_violated",
+                        format!("{}（來源教訓「{}」）", v.message, v.lesson_title),
+                        None,
+                    )
+                })
+                .collect(),
+        ),
         RunError::AdmissionRejected(
             denied @ (AdmissionDenied::AuthorizationUnconfirmed(_) | AdmissionDenied::CapabilityNotGranted { .. }),
         ) => Some(vec![authorization(denied.code(), denied.to_string())]),
@@ -261,7 +282,7 @@ pub fn usable_profiles(profiles: &[AccountProfile]) -> Vec<&AccountProfile> {
 /// 把 Profile 的阻擋原因對應成呼叫端看得懂的類別：還沒核對、無法確認身分是「狀態不明」，其餘是帳號問題。
 fn profile_blocker_category(code: &str) -> WaitCategory {
     match code {
-        "profile_unverified" | "identity_unconfirmed" => WaitCategory::StateUnknown,
+        "profile_unverified" | "identity_unconfirmed" | "cli_version_unknown" => WaitCategory::StateUnknown,
         _ => WaitCategory::Account,
     }
 }

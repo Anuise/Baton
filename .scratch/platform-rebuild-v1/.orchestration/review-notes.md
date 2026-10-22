@@ -23,3 +23,13 @@
 ## 5. 備份還原的兩個小問題（票 40）
 - `restore_backup` 直接把 manifest 的 `storage_path` 接到目標路徑，沒有防 `..` 路徑穿越；改為拒絕絕對路徑與任何 `..` 元件。
 - `baton-runtime restore` 失敗時的錯誤訊息帶著「Runtime 啟動失敗：」前綴，改用還原專用的訊息。
+
+## 6. Adapter 的兩個觀察（票 14）
+- `spawn_spec` 以 `is_file()` 判斷快照檔是否存在，`command_hash` 因而依賴檔案系統狀態；Run 啟動後快照被刪，重建時對回執未寫回的 Run 算出的雜湊會不同。改為只依 Run 綁定的快照版本計算。
+- CLI 版本只在核對 Profile 時記錄；降版要到下次核對才會被擋。評估是否在每次啟動前比對。
+
+## 7. 重犯回報靜默丟棄 workspace_id（票 38）
+- `POST /api/v1/knowledge/{id}/recurrences` 只帶 `workspace_id`、不帶 `task_id` 時，`crates/baton-api/src/guards.rs` 的 `report` 會靜默丟棄 `workspace_id`。改為保存或明確回 400。
+
+## 8. 訊息字串內多餘空白（票 35）
+- `crates/baton-api/src/agent.rs:436` 的 `requires_decision` 回應訊息中間夾了約 17 個空白，改用 `\` 續行或刪除。

@@ -14,6 +14,7 @@ pub mod fakes;
 use std::ops::Deref;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use baton_domain::agent::AGENT_TOKEN_ENV;
 use baton_domain::auth::Role;
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::Timestamp;
-use baton_ports::Ports;
+use baton_ports::{AgentAdapter, Ports};
 use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeOptions};
 use serde::de::DeserializeOwned;
 use tempfile::TempDir;
@@ -35,9 +36,13 @@ const DEFAULT_CLOCK_START: Timestamp = Timestamp::from_millis(1_000_000_000_000)
 /// 在 Runtime 第一次啟動之前整理資料目錄的函式（例如放入較新版本的資料庫）。
 type PrepareDataDir = Box<dyn FnOnce(&Path)>;
 
+/// 以資料目錄建立 Agent Adapter 的函式（例如真實的 Claude Code Adapter，其 Run 檔案放在資料目錄下）。
+type AdapterFactory = Box<dyn FnOnce(&Path) -> Arc<dyn AgentAdapter>>;
+
 pub struct HarnessBuilder {
     clock_start: Timestamp,
     prepare: Option<PrepareDataDir>,
+    adapter: Option<AdapterFactory>,
     exit_timing: ExitTiming,
     full_text_search: bool,
 }
@@ -67,6 +72,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// 以指定的 Agent Adapter 取代 fake（其餘 Port 仍是 fake）；重啟時沿用同一個 Adapter。
+    pub fn agent_adapter(mut self, factory: impl FnOnce(&Path) -> Arc<dyn AgentAdapter> + 'static) -> Self {
+        self.adapter = Some(Box::new(factory));
+        self
+    }
+
     pub async fn start(self) -> Harness {
         self.try_start().await.unwrap_or_else(|e| panic!("Runtime 啟動失敗：{e}"))
     }
@@ -78,22 +89,28 @@ impl HarnessBuilder {
             prepare(data_dir.path());
         }
         let fakes = FakePorts::new(self.clock_start);
-        let runtime = try_start_runtime(data_dir.path(), &fakes.to_ports(), self.exit_timing, self.full_text_search).await?;
-        Ok(Harness {
+        let adapter = self.adapter.map(|factory| factory(data_dir.path()));
+        let mut harness = Harness {
             data_dir,
             fakes,
-            runtime: Some(runtime),
+            adapter,
+            runtime: None,
             http: reqwest::Client::new(),
             exit_timing: self.exit_timing,
             exits_seen: AtomicU64::new(0),
             full_text_search: self.full_text_search,
-        })
+        };
+        harness.runtime =
+            Some(try_start_runtime(harness.data_dir.path(), &harness.ports(), harness.exit_timing, harness.full_text_search).await?);
+        Ok(harness)
     }
 }
 
 pub struct Harness {
     data_dir: TempDir,
     fakes: FakePorts,
+    /// 取代 fake 的 Agent Adapter；`None` 時用 `fakes.agent_adapter`。
+    adapter: Option<Arc<dyn AgentAdapter>>,
     runtime: Option<RunningRuntime>,
     http: reqwest::Client,
     exit_timing: ExitTiming,
@@ -116,6 +133,7 @@ impl Harness {
         HarnessBuilder {
             clock_start: DEFAULT_CLOCK_START,
             prepare: None,
+            adapter: None,
             exit_timing: ExitTiming::default(),
             full_text_search: true,
         }
@@ -136,9 +154,13 @@ impl Harness {
         self.data_dir.path().join(baton_domain::artifact::ARTIFACTS_DIR)
     }
 
-    /// 目前注入給 Runtime 的 Port（同一批 fake）。
+    /// 目前注入給 Runtime 的 Port（同一批 fake；指定了 Agent Adapter 時換成它）。
     pub fn ports(&self) -> Ports {
-        self.fakes.to_ports()
+        let mut ports = self.fakes.to_ports();
+        if let Some(adapter) = &self.adapter {
+            ports.agent_adapter = adapter.clone();
+        }
+        ports
     }
 
     /// 目前 Runtime 的 Store（重建 Runtime 後是新的實例）；故障注入用。
@@ -341,7 +363,7 @@ impl Harness {
             runtime.shutdown().await;
         }
         let runtime =
-            try_start_runtime(self.data_dir.path(), &self.fakes.to_ports(), self.exit_timing, self.full_text_search).await;
+            try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search).await;
         self.runtime = Some(runtime.unwrap_or_else(|e| panic!("Runtime 重啟失敗：{e}")));
         self.exits_seen.store(0, Ordering::SeqCst);
     }

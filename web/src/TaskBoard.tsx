@@ -74,6 +74,7 @@ const WAIT_CATEGORY_LABELS: [WaitCategory, string][] = [
   ["state_unknown", "狀態不明"],
   ["account", "帳號"],
   ["lifecycle", "完全退出"],
+  ["guard", "Guard 擋下"],
 ];
 
 /** Run 仍在進行（尚未結束）。 */
@@ -444,7 +445,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   );
 }
 
-/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、完全退出）。 */
+/** 排隊中：順位與依類別分組的原因（名額已滿、額度、授權、相依、狀態不明、帳號、完全退出、Guard 擋下）。 */
 function QueuedStatus({ position, reasons }: { position: number | null; reasons: WaitReason[] }) {
   return (
     <div className="task-queued" role="group" aria-label="排隊原因">
@@ -461,7 +462,11 @@ function QueuedStatus({ position, reasons }: { position: number | null; reasons:
               <strong>{label}</strong>
               <ul>
                 {inCategory.map((reason, index) => (
-                  <li key={`${reason.code}-${reason.profile_id ?? index}`}>{reason.message}</li>
+                  <li key={`${reason.code}-${reason.profile_id ?? index}`}>
+                    {reason.message}
+                    {/* Guard 擋下時標明來源教訓，讓使用者知道是哪個教訓擋下的 */}
+                    {reason.guard && <p className="task-guard-source">來源教訓：{reason.guard.lesson_title}</p>}
+                  </li>
                 ))}
               </ul>
             </li>

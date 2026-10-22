@@ -31,6 +31,7 @@ fn cmd_spec(command_id: &str, args: &[&str]) -> SpawnSpec {
         working_dir: None,
         command_id: command_id.to_string(),
         env: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -252,6 +253,7 @@ async fn spawn_of_missing_program_fails_without_leftovers() {
         working_dir: None,
         command_id: id.clone(),
         env: Vec::new(),
+        ..Default::default()
     };
 
     assert!(control.spawn(spec.clone()).await.is_err());
@@ -303,4 +305,151 @@ async fn extra_environment_reaches_the_child_and_does_not_change_the_command_has
     }
     let _ = std::fs::remove_file(&marker);
     assert!(!format!("{spec:?}").contains("secret-value"), "Debug 輸出不可含環境變數的值");
+}
+
+/// 等待程序（含整個 Job）自行結束。
+async fn wait_until_finished(control: &WindowsProcessControl, identity: &baton_ports::ProcessIdentity) {
+    let result = control.stop(identity, Duration::from_secs(10)).await.unwrap();
+    assert_eq!(result, StopResult::StoppedGracefully, "程序沒有在時限內自行結束");
+}
+
+fn path_string(path: &std::path::Path) -> String {
+    path.to_str().unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stdout_and_stderr_are_written_to_files() {
+    let id = unique_id("stdio");
+    let _guard = JobGuard(id.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    let err = dir.path().join("err.txt");
+    // 預先寫入舊內容，確認會被覆寫
+    std::fs::write(&out, "stale-content").unwrap();
+    let control = WindowsProcessControl::new();
+    let mut spec = cmd_spec(&id, &["/c", "echo out-line & echo err-line 1>&2"]);
+    spec.stdout_file = Some(path_string(&out));
+    spec.stderr_file = Some(path_string(&err));
+
+    let receipt = control.spawn(spec).await.unwrap();
+    wait_until_finished(&control, &receipt.identity).await;
+
+    let out_text = std::fs::read_to_string(&out).unwrap();
+    let err_text = std::fs::read_to_string(&err).unwrap();
+    assert!(out_text.contains("out-line"), "stdout 檔內容：{out_text:?}");
+    assert!(!out_text.contains("err-line") && !out_text.contains("stale-content"), "stdout 檔內容：{out_text:?}");
+    assert!(err_text.contains("err-line"), "stderr 檔內容：{err_text:?}");
+    assert!(!err_text.contains("out-line"), "stderr 檔內容：{err_text:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stdout_and_stderr_can_share_one_file() {
+    let id = unique_id("stdio-shared");
+    let _guard = JobGuard(id.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let log = path_string(&dir.path().join("log.txt"));
+    let control = WindowsProcessControl::new();
+    let mut spec = cmd_spec(&id, &["/c", "echo out-line & echo err-line 1>&2"]);
+    spec.stdout_file = Some(log.clone());
+    spec.stderr_file = Some(log.clone());
+
+    let receipt = control.spawn(spec).await.unwrap();
+    wait_until_finished(&control, &receipt.identity).await;
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("out-line") && text.contains("err-line"), "共用檔內容：{text:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stdin_is_read_from_a_file() {
+    let id = unique_id("stdin");
+    let _guard = JobGuard(id.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.txt");
+    let out = dir.path().join("out.txt");
+    std::fs::write(&input, "keep-x-line\r\nskip-line\r\n").unwrap();
+    let control = WindowsProcessControl::new();
+    let mut spec = cmd_spec(&id, &["/c", "findstr", "x"]);
+    spec.stdin_file = Some(path_string(&input));
+    spec.stdout_file = Some(path_string(&out));
+
+    let receipt = control.spawn(spec).await.unwrap();
+    wait_until_finished(&control, &receipt.identity).await;
+
+    let text = std::fs::read_to_string(&out).unwrap();
+    assert!(text.contains("keep-x-line"), "stdout 檔內容：{text:?}");
+    assert!(!text.contains("skip-line"), "stdout 檔內容：{text:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stdout_file_can_be_read_while_the_process_is_running() {
+    let id = unique_id("stdout-live");
+    let _guard = JobGuard(id.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.txt");
+    let control = WindowsProcessControl::new();
+    let mut spec = cmd_spec(&id, &["/c", "echo started & ping -n 60 127.0.0.1"]);
+    spec.stdout_file = Some(path_string(&out));
+
+    let receipt = control.spawn(spec).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        // 程序仍持有寫入 handle 時讀取必須成功
+        let bytes = std::fs::read(&out).expect("程序執行中應能讀取 stdout 檔");
+        if String::from_utf8_lossy(&bytes).contains("started") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "等不到 stdout 檔出現輸出");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(control.inspect(&receipt.identity).await.unwrap(), Liveness::Alive);
+    assert_eq!(control.stop(&receipt.identity, SHORT_GRACE).await.unwrap(), StopResult::ForceKilled);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn env_remove_drops_inherited_variables_but_env_still_wins() {
+    let id = unique_id("env-remove");
+    let _guard = JobGuard(id.clone());
+    let suffix = id.replace('-', "_").to_uppercase();
+    let removed = format!("BATON_REMOVED_{suffix}");
+    let overridden = format!("BATON_OVERRIDDEN_{suffix}");
+    let added = format!("BATON_ADDED_{suffix}");
+    std::env::set_var(&removed, "inherited-removed");
+    std::env::set_var(&overridden, "inherited-overridden");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("set.txt");
+    let control = WindowsProcessControl::new();
+    let mut spec = cmd_spec(&id, &["/c", "set"]);
+    spec.stdout_file = Some(path_string(&out));
+    // 以小寫名稱移除，驗證不分大小寫
+    spec.env_remove = vec![removed.to_lowercase(), overridden.clone()];
+    spec.env = vec![(overridden.clone(), "from-env".to_string()), (added.clone(), "added-value".to_string())];
+
+    let receipt = control.spawn(spec).await.unwrap();
+    wait_until_finished(&control, &receipt.identity).await;
+    std::env::remove_var(&removed);
+    std::env::remove_var(&overridden);
+
+    let text = std::fs::read_to_string(&out).unwrap().to_uppercase();
+    assert!(!text.contains(&format!("{removed}=")), "env_remove 的變數仍被繼承");
+    assert!(text.contains(&format!("{overridden}=FROM-ENV")), "env 應蓋過 env_remove");
+    assert!(!text.contains("INHERITED-OVERRIDDEN"), "env_remove 與 env 同名時不應保留繼承值");
+    assert!(text.contains(&format!("{added}=ADDED-VALUE")), "env 指定的變數應出現");
+    assert!(text.contains("SYSTEMROOT="), "其他繼承的變數應保留");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_with_missing_stdin_file_fails_without_leftovers() {
+    let id = unique_id("stdin-missing");
+    let _guard = JobGuard(id.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let missing = path_string(&dir.path().join("no-such-input.txt"));
+    let control = WindowsProcessControl::new();
+    let mut spec = cmd_spec(&id, &["/c", "exit", "0"]);
+    spec.stdin_file = Some(missing.clone());
+
+    let error = control.spawn(spec.clone()).await.expect_err("stdin 檔不存在時 spawn 應失敗");
+    assert!(error.to_string().contains(&missing), "錯誤訊息應包含路徑：{error}");
+    assert!(open_job(&id).is_none(), "失敗的 spawn 不應留下 Job");
+    assert_eq!(control.find(&spec).await.unwrap(), None);
 }

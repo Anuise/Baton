@@ -1,6 +1,6 @@
 # 15: Session 持久化、恢復與替換
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R077-15-impl，2026-10-22 18:18）
 Blocked by: 14
 
 **What to build:** 實作 agent_sessions、session_events、transcript_segments：平台 Session 與原生 Session、程序身分分開保存；同帳號續跑以新 Run 沿用相容 Session；跨帳號或原生 Session 遺失時建立替代 Session、保存 predecessor 與原因；持續把原生對話紀錄匯入受控儲存並記錄缺口（issue §3.1～3.3）。

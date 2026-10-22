@@ -25,6 +25,7 @@ const workspace: Workspace = {
   version: 1,
   created_at: CHECKED_AT,
   archived_at: null,
+  model_overrides: { controller: null, worker: null, reviewer: null },
 };
 
 const answeredDecision = (overrides: Partial<DecisionRequestView> = {}) =>
