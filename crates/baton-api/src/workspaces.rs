@@ -131,7 +131,7 @@ pub(crate) async fn create(
         }
     }
 
-    let command = WorkspaceCommand::Create { id: new_id()?, name: request.name, path };
+    let command = WorkspaceCommand::Create { id: new_id("ws")?, name: request.name, path };
     let created = state.store.apply_workspace_command(command, state.clock.now()).await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -144,8 +144,8 @@ pub(crate) async fn archive(
     Ok(Json(archived))
 }
 
-/// 穩定識別：`ws_` 加 96 位元隨機值（Domain 不產生亂數，由呼叫端提供）。
-fn new_id() -> Result<String, ApiError> {
+/// 穩定識別：前綴加 96 位元隨機值（Domain 不產生亂數，由呼叫端提供）。
+pub(crate) fn new_id(prefix: &str) -> Result<String, ApiError> {
     let mut entropy = [0u8; 12];
     getrandom::fill(&mut entropy).map_err(|e| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -153,5 +153,5 @@ fn new_id() -> Result<String, ApiError> {
         message: format!("無法取得系統亂數：{e}"),
     })?;
     let hex: String = entropy.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("ws_{hex}"))
+    Ok(format!("{prefix}_{hex}"))
 }

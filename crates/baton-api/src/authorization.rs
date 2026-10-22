@@ -133,7 +133,7 @@ impl From<AdmissionCheckError> for ApiError {
     }
 }
 
-fn bad_json(rejection: JsonRejection) -> ApiError {
+pub(crate) fn bad_json(rejection: JsonRejection) -> ApiError {
     ApiError {
         status: StatusCode::BAD_REQUEST,
         code: "bad_request",

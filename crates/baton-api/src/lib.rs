@@ -1,10 +1,11 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
 
 mod authorization;
 mod guard;
+mod tasks;
 mod workspaces;
 
 use std::convert::Infallible;
@@ -25,6 +26,11 @@ use tokio::sync::watch;
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
     AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
+};
+pub use tasks::{
+    goals_path, task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_path,
+    task_ready_path, tasks_path, AddDependencyRequest, AdmissionReport, CreateGoalRequest, CreateTaskRequest, TaskBoard,
+    TaskDetail, UpdateContractRequest,
 };
 pub use guard::{Denial, CLIENT_HEADER, CLIENT_HEADER_VALUE};
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
@@ -99,6 +105,14 @@ pub fn router(state: ApiState) -> Router {
         .route(authorization::AUTHORIZATION_ROUTE, get(authorization::view).put(authorization::confirm))
         .route(authorization::SUMMARY_ROUTE, post(authorization::summary))
         .route(authorization::ADMISSION_ROUTE, post(authorization::admission_check))
+        .route(tasks::GOALS_ROUTE, post(tasks::create_goal))
+        .route(tasks::TASKS_ROUTE, get(tasks::board).post(tasks::create_task))
+        .route(tasks::TASK_ROUTE, get(tasks::detail))
+        .route(tasks::CONTRACT_ROUTE, axum::routing::put(tasks::update_contract))
+        .route(tasks::DEPENDENCIES_ROUTE, post(tasks::add_dependency))
+        .route(tasks::ADMISSION_ROUTE, post(tasks::admission_check))
+        .route(tasks::READY_ROUTE, post(tasks::mark_ready))
+        .route(tasks::CANCEL_ROUTE, post(tasks::cancel))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)
