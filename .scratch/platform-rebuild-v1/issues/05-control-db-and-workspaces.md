@@ -1,6 +1,6 @@
 # 05: 控制資料庫、寫入佇列與 Workspace 建立
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R011-05-impl，2026-10-22 14:15）
 Blocked by: 04
 
 **What to build:** 建立 SQLite 控制資料庫（spec D-17 的資料目錄、issue §11.1 PRAGMA 並於啟動時讀回驗證）、schema_migrations、Store 的單一寫入佇列與 Domain 核心「命令 → 新狀態 + 事件」的模式。第一個垂直切片：使用者在 App 中選擇目錄建立 Workspace（可以不是 Git repo），在左側清單看到它；資料位於網路共享或雲端同步資料夾時拒絕並說明。
