@@ -2,6 +2,8 @@ import type {
   AccountProfile,
   AccountRun,
   AccountScheduling,
+  DecisionRequestView,
+  ImportPreview,
   PlatformResponse,
   QuotaAssessment,
   QuotaObservation,
