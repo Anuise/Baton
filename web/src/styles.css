@@ -552,11 +552,19 @@ body {
 }
 
 .decision-list li {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
   margin-bottom: 6px;
+}
+
+.decision-batch-check {
+  margin-top: 10px;
 }
 
 .decision-list li button {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 2px;
   width: 100%;
@@ -665,8 +673,151 @@ body {
   margin-bottom: 8px;
 }
 
-.decision-form [role="alert"] {
+.decision-form [role="alert"],
+.decision-error,
+.decision-batch [role="alert"],
+.decision-related [role="alert"],
+.decision-authority [role="alert"],
+.decision-batch-failed {
   color: #cf222e;
+}
+
+.decision-overview dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.decision-overview-item {
+  min-width: 72px;
+  padding: 6px 10px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.decision-overview-item dt {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.decision-overview-item dd {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.decision-overview-overdue dd,
+.decision-overview-high_urgency dd {
+  color: #9a6700;
+}
+
+.decision-deferred,
+.decision-status {
+  color: #656d76;
+  font-weight: 600;
+}
+
+.decision-superseded h4 {
+  color: #9a6700;
+}
+
+.decision-options {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.decision-actions label,
+.decision-form fieldset label {
+  margin-right: 12px;
+}
+
+.decision-form select,
+.decision-batch select,
+.decision-batch textarea {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.decision-batch textarea {
+  width: 100%;
+  min-height: 40px;
+}
+
+.decision-batch,
+.decision-batch-results,
+.decision-authority {
+  margin: 12px 0;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
+
+.decision-batch {
+  border-color: #0969da;
+}
+
+.decision-batch-item {
+  margin: 8px 0;
+}
+
+.decision-batch button + button {
+  margin-left: 8px;
+}
+
+.decision-related {
+  margin: 8px 0;
+}
+
+.decision-related h5 {
+  margin: 4px 0;
+}
+
+.decision-links {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.decision-related-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.decision-related-action .decision-scope-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.decision-link-button {
+  padding: 0;
+  color: #0969da;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.decision-authority table {
+  width: 100%;
+  margin-bottom: 8px;
+  border-collapse: collapse;
+}
+
+.decision-authority th,
+.decision-authority td {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid #d0d7de;
+}
+
+.authority-locked {
+  color: #656d76;
+  font-size: 12px;
 }
 
 .artifacts-page {

@@ -1,9 +1,9 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { decisionView } from "./fixtures";
+import { authorityTable, decisionView } from "./fixtures";
 import type { AppClient, Workspace } from "./runtimeClient";
 
 const workspace: Workspace = {
@@ -26,7 +26,13 @@ const client = {
     throw new Error("授權讀取失敗");
   }),
   getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [], verifications: [] })),
-  listDecisions: vi.fn(async () => ({ pending_count: 1, decisions: [decisionView()] })),
+  listDecisions: vi.fn(async () => ({
+    pending_count: 1,
+    overview: { pending: 1, actionable: 1, deferred: 0, overdue: 0, high_urgency: 0, answered: 0, superseded: 0, merged: 0 },
+    decisions: [decisionView()],
+  })),
+  answerDecision: vi.fn(async () => ({ decision: decisionView({ status: "answered", allowed_actions: [] }), resumed_task_ids: [] })),
+  decisionAuthority: vi.fn(async () => authorityTable()),
   pendingDecisions: vi.fn(async () => ({ pending_count: 1, by_workspace: [{ workspace_id: "ws_1", pending_count: 1 }] })),
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
   listKnowledge: vi.fn(async () => ({ search_mode: "full_text", entries: [] })),
@@ -64,6 +70,19 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "裁定：筆記" })).toBeInTheDocument();
     expect(client.listDecisions).toHaveBeenCalledWith("ws_1");
     expect(screen.getByRole("heading", { name: "要保留舊的目錄結構嗎？" })).toBeInTheDocument();
+  });
+
+  it("在裁定中心處理後，狀態列立即重新讀取待裁定數（spec D-21）", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "裁定 筆記" }));
+    await user.click(await screen.findByRole("radio", { name: "駁回" }));
+    const before = vi.mocked(client.pendingDecisions).mock.calls.length;
+
+    await user.click(screen.getByRole("button", { name: "送出裁定" }));
+
+    expect(client.answerDecision).toHaveBeenCalledWith("ws_1", "dec_1", { action: "reject", expected_revision: 1 });
+    await waitFor(() => expect(vi.mocked(client.pendingDecisions).mock.calls.length).toBeGreaterThan(before));
   });
 
   it("可從 Workspace 清單開啟成果與驗證，並切回其他檢視", async () => {
