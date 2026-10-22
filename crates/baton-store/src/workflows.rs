@@ -471,9 +471,12 @@ fn queue_reverification(
             }
         }
     }
+    // 只供診斷的重現或修復驗證不算：它的 Bundle 不能作為 Gate 的驗證證據，沿用的話重驗等於被吃掉（R151 第 11 項）
     let queued: Option<String> = tx
         .query_row(
-            "SELECT id FROM verification_request WHERE workspace_id = ?1 AND task_id IS ?2 AND status = 'queued'",
+            "SELECT id FROM verification_request r WHERE workspace_id = ?1 AND task_id IS ?2 AND status = 'queued'
+               AND NOT EXISTS (SELECT 1 FROM exploration_attempt e
+                               WHERE e.request_id = r.id AND e.purpose IN ('reproduce', 'verify_fix'))",
             rusqlite::params![workflow.workspace_id, workflow.task_id],
             |r| r.get(0),
         )
