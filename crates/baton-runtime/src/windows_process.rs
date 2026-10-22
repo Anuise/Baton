@@ -495,3 +495,93 @@ fn root_liveness(process: HANDLE, expected_created_millis: i64) -> Liveness {
         Err(_) => Liveness::Unknown,
     }
 }
+
+// ------------------------------------------------------------ 驗證命令的 Job（審查 R152、票 13）
+
+/// 驗證命令用的匿名 Job：設定 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，Job handle 關閉（含 Runtime 結束）時整棵程序樹一併終止。
+/// 與 Run 的具名 Job 不同，驗證命令不需要在 Runtime 重建後找回。
+pub(crate) struct KillOnCloseJob(OwnedHandle);
+
+impl KillOnCloseJob {
+    pub(crate) fn new() -> PortResult<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        // SAFETY：不具名、使用預設安全性；失敗回傳 NULL。
+        let job = OwnedHandle::from_raw(unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) })
+            .ok_or_else(|| last_error("CreateJobObjectW 失敗"))?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY：job 是有效 handle，結構與大小符合 JobObjectExtendedLimitInformation。
+        let ok = unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(last_error("SetInformationJobObject 失敗"));
+        }
+        Ok(Self(job))
+    }
+
+    /// 把以 `CREATE_SUSPENDED` 建立的程序放進 Job，再恢復它的主執行緒：程序加入 Job 之前不會執行任何碼，
+    /// 所以它再開的子孫程序都在 Job 內。任何一步失敗都終止該程序。
+    pub(crate) fn adopt_suspended(&self, child: &std::process::Child) -> PortResult<()> {
+        use std::os::windows::io::AsRawHandle;
+        let process = child.as_raw_handle() as HANDLE;
+        let abort = |error: PortError| -> PortError {
+            // SAFETY：process 是 child 持有的有效 handle（具 PROCESS_TERMINATE）。
+            unsafe {
+                TerminateProcess(process, 1);
+            }
+            error
+        };
+        // SAFETY：兩個 handle 皆有效，程序仍在暫停狀態。
+        if unsafe { AssignProcessToJobObject(self.0 .0, process) } == 0 {
+            return Err(abort(last_error("AssignProcessToJobObject 失敗")));
+        }
+        // 標準函式庫沒有提供主執行緒的 handle：剛建立、仍暫停的程序只有主執行緒，從執行緒快照找出它
+        let thread = suspended_main_thread(child.id()).map_err(abort)?;
+        // SAFETY：thread 是程序的主執行緒 handle（具 THREAD_SUSPEND_RESUME），目前為暫停狀態。
+        if unsafe { ResumeThread(thread.0) } == u32::MAX {
+            return Err(abort(last_error("ResumeThread 失敗")));
+        }
+        Ok(())
+    }
+
+    /// 終止 Job 內仍在執行的全部程序；已經沒有程序時沒有作用。
+    pub(crate) fn terminate(&self) {
+        // SAFETY：self.0 是有效的 Job handle（建立者擁有全部權限）。
+        unsafe {
+            TerminateJobObject(self.0 .0, 1);
+        }
+    }
+}
+
+/// 以執行緒快照找出程序 `pid` 的執行緒並開啟（暫停中的新程序只有主執行緒）。
+fn suspended_main_thread(pid: u32) -> PortResult<OwnedHandle> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, THREAD_SUSPEND_RESUME};
+    // SAFETY：TH32CS_SNAPTHREAD 的快照包含全部程序的執行緒，第二個參數被忽略；失敗回傳 INVALID_HANDLE_VALUE。
+    let snapshot = OwnedHandle::from_raw(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })
+        .ok_or_else(|| last_error("CreateToolhelp32Snapshot 失敗"))?;
+    let mut entry = THREADENTRY32 { dwSize: std::mem::size_of::<THREADENTRY32>() as u32, ..Default::default() };
+    // SAFETY：snapshot 有效，entry 的 dwSize 已設定。
+    let mut more = unsafe { Thread32First(snapshot.0, &mut entry) } != 0;
+    while more {
+        if entry.th32OwnerProcessID == pid {
+            // SAFETY：OpenThread 沒有前置條件，失敗回傳 NULL。
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            return OwnedHandle::from_raw(thread).ok_or_else(|| last_error("OpenThread 失敗"));
+        }
+        // SAFETY：同上。
+        more = unsafe { Thread32Next(snapshot.0, &mut entry) } != 0;
+    }
+    Err(PortError::Failed(format!("找不到程序 {pid} 的主執行緒")))
+}
