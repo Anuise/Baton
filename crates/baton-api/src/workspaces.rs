@@ -11,7 +11,7 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use baton_domain::workspace::{self, Workspace, WorkspaceCommand, WorkspaceError};
+use baton_domain::workspace::{self, ModelOverrides, Workspace, WorkspaceCommand, WorkspaceError};
 use baton_ports::DirectoryState;
 use baton_store::{StoreError, WorkspaceApplyError};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,8 @@ use crate::{ApiState, ErrorBody};
 pub const WORKSPACES_PATH: &str = "/api/v1/workspaces";
 /// 封存路徑樣板（`{id}` 是 Workspace 識別）。
 pub(crate) const ARCHIVE_ROUTE: &str = "/api/v1/workspaces/{id}/archive";
+/// 依角色的模型覆寫路徑樣板：PUT 整組取代（spec D-30）。
+pub(crate) const MODEL_OVERRIDES_ROUTE: &str = "/api/v1/workspaces/{id}/model-overrides";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWorkspaceRequest {
@@ -54,9 +56,10 @@ impl IntoResponse for ApiError {
 impl From<WorkspaceError> for ApiError {
     fn from(error: WorkspaceError) -> Self {
         let status = match &error {
-            WorkspaceError::PathEmpty | WorkspaceError::PathNotAbsolute(_) | WorkspaceError::NameTooLong => {
-                StatusCode::BAD_REQUEST
-            }
+            WorkspaceError::PathEmpty
+            | WorkspaceError::PathNotAbsolute(_)
+            | WorkspaceError::NameTooLong
+            | WorkspaceError::ModelNameInvalid(_) => StatusCode::BAD_REQUEST,
             WorkspaceError::NotFound(_) => StatusCode::NOT_FOUND,
             WorkspaceError::AlreadyRegistered { .. } | WorkspaceError::AlreadyArchived(_) => StatusCode::CONFLICT,
         };
@@ -142,6 +145,22 @@ pub(crate) async fn archive(
 ) -> Result<Json<Workspace>, ApiError> {
     let archived = state.store.apply_workspace_command(WorkspaceCommand::Archive { id }, state.clock.now()).await?;
     Ok(Json(archived))
+}
+
+/// 設定依角色的模型覆寫；空字串或省略的角色表示不覆寫（沿用帳號的 Claude Code 預設）。
+/// 只影響之後派出的 Run：已派出的 Run 在派工時就固定了模型。
+pub(crate) async fn set_model_overrides(
+    State(state): State<Arc<ApiState>>,
+    UrlPath(id): UrlPath<String>,
+    body: Result<Json<ModelOverrides>, JsonRejection>,
+) -> Result<Json<Workspace>, ApiError> {
+    let Json(overrides) = body.map_err(|rejection| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "bad_request",
+        message: format!("請求內容不是有效的模型覆寫：{}", rejection.body_text()),
+    })?;
+    let command = WorkspaceCommand::SetModelOverrides { id, overrides };
+    Ok(Json(state.store.apply_workspace_command(command, state.clock.now()).await?))
 }
 
 /// 穩定識別：前綴加 96 位元隨機值（Domain 不產生亂數，由呼叫端提供）。

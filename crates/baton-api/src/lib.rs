@@ -139,6 +139,7 @@ pub fn router(state: ApiState) -> Router {
         .route(EVENTS_PATH, get(events))
         .route(WORKSPACES_PATH, get(workspaces::list).post(workspaces::create))
         .route(workspaces::ARCHIVE_ROUTE, post(workspaces::archive))
+        .route(workspaces::MODEL_OVERRIDES_ROUTE, axum::routing::put(workspaces::set_model_overrides))
         .route(authorization::AUTHORIZATION_ROUTE, get(authorization::view).put(authorization::confirm))
         .route(authorization::SUMMARY_ROUTE, post(authorization::summary))
         .route(authorization::ADMISSION_ROUTE, post(authorization::admission_check))

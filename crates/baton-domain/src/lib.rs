@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod artifact;
 pub mod auth;
+pub mod claude_code;
 pub mod authorization;
 pub mod config;
 pub mod event;
