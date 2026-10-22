@@ -41,7 +41,7 @@ pub const TOOL_CANCEL_TASK: &str = "cancel_task";
 /// 票 17：Controller 向使用者提出裁定請求，並指明哪些 Task 依賴這個答案（spec D-05）。
 pub const TOOL_PROPOSE_DECISION_REQUEST: &str = "propose_decision_request";
 /// Controller 專屬的工具；Controller 憑證只能使用這些工具（與 `permission_prompt`），Worker 憑證不能使用它們。
-pub const CONTROLLER_TOOLS: [&str; 20] = [
+pub const CONTROLLER_TOOLS: [&str; 21] = [
     TOOL_PROPOSE_TASK,
     TOOL_UPDATE_TASK,
     TOOL_ADD_DEPENDENCY,
@@ -67,6 +67,8 @@ pub const CONTROLLER_TOOLS: [&str; 20] = [
     crate::exploration::TOOL_TRIAGE_EXPLORATION_FINDING,
     crate::exploration::TOOL_REPRODUCE_EXPLORATION_FINDING,
     crate::exploration::TOOL_GET_EXPLORATION,
+    // 票 54：Controller 接受成果（仍受驗證 Gate 約束）
+    crate::verification::TOOL_ACCEPT_ARTIFACT,
 ];
 /// Controller 一次指明的依賴 Task 數上限。
 pub const BLOCKING_MAX_TASKS: usize = 20;

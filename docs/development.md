@@ -193,7 +193,7 @@ Worker 不直接碰資料庫或管理 API：它的程序啟動時帶著一組**�
 
 **MCP 設定**：`baton_domain::agent::mcp_config_json(shim 路徑)` 產生的設定只含 shim 指令與 `${BATON_AGENT_TOKEN}`、`${BATON_RUNTIME_URL}` 的參照，由 Claude Code 展開；真實 AgentAdapter 為每個 Run 把它寫成 `runs\<run_id>\mcp.json`。
 
-**兩組 API 分流**：`POST /agent/v1/tools/{工具}` 只接受 Agent 角色，管理 API（`/api/v1/…`）只接受桌面角色；`guard` 依路徑前綴 `/agent/v1/` 決定所需角色，角色不符回 403 `role_not_allowed`，Agent 憑證沒有範圍回 401 `credential_invalid`。身分與資源歸屬一律取自憑證；請求可以選擇帶 `workspace_id`／`run_id`，與憑證不一致就回 403 `agent_scope_mismatch`，不會悄悄改用請求裡的值。Agent 角色另有 Controller 憑證（票 17，綁定 Controller 的一輪）：它只能使用 Controller 專屬的工具，呼叫下表的 Worker 工具回 403 `worker_only`；Worker 憑證呼叫 Controller 工具回 403 `controller_only`，見〈Controller 拆工與派工工具（票 17）〉。
+**兩組 API 分流**：`POST /agent/v1/tools/{工具}` 只接受 Agent 角色，管理 API（`/api/v1/…`）只接受桌面角色；`guard` 依路徑前綴 `/agent/v1/` 決定所需角色，角色不符回 403 `role_not_allowed`，Agent 憑證沒有範圍回 401 `credential_invalid`。身分與資源歸屬一律取自憑證；請求可以選擇帶 `workspace_id`／`run_id`，與憑證不一致就回 403 `agent_scope_mismatch`，不會悄悄改用請求裡的值。Agent 角色另有 Controller 憑證（票 17，綁定 Controller 的一輪）：它只能使用 Controller 專屬的工具與共同工具（`search_knowledge`、`record_lesson_candidate`、訊息，見〈Controller 的共同工具（票 54）〉），呼叫下表其餘的 Worker 工具回 403 `worker_only`；Worker 憑證呼叫 Controller 工具回 403 `controller_only`，見〈Controller 拆工與派工工具（票 17）〉。
 
 | 工具 | 請求 | 行為 |
 | --- | --- | --- |
@@ -1100,7 +1100,8 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 | 憑證 | 呼叫 | 結果 |
 | --- | --- | --- |
 | Controller | 6 個 Controller 工具 | 那一輪仍是 `starting`／`running` 才接受，結束後 401 `credential_revoked`；請求帶的 `workspace_id`／`run_id`（Controller 的一輪）與憑證不一致 403 `agent_scope_mismatch` |
-| Controller | Worker 工具（`get_task_contract`、三個回報工具、`request_decision`、`controller_action`、`register_artifact`、知識、外部操作、訊息、`confirm_handoff`） | 403 `worker_only`：不能冒充 Worker 的 Run 回報或寫入 |
+| Controller | Worker 工具（`get_task_contract`、三個回報工具、`request_decision`、`controller_action`、`register_artifact`、外部操作、`confirm_handoff`） | 403 `worker_only`：不能冒充 Worker 的 Run 回報或寫入 |
+| Controller | 共同工具（`search_knowledge`、`send_message`、`read_inbox`、`record_lesson_candidate`） | 範圍是它的整個 Workspace，見〈Controller 的共同工具（票 54）〉 |
 | Controller | `permission_prompt` | 一律 `{behavior: "deny", status: "controller_denied"}`，不建立裁定請求：Controller 不能直接執行指令、寫資料或自己啟動 Worker |
 | Worker | 6 個 Controller 工具 | 403 `controller_only` |
 
@@ -1131,6 +1132,22 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 **喚醒 Controller**：Controller 提出的請求（含被合併進來的）被回答或過期時，`decision::wake` 不寫喚醒 Outbox，而是產生 `ConversationNotice`，在**同一個交易中**成為該 Workspace conversation 的工作事件（`conversations.rs` 的 `enqueue_notice`，`source` = `decision_wake:<請求>:<revision>`，同一個結果只成為一個輸入；內容由 `notice_content` 產生：處理方式、選項、說明與依賴的 Task，或過期原因），由〈Controller 長期對話與事件驅動〉的事件迴圈喚起下一輪。
 
 **資料**（migration 33 `controller_tools`）：`credential.controller_run_id`（參照 `controller_run`，唯一）；重建 `decision_request`，加 `origin`（`worker`／`controller`，既有資料為 `worker`；權限提示只能由 Worker 提出），`run_id` 不再是對 `run` 的外鍵，改由觸發器 `decision_request_origin` 依來源檢查（Worker → `run`、Controller → `controller_run`）；重建 `decision_approval_use`，`run_id` 同樣改由觸發器檢查（`run` 或 `controller_run`）。這個 migration 列在 `FOREIGN_KEYS_OFF_MIGRATIONS`：`migrate` 在交易外關閉 `foreign_keys`、`apply_migration` 套用後提交前以 `foreign_key_check` 核對沒有任何違反，再開回 `foreign_keys`。情境測試在 `crates/baton-harness/tests/controller_tools.rs`。
+
+### Controller 的共同工具（票 54）
+
+spec D-05 的共同工具讓 Controller 也能使用，範圍是**它那一輪所屬的 Workspace**（不是單一 Task）；Worker 的既有範圍不變。入口防護以 `guard.rs` 的 `CONTROLLER_SHARED_TOOLS` 放行，處理函式依憑證角色分流：Controller 一律先經 `controller_scope`（這一輪仍是 `starting`／`running`，否則 401 `credential_revoked`；請求帶的 `workspace_id`／`run_id` 與憑證不一致 403 `agent_scope_mismatch`）。情境測試：`crates/baton-harness/tests/controller_shared_tools.rs`、`controller_messages.rs`、`controller_lesson_candidate.rs`、`controller_accept_artifact.rs`。
+
+| 工具 | Controller 的範圍與行為 |
+| --- | --- |
+| `search_knowledge` | 全域加上這個 Workspace 內所有範圍（Workspace、Goal、Task）的有效條目（AI-488） |
+| `send_message` | 收件人是這個 Workspace 的任何 Task；寄件地址是保留地址 `controller`（`baton_domain::message::CONTROLLER_ADDRESS`）。別的 Workspace 的 Task 404 `recipient_not_found`；寄給 `controller` 400 `message_invalid`（寄給自己）。想用訊息改範圍時忽略（200 `ignored: true`），不另外產生事件 |
+| `read_inbox` | 讀寄給這個 Workspace 的 Controller 的訊息（`task_id` 回 `controller`）；收件匣屬於 Workspace，下一輪讀得到上一輪沒讀的訊息 |
+| `record_lesson_candidate` | 必須以 `task_id` 指定教訓來源的 Task（這個 Workspace 內），範圍（`task`／`goal`／`workspace`）依那個 Task 解析；來源記為 `{kind: "controller", controller_run_id, task_id}`，狀態一律 `candidate`。先依決策權限表判定 `submit_lesson_candidate`（內建可自主處理，Workspace 可以收窄為必須送裁定） |
+| `accept_artifact`（Controller 專屬） | 見下 |
+
+**訊息**：Worker 也可以寄給 `controller`（寄到自己 Workspace 的 Controller），並回覆 Controller 寄給它的訊息；Worker 仍只讀得到寄給自己 Task 的訊息、只能回覆自己寄過或收到的訊息。收件匣與 Run 啟動時的未讀摘要中，Controller 寄的訊息 `from_task_id` 是 `controller`、標題是 `Controller`。資料（migration 47 `controller_messages`，列在 `FOREIGN_KEYS_OFF_MIGRATIONS`）：重建 `message`，寄件者是 Worker 的 Run（`sender_run_id`、`sender_task_id`、`sender_generation`）或 Controller 的一輪（`sender_controller_run_id`，參照 `controller_run`），以 CHECK 保證恰好一種；寄給 Controller 的交付存在 `message_controller_delivery`（每則訊息最多一筆、不可刪除）。Controller 的系統提示要求每一輪開始時以 `read_inbox` 讀取；Worker 寄給 Controller 不會喚起它。
+
+**`accept_artifact`**（`baton-api` 的 `verification.rs`；請求 `{task_id, reason, note?}`，成功回這個 Task 的驗證狀況）：成果接受仍受驗證 Gate 約束（票 13）。只在這個 Workspace 內查找 Task（別的 Workspace 404 `task_not_found`）；不是 `verifying` 409 `task_not_verifying`。契約宣告了確定性檢查（`automatic`）時 409 `verification_gate_pending`：由 Runtime 執行檢查、全部通過才接受，不建立裁定請求。沒有宣告檢查的 Task 原本只能由使用者手動接受，所以 Controller 接受等同略過驗證 Gate，以 `skip_stage_or_gate`（內建必須送裁定）經 `ControllerGate` 判定；裁定對象（`subject`）綁定 Run、世代、契約版本與成果雜湊，核准只能用在使用者看到的那一份成果。核准後以與桌面手動接受相同的接受交易（`AcceptManually`）完成，`accepted_by` 記為 `decision:<請求>`；拒絕 409 `decision_denied`。
 
 ### Controller 跨帳號交接
 

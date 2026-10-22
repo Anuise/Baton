@@ -25,6 +25,8 @@ use crate::workspace::WorkspaceStatus;
 use crate::Timestamp;
 
 pub const EVENT_TASK_VERIFICATION_RECORDED: &str = "task_verification_recorded";
+/// Controller 接受一個 Task 成果的工具名稱（spec D-05 的 Controller 專屬工具，票 54）；仍受驗證 Gate 約束。
+pub const TOOL_ACCEPT_ARTIFACT: &str = "accept_artifact";
 
 /// 一份契約最多宣告幾項確定性檢查。
 pub const MAX_CHECKS: usize = 20;

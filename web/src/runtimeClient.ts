@@ -1163,7 +1163,10 @@ export interface KnowledgeScope {
   task_id: string | null;
 }
 
-export type KnowledgeSource = { kind: "user" } | { kind: "agent"; run_id: string; generation: number; task_id: string };
+export type KnowledgeSource =
+  | { kind: "user" }
+  | { kind: "agent"; run_id: string; generation: number; task_id: string }
+  | { kind: "controller"; controller_run_id: string; task_id: string };
 
 /** 教訓欄位：觸發條件、根因或待驗假說、解法。 */
 export interface LessonDetail {

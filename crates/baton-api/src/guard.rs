@@ -13,9 +13,9 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use baton_domain::agent::{CONTROLLER_TOOLS, TOOL_PERMISSION_PROMPT};
+use baton_domain::agent::{CONTROLLER_TOOLS, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_SEND_MESSAGE};
 use baton_domain::auth::{hash_token, CredentialRecord, Role};
-use baton_domain::knowledge::TOOL_SEARCH_KNOWLEDGE;
+use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 
 use crate::{ApiState, ErrorBody};
 
@@ -28,8 +28,15 @@ const AGENT_API_PREFIX: &str = "/agent/v1/";
 /// Agent 工具的路徑前綴（後面接工具名稱）。
 const AGENT_TOOLS_PATH: &str = "/agent/v1/tools/";
 
-/// Controller 憑證除了 Controller 專屬工具之外還能使用的共同工具（spec D-05）；處理函式依憑證的角色決定範圍。
-const CONTROLLER_SHARED_TOOLS: [&str; 2] = [TOOL_PERMISSION_PROMPT, TOOL_SEARCH_KNOWLEDGE];
+/// Controller 憑證除了 Controller 專屬工具之外還能使用的共同工具（spec D-05，票 54）；處理函式依憑證的角色決定範圍：
+/// Controller 的範圍是它的整個 Workspace，Worker 仍以它的 Run 與 Task 為界。
+const CONTROLLER_SHARED_TOOLS: [&str; 5] = [
+    TOOL_PERMISSION_PROMPT,
+    TOOL_SEARCH_KNOWLEDGE,
+    TOOL_SEND_MESSAGE,
+    TOOL_READ_INBOX,
+    TOOL_RECORD_LESSON_CANDIDATE,
+];
 
 /// Tauri WebView 的 origin（Windows 預設為 http，啟用 https 方案時為 https；其他平台為 tauri 方案）。
 const APP_ORIGINS: [&str; 3] = ["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"];
