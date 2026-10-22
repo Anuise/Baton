@@ -146,7 +146,7 @@ impl Origin {
     }
 }
 
-// ---------------------------------------------------------------- Method Registry
+// ---------------------------------------------------------------- 方法登錄（Method Registry）
 
 /// 一個方法的內容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,7 +547,7 @@ pub fn publish_method(
     Ok(Some((method, event)))
 }
 
-// ---------------------------------------------------------------- Router
+// ---------------------------------------------------------------- 選擇 Playbook 的路由（Playbook Router）
 
 /// Router 的選擇：所選 Playbook 的版本與理由。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,7 +603,7 @@ pub fn route(
     })
 }
 
-// ---------------------------------------------------------------- Workflow
+// ---------------------------------------------------------------- Workflow 實例與 Stage 推進
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

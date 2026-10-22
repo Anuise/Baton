@@ -1653,7 +1653,7 @@ pub fn aggregate(steps: &[StepRecord], journeys: &[JourneyResult]) -> (Verdict, 
     (Verdict::Passed, "all_journeys_passed".into())
 }
 
-// ---------------------------------------------------------------- Evidence Bundle
+// ---------------------------------------------------------------- 證據包（Evidence Bundle）
 
 /// 清理的結果：只移除本次驗證的狀態，證據保留在 Evidence Bundle。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

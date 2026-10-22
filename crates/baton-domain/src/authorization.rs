@@ -405,7 +405,7 @@ pub fn changes(current: &AuthorizationRevision, grants: &[Grant]) -> Authorizati
         }
     } else if !list.is_empty() {
         impact.push(
-            "這次修改只縮小授權：尚未准入（含已排隊）、交接與恢復的 Run 依新授權准入；已准入的 Run 沿用准入時的版本，             撤權沒有固定完成時間，可以自行暫停或取消它們。"
+            "這次修改只縮小授權：尚未准入（含已排隊）、交接與恢復的 Run 依新授權准入；已准入的 Run 沿用准入時的版本，撤權沒有固定完成時間，可以自行暫停或取消它們。"
                 .to_string(),
         );
     }

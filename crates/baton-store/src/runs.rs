@@ -251,8 +251,12 @@ pub(crate) fn views(loaded: &Loaded) -> Vec<RunView> {
 
 const RUN_COLUMNS: &str = "id, workspace_id, task_id, status, version, generation, contract_version, \
      authorization_revision, command_id, pid, process_created_at, command_hash, cancel_requested_at, end_reason, \
-     created_at, updated_at, started_at, ended_at, profile_id, native_session_id, admitted_at, settings_version,      agent_session_id, resume_native_session_id";
-const RUN_COLUMNS_QUALIFIED: &str = "r.id, r.workspace_id, r.task_id, r.status, r.version, r.generation,      r.contract_version, r.authorization_revision, r.command_id, r.pid, r.process_created_at, r.command_hash,      r.cancel_requested_at, r.end_reason, r.created_at, r.updated_at, r.started_at, r.ended_at, r.profile_id,      r.native_session_id, r.admitted_at, r.settings_version, r.agent_session_id, r.resume_native_session_id";
+     created_at, updated_at, started_at, ended_at, profile_id, native_session_id, admitted_at, settings_version, \
+     agent_session_id, resume_native_session_id";
+const RUN_COLUMNS_QUALIFIED: &str = "r.id, r.workspace_id, r.task_id, r.status, r.version, r.generation, \
+     r.contract_version, r.authorization_revision, r.command_id, r.pid, r.process_created_at, r.command_hash, \
+     r.cancel_requested_at, r.end_reason, r.created_at, r.updated_at, r.started_at, r.ended_at, r.profile_id, \
+     r.native_session_id, r.admitted_at, r.settings_version, r.agent_session_id, r.resume_native_session_id";
 const RUN_COLUMN_COUNT: usize = 24;
 
 const LEASE_COLUMNS: &str =
