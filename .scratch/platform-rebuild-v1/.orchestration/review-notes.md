@@ -108,3 +108,6 @@
 ## 29. 最終修正後仍待處理（R157 觀察）
 - Web 的確認授權呼叫尚未帶 `expected_revision: summary.changes?.base_revision`（AI-471），後端的並行編輯保護目前不會生效。
 - R151 第 3 項（Controller 重現案例的程式與 HTTP 目標限制）的新限制尚未寫進 mcp-shim 工具說明。
+
+## 30. clippy 警告（票 54 觀察）
+- `cargo clippy -- -D warnings` 在 `baton-domain` 有 12 個既有錯誤，CI 沒有跑 clippy；評估清掉並把 clippy 加入 `pnpm test` 或 CI。
