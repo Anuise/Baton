@@ -69,6 +69,14 @@ impl From<WorkspaceError> for ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
+        // 磁碟滿、資料庫被鎖住或無法寫入：回報可處理的原因，不當成內部錯誤（票 26）
+        if let Some(fault) = baton_store::storage_fault_of(&error) {
+            return ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: fault.kind.code(),
+                message: format!("{}，這次的變更沒有保存，新派工已停止。{}", fault.summary, fault.action),
+            };
+        }
         match error {
             StoreError::IncompatibleSchema { .. } => ApiError {
                 status: StatusCode::SERVICE_UNAVAILABLE,

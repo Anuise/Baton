@@ -435,6 +435,10 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
     for event in &change.events {
         append_event(tx, event)?;
     }
+    // Run 結束（任何路徑：結束回報、核對、取消、完全退出、還原）：還沒回報結果的外部操作在同一個交易變成結果未知（票 26）
+    if let Some(run) = change.run.as_ref().filter(|r| r.status.is_terminal()) {
+        super::external_operations::settle_run_end(tx, run, now)?;
+    }
     Ok(())
 }
 

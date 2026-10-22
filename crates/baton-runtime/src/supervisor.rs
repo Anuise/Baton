@@ -181,6 +181,7 @@ impl Supervisor {
     /// 驗證以外的七個步驟。
     async fn supervise_once(&self) {
         let _serial = self.tick_lock.lock().await;
+        self.check_storage().await;
         self.reopen_if_pending().await;
         self.launch_pending().await;
         self.pump_events().await;
@@ -190,6 +191,11 @@ impl Supervisor {
         if self.schedule_queue().await {
             self.launch_pending().await;
         }
+    }
+
+    /// Supervisor 使用的 Store（測試 harness 以它注入寫入故障）。
+    pub fn store(&self) -> &Store {
+        &self.store
     }
 
     fn note(&self, message: &str) {
@@ -459,6 +465,10 @@ impl Supervisor {
 
     /// 讓佇列中等待的 Task 依序嘗試派出；回傳這次有沒有派出新的 Run。
     async fn schedule_queue(&self) -> bool {
+        // 控制資料庫無法寫入時停止新派工（票 26）
+        if self.store.storage_health().dispatch_halted {
+            return false;
+        }
         match self.store.has_dispatch_requests().await {
             Ok(true) => {}
             Ok(false) => return false,
@@ -495,7 +505,22 @@ impl Supervisor {
 
     // ------------------------------------------------------------ 啟動
 
+    // ------------------------------------------------------------ 儲存故障（票 26）
+
+    /// 控制資料庫先前寫入失敗（磁碟滿、被鎖住、無法寫入）：試寫一次，成功就解除新派工的停止。
+    async fn check_storage(&self) {
+        let Some(fault) = self.store.storage_health().fault else { return };
+        match self.store.probe_storage(self.ports.clock.now()).await {
+            Ok(()) => self.note(&format!("控制資料庫恢復可寫（先前：{}），恢復啟動程序與派工", fault.summary)),
+            Err(error) => self.note(&format!("{}，暫停啟動程序與派工：{error}", fault.summary)),
+        }
+    }
+
     async fn launch_pending(&self) {
+        // 無法寫入時不啟動任何程序：回執寫不回去就會產生無法追溯的程序（票 26）
+        if self.store.storage_health().dispatch_halted {
+            return;
+        }
         let pending = match self.store.pending_launches().await {
             Ok(pending) => pending,
             Err(error) => return self.note(&format!("無法讀取派工 Outbox：{error}")),
@@ -582,21 +607,33 @@ impl Supervisor {
         let mut spec = self.ports.agent_adapter.spawn_spec(&run_spec);
         spec.env.push((AGENT_TOKEN_ENV.to_string(), token));
         spec.env.push((RUNTIME_URL_ENV.to_string(), self.runtime_url.clone()));
-        match self.ports.process_control.spawn(spec).await {
-            // 5. 回執寫回；寫回之前當掉的話，下一次 tick 以 command_id 找回
-            Ok(receipt) => {
-                let command = RunCommand::RecordReceipt {
-                    run_id: item.run.id.clone(),
-                    process: process_record(&receipt.identity),
-                };
-                self.apply(&item.run, command).await;
-                self.adopted.lock().await.insert(item.run.id.clone());
-            }
-            Err(error) => {
-                let command = RunCommand::LaunchFailed { run_id: item.run.id.clone(), reason: error.to_string() };
-                self.apply(&item.run, command).await;
-            }
-        }
+        let lookup = spec.clone();
+        let receipt = match self.ports.process_control.spawn(spec).await {
+            Ok(receipt) => receipt,
+            // spawn 回報失敗不代表程序沒有啟動（例如回執在傳回途中遺失）：先以 command_id 查證（票 26）
+            Err(error) => match self.ports.process_control.find(&lookup).await {
+                Ok(Some(receipt)) => {
+                    self.note(&format!("Run {} 的 spawn 回報失敗（{error}），但以 command_id 找到已啟動的程序", item.run.id));
+                    receipt
+                }
+                // 確定沒有程序：啟動失敗
+                Ok(None) => {
+                    let command = RunCommand::LaunchFailed { run_id: item.run.id.clone(), reason: error.to_string() };
+                    return self.apply(&item.run, command).await;
+                }
+                // 無法證明有沒有啟動：留在 starting 等核對，不重新啟動、不判定失敗
+                Err(find_error) => {
+                    return self.note(&format!(
+                        "Run {} 的 spawn 回報失敗（{error}），也無法以 command_id 查證（{find_error}），留待下次核對",
+                        item.run.id
+                    ));
+                }
+            },
+        };
+        // 5. 回執寫回；寫回之前當掉的話，下一次 tick 以 command_id 找回
+        let command = RunCommand::RecordReceipt { run_id: item.run.id.clone(), process: process_record(&receipt.identity) };
+        self.apply(&item.run, command).await;
+        self.adopted.lock().await.insert(item.run.id.clone());
     }
 
     /// Run 停在 `starting`：上一次啟動被中斷，結果不明。以 command_id 找回原程序，找到就補寫回執；

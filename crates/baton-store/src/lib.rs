@@ -18,6 +18,7 @@ use baton_domain::authorization::{
     ConfirmRequest,
 };
 use baton_domain::event::DomainEvent;
+use baton_domain::storage_health::{StorageFault, StorageFaultKind};
 use baton_domain::storage_location::{self, RejectedLocation};
 use baton_domain::workspace::{self, Workspace, WorkspaceCommand, WorkspaceError, WorkspaceStatus};
 use baton_domain::Timestamp;
@@ -29,7 +30,9 @@ mod artifacts;
 mod cleanup;
 pub mod backup;
 mod decisions;
+mod external_operations;
 mod guards;
+mod health;
 mod integration;
 mod knowledge;
 mod lifecycle;
@@ -46,7 +49,9 @@ pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use cleanup::{CleanupApplyError, CleanupWork};
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
+pub use external_operations::ExternalApplyError;
 pub use guards::{GuardApplyError, GuardOverview};
+pub use health::classify as storage_fault_of;
 pub use integration::{IntegrationApplyError, IntegrationWork};
 pub use knowledge::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, ScopeRequest};
 pub use lifecycle::{
@@ -859,6 +864,40 @@ const MIGRATIONS: &[Migration] = &[
         );
         CREATE INDEX worktree_cleanup_workspace ON worktree_cleanup (workspace_id);",
     },
+    // 外部操作（票 26，第 25 個 migration）：冪等鍵在 Workspace 內唯一；結果未知時引用為它建立的裁定請求。
+    // storage_probe 只有一列：寫入故障之後 Supervisor 以它試寫，確認資料庫恢復可寫
+    Migration {
+        name: "external_operation",
+        sql: "CREATE TABLE external_operation (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            run_id TEXT NOT NULL REFERENCES run (id),
+            idempotency_key TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            target TEXT NOT NULL,
+            request TEXT NOT NULL CHECK (json_valid(request)),
+            request_hash TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('in_progress', 'succeeded', 'failed', 'unknown')),
+            attempt INTEGER NOT NULL CHECK (attempt >= 1),
+            receipt TEXT,
+            failure_reason TEXT,
+            unknown_reason TEXT,
+            decision_request_id TEXT REFERENCES decision_request (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE (workspace_id, idempotency_key)
+        );
+        CREATE INDEX external_operation_run ON external_operation (run_id, status);
+        CREATE INDEX external_operation_decision ON external_operation (decision_request_id);
+        CREATE TRIGGER external_operation_no_delete BEFORE DELETE ON external_operation
+        BEGIN SELECT RAISE(ABORT, 'external_operation 不可刪除'); END;
+        CREATE TABLE storage_probe (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            probed_at INTEGER NOT NULL
+        );",
+    },
 ];
 
 /// 開啟 Store 的選項；預設值就是正式執行的行為。
@@ -903,6 +942,10 @@ struct Inner {
     data_dir: PathBuf,
     /// 全文檢索（FTS5 + trigram）在開啟時確認可用並已重建索引；否則搜尋退回 LIKE（spec D-26）。
     full_text: bool,
+    /// 最近一次寫入遇到的儲存故障（磁碟滿、被鎖住、無法寫入）；試寫成功才清除（票 26）。
+    health: Arc<Mutex<Option<StorageFault>>>,
+    /// 測試注入的寫入故障。
+    injected: Arc<Mutex<Option<StorageFaultKind>>>,
 }
 
 impl Drop for Inner {
@@ -973,6 +1016,8 @@ impl Store {
                 reader: Arc::new(Mutex::new(reader)),
                 data_dir: data_dir.to_path_buf(),
                 full_text,
+                health: Arc::new(Mutex::new(None)),
+                injected: Arc::new(Mutex::new(None)),
             }),
         })
     }
@@ -983,9 +1028,18 @@ impl Store {
         work: impl FnOnce(&Transaction<'_>) -> StoreResult<T> + Send + 'static,
     ) -> StoreResult<T> {
         let (reply, result) = oneshot::channel();
+        let (health, injected) = (self.inner.health.clone(), self.inner.injected.clone());
         let job: Job = Box::new(move |conn| {
-            let outcome = catch_unwind(AssertUnwindSafe(|| run_in_transaction(conn, work)));
-            let _ = reply.send(outcome.unwrap_or(Err(StoreError::Join)));
+            let injected = *injected.lock().unwrap_or_else(|e| e.into_inner());
+            let outcome = match injected {
+                Some(kind) => Err(health::injected_error(kind)),
+                None => catch_unwind(AssertUnwindSafe(|| run_in_transaction(conn, work))).unwrap_or(Err(StoreError::Join)),
+            };
+            // 儲存故障記下來，讓 Supervisor 停止新派工、UI 顯示原因（票 26）
+            if let Some(fault) = outcome.as_ref().err().and_then(health::classify) {
+                *health.lock().unwrap_or_else(|e| e.into_inner()) = Some(fault);
+            }
+            let _ = reply.send(outcome);
         });
         self.inner.writer.as_ref().ok_or(StoreError::Join)?.send(job).map_err(|_| StoreError::Join)?;
         result.await.map_err(|_| StoreError::Join)?

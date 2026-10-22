@@ -84,7 +84,8 @@ impl TaskStatus {
         use TaskStatus::*;
         match self {
             Pending => &[Ready, Blocked, Cancelled],
-            Ready => &[Pending, Running, Blocked, Cancelled],
+            // ready → waiting_decision：Run 結束時留下結果未知的外部操作（票 26）
+            Ready => &[Pending, Running, WaitingDecision, Blocked, Cancelled],
             Running => &[Ready, WaitingDecision, WaitingResource, Blocked, Verifying, Cancelled],
             WaitingDecision => &[Ready, Blocked, Cancelled],
             WaitingResource => &[Ready, Blocked, Cancelled],

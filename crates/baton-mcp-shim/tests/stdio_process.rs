@@ -42,7 +42,7 @@ fn speaks_mcp_over_stdio_and_leaks_no_token() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let replies: Vec<Value> = stdout.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
     assert_eq!(replies.iter().map(|r| r["id"].clone()).collect::<Vec<_>>(), [json!(1), json!(2), json!(3)]);
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 14);
     assert_eq!(replies[2]["result"]["isError"], true);
     assert!(!stdout.contains(TOKEN));
     assert!(!String::from_utf8(output.stderr).unwrap().contains(TOKEN));

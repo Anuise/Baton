@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { supportedPlatform, unofficialPlatform } from "./fixtures";
 import { StatusBar } from "./StatusBar";
-import type { PlatformResponse, RuntimeClient } from "./runtimeClient";
+import type { HealthResponse, PlatformResponse, RuntimeClient } from "./runtimeClient";
 
 const health = { status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 };
 
@@ -138,5 +138,69 @@ describe("頂部狀態列", () => {
     await settle();
 
     expect(screen.getByText("待裁定：0")).toBeInTheDocument();
+  });
+
+  describe("控制資料庫儲存故障", () => {
+    const diskFull: HealthResponse["storage"] = {
+      dispatch_halted: true,
+      fault: {
+        kind: "disk_full",
+        code: "storage_disk_full",
+        summary: "資料目錄所在的磁碟空間不足，控制資料庫無法寫入",
+        action: "請釋放資料目錄所在磁碟的空間；空間足夠後 Baton 會自動恢復派工",
+        detail: "database or disk is full",
+      },
+    };
+
+    function clientWithStorage(...storages: Array<HealthResponse["storage"]>): RuntimeClient {
+      const queue = [...storages];
+      return {
+        ...clientReturning("ok"),
+        getHealth: vi.fn(async () => {
+          const storage = queue.length > 1 ? queue.shift() : queue[0];
+          return storage === undefined ? health : { ...health, storage };
+        }),
+      };
+    }
+
+    it("磁碟滿時顯示新派工已停止、原因與處理方式", async () => {
+      render(<StatusBar client={clientWithStorage(diskFull)} pollMs={5000} />);
+
+      await settle();
+
+      const alert = screen.getByRole("alert");
+      expect(alert).toHaveTextContent("新派工已停止");
+      expect(alert).toHaveTextContent("資料目錄所在的磁碟空間不足，控制資料庫無法寫入");
+      expect(alert).toHaveTextContent("請釋放資料目錄所在磁碟的空間；空間足夠後 Baton 會自動恢復派工");
+      expect(alert).toHaveTextContent("database or disk is full");
+      expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+    });
+
+    it("舊版 Runtime 沒有 storage 欄位時不顯示警示", async () => {
+      render(<StatusBar client={clientWithStorage(undefined)} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+    });
+
+    it("沒有故障時不顯示警示", async () => {
+      render(<StatusBar client={clientWithStorage({ dispatch_halted: false, fault: null })} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("下一次輪詢恢復後警示消失", async () => {
+      render(<StatusBar client={clientWithStorage(diskFull, { dispatch_halted: false, fault: null })} pollMs={5000} />);
+      await settle();
+      expect(screen.getByRole("alert")).toHaveTextContent("新派工已停止");
+
+      await settle(5000);
+
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
   });
 });
