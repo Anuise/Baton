@@ -42,6 +42,8 @@ struct World {
     task: Task,
     entry: IntegrationEntry,
     checks: Vec<VerificationCheck>,
+    /// Task 目前受驗的 Run。
+    subject_run: String,
 }
 
 impl World {
@@ -50,12 +52,17 @@ impl World {
         let (mut entry, event) = enqueue("int_1".into(), &task, "r1", 1, "baton/t1", "main", T0);
         entry.seq = 1;
         assert_eq!((event.event_type, event.aggregate_version), (EVENT_QUEUED, 1));
-        Self { workspace: workspace(), task, entry, checks: vec![check()] }
+        Self { workspace: workspace(), task, entry, checks: vec![check()], subject_run: "r1".into() }
     }
 
     fn step(&mut self, command: IntegrationCommand, now: Timestamp) -> Result<IntegrationChange, IntegrationError> {
-        let ctx =
-            IntegrationContext { entry: &self.entry, workspace: Some(&self.workspace), task: Some(&self.task), checks: &self.checks };
+        let ctx = IntegrationContext {
+            entry: &self.entry,
+            workspace: Some(&self.workspace),
+            task: Some(&self.task),
+            subject_run: Some(&self.subject_run),
+            checks: &self.checks,
+        };
         let change = decide(&ctx, command, now)?;
         self.entry = change.entry.clone();
         if let Some(task) = &change.task {
@@ -178,6 +185,30 @@ fn a_task_that_left_verifying_is_not_integrated() {
     assert_eq!(world.entry.status, IntegrationStatus::Failed);
     assert_eq!(change.task, None, "已取消的 Task 不會被拉回 ready");
     assert!(world.entry.failure.as_deref().unwrap().contains("cancelled"));
+}
+
+/// R151 第 24 項：Task 已在驗證較新的 Run（例如整合失敗或查證後重做）時，舊項目不合併、不動 Task，
+/// 讓較新的項目整合並完成 Task（清理只看最新項目）。
+#[test]
+fn an_entry_whose_run_is_no_longer_the_task_subject_fails_without_touching_the_task() {
+    let mut world = World::queued();
+    world.subject_run = "r2".into();
+
+    let change = world.step(IntegrationCommand::BeginMerge { id: "int_1".into() }, later(1)).unwrap();
+
+    assert_eq!(world.entry.status, IntegrationStatus::Failed);
+    assert_eq!(change.task, None, "Task 屬於較新的 Run，不會被拉回 ready");
+    assert_eq!(world.task.status, TaskStatus::Verifying);
+    assert!(world.entry.failure.as_deref().unwrap().contains("r2"), "{:?}", world.entry.failure);
+
+    // 合併途中 Task 換成較新的 Run：舊項目即使前移成功也不完成 Task
+    let mut world = World::queued();
+    world.merged();
+    world.step(IntegrationCommand::RecordChecks { id: "int_1".into(), results: vec![result_passed()] }, later(3)).unwrap();
+    world.subject_run = "r2".into();
+    let change = world.step(IntegrationCommand::RecordAdvance { id: "int_1".into(), result: AdvanceResult::Advanced }, later(4)).unwrap();
+    assert_eq!(change.task, None);
+    assert_eq!(world.task.status, TaskStatus::Verifying);
 }
 
 #[test]
