@@ -252,6 +252,8 @@ pub enum AuthorizationError {
     MissingTarget(Capability),
     #[error("授權包含會執行專案或第三方依賴程式、或屬於高風險的能力，必須先確認已了解：{TRUSTED_EXECUTION_RISK}")]
     RiskNotAcknowledged,
+    #[error("這次修改會擴大 Workspace 授權（新增能力、目標資源或移除限制），必須先看過新增的能力與影響並明確確認")]
+    ExpansionNotAcknowledged,
 }
 
 impl AuthorizationError {
@@ -263,6 +265,7 @@ impl AuthorizationError {
             AuthorizationError::UnknownTemplate(_) => "authorization_template_unknown",
             AuthorizationError::DuplicateCapability(_) | AuthorizationError::MissingTarget(_) => "authorization_invalid",
             AuthorizationError::RiskNotAcknowledged => "risk_acknowledgement_required",
+            AuthorizationError::ExpansionNotAcknowledged => "authorization_expansion_not_acknowledged",
         }
     }
 }
@@ -310,10 +313,103 @@ pub struct ConfirmationSummary {
     pub risks: Vec<String>,
     /// 為真時，確認請求必須帶 `acknowledged_risk: true`。
     pub requires_risk_acknowledgement: bool,
+    /// 相對於目前生效 revision 的變動；第一次確認（還沒有任何 revision）時為 `null`。
+    pub changes: Option<AuthorizationChanges>,
 }
 
-pub fn summarize(grants: Vec<Grant>) -> Result<ConfirmationSummary, AuthorizationError> {
+/// 修改授權時，一項能力的變動。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantChange {
+    pub capability: Capability,
+    pub label: String,
+    pub high_risk: bool,
+    /// 這項能力原本沒有授權（新增能力）。
+    pub new_capability: bool,
+    /// 這項能力整個被移除。
+    pub removed_capability: bool,
+    pub added_targets: Vec<String>,
+    pub removed_targets: Vec<String>,
+    pub added_restrictions: Vec<String>,
+    pub removed_restrictions: Vec<String>,
+    /// 這項變動是否擴大授權（新增能力、新增目標或移除限制）。
+    pub expands: bool,
+}
+
+/// 修改授權的變動與影響：擴大授權時，確認請求必須帶 `acknowledged_expansion: true`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationChanges {
+    /// 比較的基準：目前生效的 revision。
+    pub base_revision: i64,
+    pub changes: Vec<GrantChange>,
+    pub expands: bool,
+    /// 給使用者看的影響說明。
+    pub impact: Vec<String>,
+}
+
+/// 比較目前生效的 revision 與新內容（已整理）。內容相同時 `changes` 是空的。
+pub fn changes(current: &AuthorizationRevision, grants: &[Grant]) -> AuthorizationChanges {
+    let minus = |a: &[String], b: &[String]| -> Vec<String> { a.iter().filter(|x| !b.contains(x)).cloned().collect() };
+    let mut capabilities: Vec<Capability> =
+        current.grants.iter().chain(grants.iter()).map(|g| g.capability).collect();
+    capabilities.sort();
+    capabilities.dedup();
+    let mut list = Vec::new();
+    for capability in capabilities {
+        let before = current.grants.iter().find(|g| g.capability == capability);
+        let after = grants.iter().find(|g| g.capability == capability);
+        let empty = Vec::new();
+        let (bt, br) = before.map_or((&empty, &empty), |g| (&g.targets, &g.restrictions));
+        let (at, ar) = after.map_or((&empty, &empty), |g| (&g.targets, &g.restrictions));
+        let change = GrantChange {
+            capability,
+            label: capability.label().to_string(),
+            high_risk: capability.is_high_risk(),
+            new_capability: before.is_none(),
+            removed_capability: after.is_none(),
+            added_targets: minus(at, bt),
+            removed_targets: minus(bt, at),
+            // 能力整個移除時，它的限制隨之消失，不算「移除限制」
+            added_restrictions: if after.is_some() { minus(ar, br) } else { Vec::new() },
+            removed_restrictions: if after.is_some() { minus(br, ar) } else { Vec::new() },
+            expands: false,
+        };
+        let expands = after.is_some()
+            && (change.new_capability || !change.added_targets.is_empty() || !change.removed_restrictions.is_empty());
+        let changed = change.new_capability
+            || change.removed_capability
+            || !change.added_targets.is_empty()
+            || !change.removed_targets.is_empty()
+            || !change.added_restrictions.is_empty()
+            || !change.removed_restrictions.is_empty();
+        if changed {
+            list.push(GrantChange { expands, ..change });
+        }
+    }
+    let expands = list.iter().any(|c| c.expands);
+    let mut impact = Vec::new();
+    if expands {
+        impact.push(
+            "這是修改 Workspace 授權，不是單次批准：新的範圍套用到這個 Workspace 的所有 Task，之後要收回必須再修改授權。".to_string(),
+        );
+        for c in list.iter().filter(|c| c.expands) {
+            impact.push(format!("「{}」範圍內的操作之後會自動允許，不再逐次詢問。", c.label));
+        }
+        impact.push(
+            "執行中的 Worker 下一次權限提示就依新授權判定；尚未准入、交接與恢復的 Run 也使用新版。".to_string(),
+        );
+        for c in list.iter().filter(|c| c.expands && c.high_risk) {
+            impact.push(format!("「{}」是高風險能力，不屬於可信專案開發範本。", c.label));
+        }
+    } else if !list.is_empty() {
+        impact.push("這次修改只縮小授權：權限提示立即依新授權判定；已准入的 Run 沿用准入時的版本。".to_string());
+    }
+    AuthorizationChanges { base_revision: current.revision, changes: list, expands, impact }
+}
+
+/// 確認摘要；`current` 是目前生效的 revision（還沒有確認過則為 `None`）。
+pub fn summarize(grants: Vec<Grant>, current: Option<&AuthorizationRevision>) -> Result<ConfirmationSummary, AuthorizationError> {
     let grants = normalize_grants(grants)?;
+    let changes = current.map(|c| changes(c, &grants));
     let requires_risk_acknowledgement = needs_risk_acknowledgement(&grants);
     let mut risks = Vec::new();
     if requires_risk_acknowledgement {
@@ -332,7 +428,7 @@ pub fn summarize(grants: Vec<Grant>) -> Result<ConfirmationSummary, Authorizatio
             restrictions: g.restrictions,
         })
         .collect();
-    Ok(ConfirmationSummary { items, risks, requires_risk_acknowledgement })
+    Ok(ConfirmationSummary { items, risks, requires_risk_acknowledgement, changes })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,6 +437,8 @@ pub struct ConfirmRequest {
     pub template_id: Option<String>,
     pub grants: Vec<Grant>,
     pub acknowledged_risk: bool,
+    /// 使用者已看過「新增的能力與影響」並明確確認擴大授權（修改既有授權而且擴大時必須為真）。
+    pub acknowledged_expansion: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -375,6 +473,9 @@ pub fn confirm(
     }
     if let Some(current) = current.filter(|c| c.grants == grants) {
         return Ok(ConfirmOutcome::Unchanged(current.clone()));
+    }
+    if current.is_some_and(|c| changes(c, &grants).expands) && !request.acknowledged_expansion {
+        return Err(AuthorizationError::ExpansionNotAcknowledged);
     }
 
     let kind = match &template {
@@ -487,7 +588,7 @@ mod tests {
     }
 
     fn request(template_id: Option<&str>, grants: Vec<Grant>, acknowledged: bool) -> ConfirmRequest {
-        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: acknowledged }
+        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: acknowledged, acknowledged_expansion: true }
     }
 
     fn created(outcome: ConfirmOutcome) -> (AuthorizationRevision, DomainEvent) {
@@ -694,7 +795,7 @@ mod tests {
 
     #[test]
     fn summary_of_trusted_dev_discloses_running_code_as_the_windows_user() {
-        let summary = summarize(template(TEMPLATE_TRUSTED_DEV).grants).unwrap();
+        let summary = summarize(template(TEMPLATE_TRUSTED_DEV).grants, None).unwrap();
 
         assert!(summary.requires_risk_acknowledgement);
         assert!(summary.risks.iter().any(|r| r.contains("Windows 使用者的身分執行")), "{:?}", summary.risks);
@@ -704,7 +805,7 @@ mod tests {
 
     #[test]
     fn summary_of_research_template_has_no_execution_risk() {
-        let summary = summarize(template(TEMPLATE_RESEARCH_DOCS).grants).unwrap();
+        let summary = summarize(template(TEMPLATE_RESEARCH_DOCS).grants, None).unwrap();
 
         assert!(!summary.requires_risk_acknowledgement);
         assert!(summary.risks.is_empty());
@@ -715,11 +816,69 @@ mod tests {
         let mut grants = template(TEMPLATE_TRUSTED_DEV).grants;
         grants.push(Grant { capability: Capability::Deploy, targets: vec!["staging".into()], restrictions: vec![] });
 
-        let summary = summarize(grants).unwrap();
+        let summary = summarize(grants, None).unwrap();
 
         let deploy = summary.items.iter().find(|i| i.capability == Capability::Deploy).unwrap();
         assert!(deploy.high_risk);
         assert!(summary.risks.iter().any(|r| r.contains("部署")));
+    }
+
+    // --- 修改授權：新增的能力與影響 ---
+
+    #[test]
+    fn expanding_a_confirmed_authorization_lists_the_added_capability_and_needs_explicit_confirmation() {
+        let first = confirm_template(TEMPLATE_TRUSTED_DEV);
+        let mut grants = first.grants.clone();
+        grants.push(Grant { capability: Capability::RemoteWrite, targets: vec!["origin".into()], restrictions: vec![] });
+
+        let summary = summarize(grants.clone(), Some(&first)).unwrap();
+        let changes = summary.changes.expect("修改既有授權時要列出變動");
+        assert_eq!(changes.base_revision, 1);
+        assert!(changes.expands);
+        assert_eq!(changes.changes.len(), 1);
+        let added = &changes.changes[0];
+        assert_eq!((added.capability, added.new_capability, added.expands), (Capability::RemoteWrite, true, true));
+        assert_eq!(added.added_targets, vec!["origin".to_string()]);
+        assert!(changes.impact.iter().any(|i| i.contains("不是單次批准")), "{:?}", changes.impact);
+        assert!(changes.impact.iter().any(|i| i.contains("遠端寫入")), "{:?}", changes.impact);
+
+        let mut unacknowledged = request(Some(TEMPLATE_TRUSTED_DEV), grants.clone(), true);
+        unacknowledged.acknowledged_expansion = false;
+        assert_eq!(
+            confirm(&workspace(), Some(&first), unacknowledged, T2),
+            Err(AuthorizationError::ExpansionNotAcknowledged)
+        );
+        let (second, _) = created(confirm(&workspace(), Some(&first), request(Some(TEMPLATE_TRUSTED_DEV), grants, true), T2).unwrap());
+        assert_eq!(second.revision, 2);
+    }
+
+    #[test]
+    fn new_targets_and_removed_restrictions_expand_while_narrowing_needs_no_expansion_confirmation() {
+        let first = confirm_template(TEMPLATE_TRUSTED_DEV);
+        let mut wider = first.grants.clone();
+        wider[0].targets.push("D:/other".into());
+        let c = changes(&first, &normalize_grants(wider).unwrap());
+        assert!(c.expands);
+        assert_eq!(c.changes[0].added_targets, vec!["D:/other".to_string()]);
+
+        let mut fewer_restrictions = first.grants.clone();
+        let restricted = fewer_restrictions.iter_mut().find(|g| !g.restrictions.is_empty()).unwrap();
+        restricted.restrictions.pop();
+        assert!(changes(&first, &normalize_grants(fewer_restrictions).unwrap()).expands);
+
+        let narrower: Vec<Grant> = first.grants[1..].to_vec();
+        let c = changes(&first, &narrower);
+        assert!(!c.expands);
+        assert!(c.changes[0].removed_capability);
+        let mut ack_free = request(Some(TEMPLATE_TRUSTED_DEV), narrower, true);
+        ack_free.acknowledged_expansion = false;
+        assert!(confirm(&workspace(), Some(&first), ack_free, T2).is_ok());
+
+        // 第一次確認沒有「目前的授權」可以比較，由確認摘要（I2）把關，不需要擴權確認
+        assert!(summarize(first.grants.clone(), None).unwrap().changes.is_none());
+        let mut first_time = request(Some(TEMPLATE_TRUSTED_DEV), first.grants.clone(), true);
+        first_time.acknowledged_expansion = false;
+        assert!(confirm(&workspace(), None, first_time, T1).is_ok());
     }
 
     // --- 准入 ---

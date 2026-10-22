@@ -887,7 +887,7 @@ mod tests {
                 .find(|t| t.id == TEMPLATE_RESEARCH_DOCS)
                 .unwrap()
                 .grants;
-            let request = ConfirmRequest { template_id: None, grants, acknowledged_risk: false };
+            let request = ConfirmRequest { template_id: None, grants, acknowledged_risk: false, acknowledged_expansion: true };
             match crate::authorization::confirm(&self.workspace, None, request, T1).unwrap() {
                 ConfirmOutcome::Created { revision, .. } => self.authorization = Some(revision),
                 other => panic!("{other:?}"),

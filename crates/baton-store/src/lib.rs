@@ -1464,7 +1464,7 @@ mod tests {
     // --- 授權 revision ---
 
     fn confirm_request(template_id: Option<&str>, grants: Vec<authorization::Grant>) -> ConfirmRequest {
-        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: true }
+        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: true, acknowledged_expansion: true }
     }
 
     fn research_grants(path: &str) -> Vec<authorization::Grant> {
