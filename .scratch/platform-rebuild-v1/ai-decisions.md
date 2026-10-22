@@ -2458,16 +2458,78 @@
 - 影響：用本票分支（本次合併前）建過的開發資料庫，`agent_session_and_transcript` 記在第 25 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
-### AI-273：以「前一次啟動有沒有正常結束」判定意外崩潰；harness 的 `restart` 是正常結束，另有 `crash_restart`
+### AI-273：哪些事件計入哪一種預算；交接、恢復、取消與契約變更都不計入
+- 重要度：高
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：(1) 實作失敗修正：Worker 以失敗結束（`RunOutcome::Failed`）、確定性檢查有任一項未通過。(2) 驗證不完整重驗：確定性檢查沒有未通過、但有取不到證據的項目（AI-274）。(3) 基礎設施重試：啟動失敗（`LaunchFailed`）、lease 過期後確認程序已不在（`ReconcileLease` 觀察到 `Dead`）。(4) 不計入：額度交接——目前還沒有交接流程（票 28、29），以「Adapter 回報額度用盡 `RateLimited { status: Exhausted }` 之後程序以失敗結束」視為突然限流，新增 `RunOutcome::QuotaLimited`，Run 記為 `interrupted`（`quota_limited：…`）、Task 回到 `ready`；恢復與停止——所有 `RunCommand::Interrupt`（`launch_outcome_unknown`、完全退出後程序已不在、完全退出停止、還原）；使用者取消；「契約在 Run 派工後變更」造成的驗證未通過（不是任何人的失敗）。只有 Task 還在 `running`／`verifying` 而實際發生轉換時才計入（使用者已取消的 Task 不計）。
+- 理由：spec D-16 只列了三種名稱。Worker 自己宣告失敗、或成果被檢查否決，是「實作」需要修正；平台啟動不了程序或程序無故消失是「基礎設施」；取不到證據既不是產品缺陷也不是通過（使用者故事 70）。交接、恢復與取消明文不計入，契約變更比照辦理。
+- 替代方案：Worker 以失敗結束也可能是 CLI 或 API 錯誤（偏基礎設施）；但目前 Adapter 分不出原因，一律算實作失敗較保守（預算較快用完、較早問使用者）。
+- 影響：票 28、29 實作交接時，應讓交接結束的舊 Run 走 `QuotaLimited` 或新的不計入路徑；票 31 的恢復嘗試若改用 `Interrupt` 以外的命令，需要明確標為不計入。
+- 審閱：未審
+
+### AI-274：「驗證不完整」的定義與重驗方式；整合驗證把不完整當成未通過
+- 重要度：中
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：確定性檢查新增結果 `inconclusive`：命令無法啟動、被終止（沒有結束碼）、逾時 10 分鐘，檔案或成果檔讀取失敗。結束碼不符、檔案不存在、雜湊不符、成果未登記或與 manifest 不符仍是 `failed`。一次驗證中只要有 `failed` 就是未通過（實作失敗）；沒有 `failed` 但有 `inconclusive` 時，驗證紀錄的結果是 `inconclusive`，Task 留在 `verifying`，Supervisor 下一次處理就重新執行檢查（不另設延遲）。整合佇列的整合驗證把 `inconclusive` 視為未通過。`task_verification` 原本 `run_id` 唯一且結果只允許 passed／failed，改以 migration 27 重建：同一個 Run 最多一筆有結論（passed／failed）的紀錄，`inconclusive` 可以有多筆。
+- 理由：要計數「驗證不完整」必須先有這個結論；逾時歸為不完整，因為逾時本身不能證明產品錯誤（也可能是機器忙）。重驗不設延遲，是因為 spec 只對基礎設施重試規定退避；兩次重驗很快用完時會送裁定，由使用者處理環境問題。
+- 替代方案：逾時算未通過（產品可能卡死）；重驗也加退避。都可以之後再調。
+- 影響：票 13 的「無法執行／讀取失敗算未通過」改為不完整（原有 Domain 測試已更新）。票 45 會導入完整的 reason_code（environment_blocked 等），屆時可細分。
+- 審閱：未審
+
+### AI-275：計數的意義、用盡的時點，以及哪一種會自動重試
+- 重要度：中
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：計數是「已用掉的重試次數」：第一次嘗試不算，每次計入的失敗讓計數加一，直到等於上限；已到上限後再發生一次才是「用盡」，此時計數停在上限、Task 進入 `blocked`。也就是實作最多執行 1＋3 次、驗證最多 1＋2 次、基礎設施最多 1＋5 次。只有基礎設施重試在預算內會自動排回派工佇列（優先序 0），並設定退避期限：第 n 次重試等 min(1 分鐘 × 2^(n−1), 10 分鐘)，即 1、2、4、8、10 分鐘；期限前留在佇列，等待原因 `backoff`／`retry_backoff`。實作失敗仍照票 10 回到 `ready`、不自動排隊（spec D-15 把「在預算內重派」交給 Controller）。
+- 理由：「修正 3 次」最自然的讀法是首次之外再修 3 次。spec 只給了退避上限 10 分鐘，起點 1 分鐘讓五次重試正好用到上限。退避只對自動重試有意義，所以只有基礎設施重試自動排隊。
+- 替代方案：計數包含第一次嘗試（總共 3 次）；退避起點 30 秒（30 秒到 8 分鐘，用不到上限）。
+- 影響：既有情境測試 `acceptance.rs` 的「程序死亡後重新派工」需要先等過 1 分鐘的退避期限（已更新）。使用者在退避期間手動派工也會留在佇列。
+- 審閱：未審
+
+### AI-276：用盡時的裁定請求沿用「Controller 動作」種類，核准即重設並讓 Task 繼續
+- 重要度：中
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：用盡時由 Runtime 在同一個交易建立裁定請求，種類用既有的 `authority`、事項 `next_step_after_budget`（spec D-15 的「預算用盡後的下一步」），fingerprint 與 Controller 動作相同（`next_step_after_budget:<Task>`），`run_id` 指向用盡預算的 Run（驗證時是受驗 Run），識別為 `dr_budget_<Run 識別或驗證紀錄識別>`，阻擋範圍是這個 Task，選項 `approve`（再給一輪這一種預算）與 `reject`（維持阻擋），沒有建議選項。核准（接受或修改條件選 `approve`）時：只重設用盡的那一種計數（基礎設施另外清掉退避期限），Task 從 `blocked` 回到 `ready` 並排回派工佇列；驗證不完整用盡的回到 `verifying` 重驗（`TaskStatus` 新增 `blocked → verifying` 轉換）；核准同時記為已使用（`decision_approval_use`），Controller 之後不能再拿它當單次核准。駁回或其他處理方式只記下裁定，Task 維持 `blocked`。核准的不是目前用盡的那個請求（之後又用盡而有新請求）時只記裁定，不重設。用盡期間使用者仍可用既有的 `POST ready` 把 Task 標回可派工（不擋），之後再失敗會立即再用盡並建立新的請求。
+- 理由：新增一種 `DecisionKind` 要再重建 `decision_request` 表（CHECK 約束）；而這件事本來就是權限表中的事項，沿用 `authority` 讓裁定中心既有的 UI、批次與過期機制全部適用。只有核准有直接效果，才不會出現「回答了卻什麼都沒發生」。
+- 替代方案：新增 `budget` 種類；核准後重設全部三種計數；核准後不自動排隊。
+- 影響：Controller（票 16、17）對同一個 Task 提出 `next_step_after_budget` 時，若預算請求還在等待，會拿到這個既有的請求。
+- 審閱：未審
+
+### AI-277：突然限流的判定只存在 Supervisor 記憶體中
+- 重要度：低
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：Supervisor 收到某個 Run 的 `RateLimited { status: Exhausted }` 時，在記憶體中記下這個 Run；同一個 Run 之後以失敗結束時送出 `RunOutcome::QuotaLimited`，不計入預算。不寫入資料庫；Runtime 在兩個事件之間重建時，這次結束會被當成實作失敗。
+- 理由：與既有的「最後一個錯誤當失敗原因」（`last_errors`）同樣做法，改動最小；完整、可恢復的交接流程屬於票 28、29。
+- 替代方案：結束時查詢該 Run 的額度觀測紀錄（`raw_ref = run:<id>`）判斷；需要在 Run 命令的交易中多載入額度資料。
+- 影響：票 28、29 實作交接時應以持久化的交接 phase 取代這個判定。
+- 審閱：未審
+
+### AI-278：預算的資料與 API 形狀（migration 27 `retry_budgets`）
+- 重要度：低
+- 時間／階段：2026-10-22，票 36 實作
+- 決策：新表 `task_budget`（每個 Task 一列，從未計入的沒有列）：三種計數、`retry_not_before`、`exhausted`、`request_id`（參照裁定請求；兩者同時有或同時沒有）、`version`、`updated_at`；上限不寫進 CHECK（D-16 改動成本低，改數字不需要 migration）。事件聚合 `task_budget`（識別是 Task）：`task_budget_charged`、`task_budget_exhausted`、`task_budget_reset`。API：`GET tasks/{id}` 新增 `budget`、`GET tasks` 新增 `budgets`（`BudgetView`：`counters[{kind,label,used,limit}]`、`retry_not_before`、`exhausted`、`decision_request_id`）；排程等待類別新增 `backoff`。Web UI 在 Task 卡片有計數時才顯示「修正與重試預算」區塊、退避期限與用盡提示，並把不完整的驗證與整合檢查另外列出。
+- 理由：計數要能在 Runtime 重建後延續，也要與 Run／驗證的結果在同一個交易寫入；放在獨立的表，不改動 `task` 表與 Task 的版本。
+- 替代方案：每次由 Run 與驗證紀錄重新推算（重設要另外記錄起點，較複雜）。
+- 影響：與其他進行中的票合併時，migration 與 AI 編號可能需要順延。
+- 審閱：未審
+
+### AI-279：票 36 整合 rebuild/v1（票 24、21、26、15）：migration 順延為第 27 個、AI 編號改為 AI-273～AI-278、准入被拒不計入預算
+- 重要度：中
+- 時間／階段：2026-10-22，票 36 實作 run R086-36-impl（結束前整合，三次）
+- 決策：(1) 實作期間整合分支先後併入票 24（第 23 個 migration `run_admission`）、票 21（第 24 個 `worktree_cleanup`）、票 26（第 25 個 `external_operation`）與票 15（第 26 個 `agent_session_and_transcript`），本票的 `retry_budgets` 順延為第 27 個，排在最後；彼此不參照。migration 註解、開發指南與 AI-274、AI-278 中的序號改為 27；Store 的 migration 測試以名稱找出位置，不受序號影響。(2) 整合分支已用到 AI-272，本票條目改為 AI-273～AI-278，移到 AI-272 之後，條目內互相引用的編號一併更新；本票第一次整合時寫的整合條目由這一條取代。(3) 票 24 新增的「啟動准入被拒」（`deny_admission`：Run `interrupted`、Task 回 `ready` 並重新排隊）不計入任何預算——授權不足不是失敗，與 AI-273 的「恢復、停止不計入」同一原則。(4) 票 26 與本票都把「寫入新的裁定請求」抽成 `decisions::insert_request`，內容相同，只合併說明；外部操作結果未知時 Task 轉為 `waiting_decision` 的規則不碰 `blocked` 的 Task，所以預算用盡（`blocked`）與結果未知同時發生時 Task 維持 `blocked`，兩個裁定請求都會出現。程序意外消失同時是基礎設施重試，裁定恢復的 Task 仍要等過退避期限才再派；票 26 的情境測試 `a_crash_after_an_external_operation_was_sent_never_resends_it_and_holds_only_the_related_task` 因此在回答之後先把時鐘推過 1 分鐘（只加這一行，斷言不變）。(5) 其餘衝突兩邊都保留：`RunContext`（`settings_version`、票 15 的 `sessions` 與 `budgets`）、`RunChange`（`sessions` 與預算三欄）、`DecisionContext`（`authorizations` 與 `budgets`）、`run.rs` 模組說明、Web 工作面板（清理狀態與預算區塊、兩組測試）、開發指南的模組表與情境測試清單。票 21 的清理重試（AI-249）沿用與本票相同的退避數列，兩者各自計數、互不影響。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-237、AI-252、AI-260 同）。
+- 替代方案：無（編號規則已定）；准入被拒也可算基礎設施重試，但那會讓撤銷授權消耗預算。
+- 影響：用本票分支建過的開發資料庫，`retry_budgets` 記在第 23、25 或 26 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-238～AI-243、AI-253～AI-259、AI-263～AI-269 與 migration 23、25、26 是改號前的編號。
+- 審閱：未審
+### AI-280：以「前一次啟動有沒有正常結束」判定意外崩潰；harness 的 `restart` 是正常結束，另有 `crash_restart`
 - 重要度：高
 - 時間／階段：2026-10-22，票 31 實作
-- 決策：`runtime_boot` 加上 `ended_cleanly_at`（migration 第 27 個 `crash_recovery`；既有的啟動紀錄在升級時一律視為正常結束）。`RunningRuntime::shutdown()` 是有秩序的停止，會記下正常結束；新增的 `RunningRuntime::kill()`、程序被終止或當掉都不會。Runtime 啟動時（停止意圖核對之後、任何程序副作用之前），前一次啟動沒有正常結束、而且沒有停止意圖，就判定為意外終止並建立或沿用恢復事件。完全退出的停止意圖優先（走票 25 的重新開啟）。harness 的 `restart()` 沿用 `shutdown()`（正常重啟，行為與票 31 之前完全相同）；模擬崩潰改用新增的 `crash_restart()`。正式執行檔目前只有完全退出（有停止意圖）一種正常結束方式，主控台的 Ctrl-C 與程序被終止都算意外終止。不區分「同一次 Windows 登入」與跨登入（DR-05 限定同次登入；跨登入的語意屬於票 33）。
+- 決策：`runtime_boot` 加上 `ended_cleanly_at`（migration 第 28 個 `crash_recovery`；既有的啟動紀錄在升級時一律視為正常結束）。`RunningRuntime::shutdown()` 是有秩序的停止，會記下正常結束；新增的 `RunningRuntime::kill()`、程序被終止或當掉都不會。Runtime 啟動時（停止意圖核對之後、任何程序副作用之前），前一次啟動沒有正常結束、而且沒有停止意圖，就判定為意外終止並建立或沿用恢復事件。完全退出的停止意圖優先（走票 25 的重新開啟）。harness 的 `restart()` 沿用 `shutdown()`（正常重啟，行為與票 31 之前完全相同）；模擬崩潰改用新增的 `crash_restart()`。正式執行檔目前只有完全退出（有停止意圖）一種正常結束方式，主控台的 Ctrl-C 與程序被終止都算意外終止。不區分「同一次 Windows 登入」與跨登入（DR-05 限定同次登入；跨登入的語意屬於票 33）。
 - 理由：DR-05 需要分辨「意外終止」與「有秩序的停止」，持久化的正常結束標記是最直接、可在任何邊界中斷後正確判讀的訊號（沒寫到就當意外，偏保守）。既有 25 個情境測試檔、57 處 `restart()` 模擬的是「Runtime 重建後以 command_id 找回原程序、不重複啟動」（票 10、26）；若一律視為崩潰，恢復會停止舊程序並另派新 Run，等於改寫那些已驗收的行為，超出本票範圍。
 - 替代方案：(a) 只要不是完全退出後的啟動就一律視為崩潰：要改寫大量既有測試，也讓「Runtime 重建後找回原程序」這條已驗收的路徑失去意義。(b) 以 Runtime 的 heartbeat 檔或監護日誌判斷：監護是票 32 的範圍。
 - 影響：日後若新增其他有秩序停止 Runtime 的路徑（例如更新流程），要呼叫 `shutdown()` 才不會在下次啟動觸發崩潰恢復。重開機後由登入自啟動拉起的 Runtime 目前也會被判定為崩潰並恢復；舊程序那時已不在，停止會立即回報已停止，Task 以新 Run 恢復（票 33 若要不同處理需另行調整）。
 - 審閱：未審
 
-### AI-274：一次恢復嘗試的內容與「處置完成」的條件
+### AI-281：一次恢復嘗試的內容與「處置完成」的條件
 - 重要度：高
 - 時間／階段：2026-10-22，票 31 實作
 - 決策：Supervisor 的 `tick` 在任何啟動之前處理恢復事件。一次嘗試依序：(1) 持久化嘗試（輪次、序號、嘗試識別），寫不進去就不開始；(2) 只核對啟動中的 Run（以 command_id 找回就補寫回執，確定沒有程序的照舊以 `launch_outcome_unknown` 中斷、不自動重派），並收下已到達的 Adapter 事件（保存證據，已自行結束的 Run 正常結束）；(3) 對每個尚未結束、有程序身分的 Run 並行呼叫 `ProcessControl::stop(identity, 30 秒)`；確認停止的 Run 以 `interrupted`（`stopped_by_crash_recovery`）結束，Task 退回 `ready` 並重新排隊（與完全退出共用 `stop_run_and_requeue`），由排程以新 Run 恢復，新 Run 照常經過准入（授權、共同設定版本）、相依與 Guard，原生 Session 依票 15 決定沿用或替換；崩潰前已要求取消的 Run 完成取消，Task 回到 `ready` 但不重新排隊。(4) 全部確認停止才算處置完成、進入穩定觀察；任何一個 `StillAlive`、停止呼叫失敗，或啟動中而無法查證的 Run，都讓這次嘗試失敗，那些 Run 保留寫入所有權、不建立新 Run。排隊中（尚未啟動、沒有程序）的 Run 不停止，恢復門檻打開後照常准入與啟動。
@@ -2476,7 +2538,7 @@
 - 影響：恢復會中斷仍正常執行的舊 Worker，重做最近檢查點之後的工作（ADR-0005 已接受的後果）。恢復嘗試的停止握著 Supervisor 的 tick 鎖；嘗試中按「完全退出」時，停止流程要等這次停止結束（最多約 30 秒，仍在 40 秒總上限內）。
 - 審閱：未審
 
-### AI-275：退避期限的起算點、退避中與嘗試中重建的處理
+### AI-282：退避期限的起算點、退避中與嘗試中重建的處理
 - 重要度：中
 - 時間／階段：2026-10-22，票 31 實作
 - 決策：退避期限從「失敗被記下的時刻」起算並持久化在 `next_attempt_at`：嘗試中或觀察中崩潰時是下一次 Runtime 啟動的時刻；嘗試本身失敗（無法確認停止）時是失敗的時刻。退避中重建 Runtime（不論是否正常結束）不計次、不改期限。Runtime 啟動時若有進行中的嘗試，不論前一次是否正常結束，一律把那次嘗試記為失敗（做那次嘗試的 Runtime 已不在）。觀察中的正常重啟不打斷觀察；觀察中的崩潰則讓那次嘗試失敗、沿用原事件與已用次數。
@@ -2485,7 +2547,7 @@
 - 影響：票 32 的監護在啟動 Runtime 前就計次，屆時「嘗試開始」的時刻改由監護日誌提供，期限計算要與監護一致。
 - 審閱：未審
 
-### AI-276：恢復門檻擋住的範圍與等待原因
+### AI-283：恢復門檻擋住的範圍與等待原因
 - 重要度：高
 - 時間／階段：2026-10-22，票 31 實作
 - 決策：恢復事件在 `waiting`（含退避）、`attempting`、`exhausted` 時，`halt_for`／`launch_halted_in` 擋住所有 Workspace 的派工、啟動程序（launch intent）、工作目錄準備與 worktree 清理；Supervisor 也在這段期間略過啟動與排程。`observing` 與 `succeeded` 不擋。等待原因沿用 `lifecycle` 類別，代碼 `crash_recovery_pending`／`crash_recovery_exhausted`，不新增類別。用盡之後，無法確認停止的舊程序不再被要求停止，繼續持有寫入所有權。
@@ -2494,7 +2556,7 @@
 - 影響：用盡期間整個平台停止派新工作，直到使用者按「重新嘗試恢復」。
 - 審閱：未審
 
-### AI-277：「重新嘗試恢復」的語意
+### AI-284：「重新嘗試恢復」的語意
 - 重要度：中
 - 時間／階段：2026-10-22，票 31 實作
 - 決策：只在 `exhausted` 時接受（`POST /api/v1/recovery/retry`，桌面憑證）；同一事件輪次加一、本輪已用次數歸零、立即可以做新輪次的第一次嘗試（沒有退避）。舊輪次的嘗試全部保留，以 `(round, seq)` 區分。不是用盡時回 409 `recovery_not_exhausted`，沒有任何事件時回 409 `no_recovery_event`。成功（`succeeded`）之後再崩潰建立新的恢復事件。
@@ -2503,13 +2565,22 @@
 - 影響：無。
 - 審閱：未審
 
-### AI-278：恢復事件的資料形狀、API 與 UI 位置
+### AI-285：恢復事件的資料形狀、API 與 UI 位置
 - 重要度：低
 - 時間／階段：2026-10-22，票 31 實作
 - 決策：`recovery_event`（每個事件一列：輪次、狀態、本輪已用次數、偵測時間、退避期限、觀察期滿、最後失敗原因、結束時間、版本）與 `recovery_attempt`（嘗試識別、輪次、序號 `CHECK (seq BETWEEN 1 AND 3)`、`UNIQUE (event_id, round, seq)`、結果、失敗原因、受影響工作 JSON）；只處理最新的事件。Domain 事件寫在 `recovery_event` 聚合。`GET /api/v1/recovery` 回傳最新事件、`max_attempts`、`can_retry`、`blocking`。Web UI 新增 `RecoveryPanel`（放在主欄的備份設定之下，與其他全域面板並列），頂部狀態列在事件未結束時顯示「恢復中（n/3）」或「恢復額度用盡」（spec D-21）。
 - 理由：資料表的限制讓「同一輪第四次」在儲存層就不可能發生；受影響工作以 JSON 存在嘗試上，只供顯示。App 目前沒有分頁，全域面板都直接列在主欄。
 - 替代方案：把嘗試存成事件列上的 JSON：失去資料表層級的序號限制。
 - 影響：票 32 匯入監護日誌時可用嘗試識別去重。
+- 審閱：未審
+
+### AI-286：票 31 整合 rebuild/v1（票 36）：migration 順延為第 28 個、AI 編號改為 AI-280～AI-285
+- 重要度：低
+- 時間／階段：2026-10-22，票 31 實作（run R095-31-impl 結束前合併整合分支）
+- 決策：實作期間整合分支併入票 36（第 27 個 migration `retry_budgets`，AI-273～AI-279）。本票的 `crash_recovery` 順延為第 28 個、排在 `retry_budgets` 之後；兩者沒有共用的資料表，都會套用。本票條目原本寫成 AI-273～AI-278，改為 AI-280～AI-285 並移到 AI-279 之後，條目內的 migration 編號同步改為 28；整合分支的條目逐字未動。衝突合併：Supervisor 的 import 同時保留票 36 的 `LimitStatus` 與本票的 `recovery`；開發指南目錄表以整合分支的敘述為底，再補上本票的 `recovery.rs` 與 `/api/v1/recovery`。崩潰恢復把 Run 以 `interrupted`（`stopped_by_crash_recovery`）結束，依 D-16 與票 36 的 AI-273「恢復不計入」，不計入任何預算。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：本票較早的 commit 中條目編號寫 AI-273～AI-278、migration 是第 27 個，是改號前的編號；用本票分支（本次合併前）建過的開發資料庫，`crash_recovery` 記在第 27 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

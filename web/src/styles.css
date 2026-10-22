@@ -311,7 +311,8 @@ body {
 }
 
 .task-workdir,
-.task-integration {
+.task-integration,
+.task-budget {
   display: grid;
   gap: 4px;
   padding: 6px 8px;
@@ -322,7 +323,8 @@ body {
 }
 
 .task-workdir-failed,
-.task-integration-failed {
+.task-integration-failed,
+.task-budget-exhausted {
   background: #ffebe9;
   border-color: #ff8182;
 }
@@ -344,6 +346,7 @@ body {
 }
 
 .task-integration ul,
+.task-budget ul,
 .integration-queue ol {
   padding-left: 18px;
 }

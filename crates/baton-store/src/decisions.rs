@@ -97,6 +97,7 @@ impl DecisionData {
             authority: &self.policy,
             artifacts: &self.artifacts,
             authorizations: &self.authorizations,
+            budgets: &loaded.budgets,
         }
     }
 }
@@ -586,7 +587,7 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
     Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)?, artifacts, authorizations })
 }
 
-/// 寫入一個新的裁定請求與它的阻擋範圍（外部操作結果未知時由 Runtime 建立的請求也走這裡，票 26）。
+/// 寫入一個新的裁定請求與它的阻擋範圍（外部操作結果未知（票 26）與預算用盡（票 36）時由 Runtime 建立的請求也走這裡）。
 pub(crate) fn insert_request(tx: &Transaction<'_>, request: &DecisionRequest) -> rusqlite::Result<()> {
     // Domain 型別只含字串與數字，序列化不會失敗
     let options = serde_json::to_string(&request.options).expect("選項可序列化");
@@ -690,6 +691,10 @@ fn save(tx: &Transaction<'_>, change: &DecisionChange, now: Timestamp) -> rusqli
     for task in &change.tasks {
         let task: &Task = task;
         save_task(tx, task)?;
+    }
+    // 核准「預算用盡後的下一步」而重設的預算（票 36）
+    for budget in &change.budgets {
+        super::budgets::save_budget(tx, budget, None, now)?;
     }
     // 恢復排程：回到 ready 的 Task 重新排進派工佇列，由 Scheduler 派出（舊 Run 還持有 lease 時留在佇列等待）。
     // 原本派工的優先序沒有保存，一律用派工 API 的預設值 0；已在佇列中的保留原本的位置與優先序

@@ -314,7 +314,8 @@ pub fn decide(
             if !matches {
                 return Err(IntegrationError::ResultsMismatch);
             }
-            let failed = results.iter().filter(|r| r.status == CheckStatus::Failed).count();
+            // 取不到證據（不完整）也不能當成通過整合（票 36）
+            let failed = results.iter().filter(|r| r.status != CheckStatus::Passed).count();
             entry.checks = results;
             if failed > 0 {
                 let reason = format!("合併後的整合驗證未通過：{} 項確定性檢查中有 {failed} 項未通過", entry.checks.len());

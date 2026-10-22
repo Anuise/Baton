@@ -74,6 +74,7 @@ impl Store {
                     artifacts: &artifacts,
                     workdirs: &loaded.workdirs,
                     integrations: &loaded.integrations,
+                    budgets: &loaded.budgets,
                 };
                 match verification::decide(&ctx, command, record_id, now) {
                     Err(rejected) => Ok(Err(rejected)),
@@ -82,6 +83,10 @@ impl Store {
                         insert_record(tx, &change.record)?;
                         if let Some(entry) = change.integration.as_mut() {
                             entry.seq = super::integration::insert_entry(tx, entry)?;
+                        }
+                        // 未通過或不完整計入預算；用盡時同一個交易寫入裁定請求（票 36）
+                        if let Some(budget) = &change.budget {
+                            super::budgets::save_budget(tx, budget, change.decision.as_ref(), now)?;
                         }
                         for event in &change.events {
                             append_event(tx, event)?;

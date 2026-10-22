@@ -297,6 +297,8 @@ async fn a_crash_after_an_external_operation_was_sent_never_resends_it_and_holds
     // 使用者查證已生效：Task 恢復並重新排隊，新的 Worker 用同一個鍵登記時被告知不要重送
     let answered = answer(&harness, &ws, &request_id, OPTION_VERIFIED_DONE).await;
     assert_eq!(answered["resumed_task_ids"], json!([deploy]));
+    // 程序意外消失也計入基礎設施重試：等過退避期限才再派（票 36）
+    harness.clock.advance_millis(baton_domain::budget::backoff_millis(1));
     harness.supervise().await;
     let second_run = latest_run(&harness, &ws, &deploy).await;
     assert_ne!(second_run, deploy_run);

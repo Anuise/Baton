@@ -52,7 +52,7 @@ use baton_domain::lifecycle::{
     ExitReport, ExitTiming, LifecycleFile, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
     RUN_GONE_AFTER_EXIT_REASON,
 };
-use baton_domain::quota::RateLimitSignal;
+use baton_domain::quota::{LimitStatus, RateLimitSignal};
 use baton_domain::recovery::{self, AffectedRun, RecoveryCommand, RecoveryStatus, RunDisposition};
 use baton_domain::run::{
     LaunchPayload, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
@@ -107,6 +107,8 @@ pub struct Supervisor {
     adopted: Mutex<HashSet<String>>,
     /// 每個 Run 最近一次 Adapter 回報的錯誤；程序以失敗結束時作為失敗原因。
     last_errors: Mutex<HashMap<String, String>>,
+    /// Adapter 回報過額度用盡的 Run：之後以失敗結束是突然限流，不是實作失敗（票 36）。
+    quota_limited: Mutex<HashSet<String>>,
     /// 完全退出的時間參數與生命週期檔所在的資料目錄。
     exit_timing: ExitTiming,
     data_dir: PathBuf,
@@ -150,6 +152,7 @@ impl Supervisor {
             streams: Mutex::new(HashMap::new()),
             adopted: Mutex::new(HashSet::new()),
             last_errors: Mutex::new(HashMap::new()),
+            quota_limited: Mutex::new(HashSet::new()),
             exit_timing: lifecycle.exit_timing,
             data_dir: lifecycle.data_dir,
             reopen_from: Mutex::new(lifecycle.reopen_from),
@@ -924,10 +927,13 @@ impl Supervisor {
                     AdapterEvent::Exited { success } => {
                         // 程序結束只產生 Run 結束事件；Task 是否完成由後續的驗證決定
                         let last_error = self.last_errors.lock().await.remove(&run_id);
-                        let outcome = if success {
-                            RunOutcome::Succeeded
-                        } else {
-                            RunOutcome::Failed { reason: last_error.unwrap_or_else(|| "程序以失敗結束".into()) }
+                        let limited = self.quota_limited.lock().await.remove(&run_id);
+                        let reason = last_error.unwrap_or_else(|| "程序以失敗結束".into());
+                        let outcome = match (success, limited) {
+                            (true, _) => RunOutcome::Succeeded,
+                            // 帳號額度用盡後才失敗：交給其他帳號接手，不計入任何預算
+                            (false, true) => RunOutcome::QuotaLimited { reason },
+                            (false, false) => RunOutcome::Failed { reason },
                         };
                         let command =
                             RunCommand::Finish { run_id: run_id.clone(), generation: item.view.run.generation, outcome };
@@ -936,6 +942,9 @@ impl Supervisor {
                         break;
                     }
                     event @ (AdapterEvent::RateLimited { .. } | AdapterEvent::UsageReported { .. }) => {
+                        if matches!(event, AdapterEvent::RateLimited { status: LimitStatus::Exhausted, .. }) {
+                            self.quota_limited.lock().await.insert(run_id.clone());
+                        }
                         self.record_quota_event(&item.view.run, event).await;
                     }
                     // 訊息由後續的票處理（對話紀錄）
