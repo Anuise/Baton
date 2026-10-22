@@ -25,11 +25,16 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
 
 mod agent;
+mod lifecycle;
 mod profiles;
 mod runs;
 mod scheduling;
 mod tasks;
 pub use agent::AgentContext;
+pub use lifecycle::{
+    lifecycle_file_path, read_lifecycle_file, write_lifecycle_file, LifecycleApplyError, LifecycleSnapshot,
+    WorkspaceLifecycleOutcome, LIFECYCLE_FILE_NAME,
+};
 pub use profiles::ProfileApplyError;
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use scheduling::{
@@ -317,6 +322,25 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TABLE scheduler_setting (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             mode TEXT NOT NULL CHECK (mode IN ('reserve_handoff', 'higher_concurrency')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );",
+    },
+    // 桌面生命週期與完全退出（票 25）：Runtime 的停止意圖與最近一次退出的經過只有一列；
+    // 每個 Workspace 的「完全退出後自動續跑」與暫停狀態（沒有列的 Workspace 等同預設：關閉、未暫停）
+    Migration {
+        name: "lifecycle",
+        sql: "CREATE TABLE runtime_lifecycle (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            phase TEXT NOT NULL CHECK (phase IN ('running', 'stopping', 'stopped')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            last_exit TEXT CHECK (last_exit IS NULL OR json_valid(last_exit)),
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE workspace_lifecycle (
+            workspace_id TEXT PRIMARY KEY REFERENCES workspace (id),
+            auto_resume_after_exit INTEGER NOT NULL CHECK (auto_resume_after_exit IN (0, 1)),
+            paused_since INTEGER,
             version INTEGER NOT NULL CHECK (version >= 1),
             updated_at INTEGER NOT NULL
         );",

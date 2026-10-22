@@ -78,6 +78,9 @@ pub struct TaskContractResponse {
 pub struct ReportAck {
     pub accepted: bool,
     pub kind: ReportKind,
+    /// Runtime 正在完全退出（票 25）：Worker 應儘快保存 checkpoint 並結束；寬限期過後程序樹會被終止。
+    #[serde(default)]
+    pub stop_requested: bool,
 }
 
 fn api_error(status: StatusCode, code: &'static str, message: &str) -> ApiError {
@@ -164,7 +167,9 @@ async fn report(
     let content = content?;
     let kind = content.kind();
     state.store.apply_agent_report(&scope, content, state.clock.now()).await?;
-    Ok(Json(ReportAck { accepted: true, kind }))
+    // 回報的回應是 Runtime 通知 Worker「保存進度並停止」的管道：停止意圖生效時告訴它
+    let stop_requested = state.store.lifecycle_state().await?.stop_intent_active();
+    Ok(Json(ReportAck { accepted: true, kind, stop_requested }))
 }
 
 pub(crate) async fn report_progress(

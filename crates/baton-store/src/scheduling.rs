@@ -13,6 +13,7 @@ use baton_domain::scheduler::{
     self, Capacity, CapacityMode, Evaluation, SchedulerSettings, SlotKind, WaitCategory, WaitReason,
 };
 
+use super::lifecycle::halt_for;
 use super::profiles::load_profiles;
 use super::runs::{load_active_runs, save, RunApplyError};
 use super::tasks::load;
@@ -92,7 +93,8 @@ impl Store {
                         return Ok(Err(RunError::WorkspaceNotFound(request.workspace_id.clone())));
                     }
                     let active = load_active_runs(tx)?;
-                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used };
+                    let halt = halt_for(tx, loaded.workspace.as_ref(), &request.workspace_id)?;
+                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
                     let task_ctx = loaded.ctx(&request.workspace_id);
                     let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases };
                     if let Err(rejected) = scheduler::evaluate(&ctx, &capacity, &request.task_id, SlotKind::Normal) {
@@ -110,7 +112,9 @@ impl Store {
                 for entry in load_queue(tx)? {
                     let loaded = load(tx, &entry.workspace_id)?;
                     let active = load_active_runs(tx)?;
-                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used };
+                    // 停止意圖或 Workspace 暫停：佇列重試與額度恢復都不派（票 25）
+                    let halt = halt_for(tx, loaded.workspace.as_ref(), &entry.workspace_id)?;
+                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
                     let task_ctx = loaded.ctx(&entry.workspace_id);
                     let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases };
                     let waiting = |reasons| WaitingTask {
@@ -179,7 +183,8 @@ impl Store {
             let mut queue = Vec::new();
             for entry in load_queue(conn)? {
                 let loaded = load(conn, &entry.workspace_id)?;
-                let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used };
+                let halt = halt_for(conn, loaded.workspace.as_ref(), &entry.workspace_id)?;
+                let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
                 let task_ctx = loaded.ctx(&entry.workspace_id);
                 let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases };
                 let reasons = match scheduler::evaluate(&ctx, &capacity, &entry.task_id, SlotKind::Normal) {

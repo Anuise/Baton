@@ -14,11 +14,13 @@ pub mod fakes;
 use std::ops::Deref;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use baton_api::{tool_path, CLIENT_HEADER, CLIENT_HEADER_VALUE};
 use baton_domain::agent::AGENT_TOKEN_ENV;
 use baton_domain::auth::Role;
+use baton_domain::lifecycle::ExitTiming;
 use baton_domain::Timestamp;
 use baton_ports::Ports;
 use baton_runtime::{RunningRuntime, Runtime, RuntimeConfig, RuntimeError, RuntimeOptions};
@@ -36,11 +38,19 @@ type PrepareDataDir = Box<dyn FnOnce(&Path)>;
 pub struct HarnessBuilder {
     clock_start: Timestamp,
     prepare: Option<PrepareDataDir>,
+    exit_timing: ExitTiming,
 }
 
 impl HarnessBuilder {
     pub fn clock_at(mut self, start: Timestamp) -> Self {
         self.clock_start = start;
+        self
+    }
+
+    /// 完全退出的寬限期與強制終止確認上限（預設即 spec D-11 的 30 + 10 秒）；
+    /// 測「停不下來」的情境時縮短，免得真的等 40 秒。
+    pub fn exit_timing(mut self, timing: ExitTiming) -> Self {
+        self.exit_timing = timing;
         self
     }
 
@@ -61,8 +71,15 @@ impl HarnessBuilder {
             prepare(data_dir.path());
         }
         let fakes = FakePorts::new(self.clock_start);
-        let runtime = try_start_runtime(data_dir.path(), &fakes.to_ports()).await?;
-        Ok(Harness { data_dir, fakes, runtime: Some(runtime), http: reqwest::Client::new() })
+        let runtime = try_start_runtime(data_dir.path(), &fakes.to_ports(), self.exit_timing).await?;
+        Ok(Harness {
+            data_dir,
+            fakes,
+            runtime: Some(runtime),
+            http: reqwest::Client::new(),
+            exit_timing: self.exit_timing,
+            exits_seen: AtomicU64::new(0),
+        })
     }
 }
 
@@ -71,6 +88,9 @@ pub struct Harness {
     fakes: FakePorts,
     runtime: Option<RunningRuntime>,
     http: reqwest::Client,
+    exit_timing: ExitTiming,
+    /// 目前這個 Runtime 實例已經等到結束的完全退出次數。
+    exits_seen: AtomicU64,
 }
 
 /// 讓測試可用 `harness.clock`、`harness.process_control` 等直接取得 fake。
@@ -84,7 +104,7 @@ impl Deref for Harness {
 
 impl Harness {
     pub fn builder() -> HarnessBuilder {
-        HarnessBuilder { clock_start: DEFAULT_CLOCK_START, prepare: None }
+        HarnessBuilder { clock_start: DEFAULT_CLOCK_START, prepare: None, exit_timing: ExitTiming::default() }
     }
 
     /// 以預設設定啟動。
@@ -249,22 +269,42 @@ impl Harness {
         self.runtime.as_ref().expect("Runtime 尚未啟動").supervisor().tick().await;
     }
 
+    /// 生命週期檔（停止意圖的鏡像，spec D-25）的位置。
+    pub fn lifecycle_file_path(&self) -> std::path::PathBuf {
+        baton_store::lifecycle_file_path(self.data_dir.path())
+    }
+
+    /// 等到這次完全退出的停止流程結束（`POST /api/v1/lifecycle/exit` 之後呼叫）。
+    /// 停止流程在 Runtime 的背景執行；最多等「總上限 + 10 秒」的真實時間，逾時視為測試失敗。
+    pub async fn wait_for_exit(&self) {
+        let mut exits = self.runtime.as_ref().expect("Runtime 尚未啟動").exits_completed();
+        let seen = self.exits_seen.load(Ordering::SeqCst);
+        let limit = Duration::from_millis(self.exit_timing.total_ms() as u64) + Duration::from_secs(10);
+        let done = tokio::time::timeout(limit, exits.wait_for(|count| *count > seen)).await;
+        let count = *done.expect("完全退出的停止流程沒有在時限內結束").expect("Runtime 已停止");
+        self.exits_seen.store(count, Ordering::SeqCst);
+    }
+
     /// 模擬重啟：丟棄目前的 Runtime，保留資料目錄與 fake，重新建立。
     pub async fn restart(&mut self) {
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown().await;
         }
-        let runtime = try_start_runtime(self.data_dir.path(), &self.fakes.to_ports()).await;
+        let runtime = try_start_runtime(self.data_dir.path(), &self.fakes.to_ports(), self.exit_timing).await;
         self.runtime = Some(runtime.unwrap_or_else(|e| panic!("Runtime 重啟失敗：{e}")));
+        self.exits_seen.store(0, Ordering::SeqCst);
     }
 }
 
-async fn try_start_runtime(data_dir: &Path, ports: &Ports) -> Result<RunningRuntime, RuntimeError> {
+async fn try_start_runtime(data_dir: &Path, ports: &Ports, exit_timing: ExitTiming) -> Result<RunningRuntime, RuntimeError> {
     let config = RuntimeConfig {
         data_dir: data_dir.to_path_buf(),
         // 埠 0 讓作業系統配置；每個 Harness 與每次重建都不會互相衝突
         bind: "127.0.0.1:0".parse().expect("固定位址"),
     };
-    // 測試自己決定何時讓 Supervisor 動作（`Harness::supervise`），所以不啟動背景迴圈
-    Runtime::start_with(config, ports.clone(), RuntimeOptions { background_supervisor: false, ..RuntimeOptions::default() }).await
+    // 測試自己決定何時讓 Supervisor 動作（`Harness::supervise`），所以不啟動背景迴圈；
+    // 完全退出後也不自行結束服務，由測試決定何時丟棄或重啟 Runtime
+    let options =
+        RuntimeOptions { background_supervisor: false, exit_timing, exit_linger: None, ..RuntimeOptions::default() };
+    Runtime::start_with(config, ports.clone(), options).await
 }
