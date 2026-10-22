@@ -42,10 +42,12 @@ pub(crate) fn attach_context(
     let knowledge = super::knowledge::load_verified_guidance(tx, workspace_id)?;
     let (unread, unread_total) = super::messages::unread_summary(tx, workspace_id, &task.id)?;
     let evidence = load_evidence(tx, workspace_id, &task.id)?;
+    let stage = super::workflows::worker_stage_item(tx, &task.id)?;
     let built = context::build(&ContextInputs {
         run_id: &run.id,
         task,
         contract: &outbox.payload.prompt,
+        stage: stage.as_ref(),
         handoff,
         checkpoint: checkpoint.as_ref(),
         knowledge: &knowledge,

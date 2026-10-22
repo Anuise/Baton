@@ -30,6 +30,7 @@ mod timeline;
 mod understanding;
 mod verification;
 pub mod workdirs;
+mod workflows;
 mod workspaces;
 
 use std::convert::Infallible;
@@ -52,6 +53,7 @@ use baton_domain::guardian::GuardianStatus;
 use baton_domain::storage_health::StorageHealth;
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING};
+use baton_domain::workflow::{TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
 use baton_ports::{
@@ -119,6 +121,10 @@ pub use understanding::{
     SourceView, UnderstandingItemView, UnderstandingView,
 };
 pub use verification::{task_accept_path, task_verification_path, AcceptTaskRequest};
+pub use workflows::{
+    workflow_skip_path, workflows_path, PlaybookCatalog, PlaybookSummary, PublishPlaybookResponse, SkipStageRequest,
+    StageResultResponse, StageView, WorkflowList, WorkflowView, WorkflowsForController, PLAYBOOKS_PATH,
+};
 pub use shared_settings::{
     run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
     RunSettings, RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
@@ -272,6 +278,9 @@ pub fn router(state: ApiState) -> Router {
         .route(understanding::UNDERSTANDING_ROUTE, get(understanding::view))
         .route(understanding::SYNC_ROUTE, post(understanding::sync))
         .route(understanding::RECONCILE_ROUTE, post(understanding::reconcile))
+        .route(PLAYBOOKS_PATH, get(workflows::catalog).post(workflows::publish))
+        .route(workflows::WORKFLOWS_ROUTE, get(workflows::list))
+        .route(workflows::SKIP_ROUTE, post(workflows::skip))
         .route(LIFECYCLE_PATH, get(lifecycle::status))
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
@@ -327,6 +336,9 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_PROPOSE_DECISION_REQUEST), post(controller::propose_decision_request))
         .route(&tool_path(TOOL_RECORD_UNDERSTANDING), post(understanding::record_understanding))
         .route(&tool_path(TOOL_GET_PROJECT_UNDERSTANDING), post(understanding::get_project_understanding))
+        .route(&tool_path(TOOL_START_WORKFLOW), post(workflows::start_workflow))
+        .route(&tool_path(TOOL_RECORD_STAGE_RESULT), post(workflows::record_stage_result))
+        .route(&tool_path(TOOL_GET_WORKFLOWS), post(workflows::get_workflows))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

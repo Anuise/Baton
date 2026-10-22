@@ -1,6 +1,6 @@
 //! Context Builder 與 context receipt（票 39，spec D-07、D-27、使用者故事 61）。
 //!
-//! - 派工當下為 Worker Run 組裝 Prompt：Task 契約、交接說明或最近檢查點、適用決策、相關教訓、未讀訊息摘要與證據索引，
+//! - 派工當下為 Worker Run 組裝 Prompt：Task 契約、目前的 Workflow Stage（票 43）、交接說明或最近檢查點、適用決策、相關教訓、未讀訊息摘要與證據索引，
 //!   依這個順序排定優先序；Task 契約與交接說明是必要項目，一定載入（即使超出預算）。
 //! - 決策與教訓只取「有效且適用於這個 Run」的條目（已驗證、在有效期間內、範圍涵蓋這個 Task）；
 //!   依相關性排序：範圍越具體越前面（Task > Goal > Workspace > 全域），同範圍內標籤出現在 Task 標題或契約中的較前面，再依最後更新時間由新到舊。
@@ -31,6 +31,8 @@ pub const INBOX_REF: &str = "inbox";
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     Contract,
+    /// Task 所在 Workflow 的目前 Stage（票 43）。
+    Stage,
     Handoff,
     Checkpoint,
     Decision,
@@ -94,6 +96,16 @@ pub struct EvidenceItem {
     pub description: String,
 }
 
+/// Task 所在 Workflow 的目前 Stage（票 43）：必要項目，緊接在契約之後。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageItem {
+    pub workflow_id: String,
+    /// Workflow 的 revision。
+    pub revision: i64,
+    pub title: String,
+    pub text: String,
+}
+
 /// 組裝需要的全部輸入（由 Store 在派工的交易中取得）。
 #[derive(Debug, Clone)]
 pub struct ContextInputs<'a> {
@@ -101,6 +113,8 @@ pub struct ContextInputs<'a> {
     pub task: &'a Task,
     /// 派工時固定的 Task 契約文字（`run` 模組產生）。
     pub contract: &'a str,
+    /// Task 未完成的 Workflow 的目前 Stage；換帳號交接後 successor 收到的是同一個 Stage。
+    pub stage: Option<&'a StageItem>,
     /// successor Run 承接的交接；有交接時檢查點放在交接說明中。
     pub handoff: Option<&'a Handoff>,
     /// Task 最近一筆被接受的檢查點。
@@ -151,6 +165,10 @@ pub fn build(inputs: &ContextInputs<'_>) -> BuiltContext {
     let task = inputs.task;
     let mut prompt = inputs.contract.to_string();
     let mut items = vec![candidate(ItemKind::Contract, &task.id, Some(task.contract_version), &task.title, prompt.clone()).item];
+    if let Some(stage) = inputs.stage {
+        items.push(candidate(ItemKind::Stage, &stage.workflow_id, Some(stage.revision), &stage.title, stage.text.clone()).item);
+        prompt.push_str(&stage.text);
+    }
 
     // 交接說明是必要項目，包含要延續的檢查點；沒有交接時檢查點是第一個依預算放入的項目
     let mut sections: Vec<(&str, Vec<Candidate>)> = Vec::new();

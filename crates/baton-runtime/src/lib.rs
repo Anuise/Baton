@@ -126,6 +126,8 @@ impl Runtime {
         let store_options = StoreOptions { full_text_search: options.full_text_search };
         let store = Store::open_with(&config.data_dir, started_at, store_options).await?;
         let boot_count = store.record_boot(started_at).await?;
+        // 內建的方法與 Playbook（票 43）：內容改變時追加新版本，進行中的 Workflow 不受影響
+        store.seed_builtin_methods_and_playbooks(started_at).await?;
         // 這一次啟動是否跨了 Windows 登入（票 33）：與上一次啟動記下的登入識別比較
         let login_boundary = store.note_login_session(ports.login_session.current_login()).await?;
         // 前一次啟動是否正常結束（票 31）
