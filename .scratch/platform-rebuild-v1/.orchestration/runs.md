@@ -84,9 +84,10 @@
 | R080-20-integrate | 20 | integrate | Work-8 | 2026-10-22 18:24 | 2026-10-22 18:33 | DONE，依 AI-109 直接合併 |
 | R081-24-verify | 24 | verify | Work-8 | 2026-10-22 18:28 | 2026-10-22 18:34 | PASS（基底早於票 20；等 35 合併後整合，避免 migration 21 撞號） |
 | R082-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:28 | 2026-10-22 18:34 | DONE（b92b816），但票 20 隨後合併，需再整合 |
-| R083-21-impl | 21 | impl | Work-8 | 2026-10-22 18:34 | | |
+| R083-21-impl | 21 | impl | Work-8 | 2026-10-22 18:34 | 2026-10-22 18:57 | DONE（ae17403..ec1fcf7） |
 | R084-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:34 | 2026-10-22 18:41 | DONE，依 AI-109 直接合併 |
 | R085-24-integrate | 24 | integrate | Work-3 | 2026-10-22 18:41 | 2026-10-22 18:53 | DONE，依 AI-109 直接合併 |
 | R086-36-impl | 36 | impl | Work-8 | 2026-10-22 18:41 | | |
 | R087-26-verify | 26 | verify | Work-9 | 2026-10-22 18:41 | 2026-10-22 18:47 | PASS（等 24 合併後整合） |
 | R088-26-integrate | 26 | integrate | Work-3 | 2026-10-22 18:53 | | |
+| R089-21-verify | 21 | verify | Work-8 | 2026-10-22 18:57 | | |
