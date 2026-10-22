@@ -43,6 +43,7 @@ function fakeClient(onExit: LifecycleStatus, ...polls: Array<LifecycleStatus | E
       return next;
     }),
     quitApp: vi.fn(async () => {}),
+    cancelFullExitFallback: vi.fn(async () => {}),
     onFullExitRequested: vi.fn((h: () => void) => {
       handler = h;
       return () => {
@@ -199,6 +200,43 @@ describe("完全退出進度", () => {
 
     expect(client.requestFullExit).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("dialog")).toHaveTextContent("停止中");
+  });
+
+  it("Runtime 接手停止後取消殼的後備強制關閉，之後由畫面決定何時結束 App", async () => {
+    const { client, emitFullExit } = fakeClient(stopping(), stopping());
+    render(<ExitProgress client={client} />);
+    await emitFullExit();
+    await settle();
+
+    expect(client.cancelFullExitFallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("取消後備強制關閉失敗時仍顯示停止進度", async () => {
+    const { client, emitFullExit } = fakeClient(stopping(), stopping());
+    client.cancelFullExitFallback.mockRejectedValue(new Error("殼未回應"));
+    render(<ExitProgress client={client} />);
+    await emitFullExit();
+    await settle(500);
+
+    expect(screen.getByRole("dialog")).toHaveTextContent("停止中");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("要求完全退出失敗時不取消後備強制關閉；按「返回」留在 App 才取消", async () => {
+    const { client, emitFullExit } = fakeClient(stopping());
+    client.requestFullExit.mockRejectedValueOnce(new Error("Runtime 未回應"));
+    render(<ExitProgress client={client} />);
+    await emitFullExit();
+    await settle();
+
+    expect(client.cancelFullExitFallback).not.toHaveBeenCalled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "返回" }).click();
+    });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(client.cancelFullExitFallback).toHaveBeenCalledTimes(1);
   });
 
   it("退出進行中再收到事件不會重新要求", async () => {

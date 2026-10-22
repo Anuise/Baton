@@ -574,12 +574,13 @@ describe("Runtime 用戶端", () => {
     );
   });
 
-  it("HTTP 版沒有桌面程序與系統匣：quitApp 不送請求，完全退出事件不會觸發", async () => {
+  it("HTTP 版沒有桌面程序與系統匣：quitApp 與取消完全退出後備都不送請求，完全退出事件不會觸發", async () => {
     const fetchFn = vi.fn();
     const client = createHttpClient(fetchFn as unknown as typeof fetch);
     const handler = vi.fn();
 
     await client.quitApp();
+    await client.cancelFullExitFallback();
     const unsubscribe = client.onFullExitRequested(handler);
     unsubscribe();
 
@@ -598,6 +599,7 @@ describe("Runtime 用戶端", () => {
     await client.updateWorkspaceLoginResume("ws_1", true);
     await client.updateLoginStartup(false);
     await client.quitApp();
+    await client.cancelFullExitFallback();
 
     expect(invoke.mock.calls).toEqual([
       ["lifecycle_status"],
@@ -607,6 +609,7 @@ describe("Runtime 用戶端", () => {
       ["workspace_login_resume_update", { workspaceId: "ws_1", autoResumeAcrossLogin: true }],
       ["lifecycle_login_startup_update", { enabled: false }],
       ["app_quit"],
+      ["full_exit_cancel_fallback"],
     ]);
   });
 

@@ -66,16 +66,21 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
   // 退出進行中再收到事件時不重新開始
   const started = useRef(false);
 
+  // 由畫面決定何時結束 App 時，取消殼的 60 秒後備強制關閉；取消失敗不影響畫面
+  const cancelFallback = useCallback(() => void client.cancelFullExitFallback().catch(() => {}), [client]);
+
   const start = useCallback(async () => {
     started.current = true;
     setExit({ state: "requesting" });
     try {
       setExit({ state: "progress", status: await client.requestFullExit() });
+      // Runtime 已接手停止；之後可能要停在停止異常畫面，不能讓殼 60 秒後強制關掉
+      cancelFallback();
     } catch (error) {
       started.current = false;
       setExit({ state: "request_failed", reason: reasonOf(error) });
     }
-  }, [client]);
+  }, [client, cancelFallback]);
 
   useEffect(
     () =>
@@ -134,7 +139,13 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
               <button type="button" onClick={() => void start()}>
                 重試
               </button>
-              <button type="button" onClick={() => setExit({ state: "idle" })}>
+              <button
+                type="button"
+                onClick={() => {
+                  setExit({ state: "idle" });
+                  cancelFallback();
+                }}
+              >
                 返回
               </button>
             </div>

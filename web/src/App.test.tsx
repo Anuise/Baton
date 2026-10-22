@@ -70,6 +70,7 @@ const client = {
     throw new Error("離線");
   }),
   requestFullExit: vi.fn(async () => lifecycleStatus({ phase: "stopping", stop_intent_active: true })),
+  cancelFullExitFallback: vi.fn(async () => {}),
   onFullExitRequested: vi.fn((handler: () => void) => {
     emitFullExit = handler;
     return () => {};
