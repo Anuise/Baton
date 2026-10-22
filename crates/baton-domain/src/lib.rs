@@ -12,6 +12,7 @@ pub mod cleanup;
 pub mod authorization;
 pub mod backup;
 pub mod config;
+pub mod conversation;
 pub mod decision;
 pub mod event;
 pub mod external_operation;

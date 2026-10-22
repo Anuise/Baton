@@ -621,7 +621,7 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
             let facts = LaunchFacts {
                 run_id: &run.id,
                 workspace_id: &run.workspace_id,
-                task_id: &run.task_id,
+                owner: session::SessionOwner::Task(&run.task_id),
                 profile_id: &run.profile_id,
                 working_dir: &working_dir,
             };

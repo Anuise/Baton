@@ -43,7 +43,7 @@ fn replaced(id: &str, reason: ReplacementReason) -> SessionPlan {
 }
 
 fn facts() -> LaunchFacts<'static> {
-    LaunchFacts { run_id: "run_new", workspace_id: "ws", task_id: "task", profile_id: "prof_a", working_dir: DIR }
+    LaunchFacts { run_id: "run_new", workspace_id: "ws", owner: SessionOwner::Task("task"), profile_id: "prof_a", working_dir: DIR }
 }
 
 // ------------------------------------------------------------ 啟動時的決定
