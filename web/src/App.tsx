@@ -22,10 +22,11 @@ import { TaskBoard } from "./TaskBoard";
 import { TimelinePage } from "./TimelinePage";
 import { UpdateNotice } from "./UpdateNotice";
 import { UpdateSettings } from "./UpdateSettings";
+import { ReviewPage } from "./ReviewPage";
 import { WorkflowPage } from "./WorkflowPage";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線、專案理解或流程。 */
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線、專案理解、流程或審查。 */
 type Opened = {
   view:
     | "authorization"
@@ -36,7 +37,8 @@ type Opened = {
     | "knowledge"
     | "timeline"
     | "understanding"
-    | "workflows";
+    | "workflows"
+    | "reviews";
   workspace: Workspace;
 };
 
@@ -76,6 +78,7 @@ export function App() {
             onOpenTimeline={(workspace) => setOpened({ view: "timeline", workspace })}
             onOpenUnderstanding={(workspace) => setOpened({ view: "understanding", workspace })}
             onOpenWorkflows={(workspace) => setOpened({ view: "workflows", workspace })}
+            onOpenReviews={(workspace) => setOpened({ view: "reviews", workspace })}
           />
         )}
         <main className="main">
@@ -115,6 +118,9 @@ export function App() {
           {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 的跳過原因與錯誤 */}
           {client && opened?.view === "workflows" && (
             <WorkflowPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {client && opened?.view === "reviews" && (
+            <ReviewPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
           )}
           {client && <PlatformPage client={client} />}
         </main>

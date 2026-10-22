@@ -499,6 +499,27 @@ describe("左側 Workspace 清單", () => {
     expect(onOpenUnderstanding).not.toHaveBeenCalled();
   });
 
+  it("每個 Workspace 都有「審查」入口，不會觸發其他檢視", async () => {
+    const onSelect = vi.fn();
+    const onOpenWorkflows = vi.fn();
+    const onOpenReviews = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenWorkflows={onOpenWorkflows}
+        onOpenReviews={onOpenReviews}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "審查 筆記" }));
+
+    expect(onOpenReviews).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenWorkflows).not.toHaveBeenCalled();
+  });
+
   it("每個 Workspace 都有「對話」入口，不會觸發其他檢視", async () => {
     const onSelect = vi.fn();
     const onOpenTasks = vi.fn();

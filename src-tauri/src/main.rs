@@ -20,6 +20,7 @@ use baton_api::{
     RecoveryStatusView, MetricsResponse, TimelineResponse, RunContextView, UpdateStatusView,
     ReconcileRequest, UnderstandingView,
     SkipStageRequest, WorkflowList, WorkflowView,
+    ReviewList,
 };
 use baton_client::{
     ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, ClientError, Connection,
@@ -1205,6 +1206,15 @@ async fn workspace_workflows(link: State<'_, RuntimeLink>, workspace_id: String)
     link.client.workflows(&workspace_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 的審查分頁：Workspace 的雙軸審查、finding 與設計偏離（唯讀）。
+#[tauri::command]
+async fn workspace_reviews(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<ReviewList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.reviews(&workspace_id).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 的流程分頁：使用者附原因跳過目前 Stage（裁定與安全 Gate 由 Runtime 拒絕）。
 #[tauri::command]
 async fn workflow_skip_stage(
@@ -1321,7 +1331,8 @@ fn main() {
             workspace_understanding_sync,
             workspace_projection_reconcile,
             workspace_workflows,
-            workflow_skip_stage
+            workflow_skip_stage,
+            workspace_reviews
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {

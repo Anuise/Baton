@@ -2324,6 +2324,112 @@ export interface WorkflowClient {
   skipStage(workspaceId: string, workflowId: string, request: SkipStageRequest): Promise<WorkflowView>;
 }
 
+/** 審查的兩軸：standards 是規範（程式碼品質、專案規則與慣例），spec 是需求（是否滿足被審 Task 的契約）。 */
+export type ReviewAxis = "standards" | "spec";
+
+/** finding 的處理狀態：open 尚未分類；fix 要修正後重新審查；awaiting_decision 等待使用者裁定；dismissed 使用者同意駁回。 */
+export type FindingState = "open" | "fix" | "awaiting_decision" | "dismissed";
+
+export type FindingClassification = "fix" | "dismiss" | "needs_decision";
+
+export interface ReviewFinding {
+  id: string;
+  review_id: string;
+  axis: ReviewAxis;
+  title: string;
+  detail: string;
+  location: string | null;
+  state: FindingState;
+  classification: FindingClassification | null;
+  /** Controller 分類的理由與證據說明。 */
+  reason: string | null;
+  decision_request_id: string | null;
+  /** 裁定者；使用者在桌面裁定時是 "desktop"。 */
+  decided_by: string | null;
+  classified_by: string | null;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 一軸的結果與它的 finding。 */
+export interface ReviewAxisView {
+  summary: string;
+  paths: string[];
+  /** 沿用自哪一份審查。 */
+  reused_from: string | null;
+  reviewer_task_id: string;
+  /** 沿用，或 finding 全部經使用者同意駁回。 */
+  passed: boolean;
+  findings: ReviewFinding[];
+}
+
+export interface ReviewView {
+  id: string;
+  workspace_id: string;
+  subject_task_id: string;
+  subject_task_title: string | null;
+  reviewer_run_id: string;
+  reviewer_task_id: string;
+  reviewer_task_title: string | null;
+  base_revision: string;
+  candidate_revision: string;
+  /** 對照的規格版本（被審 Task 的契約版本）。 */
+  spec_version: number;
+  standards_source: string;
+  standards: ReviewAxisView;
+  spec: ReviewAxisView;
+  /** 兩軸都通過。 */
+  passed: boolean;
+  /** 已過期的原因；仍有效時為 null。 */
+  stale_reason: string | null;
+  created_at: number;
+}
+
+export type DeviationStatus = "proposed" | "awaiting_decision" | "accepted" | "rejected";
+
+/** 實作偏離 Design Package 的回報，附設計成果與 Task 的名稱。 */
+export interface DeviationView {
+  id: string;
+  workspace_id: string;
+  task_id: string;
+  reported_by_run_id: string;
+  reported_generation: number;
+  design_artifact_id: string;
+  design_version: number;
+  deviation: string;
+  reason: string;
+  affected_contracts: string[];
+  proposed_design: string;
+  status: DeviationStatus;
+  /** Controller 處理時的理由。 */
+  resolution_reason: string | null;
+  decision_request_id: string | null;
+  /** 接受者；使用者在桌面裁定時是 "desktop"。 */
+  accepted_by: string | null;
+  resolved_by: string | null;
+  /** 接受後設計的新版本。 */
+  accepted_design_version: number | null;
+  version: number;
+  created_at: number;
+  updated_at: number;
+  design_name: string | null;
+  task_title: string | null;
+}
+
+export interface ReviewList {
+  workspace_id: string;
+  /** 最新的在前。 */
+  reviews: ReviewView[];
+  /** 最新的在前。 */
+  deviations: DeviationView[];
+}
+
+/** 審查與設計偏離（唯讀，只有桌面憑證能用）。 */
+export interface ReviewClient {
+  reviews(workspaceId: string): Promise<ReviewList>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -2341,6 +2447,7 @@ export type AppClient = RuntimeClient &
   ObservabilityClient &
   UnderstandingClient &
   WorkflowClient &
+  ReviewClient &
   ConversationClient &
   UpdateClient;
 
@@ -2586,6 +2693,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     workflows: (workspaceId) => send(`${workspacePath(workspaceId)}/workflows`),
     skipStage: (workspaceId, workflowId, request) =>
       send(`${workspacePath(workspaceId)}/workflows/${encodeURIComponent(workflowId)}/skip`, { method: "POST", body: request }),
+    reviews: (workspaceId) => send(`${workspacePath(workspaceId)}/reviews`),
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
@@ -2729,6 +2837,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     workflows: (workspaceId) => call<WorkflowList>("workspace_workflows", { workspaceId }),
     skipStage: (workspaceId, workflowId, request) =>
       call<WorkflowView>("workflow_skip_stage", { workspaceId, workflowId, request }),
+    reviews: (workspaceId) => call<ReviewList>("workspace_reviews", { workspaceId }),
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),

@@ -9,6 +9,7 @@ import type {
   ControllerRun,
   ConversationTurn,
   ConversationView,
+  DeviationView,
   DrillReport,
   DecisionRequestView,
   ExitRunResult,
@@ -26,6 +27,10 @@ import type {
   RecoveryAttempt,
   RecoveryEvent,
   RecoveryStatusView,
+  ReviewAxisView,
+  ReviewFinding,
+  ReviewList,
+  ReviewView,
   QuotaObservation,
   RunContext,
   RunView,
@@ -1006,4 +1011,154 @@ export function workflowView(overrides: Partial<WorkflowView> = {}): WorkflowVie
 
 export function workflowList(overrides: Partial<WorkflowList> = {}): WorkflowList {
   return { workspace_id: "ws_1", workflows: [workflowView()], ...overrides };
+}
+
+/** 測試用的 finding：rev_1 規範軸上尚未分類的一項。 */
+export function reviewFinding(overrides: Partial<ReviewFinding> = {}): ReviewFinding {
+  return {
+    id: "fnd_1",
+    review_id: "rev_1",
+    axis: "standards",
+    title: "匯出函式吞掉錯誤",
+    detail: "寫檔失敗時沒有回報",
+    location: "src/export.rs:42",
+    state: "open",
+    classification: null,
+    reason: null,
+    decision_request_id: null,
+    decided_by: null,
+    classified_by: null,
+    version: 1,
+    created_at: CHECKED_AT,
+    updated_at: CHECKED_AT,
+    ...overrides,
+  };
+}
+
+/** 測試用的一軸結果：沒有 finding、通過。 */
+export function reviewAxisView(overrides: Partial<ReviewAxisView> = {}): ReviewAxisView {
+  return {
+    summary: "符合專案慣例",
+    paths: ["src/export.rs"],
+    reused_from: null,
+    reviewer_task_id: "task_2",
+    passed: true,
+    findings: [],
+    ...overrides,
+  };
+}
+
+/** 測試用的審查：task_2 審查 task_1 的 candidate e4f5a6b，兩軸都通過；需求軸沿用 rev_1。 */
+export function reviewView(overrides: Partial<ReviewView> = {}): ReviewView {
+  return {
+    id: "rev_2",
+    workspace_id: "ws_1",
+    subject_task_id: "task_1",
+    subject_task_title: "修正匯出錯誤",
+    reviewer_run_id: "run_2",
+    reviewer_task_id: "task_2",
+    reviewer_task_title: "審查匯出修正",
+    base_revision: "a1b2c3d",
+    candidate_revision: "e4f5a6b",
+    spec_version: 2,
+    standards_source: "AGENTS.md",
+    standards: reviewAxisView(),
+    spec: reviewAxisView({ summary: "滿足契約的驗收條件", paths: [], reused_from: "rev_1" }),
+    passed: true,
+    stale_reason: null,
+    created_at: CHECKED_AT + 60_000,
+    ...overrides,
+  };
+}
+
+/**
+ * 測試用的未通過審查：對較早的 candidate 9c8d7e6，規範軸有一項尚未分類的 finding；
+ * 需求軸的 finding 已經使用者同意駁回而通過。已有對較新 candidate 的審查，因此已過期。
+ */
+export function failingReviewView(overrides: Partial<ReviewView> = {}): ReviewView {
+  return reviewView({
+    id: "rev_1",
+    candidate_revision: "9c8d7e6",
+    standards: reviewAxisView({ summary: "錯誤處理不符合慣例", passed: false, findings: [reviewFinding()] }),
+    spec: reviewAxisView({
+      summary: "匯出格式與契約一致",
+      paths: ["src/export.rs", "tests/export.rs"],
+      findings: [
+        reviewFinding({
+          id: "fnd_2",
+          axis: "spec",
+          title: "CSV 標頭順序不同",
+          detail: "契約沒有規定標頭順序",
+          location: null,
+          state: "dismissed",
+          classification: "dismiss",
+          reason: "契約沒有規定標頭順序",
+          decision_request_id: "dec_1",
+          decided_by: "desktop",
+          classified_by: "ctl_1",
+          version: 2,
+        }),
+      ],
+    }),
+    passed: false,
+    stale_reason: "已有對較新 candidate 的審查",
+    created_at: CHECKED_AT,
+    ...overrides,
+  });
+}
+
+/** 測試用的設計偏離：task_1 回報、使用者已接受，「匯出設計」從第 1 版更新為第 2 版。 */
+export function deviationView(overrides: Partial<DeviationView> = {}): DeviationView {
+  return {
+    id: "dev_1",
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    reported_by_run_id: "run_1",
+    reported_generation: 1,
+    design_artifact_id: "art_design",
+    design_version: 1,
+    deviation: "改用串流匯出",
+    reason: "大檔案會耗盡記憶體",
+    affected_contracts: ["ExportService::export 的回傳型別"],
+    proposed_design: "匯出改為逐列寫入",
+    status: "accepted",
+    resolution_reason: "串流匯出較穩定",
+    decision_request_id: "dec_2",
+    accepted_by: "desktop",
+    resolved_by: "ctl_1",
+    accepted_design_version: 2,
+    version: 3,
+    created_at: CHECKED_AT,
+    updated_at: CHECKED_AT,
+    design_name: "匯出設計",
+    task_title: "修正匯出錯誤",
+    ...overrides,
+  };
+}
+
+/** 測試用的審查清單：通過與未通過（已過期）的審查各一份；已接受與等待裁定的設計偏離各一項。 */
+export function reviewList(overrides: Partial<ReviewList> = {}): ReviewList {
+  return {
+    workspace_id: "ws_1",
+    reviews: [reviewView(), failingReviewView()],
+    deviations: [
+      deviationView({
+        id: "dev_2",
+        deviation: "匯出檔名加上時間戳",
+        reason: "避免覆寫既有檔案",
+        affected_contracts: [],
+        status: "awaiting_decision",
+        resolution_reason: "檔名規則屬於設計範圍",
+        decision_request_id: "dec_3",
+        accepted_by: null,
+        resolved_by: "ctl_1",
+        accepted_design_version: null,
+        version: 2,
+        created_at: CHECKED_AT + 60_000,
+        updated_at: CHECKED_AT + 60_000,
+      }),
+      deviationView(),
+    ],
+    ...overrides,
+  };
 }
