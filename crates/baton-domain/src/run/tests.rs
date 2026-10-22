@@ -1270,3 +1270,58 @@ fn quota_limits_recovery_interruptions_and_cancellations_never_charge_any_budget
     assert_eq!(used(&world, "t1"), (0, 0, 0));
     assert!(world.budgets.is_empty());
 }
+
+// ------------------------------------------------------------ 取消意圖優先（R151 第 4 項）
+
+/// 已要求取消的 Run 以失敗類路徑結束：一律完成取消，不計任何預算、不重新排隊（取消 Run＝暫停）。
+fn assert_cancelled_without_charge(world: &World, change: &RunChange, run_id: &str) {
+    assert_eq!(world.run(run_id).status, RunStatus::Cancelled);
+    assert_eq!(world.run(run_id).end_reason.as_deref(), Some("cancelled_by_user"));
+    assert!(change.events.iter().any(|e| e.event_type == EVENT_RUN_CANCELLED));
+    assert!(!change.requeue, "取消不自動重派");
+    assert!(change.budget.is_none() && change.decision.is_none(), "取消不計預算");
+    assert!(!world.lease(run_id).is_held());
+    assert_eq!(world.task("t1").status, TaskStatus::Ready);
+    assert_eq!(used(world, "t1"), (0, 0, 0));
+}
+
+#[test]
+fn a_launch_failure_after_a_cancel_request_completes_the_cancel() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.dispatch("t1", T0).unwrap();
+    world.step(begin(&run_id, "cmd"), T0).unwrap();
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+
+    let change = world.step(RunCommand::LaunchFailed { run_id: run_id.clone(), reason: "找不到 claude".into() }, T0).unwrap();
+
+    assert_cancelled_without_charge(&world, &change, &run_id);
+}
+
+#[test]
+fn a_process_found_dead_after_a_cancel_request_completes_the_cancel() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+
+    let now = later(LEASE_DURATION_MS + 1);
+    let change =
+        world.step(RunCommand::ReconcileLease { run_id: run_id.clone(), observed: ProcessObservation::Dead }, now).unwrap();
+
+    assert_cancelled_without_charge(&world, &change, &run_id);
+}
+
+#[test]
+fn a_failed_or_quota_limited_exit_after_a_cancel_request_completes_the_cancel() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+    let failed = RunOutcome::Failed { reason: "收到停止訊號".into() };
+    let change = world.step(RunCommand::Finish { run_id: run_id.clone(), generation: 1, outcome: failed }, T0).unwrap();
+    assert_cancelled_without_charge(&world, &change, &run_id);
+
+    let run_id = world.running("t1", T0);
+    world.step(RunCommand::RequestCancel { run_id: run_id.clone() }, T0).unwrap();
+    let limited = RunOutcome::QuotaLimited { reason: "usage limit reached".into() };
+    let change = world.step(RunCommand::Finish { run_id: run_id.clone(), generation: 2, outcome: limited }, T0).unwrap();
+    assert_cancelled_without_charge(&world, &change, &run_id);
+}

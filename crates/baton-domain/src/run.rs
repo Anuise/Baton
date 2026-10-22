@@ -642,6 +642,22 @@ impl<'a> Editing<'a> {
         })
     }
 
+    /// 同 `finish`，但使用者已要求取消的 Run 不論以哪種方式結束（啟動失敗、程序消失、Worker 失敗或限流結束）
+    /// 都完成取消：不計入任何預算、不重新排隊（取消 Run＝暫停，AI-241）。
+    fn finish_unless_cancelling(
+        self,
+        to: RunStatus,
+        event_type: &'static str,
+        reason: &str,
+        task_after: TaskStatus,
+        charge: Option<BudgetKind>,
+    ) -> Result<RunChange, RunError> {
+        if self.run.cancel_requested_at.is_some() {
+            return self.finish(RunStatus::Cancelled, EVENT_RUN_CANCELLED, "cancelled_by_user", TaskStatus::Ready, None);
+        }
+        self.finish(to, event_type, reason, task_after, charge)
+    }
+
     fn into_change(mut self) -> RunChange {
         let (sessions, events) = self.take_events();
         RunChange { run: Some(self.run), lease: self.lease, sessions, events, ..RunChange::default() }
@@ -726,7 +742,8 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
         }
         RunCommand::LaunchFailed { reason, .. } => {
             let reason = format!("launch_failed：{reason}");
-            edit.finish(RunStatus::Failed, EVENT_RUN_FAILED, &reason, TaskStatus::Ready, Some(BudgetKind::Infrastructure))
+            let charge = Some(BudgetKind::Infrastructure);
+            edit.finish_unless_cancelling(RunStatus::Failed, EVENT_RUN_FAILED, &reason, TaskStatus::Ready, charge)
         }
         RunCommand::Heartbeat { generation, .. } => {
             check_report(run, edit.lease.as_ref(), generation)?;
@@ -820,14 +837,14 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                     TaskStatus::Verifying,
                     None,
                 ),
-                RunOutcome::Failed { reason } => edit.finish(
+                RunOutcome::Failed { reason } => edit.finish_unless_cancelling(
                     RunStatus::Failed,
                     EVENT_RUN_FAILED,
                     &format!("exited_with_failure：{reason}"),
                     TaskStatus::Ready,
                     Some(BudgetKind::Implementation),
                 ),
-                RunOutcome::QuotaLimited { reason } => edit.finish(
+                RunOutcome::QuotaLimited { reason } => edit.finish_unless_cancelling(
                     RunStatus::Interrupted,
                     EVENT_RUN_INTERRUPTED,
                     &format!("quota_limited：{reason}"),
@@ -855,7 +872,7 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                 }
                 // 只有確實觀察到程序已經不在，才把 Run 判定為中斷
                 // 程序意外消失是基礎設施問題
-                ProcessObservation::Dead => edit.finish(
+                ProcessObservation::Dead => edit.finish_unless_cancelling(
                     RunStatus::Interrupted,
                     EVENT_RUN_INTERRUPTED,
                     "process_dead_after_lease_expired",
