@@ -22,6 +22,9 @@ pub const TOOL_GET_TASK_CONTRACT: &str = "get_task_contract";
 pub const TOOL_REPORT_PROGRESS: &str = "report_progress";
 pub const TOOL_SAVE_CHECKPOINT: &str = "save_checkpoint";
 pub const TOOL_REPORT_BLOCKED: &str = "report_blocked";
+/// Worker 間訊息（票 18）。
+pub const TOOL_SEND_MESSAGE: &str = "send_message";
+pub const TOOL_READ_INBOX: &str = "read_inbox";
 
 /// 進度與 checkpoint 摘要、受阻原因的長度上限（字元數）。
 pub const SUMMARY_MAX_CHARS: usize = 500;
