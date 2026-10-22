@@ -1,6 +1,6 @@
 # 46: Web 驗證 Adapter（Playwright）
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R134-46-impl，2026-10-23 01:12）
 Blocked by: 45
 
 **What to build:** 實作 web Verification Adapter：以 Playwright 為基礎執行操作與程式斷言，需要語意判斷時使用受限的 judge（輸入取自當前畫面與固定預期，不採信行動者敘述）；秘密只以參照傳給 Runner、不進 Prompt；截圖、trace、錄影保存為 Artifact 並依政策遮蔽。tester-army/e2e 作為候選引擎，整合前驗證授權與契約，可延後。
