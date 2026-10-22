@@ -1,6 +1,6 @@
 # 02: 建立 GLOSSARY.md 與既有決策的 ADR
 
-Status: in_progress（Work-3，run R002-02-impl，2026-10-22 13:29）
+Status: in_progress（Work-3，run R004-02-impl，2026-10-22 13:30）
 Blocked by: None
 
 **What to build:** 依 docs/agents/domain.md，在 repo 根目錄建立 GLOSSARY.md，收錄 spec 與 issue #3 的領域詞彙（Workspace、Goal、Task、Run、Session、Artifact、Decision Request、Decision、Lesson、Guard、Controller、Worker、Runtime、Workflow、Stage、Gate、Playbook、Verification Profile、Evidence Bundle、handoff、checkpoint、draining 等）及關係；在 docs/adr/ 為 DR-20261021-01～08、DR-20261022-01～03 及 spec 的 D-04（測試 seam）、D-05（MCP 工具介面）各建一份 ADR。只寫文件，不寫程式。

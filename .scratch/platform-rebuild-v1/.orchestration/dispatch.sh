@@ -15,7 +15,7 @@ for v in $(env | cut -d= -f1 | grep -E '^(CLAUDE|ANTHROPIC|AI_AGENT$|BAGGAGE$)')
 export PATH="$HOME/.cargo/bin:$PATH"
 cd "$WD" || exit 3
 MSYS_NO_PATHCONV=1 env $CLEAN \
-  CLAUDE_CONFIG_DIR="$HOME/.claude-Work-$N" \
+  CLAUDE_CONFIG_DIR="$(cygpath -w "$HOME/.claude-Work-$N")" \
   CLAUDE_CODE_RETRY_WATCHDOG=1 \
   CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=18000000 \
   claude -p --model claude-sonnet-5-5 --effort high \
