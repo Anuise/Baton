@@ -2809,6 +2809,69 @@
 - 影響：程序死掉到這一輪被找回最多約 60 秒加一次 tick。Controller 若超過 60 秒沒有任何輸出，每 60 秒會被查證一次（存活就繼續）。票 30 若要讓崩潰恢復也處置 Controller 的輪次，需要另外決定。
 - 審閱：未審
 
+### AI-312：突然限流沿用交接的 phase：門檻原因 `limit_reached`，不受冷卻、不等 checkpoint、不需先有承接帳號；以持久化的門檻判定
+- 重要度：高
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：(1) CLI 回報已達上限（`RateLimited { status: Exhausted }`）時，帳號門檻進入 draining，原因是新的 `limit_reached`（突然限流）；原本的 `limit_warning` 只剩警告。已在 draining（例如 86%）的帳號撞到上限時，狀態不變也把原因改成 `limit_reached`。(2) 突然限流是帳號層級：該帳號上所有執行中的 Run 都以票 28 的交接流程交出去，但交接不受 10 分鐘冷卻限制（spec D-13 的例外）、安全邊界立即成立（不等 Worker 保存新的 checkpoint，以 Task 最近一筆被接受的 checkpoint 為準）、也不需要先有承接帳號（沒有時 `to_profile_id` 是空字串，轉移時再選）。之前以其他原因（例如 85%）建立、還在等 checkpoint 的交接，帳號撞到上限後也立即進入 stopping。(3) CLI 仍活著（例如在等額度恢復）時，Supervisor 查證並停止它（確認停止才轉移，沿用票 28）；CLI 自行以失敗結束、還沒有交接時，Supervisor 在收事件的那一步先推進門檻，再以 `Store::request_sudden_handoff` 建立交接並直接轉移（`stop_outcome` = `exited`）。只有失敗結束才這樣處理；成功結束照一般流程進驗證。(4) 判定依據是持久化的門檻（Runtime 在訊號與結束之間重建也一樣），取代 AI-277 的記憶體旗標；旗標保留為建立交接失敗時的退路（退回 `RunOutcome::QuotaLimited`）。(5) successor 的 Prompt 改用突然限流版本：說明舊 Worker 沒有機會保存最後一輪的進度或摘要，以最近的有效 checkpoint、工作目錄實際狀態與已登記的成果為準，並照舊要求 `confirm_handoff`。
+- 理由：使用者故事 45「從最近有效檢查點與實際成果重建，不依賴最後一輪摘要成功」；撞到上限的 Worker 已無法呼叫模型，等它保存 checkpoint 或等冷卻都只是浪費時間。沿用交接的 phase，就直接得到「舊 writer 確認停止前不建立 successor」、單一交易轉移、Runtime 重建後依 phase 繼續、交接不計入預算等票 28 已驗收的性質，不另寫一套。
+- 替代方案：另設一條「突然限流恢復」流程（Run 以 `QuotaLimited` 結束、Task 回 ready 再由排程派工，Prompt 另外附 checkpoint）：要重做交接已有的停止確認與單一交易；以 `limit_warning` 加上記憶體旗標判定：Runtime 重建後會誤判。
+- 影響：`retry_budgets.rs` 的 `quota_handoff_recovery_and_cancellation_never_increase_any_counter` 原本預期突然限流後 Task 停在 ready、由測試手動派工，改為斷言另一個帳號的 successor 已自動接手（斷言預算仍是 0）。帳號頁與交接卡片多一個原因文字「Claude Code 回報已達上限（突然限流）」。**Validation Required**：真實 CLI 撞到上限時是自行結束還是依 watchdog 等待，兩種都已處理，但 stream-json 中的訊號格式仍待 Adapter 契約測試確認（spec Further Notes）。
+- 審閱：未審
+
+### AI-313：只有突然限流的交接找不到承接帳號時才進入 waiting_resource；不論找不到的原因是額度還是名額
+- 重要度：高
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：交接在轉移時（舊程序已確認停止）以 `SlotKind::Handoff` 選承接帳號，名額以舊 Run 結束後計；突然限流的交接找不到任何可接手的帳號時，在同一個交易中以新的 `RunCommand::ParkForResource` 結束舊 Run（`interrupted`、`handed_off_waiting_resource`、事件 `run_handed_off`，不計入預算）、Task 進入 `waiting_resource`、交接停在新的 phase `waiting_resource`（保存要延續的 checkpoint、預計重新評估時間與當時的等待原因）。找不到的原因不分額度、名額已滿或帳號狀態，一律等待。一般（非突然限流）交接找不到承接帳號時維持票 28 的行為（不建立交接，Run 留在原帳號繼續執行）；從未開始的 Task 在派工佇列等額度時也不進入 `waiting_resource`（GLOSSARY：派工佇列與 waiting_resource 是不同階段）。
+- 理由：spec 的 waiting_resource 指「所有合適帳號都受限、進度已保存」的工作；只有突然限流會讓進行中的工作非停不可。名額已滿也進入等待，是為了讓之後接手的 successor 一定帶著檢查點與交接說明（排回派工佇列的話，新的 Run 只是一般重派，不保證延續）。
+- 替代方案：名額已滿時改排回派工佇列（名額一空就派，但失去檢查點延續）；派工佇列中所有帳號都受限的 Task 也改成 waiting_resource（要改動票 19、27、28 的排程與等待原因）。
+- 影響：只有名額已滿時，等待的重新評估依退避（5 分鐘起），可能比佇列晚幾分鐘才接手。使用者目前沒有手動把 `waiting_resource` 的 Task 拉回 ready 的端點（取消仍可用）。
+- 審閱：未審
+
+### AI-314：重新評估時間：合適帳號最早的重置時間之後 1 分鐘；任何帳號的重置時間未知時另算退避，取較早者
+- 重要度：中
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：`handoff::next_resource_check` 對每個合適（可派工、核對無誤）帳號取一個重置時間：門檻關閉（paused／draining）的帳號取門檻記下的 `reset_at`，其他原因不能接手的（例如名額已滿）以及 `reset_at` 未知的都算未知。有尚未過去的重置時間：最早者之後 1 分鐘；有任何未知（或已過重置時間仍受限、或根本沒有可用帳號）：退避 `5 分鐘 × 2^n`、上限 60 分鐘（5、10、20、40、60…），n 是這筆等待已重新評估而仍受限的次數（`wait_attempts`）；兩者都有時取較早者。依據的重置時間存在 `wait_reset_at`（API 與 UI 顯示「依帳號重置時間後 1 分鐘」或「重置時間未知，退避第幾次」）。重新評估在 Supervisor 的交接步驟中、到了 `next_check_at` 才做；Runtime 重建不改排定的時間。
+- 理由：spec「有 reset_at 時於重置後 1 分鐘重新評估，未知時以 5 分鐘起、上限 60 分鐘的退避輪詢」沒有說明多個帳號、部分已知部分未知時怎麼算；取較早者才不會因為一個未知的帳號而錯過另一個帳號的重置。
+- 替代方案：只看已知的重置時間（未知的帳號可能更早恢復卻要等到別的帳號重置）；退避次數在每次已知重置後歸零。
+- 影響：門檻記下的 `reset_at` 是帳號進入 paused／draining 時的判斷結果；之後才得知的重置時間（例如外部觀測器更新）要等下一次重新評估才會採用。
+- 審閱：未審
+
+### AI-315：停止意圖與等待「繼續工作」優先於資源喚醒：不派工、也不重新排定，解除後立即重新評估
+- 重要度：高
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：到了重新評估時間時，若承接帳號的選擇被生命週期擋住（完全退出的停止意圖，或 Workspace 在完全退出後等待「繼續工作」，等待原因類別 `lifecycle`），既不派工也不重新排定（不增加退避次數），之後每次處理都再檢查；停止意圖解除且 Workspace 已續跑（自動續跑或使用者按「繼續工作」）後的下一次處理，若資源已恢復就立即由 successor 接手。完全退出的停止流程不動 `waiting_resource` 的 Task（它沒有 Run）。Supervisor 的交接步驟在停止意圖下不為仍在執行的 Run 建立突然限流交接；但程序已自行結束時仍建立（只保存檢查點並等待，不會啟動任何 Worker）。
+- 理由：驗收「資源恢復不會解除完全退出」與 GLOSSARY 的 Stop Intent「優先於額度恢復、資源喚醒」；派工的唯一入口（`Capacity.halt`）已經擋住，這裡只決定擋住期間要不要推遲排程。不推遲，使用者按「繼續工作」時才不必再等最多 60 分鐘。
+- 替代方案：擋住期間照常退避（解除後可能還要等一個退避期間）；完全退出時把等待中的 Task 改回 ready（會失去檢查點延續）。
+- 影響：停止意圖期間每次處理都會讀一次到期的等待（不寫入）。
+- 審閱：未審
+
+### AI-316：資源恢復時同一筆交接從等待中轉移；派工檢查不過就以那個原因繼續等待；Task 被取消則放棄
+- 重要度：中
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：`Store::resume_resource_waits` 對到期的等待以單一交易：Task `waiting_resource` → `ready`（`handoff::resume_task`）→ 以 `SlotKind::Handoff` 選的帳號 `RunCommand::Dispatch` 派出 successor（不偏好原帳號，重置後原帳號也可以接手）→ Prompt 附上突然限流版本的交接段落與 Task 最近的有效 checkpoint → 同一筆交接轉移（`transferred`，`to_run_id`），之後照常 `confirm_handoff`。派工檢查不過（Guard、工作目錄不可用等）時什麼都不寫，以那個原因重新排定（照退避）。Task 已不在 `waiting_resource`（例如使用者取消）時交接改為 `abandoned`（`task_left_waiting_resource：<狀態>`），不論是否到期。
+- 理由：一筆交接記錄從限流到接手的完整經過，工作卡片與確認流程都沿用票 28；先在記憶體中把 Task 轉成 ready 再派工，檢查不過時整個交易沒有寫入，Task 不會停在「ready 但沒有人派」的狀態。
+- 替代方案：資源恢復時新建一筆交接（歷史分散在兩筆）；派工檢查不過就放棄等待並排回佇列（失去檢查點延續）。
+- 影響：交接的冷卻以這次的 `transferred_at` 起算，之後的一般交接照常受冷卻限制。
+- 審閱：未審
+
+### AI-317：等待資源的資料形狀、API 與 migration 31
+- 重要度：低
+- 時間／階段：2026-10-22，票 29 實作
+- 決策：第 31 個 migration `handoff_waiting_resource` 重建 `handoff`（phase 的 CHECK 多 `waiting_resource`，SQLite 無法直接改 CHECK）：新增 `waiting_at`、`next_check_at`、`wait_attempts`、`wait_reset_at`、`wait_reasons`（JSON 的 `WaitReason` 陣列），CHECK `waiting_resource` 一定有 `next_check_at`；Task 層級的唯一索引把 `waiting_resource` 也算進「同一個 Task 最多一筆」。事件：`handoff_waiting_resource`、`handoff_wait_rescheduled`。Domain：`HandoffPhase::WaitingResource`、`awaits_successor()`（可轉移或放棄）、`wait_for_resource`、`reschedule_wait`、`next_resource_check`、`resume_task`、`RunCommand::ParkForResource`。API：工作面板 `handoffs[]` 多出上述欄位（舊資料預設 null／0／空陣列）。Web UI：交接卡片在 `waiting_resource` 時顯示「預計 … 重新評估」、依據與等待原因，尚未選定承接帳號時不顯示空帳號名，`handed_off_waiting_resource` 的 Run 顯示「已停止（等待資源）」。
+- 理由：等待資源是交接的一個階段，放在同一筆紀錄最容易呈現與恢復。
+- 替代方案：另建 `resource_wait` 表（不必重建 `handoff`，但同一件事分在兩張表）。
+- 影響：與平行進行的票合併時 migration 與 AI 編號可能需要順延（見 AI-318）。
+- 審閱：未審
+
+### AI-318：票 29 整合 rebuild/v1（票 16）：migration 順延為第 31 個、AI 編號從 AI-312 起
+- 重要度：低
+- 時間／階段：2026-10-22，票 29 實作（run R103-29-impl 結束前合併整合分支）
+- 決策：整合分支併入票 16（第 30 個 migration `conversation_and_controller_run`，AI-299～AI-311）。本票的 `handoff_waiting_resource` 順延為第 31 個、排在其後（兩者沒有共用的資料表）；本票條目從 AI-312 起編號。衝突合併：開發指南目錄表以整合分支為底，再補上本票對 `handoff.rs` 的說明；Supervisor 同時保留票 16 的 Controller 步驟與本票的交接變更（自動合併）。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：本票較早的 commit（合併前）中 migration 是第 30 個；用那時的分支建過的開發資料庫需要刪除重建。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
