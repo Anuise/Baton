@@ -709,6 +709,26 @@ describe("帳號頁", () => {
       expect(within(gate).queryByText(/重置時間/)).not.toBeInTheDocument();
     });
 
+    it("draining：Claude Code 回報已達上限（limit_reached）時顯示突然限流原因", async () => {
+      render(
+        <AccountsPage
+          client={withGate({
+            profile_id: "prof_1",
+            state: "draining",
+            reason: "limit_reached",
+            used: null,
+            reset_at: null,
+            since: CHECKED_AT,
+            version: 2,
+          })}
+          timeZone="UTC"
+        />,
+      );
+
+      const gate = await gateGroup();
+      expect(within(gate).getByText(/^原因/)).toHaveTextContent(/^原因：Claude Code 回報已達上限（突然限流）$/);
+    });
+
     it("沒有門檻紀錄（null）時是可派工，不顯示原因與恢復提示", async () => {
       render(<AccountsPage client={withGate(null)} timeZone="UTC" />);
 

@@ -2008,6 +2008,110 @@ describe("交接狀態", () => {
     expect(handoffRegion()).toHaveTextContent("交接：交接中：停止舊程序");
   });
 
+  /** 突然限流而所有合適帳號都受限：舊 Run 已停止，Task 等待資源。 */
+  const waitingTask = () => task("task_1", "部署", { status: "waiting_resource", contract: filledContract("task_1") });
+  const waitingRuns = () => [
+    run("run_1", "task_1", "interrupted", { end_reason: "handed_off_waiting_resource", ended_at: T0 }),
+  ];
+  const waitingRegion = () => within(handoffRegion()).getByRole("group", { name: "等待資源" });
+
+  it("waiting_resource：有重置時間時顯示預計重新評估時間、依據重置時間後 1 分鐘與等待原因；不顯示空的承接帳號", async () => {
+    const resetAt = T0 + 2 * 60 * 60 * 1000;
+    await renderBoard(
+      fakeClient({
+        tasks: [waitingTask()],
+        runs: waitingRuns(),
+        accounts,
+        handoffs: [
+          handoff({
+            phase: "waiting_resource",
+            reason: "limit_reached",
+            to_profile_id: "",
+            stop_outcome: "stopped_gracefully",
+            stopping_at: T0,
+            waiting_at: T0,
+            next_check_at: resetAt + 60_000,
+            wait_attempts: 0,
+            wait_reset_at: resetAt,
+            wait_reasons: [
+              { category: "account", code: "profile_limited", message: "主要帳號已達上限", profile_id: "prof_1" },
+              { category: "quota", code: "quota_gate_closed", message: "備用帳號達 75% 停止派工門檻", profile_id: "prof_2" },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    const region = handoffRegion();
+    expect(region).toHaveTextContent("交接：等待資源：所有合適帳號都受限");
+    expect(region).toHaveTextContent("從 主要帳號 交接，尚未選定承接帳號（Claude Code 回報已達上限（突然限流））");
+    expect(region).not.toHaveTextContent("交接到");
+    const waiting = waitingRegion();
+    expect(waiting).toHaveTextContent("預計 2023/11/15 00:14 重新評估");
+    expect(waiting).toHaveTextContent("依帳號重置時間（2023/11/15 00:13）後 1 分鐘");
+    expect(waiting).not.toHaveTextContent("退避");
+    expect(within(waiting).getByText("主要帳號已達上限")).toBeInTheDocument();
+    expect(within(waiting).getByText("備用帳號達 75% 停止派工門檻")).toBeInTheDocument();
+  });
+
+  it("waiting_resource：重置時間未知時說明以退避輪詢與第幾次評估", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [waitingTask()],
+        runs: waitingRuns(),
+        accounts,
+        handoffs: [
+          handoff({
+            phase: "waiting_resource",
+            reason: "limit_reached",
+            to_profile_id: "",
+            stopping_at: T0,
+            waiting_at: T0,
+            next_check_at: T0 + 10 * 60_000,
+            wait_attempts: 1,
+            wait_reset_at: null,
+            wait_reasons: [],
+          }),
+        ],
+      }),
+    );
+
+    const waiting = waitingRegion();
+    expect(waiting).toHaveTextContent("預計 2023/11/14 22:23 重新評估");
+    expect(waiting).toHaveTextContent("重置時間未知，退避輪詢（第 2 次評估）");
+    expect(waiting).not.toHaveTextContent("依帳號重置時間");
+  });
+
+  it("其他階段不顯示等待資源的區塊", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [runningTask()],
+        runs: transferredRuns(),
+        accounts,
+        handoffs: [handoff({ phase: "transferred", reason: "limit_reached", to_run_id: "run_2", transferred_at: T0 })],
+      }),
+    );
+
+    const region = handoffRegion();
+    expect(region).toHaveTextContent("從 主要帳號 交接到 備用帳號（Claude Code 回報已達上限（突然限流））");
+    expect(within(region).queryByRole("group", { name: "等待資源" })).not.toBeInTheDocument();
+  });
+
+  it("結束原因是 handed_off_waiting_resource 的 Run 標成「已停止（等待資源）」，不另列結束原因", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [waitingTask()],
+        runs: waitingRuns(),
+        accounts,
+        handoffs: [handoff({ phase: "waiting_resource", reason: "limit_reached", to_profile_id: "", next_check_at: T0 })],
+      }),
+    );
+
+    expect(runStatus()).toHaveTextContent("Run（第 1 次）：已停止（等待資源）");
+    expect(runStatus()).not.toHaveTextContent("中斷");
+    expect(runStatus()).not.toHaveTextContent("結束原因");
+  });
+
   it("沒有交接時不顯示交接狀態", async () => {
     await renderBoard(fakeClient({ tasks: [runningTask()], runs: [run("run_1", "task_1", "running")], handoffs: [] }));
 

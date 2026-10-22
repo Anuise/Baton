@@ -13,6 +13,9 @@
 //!    在安全邊界（舊 Worker 保存了 checkpoint 或等滿上限）先持久化 `stopping` 再要求舊程序停止，**確認停止**（或程序自行結束）
 //!    之後以單一交易結束舊 Run、建立 successor Run 並把世代轉給它；停不下來就留在 `stopping`，successor 不會被建立。
 //!    每個 phase 都先持久化，Runtime 在任何一點重建後都從持久化的 phase 繼續。
+//!    突然限流（票 29，CLI 回報帳號已達上限）不受冷卻限制、不等 checkpoint；程序已自行結束時在收事件的這一步就建立交接並轉移。
+//!    轉移時所有合適帳號都受限，Task 進入 `waiting_resource`，到了重新評估的時間（重置後 1 分鐘，或 5～60 分鐘的退避）
+//!    才再找承接帳號；停止意圖或 Workspace 等待「繼續工作」時不派工。
 //! 6. **排程**：前面幾步可能釋放了帳號與全域名額，於是讓佇列中等待的 Task 依優先序逐一嘗試派出（票 19）；
 //!    派出的 Run 在同一次 `tick` 就啟動。派出之前先為排隊的 Task 準備工作目錄（worktree 或輸出目錄，票 20），
 //!    目錄不可用時不派工，等待原因就是登記的失敗原因。
@@ -745,7 +748,7 @@ impl Supervisor {
                 return false;
             }
         };
-        let mut transferred = false;
+        let mut transferred = self.resume_resource_waits(quota.clone(), now).await;
         for work in works {
             let stopping = match work.handoff.phase {
                 HandoffPhase::Stopping => true,
@@ -770,6 +773,62 @@ impl Supervisor {
             }
         }
         transferred
+    }
+
+    /// 等待資源的交接（票 29）：到了重新評估的時間就找承接帳號，有就派出 successor。回傳這次有沒有建立 successor。
+    async fn resume_resource_waits(&self, quota: HashMap<String, f64>, now: Timestamp) -> bool {
+        let changed = match self.store.resume_resource_waits(quota, now, new_run_id).await {
+            Ok(changed) => changed,
+            Err(error) => {
+                self.note(&format!("無法重新評估等待資源的交接：{error}"));
+                return false;
+            }
+        };
+        let mut transferred = false;
+        for handoff in changed {
+            match handoff.phase {
+                HandoffPhase::Transferred => {
+                    transferred = true;
+                    self.note(&format!(
+                        "交接 {}：資源恢復，由帳號 {} 的 Run {} 從檢查點接手",
+                        handoff.id,
+                        handoff.to_profile_id,
+                        handoff.to_run_id.as_deref().unwrap_or("")
+                    ));
+                }
+                HandoffPhase::WaitingResource => self.note(&format!(
+                    "交接 {}：所有合適帳號仍受限，第 {} 次重新評估排在 {}",
+                    handoff.id,
+                    handoff.wait_attempts,
+                    handoff.next_check_at.map_or(0, Timestamp::as_millis)
+                )),
+                _ => self.note(&format!(
+                    "交接 {} 已放棄：{}",
+                    handoff.id,
+                    handoff.abandoned_reason.as_deref().unwrap_or_default()
+                )),
+            }
+        }
+        transferred
+    }
+
+    /// 突然限流的 Run 已自行結束、還沒有交接：先依最新的額度推進門檻，再為它建立交接（帳號不是突然限流時沒有）。
+    async fn request_sudden_handoff(&self, run_id: &str) -> Option<baton_domain::handoff::Handoff> {
+        let now = self.ports.clock.now();
+        let quota = match quota::current(&self.store, &*self.ports.quota_observer, now).await {
+            Ok(status) => quota::known_used(&status),
+            Err(error) => {
+                self.note(&format!("無法取得額度觀測，Run {run_id} 照一般結束處理：{error}"));
+                return None;
+            }
+        };
+        match self.store.request_sudden_handoff(run_id, quota, now, || new_prefixed_id("hof")).await {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                self.note(&format!("無法為突然限流的 Run {run_id} 建立交接，照一般結束處理：{error}"));
+                None
+            }
+        }
     }
 
     /// 要求交接中的舊程序停止；**確認停止**才轉移（停不下來或停止失敗就留在 stopping，下一次再試，不會有第二個 writer）。
@@ -835,6 +894,14 @@ impl Supervisor {
                     handoff.to_generation.unwrap_or_default()
                 ));
                 true
+            }
+            Ok(handoff) if handoff.phase == HandoffPhase::WaitingResource => {
+                self.note(&format!(
+                    "交接 {handoff_id}：Run {} 已停止（{stop_outcome}），所有合適帳號都受限，Task 等待資源，預計 {} 重新評估",
+                    handoff.from_run_id,
+                    handoff.next_check_at.map_or(0, Timestamp::as_millis)
+                ));
+                false
             }
             Ok(handoff) => {
                 let reason = handoff.abandoned_reason.unwrap_or_default();
@@ -1152,6 +1219,17 @@ impl Supervisor {
                                 transferred |= self.transfer_handoff(&handoff.id, "exited").await;
                                 finished = true;
                                 break;
+                            }
+                            // 帳號已達上限後以失敗結束（突然限流，票 29）：不依賴最後一輪摘要，以最近的有效 checkpoint
+                            // 交給其他帳號接手，或在所有帳號都受限時等待資源
+                            Ok(None) if !success => {
+                                if let Some(handoff) = self.request_sudden_handoff(&run_id).await {
+                                    self.last_errors.lock().await.remove(&run_id);
+                                    self.quota_limited.lock().await.remove(&run_id);
+                                    transferred |= self.transfer_handoff(&handoff.id, "exited").await;
+                                    finished = true;
+                                    break;
+                                }
                             }
                             Ok(None) => {}
                             // 讀不到交接紀錄：照一般的結束處理（Domain 仍以世代與狀態把關）
