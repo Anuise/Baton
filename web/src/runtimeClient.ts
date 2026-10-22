@@ -110,12 +110,40 @@ export interface ConfirmationSummary {
   items: { capability: Capability; label: string; targets: string[]; restrictions: string[]; high_risk: boolean }[];
   risks: string[];
   requires_risk_acknowledgement: boolean;
+  /** 相對於目前生效 revision 的變動；第一次確認（還沒有任何 revision）時為 null。 */
+  changes: AuthorizationChanges | null;
+}
+
+/** 修改授權時，一項能力的變動（對應 Rust 的 GrantChange）。 */
+export interface GrantChange {
+  capability: Capability;
+  label: string;
+  high_risk: boolean;
+  new_capability: boolean;
+  removed_capability: boolean;
+  added_targets: string[];
+  removed_targets: string[];
+  added_restrictions: string[];
+  removed_restrictions: string[];
+  expands: boolean;
+}
+
+/** 新內容相對於目前生效 revision 的變動（對應 Rust 的 AuthorizationChanges）。 */
+export interface AuthorizationChanges {
+  base_revision: number;
+  changes: GrantChange[];
+  /** 這次修改擴大授權：確認時必須帶 `acknowledgedExpansion: true`。 */
+  expands: boolean;
+  /** 給使用者看的影響說明。 */
+  impact: string[];
 }
 
 export interface ConfirmAuthorizationRequest {
   templateId: string | null;
   grants: Grant[];
   acknowledgedRisk: boolean;
+  /** 使用者已承認這次修改會擴大授權；修改既有授權且 `changes.expands` 為真時必須是 true。 */
+  acknowledgedExpansion: boolean;
 }
 
 /** Claude Code 實際使用的認證來源（對應 Rust 的 AuthSource）；只有 `native_login` 可以派工。 */
@@ -509,6 +537,40 @@ export interface DecisionBlocking {
   task_status: TaskStatus;
 }
 
+/** 「允許本次操作」綁定的單一邏輯操作；執行時逐項核對，任何一項不同就不能沿用。 */
+export interface ApprovalBinding {
+  /** 例如 "Bash:git push"、"Write"。 */
+  operation: string;
+  /** 目標資源，例如 "origin main"、檔案路徑、網址。 */
+  target: string | null;
+  /** 重要參數，例如 { flags: ["--force"] }。 */
+  params: Record<string, unknown>;
+  /** SHA-256 小寫十六進位。 */
+  request_hash: string;
+  /** Task 的成果版本，例如 "report.md@2,notes.md@1"；沒有成果時是空字串。 */
+  artifact_version: string;
+}
+
+/** 單次批准被某個 Run 使用的紀錄。 */
+export interface ApprovalUse {
+  request_id: string;
+  run_id: string;
+  used_at: number;
+}
+
+export type ApprovalMismatchReason =
+  | "operation_changed"
+  | "target_changed"
+  | "params_changed"
+  | "request_hash_changed"
+  | "artifact_version_changed";
+
+/** 先前有單次批准，但這次的操作與它的綁定不符而不能沿用。 */
+export interface RejectedApproval {
+  request_id: string;
+  reason: ApprovalMismatchReason;
+}
+
 /** 權限提示的內容：哪個工具、對應哪項授權能力。 */
 export interface DecisionPermission {
   tool_name: string;
@@ -516,6 +578,13 @@ export interface DecisionPermission {
   capability: Capability | null;
   capability_label: string | null;
   summary: string;
+  /** 單次批准綁定的操作；票 23 之前建立的請求沒有。 */
+  binding: ApprovalBinding | null;
+  /** 同一操作先前已用掉一次批准、結果未知：要先查證再回答。 */
+  prior_use: ApprovalUse | null;
+  rejected_approval: RejectedApproval | null;
+  /** 這個請求的裁定已被某個 Run 使用。 */
+  approval_use: ApprovalUse | null;
 }
 
 /** 使用者已作出的裁定。 */
@@ -931,11 +1000,16 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       if (!response.ok) throw await failure(response);
       return (await response.json()) as ConfirmationSummary;
     },
-    async confirmAuthorization(workspaceId, { templateId, grants, acknowledgedRisk }) {
+    async confirmAuthorization(workspaceId, { templateId, grants, acknowledgedRisk, acknowledgedExpansion }) {
       const response = await fetchFn(authorizationPath(workspaceId), {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ template_id: templateId, grants, acknowledged_risk: acknowledgedRisk }),
+        body: JSON.stringify({
+          template_id: templateId,
+          grants,
+          acknowledged_risk: acknowledgedRisk,
+          acknowledged_expansion: acknowledgedExpansion,
+        }),
       });
       if (!response.ok) throw await failure(response);
       return (await response.json()) as AuthorizationRevision;
@@ -1010,8 +1084,14 @@ export function createTauriClient(invoke: Invoke): AppClient {
     archiveWorkspace: (id) => call<Workspace>("workspace_archive", { id }),
     getAuthorization: (id) => call<AuthorizationView>("workspace_authorization", { id }),
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
-    confirmAuthorization: (id, { templateId, grants, acknowledgedRisk }) =>
-      call<AuthorizationRevision>("workspace_authorization_confirm", { id, templateId, grants, acknowledgedRisk }),
+    confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion }) =>
+      call<AuthorizationRevision>("workspace_authorization_confirm", {
+        id,
+        templateId,
+        grants,
+        acknowledgedRisk,
+        acknowledgedExpansion,
+      }),
     getTaskBoard: (workspaceId) => call<TaskBoard>("task_board", { workspaceId }),
     createGoal: (workspaceId, title) => call<Goal>("goal_create", { workspaceId, title }),
     createTask: (workspaceId, { goalId, title, contract }) =>
