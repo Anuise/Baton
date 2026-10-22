@@ -4,6 +4,7 @@ import { AccountsPage } from "./AccountsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { DecisionCenter } from "./DecisionCenter";
 import { PlatformPage } from "./PlatformPage";
+import { SchedulingSettings } from "./SchedulingSettings";
 import { SetupWizard } from "./SetupWizard";
 import { StatusBar } from "./StatusBar";
 import { createRuntimeClient, type AppClient, type HealthResponse, type PendingDecisions, type Workspace } from "./runtimeClient";
@@ -50,6 +51,7 @@ export function App() {
           <h1>{health?.product ?? ""}</h1>
           {client && <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
+          {client && <SchedulingSettings client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
           {client && opened?.view === "decisions" && (

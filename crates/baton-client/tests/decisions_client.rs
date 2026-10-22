@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use baton_api::{CreateTaskRequest, CreateWorkspaceRequest};
-use baton_client::{ClientError, RuntimeClient};
+use baton_client::{ClientError, DispatchOutcome, RuntimeClient};
 use baton_domain::decision::{DecisionKind, DecisionStatus};
 use baton_domain::task::{ContractContent, ContractField};
 use baton_domain::agent::TOOL_REQUEST_DECISION;
@@ -42,6 +42,8 @@ async fn started_run(harness: &Harness, client: &RuntimeClient) -> (String, Stri
         .await
         .unwrap()
         .id;
+    // 派工需要一個可派工的帳號（票 19）
+    harness.add_account("主要帳號", "main@example.com").await;
     let goal = client.create_goal(&workspace_id, "研究競品").await.unwrap();
     let created = client
         .create_task(
@@ -51,7 +53,10 @@ async fn started_run(harness: &Harness, client: &RuntimeClient) -> (String, Stri
         .await
         .unwrap();
     client.mark_task_ready(&workspace_id, &created.task.id).await.unwrap();
-    let run = client.dispatch_task(&workspace_id, &created.task.id).await.unwrap();
+    let run = match client.dispatch_task(&workspace_id, &created.task.id).await.unwrap() {
+        DispatchOutcome::Started(view) => *view,
+        DispatchOutcome::Queued(queued) => panic!("應該直接派出，卻排隊中：{queued:?}"),
+    };
     harness.supervise().await;
     let token = harness.agent_credential(&run.run.id).expect("Run 啟動時應該把 Agent 憑證放進程序的環境變數");
     (workspace_id, created.task.id, run.run.id, token)

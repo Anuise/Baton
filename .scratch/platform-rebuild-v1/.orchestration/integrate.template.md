@@ -9,7 +9,7 @@
 2. Store migration 編號若與整合分支重複，把本票的 migration 順延到整合分支最大編號之後，並確認兩邊的 schema 都會被套用。
 3. `ai-decisions.md` 中本票新增的 AI-NN 若與整合分支重號，順延到整合分支最大編號之後，並同步更新本票程式碼、文件裡對這些編號的引用。不能修改整合分支已有的條目。每個條目都要有 `- 審閱：` 行。
 4. 跑 `pnpm test`（必要時 `pnpm --filter web typecheck`、`cargo check -p baton-desktop`），全部通過；本票與整合分支的測試都不可刪除或弱化。
-5. commit 到 `{{BRANCH}}`，結尾加 `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`。結束時 `rebuild/v1` 必須是 HEAD 的祖先、工作樹乾淨。不要 push，不要動 `main` 或 `rebuild/v1`。
+5. commit 到 `{{BRANCH}}`，結尾加 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。結束時 `rebuild/v1` 必須是 HEAD 的祖先、工作樹乾淨。不要 push，不要動 `main` 或 `rebuild/v1`。
 6. 若解衝突時需要做判斷，依 `ai-decisions.md` 格式追加新條目（標「票 {{NN}} 整合」，`- 審閱：未審`）。
 
 最後一則回覆請用以下格式：

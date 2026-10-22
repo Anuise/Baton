@@ -1,4 +1,14 @@
-import type { AccountProfile, DecisionRequestView, PlatformResponse, SetupStatus, ToolCheck } from "./runtimeClient";
+import type {
+  AccountProfile,
+  AccountRun,
+  AccountScheduling,
+  DecisionRequestView,
+  PlatformResponse,
+  RunView,
+  SchedulingOverview,
+  SetupStatus,
+  ToolCheck,
+} from "./runtimeClient";
 
 /** 測試用的平台狀態：Windows 11 26H2 Pro x64，正式支援。 */
 export const supportedPlatform: PlatformResponse = {
@@ -123,6 +133,102 @@ export function decisionView(overrides: Partial<DecisionRequestView> = {}): Deci
     permission: null,
     created_at: CHECKED_AT,
     decision: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的 Run（使用 prof_1）；預設是 running。 */
+export function runView(overrides: Partial<RunView> = {}): RunView {
+  return {
+    id: "run_1",
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    status: "running",
+    profile_id: "prof_1",
+    version: 1,
+    generation: 1,
+    contract_version: 1,
+    authorization_revision: null,
+    command_id: null,
+    process: null,
+    cancel_requested_at: null,
+    end_reason: null,
+    created_at: CHECKED_AT,
+    updated_at: CHECKED_AT,
+    started_at: null,
+    ended_at: null,
+    lease: null,
+    latest_progress: null,
+    latest_checkpoint: null,
+    blocked: null,
+    ...overrides,
+  };
+}
+
+/** 排程總覽裡帳號 prof_1 的進行中 Run。 */
+export function accountRun(overrides: Partial<AccountRun> = {}): AccountRun {
+  return {
+    run_id: "run_1",
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    task_title: "整理資料",
+    status: "running",
+    generation: 1,
+    cancel_requested: false,
+    ...overrides,
+  };
+}
+
+/** 排程總覽裡的帳號：預設沒有進行中的 Run、用量未知、每帳號上限 2。 */
+export function accountScheduling(overrides: Partial<AccountScheduling> = {}): AccountScheduling {
+  return {
+    profile_id: "prof_1",
+    name: "主要帳號",
+    dispatchable: true,
+    blockers: [],
+    quota_used: null,
+    running: 0,
+    limit: 2,
+    runs: [],
+    ...overrides,
+  };
+}
+
+/** 測試用的排程總覽：一個可用帳號、保留交接容量（帳號不到 3 個，實際不保留）。 */
+export function schedulingOverview(overrides: Partial<SchedulingOverview> = {}): SchedulingOverview {
+  return {
+    settings: {
+      mode: "reserve_handoff",
+      mode_label: "保留交接容量",
+      modes: [
+        {
+          mode: "reserve_handoff",
+          label: "保留交接容量",
+          description: "每帳號 2 個、全域 6 個並行 Run；帳號數達 3 個以上時保留 1 個交接槽",
+          per_account_limit: 2,
+          global_limit: 6,
+          handoff_reserve: 1,
+        },
+        {
+          mode: "higher_concurrency",
+          label: "較高並行",
+          description: "每帳號 3 個、全域 8 個並行 Run，不保留交接槽",
+          per_account_limit: 3,
+          global_limit: 8,
+          handoff_reserve: 0,
+        },
+      ],
+    },
+    capacity: {
+      per_account_limit: 2,
+      global_limit: 6,
+      handoff_reserve: 0,
+      normal_limit: 6,
+      running: 0,
+      usable_accounts: 1,
+    },
+    accounts: [accountScheduling()],
+    queue: [],
     ...overrides,
   };
 }

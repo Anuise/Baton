@@ -40,7 +40,7 @@ async fn run_cmd(store: &Store, command: RunCommand, now: Timestamp) -> Result<R
 }
 
 fn dispatch(run_id: &str) -> RunCommand {
-    RunCommand::Dispatch { run_id: run_id.into(), task_id: "t1".into() }
+    RunCommand::Dispatch { run_id: run_id.into(), task_id: "t1".into(), profile_id: "p1".into() }
 }
 
 fn raw(dir: &Path) -> Connection {

@@ -4,4 +4,4 @@
 set -u
 LOG="$(cd "$(dirname "$0")" && pwd)/runs/$1.log"
 until tail -1 "$LOG" | grep -q '"type":"result"'; do sleep 30; done
-tail -1 "$LOG" | python -I -c "import sys,json; d=json.loads(sys.stdin.read()); print('subtype:', d.get('subtype'), 'is_error:', d.get('is_error')); print(d.get('result',''))"
+tail -1 "$LOG" | python -I -X utf8 -c "import sys,json; d=json.loads(sys.stdin.buffer.read().decode('utf-8')); print('subtype:', d.get('subtype'), 'is_error:', d.get('is_error')); print(d.get('result',''))"

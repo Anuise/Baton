@@ -28,7 +28,7 @@
 | --- | --- | --- |
 | 帳號 | `CLAUDE_CONFIG_DIR` 指向 `.claude-Work-n` | 使用者指定 |
 | 環境清理 | 先移除從主控 session 繼承的所有 `CLAUDE*`、`CLAUDECODE`、`ANTHROPIC*`、`AI_AGENT`、`BAGGAGE` 環境變數，再設定 `CLAUDE_CONFIG_DIR` | AI-02 |
-| 模型 | `--model claude-sonnet-5-5` | 使用者指定 |
+| 模型 | `--model claude-opus-5-5` | 使用者指定（2026-10-22 由 Sonnet 5.5 上調） |
 | effort | `--effort high` | 使用者指定 |
 | 限流等待 | `CLAUDE_CODE_RETRY_WATCHDOG=1`、`CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=18000000`（5 小時） | 使用者指定；變數名稱見 AI-07 |
 | 權限 | `--permission-mode bypassPermissions`，工作目錄限定在該票的 worktree | AI-08 |
@@ -42,7 +42,7 @@ MSYS_NO_PATHCONV=1 env $CLEAN \
   CLAUDE_CONFIG_DIR="$HOME/.claude-Work-3" \
   CLAUDE_CODE_RETRY_WATCHDOG=1 \
   CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=18000000 \
-  claude -p --model claude-sonnet-5-5 --effort high \
+  claude -p --model claude-opus-5-5 --effort high \
     --permission-mode bypassPermissions \
     --output-format stream-json --verbose \
     "$(cat <run 指示檔>)" > <run 紀錄檔> 2>&1

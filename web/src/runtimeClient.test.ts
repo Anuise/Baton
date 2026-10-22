@@ -212,11 +212,71 @@ describe("Runtime 用戶端", () => {
     await expect(client.cancelRun("ws_1", "run_1")).rejects.toThrow("Task 不是 ready，不能派工");
   });
 
-  it("HTTP 版派工回傳 Runtime 的 Run", async () => {
-    const run = { id: "run_1", status: "queued", lease: null };
+  it("HTTP 版派工建立 Run（201）時回傳 started 與 Runtime 的 Run", async () => {
+    const run = { id: "run_1", status: "queued", profile_id: "prof_1", lease: null };
     const fetchFn = vi.fn(async () => new Response(JSON.stringify(run), { status: 201 }));
 
-    await expect(createHttpClient(fetchFn as unknown as typeof fetch).dispatchTask("ws_1", "task_1")).resolves.toEqual(run);
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).dispatchTask("ws_1", "task_1")).resolves.toEqual({
+      kind: "started",
+      run,
+    });
+  });
+
+  it("HTTP 版派工排隊中（202）時回傳 queued 與等待原因", async () => {
+    const queued = {
+      queued: true,
+      task_id: "task_1",
+      priority: 0,
+      reasons: [{ category: "capacity", code: "account_capacity_full", message: "帳號名額已滿", profile_id: "prof_1" }],
+    };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(queued), { status: 202 }));
+
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).dispatchTask("ws_1", "task_1")).resolves.toEqual({
+      kind: "queued",
+      task_id: "task_1",
+      priority: 0,
+      reasons: queued.reasons,
+    });
+  });
+
+  it("Tauri 版派工以 queued 欄位區分已建立 Run 與排隊中", async () => {
+    const run = { id: "run_1", status: "queued", profile_id: "prof_1", lease: null };
+    const queued = { queued: true, task_id: "task_1", priority: 2, reasons: [] };
+    const invoke = vi.fn().mockResolvedValueOnce(run).mockResolvedValueOnce(queued);
+    const client = createTauriClient(invoke as never);
+
+    await expect(client.dispatchTask("ws_1", "task_1")).resolves.toEqual({ kind: "started", run });
+    await expect(client.dispatchTask("ws_1", "task_2")).resolves.toEqual({
+      kind: "queued",
+      task_id: "task_1",
+      priority: 2,
+      reasons: [],
+    });
+  });
+
+  it("HTTP 版讀取排程總覽與切換容量預設", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.schedulingOverview();
+    await client.setSchedulingMode("higher_concurrency");
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/scheduling");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/scheduling/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "higher_concurrency" }),
+    });
+  });
+
+  it("Tauri 版以指令讀取排程總覽與切換容量預設", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.schedulingOverview();
+    await client.setSchedulingMode("reserve_handoff");
+
+    expect(invoke.mock.calls).toEqual([["scheduling_overview"], ["scheduling_set_mode", { mode: "reserve_handoff" }]]);
   });
 
   it("HTTP 版把 Task 操作失敗時 Runtime 的說明當成錯誤訊息", async () => {
