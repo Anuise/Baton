@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::authorization::Capability;
+use baton_domain::run::RunView;
 use baton_domain::task::{ContractContent, Goal, MissingItem, TaskCommand, TaskContract, TaskError, TaskView};
 use baton_store::TaskApplyError;
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,8 @@ pub struct TaskBoard {
     pub workspace_id: String,
     pub goals: Vec<Goal>,
     pub tasks: Vec<TaskView>,
+    /// Workspace 的全部 Run（含已結束），依建立順序；卡片上的執行狀態由它組出。
+    pub runs: Vec<RunView>,
     /// 契約「所需能力」可選的清單。
     pub capabilities: Vec<CapabilityInfo>,
 }
@@ -207,6 +210,7 @@ pub(crate) async fn board(
         workspace_id: id,
         goals: data.goals,
         tasks: data.tasks,
+        runs: data.runs,
         capabilities: Capability::ALL
             .into_iter()
             .map(|c| CapabilityInfo { capability: c, label: c.label().to_string(), high_risk: c.is_high_risk() })
