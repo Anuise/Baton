@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { App } from "./App";
 import {
@@ -16,7 +16,7 @@ import {
   understandingView,
   workflowList,
 } from "./fixtures";
-import type { AppClient, Workspace } from "./runtimeClient";
+import type { AppClient, AuthorizationView, Capability, Workspace } from "./runtimeClient";
 
 const workspace: Workspace = {
   id: "ws_1",
@@ -28,6 +28,30 @@ const workspace: Workspace = {
   archived_at: null,
   model_overrides: { controller: null, worker: null, reviewer: null },
 };
+
+/** 只有一項已確認能力的授權設定。 */
+function authorizationOf(target: Workspace, capability: Capability): AuthorizationView {
+  const revision = {
+    workspace_id: target.id,
+    revision: 1,
+    grants: [{ capability, targets: [target.path], restrictions: [] }],
+    source: { kind: "custom" as const, template_id: null, base_revision: null, confirmed_by: "desktop" },
+    confirmed_at: 1_700_000_000_000,
+  };
+  return {
+    workspace_id: target.id,
+    status: "confirmed",
+    effective: revision,
+    revisions: [revision],
+    templates: [],
+    capabilities: [
+      { capability: "read_files", label: "讀取檔案", high_risk: false },
+      { capability: "deploy", label: "部署", high_risk: true },
+    ],
+    risk_disclosure: "",
+    legacy_runs: [],
+  };
+}
 
 /** 相當於使用者在系統匣按「完全退出」。 */
 let emitFullExit: () => void = () => {};
@@ -262,5 +286,31 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "工作面板 筆記" }));
     expect(await screen.findByRole("heading", { name: "工作面板：筆記" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "對話：筆記" })).not.toBeInTheDocument();
+  });
+
+  it("切換 Workspace 後，上一個 Workspace 較晚回來的授權設定不會蓋掉目前的草稿", async () => {
+    const other: Workspace = { ...workspace, id: "ws_2", name: "文件", path: "C:\work\docs" };
+    let resolveFirst: (view: AuthorizationView) => void = () => {};
+    vi.mocked(client.listWorkspaces).mockImplementation(async () => ({ workspaces: [workspace, other] }));
+    vi.mocked(client.getAuthorization)
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)))
+      .mockImplementationOnce(async () => authorizationOf(other, "read_files"));
+    // 只影響這個測試，結束後還原成模組層級的預設行為
+    onTestFinished(() => {
+      vi.mocked(client.listWorkspaces).mockReset();
+      vi.mocked(client.getAuthorization).mockReset();
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "授權設定 筆記" }));
+    await user.click(screen.getByRole("button", { name: "授權設定 文件" }));
+    expect(await screen.findByRole("heading", { name: "授權設定：文件" })).toBeInTheDocument();
+    // 「筆記」的回應這時才到
+    await act(async () => resolveFirst(authorizationOf(workspace, "deploy")));
+
+    expect(screen.getByRole("heading", { name: "授權設定：文件" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /^讀取檔案/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /^部署/ })).not.toBeChecked();
   });
 });
