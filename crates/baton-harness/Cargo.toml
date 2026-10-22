@@ -1,0 +1,22 @@
+[package]
+name = "baton-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 測試專用：以程序內方式啟動完整 Runtime，並提供全部 Port 的 fake（spec D-04）
+[dependencies]
+baton-api = { path = "../baton-api" }
+baton-domain = { path = "../baton-domain" }
+baton-ports = { path = "../baton-ports" }
+baton-runtime = { path = "../baton-runtime" }
+async-trait = "0.1"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+
+[dev-dependencies]
+baton-api = { path = "../baton-api" }

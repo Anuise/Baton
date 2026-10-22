@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/baton-domain",
+    "crates/baton-ports",
+    "crates/baton-store",
+    "crates/baton-api",
+    "crates/baton-runtime",
+    "crates/baton-harness",
+    "crates/baton-client",
+    "src-tauri",
+]
+# 桌面殼編譯時需要已建置的 web/dist，因此不納入預設成員；以 `pnpm build` 建置
+default-members = [
+    "crates/baton-domain",
+    "crates/baton-ports",
+    "crates/baton-store",
+    "crates/baton-api",
+    "crates/baton-runtime",
+    "crates/baton-harness",
+    "crates/baton-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false

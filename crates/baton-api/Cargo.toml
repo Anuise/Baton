@@ -1,0 +1,11 @@
+[package]
+name = "baton-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+baton-domain = { path = "../baton-domain" }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,29 @@
+[package]
+name = "baton-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "baton-runtime"
+path = "src/main.rs"
+
+[dependencies]
+baton-api = { path = "../baton-api" }
+baton-domain = { path = "../baton-domain" }
+baton-ports = { path = "../baton-ports" }
+baton-store = { path = "../baton-store" }
+async-trait = "0.1"
+futures = "0.3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
+axum = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+
+[dev-dependencies]
+baton-client = { path = "../baton-client" }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
