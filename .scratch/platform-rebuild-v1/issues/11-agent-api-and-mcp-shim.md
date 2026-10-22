@@ -1,6 +1,6 @@
 # 11: Agent API、範圍憑證與 MCP 工具 shim
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R022-11-impl，2026-10-22 15:47）
 Blocked by: 10, 04
 
 **What to build:** 依 spec D-05：Run 准入時簽發 Agent 範圍憑證（關聯 Workspace、Run、角色、世代），只經環境變數交給 MCP shim；shim 以 stdio 提供 MCP 工具並轉送到 Runtime 的 Agent API。本票實作共同工具：get_task_contract、report_progress、save_checkpoint、report_blocked。Runtime 每次請求以憑證核對身分與資源歸屬，不信任請求內填寫的 Workspace／Run。Run 結束或被接替後憑證失效。
