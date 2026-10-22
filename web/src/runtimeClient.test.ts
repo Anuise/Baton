@@ -1012,4 +1012,46 @@ describe("Runtime 用戶端", () => {
       ["task_accept", { workspaceId: "ws_1", taskId: "task_1", request: { basis, note: null } }],
     ]);
   });
+
+  it("HTTP 版讀取對話，並以 JSON 送出使用者訊息", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({ turn: {}, busy: true }), { status: 201 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.getConversation("ws_1");
+    const sent = await client.sendConversationMessage("ws_1", "整理一下進度");
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/conversation");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/conversation/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "整理一下進度" }),
+    });
+    expect(sent.busy).toBe(true);
+  });
+
+  it("HTTP 版送出訊息被拒時保留 Runtime 的說明與錯誤代碼", async () => {
+    const body = { error: "message_too_long", message: "訊息超過 20000 字元" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 400 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .sendConversationMessage("ws_1", "x")
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("訊息超過 20000 字元");
+    expect(errorCode(error)).toBe("message_too_long");
+  });
+
+  it("Tauri 版以指令與參數讀取對話與送出訊息", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.getConversation("ws_1");
+    await client.sendConversationMessage("ws_1", "整理一下進度");
+
+    expect(invoke.mock.calls).toEqual([
+      ["conversation_view", { workspaceId: "ws_1" }],
+      ["conversation_send_message", { workspaceId: "ws_1", text: "整理一下進度" }],
+    ]);
+  });
 });

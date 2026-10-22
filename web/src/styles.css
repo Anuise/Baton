@@ -1389,3 +1389,123 @@ body {
 .backup-settings > [role="alert"] {
   color: #cf222e;
 }
+
+.conversation-page {
+  display: grid;
+  gap: 12px;
+}
+
+.conversation-page h2 {
+  margin: 0;
+}
+
+.conversation-hint {
+  margin: 0;
+  color: #656d76;
+  font-size: 12px;
+}
+
+.conversation-page > [role="alert"],
+.conversation-form [role="alert"] {
+  color: #cf222e;
+}
+
+.conversation-busy,
+.conversation-wake {
+  margin: 0;
+  padding: 8px 12px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  border-radius: 6px;
+}
+
+.conversation-turns {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-turn {
+  display: grid;
+  gap: 4px;
+  max-width: 720px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.conversation-turn p {
+  margin: 0;
+}
+
+.conversation-user_message {
+  justify-self: end;
+  background: #ddf4ff;
+  border-color: #54aeff;
+}
+
+/* 工作事件是系統通知，不是對話的一方 */
+.conversation-work_event {
+  justify-self: center;
+  background: #f6f8fa;
+  border-style: dashed;
+  color: #656d76;
+  font-size: 12px;
+}
+
+.conversation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  color: #656d76;
+}
+
+.conversation-content {
+  white-space: pre-wrap;
+}
+
+.conversation-status {
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  font-weight: 600;
+}
+
+.conversation-status-processing {
+  background: #ddf4ff;
+  border-color: #54aeff;
+}
+
+.conversation-status-processed {
+  background: none;
+  border-color: transparent;
+  font-weight: normal;
+}
+
+.conversation-form {
+  display: grid;
+  gap: 6px;
+  max-width: 720px;
+}
+
+.conversation-form label {
+  display: grid;
+  gap: 4px;
+}
+
+.conversation-form textarea {
+  min-height: 72px;
+  font: inherit;
+}
+
+.conversation-form button {
+  justify-self: start;
+}
