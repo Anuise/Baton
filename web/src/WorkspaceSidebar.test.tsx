@@ -367,4 +367,28 @@ describe("左側 Workspace 清單", () => {
     expect(onOpenTasks).not.toHaveBeenCalled();
     expect(onOpenArtifacts).not.toHaveBeenCalled();
   });
+
+  it("每個 Workspace 都有「時間線」入口，不會觸發其他檢視", async () => {
+    const onSelect = vi.fn();
+    const onOpenTasks = vi.fn();
+    const onOpenKnowledge = vi.fn();
+    const onOpenTimeline = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenTasks={onOpenTasks}
+        onOpenKnowledge={onOpenKnowledge}
+        onOpenTimeline={onOpenTimeline}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "時間線 筆記" }));
+
+    expect(onOpenTimeline).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenTasks).not.toHaveBeenCalled();
+    expect(onOpenKnowledge).not.toHaveBeenCalled();
+  });
 });

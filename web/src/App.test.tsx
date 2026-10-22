@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { authorityTable, decisionView, lifecycleStatus } from "./fixtures";
+import { authorityTable, decisionView, lifecycleStatus, metricsResponse } from "./fixtures";
 import type { AppClient, Workspace } from "./runtimeClient";
 
 const workspace: Workspace = {
@@ -51,6 +51,8 @@ const client = {
   recoveryStatus: vi.fn(async () => ({ event: null, max_attempts: 3, can_retry: false, blocking: null })),
   listKnowledge: vi.fn(async () => ({ search_mode: "full_text", entries: [] })),
   listGuards: vi.fn(async () => ({ guards: [] })),
+  timeline: vi.fn(async () => ({ workspace_id: "ws_1", task_id: null, events: [] })),
+  metrics: vi.fn(async () => metricsResponse()),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({
@@ -136,5 +138,19 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "成果與驗證 筆記" }));
     expect(await screen.findByRole("heading", { name: "成果與驗證：筆記" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "知識：筆記" })).not.toBeInTheDocument();
+  });
+
+  it("可從 Workspace 清單開啟時間線，並切回其他檢視", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "時間線 筆記" }));
+    expect(await screen.findByRole("heading", { name: "時間線：筆記" })).toBeInTheDocument();
+    expect(client.timeline).toHaveBeenCalledWith("ws_1", undefined);
+    expect(client.metrics).toHaveBeenCalledWith("ws_1");
+
+    await user.click(screen.getByRole("button", { name: "知識 筆記" }));
+    expect(await screen.findByRole("heading", { name: "知識：筆記" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "時間線：筆記" })).not.toBeInTheDocument();
   });
 });
