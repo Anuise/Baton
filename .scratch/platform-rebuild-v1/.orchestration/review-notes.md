@@ -58,3 +58,6 @@
 ## 15. 監護程序的邊界（票 32）
 - 監護寫下 Attempt 後、寫入 Withdrawn 前，若 App 拉起的 Runtime 先匯入日誌，撤回的嘗試會被多算一次（`crates/baton-guardian/src/lib.rs:152-165`、`import_guardian_journal`）。
 - `crates/baton-guardian/src/process.rs:265-267` 的 `OpenProcess` 失敗（例如權限不足）被當成程序已結束，與「只認確認過的終止」不一致。
+
+## 16. Controller 工具與 spec D-05 的落差（票 17，AI-327）
+- Controller 憑證目前只能呼叫 6 個 Controller 工具與 `permission_prompt`；spec D-05 列為共同工具的 `search_knowledge`、`send_message`、`read_inbox` 對 Controller 不可用，`accept_artifact` 與 Controller 版 `record_lesson_candidate` 尚未實作。確認後續票是否涵蓋，否則補上或在 spec 註記。
