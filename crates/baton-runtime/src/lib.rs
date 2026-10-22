@@ -335,7 +335,7 @@ async fn reconcile_stop_intent(
 /// 讀不到日誌時只記日誌：監護寫下的嘗試留到下次啟動再匯入，Runtime 照常以自己的判定恢復。
 async fn import_guardian_journal(store: &Store, data_dir: &std::path::Path, ports: &Ports, log: &LogSink) -> Result<(), RuntimeError> {
     let dir = data_dir.to_path_buf();
-    let journal = match tokio::task::spawn_blocking(move || baton_guardian::files::read_journal(&dir)).await {
+    let journal = match tokio::task::spawn_blocking(move || baton_guardian::files::read_journal_for_import(&dir)).await {
         Ok(Ok(journal)) => journal,
         Ok(Err(error)) => {
             (log)(&format!("監護：無法讀取監護日誌，這次不匯入：{error}"));
