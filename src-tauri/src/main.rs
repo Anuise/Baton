@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest, CreateProfileRequest, CreateTaskRequest,
-    CreateWorkspaceRequest, HealthResponse, LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus,
-    SchedulingOverview, SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
+    AdmissionReport, ArtifactList, ArtifactPreview, AuthorizationView, ConfirmAuthorizationRequest, CreateProfileRequest,
+    CreateTaskRequest, CreateWorkspaceRequest, HealthResponse, ImportPreview, LoginTerminalResponse, PlatformResponse,
+    ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus, SummaryRequest, TaskBoard, TaskDetail, WorkspaceList,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOutcome, RuntimeClient};
 use baton_credential::DpapiProtector;
@@ -20,8 +20,11 @@ use baton_domain::quota::PlanLimits;
 use baton_domain::authorization::{AuthorizationRevision, ConfirmationSummary, Grant};
 use baton_domain::run::RunView;
 use baton_domain::scheduler::CapacityMode;
+use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
+use base64::Engine;
+use serde::Serialize;
 use tauri::{Manager, State};
 use tokio::sync::OnceCell;
 
@@ -174,6 +177,42 @@ async fn profile_archive(link: State<'_, RuntimeLink>, id: String) -> Result<Pro
         return Err(reason.clone());
     }
     link.client.archive_profile(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 取得共同設定的目前狀態（已採用的版本）。
+#[tauri::command]
+async fn shared_settings_status(link: State<'_, RuntimeLink>) -> Result<SharedSettingsStatus, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.shared_settings().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 預覽匯入使用者既有的 Claude Code 設定（不保存、不改寫來源）。
+#[tauri::command]
+async fn shared_settings_preview(link: State<'_, RuntimeLink>) -> Result<ImportPreview, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.preview_settings_import().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 採用預覽的內容成為新版本；`expected_hash` 為預覽回傳的候選雜湊。
+#[tauri::command]
+async fn shared_settings_adopt(link: State<'_, RuntimeLink>, expected_hash: String) -> Result<SettingsVersion, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.adopt_settings(&expected_hash).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 讀取單一共同設定版本。
+#[tauri::command]
+async fn shared_settings_version(link: State<'_, RuntimeLink>, version: i64) -> Result<SettingsVersion, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.settings_version(version).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 取得首次啟動精靈的狀態。
@@ -423,6 +462,55 @@ async fn run_cancel(
     link.client.cancel_run(&workspace_id, &run_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 查看某個 Workspace 的成果（含全部版本與未登記的檔案）。
+#[tauri::command]
+async fn artifact_list(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<ArtifactList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.list_artifacts(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 預覽成果的某個版本（Runtime 會先核對雜湊）。
+#[tauri::command]
+async fn artifact_preview(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    artifact_id: String,
+    version: i64,
+) -> Result<ArtifactPreview, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.preview_artifact(&workspace_id, &artifact_id, version).await.map_err(|e| e.to_string())
+}
+
+/// 下載成果的內容：Tauri 指令的回傳值是 JSON，所以內容以 base64 交給 Web UI。
+#[derive(Serialize)]
+struct ArtifactDownloadPayload {
+    sha256: String,
+    content_base64: String,
+}
+
+/// Web UI 下載成果的某個版本；殼帶桌面憑證取回，內容與 manifest 不符時 Runtime 會拒絕。
+#[tauri::command]
+async fn artifact_download(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    artifact_id: String,
+    version: i64,
+) -> Result<ArtifactDownloadPayload, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    let download =
+        link.client.download_artifact(&workspace_id, &artifact_id, version).await.map_err(|e| e.to_string())?;
+    Ok(ArtifactDownloadPayload {
+        sha256: download.sha256,
+        content_base64: base64::engine::general_purpose::STANDARD.encode(download.bytes),
+    })
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
@@ -438,6 +526,10 @@ fn main() {
             profile_verify,
             profile_login_terminal,
             profile_archive,
+            shared_settings_status,
+            shared_settings_preview,
+            shared_settings_adopt,
+            shared_settings_version,
             setup_status,
             setup_recheck,
             setup_acknowledge_notice,
@@ -457,6 +549,9 @@ fn main() {
             run_cancel,
             scheduling_overview,
             scheduling_set_mode,
+            artifact_list,
+            artifact_preview,
+            artifact_download,
             profile_set_quota_limits
         ])
         .setup(|app| {

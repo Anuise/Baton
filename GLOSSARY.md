@@ -48,14 +48,49 @@
 - **避免使用**：thread、chat、context（context 指載入的資訊，見 context receipt）、把 Session ID 當 Run ID 或 PID。
 
 ### Artifact
-- **定義**：Task 產生的成果，含位置、版本、雜湊、產生者、Task 關聯與驗證紀錄。大型內容放檔案儲存，只登記位置與雜湊。
-- **關係**：由 Run 產生、屬於 Task；被 Decision Request、checkpoint、Evidence Bundle 引用；被引用的 Artifact 受保護，不被清理。Artifact 通過驗證條件後才被接受。
+- **定義**：Task 產生的成果，含位置、版本、雜湊、產生者、Task 關聯與驗證紀錄。大型內容放檔案儲存，只登記位置與雜湊。同一個 Task 內同名者是同一個 Artifact，再次登記只會追加新版本。
+- **關係**：由 Run 產生、屬於 Task；被 Decision Request、checkpoint、Evidence Bundle 引用；被引用的 Artifact 受保護，不被清理。Artifact 通過驗證條件後才被接受；登記只表示內容已完整保存並有 manifest，不等於被接受，也不改變 Task 狀態。
 - **避免使用**：output、deliverable、file、attachment。
+
+### Artifact 版本
+- **定義**：Artifact 的某一次登記結果，不可變：版本號、描述、大小、SHA-256、儲存位置、產生者 Run 與世代、時間。每個版本是獨立的檔案，不用成果名稱當檔名。
+- **關係**：屬於一個 Artifact；新版本只追加，不覆寫舊版本的檔案與 manifest；預覽與下載前會重新核對雜湊與大小，不符時拒絕提供。
+- **避免使用**：revision（授權與契約的 revision 另有專義）、覆寫、更新成果。
+
+### manifest（成果清單）
+- **定義**：Runtime 在控制資料庫保存的 Artifact 與 Artifact 版本紀錄（追加式、不可更新或刪除），說明「哪些檔案是成果」。manifest 只在檔案完整落地之後才提交。
+- **關係**：「已登記」＝有 manifest 引用＝內容完整；沒有 manifest 引用的檔案不是成果；與事件 `artifact_registered` 在同一個交易寫入。
+- **避免使用**：index、metadata、registry（泛稱）。
+
+### 未登記檔案（unregistered file）與暫存檔
+- **定義**：成果儲存中沒有被任何 manifest 引用的檔案，分兩種：暫存檔（staging，`.partial`，寫入中斷、內容不完整）與已改名但 manifest 未提交的檔案（unregistered，內容完整但仍不是成果）。
+- **關係**：由 Runtime 中途中斷（或登記被拒）造成；不被當成成果、不自動刪除，在成果列表中顯示，讓恢復時可辨識；與 Task 狀態無關。
+- **避免使用**：orphan file、垃圾檔、temp file（暫存檔只指 `.partial`）。
 
 ### Account Profile
 - **定義**：一個 Claude Code 帳號及其獨立的原生登入與 Session 狀態，是額度管理的單位。
 - **關係**：每個 Run 綁定一個 Account Profile；額度觀測、並行上限與 draining 都以 Account Profile 為單位；各 Profile 之間不共用登入資料；共同設定以版本化快照提供，不直接共用。
 - **避免使用**：account（單說 account 容易與應用程式測試帳號混淆）、user、seat、token。
+
+### 共同設定（Shared Settings）
+- **定義**：所有 Account Profile 的 Agent 共用的行為基準，從使用者平常使用的 Claude Code 設定匯入，分偏好、指示、hooks、MCP 伺服器、plugins 與市集五類。不含任何登入資料；登入與 Session 狀態只留在各 Account Profile 自己的設定目錄。
+- **關係**：只讀白名單來源（`settings.json`、`CLAUDE.md`、`.claude.json` 的 `mcpServers`），絕不改寫使用者的原始設定；經匯入候選預覽、使用者採用後才成為設定版本；各 Account Profile 不直接共用它，Run 只使用自己准入的設定快照。
+- **避免使用**：global settings、user settings（那是使用者原本的設定檔，是匯入的來源，不是共同設定）、config、profile 設定、同步（本平台只單向匯入，不回寫）。
+
+### 設定版本（Settings Version）
+- **定義**：使用者採用匯入候選時建立的共同設定版本，編號從 1 連續遞增，含內容、內容雜湊、來源指紋、排除清單與採用時間。建立後不可變。
+- **關係**：每次採用都建立新版本，即使內容與前一版相同；舊版本內容永不改變；Run 以設定快照固定使用某一版本，之後採用的新版本不影響已准入的 Run；交接與恢復產生的新 Run 重新檢查新版。
+- **避免使用**：revision（授權的確認版本稱 revision，兩者獨立編號）、設定檔版本、覆寫、更新（版本只會新增，不會被更新）。
+
+### 匯入候選（Import Candidate）
+- **定義**：從來源檔讀出、尚未採用的共同設定預覽：候選內容、內容雜湊（`candidate_hash`）、來源指紋、與目前版本的差異，以及沒有被匯入的項目與原因（排除清單，不含值）。不寫入任何地方。
+- **關係**：採用時必須帶預覽的 `candidate_hash`，來源在預覽後改變就拒絕，讓使用者採用的一定是他看過的內容；採用後成為設定版本。登入相關與看起來像秘密的內容在這一步被排除，秘密辨識是啟發式規則，不保證完全涵蓋。
+- **避免使用**：draft、pending settings、匯入結果（泛稱，預覽之後才有「採用」的動作時不夠精確）。
+
+### 設定快照（Run Settings Snapshot）
+- **定義**：某個設定版本渲染成 Run 專屬的唯讀設定目錄（`<資料目錄>\run-settings\<run_id>\`：`settings.json`、`mcp.json`、`CLAUDE.md`、`manifest.json`），內容與版本雜湊一致，`manifest.json` 記錄每個檔案的 SHA-256。
+- **關係**：屬於一個 Run，第一次產生時綁定版本且不再改變；Run 啟動時以設定參數傳給 Claude Code，避免熱重載改變已准入的 Run（此效果仍待實測）；在 Windows 上以檔案唯讀屬性保護，不是安全邊界。
+- **避免使用**：checkpoint（Run 的進度保存，另有專義）、備份、副本、config dump。
 
 ---
 

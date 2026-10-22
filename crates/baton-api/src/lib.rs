@@ -1,10 +1,11 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點與事件串流；
+//! 目前有健康狀態、平台狀態、Workspace 管理與授權端點、Goal／Task 與契約端點、Run（派工與取消）端點、多帳號排程總覽與容量預設端點、成果（瀏覽、預覽、下載）端點、帳號 Profile 管理（含方案上限）與首次啟動精靈端點、共同設定（匯入、版本、Run 設定快照）端點與事件串流；
 //! 另有只給 Agent 憑證使用的 Agent API（`/agent/v1/tools/*`，票 11）。所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）；管理 API 只接受桌面角色，Agent API 只接受 Agent 角色。
 
 mod agent;
+mod artifacts;
 mod authorization;
 mod guard;
 mod profiles;
@@ -12,6 +13,7 @@ pub mod quota;
 mod runs;
 mod scheduling;
 mod setup;
+mod shared_settings;
 mod tasks;
 mod workspaces;
 
@@ -24,15 +26,20 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::agent::{TOOL_GET_TASK_CONTRACT, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT};
+use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
-use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, QuotaObserver, WorkspaceFs};
+use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, QuotaObserver, UserSettingsSource, WorkspaceFs};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Notify};
 
 pub use agent::{tool_path, ReportAck, TaskContractResponse};
+pub use artifacts::{
+    artifact_content_path, artifact_preview_path, artifacts_path, ArtifactList, ArtifactPreview, ArtifactRegistered,
+    ArtifactView, ArtifactVersionView, SHA256_HEADER,
+};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
     AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
@@ -49,6 +56,11 @@ pub use runs::{run_cancel_path, run_path, runs_path, task_dispatch_path, Dispatc
 pub use scheduling::{
     AccountRun, AccountScheduling, CapacityModeInfo, CapacityView, QueueEntryView, SchedulingOverview,
     SchedulingSettingsView, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
+};
+pub use shared_settings::{
+    run_settings_snapshot_path, shared_settings_version_path, AdoptRequest, ImportPreview,
+    RunSettingsSnapshot, SharedSettingsStatus, SnapshotFileInfo, SnapshotRequest, RUN_SETTINGS_DIR, SHARED_SETTINGS_ADOPT_PATH,
+    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH,
 };
 pub use workspaces::{CreateWorkspaceRequest, WorkspaceList, WORKSPACES_PATH};
 
@@ -111,6 +123,8 @@ pub struct ApiState {
     pub claude_env: Arc<dyn ClaudeEnvironment>,
     /// 外部額度觀測器，每個帳號每 5 分鐘輪詢一次（票 27）；觀測不到的帳號不阻擋派工。
     pub quota_observer: Arc<dyn QuotaObserver>,
+    /// 使用者平常使用的 Claude Code 設定（唯讀；共同設定匯入的來源）。
+    pub user_settings: Arc<dyn UserSettingsSource>,
     pub log: LogSink,
     /// 派工或要求取消之後通知 Supervisor 儘快處理（背景迴圈等待它；沒有背景迴圈時沒有作用）。
     pub supervisor_wake: Arc<Notify>,
@@ -151,11 +165,20 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
         .route(SCHEDULING_PATH, get(scheduling::view))
         .route(SCHEDULING_SETTINGS_PATH, axum::routing::put(scheduling::update_settings))
+        .route(SHARED_SETTINGS_PATH, get(shared_settings::status))
+        .route(SHARED_SETTINGS_PREVIEW_PATH, post(shared_settings::preview))
+        .route(SHARED_SETTINGS_ADOPT_PATH, post(shared_settings::adopt))
+        .route(shared_settings::VERSION_ROUTE, get(shared_settings::version))
+        .route(shared_settings::SNAPSHOT_ROUTE, post(shared_settings::snapshot))
+        .route(artifacts::ARTIFACTS_ROUTE, get(artifacts::list))
+        .route(artifacts::PREVIEW_ROUTE, get(artifacts::preview))
+        .route(artifacts::CONTENT_ROUTE, get(artifacts::content))
         // Agent API：只接受 Agent 憑證（guard 依路徑前綴決定所需角色）
         .route(&tool_path(TOOL_GET_TASK_CONTRACT), post(agent::get_task_contract))
         .route(&tool_path(TOOL_REPORT_PROGRESS), post(agent::report_progress))
         .route(&tool_path(TOOL_SAVE_CHECKPOINT), post(agent::save_checkpoint))
         .route(&tool_path(TOOL_REPORT_BLOCKED), post(agent::report_blocked))
+        .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

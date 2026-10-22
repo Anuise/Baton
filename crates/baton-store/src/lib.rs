@@ -25,12 +25,15 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
 
 mod agent;
+mod artifacts;
 mod profiles;
 mod quota;
 mod runs;
 mod scheduling;
+mod shared_settings;
 mod tasks;
 pub use agent::AgentContext;
+pub use artifacts::NewArtifactVersion;
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
@@ -322,6 +325,66 @@ const MIGRATIONS: &[Migration] = &[
             version INTEGER NOT NULL CHECK (version >= 1),
             updated_at INTEGER NOT NULL
         );",
+    },
+    // 成果與它的不可變版本 manifest（票 12）：同 Workspace、同 Task、同名是同一個成果；版本只追加、不可更新或刪除，
+    // storage_path 唯一，所以兩個版本不可能指向同一個檔案（新版本不覆寫舊版本）
+    Migration {
+        name: "artifact",
+        sql: "CREATE TABLE artifact (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            UNIQUE (workspace_id, task_id, name)
+        );
+        CREATE TABLE artifact_version (
+            artifact_id TEXT NOT NULL REFERENCES artifact (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            description TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+            sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+            storage_path TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL REFERENCES run (id),
+            generation INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (artifact_id, version)
+        );
+        CREATE TRIGGER artifact_no_update BEFORE UPDATE ON artifact
+        BEGIN SELECT RAISE(ABORT, 'artifact 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER artifact_no_delete BEFORE DELETE ON artifact
+        BEGIN SELECT RAISE(ABORT, 'artifact 是追加式資料表，不可刪除'); END;
+        CREATE TRIGGER artifact_version_no_update BEFORE UPDATE ON artifact_version
+        BEGIN SELECT RAISE(ABORT, 'artifact_version 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER artifact_version_no_delete BEFORE DELETE ON artifact_version
+        BEGIN SELECT RAISE(ABORT, 'artifact_version 是追加式資料表，不可刪除'); END;",
+    },
+    // 共同設定的每個採用版本不可變（改設定 = 採用新版本）；Run 與版本的綁定一經建立也不可更改（spec D-09）
+    Migration {
+        name: "shared_settings_version",
+        sql: "CREATE TABLE shared_settings_version (
+            version INTEGER PRIMARY KEY CHECK (version >= 1),
+            content_hash TEXT NOT NULL,
+            bundle TEXT NOT NULL CHECK (json_valid(bundle)),
+            sources TEXT NOT NULL CHECK (json_valid(sources)),
+            exclusions TEXT NOT NULL CHECK (json_valid(exclusions)),
+            adopted_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER shared_settings_version_no_update BEFORE UPDATE ON shared_settings_version
+        BEGIN SELECT RAISE(ABORT, 'shared_settings_version 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER shared_settings_version_no_delete BEFORE DELETE ON shared_settings_version
+        BEGIN SELECT RAISE(ABORT, 'shared_settings_version 是追加式資料表，不可刪除'); END;
+        CREATE TABLE run_settings_snapshot (
+            run_id TEXT PRIMARY KEY REFERENCES run (id),
+            version INTEGER NOT NULL REFERENCES shared_settings_version (version),
+            content_hash TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER run_settings_snapshot_no_update BEFORE UPDATE ON run_settings_snapshot
+        BEGIN SELECT RAISE(ABORT, 'run_settings_snapshot 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER run_settings_snapshot_no_delete BEFORE DELETE ON run_settings_snapshot
+        BEGIN SELECT RAISE(ABORT, 'run_settings_snapshot 是追加式資料表，不可刪除'); END;",
     },
     // 額度觀測（票 27）：每筆觀測的來源、時間、可信度與原始資料參照；本機 Run 回報的用量（推估的依據）；
     // 使用者設定的方案上限；外部觀測器的輪詢時間。觀測不到的值存 NULL（未知），不填零。

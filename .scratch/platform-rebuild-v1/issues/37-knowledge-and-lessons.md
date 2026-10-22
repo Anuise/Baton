@@ -1,6 +1,6 @@
 # 37: 知識、教訓與全文檢索
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R043-37-impl，2026-10-22 16:37）
 Blocked by: 12
 
 **What to build:** 實作 knowledge_entries 與 lessons：依全域、Workspace、Goal、Task 範圍保存來源、證據、可信狀態、有效期間、版本與取代關係。Controller 只能提交候選教訓；使用者在「知識」分頁確認後才升為已驗證，可修正、撤銷、淘汰並保留歷史（spec D-28）。以 FTS5 + trigram 建立可重建索引，支援繁體中文子字串搜尋；FTS5 不可用時退回 LIKE 並顯示降級（spec D-26）。
