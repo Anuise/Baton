@@ -81,6 +81,12 @@ struct ProcessState {
     inspect_count: usize,
     hang: Option<HangPoint>,
     fail_spawn: Option<String>,
+    /// 下一次 `spawn` 啟動並登記程序之後仍回傳失敗（回執遺失）。
+    fail_spawn_after_start: Option<String>,
+    /// 設定時每次 `find` 都失敗（無法查證程序在不在）。
+    fail_find: Option<String>,
+    /// 下一次 `spawn` 啟動並登記程序之後、回傳之前執行（在這個邊界注入別的故障）。
+    on_next_spawn: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Default for FakeProcessControl {
@@ -98,6 +104,9 @@ impl Default for FakeProcessControl {
                 inspect_count: 0,
                 hang: None,
                 fail_spawn: None,
+                fail_spawn_after_start: None,
+                fail_find: None,
+                on_next_spawn: None,
             }),
         }
     }
@@ -130,6 +139,21 @@ impl FakeProcessControl {
     /// 下一次 `spawn` 失敗（沒有啟動任何程序），只生效一次。
     pub fn fail_next_spawn(&self, reason: &str) {
         lock(&self.state).fail_spawn = Some(reason.to_string());
+    }
+
+    /// 下一次 `spawn` 真的啟動並登記了程序，卻回傳失敗（回執在傳回途中遺失），只生效一次。
+    pub fn fail_next_spawn_after_start(&self, reason: &str) {
+        lock(&self.state).fail_spawn_after_start = Some(reason.to_string());
+    }
+
+    /// `Some` 之後每次 `find` 都失敗（無法查證程序在不在），`None` 恢復。
+    pub fn fail_finds(&self, reason: Option<&str>) {
+        lock(&self.state).fail_find = reason.map(str::to_string);
+    }
+
+    /// 下一次 `spawn` 啟動並登記程序之後、回傳回執之前執行 `action`，只生效一次。
+    pub fn run_on_next_spawn(&self, action: impl FnOnce() + Send + 'static) {
+        lock(&self.state).on_next_spawn = Some(Box::new(action));
     }
 
     pub fn spawn_count(&self) -> usize {
@@ -185,12 +209,22 @@ impl ProcessControl for FakeProcessControl {
         if self.take_hang(HangPoint::AfterSpawn) {
             std::future::pending::<()>().await;
         }
+        let action = lock(&self.state).on_next_spawn.take();
+        if let Some(action) = action {
+            action();
+        }
+        if let Some(reason) = lock(&self.state).fail_spawn_after_start.take() {
+            return Err(PortError::Failed(reason));
+        }
         Ok(Receipt { identity })
     }
 
     /// 與正式版一致：程序已經全部結束就找不到。
     async fn find(&self, spec: &SpawnSpec) -> PortResult<Option<Receipt>> {
         let state = lock(&self.state);
+        if let Some(reason) = &state.fail_find {
+            return Err(PortError::Failed(reason.clone()));
+        }
         Ok(state
             .by_command
             .get(&spec.command_id)

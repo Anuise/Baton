@@ -366,6 +366,10 @@ fn apply_in(
             if change.changed() {
                 save(tx, &change, now)?;
             }
+            // 外部操作「結果未知」的請求：查證結果與 Task 恢復在同一個交易提交（票 26）
+            if let Some(decision) = &change.decision {
+                super::external_operations::resolve_by_decision(tx, workspace_id, decision, now)?;
+            }
             Ok(change.outcome)
         }
     })
@@ -462,6 +466,7 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
                 deadline_at: r.get::<_, Option<i64>>(12)?.map(Timestamp::from_millis),
                 permission: permission.map(|raw| json_column(13, &raw)).transpose()?,
                 authority: authority.map(|raw| json_column::<AuthorityDetail>(14, &raw)).transpose()?,
+                external_operation_id: None,
                 blocking: Vec::new(),
                 target: DecisionTarget {
                     task_id: r.get(15)?,
@@ -505,6 +510,20 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
             if let Some(request) = requests.iter_mut().find(|r| &r.id == from) {
                 request.links.push(to.clone());
             }
+        }
+    }
+
+    // 外部操作的查證請求（票 26）：操作記著它目前的查證請求
+    let external = conn
+        .prepare(
+            "SELECT decision_request_id, id FROM external_operation
+             WHERE workspace_id = ?1 AND decision_request_id IS NOT NULL",
+        )?
+        .query_map([workspace_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (request_id, operation_id) in external {
+        if let Some(request) = requests.iter_mut().find(|r| r.id == request_id) {
+            request.external_operation_id = Some(operation_id);
         }
     }
 
@@ -567,52 +586,58 @@ fn load_decision_data(conn: &Connection, workspace_id: &str) -> rusqlite::Result
     Ok(DecisionData { requests, decisions, uses, policy: load_policy(conn, workspace_id)?, artifacts, authorizations })
 }
 
+/// 寫入一個新的裁定請求與它的阻擋範圍（外部操作結果未知時由 Runtime 建立的請求也走這裡，票 26）。
+pub(crate) fn insert_request(tx: &Transaction<'_>, request: &DecisionRequest) -> rusqlite::Result<()> {
+    // Domain 型別只含字串與數字，序列化不會失敗
+    let options = serde_json::to_string(&request.options).expect("選項可序列化");
+    let evidence = serde_json::to_string(&request.evidence).expect("證據可序列化");
+    let permission = request.permission.as_ref().map(|p| serde_json::to_string(p).expect("權限細節可序列化"));
+    let authority = request.authority.as_ref().map(|a| serde_json::to_string(a).expect("動作細節可序列化"));
+    tx.execute(
+        &format!(
+            "INSERT INTO decision_request ({REQUEST_COLUMNS})
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
+        ),
+        rusqlite::params![
+            request.id,
+            request.workspace_id,
+            request.run_id,
+            request.task_id,
+            request.kind.as_str(),
+            request.status.as_str(),
+            request.question,
+            request.reason,
+            options,
+            request.recommendation,
+            evidence,
+            request.urgency.as_str(),
+            request.deadline_at.map(|t| t.as_millis()),
+            permission,
+            authority,
+            request.target.task_id,
+            request.target.contract_version,
+            request.target.authorization_revision,
+            request.revision,
+            request.deferred_until.map(|t| t.as_millis()),
+            request.merged_into,
+            request.status_reason,
+            request.created_at.as_millis(),
+            request.updated_at.as_millis(),
+        ],
+    )?;
+    for task_id in &request.blocking {
+        tx.execute(
+            "INSERT INTO decision_request_block (request_id, task_id) VALUES (?1, ?2)",
+            rusqlite::params![request.id, task_id],
+        )?;
+    }
+    Ok(())
+}
+
 /// 把 Domain 的結果寫進同一個交易：請求、阻擋範圍、連結、裁定、單次批准的消耗、受影響的 Task、派工佇列、喚醒 Outbox 與事件。
 fn save(tx: &Transaction<'_>, change: &DecisionChange, now: Timestamp) -> rusqlite::Result<()> {
     if let Some(request) = &change.created {
-        // Domain 型別只含字串與數字，序列化不會失敗
-        let options = serde_json::to_string(&request.options).expect("選項可序列化");
-        let evidence = serde_json::to_string(&request.evidence).expect("證據可序列化");
-        let permission = request.permission.as_ref().map(|p| serde_json::to_string(p).expect("權限細節可序列化"));
-        let authority = request.authority.as_ref().map(|a| serde_json::to_string(a).expect("動作細節可序列化"));
-        tx.execute(
-            &format!(
-                "INSERT INTO decision_request ({REQUEST_COLUMNS})
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)"
-            ),
-            rusqlite::params![
-                request.id,
-                request.workspace_id,
-                request.run_id,
-                request.task_id,
-                request.kind.as_str(),
-                request.status.as_str(),
-                request.question,
-                request.reason,
-                options,
-                request.recommendation,
-                evidence,
-                request.urgency.as_str(),
-                request.deadline_at.map(|t| t.as_millis()),
-                permission,
-                authority,
-                request.target.task_id,
-                request.target.contract_version,
-                request.target.authorization_revision,
-                request.revision,
-                request.deferred_until.map(|t| t.as_millis()),
-                request.merged_into,
-                request.status_reason,
-                request.created_at.as_millis(),
-                request.updated_at.as_millis(),
-            ],
-        )?;
-        for task_id in &request.blocking {
-            tx.execute(
-                "INSERT INTO decision_request_block (request_id, task_id) VALUES (?1, ?2)",
-                rusqlite::params![request.id, task_id],
-            )?;
-        }
+        insert_request(tx, request)?;
     }
     for request in &change.updated {
         tx.execute(

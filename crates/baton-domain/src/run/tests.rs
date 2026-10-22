@@ -487,6 +487,37 @@ fn a_failed_launch_releases_the_lease_and_returns_the_task_to_ready() {
     assert_eq!(world.task("t1").status, TaskStatus::Ready);
 }
 
+#[test]
+fn the_launch_intent_rechecks_admission_and_ends_the_run_without_a_process_when_it_no_longer_holds() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.dispatch("t1", T0).unwrap();
+    // 派工之後、啟動之前 Workspace 被封存：准入不再成立
+    world.workspace.status = crate::workspace::WorkspaceStatus::Archived;
+
+    let change = world.step(begin(&run_id, "c"), later(1_000)).unwrap();
+
+    let run = world.run(&run_id);
+    // 准入被拒的結束方式沿用票 24（R1-a）：interrupted、admission_denied（票 26 整合，AI-261）
+    assert_eq!(run.status, RunStatus::Interrupted, "沒有寫入 launch intent，所以不會有程序");
+    assert_eq!(run.command_id, None);
+    assert!(run.end_reason.as_deref().unwrap().starts_with(ADMISSION_DENIED_REASON), "{:?}", run.end_reason);
+    assert_eq!(change.outbox_delivered.as_deref(), Some(run_id.as_str()), "派工 Outbox 視為處理完畢，不再重試");
+    assert!(!world.lease(&run_id).is_held());
+    assert_eq!(world.task("t1").status, TaskStatus::Ready);
+}
+
+#[test]
+fn an_admitted_launch_records_the_admission_in_the_launch_event() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.dispatch("t1", T0).unwrap();
+
+    let change = world.step(begin(&run_id, "c"), T0).unwrap();
+
+    let event = change.events.iter().find(|e| e.event_type == EVENT_RUN_LAUNCH_STARTED).unwrap();
+    assert_eq!(event.payload["command_id"], "c");
+    assert!(event.payload.get("authorization_revision").is_some(), "{}", event.payload);
+}
+
 // ---------------------------------------------------------------- 結束
 
 #[test]
