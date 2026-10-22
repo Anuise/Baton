@@ -4972,6 +4972,7 @@
 - 重要度：低
 - 時間／階段：2026-10-23，票 54 實作
 - 決策：
+- 審閱：未審
   - Controller 呼叫 `record_lesson_candidate` 必須帶 `task_id`，指定這個 Workspace 內的來源 Task。缺少或 `scope` 為 `global` 時回 400 `knowledge_scope_invalid`；Task 不在這個 Workspace 時回 404 `task_not_found`，不寫入。範圍（`task`／`goal`／`workspace`）依那個 Task 解析。
   - 來源記為 `KnowledgeSource::Controller { controller_run_id, task_id }`，知識分頁顯示「Controller（Run …，Task …）」。狀態一律是 `candidate`。
   - 寫入前以 `submit_lesson_candidate` 經 `ControllerGate` 判定：內建可自主處理，Workspace 收窄為必須送裁定時回 `requires_decision`。核准綁定內容與範圍的雜湊。
