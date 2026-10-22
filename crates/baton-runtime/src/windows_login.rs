@@ -12,6 +12,7 @@
 //! **登入啟動登記（`HkcuRunRegistration`）**：`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的一個 REG_SZ 值，
 //! 內容是登入啟動入口的命令列 `"<baton-guardian.exe>" --login --data-dir "<資料目錄>" --port <埠>`。
 //! 只有值存在且命令列完全相同才算已登記，所以資料目錄或埠變了、或執行檔換了位置，Runtime 啟動時都會補正。
+//! 值的歸屬依值名稱判定：偏好為關閉時，同名但命令列不同的值（例如舊安裝位置留下的）也會被移除。
 
 use std::path::Path;
 
@@ -155,6 +156,10 @@ impl StartupRegistration for HkcuRunRegistration {
         Ok(self.read()?.as_deref() == Some(self.command.as_str()))
     }
 
+    fn has_registration(&self) -> PortResult<bool> {
+        Ok(self.read()?.is_some())
+    }
+
     fn set_registered(&self, enabled: bool) -> PortResult<()> {
         let (subkey, name) = (wide(RUN_KEY), wide(&self.value_name));
         let status = if enabled {
@@ -255,12 +260,14 @@ mod tests {
         assert_eq!(mine.0.read().unwrap().as_deref(), Some(mine.0.command.as_str()));
 
         assert!(!other.is_registered().unwrap(), "同名但命令列不同不算已登記");
+        assert!(other.has_registration().unwrap(), "但值名稱相同，歸屬於本產品");
         other.set_registered(true).unwrap();
         assert!(other.is_registered().unwrap(), "覆寫成另一個命令列");
         assert!(!mine.0.is_registered().unwrap(), "被覆寫後原本的命令列不算已登記");
 
         mine.0.set_registered(false).unwrap();
         assert_eq!(mine.0.read().unwrap(), None, "刪除後值不存在");
+        assert!(!other.has_registration().unwrap(), "依值名稱刪除，不論命令列");
         assert!(!other.is_registered().unwrap());
         mine.0.set_registered(false).unwrap(); // 重複刪除也算成功
     }

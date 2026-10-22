@@ -65,6 +65,33 @@ pub fn read_journal(data_dir: &Path) -> std::io::Result<Vec<JournalRecord>> {
     }
 }
 
+/// 監護日誌的鎖檔。監護從寫下嘗試、最後核對到寫下撤回都持有它；Runtime 在它之內讀日誌，
+/// 所以 Runtime 不會讀到「已寫下嘗試、但還沒決定撤回或啟動」的中間狀態（否則撤回的嘗試會被多算一次）。
+pub const JOURNAL_LOCK_FILE_NAME: &str = "journal.lock";
+
+/// 取得監護日誌的鎖（阻塞到取得為止）；回傳的檔案關閉時釋放，程序結束時由系統釋放。
+pub fn lock_journal(data_dir: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(guardian_dir(data_dir))?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(guardian_dir(data_dir).join(JOURNAL_LOCK_FILE_NAME))?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// Runtime 匯入時讀取監護日誌：在監護日誌的鎖之內讀。還沒有日誌時是空的（不建立監護目錄）；
+/// 這時監護之後才寫下的嘗試，最後核對一定看得到這個 Runtime（它在匯入之前就記下了程序身分），會撤回。
+pub fn read_journal_for_import(data_dir: &Path) -> std::io::Result<Vec<JournalRecord>> {
+    if !journal_path(data_dir).exists() {
+        return Ok(Vec::new());
+    }
+    let _lock = lock_journal(data_dir)?;
+    read_journal(data_dir)
+}
+
 /// 原子寫入：暫存檔 → fsync → 改名取代。
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {

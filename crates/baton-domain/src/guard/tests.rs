@@ -287,13 +287,15 @@ fn a_prevented_recurrence_points_at_the_lesson_and_guard_and_is_keyed_by_task_co
 #[test]
 fn reported_recurrences_need_a_verified_lesson_and_a_note() {
     let lesson = lesson();
-    let (recurrence, _) = report("rec1".into(), &lesson, Some(&task("t1")), "又忘了寫回滾", T1).unwrap();
+    let (recurrence, _) = report("rec1".into(), &lesson, None, Some(&task("t1")), "又忘了寫回滾", T1).unwrap();
     assert_eq!(recurrence.kind, RecurrenceKind::Reported);
     assert_eq!(recurrence.guard_id, None);
     assert_eq!(recurrence.task_id.as_deref(), Some("t1"));
+    let (only_workspace, _) = report("rec4".into(), &lesson, Some("ws9"), None, "又發生", T1).unwrap();
+    assert_eq!((only_workspace.workspace_id.as_deref(), only_workspace.task_id), (Some("ws9"), None), "只有 Workspace 也要記下");
 
-    assert_eq!(report("rec2".into(), &lesson, None, " ", T1).unwrap_err().code(), "guard_invalid");
+    assert_eq!(report("rec2".into(), &lesson, None, None, " ", T1).unwrap_err().code(), "guard_invalid");
     let mut candidate = lesson.clone();
     candidate.status = knowledge::KnowledgeStatus::Candidate;
-    assert_eq!(report("rec3".into(), &candidate, None, "x", T1).unwrap_err().code(), "lesson_ineligible");
+    assert_eq!(report("rec3".into(), &candidate, None, None, "x", T1).unwrap_err().code(), "lesson_ineligible");
 }

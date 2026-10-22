@@ -1242,6 +1242,8 @@ impl LoginSession for FakeLoginSession {
 #[derive(Debug, Default)]
 pub struct FakeStartupRegistration {
     registered: std::sync::atomic::AtomicBool,
+    /// 同名但命令列不同的舊登記（例如舊安裝位置留下的）。
+    stale: std::sync::atomic::AtomicBool,
     fail_next: std::sync::Mutex<Option<String>>,
     changes: std::sync::Mutex<Vec<bool>>,
 }
@@ -1254,6 +1256,17 @@ impl FakeStartupRegistration {
     /// 不經 Runtime 直接改變登記（例如使用者手動刪掉登錄值）。
     pub fn force(&self, registered: bool) {
         self.registered.store(registered, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 不經 Runtime 留下一筆同名、但命令列是舊安裝位置的登記（不算已登記）。
+    pub fn leave_stale(&self) {
+        self.force(false);
+        self.stale.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 是否還留著舊安裝位置的登記。
+    pub fn stale(&self) -> bool {
+        self.stale.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// 下一次 `set_registered` 以這個原因失敗。
@@ -1272,10 +1285,16 @@ impl StartupRegistration for FakeStartupRegistration {
         Ok(self.registered())
     }
 
+    fn has_registration(&self) -> PortResult<bool> {
+        Ok(self.registered() || self.stale())
+    }
+
     fn set_registered(&self, enabled: bool) -> PortResult<()> {
         if let Some(reason) = self.fail_next.lock().unwrap().take() {
             return Err(PortError::Failed(reason));
         }
+        // 同名的值只有一個：登記時覆寫、移除時刪掉
+        self.stale.store(false, std::sync::atomic::Ordering::SeqCst);
         self.force(enabled);
         self.changes.lock().unwrap().push(enabled);
         Ok(())

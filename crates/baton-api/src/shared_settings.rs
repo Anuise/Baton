@@ -17,7 +17,7 @@ use baton_domain::shared_settings::{
     SettingsVersionSummary, SourceReport,
 };
 use baton_ports::{Clock, WorkspaceFs};
-use baton_store::{Store, StoreError};
+use baton_store::Store;
 use serde::{Deserialize, Serialize};
 
 use crate::authorization::bad_json;

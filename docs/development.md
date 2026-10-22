@@ -636,7 +636,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 依 ADR-0005（DR-20261021-05）。規則在 `baton_domain::recovery`，持久化在 `baton_store` 的 `recovery.rs`，執行在 Supervisor。
 
-**判定崩潰**：`RunningRuntime::shutdown()` 是有秩序的停止，會在 `runtime_boot` 記下 `ended_cleanly_at`；`RunningRuntime::kill()`、程序被終止或當掉都不會。Runtime 啟動時（停止意圖已核對之後、任何程序副作用之前）若前一次啟動沒有正常結束、也沒有停止意圖，就是意外終止：沒有未結束的恢復事件時建立一個（第 1 輪、尚未嘗試），有的話沿用。完全退出的停止意圖優先，那種情況走「重新開啟」，不是崩潰恢復。
+**判定崩潰**：`RunningRuntime::shutdown()` 是有秩序的停止，會在 `runtime_boot` 記下 `ended_cleanly_at`；`RunningRuntime::kill()`、程序被終止或當掉都不會。正式執行檔以 `serve_until` 提供服務：主控台 Ctrl-C 或服務自行結束（完全退出後）都走 `shutdown()`，所以不算意外終止；程序被終止、登出或重開機仍算。Runtime 啟動時（停止意圖已核對之後、任何程序副作用之前）若前一次啟動沒有正常結束、也沒有停止意圖，就是意外終止：沒有未結束的恢復事件時建立一個（第 1 輪、尚未嘗試），有的話沿用。完全退出的停止意圖優先，那種情況走「重新開啟」，不是崩潰恢復。
 
 **一次嘗試**（Supervisor 的 `tick` 在任何啟動之前處理）：
 1. 先持久化嘗試（輪次、序號 1～3、嘗試識別）；寫不進去就不開始，不碰任何程序。資料表以 `CHECK (seq BETWEEN 1 AND 3)` 與 `UNIQUE (event_id, round, seq)` 保證同一輪不可能有第四次。
@@ -857,7 +857,7 @@ Web UI 的「知識」分頁（`web/src/KnowledgePage.tsx`，從左側 Workspace
 | `POST /api/v1/guards` | `{ lesson_id, rule }`，回 201（啟用）。400 `guard_invalid`、404 `knowledge_not_found`、409 `lesson_ineligible` |
 | `POST /api/v1/guards/{id}/enable`、`…/disable` | `{ expected_revision }`；已是目標狀態時不變更。404 `guard_not_found`、409 `guard_revision_conflict`、409 `lesson_ineligible`（啟用時教訓已不有效） |
 | `GET /api/v1/knowledge/{id}/recurrences` | `{ recurrences }`，新到舊 |
-| `POST /api/v1/knowledge/{id}/recurrences` | `{ note, workspace_id?, task_id? }` 回報沒被攔下的重犯，回 201。教訓必須是已驗證的教訓（過期也可以），否則 409 `lesson_ineligible`；說明空白或 Task 不存在 400 `guard_invalid` |
+| `POST /api/v1/knowledge/{id}/recurrences` | `{ note, workspace_id?, task_id? }` 回報沒被攔下的重犯，回 201。教訓必須是已驗證的教訓（過期也可以），否則 409 `lesson_ineligible`；只帶 `workspace_id` 時記下該 Workspace；說明空白、Workspace 或 Task 不存在、只帶 `task_id` 400 `guard_invalid` |
 
 資料表（migration 20 `guard`）：`guard`（觸發器禁止刪除）、`lesson_recurrence`（追加式，觸發器禁止更新與刪除；`prevented` 必定有 `guard_id`）。Guard 的事件：`guard_created`、`guard_enabled`、`guard_disabled`（`aggregate_type = 'guard'`，聚合版本 = `revision`）。桌面殼的 Tauri 指令：`guard_list`、`guard_create`、`guard_enable`、`guard_disable`、`knowledge_recurrences`、`knowledge_report_recurrence`。
 

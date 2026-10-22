@@ -335,7 +335,7 @@ async fn reconcile_stop_intent(
 /// 讀不到日誌時只記日誌：監護寫下的嘗試留到下次啟動再匯入，Runtime 照常以自己的判定恢復。
 async fn import_guardian_journal(store: &Store, data_dir: &std::path::Path, ports: &Ports, log: &LogSink) -> Result<(), RuntimeError> {
     let dir = data_dir.to_path_buf();
-    let journal = match tokio::task::spawn_blocking(move || baton_guardian::files::read_journal(&dir)).await {
+    let journal = match tokio::task::spawn_blocking(move || baton_guardian::files::read_journal_for_import(&dir)).await {
         Ok(Ok(journal)) => journal,
         Ok(Err(error)) => {
             (log)(&format!("監護：無法讀取監護日誌，這次不匯入：{error}"));
@@ -422,13 +422,18 @@ async fn note_login_boundary(
 
 /// 讓 Windows 的登入啟動登記與「登入時自動啟動」的偏好一致（票 33）：偏好是依據，登記被移除或殘留時補正。
 /// 失敗只記日誌（不影響工作；設定頁會顯示登記狀態）。完全退出不改變偏好，所以這裡也不因停止意圖而移除登記。
+/// 偏好為關閉時依值名稱判定歸屬：同名但命令列不同的值（例如舊安裝位置留下的）也移除。
 async fn sync_login_startup(store: &Store, ports: &Ports, log: &LogSink) -> Result<(), RuntimeError> {
     let enabled = store.login_startup().await?.enabled;
     let registration = ports.startup_registration.clone();
-    let synced = tokio::task::spawn_blocking(move || match registration.is_registered() {
-        Ok(registered) if registered == enabled => Ok(false),
-        Ok(_) => registration.set_registered(enabled).map(|()| true),
-        Err(error) => Err(error),
+    let synced = tokio::task::spawn_blocking(move || {
+        // 開啟時要是這個安裝位置的命令列；關閉時同名的值都不該留著
+        let present = if enabled { registration.is_registered() } else { registration.has_registration() };
+        match present {
+            Ok(present) if present == enabled => Ok(false),
+            Ok(_) => registration.set_registered(enabled).map(|()| true),
+            Err(error) => Err(error),
+        }
     })
     .await;
     match synced {
@@ -586,7 +591,10 @@ impl RunningRuntime {
 
     async fn stop(mut self, clean: bool) {
         let _ = self.stop_tx.send(true);
-        let _ = (&mut self.task).await;
+        // `serve_until` 可能已經等到服務結束；已結束的 JoinHandle 不能再 await
+        if !self.task.is_finished() {
+            let _ = (&mut self.task).await;
+        }
         if let Some(supervising) = self.supervising.take() {
             let _ = supervising.await;
         }
@@ -604,9 +612,14 @@ impl RunningRuntime {
         let _ = (&mut self.exiting).await;
     }
 
-    /// 等到服務自行結束（正式執行檔用）。
-    pub async fn wait(mut self) {
-        let _ = (&mut self.task).await;
+    /// 正式執行檔用：提供服務到自行結束（完全退出後）或 `interrupt` 完成（主控台 Ctrl-C）為止，再有秩序地停止，
+    /// 記下這一次啟動正常結束（票 31，AI-280）。程序被終止或重開機走不到這裡，下次啟動仍判為意外終止。
+    pub async fn serve_until(mut self, interrupt: impl std::future::Future<Output = ()>) {
+        tokio::select! {
+            _ = &mut self.task => {}
+            _ = interrupt => {}
+        }
+        self.shutdown().await;
     }
 }
 
