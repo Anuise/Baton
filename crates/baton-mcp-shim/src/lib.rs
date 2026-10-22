@@ -361,7 +361,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_RECORD_LESSON_CANDIDATE,
-            "description": "提交一則候選教訓（踩過的坑、根因與解法）。提交後只是「候選」，不會被當作已驗證的知識，                需使用者在知識分頁確認後才會生效；適用範圍由這個 Run 的 Task 決定。",
+            "description": "提交一則候選教訓（踩過的坑、根因與解法）。提交後只是「候選」，不會被當作已驗證的知識，需使用者在知識分頁確認後才會生效；適用範圍由這個 Run 的 Task 決定。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
