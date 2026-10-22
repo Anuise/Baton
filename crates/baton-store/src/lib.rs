@@ -47,6 +47,7 @@ mod scheduling;
 mod sessions;
 mod shared_settings;
 mod tasks;
+mod timeline;
 mod verification;
 mod workdirs;
 pub use agent::AgentContext;
@@ -73,6 +74,7 @@ pub use scheduling::{
     QueuedRequest, ScheduleOutcome, ScheduleRequest, SchedulingSnapshot, StartedRun, WaitingTask,
 };
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
+pub use timeline::TimelineError;
 pub use verification::{AcceptanceApplyError, PendingVerification};
 pub use workdirs::WorkdirCandidate;
 

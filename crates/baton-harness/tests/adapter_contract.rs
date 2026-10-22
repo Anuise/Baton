@@ -120,10 +120,11 @@ async fn contract_completes(subject: &dyn Subject, spec: RunSpec) {
         events.iter().any(|e| matches!(e, AdapterEvent::Message { text } if text.contains("OK"))),
         "Worker 的回覆以 Message 交出：{events:?}"
     );
-    // 額度的「推估」來源（票 27）：結束前回報這一輪的用量
+    // 額度的「推估」來源（票 27）：結束前回報這一輪的用量；Context 使用量（票 41）一併回報
     assert!(
-        events.iter().any(|e| matches!(e, AdapterEvent::UsageReported { tokens, .. } if *tokens > 0)),
-        "完成前回報用量：{events:?}"
+        events.iter().any(|e| matches!(e, AdapterEvent::UsageReported { tokens, context_tokens: Some(context), .. }
+            if *tokens > 0 && *context > 0)),
+        "完成前回報用量與 Context：{events:?}"
     );
 }
 
@@ -183,13 +184,13 @@ impl Subject for FakeSubject {
                     reset_at_millis: Some(1_792_660_800_000),
                     raw: "{}".into(),
                 },
-                AdapterEvent::UsageReported { tokens: 1_200, raw: "{}".into() },
+                AdapterEvent::UsageReported { tokens: 1_200, context_tokens: Some(30_000), raw: "{}".into() },
                 AdapterEvent::Exited { success: true },
             ],
             Scenario::InvalidModel => vec![
                 started,
                 AdapterEvent::Message { text: format!("There's an issue with the selected model ({INVALID_MODEL}).") },
-                AdapterEvent::UsageReported { tokens: 0, raw: "{}".into() },
+                AdapterEvent::UsageReported { tokens: 0, context_tokens: None, raw: "{}".into() },
                 AdapterEvent::Error { message: format!("There's an issue with the selected model ({INVALID_MODEL}).") },
                 AdapterEvent::Exited { success: false },
             ],

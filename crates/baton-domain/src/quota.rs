@@ -282,7 +282,7 @@ pub const EVENT_RUN_USAGE_REPORTED: &str = "run_usage_reported";
 /// `context_tokens` 是模型讀入的 Context（輸入 + 快取建立 + 快取讀取）；Adapter 看不到時為 `None`（未知，不填零）。
 pub fn usage_reported_event(
     run_id: &str,
-    task_id: &str,
+    task_id: Option<&str>,
     profile_id: &str,
     version: i64,
     tokens: u64,
