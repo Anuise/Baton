@@ -4778,15 +4778,18 @@
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #18 第一點、#21 第二點）
 - 決策：
+- 審閱：未審
   - `stop_controllers_for_handoff` 找承接帳號時傳 `active_runs: &[]`，不修：依 AI-305，Controller 不佔 Worker 的並行名額，實際喚起下一輪也以同樣的輸入選帳號，所以不會發生「停掉舊輪後才發現承接帳號放不下」。補上情境測試 `controller_handoff_single_account.rs`：唯一帳號 draining 時等滿 2 分鐘不停止進行中的一輪、留在原帳號做完（M7）。
   - 驗證要求與整合佇列共用 `verify_lock` 依序執行，不修：兩者都會在同一個 repo 與 worktree 執行 git 與命令，平行時要另外處理 git 的 index.lock 與同一工作目錄的交錯；整合不是延遲敏感的工作。
 - 理由：見上。
 - 替代方案：交接判斷計入 Worker 並行量（與 AI-305 矛盾）；依 repo 分鎖讓驗證與整合平行。
 - 影響：長時間的驗證會延後整合。
+
 ### AI-490：R155-fix-b 合併整合分支：決策編號順延為 AI-475～AI-489；review-notes #22 在 Ports 改用 `git diff -z`
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b 結束前合併 rebuild/v1）
 - 決策：
+- 審閱：未審
   - 修正 A（R154）先合併進整合分支，佔用了 AI-449～AI-473。本 run 原寫的 AI-449～AI-463 依序加 25，又因主控新增 AI-474（票 53）再加 1，改編為 AI-475～AI-489，移到這些條目之後；本 run 先前 commit 訊息中的「AI-449～AI-463」與合併 commit 中的「AI-474～AI-488」都指改號前的條目。
   - review-notes #22 兩個 run 各修一層：修正 A 在 Domain 比對前還原 git 的引號路徑、無法還原就視為受影響（AI-470）；本 run 在 `crates/baton-ports/src/git.rs` 改以 `git diff -z` 取得 NUL 分隔、不加引號的路徑。兩者並存：正式版不再收到加引號的路徑，Domain 的還原只在其他來源仍帶引號時生效。
   - `crates/baton-domain/src/guard.rs` 的衝突：修正 A 為 `report` 加上教訓範圍檢查、本 run 加上 `workspace_id` 參數（AI-481），兩者都保留，說明文字合併。
