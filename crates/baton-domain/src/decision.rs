@@ -898,6 +898,12 @@ impl DecisionContext<'_> {
         if task.status.is_terminal() {
             return Some(format!("目標 Task「{}」已結束（{}）", task.title, task.status.as_str()));
         }
+        // 預算用盡的裁定（票 36）問的是「用盡之後怎麼做」，與契約版本無關：使用者常會先修改契約再核准重設，
+        // 過期的話就再也無法重設，Task 卡在阻擋（R151 第 10 項）。只限目前用盡的那一個請求
+        let budget = TaskBudget::of(self.budgets, task);
+        if budget.exhausted.is_some() && budget.request_id.as_deref() == Some(request.id.as_str()) {
+            return None;
+        }
         if task.contract_version != target.contract_version {
             return Some(format!(
                 "目標 Task「{}」的契約已從版本 {} 改為版本 {}",
