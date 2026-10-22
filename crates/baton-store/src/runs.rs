@@ -52,6 +52,12 @@ impl Store {
     ) -> Result<RunChange, RunApplyError> {
         let outcome = self
             .write(move |tx| {
+                // 啟動程序前的最後一道檢查：完全退出的停止意圖生效或 Workspace 被暫停時，不寫入 launch intent（票 25）
+                if matches!(command, RunCommand::BeginLaunch { .. })
+                    && super::lifecycle::launch_halted_in(tx, &workspace_id)?
+                {
+                    return Ok(Err(RunError::LaunchHalted));
+                }
                 let loaded = load(tx, &workspace_id)?;
                 match decide_in(&loaded, &workspace_id, &loaded.tasks, command, now) {
                     Err(rejected) => Ok(Err(rejected)),
@@ -244,6 +250,20 @@ fn lease_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ExecutionLease> {
         released_at: timestamp(6)?,
         release_reason: r.get(7)?,
     })
+}
+
+/// 全部尚未結束的 Run（跨 Workspace，依建立順序）與派工時固定的啟動資訊；完全退出要停下的對象。
+pub(crate) fn load_unfinished_with_payload(conn: &Connection) -> rusqlite::Result<Vec<PendingLaunch>> {
+    let sql = format!(
+        "SELECT {RUN_COLUMNS_QUALIFIED}, o.payload FROM run r
+         JOIN outbox o ON o.run_id = r.id AND o.kind = ?1
+         WHERE r.status IN ('queued', 'starting', 'running') ORDER BY r.rowid"
+    );
+    conn.prepare(&sql)?
+        .query_map([run::OUTBOX_LAUNCH_RUN], |r| {
+            Ok(PendingLaunch { run: run_row(r)?, payload: json_column(RUN_COLUMN_COUNT, &r.get::<_, String>(RUN_COLUMN_COUNT)?)? })
+        })?
+        .collect()
 }
 
 /// Workspace 內的全部 Run，依建立順序。

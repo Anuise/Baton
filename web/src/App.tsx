@@ -4,6 +4,7 @@ import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { DecisionCenter } from "./DecisionCenter";
+import { ExitProgress } from "./ExitProgress";
 import { KnowledgePage } from "./KnowledgePage";
 import { PlatformPage } from "./PlatformPage";
 import { SchedulingSettings } from "./SchedulingSettings";
@@ -72,6 +73,8 @@ export function App() {
           {client && <PlatformPage client={client} />}
         </main>
       </div>
+      {/* 系統匣「完全退出」的停止進度，以覆蓋層顯示 */}
+      {client && <ExitProgress client={client} />}
     </div>
   );
 }
