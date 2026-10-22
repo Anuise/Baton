@@ -7,10 +7,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::{CreateWorkspaceRequest, HealthResponse, PlatformResponse, WorkspaceList};
+use baton_api::{
+    CreateProfileRequest, CreateWorkspaceRequest, HealthResponse, LoginTerminalResponse, PlatformResponse, ProfileList,
+    SetupStatus, WorkspaceList,
+};
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, RuntimeClient};
 use baton_credential::DpapiProtector;
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
+use baton_domain::profile::ProfileView;
 use baton_domain::workspace::Workspace;
 use tauri::{Manager, State};
 use tokio::sync::OnceCell;
@@ -117,11 +121,101 @@ async fn workspace_archive(link: State<'_, RuntimeLink>, id: String) -> Result<W
     link.client.archive_workspace(&id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 列出帳號 Profile 與可派工判定。
+#[tauri::command]
+async fn profile_list(link: State<'_, RuntimeLink>) -> Result<ProfileList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.profiles().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 新增帳號 Profile（最多 8 個）。
+#[tauri::command]
+async fn profile_create(
+    link: State<'_, RuntimeLink>,
+    name: String,
+    expected_account: Option<String>,
+) -> Result<ProfileView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.create_profile(&CreateProfileRequest { name, expected_account }).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 重新核對 Profile 的登入狀態、認證來源與帳號身分。
+#[tauri::command]
+async fn profile_verify(link: State<'_, RuntimeLink>, id: String) -> Result<ProfileView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.verify_profile(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 要求開啟終端機，以該 Profile 自己的設定目錄執行原生登入。
+#[tauri::command]
+async fn profile_login_terminal(link: State<'_, RuntimeLink>, id: String) -> Result<LoginTerminalResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.open_login_terminal(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 封存 Profile（釋出名額，不刪除它的登入資料目錄）。
+#[tauri::command]
+async fn profile_archive(link: State<'_, RuntimeLink>, id: String) -> Result<ProfileView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.archive_profile(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 取得首次啟動精靈的狀態。
+#[tauri::command]
+async fn setup_status(link: State<'_, RuntimeLink>) -> Result<SetupStatus, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.setup().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的「重新檢查」。
+#[tauri::command]
+async fn setup_recheck(link: State<'_, RuntimeLink>) -> Result<SetupStatus, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.recheck_setup().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 確認已閱讀背景執行行為的告知。
+#[tauri::command]
+async fn setup_acknowledge_notice(link: State<'_, RuntimeLink>) -> Result<SetupStatus, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.acknowledge_background_notice().await.map_err(|e| e.to_string())
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
         .manage(link)
-        .invoke_handler(tauri::generate_handler![runtime_health, runtime_platform, workspace_list, workspace_create, workspace_archive])
+        .invoke_handler(tauri::generate_handler![
+            runtime_health,
+            runtime_platform,
+            workspace_list,
+            workspace_create,
+            workspace_archive,
+            profile_list,
+            profile_create,
+            profile_verify,
+            profile_login_terminal,
+            profile_archive,
+            setup_status,
+            setup_recheck,
+            setup_acknowledge_notice
+        ])
         .setup(|app| {
             // 不等 Web UI 來問：App 一開啟就連回或啟動 Runtime
             let handle = app.handle().clone();
