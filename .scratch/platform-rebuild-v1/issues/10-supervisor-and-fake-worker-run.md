@@ -1,6 +1,6 @@
 # 10: Supervisor、程序身分與 Worker Run 端到端（fake Adapter）
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R018-10-impl，2026-10-22 15:20）
 Blocked by: 09
 
 **What to build:** 打通「派工 → Run → 程序 → 結束」：派工交易建立 Run、execution lease 與派工 Outbox；Supervisor 在交易外持久化 launch intent 與 command_id 後啟動程序，記錄程序身分（PID + 建立時間 + 指令雜湊，spec D-10）與回執；真實 ProcessControl 以每個 Run 一個 Windows Job Object 管理程序樹。以 fake AgentAdapter 驗證 Run 狀態（queued、starting、running、succeeded、failed、interrupted、cancelled）與 heartbeat／lease（spec D-31）。使用者可在面板派出 Task、取消 Run。
