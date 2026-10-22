@@ -84,3 +84,4 @@
 | R080-20-integrate | 20 | integrate | Work-8 | 2026-10-22 18:24 | 2026-10-22 18:33 | DONE，依 AI-109 直接合併 |
 | R081-24-verify | 24 | verify | Work-8 | 2026-10-22 18:28 | | |
 | R082-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:28 | | |
+| R083-21-impl | 21 | impl | Work-8 | 2026-10-22 18:34 | | |
