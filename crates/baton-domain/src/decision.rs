@@ -1415,8 +1415,12 @@ fn controller_action(
         Some(subject) => format!("{}:{}:{subject}", matter.as_str(), target.id),
         None => format!("{}:{}", matter.as_str(), target.id),
     };
+    // 提出者也要相同：Worker 與 Controller 的核准不能互相用掉，回答時也只會喚醒原本的提出者（R151 第 8 項）
+    let origin = requester.origin();
     let same_operation = |r: &DecisionRequest| {
-        r.kind == DecisionKind::Authority && r.authority.as_ref().is_some_and(|a| a.fingerprint == fingerprint)
+        r.kind == DecisionKind::Authority
+            && r.origin == origin
+            && r.authority.as_ref().is_some_and(|a| a.fingerprint == fingerprint)
     };
     if let Some(pending) = ctx.requests.iter().find(|r| same_operation(r) && r.is_pending()) {
         let outcome = ControllerOutcome::RequiresDecision { request_id: pending.id.clone(), existing: true };

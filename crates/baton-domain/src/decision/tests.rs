@@ -559,6 +559,39 @@ fn a_controller_gate_with_a_subject_only_shares_requests_and_approvals_for_the_s
     assert!(matches!(used.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::Approved { .. }, .. }));
 }
 
+/// Worker 以 `controller_action` 提出的同一事項請求（指紋與 Controller 的相同）。
+fn worker_authority(id: &str, matter: Matter, task_id: &str) -> DecisionRequest {
+    let mut request = pending(id, DecisionKind::Authority, task_id);
+    request.authority =
+        Some(AuthorityDetail { matter, summary: "派出部署 Task".into(), fingerprint: format!("{}:{task_id}", matter.as_str()) });
+    request.options = vec![option(OPTION_APPROVE), option(OPTION_REJECT)];
+    request
+}
+
+#[test]
+fn a_controller_gate_neither_joins_nor_consumes_requests_raised_by_a_worker() {
+    // Worker 的請求還在等待：Controller 另建自己的請求，回答後才會喚醒 Controller（R151 第 8 項）
+    let mut world = World::new(vec![task("t1", TaskStatus::Pending, 1)], vec![worker_authority("w", Matter::ExceedAuthorization, "t1")]);
+    let change = world.run(gate(Matter::ExceedAuthorization, "t1")).unwrap();
+    assert!(
+        matches!(&change.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { request_id, existing: false }, .. } if request_id == "dg"),
+        "{:?}",
+        change.outcome
+    );
+
+    // Worker 的請求已核准：Controller 不能用掉它
+    let answered = world.run(answer("w", 1, DecisionAction::Accept, Some(OPTION_APPROVE), None)).unwrap();
+    world.requests = answered.updated.clone();
+    world.decisions.push(answered.decision.clone().unwrap());
+    let change = world.run(gate(Matter::ExceedAuthorization, "t1")).unwrap();
+    assert!(
+        matches!(change.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { existing: false, .. }, .. }),
+        "{:?}",
+        change.outcome
+    );
+    assert!(change.approval_use.is_none());
+}
+
 // --- 票 50：使用者的答案推翻既有假設 ---
 
 /// Task 目前的契約，「輸入與依據」引用裁定請求 `request_id`（照它的建議先做）。
