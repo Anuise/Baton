@@ -337,7 +337,8 @@ async fn the_supervisor_persists_intent_then_starts_the_process_once_and_records
     assert_eq!(harness.process_control.spawn_count(), 1, "再次處理不會重複啟動");
     let spawned = &harness.process_control.spawned()[0];
     assert_eq!(Some(spawned.command_id.as_str()), run["command_id"].as_str(), "啟動時帶的就是先持久化的 command_id");
-    assert_eq!(spawned.working_dir.as_deref(), Some(path.as_str()));
+    let workdir = format!(r"{path}\.baton\outputs\{tid}");
+    assert_eq!(spawned.working_dir.as_deref(), Some(workdir.as_str()), "研究 Task 在自己的輸出目錄中執行（票 20）");
     let identity = harness.process_control.identity_of(&spawned.command_id).unwrap();
     assert_eq!(run["process"]["pid"].as_u64(), Some(u64::from(identity.pid)));
     assert_eq!(run["process"]["created_at_millis"].as_i64(), Some(identity.created_at_millis));

@@ -94,7 +94,7 @@ impl Store {
                     let active = load_active_runs(tx)?;
                     let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used };
                     let task_ctx = loaded.ctx(&request.workspace_id);
-                    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases };
+                    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, workdirs: &loaded.workdirs };
                     if let Err(rejected) = scheduler::evaluate(&ctx, &capacity, &request.task_id, SlotKind::Normal) {
                         return Ok(Err(rejected));
                     }
@@ -112,7 +112,7 @@ impl Store {
                     let active = load_active_runs(tx)?;
                     let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used };
                     let task_ctx = loaded.ctx(&entry.workspace_id);
-                    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases };
+                    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, workdirs: &loaded.workdirs };
                     let waiting = |reasons| WaitingTask {
                         workspace_id: entry.workspace_id.clone(),
                         task_id: entry.task_id.clone(),
@@ -183,7 +183,7 @@ impl Store {
                 let loaded = load(conn, &entry.workspace_id)?;
                 let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used };
                 let task_ctx = loaded.ctx(&entry.workspace_id);
-                let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases };
+                let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, workdirs: &loaded.workdirs };
                 let reasons = match scheduler::evaluate(&ctx, &capacity, &entry.task_id, SlotKind::Normal) {
                     // 現在就能派：只是還沒輪到排程處理，沒有需要使用者處理的原因
                     Ok(Evaluation::Dispatch { .. }) => Vec::new(),

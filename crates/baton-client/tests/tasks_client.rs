@@ -49,7 +49,7 @@ async fn app_creates_a_task_sees_missing_items_and_marks_it_ready_once_the_contr
     let created = client
         .create_task(
             &workspace_id,
-            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), contract: ContractContent::default() },
+            &CreateTaskRequest { goal_id: goal.id.clone(), title: "整理".into(), kind: Default::default(), contract: ContractContent::default() },
         )
         .await
         .unwrap();
@@ -85,7 +85,7 @@ async fn app_cannot_add_a_dependency_that_closes_a_cycle() {
     let mut ids = Vec::new();
     for title in ["甲", "乙"] {
         let request =
-            CreateTaskRequest { goal_id: goal.id.clone(), title: title.into(), contract: ContractContent::default() };
+            CreateTaskRequest { goal_id: goal.id.clone(), title: title.into(), kind: Default::default(), contract: ContractContent::default() };
         ids.push(client.create_task(&workspace_id, &request).await.unwrap().task.id);
     }
 

@@ -3,6 +3,7 @@
 //! 規則都在 Domain（`baton_domain::verification`）；這裡只做「在同一個交易中載入 Task、Run、成果 manifest →
 //! 交給 Domain 校驗與判定 → 寫入 Task 新狀態、驗證紀錄與事件」，以及給 Supervisor 與面板的唯讀查詢。
 //! 驗證紀錄是追加式資料表（觸發器禁止更新與刪除）；同一個 Run 最多一筆紀錄，同一個 Task 最多一筆「通過」。
+//! 開發 Task 通過時，排入整合佇列的項目也在同一個交易寫入（票 20）。
 
 use baton_domain::artifact::Artifact;
 use baton_domain::run::{self, LaunchPayload};
@@ -67,12 +68,21 @@ impl Store {
                 let loaded = load(tx, &workspace_id)?;
                 let artifacts = load_artifacts(tx, &workspace_id, None)?;
                 let task_ctx = loaded.ctx(&workspace_id);
-                let ctx = AcceptanceContext { task: &task_ctx, runs: &loaded.runs, artifacts: &artifacts };
+                let ctx = AcceptanceContext {
+                    task: &task_ctx,
+                    runs: &loaded.runs,
+                    artifacts: &artifacts,
+                    workdirs: &loaded.workdirs,
+                    integrations: &loaded.integrations,
+                };
                 match verification::decide(&ctx, command, record_id, now) {
                     Err(rejected) => Ok(Err(rejected)),
-                    Ok(change) => {
+                    Ok(mut change) => {
                         save_task(tx, &change.task)?;
                         insert_record(tx, &change.record)?;
+                        if let Some(entry) = change.integration.as_mut() {
+                            entry.seq = super::integration::insert_entry(tx, entry)?;
+                        }
                         for event in &change.events {
                             append_event(tx, event)?;
                         }
@@ -97,7 +107,9 @@ impl Store {
                 let artifacts = load_artifacts(conn, &workspace_id, None)?;
                 let ctx = loaded.ctx(&workspace_id);
                 for task in loaded.tasks.iter().filter(|t| t.status == TaskStatus::Verifying) {
-                    let Some(pending) = verification::pending_check(&ctx, &loaded.runs, &artifacts, task) else {
+                    let Some(pending) =
+                        verification::pending_check(&ctx, &loaded.runs, &artifacts, &loaded.integrations, task)
+                    else {
                         continue;
                     };
                     let Some(payload) = launch_payload(conn, &pending.basis.run_id)? else { continue };
@@ -132,14 +144,15 @@ impl Store {
                 };
                 let artifacts = load_artifacts(conn, &workspace_id, None)?;
                 let records = load_verifications(conn, &workspace_id)?;
-                Ok(Ok(verification::view(&loaded.ctx(&workspace_id), &loaded.runs, &artifacts, &records, task)))
+                let ctx = loaded.ctx(&workspace_id);
+                Ok(Ok(verification::view(&ctx, &loaded.runs, &artifacts, &records, &loaded.integrations, task)))
             })
             .await?;
         Ok(result?)
     }
 }
 
-fn launch_payload(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<LaunchPayload>> {
+pub(crate) fn launch_payload(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<LaunchPayload>> {
     let mut rows = conn
         .prepare("SELECT payload FROM outbox WHERE kind = ?1 AND run_id = ?2")?
         .query_map([run::OUTBOX_LAUNCH_RUN, run_id], |r| json_column::<LaunchPayload>(0, &r.get::<_, String>(0)?))?

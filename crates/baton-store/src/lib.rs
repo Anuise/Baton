@@ -27,6 +27,7 @@ use tokio::sync::oneshot;
 mod agent;
 mod artifacts;
 mod decisions;
+mod integration;
 mod messages;
 mod profiles;
 mod quota;
@@ -35,9 +36,11 @@ mod scheduling;
 mod shared_settings;
 mod tasks;
 mod verification;
+mod workdirs;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, PendingByWorkspace};
+pub use integration::{IntegrationApplyError, IntegrationWork};
 pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
@@ -47,6 +50,7 @@ pub use scheduling::{
 };
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 pub use verification::{AcceptanceApplyError, PendingVerification};
+pub use workdirs::WorkdirCandidate;
 
 /// 控制資料庫檔名，位於資料目錄之下。
 pub const DB_FILE_NAME: &str = "control.sqlite";
@@ -548,6 +552,51 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'task_verification 是追加式資料表，不可更新'); END;
         CREATE TRIGGER task_verification_no_delete BEFORE DELETE ON task_verification
         BEGIN SELECT RAISE(ABORT, 'task_verification 是追加式資料表，不可刪除'); END;",
+    },
+    Migration {
+        // 票 20：Task 種類、平台登記的工作目錄（worktree／輸出目錄）與單一整合佇列。
+        // 同一個 Task 一個工作目錄、可用的目錄路徑不重複；整合佇列任何時刻最多一個處理中的項目
+        name: "task_workdir_and_integration_queue",
+        sql: "ALTER TABLE task ADD COLUMN kind TEXT NOT NULL DEFAULT 'research'
+            CHECK (kind IN ('development', 'research', 'document'));
+        CREATE TABLE task_workdir (
+            task_id TEXT PRIMARY KEY REFERENCES task (id),
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            kind TEXT NOT NULL CHECK (kind IN ('worktree', 'output_dir')),
+            path TEXT NOT NULL,
+            branch TEXT,
+            base_branch TEXT,
+            status TEXT NOT NULL CHECK (status IN ('ready', 'failed')),
+            failure TEXT,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            attempted_at INTEGER NOT NULL,
+            ready_at INTEGER
+        );
+        CREATE INDEX task_workdir_workspace ON task_workdir (workspace_id);
+        CREATE UNIQUE INDEX task_workdir_one_path ON task_workdir (path COLLATE NOCASE) WHERE status = 'ready';
+        CREATE TABLE integration_entry (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            run_id TEXT NOT NULL UNIQUE REFERENCES run (id),
+            generation INTEGER NOT NULL,
+            branch TEXT NOT NULL,
+            target_branch TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('queued', 'merging', 'verifying', 'advancing', 'integrated', 'failed')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            merge_commit TEXT,
+            target_tip TEXT,
+            checks TEXT NOT NULL CHECK (json_valid(checks)),
+            failure TEXT,
+            queued_at INTEGER NOT NULL,
+            started_at INTEGER,
+            finished_at INTEGER
+        );
+        CREATE INDEX integration_entry_workspace ON integration_entry (workspace_id);
+        CREATE UNIQUE INDEX integration_entry_one_active
+            ON integration_entry ((status IN ('merging', 'verifying', 'advancing')))
+            WHERE status IN ('merging', 'verifying', 'advancing');",
     },
 ];
 

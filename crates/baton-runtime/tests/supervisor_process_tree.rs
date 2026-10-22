@@ -208,7 +208,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
     let task = client
         .create_task(
             &workspace.id,
-            &CreateTaskRequest { goal_id: goal.id, title: "跑一棵程序樹".into(), contract: complete() },
+            &CreateTaskRequest { goal_id: goal.id, title: "跑一棵程序樹".into(), kind: Default::default(), contract: complete() },
         )
         .await
         .unwrap();

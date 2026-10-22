@@ -136,6 +136,7 @@ async fn every_port_can_be_driven_through_its_fake() {
 
     // WorkspaceFs
     let target = harness.data_dir().join("wt");
+    harness.workspace_fs.init_repo(harness.data_dir(), "main");
     ports.workspace_fs.create_worktree(harness.data_dir(), "branch", &target).await.unwrap();
     harness.workspace_fs.mark_dirty(&target);
     assert_eq!(ports.workspace_fs.inspect_dirty(&target).await.unwrap(), DirtyState::Dirty);

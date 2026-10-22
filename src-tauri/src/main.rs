@@ -26,6 +26,7 @@ use baton_domain::verification::VerificationView;
 use baton_domain::scheduler::CapacityMode;
 use baton_domain::shared_settings::SettingsVersion;
 use baton_domain::task::{ContractContent, Goal, TaskView};
+use baton_domain::workdir::TaskKind;
 use baton_domain::workspace::Workspace;
 use base64::Engine;
 use serde::Serialize;
@@ -318,13 +319,14 @@ async fn task_create(
     workspace_id: String,
     goal_id: String,
     title: String,
+    kind: Option<TaskKind>,
     contract: Option<ContractContent>,
 ) -> Result<TaskView, String> {
     if let Err(reason) = link.ensure_started().await {
         return Err(reason.clone());
     }
     link.client
-        .create_task(&workspace_id, &CreateTaskRequest { goal_id, title, contract: contract.unwrap_or_default() })
+        .create_task(&workspace_id, &CreateTaskRequest { goal_id, title, kind: kind.unwrap_or_default(), contract: contract.unwrap_or_default() })
         .await.map_err(|e| e.to_string())
 }
 

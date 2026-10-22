@@ -47,7 +47,7 @@ async fn ready_task(client: &RuntimeClient, workspace_id: &str, goal_id: &str, t
     let created = client
         .create_task(
             workspace_id,
-            &CreateTaskRequest { goal_id: goal_id.to_string(), title: title.into(), contract: complete() },
+            &CreateTaskRequest { goal_id: goal_id.to_string(), title: title.into(), kind: Default::default(), contract: complete() },
         )
         .await
         .unwrap();

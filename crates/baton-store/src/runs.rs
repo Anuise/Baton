@@ -149,7 +149,8 @@ pub(crate) fn decide_in(
 ) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
-    run::decide(&RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases }, command, now)
+    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, workdirs: &loaded.workdirs };
+    run::decide(&ctx, command, now)
 }
 
 /// 取消 Task 之後，同一個交易中要求取消它還在進行的 Run。
