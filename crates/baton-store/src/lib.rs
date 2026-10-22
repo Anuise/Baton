@@ -28,13 +28,16 @@ mod agent;
 mod artifacts;
 mod knowledge;
 mod profiles;
+mod quota;
 mod runs;
 mod scheduling;
+mod shared_settings;
 mod tasks;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use knowledge::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, ScopeRequest};
 pub use profiles::ProfileApplyError;
+pub use quota::{AccountQuota, QuotaApplyError};
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use scheduling::{
     QueuedRequest, ScheduleOutcome, ScheduleRequest, SchedulingSnapshot, StartedRun, WaitingTask,
@@ -358,7 +361,78 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER artifact_version_no_delete BEFORE DELETE ON artifact_version
         BEGIN SELECT RAISE(ABORT, 'artifact_version 是追加式資料表，不可刪除'); END;",
     },
-    // 知識條目與教訓（票 37）：決策、教訓、一般知識同一張表，以 kind 區分。條目列保存目前狀態與目前內容的檢索文字，
+    // 共同設定的每個採用版本不可變（改設定 = 採用新版本）；Run 與版本的綁定一經建立也不可更改（spec D-09）
+    Migration {
+        name: "shared_settings_version",
+        sql: "CREATE TABLE shared_settings_version (
+            version INTEGER PRIMARY KEY CHECK (version >= 1),
+            content_hash TEXT NOT NULL,
+            bundle TEXT NOT NULL CHECK (json_valid(bundle)),
+            sources TEXT NOT NULL CHECK (json_valid(sources)),
+            exclusions TEXT NOT NULL CHECK (json_valid(exclusions)),
+            adopted_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER shared_settings_version_no_update BEFORE UPDATE ON shared_settings_version
+        BEGIN SELECT RAISE(ABORT, 'shared_settings_version 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER shared_settings_version_no_delete BEFORE DELETE ON shared_settings_version
+        BEGIN SELECT RAISE(ABORT, 'shared_settings_version 是追加式資料表，不可刪除'); END;
+        CREATE TABLE run_settings_snapshot (
+            run_id TEXT PRIMARY KEY REFERENCES run (id),
+            version INTEGER NOT NULL REFERENCES shared_settings_version (version),
+            content_hash TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER run_settings_snapshot_no_update BEFORE UPDATE ON run_settings_snapshot
+        BEGIN SELECT RAISE(ABORT, 'run_settings_snapshot 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER run_settings_snapshot_no_delete BEFORE DELETE ON run_settings_snapshot
+        BEGIN SELECT RAISE(ABORT, 'run_settings_snapshot 是追加式資料表，不可刪除'); END;",
+    },
+    // 額度觀測（票 27）：每筆觀測的來源、時間、可信度與原始資料參照；本機 Run 回報的用量（推估的依據）；
+    // 使用者設定的方案上限；外部觀測器的輪詢時間。觀測不到的值存 NULL（未知），不填零。
+    // 超過七日視窗的觀測與用量在輪詢時刪除（保留 8 天）
+    Migration {
+        name: "quota",
+        sql: "CREATE TABLE quota_observation (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id TEXT NOT NULL,
+            origin TEXT NOT NULL CHECK (origin IN ('adapter', 'estimate', 'observer')),
+            source TEXT NOT NULL CHECK (source IN ('observed', 'estimated')),
+            quota_window TEXT CHECK (quota_window IN ('five_hour', 'seven_day')),
+            status TEXT CHECK (status IN ('allowed', 'warning', 'exhausted')),
+            used REAL CHECK (used IS NULL OR used >= 0),
+            tokens INTEGER CHECK (tokens IS NULL OR tokens >= 0),
+            limit_tokens INTEGER CHECK (limit_tokens IS NULL OR limit_tokens > 0),
+            reset_at INTEGER,
+            observed_at INTEGER NOT NULL,
+            confidence TEXT NOT NULL CHECK (confidence IN ('observed', 'estimated', 'unknown')),
+            raw_ref TEXT NOT NULL,
+            raw TEXT
+        );
+        CREATE INDEX quota_observation_latest ON quota_observation (profile_id, origin, quota_window, seq);
+        CREATE INDEX quota_observation_time ON quota_observation (observed_at);
+        CREATE TABLE quota_usage (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            tokens INTEGER NOT NULL CHECK (tokens >= 0),
+            reported_at INTEGER NOT NULL,
+            raw TEXT NOT NULL
+        );
+        CREATE INDEX quota_usage_profile ON quota_usage (profile_id, reported_at);
+        CREATE TABLE quota_plan_limit (
+            profile_id TEXT PRIMARY KEY,
+            five_hour_tokens INTEGER CHECK (five_hour_tokens IS NULL OR five_hour_tokens > 0),
+            seven_day_tokens INTEGER CHECK (seven_day_tokens IS NULL OR seven_day_tokens > 0),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE quota_poll (
+            profile_id TEXT PRIMARY KEY,
+            polled_at INTEGER NOT NULL
+        );",
+    },
+    // 知識條目與教訓（票 37，第 14 個 migration）：決策、教訓、一般知識同一張表，以 kind 區分。條目列保存目前狀態與目前內容的檢索文字，
     // 內容的每個版本另存於追加式的 knowledge_entry_version（修正只追加，不覆寫）。全文檢索索引（FTS5）不在 migration 中，
     // 而是每次開啟時依可用性建立並從 search_text 重建（spec D-26）
     Migration {

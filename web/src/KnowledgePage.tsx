@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { formatTimestamp } from "./time";
 import {
-  hasErrorCode,
+  errorCode,
   type CorrectKnowledgeRequest,
   type KnowledgeClient,
   type KnowledgeContent,
@@ -132,7 +132,7 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
     try {
       await operation();
     } catch (e) {
-      if (!hasErrorCode(e, "knowledge_revision_conflict")) return reasonOf(e);
+      if (errorCode(e) !== "knowledge_revision_conflict") return reasonOf(e);
       setNotice(CONFLICT_NOTICE);
     }
     await load();

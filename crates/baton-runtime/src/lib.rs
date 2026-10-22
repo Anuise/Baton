@@ -123,6 +123,7 @@ impl Runtime {
             workspace_fs: ports.workspace_fs.clone(),
             claude_env: ports.claude_env.clone(),
             quota_observer: ports.quota_observer.clone(),
+            user_settings: ports.user_settings.clone(),
             log,
             supervisor_wake,
             shutdown: stop_rx.clone(),
