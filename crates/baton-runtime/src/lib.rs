@@ -7,10 +7,14 @@ pub mod backup;
 pub mod claude_adapter;
 pub mod claude_cli;
 pub mod credentials;
+pub mod installer;
 pub mod log;
+mod maintenance;
 pub mod production_ports;
 pub mod single_instance;
 pub mod supervisor;
+pub mod update_source;
+pub mod updates;
 pub mod verifier;
 pub mod windows_platform;
 #[cfg(windows)]
@@ -23,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{ApiState, LogSink, RunSettings};
-use baton_domain::lifecycle::{self, ExitTiming, FileStopView, LifecycleFile};
+use baton_domain::lifecycle::{self, ExitTiming, FileStopView};
 use baton_domain::login::LoginBoundary;
 use baton_domain::recovery::{RecoveryStatus, MAX_ATTEMPTS};
 use baton_ports::Ports;
@@ -36,6 +40,7 @@ pub use baton_domain::config::{self, ConfigError, RuntimeConfig};
 pub use backup::BackupScheduler;
 pub use credentials::CredentialIssuer;
 pub use supervisor::{LifecycleSettings, Supervisor};
+pub use updates::UpdateService;
 
 /// 隨機埠（埠 0）時，IPv6 同埠已被占用就重新挑一個的次數上限。
 const BIND_ATTEMPTS: usize = 16;
@@ -83,6 +88,10 @@ pub struct RuntimeOptions {
     /// 由 Windows 登入時的啟動入口拉起（票 33；環境變數 `BATON_START_SOURCE=login`）。
     /// 與監護拉起的相同：停止意圖仍生效則不提供服務（完全退出優先），不會改依跨登入設定續跑。
     pub login_start: bool,
+    /// 這個 Runtime 的版本（票 34）：更新檢查與維護結果以它比較。測試以它模擬「安裝程式換上了新版本」。
+    pub app_version: String,
+    /// 是否啟動更新檢查的背景迴圈（票 34；啟動時與每日一次）。測試 harness 關閉它，改由測試呼叫 `UpdateService::tick`。
+    pub background_update_check: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -96,6 +105,8 @@ impl Default for RuntimeOptions {
             full_text_search: true,
             guardian_attempt: None,
             login_start: false,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            background_update_check: true,
         }
     }
 }
@@ -161,6 +172,8 @@ impl Runtime {
             store.mark_clean_shutdown(ports.clock.now()).await?;
             return Err(RuntimeError::SuppressedByStopIntent);
         }
+        // 使用者手動開啟（或安裝程式代為開啟）：結束更新或解除安裝的維護，之後依 DR-01 重新開啟（票 34）
+        maintenance::finish_on_open(&store, &config.data_dir, &options.app_version, &*ports.clock, &log).await?;
         note_crash_recovery(&store, previous_unclean, options.guardian_attempt.clone(), &ports, &log).await?;
         note_login_boundary(&store, login_boundary, &ports, &log).await?;
         sync_login_startup(&store, &ports, &log).await?;
@@ -202,9 +215,24 @@ impl Runtime {
             let backups = backups.clone();
             Arc::new(move |reason: &str| backups.request_milestone_backup(reason))
         };
+        let updates = UpdateService::new(
+            ports.update_source.clone(),
+            ports.clock.clone(),
+            log.clone(),
+            config.data_dir.clone(),
+            &options.app_version,
+        );
+        let checking_updates = options.background_update_check.then(|| updates.spawn_background(stop_rx.clone()));
         let (exits_tx, exits) = watch::channel(0u64);
         let exiting = spawn_exit_runner(
             supervisor.clone(),
+            MaintenanceStep {
+                store: store.clone(),
+                backups: backups.clone(),
+                registration: ports.startup_registration.clone(),
+                clock: ports.clock.clone(),
+                log: log.clone(),
+            },
             exit_signal.clone(),
             exits_tx,
             stop_tx.clone(),
@@ -232,6 +260,8 @@ impl Runtime {
             shutdown: stop_rx.clone(),
             exit_timing: options.exit_timing,
             exit_signal,
+            app_version: options.app_version.clone(),
+            updates: updates.clone(),
             projection_lock: Arc::default(),
         });
         let task = tokio::spawn(async move {
@@ -251,6 +281,8 @@ impl Runtime {
             supervising,
             backups,
             backing_up,
+            updates,
+            checking_updates,
             exiting,
             exits,
             stop_tx,
@@ -280,7 +312,7 @@ async fn reconcile_stop_intent(
         state = store.adopt_file_stop(timing, ports.clock.now()).await?;
         (log)("生命週期：停止意圖只存在於生命週期檔，依較保守者視為已完全退出");
     } else if state.stop_intent_active() && !matches!(file, FileStopView::Stop { .. }) {
-        let mirror = LifecycleFile::mirror(&state, ports.clock.now());
+        let mirror = store.lifecycle_mirror(ports.clock.now()).await?;
         let data_dir = data_dir.to_path_buf();
         let written = tokio::task::spawn_blocking(move || baton_store::write_lifecycle_file(&data_dir, &mirror)).await;
         if !matches!(written, Ok(Ok(()))) {
@@ -406,10 +438,21 @@ async fn sync_login_startup(store: &Store, ports: &Ports, log: &LogSink) -> Resu
     Ok(())
 }
 
+/// 停止流程之後的維護步驟需要的元件（票 34）。
+struct MaintenanceStep {
+    store: Store,
+    backups: Arc<BackupScheduler>,
+    registration: Arc<dyn baton_ports::StartupRegistration>,
+    clock: Arc<dyn baton_ports::Clock>,
+    log: LogSink,
+}
+
 /// 完全退出的執行者：API 持久化停止意圖後通知它，它請 Supervisor 停下全部 Run；
+/// 更新或解除安裝的維護接著做停止之後的步驟（票 34）。
 /// 停止流程結束後（`linger` 有值時）再提供一段時間 API，讓 App 讀到最終的停止結果，然後結束服務。
 fn spawn_exit_runner(
     supervisor: Arc<Supervisor>,
+    maintenance: MaintenanceStep,
     signal: Arc<Notify>,
     exits: watch::Sender<u64>,
     stop_tx: Arc<watch::Sender<bool>>,
@@ -423,6 +466,14 @@ fn spawn_exit_runner(
                 _ = signal.notified() => {}
             }
             supervisor.full_exit().await;
+            maintenance::continue_after_stop(
+                &maintenance.store,
+                &maintenance.backups,
+                maintenance.registration.clone(),
+                &*maintenance.clock,
+                &maintenance.log,
+            )
+            .await;
             exits.send_modify(|count| *count += 1);
             if let Some(linger) = linger {
                 tokio::time::sleep(linger).await;
@@ -470,6 +521,8 @@ pub struct RunningRuntime {
     supervising: Option<JoinHandle<()>>,
     backups: Arc<BackupScheduler>,
     backing_up: Option<JoinHandle<()>>,
+    updates: Arc<UpdateService>,
+    checking_updates: Option<JoinHandle<()>>,
     /// 完全退出的執行者（票 25）。
     exiting: JoinHandle<()>,
     /// 這個實例已完成的完全退出次數（停止流程結束就加一）。
@@ -504,6 +557,11 @@ impl RunningRuntime {
         &self.backups
     }
 
+    /// 更新檢查；測試 harness 以它主動驅動一次檢查（`tick`）。
+    pub fn updates(&self) -> &Arc<UpdateService> {
+        &self.updates
+    }
+
     /// 完全退出的停止流程完成次數；測試以它等待「停止流程已結束」。
     pub fn exits_completed(&self) -> watch::Receiver<u64> {
         self.exits.clone()
@@ -529,6 +587,9 @@ impl RunningRuntime {
         if let Some(backing_up) = self.backing_up.take() {
             let _ = backing_up.await;
         }
+        if let Some(checking) = self.checking_updates.take() {
+            let _ = checking.await;
+        }
         if clean {
             self.supervisor.mark_clean_shutdown().await;
         }
@@ -552,6 +613,9 @@ impl Drop for RunningRuntime {
         }
         if let Some(backing_up) = &self.backing_up {
             backing_up.abort();
+        }
+        if let Some(checking) = &self.checking_updates {
+            checking.abort();
         }
         self.exiting.abort();
     }

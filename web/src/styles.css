@@ -1709,6 +1709,53 @@ body {
   color: #cf222e;
 }
 
+/* 更新通知（spec D-19）：不阻擋操作，放在主畫面頂端 */
+.update-notice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 8px 12px;
+  background: #ddf4ff;
+  border: 1px solid #54aeff66;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.update-notice details {
+  flex-basis: 100%;
+  order: 1;
+}
+
+.update-notes {
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
+
+.update-steps {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.update-settings {
+  display: grid;
+  gap: 8px;
+}
+
+.update-settings h2,
+.update-settings p {
+  margin: 0;
+}
+
+.update-policy {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.update-settings > [role="alert"] {
+  color: #cf222e;
+}
+
 .workflow-page {
   display: grid;
   gap: 12px;

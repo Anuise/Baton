@@ -20,6 +20,8 @@ import { StatusBar } from "./StatusBar";
 import { createRuntimeClient, type AppClient, type HealthResponse, type PendingDecisions, type Workspace } from "./runtimeClient";
 import { TaskBoard } from "./TaskBoard";
 import { TimelinePage } from "./TimelinePage";
+import { UpdateNotice } from "./UpdateNotice";
+import { UpdateSettings } from "./UpdateSettings";
 import { WorkflowPage } from "./WorkflowPage";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
@@ -79,10 +81,13 @@ export function App() {
         <main className="main">
           {/* 產品名稱取自 Runtime 回報，不在前端寫死（spec D-01） */}
           <h1>{health?.product ?? ""}</h1>
+          {/* 有新版本時只通知；更新維護中以覆蓋層顯示進度（spec D-19） */}
+          {client && <UpdateNotice client={client} runtimeStartedAt={health?.started_at ?? null} />}
           {client && <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
           {client && <SchedulingSettings client={client} />}
           {client && <LoginStartupSettings client={client} />}
+          {client && <UpdateSettings client={client} />}
           {client && <SharedSettingsPage client={client} />}
           {client && <BackupSettings client={client} />}
           {client && <RecoveryPanel client={client} />}

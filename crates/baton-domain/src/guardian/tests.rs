@@ -82,6 +82,15 @@ fn full_exit_update_uninstall_and_unknown_stop_intent_suppress_restart() {
 }
 
 #[test]
+fn maintenance_is_reported_even_while_its_stop_flow_mirrors_a_stop_intent() {
+    // 更新與解除安裝沿用完全退出的停止流程，生命週期檔同時有兩者時回報較具體的維護（票 34）
+    assert_eq!(
+        suppression_of(&LifecycleFileRead::Parsed(file(true, Some("update")))),
+        Some(Suppression::Maintenance("update".into()))
+    );
+}
+
+#[test]
 fn suppression_wins_over_everything_else() {
     let input = RestartInput {
         mirror: None,

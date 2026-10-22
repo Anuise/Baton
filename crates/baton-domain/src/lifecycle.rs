@@ -520,7 +520,7 @@ pub struct LifecycleFile {
     pub version: u32,
     /// 停止抑制：有值代表停止意圖生效中。
     pub stop: Option<StopSuppression>,
-    /// 維護抑制（更新、解除安裝；由票 34 的流程寫入）：有值時監護與登入啟動都不拉起 Runtime（票 32）。
+    /// 維護抑制（更新、解除安裝；票 34 的維護流程寫入，見 `maintenance`）：有值時監護與登入啟動都不拉起 Runtime（票 32）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<MaintenanceSuppression>,
     pub updated_at: Timestamp,
@@ -548,6 +548,12 @@ impl LifecycleFile {
             reason: "full_exit".to_string(),
         });
         Self { version: LIFECYCLE_FILE_VERSION, stop, maintenance: None, updated_at: now }
+    }
+
+    /// 帶上維護抑制（票 34）：維護進行中時，每次鏡像停止意圖都要一併寫入，不能把它覆蓋掉。
+    pub fn with_maintenance(mut self, maintenance: Option<MaintenanceSuppression>) -> Self {
+        self.maintenance = maintenance;
+        self
     }
 }
 

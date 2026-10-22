@@ -64,7 +64,7 @@ use baton_domain::cleanup::{self, CleanupCommand, CleanupStatus, Inspection};
 use baton_domain::conversation::{self, BeginTurn, ControllerHandoff, ControllerRun, ControllerRunStatus, TurnOutcome};
 use baton_domain::integration::{self, AdvanceResult, IntegrationCommand, IntegrationStatus, MergeResult};
 use baton_domain::lifecycle::{
-    ExitReport, ExitTiming, LifecycleFile, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
+    ExitReport, ExitTiming, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
     RUN_GONE_AFTER_EXIT_REASON,
 };
 use baton_domain::handoff::{GateState, HandoffPhase};
@@ -303,10 +303,10 @@ impl Supervisor {
 
     /// 把資料庫中的停止意圖鏡像到生命週期檔（spec D-25）；失敗時回傳原因（也記日誌）。
     async fn mirror_lifecycle_file(&self) -> Option<String> {
-        let problem = match self.store.lifecycle_state().await {
+        // 維護進行中時一併寫入維護抑制（票 34），不能被停止意圖的鏡像覆蓋掉
+        let problem = match self.store.lifecycle_mirror(self.ports.clock.now()).await {
             Err(error) => Some(format!("無法讀取生命週期狀態：{error}")),
-            Ok(state) => {
-                let file = LifecycleFile::mirror(&state, self.ports.clock.now());
+            Ok(file) => {
                 let data_dir = self.data_dir.clone();
                 match tokio::task::spawn_blocking(move || baton_store::write_lifecycle_file(&data_dir, &file)).await {
                     Ok(Ok(())) => None,

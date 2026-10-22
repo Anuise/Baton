@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::lifecycle::{
-    ExitReport, ExitTiming, LifecycleError, LifecycleFile, LifecyclePhase, PauseCause, WorkspaceLifecycle,
+    ExitReport, ExitTiming, LifecycleError, LifecyclePhase, PauseCause, WorkspaceLifecycle,
 };
 use baton_domain::login::LoginStartup;
 use baton_domain::Timestamp;
@@ -167,19 +167,21 @@ pub(crate) async fn status(State(state): State<Arc<ApiState>>) -> Result<Json<Li
 /// 重複要求是冪等的。回應 202 與目前的狀態，停止進度之後以 `GET` 查詢。
 pub(crate) async fn request_exit(State(state): State<Arc<ApiState>>) -> Result<Response, ApiError> {
     let now = state.clock.now();
-    let lifecycle = state.store.request_exit(state.exit_timing, now).await?;
+    state.store.request_exit(state.exit_timing, now).await?;
     (state.log)("生命週期：已持久化完全退出的停止意圖");
-    let file = LifecycleFile::mirror(&lifecycle, now);
-    let data_dir = state.data_dir.clone();
-    if !matches!(
-        tokio::task::spawn_blocking(move || baton_store::write_lifecycle_file(&data_dir, &file)).await,
-        Ok(Ok(()))
-    ) {
+    if !mirror_lifecycle_file(&state).await {
         (state.log)("生命週期：無法把停止意圖寫入生命週期檔，交給停止流程再試");
     }
     state.exit_signal.notify_one();
     let snapshot = state.store.lifecycle_snapshot().await?;
     Ok((StatusCode::ACCEPTED, Json(status_of(snapshot, &state))).into_response())
+}
+
+/// 把資料庫中的停止意圖（與進行中維護的維護抑制，票 34）鏡像到生命週期檔；回傳是否寫入成功。
+pub(crate) async fn mirror_lifecycle_file(state: &ApiState) -> bool {
+    let Ok(file) = state.store.lifecycle_mirror(state.clock.now()).await else { return false };
+    let data_dir = state.data_dir.clone();
+    matches!(tokio::task::spawn_blocking(move || baton_store::write_lifecycle_file(&data_dir, &file)).await, Ok(Ok(())))
 }
 
 /// 變更「完全退出後自動續跑」；只影響下次重新開啟，不會立即啟動或停止目前的工作。

@@ -3340,7 +3340,123 @@
 - 影響：`detached` 檔被改動時投影的 `revision` 會增加但沒有對應事件（這不是 Baton 需要記錄的狀態轉移）；檢視後檔案又被改仍回 409，使用者按「重新檢查」後即可覆寫。
 - 審閱：未審
 
-### AI-371：七個內建 Playbook 的 Stage 內容、Gate 分類與證據種類
+### AI-371：更新的檢查、下載與驗章由 Runtime 負責（UpdateSource Port），桌面殼只執行已驗證的安裝程式；不使用 tauri-plugin-updater
+- 重要度：高
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：Runtime 新增 `UpdateSource` Port（`latest`、`download`），由 `UpdateService` 在啟動時與每 24 小時檢查一次，結果只存在記憶體，只顯示通知。使用者同意後，`POST /api/v1/updates/apply` 先下載安裝程式並以 minisign 公鑰驗證簽章（與 Tauri 更新程式相同的格式，`minisign-verify` crate），通過才開始維護；桌面殼的 `update_install` 只等 Runtime 結束，再以 `/P /UPDATE /R` 執行這個已驗證的檔案並結束 App。不加入 `tauri-plugin-updater`。
+- 理由：「只通知、使用者同意後才維護」與維護的各步驟都在 Runtime，可以用主要 seam（harness 的 fake 更新來源）測試；先下載驗章再停止工作，壞掉或被竄改的安裝程式不會讓工作白白停下。外掛只能在桌面殼內執行，App 沒開時無法檢查；它的下載與安裝也無法插入「維護抑制 → 停止流程 → 備份」這幾步。
+- 替代方案：(1) 桌面殼用 tauri-plugin-updater 檢查與安裝：程式碼較少，但規則落在無法以 harness 測試的殼裡，且外掛的安裝流程會直接結束 App，不經停止流程。(2) Runtime 只檢查、殼用外掛下載安裝：兩處各抓一次清單，驗章時機在停止之後。
+- 影響：Runtime 新增 `reqwest`（native-tls）、`minisign-verify`、`base64` 相依。安裝程式的 `/P /UPDATE /R` 參數取自 Tauri 2.12 的 NSIS 樣板（`.onInstSuccess` 的 `/R` 重新開啟、`/UPDATE` 保留捷徑與 HKCU Run 值），屬 Validation Required。
+- 審閱：未審
+
+### AI-372：更新清單網址與簽章公鑰在建置時設定；沒有設定就是「未設定更新來源」
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：正式版更新來源讀取建置時的環境變數 `BATON_UPDATE_ENDPOINT`（Tauri 格式 `latest.json` 的網址，平台鍵 `windows-x86_64-nsis` 或 `windows-x86_64`）與 `BATON_UPDATE_PUBKEY`（`tauri signer generate` 的公鑰，base64），以 `option_env!` 編進 Runtime。任一個沒有設定時，Port 回 `NotImplemented`，更新狀態是 `unconfigured`，不連線、不能套用。單元測試用 `tauri signer` 產生的測試公鑰與簽章（私鑰產生後即刪除、沒有進 repo）。
+- 理由：repo 目前沒有發行網址與簽章金鑰；寫死一個網址或把私鑰放進 repo 都不對。建置時設定讓發行者自行決定託管位置與保管金鑰，開發版也不會意外連線。
+- 替代方案：(1) 執行時讀環境變數：使用者機器上沒有人會設定，而且可以被改成任意網址（公鑰仍會擋下未簽章的檔案，但清單會被誤導）。(2) 寫死 GitHub Releases 網址：repo 名稱與發行流程都還沒定（D-03 的改名票在最後）。
+- 影響：在發行流程建立之前，所有建置都顯示「未設定更新來源」，更新流程只在 harness 與單元測試中被驗證。發行者需要保管簽章私鑰並託管 `latest.json`（尚未決定，已記在開發指南的 Validation Required）。
+- 審閱：未審
+
+### AI-373：更新的維護順序：下載驗章 → 同一交易持久化維護與停止意圖 → 停止流程 → 更新前備份 → 準備套用；備份失敗就不套用
+- 重要度：高
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：`maintenance` 單列表（migration 37）記錄進行中的維護（`kind`、`phase = stopping | ready | failed`、來源與目標版本、安裝程式路徑、備份識別、訊息）與最近一次結束的結果。開始維護與 `lifecycle::request_exit` 在同一個交易；生命週期檔一律由 `Store::lifecycle_mirror` 產生，維護中的每次鏡像都帶著維護抑制（修正 AI-315 提到的覆蓋問題）。停止流程沿用完全退出（30 + 10 秒、Run 以 `interrupted` 結束、Task 重新排隊）。之後更新做一份觸發原因 `pre_update` 的備份（依一般保留規則），成功進入 `ready`，失敗進入 `failed` 且不套用；Runtime 照完全退出的規則再提供 API 5 秒後結束。完全退出進行中不能開始維護（409 `stop_intent_active`）；同一種維護的重複要求是冪等的，另一種維護進行中回 409 `maintenance_in_progress`。停止異常不阻擋更新：Web UI 列出異常，要使用者按「仍要安裝更新並重新開啟」才安裝；沒有異常就自動安裝。
+- 理由：spec D-19 的順序是「維護抑制 → 停止流程 → 備份 → 套用」；同一交易避免只寫入其中一個；備份是套用的前提，失敗時不冒險。停止異常指的是 Worker 程序，不影響替換 Baton 的執行檔，但使用者應該知道。
+- 替代方案：(1) 先停止再下載：下載失敗時工作已經白停。(2) 完全退出進行中也接受維護並接續：狀態組合變多，而 App 在完全退出後本來就會結束。(3) 有停止異常就拒絕更新：使用者無法自行判斷是否要繼續。
+- 影響：備份失敗時 Baton 仍會完全退出，下次手動開啟依完全退出的規則續跑。更新前備份與更新後第一次啟動的 migration 前備份內容相同，同一天只保留較新的那份。
+- 審閱：未審
+
+### AI-374：只有手動開啟（含安裝程式代為開啟）才結束維護；結束後依 DR-01 重新開啟
+- 重要度：高
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：維護抑制一直留在生命週期檔，直到使用者手動開 App（或安裝程式以 `/R` 代為開啟）啟動的 Runtime 結束維護。這時 Runtime 記下結果：來源版本、執行中的版本，以及是否已套用（有目標版本時以「執行中的版本 = 目標版本」判斷；安裝程式直接要求的更新以「版本有變」判斷；解除安裝為 `null`）。接著依資料庫重寫生命週期檔以清除維護抑制，並刪除 `<資料目錄>\updates`。停止意圖仍在，之後由 Supervisor 依 DR-01 核對，再依各 Workspace 的「完全退出後自動續跑」續跑，不因為是更新就全部續跑。監護與登入啟動入口看到維護抑制都不拉起 Runtime；兩者並存時，`guardian::suppression_of` 改為優先回報較具體的 `Maintenance`。
+- 理由：驗收條件是「更新期間監護與登入啟動不會拉起 Runtime」。安裝時間不定，可能跨越重新登入，以手動開啟作為結束點最保守，也與 DR-01「完全退出後只有手動開 App 才重新開啟」一致。
+- 替代方案：(1) 以版本變化自動結束維護（任何啟動方式都可以）：安裝程式還沒換完檔案時，監護就可能拉起舊版。(2) 更新後一律續跑全部 Workspace：違反各 Workspace 設定。
+- 影響：安裝程式被取消、而使用者遲遲沒有開 App 時，登入啟動會一直受抑制，直到下次手動開啟。升級前的版本沒有這張表，第一次啟動時 migration 37 建立空表。
+- 審閱：未審
+
+### AI-375：解除安裝由 NSIS hook 執行 `baton-runtime.exe maintenance prepare-uninstall`；登入啟動的偏好保留在資料目錄中
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：
+  - **PREUNINSTALL hook**（更新模式除外）執行準備步驟：
+    - 有 Runtime：要求 `uninstall` 維護。Runtime 執行停止流程、移除 HKCU Run 登記、進入 `ready` 後結束，準備步驟等它不再回應。
+    - 沒有 Runtime：直接在生命週期檔加上維護抑制（保留既有的停止抑制；讀不懂的檔案另記為停止）。
+    - 兩種情況最後都等 Runtime 與監護的程序結束（依 `guardian\runtime.json`、`guardian.json`），再移除一次登記。
+    - 生命週期檔已有更新的維護時，什麼都不做。
+    - 每一步失敗都只記下來，不讓解除安裝程式失敗。
+  - **PREINSTALL hook**：覆蓋安裝時以同一個程式的 `prepare-update` 讓舊版完成更新的維護（不下載），並等程序結束。
+  - **登入啟動的偏好**：留在控制資料庫，不改成關閉；重新安裝後第一次手動開啟時，依偏好重新登記。
+  - **資料目錄與埠**：取自環境變數，沒有設定時用預設值，不解析 HKCU Run 的命令列。
+- 理由：
+  - Tauri 的解除安裝程式只檢查 `baton-desktop.exe` 是否在執行。Runtime 與監護不先結束，檔案會刪不掉，監護也可能在刪檔途中拉起 Runtime。
+  - 準備步驟放在 Runtime 執行檔，可以沿用登錄、桌面用戶端與生命週期檔的既有程式碼。
+  - 資料目錄保留，偏好也一併保留，與「資料預設保留」一致。
+- 替代方案：
+  - (1) hook 直接 `taskkill`：等同崩潰，下次會走崩潰恢復，也不尊重停止流程。
+  - (2) 解除安裝時把偏好改成關閉：重新安裝後要再開一次。
+  - (3) 從 HKCU Run 的命令列解析資料目錄：只有開啟登入啟動時才有這個值，而且自訂資料目錄只有開發者會用。
+- 影響：
+  - 使用自訂資料目錄（`BATON_DATA_DIR`）的安裝，準備步驟找不到它的 Runtime，只能靠 Tauri 解除安裝程式本身刪除 HKCU Run 的 `Baton` 值。
+  - 重新安裝並開啟後，若偏好是開啟，會自動恢復登入啟動。
+- 審閱：未審
+
+### AI-376：安裝資料夾沿用 Tauri 的預設 `%LOCALAPPDATA%\Baton`，與資料目錄相同
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：不自訂 NSIS 樣板，單使用者安裝的預設安裝資料夾維持 Tauri 的 `$LOCALAPPDATA\${PRODUCTNAME}`。這個位置與 spec D-17 的資料目錄預設 `%LOCALAPPDATA%\Baton` 相同。
+- 理由：已查看 Tauri 2.12 的 NSIS 樣板。解除安裝程式只刪除它安裝的檔案與 `uninstall.exe`，再以不遞迴的 `RMDir` 移除安裝資料夾，所以資料目錄的內容不會被刪除。「刪除應用程式資料」的勾選只刪除 `%LOCALAPPDATA%\app.baton.desktop`（WebView 資料）。若要換安裝資料夾，就得維護一份自訂樣板，每次升級 Tauri 都要同步。
+- 替代方案：自訂樣板改成 `%LOCALAPPDATA%\Programs\Baton`，執行檔與資料分開較乾淨，但要長期維護樣板。
+- 影響：資料目錄裡會混著執行檔。日後若 Tauri 的解除安裝程式改成遞迴刪除安裝資料夾，資料會被刪掉；升級 Tauri 時必須重新確認（已記在開發指南）。
+- 審閱：未審
+
+### AI-377：維護與更新的 API、事件、資料形狀與 harness 擴充
+- 重要度：低
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：
+  - **端點**：`GET /api/v1/updates`（檢查結果 + `maintenance` + `last_maintenance`；不回傳下載網址與簽章）、`POST /api/v1/updates/apply`（`{ version }`）、`POST /api/v1/maintenance`（`{ kind }`）。錯誤代碼：`update_not_available`、`updates_unconfigured`、`update_download_failed`、`stop_intent_active`、`maintenance_in_progress`。
+  - **事件與備份**：`maintenance` 聚合有 `maintenance_requested`、`maintenance_ready`、`maintenance_failed`、`maintenance_finished`。`BackupTrigger` 新增 `pre_update`。
+  - **健康查詢**：`version` 改報 Runtime 的版本（`RuntimeOptions::app_version`）。
+  - **桌面殼指令**：`update_status`、`update_apply`、`update_install`。
+  - **Web UI**：主區頂端的 `UpdateNotice`（每 60 秒讀一次）、`UpdateProgress`（每 0.5 秒讀一次，沿用完全退出的停止進度）、設定區的 `UpdateSettings`。解除安裝的維護沒有畫面。重新開啟後的結果通知只在同一次 Runtime 啟動內顯示。
+  - **Harness**：`FakeUpdateSource`、`check_updates`、`install_version`、`HarnessBuilder::exit_linger`。
+- 理由：更新與維護是同一件事的兩面，放在同一組端點；版本由選項注入，harness 才能模擬「安裝程式換上新版本」。
+- 替代方案：把維護放進 `GET /api/v1/lifecycle`：生命週期總覽已經很大，而且更新通知需要的是檢查結果。
+- 影響：其他平行的票若也新增第 37 個 migration，整合時依編號規則順延後合併的那一個。
+- 審閱：未審
+
+### AI-378：桌面殼套用更新時記住最後看到的「準備套用」安裝程式；等 Runtime 結束逾時也繼續
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：`update_install` 先向 Runtime 讀更新狀態；Runtime 已不回應時，改用殼在 `update_status` 最後一次看到的「準備套用」的安裝程式路徑（只接受 Runtime 回報過的路徑，Web UI 不能指定）。之後等 Runtime 不再回應最多 20 秒，逾時也照樣以 `/P /UPDATE /R` 執行安裝程式（PREINSTALL hook 會再等 Runtime 與監護結束），然後結束 App。
+- 理由：Runtime 在維護就緒約 5 秒後結束；有停止異常時要等使用者按「仍要安裝更新並重新開啟」，那時 Runtime 多半已不在，殼若只問 Runtime 就無法套用。讓殼記住 Runtime 自己回報的路徑，比延長 Runtime 的結束時間或讓殼讀資料庫都簡單。
+- 替代方案：(1) 有停止異常時 Runtime 不自行結束：完全退出的結束規則要分兩套。(2) 由 Web UI 傳入路徑：等於讓 UI 能要求殼執行任意檔案。
+- 影響：App 在「準備套用」之後被關掉再開，就需要重新開啟（結束維護）後再更新一次。
+- 審閱：未審
+
+### AI-379：建置與安裝程式冒煙測試的細節
+- 重要度：低
+- 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
+- 決策：
+  - **建置腳本**：`scripts/build.mjs` 只有在 `TAURI_SIGNING_PRIVATE_KEY` 與 `BATON_UPDATE_PUBKEY` 都設定時，才另外寫出 `target/tauri.updater.conf.json`（`createUpdaterArtifacts` + `plugins.updater` 的公鑰與清單網址）並交給 Tauri CLI。Tauri CLI 要產生 `.sig` 一定要有這段設定，也會核對私鑰與公鑰是否成對。因為 `generate_context!` 需要，`src-tauri` 加了 `serde_json`。
+  - **NSIS hook**：以 `nsExec::Exec` 隱藏執行，檔案存成含 BOM 的 UTF-8，讓 makensis 正確讀取中文。hook 執行的是舊版安裝裡的 `baton-runtime.exe`，從沒有 `maintenance` 子命令的舊版升級時不會停止程序；產品尚未發行，影響不大。
+  - **冒煙測試**：`scripts/smoke-installer.mjs` 以 API 開啟登入啟動，不直接寫登錄，因為 Runtime 每次啟動都會讓登記與偏好一致。以下情形拒絕執行：以系統管理員身分執行、已有 HKCU Run 的 `Baton` 值、已有 Baton 的解除安裝機碼、已有 `HKCU\Software\baton\Baton`。結束時清掉這次留下的登錄與暫存資料夾。
+- 理由：沒有設定更新來源的建置不應產生半套的更新設定。冒煙測試會動到真實使用者的登錄，必須避開已有的安裝。
+- 替代方案：冒煙測試直接寫 HKCU Run：可能被 Runtime 啟動時的補正改掉，與真實情境不同。
+- 影響：本機已在 2026-10-22 實際執行，安裝、啟動、解除安裝、Run 值移除、資料保留都通過。無法分辨 Run 值是被我們的 hook 移除，還是被 Tauri 解除安裝程式本身移除，但 `lifecycle.json` 留下的 `maintenance: uninstall` 證明 hook 有執行。
+- 審閱：未審
+
+### AI-380：票 34 整合 rebuild/v1（票 42）：`maintenance` 順延為第 38 個 migration、AI 編號改為 AI-371～AI-379
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 整合（run R128-34-integrate）
+- 決策：(1) 整合分支併入票 42，第 37 個 migration 是 `project_understanding`（新建 `understanding_item`、`understanding_projection` 與一個觸發器）。本票的 `maintenance` 順延為第 38 個、排在 `project_understanding` 之後；兩者沒有共用的資料表，都不需要 `foreign_keys=OFF`，都會套用。migration 註解與開發指南（目錄表與〈更新與解除安裝〉一節）的「migration 37」改為 38。(2) 本票條目原寫成 AI-362～AI-370，與票 42 的 AI-362～AI-370 同號，現改為 AI-371～AI-379，移到票 42 的 AI-370 之後；條目內文沒有引用本票自己的編號，本票的程式碼、文件與票面也沒有引用。git 自動合併時把原 AI-370 的 `- 審閱：未審` 行併掉了，改以本票分支上的原文為準補回。整合分支的條目逐字未動。(3) 衝突處理：`baton-api` 的模組宣告與 `ApiState` 欄位、`baton-runtime` 組裝 `ApiState` 的欄位、`baton-store` 的 migration 清單、Web 的 `RuntimeClient` 型別交集與 `App.test.tsx` 的 fixture 匯入、桌面殼的 `baton_api` 匯入，都是兩邊並列保留；開發指南的目錄表以整合分支的列為底，補回本票在 `baton-domain`（`maintenance.rs`）、`baton-ports`（`UpdateSource`）、`baton-store`（`maintenance`）與 `baton-api`（`/api/v1/updates`、`/api/v1/maintenance`）的描述。其餘檔案由 git 自動合併。本次只整合、不新增行為。
+- 理由：依編號規則，後合併的票順延到整合分支的最大編號之後；不修改整合分支已有的 migration 與條目。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票較早的分支（migration 37 是 `maintenance`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R127）提到的 AI-362～AI-370、migration 37 是改號前的編號，分別對應現在的 AI-371～AI-379、migration 38。
+- 審閱：未審
+
+### AI-381：七個內建 Playbook 的 Stage 內容、Gate 分類與證據種類
 - 重要度：中
 - 時間／階段：2026-10-23，票 43 實作
 - 決策：依 issue §9.1 的表格，每個流程步驟成為一個 Stage（key 用英文、title 用表格原文），另內建 12 個方法（設計問答、領域詞彙、替代設計、垂直切片、行為測試、真實介面驗證、雙軸審查、重現與最小化、可否證假說、基線量測、一手來源研究、探索章程）。每個 Stage 至少一項 exit check，證據只有三種且都由 Runtime 查驗：已登記的成果（artifact）、已回答的裁定（decision）、已通過成果接受的 Task（task_accepted）。Gate 分類：「裁定」是裁定 Gate；真實介面驗證、獨立審查、整合、原案例與回歸驗證、契約核對、同條件比較、探索測試的重現確認與修復回歸是安全 Gate；其餘為一般 Stage。預算一律最多失敗 3 次；驗證類 Stage 失敗回到實作或假說 Stage。
@@ -3349,7 +3465,7 @@
 - 影響：內容放在 `crates/baton-domain/src/workflow/builtin.rs`；修改後 Runtime 啟動會追加新版本，進行中的 Workflow 不受影響。
 - 審閱：未審
 
-### AI-372：「非開發工作不套用開發流程」以 Task 的工作種類判斷；情境由 Controller 指定
+### AI-382：「非開發工作不套用開發流程」以 Task 的工作種類判斷；情境由 Controller 指定
 - 重要度：中
 - 時間／階段：2026-10-23，票 43 實作
 - 決策：Controller 以 `start_workflow` 指定情境（七種之一）與理由，Router 選該情境 Playbook 的最新版本。綁定的 Task 是研究或文件（票 20 的 TaskKind）時，開發情境（功能、缺陷、遷移、效能、探索測試）一律拒絕（`playbook_not_applicable`），只能用調查或需求釐清。只綁 Goal 的 Workflow 不受此限制。同一個 Task 同時最多一個未完成的 Workflow。
@@ -3358,7 +3474,7 @@
 - 影響：研究或文件 Task 不會被套用含「修改程式」的流程；Controller 若誤把開發工作建成研究 Task，需要另建 development Task。
 - 審閱：未審
 
-### AI-373：每種情境一個 Playbook；使用者只能發布既有 Playbook 的新版本，不能改情境
+### AI-383：每種情境一個 Playbook；使用者只能發布既有 Playbook 的新版本，不能改情境
 - 重要度：中
 - 時間／階段：2026-10-23，票 43 實作
 - 決策：Playbook 以 key 識別，版本只追加（資料表 trigger 禁止更新與刪除），識別為 `pbv_<key>_v<版本>`。使用者以 `POST /api/v1/playbooks` 發布新版本：驗證通過才追加，內容相同不新增。只能升級已存在的 key，而且不能改變情境，所以每種情境永遠只有一個 Playbook，Router 的選擇是唯一的。內建內容變更時，以「與上一個內建版本比較」決定是否追加，因此使用者發布的較新版本不會因重啟而被內建內容蓋過（但內建內容日後真的改變時，新的內建版本會成為最新）。
@@ -3367,7 +3483,7 @@
 - 影響：UI 目前只顯示 Workflow 與「已有新版」，沒有發布 Playbook 的畫面（以 API 發布）。
 - 審閱：未審
 
-### AI-374：Stage 推進的判定規則與預算計算
+### AI-384：Stage 推進的判定規則與預算計算
 - 重要度：中
 - 時間／階段：2026-10-23，票 43 實作
 - 決策：Controller 回報 `passed` 時，每項 exit check 都有查驗通過的證據才記為 passed 並前進；有裁定尚未回答的記 blocked（Workflow 阻擋，之後以已回答的裁定再回報即可解除）；其餘記 incomplete（留在原 Stage，列出缺少的證據與原因）。`failed` 與 `blocked` 必須附說明。只有 failed 計入 Stage 預算；累計失敗達上限時 Workflow 阻擋，且之後缺證據的回報不會解除阻擋，只有附齊證據的 passed 才繼續。每次回報都追加一筆 stage_attempt，必須帶目前的 revision，而且只能回報目前 Stage。
@@ -3376,7 +3492,7 @@
 - 影響：預算用盡後若 Controller 補齊證據，Workflow 會繼續，不需要使用者介入。
 - 審閱：未審
 
-### AI-375：只有使用者能在桌面跳過 Stage；裁定與安全 Gate 連使用者也不能跳過
+### AI-385：只有使用者能在桌面跳過 Stage；裁定與安全 Gate 連使用者也不能跳過
 - 重要度：高
 - 時間／階段：2026-10-23，票 43 實作
 - 決策：Controller 沒有跳過工具；使用者在流程視圖附原因跳過一般 Stage（`POST …/workflows/{id}/skip`），原因保存在 stage_attempt（記錄者 `desktop`）。裁定 Gate 與安全 Gate 一律拒絕跳過（`stage_not_skippable`）。「使用者明定的裁定或安全門檻」以 Playbook 版本中的 `gate` 欄位表達：使用者可發布把某些 Stage 標為 Gate 的新版本。
@@ -3385,7 +3501,7 @@
 - 影響：Controller 想跳過時只能以 propose_decision_request 詢問使用者，由使用者在流程視圖操作。
 - 審閱：未審
 
-### AI-376：allowed_actions 與 entry_conditions 本票只宣告並交給 Agent，不用來收窄權限
+### AI-386：allowed_actions 與 entry_conditions 本票只宣告並交給 Agent，不用來收窄權限
 - 重要度：中
 - 時間／階段：2026-10-23，票 43 實作
 - 決策：Stage 的 `allowed_actions`、`entry_conditions`、`expected_outputs` 與 exit check 說明會放進 Worker Prompt（Context Builder 的必要項目）與 Controller 的工具回應，但不參與 D-08 的允許工具清單或權限提示判定。進入條件由 Runtime 以 Stage 順序保證（只能回報目前 Stage），文字條件不另行機器檢查。Gate 失效與重驗（票 50）、雙軸 Review（票 44）、每階段用量指標的 `stage` 欄位都不在本票。
@@ -3394,7 +3510,7 @@
 - 影響：Worker 若做了 Stage 未允許的動作，目前只靠 Workspace 授權與權限提示攔截。
 - 審閱：未審
 
-### AI-377：方法與 Playbook 內容只存控制資料庫；內建版本的登錄不追加事件
+### AI-387：方法與 Playbook 內容只存控制資料庫；內建版本的登錄不追加事件
 - 重要度：低
 - 時間／階段：2026-10-23，票 43 實作
 - 決策：方法與 Playbook 的完整定義以 JSON 存在 `method_version`／`playbook_version`，附內容的 SHA-256，沒有另存為 Artifact。Runtime 啟動時登錄內建內容不追加事件（版本列本身就是不可變紀錄），使用者發布的 Playbook 版本才追加 `playbook_version_published` 事件；Workflow 開始與每次 stage attempt 都追加事件。
@@ -3403,7 +3519,7 @@
 - 影響：備份與還原沿用控制資料庫即可涵蓋方法與 Playbook。
 - 審閱：未審
 
-### AI-378：換帳號後從目前 Stage 接續：Controller 背景與 Worker Prompt 都帶入目前 Stage
+### AI-388：換帳號後從目前 Stage 接續：Controller 背景與 Worker Prompt 都帶入目前 Stage
 - 重要度：中
 - 時間／階段：2026-10-23，票 43 實作
 - 決策：Workflow 與 Run、帳號無關，狀態只在控制資料庫。新的 Controller Session（含換帳號的替代 Session）在背景中看到「進行中的 Workflow」：Workflow 識別、Playbook 與版本、revision、目前 Stage 與已完成的 Stage，並被要求不要重跑。Worker Run 的 Prompt 在契約之後加入目前 Stage 的說明（Context Builder 的必要項目，receipt 中 `kind = stage`），交接的 successor 收到的是同一個 Stage。stage_attempt 記下 Controller 那一輪的帳號，方便看出跨帳號的接續。
@@ -3412,13 +3528,20 @@
 - 影響：Controller 背景 Prompt 會變長（每個未完成的 Workflow 一行）。
 - 審閱：未審
 
-### AI-379：流程的資料形狀、API、錯誤碼、migration 38 與 UI 位置
+### AI-389：流程的資料形狀、API、錯誤碼、migration 39 與 UI 位置
 - 重要度：低
 - 時間／階段：2026-10-23，票 43 實作
-- 決策：migration 38 `methods_and_workflows` 建立 `method_version`、`playbook_version`、`workflow_instance`（固定 Playbook 版本與綁定的 trigger、同一 Task 最多一個未完成的部分唯一索引）與 `stage_attempt`（只追加）。Controller 工具 `start_workflow`、`record_stage_result`、`get_workflows`；桌面 API `GET/POST /api/v1/playbooks`、`GET /api/v1/workspaces/{id}/workflows`、`POST …/workflows/{workflow_id}/skip`；錯誤碼 `workflow_invalid`、`playbook_invalid`、`playbook_not_applicable`、`playbook_not_found`、`workflow_not_found`、`stage_not_current`、`workflow_revision_mismatch`、`stage_not_skippable`、`workflow_completed`、`workflow_exists`。Workflow 至少綁一個 Goal（只給 Task 時由 Task 決定 Goal）。UI 在側欄每個 Workspace 的「流程」，桌面殼指令 `workspace_workflows`、`workflow_skip_stage`。
+- 決策：migration 39 `methods_and_workflows` 建立 `method_version`、`playbook_version`、`workflow_instance`（固定 Playbook 版本與綁定的 trigger、同一 Task 最多一個未完成的部分唯一索引）與 `stage_attempt`（只追加）。Controller 工具 `start_workflow`、`record_stage_result`、`get_workflows`；桌面 API `GET/POST /api/v1/playbooks`、`GET /api/v1/workspaces/{id}/workflows`、`POST …/workflows/{workflow_id}/skip`；錯誤碼 `workflow_invalid`、`playbook_invalid`、`playbook_not_applicable`、`playbook_not_found`、`workflow_not_found`、`stage_not_current`、`workflow_revision_mismatch`、`stage_not_skippable`、`workflow_completed`、`workflow_exists`。Workflow 至少綁一個 Goal（只給 Task 時由 Task 決定 Goal）。UI 在側欄每個 Workspace 的「流程」，桌面殼指令 `workspace_workflows`、`workflow_skip_stage`。
 - 理由：沿用票 42 的模式（Controller 專屬工具 + 桌面檢視 API + 側欄入口）。
 - 替代方案：把流程放進「工作」分頁的 Task 詳細面板。Goal 層級的 Workflow 沒有對應的 Task，放不進去。
-- 影響：與同時進行的票整合時，migration 編號可能需要順延。
+- 影響：與同時進行的票整合時，migration 編號可能需要順延（見 AI-390）。
+### AI-390：票 43 整合 rebuild/v1（票 34）：`methods_and_workflows` 順延為第 39 個 migration、AI 編號改為 AI-381～AI-389
+- 重要度：低
+- 時間／階段：2026-10-23，票 43 實作
+- 決策：票 34 先合併進整合分支，佔用了第 38 個 migration（`maintenance`）與 AI-371～AI-380。本票的 migration 改排在 `maintenance` 之後成為第 39 個，AI 決策改編為 AI-381～AI-389（內容不變）。Web UI、開發指南的衝突兩邊都保留。
+- 理由：已合併的 migration 順序不能改變，否則既有資料庫的 `schema_migrations` 會對不上。
+- 替代方案：無。
+- 影響：無行為差異。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

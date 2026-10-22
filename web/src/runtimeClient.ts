@@ -1708,7 +1708,7 @@ export interface SharedSettingsClient {
 }
 
 /** 備份的觸發原因（對應 Rust 的 BackupTrigger）。 */
-export type BackupTrigger = "daily" | "pre_migration" | "milestone";
+export type BackupTrigger = "daily" | "pre_migration" | "milestone" | "pre_update";
 
 /** 備份被保留的原因（對應 Rust 的 RetentionReason）。 */
 export type RetentionReason = "daily" | "weekly" | "latest_pre_migration";
@@ -1751,6 +1751,72 @@ export interface BackupStatus {
 /** 備份與還原演練：唯讀查詢 Runtime 回報的狀態。 */
 export interface BackupClient {
   backupStatus(): Promise<BackupStatus>;
+}
+
+/** 更新檢查的結果：尚未檢查、已是最新、有新版本、這個版本沒有設定更新來源、檢查失敗。 */
+export type UpdateCheckStatus = "not_checked" | "up_to_date" | "available" | "unconfigured" | "failed";
+
+export type MaintenanceKind = "update" | "uninstall";
+
+/** 維護階段：停止中（與完全退出相同的停止流程）、準備套用（停止與更新前備份都完成）、失敗（不套用）。 */
+export type MaintenancePhase = "stopping" | "ready" | "failed";
+
+/** 可更新的版本（對應 Rust 的 AvailableUpdateView）。 */
+export interface AvailableUpdate {
+  version: string;
+  notes: string | null;
+  published_at: string | null;
+}
+
+/** 進行中的維護（對應 Rust 的 Maintenance）；時間是 UTC 毫秒。 */
+export interface Maintenance {
+  kind: MaintenanceKind;
+  phase: MaintenancePhase;
+  requested_at: number;
+  from_version: string;
+  /** 不經 App、由安裝程式直接要求的更新不知道目標版本。 */
+  target_version: string | null;
+  package_path: string | null;
+  backup_id: string | null;
+  /** 失敗原因或附註。 */
+  message: string | null;
+  completed_at: number | null;
+}
+
+/** 最近一次結束的維護（對應 Rust 的 MaintenanceOutcome）。 */
+export interface MaintenanceOutcome {
+  kind: MaintenanceKind;
+  from_version: string;
+  /** 結束維護時（重新開啟後）執行中的版本。 */
+  running_version: string;
+  target_version: string | null;
+  /** 更新是否已套用；解除安裝後又重新安裝時為 null。 */
+  applied: boolean | null;
+  requested_at: number;
+  finished_at: number;
+  backup_id: string | null;
+  message: string | null;
+}
+
+/** 更新狀態（對應 Rust 的 UpdateStatusView）：檢查結果（只通知）與維護。 */
+export interface UpdateStatusView {
+  current_version: string;
+  status: UpdateCheckStatus;
+  available: AvailableUpdate | null;
+  checked_at: number | null;
+  next_check_at: number | null;
+  error: string | null;
+  maintenance: Maintenance | null;
+  last_maintenance: MaintenanceOutcome | null;
+}
+
+/** 更新（spec D-19）：Runtime 只檢查與通知，使用者同意後才下載、停止並由桌面殼安裝。 */
+export interface UpdateClient {
+  updateStatus(): Promise<UpdateStatusView>;
+  /** 使用者同意更新到 `version`：先下載並驗證安裝程式（失敗時拋出錯誤，工作沒有停止），通過才開始維護。 */
+  applyUpdate(version: string): Promise<UpdateStatusView>;
+  /** 維護「準備套用」後由桌面殼等 Runtime 結束、執行安裝程式並結束 App；未準備好時拋出錯誤。 */
+  installUpdate(): Promise<void>;
 }
 
 /** 對話輸入的種類：使用者訊息、工作事件（Worker 成果或阻礙）、Controller 的回覆。 */
@@ -2275,7 +2341,8 @@ export type AppClient = RuntimeClient &
   ObservabilityClient &
   UnderstandingClient &
   WorkflowClient &
-  ConversationClient;
+  ConversationClient &
+  UpdateClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
 export function errorCode(error: unknown): string | null {
@@ -2299,6 +2366,7 @@ export const FULL_EXIT_EVENT = "baton://full-exit-requested";
 const SHARED_SETTINGS_PATH = "/api/v1/shared-settings";
 const BACKUPS_PATH = "/api/v1/backups";
 const RECOVERY_PATH = "/api/v1/recovery";
+const UPDATES_PATH = "/api/v1/updates";
 const authorizationPath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}/authorization`;
 const workspacePath = (workspaceId: string) => `${WORKSPACES_PATH}/${encodeURIComponent(workspaceId)}`;
 const taskPath = (workspaceId: string, taskId: string) => `${workspacePath(workspaceId)}/tasks/${encodeURIComponent(taskId)}`;
@@ -2461,6 +2529,12 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     quitApp: async () => {},
     // 系統匣只存在於桌面殼，瀏覽器裡不會收到完全退出事件
     onFullExitRequested: () => () => {},
+    updateStatus: () => send(UPDATES_PATH),
+    applyUpdate: (version) => send(`${UPDATES_PATH}/apply`, { method: "POST", body: { version } }),
+    // 安裝程式由桌面殼執行；瀏覽器開發模式沒有殼
+    installUpdate: async () => {
+      throw new Error("只有桌面 App 能安裝更新");
+    },
     taskVerification: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/verification`),
     acceptTask: (workspaceId, taskId, { basis, note }) =>
       send(`${taskPath(workspaceId, taskId)}/verification/accept`, { method: "POST", body: { basis, note } }),
@@ -2599,6 +2673,9 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
       // 註冊是非同步的；取消訂閱時等註冊完成再解除
       return () => void registered.then((unlisten) => unlisten());
     },
+    updateStatus: () => call<UpdateStatusView>("update_status"),
+    applyUpdate: (version) => call<UpdateStatusView>("update_apply", { version }),
+    installUpdate: () => call<void>("update_install"),
     taskVerification: (workspaceId, taskId) => call<VerificationView>("task_verification", { workspaceId, taskId }),
     acceptTask: (workspaceId, taskId, { basis, note }) =>
       call<VerificationView>("task_accept", { workspaceId, taskId, request: { basis, note } }),

@@ -1,7 +1,8 @@
 //! 正式執行環境使用的 Port。
 //!
 //! 目前只有系統時鐘、平台辨識、DPAPI 憑證保護、目錄檢查與建立、成果與工作目錄檔案讀寫、Claude Code／Git 環境探測、驗證命令執行、
-//! Claude Code Adapter、worktree 建立與整合合併（git CLI，票 20）、Windows 登入識別與登入啟動登記（票 33）是真實實作；其餘 Port 的正式版由後續的票提供，
+//! Claude Code Adapter、worktree 建立與整合合併（git CLI，票 20）、Windows 登入識別與登入啟動登記（票 33）、
+//! 簽章更新的來源（票 34；建置時設定才啟用）是真實實作；其餘 Port 的正式版由後續的票提供，
 //! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
 
 use std::path::Path;
@@ -62,6 +63,20 @@ impl StartupRegistration for Unavailable {
     }
     fn set_registered(&self, _enabled: bool) -> PortResult<()> {
         Err(PortError::NotImplemented("StartupRegistration"))
+    }
+}
+
+#[async_trait]
+impl UpdateSource for Unavailable {
+    async fn latest(&self) -> PortResult<baton_domain::maintenance::ReleaseInfo> {
+        Err(PortError::NotImplemented("UpdateSource"))
+    }
+    async fn download(
+        &self,
+        _release: &baton_domain::maintenance::ReleaseInfo,
+        _dest_dir: &Path,
+    ) -> PortResult<std::path::PathBuf> {
+        Err(PortError::NotImplemented("UpdateSource"))
     }
 }
 
@@ -225,6 +240,11 @@ pub fn production_ports(data_dir: &Path, port: u16) -> Ports {
         guardian_probe: Arc::new(GuardianInstanceProbe { data_dir: data_dir.to_path_buf() }),
         login_session,
         startup_registration,
+        // 建置時設定了更新清單與簽章公鑰才連線檢查；否則是「未設定」（票 34）
+        update_source: match crate::update_source::configured() {
+            Some(source) => Arc::new(source),
+            None => unavailable.clone(),
+        },
     }
 }
 

@@ -404,7 +404,7 @@ fn active_workspace(conn: &Connection, workspace_id: &str) -> rusqlite::Result<O
     Ok(load_workspaces(conn)?.into_iter().find(|w| w.id == workspace_id && w.status == WorkspaceStatus::Active))
 }
 
-fn apply_change(tx: &Transaction<'_>, change: &LifecycleChange) -> rusqlite::Result<()> {
+pub(crate) fn apply_change(tx: &Transaction<'_>, change: &LifecycleChange) -> rusqlite::Result<()> {
     if let Some(state) = &change.state {
         save_lifecycle(tx, state)?;
     }
