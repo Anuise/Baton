@@ -219,6 +219,7 @@ async fn workspace_path(state: &ApiState, id: &str) -> Result<std::path::PathBuf
 }
 
 /// 依決策權限表判定 Controller 的動作（事項與對象由 Runtime 推導）。
+#[allow(clippy::too_many_arguments)]
 async fn decide(
     state: &ApiState,
     scope: &ControllerScope,
