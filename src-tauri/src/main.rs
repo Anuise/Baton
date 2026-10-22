@@ -17,7 +17,7 @@ use baton_api::{
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
-    RecoveryStatusView, MetricsResponse, TimelineResponse,
+    RecoveryStatusView, MetricsResponse, TimelineResponse, RunContextView,
     ReconcileRequest, UnderstandingView,
 };
 use baton_client::{
@@ -557,6 +557,19 @@ async fn run_cancel(
         return Err(reason.clone());
     }
     link.client.cancel_run(&workspace_id, &run_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 在 Run 詳情查看 context receipt 與實際 Prompt（票 39）。
+#[tauri::command]
+async fn run_context(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    run_id: String,
+) -> Result<RunContextView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.run_context(&workspace_id, &run_id).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 讀取「對話」分頁：Workspace 與 Controller 的長期對話（票 16）。
@@ -1117,6 +1130,7 @@ fn main() {
             task_verification,
             task_accept,
             run_cancel,
+            run_context,
             conversation_view,
             conversation_send_message,
             scheduling_overview,

@@ -819,6 +819,38 @@ export interface IntegrationEntry {
   finished_at: number | null;
 }
 
+/** Context Builder 組裝 Prompt 的項目類型。 */
+export type ContextItemKind = "contract" | "handoff" | "checkpoint" | "decision" | "lesson" | "messages" | "evidence";
+
+/** context receipt 的一個項目；`omitted_reason` 目前只有 `budget_exceeded`。 */
+export interface ContextItem {
+  kind: ContextItemKind;
+  ref_id: string;
+  /** 沒有版本的項目（例如未讀訊息摘要）為 null。 */
+  version: number | null;
+  title: string;
+  tokens: number;
+  status: "loaded" | "omitted";
+  omitted_reason: string | null;
+}
+
+/** Run 啟動時保存的 context receipt：載入了哪些項目與版本、因預算省略了什麼；`items` 依優先序排列。 */
+export interface ContextReceipt {
+  run_id: string;
+  task_id: string;
+  built_at: number;
+  budget_tokens: number;
+  used_tokens: number;
+  prompt_sha256: string;
+  items: ContextItem[];
+}
+
+/** Run 的 context receipt 與實際交給 Worker 的完整 Prompt。 */
+export interface RunContext {
+  receipt: ContextReceipt;
+  prompt: string;
+}
+
 export interface TaskDetail {
   task: TaskView;
   /** 由舊到新，含目前版本。 */
@@ -854,6 +886,8 @@ export interface TaskClient {
   dispatchTask(workspaceId: string, taskId: string): Promise<DispatchResult>;
   /** 要求取消 Run；已啟動的 Run 要等程序確認停止才會變 cancelled。 */
   cancelRun(workspaceId: string, runId: string): Promise<RunView>;
+  /** Run 的 context receipt；Context Builder 之前建立的 Run 沒有，Runtime 回 404（context_receipt_not_found）。 */
+  runContext(workspaceId: string, runId: string): Promise<RunContext>;
   /** verifying 的 Task 目前的驗證資料：宣告的檢查、成果 manifest、接受依據與驗證紀錄。 */
   taskVerification(workspaceId: string, taskId: string): Promise<VerificationView>;
   /** 手動接受成果；依據過期時 Runtime 回 409。 */
@@ -2264,6 +2298,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     retryRecovery: () => send(`${RECOVERY_PATH}/retry`, { method: "POST" }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
+    runContext: (workspaceId, runId) => send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/context`),
     lifecycleStatus: () => send(LIFECYCLE_PATH),
     requestFullExit: () => send(`${LIFECYCLE_PATH}/exit`, { method: "POST" }),
     updateWorkspaceLifecycle: (workspaceId, autoResumeAfterExit) =>
@@ -2396,6 +2431,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     recoveryStatus: () => call<RecoveryStatusView>("recovery_status"),
     retryRecovery: () => call<RecoveryStatusView>("recovery_retry"),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
+    runContext: (workspaceId, runId) => call<RunContext>("run_context", { workspaceId, runId }),
     lifecycleStatus: () => call<LifecycleStatus>("lifecycle_status"),
     requestFullExit: () => call<LifecycleStatus>("lifecycle_exit"),
     updateWorkspaceLifecycle: (workspaceId, autoResumeAfterExit) =>

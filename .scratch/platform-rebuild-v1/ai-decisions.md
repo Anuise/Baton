@@ -3151,7 +3151,52 @@
 - 影響：用本票較早的分支（migration 33 是 `controller_handoff`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R113）提到的 AI-327～AI-331 是改號前的編號，分別對應現在的 AI-344～AI-348。
 - 審閱：未審
 
-### AI-350：「已確認」必須有 Runtime 查驗過的來源；找不到的來源一律拒絕，沒指定狀態就是假說
+### AI-350：Context Builder 的 token 預算與估計方式
+- 重要度：中
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：每個 Worker Run 的 context 預算固定為 8,000（估計的 token 數），不提供設定。token 以字元估計：非 ASCII 字元（含中文）每字算 1、ASCII 每 4 個字元算 1（無條件進位）；放入一項時以「放入後整個 Prompt 的估計值」判斷是否超出，receipt 的 `used_tokens` 就是最終 Prompt 的估計值。
+- 理由：spec 與票都沒有給數值；8,000 足以放下契約、檢查點、數則決策與教訓與摘要，又讓 Worker 的起始 context 保持聚焦（其餘可用 `search_knowledge`、`read_inbox` 取得）。以字元估計不需要 tokenizer 依賴，且偏保守（中文實際常低於 1 token／字）。
+- 替代方案：(1) 依 Workspace 或模型設定預算——目前沒有需求，之後要調整時只需改常數或加設定；(2) 呼叫 API 計算精確 token——需要網路與帳號額度，不適合在派工交易中做。
+- 影響：預算不夠時省略的項目會記在 receipt；若實際使用發現常被省略，調高常數即可，不影響既有 receipt。
+- 審閱：未審
+
+### AI-351：載入的內容、優先序與相關性排序
+- 重要度：中
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：(1) 優先序（也是 Prompt 中的順序）：Task 契約 → 交接說明（或沒有交接時的最近檢查點）→ 適用決策 → 相關教訓 → 未讀訊息摘要 → 證據索引。契約與交接說明是必要項目，即使超出預算也一定載入；其餘逐項放入，放不下的「整項省略」（不截斷），後面較小的項目仍可放入。(2) 決策與教訓只取有效且適用於該 Run 的條目（已驗證、在有效期間內、範圍為全域或涵蓋該 Task 的 Workspace／Goal／Task，與 `search_knowledge` 相同）；一般知識（`fact`）不主動載入。(3) 相關性：範圍越具體越前面（Task > Goal > Workspace > 全域），同範圍內「標籤出現在 Task 標題或契約文字中」的較前面，再依最後更新時間由新到舊。(4) 「重要約束優先保留」解讀為：決策（使用者定案的判斷）排在教訓之前，兩者都排在訊息與證據之前。
+- 理由：契約與交接說明缺一不可（交接說明含 `confirm_handoff` 指示與延續的檢查點）；決策與教訓是約束，訊息與證據是可以用工具再取得的參考。整項省略讓 receipt 的「載入」與「省略」語意清楚，不會出現半截內容。一般知識量可能很大，留給 Worker 以 `search_knowledge` 查詢。
+- 替代方案：以全文檢索比對契約關鍵字決定相關性——中文分詞不可靠，且範圍已表達大部分相關性；截斷過長的項目——receipt 需要再記錄截斷位置，版本與內容的對應變得模糊。
+- 影響：同一範圍內教訓很多時，最舊且標籤不相符的會先被省略。
+- 審閱：未審
+
+### AI-352：教訓摘要、決策與證據索引的呈現
+- 重要度：低
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：每個決策與教訓以 `〔條目識別 v內容版本〕標題` 開頭，讓 Prompt 中的內容可以對回 receipt。決策放標題與內文；教訓摘要放標題、觸發條件與做法（兩者都空白時改放內文），根因與證據不放。「證據索引」定義為這個 Task 與它直接依賴的 Task 已登記成果的最新版本，每項列出成果識別、版本、名稱、所屬 Task、sha256 前 12 碼與說明，只列索引不放內容。
+- 理由：觸發條件與做法是 Worker 避免重犯需要的部分；證據索引讓 Worker 知道有哪些既有成果可讀，而不佔用預算放入內容。依賴 Task 的成果通常就是這個 Task 的輸入。
+- 替代方案：把知識條目的 `evidence` 欄位列為證據索引——那是條目自己的依據，不是 Worker 可讀的成果；列出整個 Workspace 的成果——與 Task 無關的項目會擠掉預算。
+- 影響：需要根因或證據時，Worker 以 `search_knowledge` 取得完整條目。
+- 審閱：未審
+
+### AI-353：context receipt 的形狀、保存與查看
+- 重要度：中
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：(1) receipt 與 Prompt 在派工的同一個交易中由同一次組裝產生，之後都不再改變；記錄 `run_id`、`task_id`、`built_at`、`budget_tokens`、`used_tokens`、`prompt_sha256`，以及依優先序的全部候選項目（種類、來源識別、版本、標題、估計 token、`loaded`／`omitted` 與省略原因 `budget_exceeded`）。「版本」是契約版本、知識條目的內容版本、成果版本與檢查點的世代；未讀訊息摘要是一個整體、沒有版本。不適用或無效的條目不算候選，不出現在 receipt。(2) 第 35 個 migration `context_receipt`（每個 Run 一列、追加式）；因為要在 `run` 列寫入前插入，`run_id` 外鍵設為 `DEFERRABLE INITIALLY DEFERRED`，四個派工點只需把原本附加未讀摘要的一行換成 Context Builder。(3) 查看：`GET /api/v1/workspaces/{id}/runs/{run_id}/context` 回傳 receipt 與派工 Outbox 中實際交給 Worker 的 Prompt；本票之前建立的 Run 回 404 `context_receipt_not_found`。Web UI 在工作面板的 Run 狀態列提供可展開的「Context receipt」，展開時才載入；桌面殼新增 Tauri 指令 `run_context`。(4) Controller 的輪次不是 Run，不產生 receipt。
+- 理由：同一次組裝保證「receipt 版本與實際載入內容一致」；Prompt 雜湊讓事後可核對。回傳實際 Prompt 符合使用者故事 61「追查 Worker 當時知道什麼」。延遲外鍵避免更動 `RunChange` 與所有建構它的地方。
+- 替代方案：把 receipt 嵌在 RunView 中——每次列出 Run 都要載入全部 receipt；在 `save` 之後另外寫入——四個派工點都要多改一段。
+- 影響：Prompt 會出現在桌面 API 與 UI（只限桌面憑證）；其中可能含未讀訊息主旨與決策內容，與知識分頁、訊息本身的可見範圍相同。
+- 審閱：未審
+
+### AI-354：檢查點的載入時機與未讀摘要的交付標記
+- 重要度：低
+- 時間／階段：2026-10-22，票 39 實作（run R115-39-impl）
+- 決策：(1) 交接時，檢查點仍包含在交接說明中（必要項目），receipt 另列一項 `checkpoint` 記錄延續了哪個檢查點（0 token，避免重複計算）。(2) 沒有交接的派工（例如實作失敗後重派）也載入 Task 最近一筆被接受的檢查點（任一世代），依預算放入；先前只有交接的 successor 會拿到檢查點。(3) 未讀訊息摘要只有放進 Prompt 時才把列出的訊息標為已交付；因預算省略時維持未交付。
+- 理由：票要求每個 Run 都有「最近檢查點」；重派的 Worker 也需要知道上一個 Run 做到哪裡。交付標記代表 Worker 真的被告知過。
+- 替代方案：重派不帶檢查點——Worker 會從頭做或重複已完成的部分。
+- 影響：重派的 Prompt 比以前多一段「最近的檢查點」。
+- 審閱：未審
+
+### AI-355：「已確認」必須有 Runtime 查驗過的來源；找不到的來源一律拒絕，沒指定狀態就是假說
 - 重要度：高
 - 時間／階段：2026-10-22，票 42 實作
 - 決策：專案理解的每一項有四種狀態：`confirmed`、`hypothesis`、`unknown`、`retired`。(1) `confirmed` 至少要有一個來源，否則 422 `understanding_unverified_claim`（資料表另有 CHECK）。(2) 來源二擇一：Workspace 內的檔案（相對路徑，可附行號），或外部來源（`reference` + 必填的 `version`）。檔案來源由 Runtime 經 WorkspaceFs 讀取，版本 = 內容 SHA-256、查驗時間 = 現在，Agent 無法自報；找不到的檔案不論宣稱什麼狀態都拒絕（422 `understanding_source_not_found`），目錄或 Workspace 外的路徑回 422 `understanding_invalid`。(3) `record_understanding` 沒給 `status` 時是 `hypothesis`。(4) 外部來源 Runtime 無法讀取，只記下提供者標明的版本與記錄時間。
@@ -3160,7 +3205,7 @@
 - 影響：Controller 寫 Project Map 時要指向模組裡的代表檔案（例如 `lib.rs`），不能指向目錄。外部來源的「已確認」仍取決於 Controller 自己標的版本。
 - 審閱：未審
 
-### AI-351：投影檔被外部修改、刪除或接入前就存在時，不覆寫而開啟協調；由使用者選擇覆寫或保留外部版本
+### AI-356：投影檔被外部修改、刪除或接入前就存在時，不覆寫而開啟協調；由使用者選擇覆寫或保留外部版本
 - 重要度：高
 - 時間／階段：2026-10-22，票 42 實作
 - 決策：每個投影檔記下 Baton 最後寫入（或採用）的整個檔案雜湊（`baseline_hash`）。比對時檔案仍是基準才寫入；已經是要產生的內容只更新基準；其他情況（修改、刪除、接入前就存在的同名檔）一律**不寫入**，投影轉為 `conflict`，記事件 `understanding_projection_conflict_detected`，並在同一個交易中讓 Controller 對話收到一則工作事件（請它讀檔、把外部修改吸收進專案理解；同一個協調只通知一次，檔案又被改時只再記事件）。只有使用者（桌面憑證）能協調：`overwrite` 以目前的 Baton 內容覆寫並回到 `in_sync`；`keep_external` 轉為 `detached`，Baton 停止寫入與比對這個檔，之後使用者仍可改選 `overwrite`。協調要帶使用者檢視時的檔案雜湊 `expected_external_hash`，與目前檔案不同回 409 `projection_changed`。接入前就存在、Baton 從未寫入過的檔案在協調中的版本記為 0（UI 顯示「Baton 尚未寫入」）。
@@ -3169,16 +3214,16 @@
 - 影響：讀檔與寫檔之間仍有極短的競態窗口（同一把鎖內先讀後寫，外部程式恰好在這之間寫入會被覆寫）；Windows 上沒有可攜的條件寫入，接受這個風險。`detached` 的檔案不再反映專案理解的變更，直到使用者改選覆寫。
 - 審閱：未審
 
-### AI-352：投影的範圍：只在 Git repo；Glossary → `GLOSSARY.md`，Workspace 範圍的決策 → `docs/adr/baton-<條目識別>.md`；Brief 與 Map 不投影
+### AI-357：投影的範圍：只在 Git repo；Glossary → `GLOSSARY.md`，Workspace 範圍的決策 → `docs/adr/baton-<條目識別>.md`；Brief 與 Map 不投影
 - 重要度：中
 - 時間／階段：2026-10-22，票 42 實作
 - 決策：(1) 只有 Workspace 目錄是 Git repo（`WorkspaceFs::inspect_git`）時才產生 repo 內的投影；研究、文件 Workspace 的專案理解只存在控制資料庫與 UI。(2) `GLOSSARY.md`（repo 根目錄）由 Glossary 項目產生：有過 Glossary 項目（或已投影過）才產生；已確認與假說依名稱排序並標示狀態與來源，未知的名詞列在「待確認（未知）」。(3) ADR 由票 37 的知識條目產生：`kind = decision`、範圍是 Workspace、非候選；每個條目一個 `docs/adr/baton-<條目識別>.md`，內容標明狀態（已採用、已撤銷、已淘汰、已被取代）、來源條目與版本、生效時間、內文與證據。決策被撤銷或淘汰時更新檔案內容，不刪除檔案。(4) Project Brief 與 Project Map 不投影成 repo 檔案。(5) 投影檔內的時間一律寫 UTC。
 - 理由：票面寫明「repo 內的 GLOSSARY／ADR」。決策已由票 37 的知識條目保存（含版本、撤銷與取代），ADR 只是它的輸出，不另建一份決策。ADR 檔名用條目識別而不是遞增編號：不會與 repo 既有的 `NNNN-*.md` 撞號，也不必在多個 Workspace 間協調編號。
 - 替代方案：投影成 `docs/adr/NNNN-<slug>.md`（中文標題做 slug 不穩定，編號要與 repo 既有 ADR 協調）；非 Git 目錄也寫入（使用者沒預期研究資料夾會多出檔案）；Brief、Map 也投影成 `docs/project-brief.md` 等（票面沒要求）。
-- 影響：Goal 或 Task 範圍的決策不會成為 ADR。repo 若已有 `GLOSSARY.md`，第一次投影就會進入協調（AI-351），使用者可保留自己的版本。
+- 影響：Goal 或 Task 範圍的決策不會成為 ADR。repo 若已有 `GLOSSARY.md`，第一次投影就會進入協調（AI-356），使用者可保留自己的版本。
 - 審閱：未審
 
-### AI-353：「Workspace 首次接入」不自動喚起 Controller，而是寫進 Controller 的角色說明
+### AI-358：「Workspace 首次接入」不自動喚起 Controller，而是寫進 Controller 的角色說明
 - 重要度：中
 - 時間／階段：2026-10-22，票 42 實作
 - 決策：新 Session 的 Controller Prompt（`conversation::build_prompt` 的角色說明）加上：先以 `get_project_understanding` 查看；沒有任何項目（首次接入）時，先從 repo 與文件找答案，以 `record_understanding` 逐項建立 Project Brief、Glossary 與 Project Map 並持續維護；只有被來源支持的描述才標 confirmed，推測與未確認的關係標 hypothesis、不知道的標 unknown。建立 Workspace 時不自動喚起 Controller，也不由 Runtime 自動產生任何專案理解。
@@ -3187,7 +3232,7 @@
 - 影響：沿用原生 Session 的 Controller 只在第一次建立 Session 時看到這段說明；換帳號或替代 Session 時會再看到一次。
 - 審閱：未審
 
-### AI-354：專案理解的資料模型與權限：（文件別, 名稱）識別、關係寫在名稱裡；工具只給 Controller；使用者在 UI 只能檢視與協調投影
+### AI-359：專案理解的資料模型與權限：（文件別, 名稱）識別、關係寫在名稱裡；工具只給 Controller；使用者在 UI 只能檢視與協調投影
 - 重要度：中
 - 時間／階段：2026-10-22，票 42 實作
 - 決策：(1) 一張 `understanding_item` 表放三種文件的項目，以（Workspace, `section`, `key`）唯一；重複記錄同一個名稱就是更新，內容與來源都相同不產生新版本，否則 `revision` 加 1 並把完整內容記在事件 `understanding_item_recorded`（歷史）。Project Map 的關係不另建型別，名稱寫成「A → B」。不再適用的項目標 `retired`（沿用原描述與來源，不刪除，不出現在投影）。(2) `record_understanding` 與 `get_project_understanding` 列入 `CONTROLLER_TOOLS`，Worker 憑證呼叫回 403 `controller_only`；這一輪結束後憑證失效。(3) 使用者在「專案理解」分頁只能檢視、重新檢查與協調投影，不能直接新增、修改或確認項目（要改請在對話中告訴 Controller）。
@@ -3196,7 +3241,7 @@
 - 影響：日後若要讓 Worker 拿到 Glossary，可由 Context Builder 從 `understanding_item` 讀取，或另開工具。
 - 審閱：未審
 
-### AI-355：投影比對的時機與並行；來源變更（stale）只在查看時計算
+### AI-360：投影比對的時機與並行；來源變更（stale）只在查看時計算
 - 重要度：低
 - 時間／階段：2026-10-22，票 42 實作
 - 決策：(1) 比對投影發生在：`record_understanding` 有變更之後、Workspace 範圍的決策被建立／確認／修正／撤銷／淘汰之後、以及桌面 `POST …/understanding/sync`（「專案理解」分頁開啟時與「重新檢查」按鈕）。Supervisor 不定期巡查。(2) 比對與寫入以 `ApiState::projection_lock`（全域一把 tokio Mutex）序列化；寫回投影狀態時以比對時讀到的 `revision` 做條件寫入。(3) 變更之後的比對失敗（例如寫檔失敗）只記 Runtime 日誌，不讓變更本身失敗，下一次比對再試。(4) 查看專案理解時（桌面視圖、`get_project_understanding`、`record_understanding` 的回應）重新讀取每個檔案來源：內容已與查驗時不同或檔案不見時 `changed: true`，已確認的項目 `stale: true`；不持久化、不自動改變狀態，也不反映在投影檔中。
@@ -3205,7 +3250,7 @@
 - 影響：使用者沒打開分頁、Baton 也沒有要寫入時，外部編輯要等下一次比對才會產生協調事件。
 - 審閱：未審
 
-### AI-356：專案理解的 API 形狀、錯誤碼、桌面殼指令與 UI 位置
+### AI-361：專案理解的 API 形狀、錯誤碼、桌面殼指令與 UI 位置
 - 重要度：低
 - 時間／階段：2026-10-22，票 42 實作
 - 決策：桌面端點 `GET /api/v1/workspaces/{id}/understanding`、`POST …/understanding/sync`、`POST …/understanding/projections/reconcile`，都回 `{ workspace_id, projection_enabled, items, projections }`。來源與查驗相關的拒絕用 422（`understanding_invalid`、`understanding_unverified_claim`、`understanding_source_not_found`），協調狀態不符或檔案又被改用 409（`projection_transition_invalid`、`projection_changed`），找不到用 404（`projection_not_found`、`workspace_not_found`）。`record_understanding` 回 `{ item, changed, projections }`（讓 Controller 立即看到協調中的投影）。桌面殼指令 `workspace_understanding`、`workspace_understanding_sync`、`workspace_projection_reconcile`。UI 在側欄每個 Workspace 加「專案理解」按鈕（spec D-21 第四階段的專案理解視圖），開啟時呼叫 sync。
@@ -3214,12 +3259,12 @@
 - 影響：分頁不會自動更新，重新開啟或按「重新檢查」才重新比對。
 - 審閱：未審
 
-### AI-357：票 42 整合 rebuild/v1（票 30）：`project_understanding` 順延為第 35 個 migration
+### AI-362：票 42 整合 rebuild/v1（票 30、39）：`project_understanding` 順延為第 36 個 migration、AI 編號改為 AI-355～AI-362
 - 重要度：低
 - 時間／階段：2026-10-22，票 42 實作（run R118-42-impl）
-- 決策：整合分支併入票 30（第 34 個 migration `controller_handoff`，AI-344～AI-349）。本票的 migration 原為第 34 個，改為第 35 個並排在 `controller_handoff` 之後；本票的 AI 條目從 AI-350 起編。衝突只有 `crates/baton-store/src/lib.rs` 的 migration 清單；Controller 角色說明（`conversation.rs`）由 git 自動合併，本票加入的專案理解指示仍在。
-- 理由：已進入整合分支的 migration 與 AI 編號不可改動。
-- 替代方案：無。
+- 決策：(1) 整合分支先後併入票 30（第 34 個 migration `controller_handoff`，AI-344～AI-349）與票 39（第 35 個 migration `context_receipt`，AI-350～AI-354）。本票的 migration 原為第 34 個，改為第 36 個並排在 `context_receipt` 之後。(2) 本票條目原寫成 AI-350～AI-357，與票 39 的條目同號，現改為 AI-355～AI-362，移到票 39 的 AI-354 之後；條目內互相引用的編號一併改正，整合分支的條目逐字未動。本票程式碼沒有引用這些編號；較早的 commit 訊息提到的 AI-350～AI-357 是改號前的編號。(3) 衝突在 migration 清單、桌面殼的 import 與開發指南的目錄表／測試清單：都以整合分支為底，補回本票的項目。Controller 角色說明（`conversation.rs`）由 git 自動合併，本票加入的專案理解指示仍在。
+- 理由：已進入整合分支的 migration 與 AI 編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
 - 影響：無。
 - 審閱：未審
 

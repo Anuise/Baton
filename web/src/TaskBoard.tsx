@@ -2,17 +2,21 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { buildContract, ContractEditor, draftFromContract, emptyDraft, type ContractDraft } from "./ContractEditor";
 import { formatTimestamp } from "./time";
+import { errorCode } from "./runtimeClient";
 import type {
   AcceptanceBasis,
   BudgetView,
   CheckResult,
   CleanupStatus,
+  ContextItem,
+  ContextItemKind,
   Goal,
   Handoff,
   HandoffPhase,
   IntegrationEntry,
   IntegrationStatus,
   MissingItem,
+  RunContext,
   RunStatus,
   RunView,
   SchedulingClient,
@@ -476,7 +480,14 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} timeZone={timeZone} />}
 
       {run && (
-        <RunStatusLine run={run} accountName={accountName} authorizationRevision={authorizationRevision} timeZone={timeZone} />
+        <RunStatusLine
+          client={client}
+          workspaceId={workspaceId}
+          run={run}
+          accountName={accountName}
+          authorizationRevision={authorizationRevision}
+          timeZone={timeZone}
+        />
       )}
 
       {handoff && <HandoffSummary handoff={handoff} profileNameOf={profileNameOf} timeZone={timeZone} />}
@@ -718,11 +729,15 @@ function QueuedStatus({ position, reasons }: { position: number | null; reasons:
  * 撤銷授權前已准入的 Run 沿用准入時的 revision（ADR-0003 R1-a），比目前舊時另外標示。
  */
 function RunStatusLine({
+  client,
+  workspaceId,
   run,
   accountName,
   authorizationRevision,
   timeZone,
 }: {
+  client: TaskClient;
+  workspaceId: string;
   run: RunView;
   accountName: string | null;
   authorizationRevision: number | null;
@@ -771,6 +786,97 @@ function RunStatusLine({
         <p role="alert">
           受阻：{run.blocked.reason}（{formatTimestamp(run.blocked.reported_at, timeZone)}）
         </p>
+      )}
+      <ContextReceiptPanel client={client} workspaceId={workspaceId} runId={run.id} />
+    </div>
+  );
+}
+
+const CONTEXT_KIND_LABELS: Record<ContextItemKind, string> = {
+  contract: "Task 契約",
+  handoff: "交接說明",
+  checkpoint: "最近檢查點",
+  decision: "決策",
+  lesson: "教訓",
+  messages: "未讀訊息摘要",
+  evidence: "證據",
+};
+
+const OMITTED_REASON_LABELS: Record<string, string> = { budget_exceeded: "超出預算" };
+
+/** 「類型：標題 v版本（tokens）」；沒有版本時省略版本。 */
+const describeContextItem = (item: ContextItem) =>
+  `${CONTEXT_KIND_LABELS[item.kind] ?? item.kind}：${item.title}${item.version === null ? "" : ` v${item.version}`}（${item.tokens} tokens）`;
+
+type ContextState =
+  | { state: "loading" }
+  | { state: "ready"; context: RunContext }
+  | { state: "missing" }
+  | { state: "failed"; reason: string };
+
+/** Run 的 context receipt（展開時才載入）：token 預算、依優先序載入與因預算省略的項目，以及實際交給 Worker 的 Prompt。 */
+function ContextReceiptPanel({ client, workspaceId, runId }: { client: TaskClient; workspaceId: string; runId: string }) {
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState<ContextState>({ state: "loading" });
+
+  useEffect(() => {
+    if (!open) return;
+    let current = true;
+    setLoaded({ state: "loading" });
+    client.runContext(workspaceId, runId).then(
+      (context) => current && setLoaded({ state: "ready", context }),
+      (e) =>
+        current &&
+        // 本票之前建立的 Run 沒有 receipt，不算錯誤
+        setLoaded(errorCode(e) === "context_receipt_not_found" ? { state: "missing" } : { state: "failed", reason: reasonOf(e) }),
+    );
+    return () => {
+      current = false;
+    };
+  }, [client, workspaceId, runId, open]);
+
+  const items = loaded.state === "ready" ? loaded.context.receipt.items : [];
+  const loadedItems = items.filter((item) => item.status === "loaded");
+  const omittedItems = items.filter((item) => item.status === "omitted");
+  return (
+    <div className="task-run-context" role="group" aria-label="Context receipt">
+      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
+        Context receipt
+      </button>
+      {open && loaded.state === "loading" && <p>載入中…</p>}
+      {open && loaded.state === "missing" && <p>這個 Run 沒有 context receipt（在 Context Builder 之前建立）</p>}
+      {open && loaded.state === "failed" && <p role="alert">無法取得 context receipt：{loaded.reason}</p>}
+      {open && loaded.state === "ready" && (
+        <>
+          <p>
+            已用 {loaded.context.receipt.used_tokens} / {loaded.context.receipt.budget_tokens} tokens
+          </p>
+          <div role="group" aria-label="已載入項目">
+            <strong>已載入（{loadedItems.length}）</strong>
+            <ul>
+              {loadedItems.map((item, index) => (
+                <li key={index}>{describeContextItem(item)}</li>
+              ))}
+            </ul>
+          </div>
+          {omittedItems.length > 0 && (
+            <div role="group" aria-label="省略項目">
+              <strong>省略（{omittedItems.length}）</strong>
+              <ul>
+                {omittedItems.map((item, index) => (
+                  <li key={index}>
+                    {describeContextItem(item)}
+                    {item.omitted_reason !== null && `，${OMITTED_REASON_LABELS[item.omitted_reason] ?? item.omitted_reason}`}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <details>
+            <summary>實際 Prompt</summary>
+            <pre>{loaded.context.prompt}</pre>
+          </details>
+        </>
       )}
     </div>
   );

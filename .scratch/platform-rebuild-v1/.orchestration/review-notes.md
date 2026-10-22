@@ -69,3 +69,6 @@
 ## 18. Controller 交接（票 30）
 - `stop_controllers_for_handoff`（`supervisor.rs`）找承接帳號時傳入 `active_runs: &[]`，沒考慮各帳號目前並行量；承接帳號滿載時可能停掉舊輪後才發現放不下。
 - 補情境測試：唯一帳號 draining 且 Controller 有一輪在執行時，等滿 2 分鐘不停止、留在原帳號（M7）。
+
+## 19. 登入自啟動的舊值（票 33）
+- 登錄已有名為 `Baton` 但命令列不同的值（例如舊安裝位置），偏好為關閉時 `sync_login_startup` 視為「未登記」而不移除；改為依值名稱判定歸屬並移除。

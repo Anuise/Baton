@@ -7,7 +7,7 @@ use baton_domain::message::{
     self, Delivery, InboxMessage, Message, MessageError, MessageKind, ScopeChangeAttempt, SendContext, SendDecision,
     Sender, StoredMessage, UnreadSummaryItem, UNREAD_SUMMARY_MAX_ITEMS,
 };
-use baton_domain::run::{self, RunChange};
+use baton_domain::run;
 
 use super::tasks::load;
 use super::*;
@@ -194,13 +194,12 @@ impl Store {
     }
 }
 
-/// 派工時把收件 Task 的未讀摘要附在 Worker 的 Prompt 末端（Prompt 在派工當下固定下來），
-/// 並把摘要裡列出的訊息標為已交付。沒有未讀訊息時什麼都不做。
-pub(crate) fn attach_unread_summary(tx: &Transaction<'_>, change: &mut RunChange, now: Timestamp) -> rusqlite::Result<()> {
-    let (Some(outbox), Some(run)) = (change.outbox.as_mut(), change.run.as_ref()) else {
-        return Ok(());
-    };
-    let (workspace_id, task_id) = (&run.workspace_id, &outbox.payload.task_id);
+/// 收件 Task 的未讀摘要（最多 [`UNREAD_SUMMARY_MAX_ITEMS`] 則，依送達順序）與實際的未讀總數；派工時由 Context Builder 放進 Prompt。
+pub(crate) fn unread_summary(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    task_id: &str,
+) -> rusqlite::Result<(Vec<UnreadSummaryItem>, usize)> {
     let items = tx
         .prepare(
             "SELECT m.message_id, m.kind, m.subject, t.title
@@ -224,8 +223,18 @@ pub(crate) fn attach_unread_summary(tx: &Transaction<'_>, change: &mut RunChange
         rusqlite::params![workspace_id, task_id],
         |r| r.get(0),
     )?;
-    outbox.payload.prompt.push_str(&message::render_unread_summary(&items, total as usize));
-    for item in &items {
+    Ok((items, total as usize))
+}
+
+/// 摘要放進 Prompt 後，把摘要裡列出的訊息標為已交付。
+pub(crate) fn mark_summary_delivered(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    task_id: &str,
+    items: &[UnreadSummaryItem],
+    now: Timestamp,
+) -> rusqlite::Result<()> {
+    for item in items {
         tx.execute(
             "UPDATE message_delivery SET delivered_at = ?4
              WHERE workspace_id = ?1 AND message_id = ?2 AND recipient_task_id = ?3 AND delivered_at IS NULL",
