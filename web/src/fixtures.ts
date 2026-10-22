@@ -170,6 +170,8 @@ export function runView(overrides: Partial<RunView> = {}): RunView {
     generation: 1,
     contract_version: 1,
     authorization_revision: null,
+    admitted_at: null,
+    settings_version: null,
     command_id: null,
     process: null,
     cancel_requested_at: null,

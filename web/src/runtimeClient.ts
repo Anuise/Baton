@@ -104,6 +104,25 @@ export interface AuthorizationView {
   templates: AuthorizationTemplate[];
   capabilities: { capability: Capability; label: string; high_risk: boolean }[];
   risk_disclosure: string;
+  /** 已准入、尚未結束、仍沿用較舊 revision（且舊 revision 有目前已撤銷或縮小的能力）的 Run。 */
+  legacy_runs: LegacyRun[];
+}
+
+/** 撤銷授權前已准入、仍沿用舊授權 revision 的 Run（對應 Rust 的 LegacyRun）。 */
+export interface LegacyRun {
+  run_id: string;
+  task_id: string;
+  task_title: string;
+  /** 只會是 starting 或 running。 */
+  status: RunStatus;
+  /** 這個 Run 沿用的舊 revision。 */
+  authorization_revision: number;
+  /** 准入時間（UTC 毫秒）。 */
+  admitted_at: number | null;
+  /** 已要求停止、正在等程序確認停止。 */
+  cancel_requested: boolean;
+  /** 舊 revision 有、但目前 revision 已移除或縮小的能力。 */
+  revoked_capabilities: Capability[];
 }
 
 export interface ConfirmationSummary {
@@ -467,7 +486,12 @@ export interface Run {
   /** 同一個 Task 的 Run 依序遞增，最新的是最大者。 */
   generation: number;
   contract_version: number;
+  /** 准入後代表准入時依據的授權 revision。 */
   authorization_revision: number | null;
+  /** 准入時間（UTC 毫秒）；尚未准入（queued）或票 24 之前的舊資料為 null。 */
+  admitted_at: number | null;
+  /** 准入時固定的共同設定版本；沒有採用任何版本為 null。 */
+  settings_version: number | null;
   command_id: string | null;
   /** 啟動回執；回執寫入前為 null。 */
   process: ProcessRecord | null;
@@ -567,6 +591,8 @@ export interface TaskBoard {
   capabilities: { capability: Capability; label: string; high_risk: boolean }[];
   /** Workspace 全部驗證紀錄，由舊到新。 */
   verifications: VerificationRecord[];
+  /** Workspace 目前生效的授權 revision；尚未確認為 null。 */
+  authorization_revision: number | null;
 }
 
 export interface TaskDetail {

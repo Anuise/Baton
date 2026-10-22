@@ -93,6 +93,7 @@ function fakeClient(initial: DecisionRequestView[], options: { resumed?: string[
     templates: [],
     capabilities: [],
     risk_disclosure: "",
+    legacy_runs: [],
   });
   const client: DecisionClient & AuthorizationClient = {
     getAuthorization: vi.fn(async () => authorizationView()),

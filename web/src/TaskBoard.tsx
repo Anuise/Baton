@@ -248,6 +248,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                   run={latestRun(board.runs, task.id)}
                   verification={latestVerification(board.verifications, task.id)}
                   accountName={accountNameOf(overview, board.runs, task.id)}
+                  authorizationRevision={board.authorization_revision}
                   queued={queuedInfo(overview, queuedNotice, task)}
                   timeZone={timeZone}
                   error={cardError?.taskId === task.id ? cardError.message : null}
@@ -287,6 +288,8 @@ interface CardProps {
   verification: VerificationRecord | null;
   /** 最新 Run 使用的帳號名稱。 */
   accountName: string | null;
+  /** Workspace 目前生效的授權 revision；尚未確認為 null。 */
+  authorizationRevision: number | null;
   /** 在佇列中等待名額時的順位（未知為 null）與原因；不在佇列為 null。 */
   queued: { position: number | null; reasons: WaitReason[] } | null;
   timeZone?: string;
@@ -303,7 +306,7 @@ interface CardProps {
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, accountName, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, accountName, authorizationRevision, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -358,7 +361,9 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
 
       {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
 
-      {run && <RunStatusLine run={run} accountName={accountName} timeZone={timeZone} />}
+      {run && (
+        <RunStatusLine run={run} accountName={accountName} authorizationRevision={authorizationRevision} timeZone={timeZone} />
+      )}
 
       {verification && <VerificationSummary record={verification} timeZone={timeZone} />}
 
@@ -472,8 +477,27 @@ function QueuedStatus({ position, reasons }: { position: number | null; reasons:
   );
 }
 
-/** 最新 Run 的狀態列：狀態、使用的帳號、程序 pid、結束原因、lease 最後心跳；已要求取消時說明正在等程序停止。 */
-function RunStatusLine({ run, accountName, timeZone }: { run: RunView; accountName: string | null; timeZone?: string }) {
+/**
+ * 最新 Run 的狀態列：狀態、使用的帳號、程序 pid、結束原因、lease 最後心跳；已要求取消時說明正在等程序停止。
+ * 撤銷授權前已准入的 Run 沿用准入時的 revision（ADR-0003 R1-a），比目前舊時另外標示。
+ */
+function RunStatusLine({
+  run,
+  accountName,
+  authorizationRevision,
+  timeZone,
+}: {
+  run: RunView;
+  accountName: string | null;
+  authorizationRevision: number | null;
+  timeZone?: string;
+}) {
+  const usesOlderAuthorization =
+    isRunActive(run.status) &&
+    run.admitted_at !== null &&
+    run.authorization_revision !== null &&
+    authorizationRevision !== null &&
+    run.authorization_revision < authorizationRevision;
   return (
     <div className="task-run" role="group" aria-label="Run 狀態">
       <p>
@@ -481,6 +505,11 @@ function RunStatusLine({ run, accountName, timeZone }: { run: RunView; accountNa
         {accountName && `，帳號 ${accountName}`}
         {run.process && `，程序 pid ${run.process.pid}`}
       </p>
+      {usesOlderAuthorization && (
+        <p>
+          沿用舊授權（revision {run.authorization_revision}，目前 {authorizationRevision}）
+        </p>
+      )}
       {run.end_reason && <p>結束原因：{run.end_reason}</p>}
       {run.lease && <p>最後心跳：{formatTimestamp(run.lease.last_heartbeat_at, timeZone)}</p>}
       {isRunActive(run.status) && run.cancel_requested_at !== null && <p>取消中，等待程序停止…</p>}

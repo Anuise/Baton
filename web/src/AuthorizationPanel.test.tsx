@@ -2,10 +2,10 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { AuthorizationPanel } from "./AuthorizationPanel";
+import { AuthorizationPanel, type AuthorizationPanelClient } from "./AuthorizationPanel";
+import { runView } from "./fixtures";
 import type {
   AuthorizationChanges,
-  AuthorizationClient,
   AuthorizationRevision,
   AuthorizationTemplate,
   AuthorizationView,
@@ -13,6 +13,8 @@ import type {
   ConfirmationSummary,
   ConfirmAuthorizationRequest,
   Grant,
+  LegacyRun,
+  TaskView,
   Workspace,
 } from "./runtimeClient";
 
@@ -90,8 +92,9 @@ function changesFrom(current: AuthorizationRevision, grants: Grant[]): Authoriza
 }
 
 /** 以記憶體模擬 Runtime 的授權行為，讓測試只看使用者可見的流程。 */
-function fakeClient(initial: AuthorizationRevision[] = []) {
+function fakeClient(initial: AuthorizationRevision[] = [], initialLegacy: LegacyRun[] = []) {
   let revisions = [...initial];
+  let legacyRuns = [...initialLegacy];
   const view = (): AuthorizationView => ({
     workspace_id: workspace.id,
     status: revisions.length > 0 ? "confirmed" : "unconfirmed",
@@ -100,8 +103,9 @@ function fakeClient(initial: AuthorizationRevision[] = []) {
     templates,
     capabilities: ALL.map(([capability, label, high_risk]) => ({ capability, label, high_risk })),
     risk_disclosure: RISK,
+    legacy_runs: [...legacyRuns],
   });
-  const client: AuthorizationClient = {
+  const client: AuthorizationPanelClient = {
     getAuthorization: vi.fn(async () => view()),
     summarizeAuthorization: vi.fn(async (_id: string, grants: Grant[]): Promise<ConfirmationSummary> => {
       const requires = grants.some((g) => EXECUTES.has(g.capability));
@@ -129,11 +133,21 @@ function fakeClient(initial: AuthorizationRevision[] = []) {
       revisions = [...revisions, revision];
       return revision;
     }),
+    // 已啟動的 Run 只記錄停止要求，等程序確認停止
+    cancelRun: vi.fn(async (_id: string, runId: string) => {
+      legacyRuns = legacyRuns.map((r) => (r.run_id === runId ? { ...r, cancel_requested: true } : r));
+      return runView({ id: runId, cancel_requested_at: 1_700_000_000_000 });
+    }),
+    // 面板不使用回傳值，只回傳識別欄位
+    cancelTask: vi.fn(async (_id: string, taskId: string) => {
+      legacyRuns = legacyRuns.filter((r) => r.task_id !== taskId);
+      return { id: taskId, status: "cancelled" } as TaskView;
+    }),
   };
   return client;
 }
 
-async function renderPanel(client: AuthorizationClient) {
+async function renderPanel(client: AuthorizationPanelClient) {
   const user = userEvent.setup();
   render(<AuthorizationPanel client={client} workspace={workspace} timeZone="UTC" />);
   await screen.findByRole("heading", { name: "授權設定：筆記" });
@@ -324,6 +338,104 @@ describe("Workspace 授權設定", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("必須指定至少一個目標資源");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.getByText(/尚未確認授權/)).toBeInTheDocument();
+  });
+
+  describe("撤銷授權後仍沿用舊授權的 Run", () => {
+    const revisions: AuthorizationRevision[] = [
+      {
+        workspace_id: "ws_1",
+        revision: 1,
+        grants: [grant("read_files"), grant("write_files"), grant("deploy")],
+        source: { kind: "custom", template_id: null, base_revision: null, confirmed_by: "desktop" },
+        confirmed_at: 1_700_000_000_000,
+      },
+      {
+        workspace_id: "ws_1",
+        revision: 2,
+        grants: [grant("read_files")],
+        source: { kind: "custom", template_id: null, base_revision: 1, confirmed_by: "desktop" },
+        confirmed_at: 1_700_003_600_000,
+      },
+    ];
+    const legacy = (overrides: Partial<LegacyRun> = {}): LegacyRun => ({
+      run_id: "run_1",
+      task_id: "task_1",
+      task_title: "整理報告",
+      status: "running",
+      authorization_revision: 1,
+      admitted_at: 1_700_000_000_000,
+      cancel_requested: false,
+      revoked_capabilities: ["write_files", "deploy"],
+      ...overrides,
+    });
+
+    it("列出沿用舊授權的 Run：Task 標題、revision、被撤銷的能力與准入時間", async () => {
+      const client = fakeClient(revisions, [
+        legacy(),
+        legacy({ run_id: "run_2", task_id: "task_2", task_title: "部署網站", status: "starting", revoked_capabilities: ["deploy"] }),
+      ]);
+      await renderPanel(client);
+
+      const notice = screen.getByRole("status", { name: "後續執行已停用，仍有 2 個 Run 沿用舊授權" });
+      expect(within(notice).getByText(/沒有固定完成時間/)).toBeInTheDocument();
+      const items = within(notice).getAllByRole("listitem");
+      expect(items).toHaveLength(2);
+      expect(items[0]).toHaveTextContent("整理報告");
+      expect(items[0]).toHaveTextContent("沿用 revision 1");
+      expect(items[0]).toHaveTextContent("編輯檔案、部署");
+      expect(items[0]).toHaveTextContent("2023/11/14 22:13");
+      expect(items[1]).toHaveTextContent("部署網站");
+    });
+
+    it("按「暫停」停止這個 Run，完成後重新載入並顯示等待程序確認", async () => {
+      const client = fakeClient(revisions, [legacy()]);
+      const user = await renderPanel(client);
+
+      await user.click(screen.getByRole("button", { name: "暫停" }));
+
+      expect(client.cancelRun).toHaveBeenCalledWith("ws_1", "run_1");
+      expect(await screen.findByText(/已要求停止，等待程序確認/)).toBeInTheDocument();
+      expect(client.getAuthorization).toHaveBeenCalledTimes(2);
+      expect(client.cancelTask).not.toHaveBeenCalled();
+    });
+
+    it("按「取消」取消整個 Task，完成後重新載入；沒有剩下的 Run 時提示消失", async () => {
+      const client = fakeClient(revisions, [legacy()]);
+      const user = await renderPanel(client);
+
+      await user.click(screen.getByRole("button", { name: "取消" }));
+
+      expect(client.cancelTask).toHaveBeenCalledWith("ws_1", "task_1");
+      await waitFor(() => expect(screen.queryByText(/沿用舊授權/)).not.toBeInTheDocument());
+      expect(client.getAuthorization).toHaveBeenCalledTimes(2);
+      expect(client.cancelRun).not.toHaveBeenCalled();
+    });
+
+    it("操作失敗時顯示 Runtime 的說明", async () => {
+      const client = fakeClient(revisions, [legacy()]);
+      vi.mocked(client.cancelRun).mockRejectedValueOnce(new Error("Runtime 無法連線"));
+      const user = await renderPanel(client);
+
+      await user.click(screen.getByRole("button", { name: "暫停" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("Runtime 無法連線");
+    });
+
+    it("已要求停止的 Run 兩個按鈕都停用，並說明正在等待程序確認", async () => {
+      await renderPanel(fakeClient(revisions, [legacy({ cancel_requested: true })]));
+
+      const item = within(screen.getByRole("status", { name: /沿用舊授權/ })).getByRole("listitem");
+      expect(within(item).getByRole("button", { name: "暫停" })).toBeDisabled();
+      expect(within(item).getByRole("button", { name: "取消" })).toBeDisabled();
+      expect(item).toHaveTextContent("已要求停止，等待程序確認");
+    });
+
+    it("沒有沿用舊授權的 Run 時不顯示提示", async () => {
+      await renderPanel(fakeClient(revisions));
+
+      expect(screen.queryByText(/沿用舊授權/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    });
   });
 
   it("讀不到授權設定時顯示原因，不假裝是未確認", async () => {
