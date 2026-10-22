@@ -4,6 +4,8 @@
 // release 版不顯示額外的主控台視窗
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod startup_cell;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,7 +55,7 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
-use tokio::sync::OnceCell;
+use crate::startup_cell::StartupCell;
 
 /// 等待 Runtime 就緒的上限。
 const START_WAIT: Duration = Duration::from_secs(20);
@@ -91,8 +93,8 @@ struct RuntimeLink {
     client: RuntimeClient,
     data_dir: PathBuf,
     envs: Vec<(String, String)>,
-    /// 啟動流程只做一次；結果（成功或失敗原因）供之後的健康查詢使用
-    startup: OnceCell<Result<Connection, String>>,
+    /// 啟動流程成功後不再執行；失敗不保留，下次呼叫重試（Runtime 之後正常監聽就能接上，不必重開 App）
+    startup: StartupCell<Connection, String>,
     /// 最後一次看到的「準備套用」的更新安裝程式（票 34）：Runtime 在維護就緒約 5 秒後結束，
     /// 使用者因停止異常而稍後才按「安裝」時，殼仍知道要執行哪個已驗證的檔案
     ready_package: std::sync::Mutex<Option<PathBuf>>,
@@ -108,7 +110,7 @@ impl RuntimeLink {
         ];
         let data_dir = config.data_dir.clone();
         let client = RuntimeClient::new(config.bind, config.data_dir, Arc::new(DpapiProtector));
-        Ok(Self { client, data_dir, envs, startup: OnceCell::new(), ready_package: std::sync::Mutex::new(None) })
+        Ok(Self { client, data_dir, envs, startup: StartupCell::new(), ready_package: std::sync::Mutex::new(None) })
     }
 
     /// 記下更新狀態中「準備套用」的安裝程式；不是這個狀態時清除。
@@ -116,10 +118,10 @@ impl RuntimeLink {
         *self.ready_package.lock().unwrap_or_else(|e| e.into_inner()) = ready_package_of(status);
     }
 
-    /// 連回既有的 Runtime，沒有就啟動一個；只會執行一次。
-    async fn ensure_started(&self) -> &Result<Connection, String> {
+    /// 連回既有的 Runtime，沒有就啟動一個；成功後不再執行，失敗則下次呼叫重試。
+    async fn ensure_started(&self) -> Result<Connection, String> {
         self.startup
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 // 資料目錄在網路共享或雲端同步資料夾時，先把原因說清楚，而不是等 Runtime 啟動逾時（spec D-17）
                 baton_store::check_data_dir(&self.data_dir).map_err(|e| e.to_string())?;
                 let exe = runtime_exe_path().map_err(|e| e.to_string())?;
