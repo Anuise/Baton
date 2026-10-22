@@ -46,7 +46,7 @@ fn capabilities_of(grants: &Value) -> Vec<String> {
 }
 
 async fn confirm(harness: &Harness, id: &str, template_id: Option<&str>, grants: &Value, acknowledged: bool) -> (StatusCode, Value) {
-    let body = json!({ "template_id": template_id, "grants": grants, "acknowledged_risk": acknowledged });
+    let body = json!({ "template_id": template_id, "grants": grants, "acknowledged_risk": acknowledged, "acknowledged_expansion": true });
     harness.send_json(Method::PUT, &authorization_path(id), Some(body)).await
 }
 

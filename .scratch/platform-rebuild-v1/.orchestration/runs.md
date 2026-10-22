@@ -68,6 +68,8 @@
 | R064-35-impl | 35 | impl | Work-3 | 2026-10-22 17:42 | | |
 | R065-23-verify | 23 | verify | Work-8 | 2026-10-22 17:46 | 2026-10-22 17:53 | 功能項全 PASS，只缺整合（基底早於票 25），依 AI-109 整合後合併 |
 | R066-38-impl | 38 | impl | Work-9 | 2026-10-22 17:46 | | |
-| R067-40-verify | 40 | verify | Work-9 | 2026-10-22 17:47 | | |
-| R068-23-integrate | 23 | integrate | Work-8 | 2026-10-22 17:53 | | |
+| R067-40-verify | 40 | verify | Work-9 | 2026-10-22 17:47 | 2026-10-22 17:55 | PASS（基底早於票 25，依 AI-109 整合後合併） |
+| R068-23-integrate | 23 | integrate | Work-8 | 2026-10-22 17:53 | 2026-10-22 17:57 | DONE，依 AI-109 直接合併 |
 | R069-14-integrate | 14 | integrate | Work-3 | 2026-10-22 17:55 | | |
+| R070-40-integrate | 40 | integrate | Work-9 | 2026-10-22 17:55 | | |
+| R071-24-impl | 24 | impl | Work-8 | 2026-10-22 17:57 | | |

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import type {
+  AuthorizationChanges,
   AuthorizationClient,
   AuthorizationRevision,
   AuthorizationTemplate,
@@ -56,6 +57,39 @@ const templates: AuthorizationTemplate[] = [
 
 const EXECUTES = new Set<Capability>(["run_build_test", "install_project_dependencies", "deploy"]);
 
+const minus = (a: string[], b: string[]) => a.filter((x) => !b.includes(x));
+
+/** 模擬 Runtime 比較目前 revision 與新內容：新增能力、目標或移除限制都算擴大授權。 */
+function changesFrom(current: AuthorizationRevision, grants: Grant[]): AuthorizationChanges {
+  const changes = ALL.flatMap(([capability, label, high_risk]) => {
+    const before = current.grants.find((g) => g.capability === capability);
+    const after = grants.find((g) => g.capability === capability);
+    if (!before && !after) return [];
+    const change = {
+      capability,
+      label,
+      high_risk,
+      new_capability: !before,
+      removed_capability: !after,
+      added_targets: minus(after?.targets ?? [], before?.targets ?? []),
+      removed_targets: minus(before?.targets ?? [], after?.targets ?? []),
+      added_restrictions: minus(after?.restrictions ?? [], before?.restrictions ?? []),
+      removed_restrictions: minus(before?.restrictions ?? [], after?.restrictions ?? []),
+    };
+    const expands =
+      !change.removed_capability &&
+      (change.new_capability || change.added_targets.length > 0 || change.removed_restrictions.length > 0);
+    const changed = expands || change.removed_capability || change.removed_targets.length > 0 || change.added_restrictions.length > 0;
+    return changed ? [{ ...change, expands }] : [];
+  });
+  return {
+    base_revision: current.revision,
+    changes,
+    expands: changes.some((c) => c.expands),
+    impact: changes.map((c) => (c.expands ? `擴大：Agent 將可以「${c.label}」` : `縮小：「${c.label}」的範圍變小`)),
+  };
+}
+
 /** 以記憶體模擬 Runtime 的授權行為，讓測試只看使用者可見的流程。 */
 function fakeClient(initial: AuthorizationRevision[] = []) {
   let revisions = [...initial];
@@ -82,6 +116,7 @@ function fakeClient(initial: AuthorizationRevision[] = []) {
         })),
         risks: requires ? [RISK] : [],
         requires_risk_acknowledgement: requires,
+        changes: revisions.length > 0 ? changesFrom(revisions.at(-1)!, grants) : null,
       };
     }),
     confirmAuthorization: vi.fn(async (_id: string, { templateId, grants }: ConfirmAuthorizationRequest) => {
@@ -159,6 +194,7 @@ describe("Workspace 授權設定", () => {
       templateId: "trusted_dev_p3",
       grants: templates[1].grants,
       acknowledgedRisk: true,
+      acknowledgedExpansion: false,
     });
     expect(screen.getByText(/目前授權：revision 1/)).toBeInTheDocument();
     expect(screen.queryByText(/尚未確認授權/)).not.toBeInTheDocument();
@@ -174,6 +210,7 @@ describe("Workspace 授權設定", () => {
     const summary = await screen.findByRole("region", { name: "確認摘要" });
 
     expect(within(summary).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(summary).queryByRole("region", { name: "授權變更" })).not.toBeInTheDocument();
     await user.click(within(summary).getByRole("button", { name: "確認並保存授權" }));
     await waitFor(() => expect(client.confirmAuthorization).toHaveBeenCalled());
     expect(vi.mocked(client.confirmAuthorization).mock.calls[0][1].grants.map((g) => g.capability)).toEqual([
@@ -211,6 +248,69 @@ describe("Workspace 授權設定", () => {
     const history = screen.getByRole("region", { name: "授權歷史" });
     expect(within(history).getAllByRole("listitem")).toHaveLength(2);
     expect(within(history).getAllByRole("listitem")[0]).toHaveTextContent("revision 2");
+  });
+
+  it("修改既有授權而擴大範圍時，列出變更與影響，必須另外承認擴大授權才能確認", async () => {
+    const revision: AuthorizationRevision = {
+      workspace_id: "ws_1",
+      revision: 1,
+      grants: [grant("read_files")],
+      source: { kind: "custom", template_id: null, base_revision: null, confirmed_by: "desktop" },
+      confirmed_at: 1_700_000_000_000,
+    };
+    const client = fakeClient([revision]);
+    const user = await renderPanel(client);
+    await user.click(checkbox("讀取公開網頁"));
+    await user.type(screen.getByLabelText("讀取公開網頁：目標資源（每行一項）"), "https://example.com");
+
+    await user.click(screen.getByRole("button", { name: "檢視確認摘要" }));
+
+    const summary = await screen.findByRole("region", { name: "確認摘要" });
+    const changes = within(summary).getByRole("region", { name: "授權變更" });
+    expect(within(changes).getByText(/相對於目前授權（revision 1）/)).toBeInTheDocument();
+    const item = within(changes).getByText("讀取公開網頁").closest("li")!;
+    expect(item).toHaveTextContent("新增能力");
+    expect(item).toHaveTextContent("新增目標：https://example.com");
+    expect(item).toHaveTextContent("擴大授權");
+    expect(within(changes).getByText("擴大：Agent 將可以「讀取公開網頁」")).toBeInTheDocument();
+    const confirm = within(summary).getByRole("button", { name: "確認並保存授權" });
+    expect(confirm).toBeDisabled();
+
+    await user.click(within(summary).getByRole("checkbox", { name: "我了解這會擴大 Workspace 授權" }));
+    await user.click(confirm);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("已保存為 revision 2");
+    expect(vi.mocked(client.confirmAuthorization).mock.calls[0][1]).toMatchObject({ acknowledgedRisk: false, acknowledgedExpansion: true });
+  });
+
+  it("修改既有授權而只縮小範圍時，列出移除的項目，不需要承認擴大授權", async () => {
+    const revision: AuthorizationRevision = {
+      workspace_id: "ws_1",
+      revision: 1,
+      grants: [grant("read_files"), grant("write_files")],
+      source: { kind: "custom", template_id: null, base_revision: null, confirmed_by: "desktop" },
+      confirmed_at: 1_700_000_000_000,
+    };
+    const client = fakeClient([revision]);
+    const user = await renderPanel(client);
+    await user.click(checkbox("編輯檔案"));
+    const restrictions = screen.getByLabelText("讀取檔案：限制（每行一項）");
+    await user.clear(restrictions);
+    await user.type(restrictions, "僅限專案內{Enter}不讀隱藏檔");
+
+    await user.click(screen.getByRole("button", { name: "檢視確認摘要" }));
+
+    const summary = await screen.findByRole("region", { name: "確認摘要" });
+    const changes = within(summary).getByRole("region", { name: "授權變更" });
+    expect(within(changes).getByText("編輯檔案").closest("li")).toHaveTextContent("移除能力");
+    expect(within(changes).getByText("讀取檔案").closest("li")).toHaveTextContent(/新增限制：不讀隱藏檔$/);
+    expect(within(changes).queryByText(/擴大授權/)).not.toBeInTheDocument();
+    expect(within(summary).queryByRole("checkbox", { name: "我了解這會擴大 Workspace 授權" })).not.toBeInTheDocument();
+
+    await user.click(within(summary).getByRole("button", { name: "確認並保存授權" }));
+
+    await waitFor(() => expect(client.confirmAuthorization).toHaveBeenCalled());
+    expect(vi.mocked(client.confirmAuthorization).mock.calls[0][1]).toMatchObject({ acknowledgedExpansion: false });
   });
 
   it("Runtime 拒絕時顯示它的說明，不宣稱已保存", async () => {

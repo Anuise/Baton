@@ -308,12 +308,18 @@ async fn workspace_authorization_confirm(
     template_id: Option<String>,
     grants: Vec<Grant>,
     acknowledged_risk: bool,
+    acknowledged_expansion: Option<bool>,
 ) -> Result<AuthorizationRevision, String> {
     if let Err(reason) = link.ensure_started().await {
         return Err(reason.clone());
     }
     link.client
-        .confirm_authorization(&id, &ConfirmAuthorizationRequest { template_id, grants, acknowledged_risk })
+        .confirm_authorization(&id, &ConfirmAuthorizationRequest {
+            template_id,
+            grants,
+            acknowledged_risk,
+            acknowledged_expansion: acknowledged_expansion.unwrap_or(false),
+        })
         .await
         .map_err(|e| e.to_string())
 }
