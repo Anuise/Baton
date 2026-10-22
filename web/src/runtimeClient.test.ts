@@ -36,4 +36,22 @@ describe("Runtime 用戶端", () => {
 
     await expect(createTauriClient(invoke as never).getHealth()).rejects.toThrow("無法連線到 Runtime");
   });
+
+  it("HTTP 版向 /api/v1/platform 取得平台狀態", async () => {
+    const platform = { app_version: "0.1.0" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(platform), { status: 200 }));
+
+    const result = await createHttpClient(fetchFn as unknown as typeof fetch).getPlatform();
+
+    expect(result).toEqual(platform);
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/platform");
+  });
+
+  it("Tauri 版透過 runtime_platform 指令取得平台狀態", async () => {
+    const invoke = vi.fn(async () => ({ app_version: "0.1.0" }));
+
+    await createTauriClient(invoke as never).getPlatform();
+
+    expect(invoke).toHaveBeenCalledWith("runtime_platform");
+  });
 });

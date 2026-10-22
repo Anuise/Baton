@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::{ErrorBody, HealthResponse, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH};
+use baton_api::{
+    ErrorBody, HealthResponse, PlatformResponse, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH,
+};
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
 
@@ -56,6 +58,15 @@ impl RuntimeClient {
 
     /// 查詢 Runtime 的健康狀態。
     pub async fn health(&self) -> Result<HealthResponse, ClientError> {
+        self.get_json(HEALTH_PATH).await
+    }
+
+    /// 查詢 Runtime 的平台狀態。
+    pub async fn platform(&self) -> Result<PlatformResponse, ClientError> {
+        self.get_json(PLATFORM_PATH).await
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         let token = baton_credential::read_desktop_credential(&self.data_dir, &*self.protector)?;
         let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
         // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
@@ -63,7 +74,7 @@ impl RuntimeClient {
             .connect_timeout(Duration::from_millis(300))
             .build()
             .map_err(unreachable)?
-            .get(format!("http://{}{HEALTH_PATH}", self.addr))
+            .get(format!("http://{}{path}", self.addr))
             .bearer_auth(token)
             .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
             .timeout(Duration::from_secs(2))

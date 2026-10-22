@@ -257,10 +257,12 @@ impl Default for FakePlatformInfo {
     fn default() -> Self {
         Self {
             snapshot: Mutex::new(PlatformSnapshot {
-                os_build: "fake".into(),
+                os_family: OsFamily::Windows11,
+                os_build: "26200".into(),
+                feature_version: "25H2".into(),
                 edition: "Pro".into(),
                 native_arch: "x64".into(),
-                support_status: SupportStatus::Supported,
+                process_arch: "x64".into(),
             }),
         }
     }

@@ -186,6 +186,7 @@ dependencies = [
  "baton-harness",
  "baton-ports",
  "reqwest 0.12.28",
+ "serde",
  "thiserror 2.0.21",
  "tokio",
 ]

@@ -1,6 +1,6 @@
 //! 正式執行環境使用的 Port。
 //!
-//! 目前只有系統時鐘與 DPAPI 憑證保護是真實實作；其餘 Port 的正式版由後續的票提供，
+//! 目前只有系統時鐘、平台辨識與 DPAPI 憑證保護是真實實作；其餘 Port 的正式版由後續的票提供，
 //! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
 
 use std::path::Path;
@@ -11,6 +11,8 @@ use async_trait::async_trait;
 use baton_domain::Timestamp;
 use baton_ports::*;
 use futures::stream::BoxStream;
+
+use crate::windows_platform::WindowsPlatformInfo;
 
 pub struct SystemClock;
 
@@ -72,18 +74,6 @@ impl WorkspaceFs for Unavailable {
     }
 }
 
-impl PlatformInfo for Unavailable {
-    fn snapshot(&self) -> PlatformSnapshot {
-        // 平台辨識由票 03 實作；在那之前一律回報未知，不假裝支援
-        PlatformSnapshot {
-            os_build: "unknown".into(),
-            edition: "unknown".into(),
-            native_arch: "unknown".into(),
-            support_status: SupportStatus::Unknown,
-        }
-    }
-}
-
 /// 組出正式執行用的 Port 組合。
 pub fn production_ports() -> Ports {
     let unavailable = Arc::new(Unavailable);
@@ -93,7 +83,7 @@ pub fn production_ports() -> Ports {
         agent_adapter: unavailable.clone(),
         quota_observer: unavailable.clone(),
         workspace_fs: unavailable.clone(),
-        platform_info: unavailable,
+        platform_info: Arc::new(WindowsPlatformInfo),
         // DPAPI 是真實實作：桌面憑證檔一定要受保護
         secret_protector: Arc::new(baton_credential::DpapiProtector),
     }

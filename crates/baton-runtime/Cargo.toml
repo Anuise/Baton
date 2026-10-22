@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 axum = "0.8"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
 baton-client = { path = "../baton-client" }

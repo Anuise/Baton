@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod log;
 pub mod production_ports;
 pub mod single_instance;
+pub mod windows_platform;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
@@ -73,6 +74,7 @@ impl Runtime {
             allowed_port: addr.port(),
             store: store.clone(),
             clock: ports.clock.clone(),
+            platform_info: ports.platform_info.clone(),
             log,
             shutdown: stop_rx.clone(),
         });

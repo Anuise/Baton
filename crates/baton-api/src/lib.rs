@@ -1,6 +1,6 @@
 //! API：Axum 路由。
 //!
-//! 目前有健康狀態端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
+//! 目前有健康狀態、平台狀態端點與事件串流；所有端點一律經過 `guard` 的身分驗證與網頁存取防護
 //! （票 04）。管理 API 與 Agent API 的分流由後續的票加入。
 
 mod guard;
@@ -12,8 +12,9 @@ use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
 use axum::{middleware, Json, Router};
+use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
-use baton_ports::Clock;
+use baton_ports::{Clock, PlatformInfo};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,9 @@ pub const EVENTS_PATH: &str = "/api/v1/events";
 
 /// 請求紀錄的輸出位置；內容不含憑證、查詢字串或實際 URL。
 pub type LogSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// 平台狀態端點路徑。
+pub const PLATFORM_PATH: &str = "/api/v1/platform";
 
 /// 健康端點的回應內容；Runtime 與用戶端（App、測試 harness）共用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +54,17 @@ pub struct ErrorBody {
     pub message: String,
 }
 
+/// 平台狀態端點的回應內容：診斷事實、支援判定與支援期限資料來源。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformResponse {
+    pub platform: PlatformSnapshot,
+    pub app_version: String,
+    pub assessment: PlatformAssessment,
+    /// 支援期限表的資料來源與查閱日期。
+    pub support_table_source: String,
+    pub support_table_checked_on: String,
+}
+
 /// Router 需要的執行期狀態。
 #[derive(Clone)]
 pub struct ApiState {
@@ -59,6 +74,7 @@ pub struct ApiState {
     pub allowed_port: u16,
     pub store: Store,
     pub clock: Arc<dyn Clock>,
+    pub platform_info: Arc<dyn PlatformInfo>,
     pub log: LogSink,
     /// Runtime 開始停止時變成 `true`；長連線（串流）據此結束，優雅停止才不會被它們卡住。
     pub shutdown: watch::Receiver<bool>,
@@ -68,6 +84,7 @@ pub fn router(state: ApiState) -> Router {
     let state = Arc::new(state);
     Router::new()
         .route(HEALTH_PATH, get(health))
+        .route(PLATFORM_PATH, get(platform_status))
         .route(EVENTS_PATH, get(events))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
@@ -92,5 +109,18 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<HealthResponse> {
         boot_count: state.boot_count,
         started_at: state.started_at,
         pid: std::process::id(),
+    })
+}
+
+/// 每次請求都以目前的時間重新判定，支援期限到期後不必重啟 Runtime。
+async fn platform_status(State(state): State<Arc<ApiState>>) -> Json<PlatformResponse> {
+    let snapshot = state.platform_info.snapshot();
+    let assessment = platform::assess(&snapshot, state.clock.now());
+    Json(PlatformResponse {
+        platform: snapshot,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        assessment,
+        support_table_source: platform::SUPPORT_TABLE_SOURCE.to_string(),
+        support_table_checked_on: platform::SUPPORT_TABLE_CHECKED_ON.to_string(),
     })
 }

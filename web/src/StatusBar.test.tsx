@@ -1,14 +1,23 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { supportedPlatform, unofficialPlatform } from "./fixtures";
 import { StatusBar } from "./StatusBar";
-import type { RuntimeClient } from "./runtimeClient";
+import type { PlatformResponse, RuntimeClient } from "./runtimeClient";
 
 const health = { status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 };
 
 function clientReturning(...results: Array<"ok" | Error>): RuntimeClient {
+  return clientWithPlatform(supportedPlatform, ...results);
+}
+
+function clientWithPlatform(platform: PlatformResponse | Error, ...results: Array<"ok" | Error>): RuntimeClient {
   const queue = [...results];
   return {
+    getPlatform: vi.fn(async () => {
+      if (platform instanceof Error) throw platform;
+      return platform;
+    }),
     getHealth: vi.fn(async () => {
       const next = queue.length > 1 ? queue.shift()! : queue[0];
       if (next instanceof Error) throw next;
@@ -59,6 +68,32 @@ describe("頂部狀態列", () => {
 
     await settle(5000);
 
+    expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+  });
+
+  it("顯示平台支援狀態", async () => {
+    render(<StatusBar client={clientReturning("ok")} pollMs={5000} />);
+
+    await settle();
+
+    expect(screen.getByText("平台：正式支援")).toBeInTheDocument();
+  });
+
+  it("非正式支援時顯示警告，但 Runtime 仍顯示運作中", async () => {
+    render(<StatusBar client={clientWithPlatform(unofficialPlatform, "ok")} pollMs={5000} />);
+
+    await settle();
+
+    expect(screen.getByText("平台：非正式支援")).toBeInTheDocument();
+    expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+  });
+
+  it("讀不到平台狀態時不影響 Runtime 狀態，平台顯示未知", async () => {
+    render(<StatusBar client={clientWithPlatform(new Error("boom"), "ok")} pollMs={5000} />);
+
+    await settle();
+
+    expect(screen.getByText("平台：未知")).toBeInTheDocument();
     expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
   });
 });

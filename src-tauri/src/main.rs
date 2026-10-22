@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use baton_api::HealthResponse;
+use baton_api::{HealthResponse, PlatformResponse};
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, RuntimeClient};
 use baton_credential::DpapiProtector;
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
@@ -72,11 +72,20 @@ async fn runtime_health(link: State<'_, RuntimeLink>) -> Result<HealthResponse, 
     link.client.health().await.map_err(|e| e.to_string())
 }
 
+/// Web UI 查詢平台支援狀態；與健康查詢一樣先確保 Runtime 已啟動。
+#[tauri::command]
+async fn runtime_platform(link: State<'_, RuntimeLink>) -> Result<PlatformResponse, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.platform().await.map_err(|e| e.to_string())
+}
+
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
         .manage(link)
-        .invoke_handler(tauri::generate_handler![runtime_health])
+        .invoke_handler(tauri::generate_handler![runtime_health, runtime_platform])
         .setup(|app| {
             // 不等 Web UI 來問：App 一開啟就連回或啟動 Runtime
             let handle = app.handle().clone();

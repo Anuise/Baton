@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 pub use agent::{AdapterEvent, AgentAdapter, AgentHandle, Capability, RunSpec, SessionRef};
 pub use clock::Clock;
-pub use platform::{PlatformInfo, PlatformSnapshot, SupportStatus};
+pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
 pub use secret::SecretProtector;

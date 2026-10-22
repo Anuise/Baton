@@ -11,6 +11,7 @@ baton-api = { path = "../baton-api" }
 baton-credential = { path = "../baton-credential" }
 baton-ports = { path = "../baton-ports" }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 
