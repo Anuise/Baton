@@ -87,3 +87,4 @@
 | R083-21-impl | 21 | impl | Work-8 | 2026-10-22 18:34 | | |
 | R084-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:34 | 2026-10-22 18:41 | DONE，依 AI-109 直接合併 |
 | R085-24-integrate | 24 | integrate | Work-3 | 2026-10-22 18:41 | | |
+| R086-36-impl | 36 | impl | Work-8 | 2026-10-22 18:41 | | |
