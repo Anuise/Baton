@@ -4,6 +4,9 @@
 // release 版不顯示額外的主控台視窗
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod fallback_timer;
+mod startup_cell;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,7 +56,8 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
-use tokio::sync::OnceCell;
+use crate::fallback_timer::FallbackTimer;
+use crate::startup_cell::StartupCell;
 
 /// 等待 Runtime 就緒的上限。
 const START_WAIT: Duration = Duration::from_secs(20);
@@ -91,11 +95,13 @@ struct RuntimeLink {
     client: RuntimeClient,
     data_dir: PathBuf,
     envs: Vec<(String, String)>,
-    /// 啟動流程只做一次；結果（成功或失敗原因）供之後的健康查詢使用
-    startup: OnceCell<Result<Connection, String>>,
+    /// 啟動流程成功後不再執行；失敗不保留，下次呼叫重試（Runtime 之後正常監聽就能接上，不必重開 App）
+    startup: StartupCell<Connection, String>,
     /// 最後一次看到的「準備套用」的更新安裝程式（票 34）：Runtime 在維護就緒約 5 秒後結束，
     /// 使用者因停止異常而稍後才按「安裝」時，殼仍知道要執行哪個已驗證的檔案
     ready_package: std::sync::Mutex<Option<PathBuf>>,
+    /// 系統匣「完全退出」的後備計時器；Web UI 接手或使用者放棄退出時取消
+    full_exit_fallback: FallbackTimer,
 }
 
 impl RuntimeLink {
@@ -108,7 +114,14 @@ impl RuntimeLink {
         ];
         let data_dir = config.data_dir.clone();
         let client = RuntimeClient::new(config.bind, config.data_dir, Arc::new(DpapiProtector));
-        Ok(Self { client, data_dir, envs, startup: OnceCell::new(), ready_package: std::sync::Mutex::new(None) })
+        Ok(Self {
+            client,
+            data_dir,
+            envs,
+            startup: StartupCell::new(),
+            ready_package: std::sync::Mutex::new(None),
+            full_exit_fallback: FallbackTimer::new(),
+        })
     }
 
     /// 記下更新狀態中「準備套用」的安裝程式；不是這個狀態時清除。
@@ -116,10 +129,10 @@ impl RuntimeLink {
         *self.ready_package.lock().unwrap_or_else(|e| e.into_inner()) = ready_package_of(status);
     }
 
-    /// 連回既有的 Runtime，沒有就啟動一個；只會執行一次。
-    async fn ensure_started(&self) -> &Result<Connection, String> {
+    /// 連回既有的 Runtime，沒有就啟動一個；成功後不再執行，失敗則下次呼叫重試。
+    async fn ensure_started(&self) -> Result<Connection, String> {
         self.startup
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
                 // 資料目錄在網路共享或雲端同步資料夾時，先把原因說清楚，而不是等 Runtime 啟動逾時（spec D-17）
                 baton_store::check_data_dir(&self.data_dir).map_err(|e| e.to_string())?;
                 let exe = runtime_exe_path().map_err(|e| e.to_string())?;
@@ -953,12 +966,21 @@ fn request_full_exit(app: &AppHandle) {
     // 後備：Web UI 沒反應時也不能無限等。使用者在系統匣按下「完全退出」本身就是停止意圖，
     // 所以逾時後殼自己送出完全退出（Runtime 端是冪等的，Web UI 已送過也無妨）再結束 App。
     // Runtime 的停止流程與 App 是否在世無關，結束 App 不會中斷它。
+    // Web UI 接手或使用者放棄退出時以 `full_exit_cancel_fallback` 取消；已有等待中的計時器時不另起。
     let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(FULL_EXIT_FALLBACK).await;
-        let _ = handle.state::<RuntimeLink>().client.request_exit().await;
-        handle.exit(0);
+    app.state::<RuntimeLink>().full_exit_fallback.arm(|| {
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(FULL_EXIT_FALLBACK).await;
+            let _ = handle.state::<RuntimeLink>().client.request_exit().await;
+            handle.exit(0);
+        })
     });
+}
+
+/// Web UI 已接手完全退出，或使用者在失敗畫面按「返回」放棄退出：取消系統匣「完全退出」的後備計時器。
+#[tauri::command]
+fn full_exit_cancel_fallback(link: State<'_, RuntimeLink>) {
+    link.full_exit_fallback.cancel();
 }
 
 /// 系統匣狀態項目的文字。
@@ -1390,6 +1412,7 @@ fn main() {
             update_apply,
             update_install,
             app_quit,
+            full_exit_cancel_fallback,
             profile_set_quota_limits,
             knowledge_list,
             knowledge_create,

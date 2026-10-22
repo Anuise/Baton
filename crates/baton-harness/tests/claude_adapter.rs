@@ -8,11 +8,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use baton_harness::Harness;
-use baton_ports::{SpawnSpec, ToolProbe};
+use baton_ports::{
+    AdapterEvent, AgentAdapter, AgentHandle, Capability, PortResult, RunSpec, SessionRef, SpawnSpec, ToolProbe,
+};
 use baton_runtime::claude_adapter::{ClaudeCodeAdapter, PROMPT_FILE, RUNS_DIR, RUN_MCP_FILE, STREAM_FILE};
+use futures::stream::BoxStream;
+use futures::StreamExt;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 
 const WORKSPACES: &str = "/api/v1/workspaces";
 const SHIM: &str = "C:\\Baton\\bin\\baton-mcp-shim.exe";
@@ -28,16 +34,76 @@ fn result_line(is_error: bool, text: &str) -> String {
     json!({ "type": "result", "subtype": "success", "is_error": is_error, "result": text, "session_id": "s" }).to_string()
 }
 
+/// 等 Adapter 事件送達的上限（真實時間；正常情況下幾毫秒內就到）。
+const EVENT_WAIT: Duration = Duration::from_secs(10);
+
+/// 正式 Adapter 外包一層：事件原樣轉交給 Runtime，每轉交一個就通知測試。
+/// 測試據此等「下一個事件送達」再讓 Supervisor 處理，而不是睡固定毫秒數等背景的檔案追蹤。
+struct Observed {
+    inner: ClaudeCodeAdapter,
+    delivered: Arc<Notify>,
+}
+
+#[async_trait]
+impl AgentAdapter for Observed {
+    fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        self.inner.spawn_spec(spec)
+    }
+
+    async fn prepare(&self, spec: &RunSpec) -> PortResult<()> {
+        self.inner.prepare(spec).await
+    }
+
+    async fn launch(&self, spec: RunSpec) -> PortResult<AgentHandle> {
+        self.inner.launch(spec).await
+    }
+
+    fn events(&self, handle: &AgentHandle) -> BoxStream<'static, AdapterEvent> {
+        let mut inner = self.inner.events(handle);
+        let delivered = self.delivered.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    // Runtime 丟棄串流（例如重建）時跟著結束，正式 Adapter 的追蹤也隨之停止
+                    _ = tx.closed() => return,
+                    next = inner.next() => {
+                        let Some(event) = next else { return };
+                        if tx.send(event).is_err() {
+                            return;
+                        }
+                        // 保留一次通知：事件比測試開始等待更早送達也不會漏
+                        delivered.notify_one();
+                    }
+                }
+            }
+        });
+        Box::pin(futures::stream::poll_fn(move |cx| rx.poll_recv(cx)))
+    }
+
+    async fn resume_capability(&self, session: &SessionRef) -> PortResult<Capability> {
+        self.inner.resume_capability(session).await
+    }
+}
+
 async fn harness() -> Harness {
-    Harness::builder()
-        .agent_adapter(|data_dir| {
+    observed_harness().await.0
+}
+
+/// 與 `harness` 相同，另外回傳「Adapter 送出事件」的通知。
+async fn observed_harness() -> (Harness, Arc<Notify>) {
+    let delivered = Arc::new(Notify::new());
+    let observed = delivered.clone();
+    let harness = Harness::builder()
+        .agent_adapter(move |data_dir| {
             let inherited = INHERITED.iter().map(|s| s.to_string()).collect();
             let adapter = ClaudeCodeAdapter::new("claude".into(), SHIM.into(), data_dir, inherited)
                 .with_poll(Duration::from_millis(5));
-            Arc::new(adapter)
+            Arc::new(Observed { inner: adapter, delivered: observed })
         })
         .start()
-        .await
+        .await;
+    (harness, delivered)
 }
 
 fn filled(text: &str) -> Value {
@@ -110,17 +176,45 @@ fn emit(harness: &Harness, run: &str, lines: &[String]) {
     }
 }
 
-/// 讓 Supervisor 反覆處理，直到 Run 符合條件（Adapter 在背景追蹤檔案，事件稍後才會到）。
-async fn supervise_until(harness: &Harness, ws: &str, run: &str, done: impl Fn(&Value) -> bool) -> Value {
-    for _ in 0..400 {
-        harness.supervise().await;
-        let view = run_view(harness, ws, run).await;
-        if done(&view) {
-            return view;
+/// 讓 Supervisor 反覆處理，直到 Run 符合條件。Adapter 在背景追蹤檔案，事件稍後才會到：
+/// 條件不成立時等下一個事件送達（`delivered`）再處理，不睡固定時間；最多等 `EVENT_WAIT`。
+async fn supervise_until(
+    harness: &Harness,
+    delivered: &Notify,
+    ws: &str,
+    run: &str,
+    done: impl Fn(&Value) -> bool,
+) -> Value {
+    let reached = tokio::time::timeout(EVENT_WAIT, async {
+        loop {
+            harness.supervise().await;
+            let view = run_view(harness, ws, run).await;
+            if done(&view) {
+                return view;
+            }
+            delivered.notified().await;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+    })
+    .await;
+    match reached {
+        Ok(view) => view,
+        Err(_) => panic!("Run {run} 一直沒有達到預期狀態：{}", run_view(harness, ws, run).await),
     }
-    panic!("Run {run} 一直沒有達到預期狀態：{}", run_view(harness, ws, run).await);
+}
+
+/// 同 `supervise_until`，但等的是 Run 記下某種事件。
+async fn supervise_until_event(harness: &Harness, delivered: &Notify, run: &str, event_type: &str) {
+    let found = tokio::time::timeout(EVENT_WAIT, async {
+        loop {
+            harness.supervise().await;
+            if event_types(harness, run).iter().any(|t| t == event_type) {
+                return;
+            }
+            delivered.notified().await;
+        }
+    })
+    .await;
+    assert!(found.is_ok(), "Run {run} 一直沒有記下 {event_type}：{:?}", event_types(harness, run));
 }
 
 /// 某個 Run 的啟動指令（依 stdout 檔案所在的 Run 目錄找出）。
@@ -244,44 +338,38 @@ async fn the_worker_model_is_fixed_at_dispatch_so_later_overrides_only_affect_la
 
 #[tokio::test]
 async fn the_first_native_session_is_bound_and_a_different_one_never_replaces_it() {
-    let harness = harness().await;
+    let (harness, delivered) = observed_harness().await;
     harness.add_account("主要帳號", "main@example.com").await;
     let (ws, goal) = workspace(&harness).await;
     let run = dispatch_ok(&harness, &ws, &goal, "工作").await;
     harness.supervise().await;
 
     emit(&harness, &run, &[session_init("sess-a")]);
-    let view = supervise_until(&harness, &ws, &run, |v| v["native_session_id"].is_string()).await;
+    let view = supervise_until(&harness, &delivered, &ws, &run, |v| v["native_session_id"].is_string()).await;
     assert_eq!(view["native_session_id"], "sess-a");
 
     emit(&harness, &run, &[session_init("sess-b")]);
-    for _ in 0..50 {
-        harness.supervise().await;
-        if event_types(&harness, &run).iter().any(|t| t == "run_native_session_conflict") {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    supervise_until_event(&harness, &delivered, &run, "run_native_session_conflict").await;
     assert_eq!(run_view(&harness, &ws, &run).await["native_session_id"], "sess-a", "不靜默改指其他原生 Session");
     let types = event_types(&harness, &run);
     assert_eq!(types.iter().filter(|t| *t == "run_native_session_bound").count(), 1, "{types:?}");
     assert!(types.iter().any(|t| t == "run_native_session_conflict"), "衝突留下紀錄：{types:?}");
 
     emit(&harness, &run, &[result_line(false, "完成")]);
-    let view = supervise_until(&harness, &ws, &run, |v| v["status"] != "running").await;
+    let view = supervise_until(&harness, &delivered, &ws, &run, |v| v["status"] != "running").await;
     assert_eq!((view["status"].as_str(), view["native_session_id"].as_str()), (Some("succeeded"), Some("sess-a")));
 }
 
 #[tokio::test]
 async fn an_error_result_fails_the_run_with_the_reason_reported_by_the_cli() {
-    let harness = harness().await;
+    let (harness, delivered) = observed_harness().await;
     harness.add_account("主要帳號", "main@example.com").await;
     let (ws, goal) = workspace(&harness).await;
     let run = dispatch_ok(&harness, &ws, &goal, "工作").await;
     harness.supervise().await;
 
     emit(&harness, &run, &[session_init("sess-a"), result_line(true, "Not logged in · Please run /login")]);
-    let view = supervise_until(&harness, &ws, &run, |v| v["status"] != "running").await;
+    let view = supervise_until(&harness, &delivered, &ws, &run, |v| v["status"] != "running").await;
 
     assert_eq!(view["status"], "failed");
     assert!(view["end_reason"].as_str().unwrap().contains("Not logged in"), "{view}");
@@ -289,7 +377,7 @@ async fn an_error_result_fails_the_run_with_the_reason_reported_by_the_cli() {
 
 #[tokio::test]
 async fn after_a_runtime_restart_the_adapter_reattaches_to_the_same_run_without_a_second_launch() {
-    let mut harness = harness().await;
+    let (mut harness, delivered) = observed_harness().await;
     adopt_shared_settings(&harness).await;
     harness.add_account("主要帳號", "main@example.com").await;
     let (ws, goal) = workspace(&harness).await;
@@ -297,11 +385,11 @@ async fn after_a_runtime_restart_the_adapter_reattaches_to_the_same_run_without_
     harness.supervise().await;
     let first = spawned_for(&harness, &run);
     emit(&harness, &run, &[session_init("sess-a")]);
-    supervise_until(&harness, &ws, &run, |v| v["native_session_id"].is_string()).await;
+    supervise_until(&harness, &delivered, &ws, &run, |v| v["native_session_id"].is_string()).await;
 
     harness.restart().await;
     emit(&harness, &run, &[result_line(false, "完成")]);
-    let view = supervise_until(&harness, &ws, &run, |v| v["status"] != "running").await;
+    let view = supervise_until(&harness, &delivered, &ws, &run, |v| v["status"] != "running").await;
 
     assert_eq!(view["status"], "succeeded");
     assert_eq!(harness.process_control.spawn_count(), 1, "重建後以同一個啟動指令找回程序，不重新啟動");

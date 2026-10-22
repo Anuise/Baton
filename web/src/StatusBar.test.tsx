@@ -1,7 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { recoveryEvent, recoveryStatus, supportedPlatform, unofficialPlatform } from "./fixtures";
+import { profile, recoveryEvent, recoveryStatus, supportedPlatform, unofficialPlatform } from "./fixtures";
 import { StatusBar } from "./StatusBar";
 import type { HealthResponse, PlatformResponse, RuntimeClient } from "./runtimeClient";
 
@@ -138,6 +138,37 @@ describe("頂部狀態列", () => {
     await settle();
 
     expect(screen.getByText("待裁定：0")).toBeInTheDocument();
+  });
+
+  describe("可用帳號數", () => {
+    it("顯示可派工的帳號數（不含被阻擋與已封存的帳號），並在輪詢時更新", async () => {
+      const blocked = profile({ id: "prof_3", dispatchable: false, blockers: [{ code: "not_logged_in", message: "尚未登入" }] });
+      const archived = profile({ id: "prof_4", status: "archived", dispatchable: false });
+      const client = {
+        ...clientReturning("ok"),
+        listProfiles: vi
+          .fn()
+          .mockResolvedValueOnce({ profiles: [profile(), profile({ id: "prof_2" }), blocked, archived], limit: 8 })
+          .mockResolvedValue({ profiles: [profile(), blocked], limit: 8 }),
+      };
+      render(<StatusBar client={client} pollMs={5000} />);
+
+      await settle();
+      expect(screen.getByText("可用帳號：2")).toBeInTheDocument();
+
+      await settle(5000);
+      expect(screen.getByText("可用帳號：1")).toBeInTheDocument();
+    });
+
+    it("讀不到帳號時不顯示該欄位，也不影響 Runtime 狀態", async () => {
+      const client = { ...clientReturning("ok"), listProfiles: vi.fn(async () => Promise.reject(new Error("boom"))) };
+      render(<StatusBar client={client} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.queryByText(/可用帳號/)).not.toBeInTheDocument();
+      expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+    });
   });
 
   describe("崩潰恢復事件", () => {

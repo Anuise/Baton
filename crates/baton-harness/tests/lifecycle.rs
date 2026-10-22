@@ -405,9 +405,7 @@ async fn full_exit_is_not_delayed_by_a_cancellation_stuck_in_stopping_its_proces
     // Supervisor 處理取消時，停止呼叫卡住（握著處理的鎖）；這時使用者要求完全退出
     let ticking = harness.supervise();
     let exiting = async {
-        while !harness.process_control.stop_calls().contains(&stuck_identity) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        harness.process_control.wait_for_stop_call(&stuck_identity).await;
         let began = Instant::now();
         let (status, body) = harness.send_json(Method::POST, LIFECYCLE_EXIT, None).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{body}");
@@ -452,7 +450,9 @@ async fn full_exit_still_ends_within_its_deadline_when_another_supervisor_step_n
     // Supervisor 啟動程序時永遠不回來（握著處理的鎖）；這時使用者要求完全退出
     let ticking = harness.supervise();
     let exiting = async {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(10), harness.process_control.wait_for_spawn_hang())
+            .await
+            .expect("Supervisor 應該卡在啟動程序的呼叫");
         let began = Instant::now();
         let (status, body) = harness.send_json(Method::POST, LIFECYCLE_EXIT, None).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{body}");

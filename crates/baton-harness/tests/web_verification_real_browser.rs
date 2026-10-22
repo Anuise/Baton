@@ -1,7 +1,8 @@
 //! 情境測試：以正式的瀏覽器 Runner（`LocalBrowserDriver`，真實的 Playwright 與 Chromium）跑完整的 web 驗證（票 46）。
 //!
 //! 受驗的網站是測試在 loopback 上啟動的小型商店；其餘 Port（judge、秘密參照、受驗服務）仍是 fake。
-//! Playwright 不在 repo 中：受驗專案與 `BATON_PLAYWRIGHT_DIR` 都解析不到時印出原因並略過。
+//! Playwright 不在 repo 中：沒設定 `BATON_PLAYWRIGHT_DIR` 且受驗專案解析不到時印出原因並略過（結果仍顯示通過）；
+//! 設定了 `BATON_PLAYWRIGHT_DIR` 卻無法使用 Playwright 時失敗。
 //! 斷言：以秘密參照登入、核對實際身分、旅程通過；保存的截圖是真的 PNG；輸入過秘密的 Session 不保存 trace；
 //! 畫面顯示秘密的截圖與那個 Session 的 trace 不保存；秘密的值不在 Bundle 與資料目錄的任何檔案中。
 
@@ -151,7 +152,13 @@ async fn a_real_browser_logs_in_by_secret_reference_and_keeps_only_safe_evidence
     if bundle["reason_code"] == "browser_unavailable" {
         let reason = bundle["steps"][0]["output"].as_str().unwrap_or_default();
         if ["找不到 Playwright", "無法啟動 Node.js", "Executable doesn't exist"].iter().any(|m| reason.contains(m)) {
-            eprintln!("略過：{reason}（可設定 BATON_PLAYWRIGHT_DIR 指向已安裝 playwright 的目錄）");
+            // 設定了 BATON_PLAYWRIGHT_DIR 表示明確要求實測：Playwright 不可用就是失敗，不能顯示為通過
+            if let Some(dir) = std::env::var_os("BATON_PLAYWRIGHT_DIR").filter(|dir| !dir.is_empty()) {
+                panic!("已設定 BATON_PLAYWRIGHT_DIR={}，但 Playwright 不可用：{reason}", dir.to_string_lossy());
+            }
+            eprintln!(
+                "略過（沒有實際跑瀏覽器，這次通過不代表實測過）：{reason}；要實測請設定 BATON_PLAYWRIGHT_DIR 指向已安裝 playwright 與其瀏覽器的目錄"
+            );
             return;
         }
     }

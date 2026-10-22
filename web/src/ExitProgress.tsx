@@ -14,7 +14,7 @@ type ExitState =
   | { state: "requesting" }
   | { state: "request_failed"; reason: string }
   | { state: "progress"; status: LifecycleStatus }
-  // 輪詢時連不上 Runtime：視為已結束
+  // 輪詢時連續連不上 Runtime：視為已結束
   | { state: "runtime_gone" };
 
 interface Props {
@@ -24,6 +24,9 @@ interface Props {
   /** 沒有停止異常時，停在結果畫面多久才結束 App（毫秒），讓使用者看到結果。 */
   quitDelayMs?: number;
 }
+
+/** 連續這麼多次讀不到生命週期才視為 Runtime 已結束；暫時性錯誤不能讓使用者看不到之後的停止異常。 */
+const GONE_AFTER_FAILURES = 3;
 
 const PHASE_LABELS: Record<LifecyclePhase, string> = {
   running: "運作中",
@@ -66,16 +69,21 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
   // 退出進行中再收到事件時不重新開始
   const started = useRef(false);
 
+  // 由畫面決定何時結束 App 時，取消殼的 60 秒後備強制關閉；取消失敗不影響畫面
+  const cancelFallback = useCallback(() => void client.cancelFullExitFallback().catch(() => {}), [client]);
+
   const start = useCallback(async () => {
     started.current = true;
     setExit({ state: "requesting" });
     try {
       setExit({ state: "progress", status: await client.requestFullExit() });
+      // Runtime 已接手停止；之後可能要停在停止異常畫面，不能讓殼 60 秒後強制關掉
+      cancelFallback();
     } catch (error) {
       started.current = false;
       setExit({ state: "request_failed", reason: reasonOf(error) });
     }
-  }, [client]);
+  }, [client, cancelFallback]);
 
   useEffect(
     () =>
@@ -91,13 +99,19 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
     if (phase === null || phase === "stopped") return;
     // 階段改變（或卸載）後，遲到的回應一律忽略，避免蓋掉已停止的結果
     let cancelled = false;
+    // 連續失敗次數；讀到一次就歸零
+    let failures = 0;
     const timer = setInterval(() => {
       client.lifecycleStatus().then(
         (status) => {
-          if (!cancelled) setExit({ state: "progress", status });
+          if (cancelled) return;
+          failures = 0;
+          setExit({ state: "progress", status });
         },
         () => {
-          if (!cancelled) setExit({ state: "runtime_gone" });
+          if (cancelled) return;
+          failures += 1;
+          if (failures >= GONE_AFTER_FAILURES) setExit({ state: "runtime_gone" });
         },
       );
     }, pollMs);
@@ -134,7 +148,13 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
               <button type="button" onClick={() => void start()}>
                 重試
               </button>
-              <button type="button" onClick={() => setExit({ state: "idle" })}>
+              <button
+                type="button"
+                onClick={() => {
+                  setExit({ state: "idle" });
+                  cancelFallback();
+                }}
+              >
                 返回
               </button>
             </div>

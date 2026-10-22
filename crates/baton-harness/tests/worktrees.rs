@@ -267,14 +267,10 @@ async fn the_integration_queue_merges_one_branch_at_a_time_and_tasks_complete_on
     harness.agent_adapter.emit(&r1, AdapterEvent::Exited { success: true });
     harness.agent_adapter.emit(&r2, AdapterEvent::Exited { success: true });
     let observe = async {
-        let mut snapshot = queue(&harness).await;
-        for _ in 0..200 {
-            if snapshot["active"].is_string() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            snapshot = queue(&harness).await;
-        }
+        tokio::time::timeout(Duration::from_secs(10), harness.workspace_fs.wait_for_held_merge())
+            .await
+            .expect("第一個合併應該停在閘門");
+        let snapshot = queue(&harness).await;
         let first_status = task_status(&harness, &ws, &first).await;
         let second_status = task_status(&harness, &ws, &second).await;
         gate.notify_one();

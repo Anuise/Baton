@@ -2,6 +2,8 @@
 //!
 //! Playwright 不在 repo 中：受驗專案（這裡是暫存目錄）與 `BATON_PLAYWRIGHT_DIR` 都解析不到時印出原因並略過。
 
+mod support;
+
 use std::time::Duration;
 
 use axum::response::Html;
@@ -87,6 +89,9 @@ async fn a_session_drives_a_real_browser_and_returns_its_trace_and_video() {
         Ok(session) => session,
         Err(error) if unavailable(&error) => {
             eprintln!("略過：{error}（可設定 BATON_PLAYWRIGHT_DIR 指向已安裝 playwright 的目錄）");
+            // 開啟失敗時 Runner 程序被終止但不等它結束，它還佔著受驗目錄
+            support::remove_temp_dir(project).await;
+            support::remove_temp_dir(scratch).await;
             return;
         }
         Err(error) => panic!("{error}"),
@@ -147,6 +152,8 @@ async fn a_session_drives_a_real_browser_and_returns_its_trace_and_video() {
     assert!(again.is_err());
     assert!(driver.close(&session).await.unwrap().is_empty());
     assert_eq!(driver.engine(&session), None, "關閉後不再回報引擎");
+    support::remove_temp_dir(project).await;
+    support::remove_temp_dir(scratch).await;
 }
 
 /// 以 Windows 內建的 bsdtar 解開 trace，確認輸入過的密碼（含表單編碼）沒有留在任何項目中。
@@ -269,6 +276,9 @@ async fn opening_without_playwright_in_the_project_explains_what_to_install() {
             driver.close(&session).await.unwrap();
         }
     }
+    // 開啟失敗時 Runner 程序被終止但不等它結束，它還佔著受驗目錄
+    support::remove_temp_dir(project).await;
+    support::remove_temp_dir(scratch).await;
 }
 
 #[tokio::test]

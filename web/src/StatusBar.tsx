@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { platformStatusLabel } from "./PlatformPage";
 import type {
+  AccountClient,
   DecisionClient,
   HealthResponse,
   PendingDecisions,
@@ -17,8 +18,11 @@ type RuntimeStatus =
   | { state: "offline"; reason: string };
 
 interface Props {
-  /** 有 `pendingDecisions` 時才顯示待裁定數；有 `recoveryStatus` 時才顯示恢復事件狀態。 */
-  client: RuntimeClient & Partial<Pick<DecisionClient, "pendingDecisions">> & Partial<Pick<RecoveryClient, "recoveryStatus">>;
+  /** 有 `listProfiles` 時才顯示可用帳號數；有 `pendingDecisions` 時才顯示待裁定數；有 `recoveryStatus` 時才顯示恢復事件狀態。 */
+  client: RuntimeClient &
+    Partial<Pick<AccountClient, "listProfiles">> &
+    Partial<Pick<DecisionClient, "pendingDecisions">> &
+    Partial<Pick<RecoveryClient, "recoveryStatus">>;
   /** 重新檢查的間隔（毫秒）。 */
   pollMs?: number;
   onHealth?: (health: HealthResponse | null) => void;
@@ -31,11 +35,13 @@ interface Props {
 /** 監護不在、Runtime 又沒有附訊息時的降級提示。 */
 const GUARDIAN_UNAVAILABLE_FALLBACK = "工作繼續，自動重啟保護不可用";
 
-/** 頂部狀態列（spec D-21）：Runtime 狀態、平台支援狀態、待裁定數、恢復事件、監護狀態與儲存故障。 */
+/** 頂部狀態列（spec D-21）：Runtime 狀態、平台支援狀態、可用帳號數、待裁定數、恢復事件、監護狀態與儲存故障。 */
 export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshKey }: Props) {
   const [status, setStatus] = useState<RuntimeStatus>({ state: "checking" });
   // null：尚未取得或讀取失敗，顯示為「未知」，不影響 Runtime 狀態
   const [platform, setPlatform] = useState<PlatformResponse | null>(null);
+  // null：尚未取得或讀取失敗，不顯示可用帳號數
+  const [usableAccounts, setUsableAccounts] = useState<number | null>(null);
   // null：尚未取得或讀取失敗，不顯示待裁定數
   const [pending, setPending] = useState<PendingDecisions | null>(null);
   // null：尚未取得或讀取失敗，不顯示恢復事件狀態
@@ -51,6 +57,9 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
         onHealth?.(health);
         const platform = await client.getPlatform().catch(() => null);
         if (!cancelled) setPlatform(platform);
+        // 可派工（核對無誤、沒有阻擋原因）的帳號數；與 Runtime 排程的「可用帳號」相同，已封存的不算
+        const profiles = (await client.listProfiles?.().catch(() => null)) ?? null;
+        if (!cancelled) setUsableAccounts(profiles && profiles.profiles.filter((p) => p.dispatchable).length);
         const pending = (await client.pendingDecisions?.().catch(() => null)) ?? null;
         if (!cancelled) {
           setPending(pending);
@@ -86,6 +95,9 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
         <span className={`status status-platform-${platform?.assessment.status ?? "unknown"}`}>
           平台：{platformStatusLabel(platform?.assessment.status ?? "unknown")}
         </span>
+      )}
+      {status.state === "running" && usableAccounts !== null && (
+        <span className="status status-accounts">可用帳號：{usableAccounts}</span>
       )}
       {status.state === "running" && pending !== null && (
         <span className={`status status-decisions${pending.pending_count > 0 ? " status-decisions-pending" : ""}`}>

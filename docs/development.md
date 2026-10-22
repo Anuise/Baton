@@ -563,7 +563,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 規則在 `baton_domain::lifecycle`（純邏輯），持久化在 `baton-store` 的 `lifecycle.rs`（migration 18：`runtime_lifecycle`、`workspace_lifecycle`），端點在 `baton-api` 的 `lifecycle.rs`，停止流程與重新開啟在 `Supervisor`（`full_exit`、第一次 `tick` 的重新開啟）。對應 ADR-0001（DR-20261021-01）與 spec D-11、D-25。
 
-**關窗不等於停止**：Runtime 是獨立程序。桌面殼關閉主視窗只會隱藏到系統匣；系統匣有狀態（每 3 秒更新）、「開啟 Baton」與「完全退出」。重開視窗以 `ensure_runtime` 連回同一個 Runtime，不會啟動第二個控制平面，也不會重複啟動 Worker。
+**關窗不等於停止**：Runtime 是獨立程序。桌面殼關閉主視窗只會隱藏到系統匣；系統匣有狀態（每 3 秒更新）、「開啟 Baton」與「完全退出」。重開視窗以 `ensure_runtime` 連回同一個 Runtime，不會啟動第二個控制平面，也不會重複啟動 Worker。桌面殼只保留成功的連線結果：啟動失敗（逾時、資料目錄被拒絕）不會被記住，下一次查詢會重試，Runtime 之後正常監聽就能接上，不必重開 App。
 
 **完全退出**（系統匣 → Web UI 的 `ExitProgress` → `POST /api/v1/lifecycle/exit`）：
 
@@ -572,6 +572,8 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 3. 停止流程（Runtime 背景）：再鏡像一次生命週期檔（API 寫入失敗時補上），等 Supervisor 的 tick 鎖（正在停止已取消 Run 的處理看到完全退出就讓出），再對每個尚未結束的 Run 呼叫 `ProcessControl::stop(identity, 30 秒)`（ProcessControl 在寬限期後以 Job Object 終止程序樹，並在 10 秒內確認），全部並行。總上限 40 秒從持久化的期限算起，等鎖的時間也算在內；到期限仍拿不到鎖時不要求任何程序停止，全部記為 `stop_unconfirmed`。拿到鎖後握到結束，不會啟動任何程序。Worker 透過 Agent 回報的回應 `stop_requested: true` 得知要保存並停止。
 4. 程序確認停止（或根本沒有程序）的 Run 以 `interrupted`（`stopped_by_full_exit`）結束、釋放寫入所有權，Task 退回 `ready` 並重新排入派工佇列；使用者先前已要求取消的 Run 則完成取消。`StillAlive`、停止呼叫失敗、到總上限仍沒有結果的記為**停止異常**（`still_alive`／`stop_failed`／`stop_unconfirmed`），Run 保留寫入所有權。完全退出不會把任何 Task 標為取消或完成。
 5. 進度（每個 Run 的結果）寫在 `runtime_lifecycle.last_exit`，結束時進入 `stopped` 並追加 `full_exit_completed`（含異常清單）。Runtime 再提供 API 5 秒（讓 App 讀最終結果）後結束。App 沒有停止異常就自動結束；有異常則列出並等使用者按「關閉 Baton」。
+
+**後備計時器**：按下系統匣的「完全退出」後，桌面殼另起一個 60 秒的後備計時器：Web UI 沒反應時，逾時由殼自行送出完全退出並結束 App。同時最多一個計時器（連按不會疊加）；Web UI 送出完全退出成功、或使用者在失敗畫面按「返回」放棄退出時，呼叫 Tauri 指令 `full_exit_cancel_fallback` 取消它。
 
 **重新開啟**：Runtime 啟動時讀資料庫與生命週期檔，不一致時採較保守者（只有檔案有停止意圖或檔案毀損都視為停止，並補記進資料庫）。停止意圖仍生效時，Supervisor 第一次 `tick` 先核對（以 command_id 找回啟動中的程序、查證上次沒能確認停止的程序：確定已不在才以 `process_gone_after_full_exit` 中斷，不自動重派），再解除停止意圖：開啟「完全退出後自動續跑」的 Workspace 解除暫停，排隊中的工作照常派出；其餘 Workspace 等使用者按「繼續工作」。啟動後若又有新的退出要求（生命週期版本改變），不會重新開啟。
 
@@ -586,7 +588,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 事件：`runtime_lifecycle` 聚合有 `full_exit_requested`、`full_exit_completed`、`runtime_reopened`；`workspace_lifecycle` 聚合有 `workspace_paused_by_exit`、`workspace_resumed`、`workspace_auto_resume_changed`。
 
-**Validation Required**：30 秒寬限 + 10 秒確認在真實 Claude Code 與 Windows Job Object 上是否足夠；系統匣、關窗隱藏與停止進度畫面只有編譯與元件測試，需在 Windows 上手動確認（按「完全退出」→ 進度 → App 結束、資料目錄出現 `lifecycle.json`）。
+**Validation Required**：30 秒寬限 + 10 秒確認在真實 Claude Code 與 Windows Job Object 上是否足夠；系統匣與關窗隱藏只有編譯與元件測試；「完全退出 → 進度 → App 結束、資料目錄出現 `lifecycle.json`」已由 `scripts/smoke-desktop.mjs` 以頁面內事件自動確認；系統匣選單本身仍需在 Windows 上手動確認。
 
 ### 事件時間線與觀測指標
 
@@ -686,7 +688,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 | `runtime.json`／`guardian.json` | Runtime／監護 | 程序識別碼與記錄時間 |
 | `guardian.log` | 監護 | 診斷文字，不參與任何判斷 |
 
-**Validation Required**：監護在 Windows 上偵測 Runtime 結束、以 `baton-guardian.exe` 拉起 `baton-runtime.exe`、登出時監護與 Runtime 一起結束，以及每秒輪詢的負擔，都只有單元測試與 harness 情境測試，需在 Windows 上手動確認（工作管理員結束 `baton-runtime.exe` → 監護重新啟動它 → 恢復面板出現同一次嘗試；結束 `baton-guardian.exe` → 狀態列顯示降級 → 重開 App 只補監護）。
+**Validation Required**：監護在 Windows 上偵測 Runtime 結束、以 `baton-guardian.exe` 拉起 `baton-runtime.exe`、登出時監護與 Runtime 一起結束，以及每秒輪詢的負擔，都只有單元測試與 harness 情境測試，其中「強制結束 `baton-runtime.exe` → 監護重新啟動它 → 恢復面板出現同一次嘗試」已由 `scripts/smoke-desktop.mjs` 自動確認，其餘需在 Windows 上手動確認（結束 `baton-guardian.exe` → 狀態列顯示降級 → 重開 App 只補監護）。
 
 ### 跨 Windows 登入的啟動與續跑
 
@@ -1265,7 +1267,7 @@ Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journ
 
 桌面殼指令：`verification_artifact`（`RuntimeClient::evidence_artifact`）。UI 在「驗證」的 Evidence Bundle 檢視中顯示 persona 與登入身分、judge 的預期與理由、限流說明與證據檔案（截圖可開啟、trace 與錄影可下載，沒有保存的顯示原因）。
 
-測試：`crates/baton-harness/tests/web_verification_adapter.rs`（情境測試）、`crates/baton-runtime/tests/browser_driver.rs`（正式 Runner；本機沒有 Playwright 時略過）、`crates/baton-domain/src/verification_profile/tests.rs`、`web/src/VerificationPage.test.tsx`。
+測試：`crates/baton-harness/tests/web_verification_adapter.rs`（情境測試）、`crates/baton-harness/tests/web_verification_real_browser.rs`（以正式 Runner 與真實瀏覽器跑完整情境；沒設定 `BATON_PLAYWRIGHT_DIR` 且本機沒有 Playwright 時會略過並顯示通過，所以 CI 綠燈不代表實測過；要實測請設定該變數指向已安裝 playwright 與其瀏覽器的目錄，設定了卻無法使用 Playwright 時測試失敗）、`crates/baton-runtime/tests/browser_driver.rs`（正式 Runner；本機沒有 Playwright 時略過）、`crates/baton-domain/src/verification_profile/tests.rs`、`web/src/VerificationPage.test.tsx`。
 
 ### 探索測試到可重現缺陷（票 47）
 
@@ -1362,7 +1364,9 @@ powershell -NoProfile -File scripts/with-msvc.ps1 cargo test --workspace --exclu
 pnpm --filter web test
 ```
 
-桌面殼 `baton-desktop` 編譯時需要已建置的 `web/dist`，所以不在預設的 `cargo test` 範圍內；`pnpm build` 會編譯它。
+桌面殼 `baton-desktop` 編譯時需要已建置的 `web/dist`，所以不在預設的 `cargo test` 範圍內；`pnpm build` 會編譯它。殼本身的單元測試（只快取成功的啟動、可取消的完全退出後備計時器）在 `pnpm --filter web build` 之後以 `cargo test -p baton-desktop`（經 `with-msvc.ps1`）執行。
+
+Runtime harness 的資料目錄建在暫存區的 `baton-harness\` 之下（`h<亂數>`，旁邊有同名的 `.lock` 鎖檔），整個 `Harness` 結束時刪除，重建 Runtime 時保留。Windows 上 Runtime 的背景工作要等測試的 tokio runtime 結束才會關閉控制資料庫與日誌，所以刪除交給背景執行緒重試，程序結束時再同步刪除剩下的（例如最後一個測試的）；程序被終止而沒刪完時，鎖檔不再有人持有，之後任何一個 harness 啟動時會清掉（`crates/baton-harness/src/data_dir.rs`，測試 `crates/baton-harness/tests/harness_cleanup.rs`）。暫存區根目錄的 `.tmp*` 是修正前留下的，可以在沒有測試執行時手動刪除。`baton-runtime` 啟動真實子程序的整合測試在結尾以 `tests/support` 的 `remove_temp_dir` 確認暫存目錄刪得掉（AI-501）。
 
 ### 桌面 App 冒煙測試
 
@@ -1372,7 +1376,7 @@ pnpm --filter web test
 node scripts/smoke-desktop.mjs
 ```
 
-它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕。這個測試會開啟視窗，所以不納入 `pnpm test`。
+它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕、強制結束 Runtime（不結束監護）後監護重新拉起它且恢復面板與狀態列顯示恢復事件、以頁面內的 Tauri 事件（與系統匣送出的 `baton://full-exit-requested` 相同）觸發完全退出後顯示停止進度，最後 App、Runtime 與監護都結束。系統匣選單本身與殼端 60 秒的後備流程沒有涵蓋。spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」需要真實的 Worker／Controller 執行（裁定請求只能由 Agent 憑證建立），不在冒煙測試範圍，由 harness 情境測試涵蓋（見 ai-decisions AI-498）。這個測試會開啟視窗，所以不納入 `pnpm test`。
 
 ### 安裝程式冒煙測試
 
