@@ -17,6 +17,7 @@ use baton_api::{
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
+    RecoveryStatusView,
 };
 use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOutcome, RuntimeClient};
 use baton_credential::DpapiProtector;
@@ -716,6 +717,24 @@ async fn lifecycle_exit(link: State<'_, RuntimeLink>) -> Result<LifecycleStatus,
     link.client.request_exit().await.map_err(|e| e.to_string())
 }
 
+/// Web UI 讀取崩潰恢復總覽：目前的恢復事件、本輪次數、退避期限、受影響工作與派工阻擋原因（票 31）。
+#[tauri::command]
+async fn recovery_status(link: State<'_, RuntimeLink>) -> Result<RecoveryStatusView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.recovery().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的「重新嘗試恢復」：建立新輪次並保留歷史；只在恢復額度用盡時被接受。
+#[tauri::command]
+async fn recovery_retry(link: State<'_, RuntimeLink>) -> Result<RecoveryStatusView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.retry_recovery().await.map_err(|e| e.to_string())
+}
+
 /// Web UI 變更 Workspace 的「完全退出後自動續跑」（只影響下次重新開啟）。
 #[tauri::command]
 async fn workspace_lifecycle_update(
@@ -1030,6 +1049,8 @@ fn main() {
             lifecycle_exit,
             workspace_lifecycle_update,
             workspace_resume,
+            recovery_status,
+            recovery_retry,
             app_quit,
             profile_set_quota_limits,
             knowledge_list,

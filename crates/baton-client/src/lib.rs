@@ -19,6 +19,7 @@ use baton_api::{
     QueuedDispatch, UpdateWorkspaceLifecycleRequest, WorkspaceLifecycleView, LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH,
     SchedulingOverview, UpdateSchedulingSettingsRequest, SCHEDULING_PATH, SCHEDULING_SETTINGS_PATH,
     BackupStatus, BACKUPS_PATH,
+    RecoveryStatusView, RECOVERY_PATH, RECOVERY_RETRY_PATH,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
@@ -325,6 +326,17 @@ impl RuntimeClient {
     /// 完全退出：Runtime 持久化停止意圖後立即回應，停止進度之後以 `lifecycle` 查詢；重複要求是冪等的。
     pub async fn request_exit(&self) -> Result<LifecycleStatus, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, LIFECYCLE_EXIT_PATH, None).await
+    }
+
+    /// 崩潰恢復總覽：目前的恢復事件（含全部輪次的嘗試與受影響工作）、每輪上限、能否重試與派工阻擋原因（票 31）。
+    pub async fn recovery(&self) -> Result<RecoveryStatusView, ClientError> {
+        self.get_json(RECOVERY_PATH).await
+    }
+
+    /// 「重新嘗試恢復」：建立新輪次並保留歷史；不是恢復額度用盡時回傳 `ClientError::Rejected`
+    /// （`recovery_not_exhausted`，沒有任何事件時 `no_recovery_event`）。
+    pub async fn retry_recovery(&self) -> Result<RecoveryStatusView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, RECOVERY_RETRY_PATH, None).await
     }
 
     /// 變更 Workspace 的「完全退出後自動續跑」（只影響下次重新開啟）。

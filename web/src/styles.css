@@ -1415,3 +1415,50 @@ body {
 .backup-settings > [role="alert"] {
   color: #cf222e;
 }
+
+/* 崩潰恢復：進行中為黃色、額度用盡為紅色 */
+.status-recovery::before {
+  background: #bf8700;
+}
+
+.status-recovery-exhausted::before {
+  background: #cf222e;
+}
+
+.recovery-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.recovery-panel h2,
+.recovery-panel p {
+  margin: 0;
+}
+
+.recovery-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.recovery-status-exhausted strong,
+.recovery-panel [role="alert"] {
+  color: #cf222e;
+}
+
+.recovery-attempts,
+.recovery-affected {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.recovery-attempt {
+  display: grid;
+  gap: 2px;
+}
+
+.recovery-attempt-failed > span {
+  color: #cf222e;
+}

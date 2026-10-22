@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use baton_api::{ApiState, LogSink, RunSettings};
 use baton_domain::lifecycle::{self, ExitTiming, FileStopView, LifecycleFile};
+use baton_domain::recovery::{RecoveryStatus, MAX_ATTEMPTS};
 use baton_ports::Ports;
 use baton_store::{Store, StoreError, StoreOptions};
 use tokio::net::TcpListener;
@@ -110,6 +111,8 @@ impl Runtime {
         let store_options = StoreOptions { full_text_search: options.full_text_search };
         let store = Store::open_with(&config.data_dir, started_at, store_options).await?;
         let boot_count = store.record_boot(started_at).await?;
+        // 前一次啟動是否正常結束（票 31）
+        let previous_unclean = store.previous_boot_ended_cleanly().await? == Some(false);
         let log = log::open_log(&config.data_dir, ports.clock.clone()).map_err(RuntimeError::Log)?;
 
         let credentials = CredentialIssuer::new(store.clone(), ports.clock.clone());
@@ -127,6 +130,7 @@ impl Runtime {
         }
 
         let reopen_from = reconcile_stop_intent(&store, &config.data_dir, options.exit_timing, &ports, &log).await?;
+        note_crash_recovery(&store, previous_unclean, &ports, &log).await?;
 
         let (stop_tx, stop_rx) = watch::channel(false);
         let stop_tx = Arc::new(stop_tx);
@@ -252,6 +256,29 @@ async fn reconcile_stop_intent(
     Ok(state.stop_intent_active().then_some(state.version))
 }
 
+/// 崩潰恢復的啟動判定（票 31）：停止意圖已核對之後、任何程序副作用之前。上一次沒有正常結束、也沒有停止意圖時，
+/// 建立或沿用恢復事件；上一次留下的進行中嘗試記為失敗。之後由 Supervisor 在退避期滿時做下一次嘗試。
+async fn note_crash_recovery(store: &Store, previous_unclean: bool, ports: &Ports, log: &LogSink) -> Result<(), RuntimeError> {
+    let event_id = supervisor::new_prefixed_id("rec").ok_or_else(|| RuntimeError::Entropy("無法產生恢復事件識別".into()))?;
+    let event = store.note_runtime_start(previous_unclean, event_id, ports.clock.now()).await?;
+    match event.filter(|event| event.is_open()) {
+        Some(event) if event.status == RecoveryStatus::Exhausted => (log)(&format!(
+            "崩潰恢復：事件 {} 的恢復額度已用盡，不自動恢復也不派工，等使用者從恢復介面重新嘗試",
+            event.id
+        )),
+        Some(event) => (log)(&format!(
+            "崩潰恢復：事件 {}（第 {} 輪，已用 {}/{} 次，狀態 {}）",
+            event.id,
+            event.round,
+            event.attempts_used,
+            MAX_ATTEMPTS,
+            event.status.as_str()
+        )),
+        None => {}
+    }
+    Ok(())
+}
+
 /// 完全退出的執行者：API 持久化停止意圖後通知它，它請 Supervisor 停下全部 Run；
 /// 停止流程結束後（`linger` 有值時）再提供一段時間 API，讓 App 讀到最終的停止結果，然後結束服務。
 fn spawn_exit_runner(
@@ -356,7 +383,17 @@ impl RunningRuntime {
     }
 
     /// 停止服務並等到資料庫連線釋放；之後可用同一資料目錄重新啟動。
-    pub async fn shutdown(mut self) {
+    /// 這是有秩序的停止：記下這一次啟動正常結束，下次啟動不視為意外終止（票 31）。
+    pub async fn shutdown(self) {
+        self.stop(true).await
+    }
+
+    /// 模擬意外終止（測試 harness 用）：停止服務但不記下正常結束，下次啟動視為崩潰並開始崩潰恢復。
+    pub async fn kill(self) {
+        self.stop(false).await
+    }
+
+    async fn stop(mut self, clean: bool) {
         let _ = self.stop_tx.send(true);
         let _ = (&mut self.task).await;
         if let Some(supervising) = self.supervising.take() {
@@ -364,6 +401,9 @@ impl RunningRuntime {
         }
         if let Some(backing_up) = self.backing_up.take() {
             let _ = backing_up.await;
+        }
+        if clean {
+            self.supervisor.mark_clean_shutdown().await;
         }
         // 停止流程進行到一半就被要求停止服務，等同當掉：下次啟動時停止意圖仍在，先核對再續跑
         self.exiting.abort();

@@ -62,6 +62,8 @@ pub enum FakeStop {
     Hang,
     /// 停止的呼叫失敗。
     Fail(String),
+    /// 程序確實停止了，但呼叫永遠不回來（模擬 Runtime 在「舊程序已停止、結果尚未寫回」的邊界當掉）。
+    HangAfterStop,
 }
 
 /// 可腳本化存活狀態的程序控制；不會真的啟動任何程序。
@@ -169,6 +171,12 @@ impl FakeProcessControl {
         lock(&self.state).stop_calls.clone()
     }
 
+    /// 目前仍存活（含無法判定）的程序身分；用來斷言同一時間沒有第二個 writer。
+    pub fn alive(&self) -> Vec<ProcessIdentity> {
+        let state = lock(&self.state);
+        state.liveness.iter().filter(|(_, l)| **l != Liveness::Dead).map(|(identity, _)| identity.clone()).collect()
+    }
+
     pub fn inspect_count(&self) -> usize {
         lock(&self.state).inspect_count
     }
@@ -247,6 +255,10 @@ impl ProcessControl for FakeProcessControl {
         };
         match behavior {
             FakeStop::Hang => std::future::pending().await,
+            FakeStop::HangAfterStop => {
+                lock(&self.state).liveness.insert(identity.clone(), Liveness::Dead);
+                std::future::pending().await
+            }
             FakeStop::Fail(reason) => Err(PortError::Failed(reason)),
             FakeStop::Result(result) => {
                 if result != StopResult::StillAlive {
