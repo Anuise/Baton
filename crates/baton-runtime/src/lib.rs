@@ -591,7 +591,10 @@ impl RunningRuntime {
 
     async fn stop(mut self, clean: bool) {
         let _ = self.stop_tx.send(true);
-        let _ = (&mut self.task).await;
+        // `serve_until` 可能已經等到服務結束；已結束的 JoinHandle 不能再 await
+        if !self.task.is_finished() {
+            let _ = (&mut self.task).await;
+        }
         if let Some(supervising) = self.supervising.take() {
             let _ = supervising.await;
         }
@@ -609,9 +612,14 @@ impl RunningRuntime {
         let _ = (&mut self.exiting).await;
     }
 
-    /// 等到服務自行結束（正式執行檔用）。
-    pub async fn wait(mut self) {
-        let _ = (&mut self.task).await;
+    /// 正式執行檔用：提供服務到自行結束（完全退出後）或 `interrupt` 完成（主控台 Ctrl-C）為止，再有秩序地停止，
+    /// 記下這一次啟動正常結束（票 31，AI-280）。程序被終止或重開機走不到這裡，下次啟動仍判為意外終止。
+    pub async fn serve_until(mut self, interrupt: impl std::future::Future<Output = ()>) {
+        tokio::select! {
+            _ = &mut self.task => {}
+            _ = interrupt => {}
+        }
+        self.shutdown().await;
     }
 }
 

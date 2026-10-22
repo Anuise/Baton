@@ -51,10 +51,15 @@ async fn run() -> Result<(), String> {
     let runtime = Runtime::start_with(config.clone(), ports, options).await.map_err(|e| e.to_string())?;
     println!("Runtime 已啟動：http://{}", runtime.local_addr());
 
-    tokio::select! {
-        _ = runtime.wait() => {}
-        _ = tokio::signal::ctrl_c() => {}
-    }
+    // 主控台 Ctrl-C 是使用者有意的停止：有秩序地停止並記下正常結束，下次啟動不判為崩潰（程序被終止、重開機仍是）
+    runtime
+        .serve_until(async {
+            if tokio::signal::ctrl_c().await.is_err() {
+                // 無法接收 Ctrl-C 時只等服務自行結束，不當成收到中斷
+                std::future::pending::<()>().await;
+            }
+        })
+        .await;
     Ok(())
 }
 
