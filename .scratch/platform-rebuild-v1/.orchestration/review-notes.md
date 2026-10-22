@@ -65,3 +65,7 @@
 ## 17. 時間線查詢效能與歸屬（票 41）
 - `read_timeline` 每次讀全庫的 TIMELINE_AGGREGATES 事件與全部 task，在 Rust 端過濾；事件量大時會變慢，改為 SQL 端依 Workspace／Task 篩選。
 - 擋多個 Task 的裁定請求只歸屬到發起的 Task，其他被擋的 Task 時間線看不到。
+
+## 18. Controller 交接（票 30）
+- `stop_controllers_for_handoff`（`supervisor.rs`）找承接帳號時傳入 `active_runs: &[]`，沒考慮各帳號目前並行量；承接帳號滿載時可能停掉舊輪後才發現放不下。
+- 補情境測試：唯一帳號 draining 且 Controller 有一輪在執行時，等滿 2 分鐘不停止、留在原帳號（M7）。
