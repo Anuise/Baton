@@ -262,6 +262,21 @@ fn observed_numbers_for_both_windows_are_complete() {
 }
 
 #[test]
+fn a_warning_without_a_number_does_not_make_the_window_complete() {
+    // 沒有數字的警告判斷時至少視為 75%（保守），但那不是觀測到的用量，視窗仍缺少已觀測用量（AI-124）
+    let a = assess(
+        &[
+            observed(Some(QuotaWindow::FiveHour), LimitStatus::Warning, None, None),
+            observed(Some(QuotaWindow::SevenDay), LimitStatus::Allowed, Some(0.2), None),
+        ],
+        NOW,
+    );
+    assert_eq!(a.used, Some(0.75), "判斷仍以停止派工門檻計");
+    assert!(!a.complete);
+    assert!(a.incomplete_reason.unwrap().contains("五小時"));
+}
+
+#[test]
 fn an_external_observed_sample_counts_and_is_complete_while_a_failed_one_is_unknown() {
     let a = assess(&[external(QuotaSource::Observed, Some(0.6))], NOW);
     assert_eq!(a.used, Some(0.6));

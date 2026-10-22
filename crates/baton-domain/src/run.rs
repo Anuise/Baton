@@ -54,6 +54,8 @@ pub const EVENT_RUN_ADMISSION_DENIED: &str = "run_admission_denied";
 pub const ADMISSION_DENIED_REASON: &str = "admission_denied";
 pub const EVENT_RUN_NATIVE_SESSION_BOUND: &str = "run_native_session_bound";
 pub const EVENT_RUN_NATIVE_SESSION_CONFLICT: &str = "run_native_session_conflict";
+/// 交接（票 28）：舊程序已確認停止，Run 結束、寫入所有權交給 successor。
+pub const EVENT_RUN_HANDED_OFF: &str = "run_handed_off";
 
 /// 派工 Outbox 項目的種類：要求 Supervisor 啟動這個 Run 的程序。
 pub const OUTBOX_LAUNCH_RUN: &str = "launch_run";
@@ -313,6 +315,9 @@ pub enum RunCommand {
     RequestCancel { run_id: String },
     /// 程序已確認停止，完成取消。
     ConfirmCancelled { run_id: String },
+    /// 交接（票 28）：舊程序已確認停止（或已自行結束），Run 以 `interrupted`（`handed_off`）結束並釋放寫入所有權；
+    /// Task 退回 `ready`，由同一個交易中的 successor 派工立刻接手。不是失敗，不計入任何預算。
+    HandOff { run_id: String, handoff_id: String },
 }
 
 impl RunCommand {
@@ -329,7 +334,8 @@ impl RunCommand {
             | RunCommand::Interrupt { run_id, .. }
             | RunCommand::ReconcileLease { run_id, .. }
             | RunCommand::RequestCancel { run_id }
-            | RunCommand::ConfirmCancelled { run_id } => run_id,
+            | RunCommand::ConfirmCancelled { run_id }
+            | RunCommand::HandOff { run_id, .. } => run_id,
         }
     }
 }
@@ -875,6 +881,18 @@ pub fn decide(ctx: &RunContext<'_>, command: RunCommand, now: Timestamp) -> Resu
                 return Ok(RunChange::default());
             }
             edit.finish(RunStatus::Cancelled, EVENT_RUN_CANCELLED, "cancelled_by_user", TaskStatus::Ready, None)
+        }
+        RunCommand::HandOff { handoff_id, .. } => {
+            if !matches!(run.status, RunStatus::Starting | RunStatus::Running) {
+                return Err(RunError::TransitionInvalid { from: run.status, to: RunStatus::Interrupted });
+            }
+            // 交接不是失敗：不計入任何預算（spec D-16）
+            let reason = crate::handoff::HANDED_OFF_REASON;
+            let mut change = edit.finish(RunStatus::Interrupted, EVENT_RUN_HANDED_OFF, reason, TaskStatus::Ready, None)?;
+            if let Some(event) = change.events.iter_mut().find(|e| e.event_type == EVENT_RUN_HANDED_OFF) {
+                event.payload["handoff_id"] = serde_json::json!(handoff_id);
+            }
+            Ok(change)
         }
     }
 }

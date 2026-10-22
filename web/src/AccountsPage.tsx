@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { formatTimestamp } from "./time";
-import { RUN_STATUS_LABELS } from "./TaskBoard";
+import { GATE_REASON_LABELS, RUN_STATUS_LABELS } from "./TaskBoard";
 import type {
   AccountClient,
   AccountProfile,
   AccountScheduling,
   AuthSource,
+  GateState,
   PlanLimits,
   QuotaConfidence,
+  QuotaGate,
   QuotaObservation,
   QuotaSource,
   SchedulingClient,
@@ -326,8 +328,43 @@ function AccountLoad({
           </ul>
         )}
       </div>
+      <AccountGate name={account.name} gate={account.quota_gate} timeZone={timeZone} />
       <AccountQuota account={account} timeZone={timeZone} onSaveLimits={onSaveLimits} />
     </>
+  );
+}
+
+const GATE_STATE_LABELS: Record<GateState, string> = {
+  open: "可派工",
+  paused: "停止派工",
+  draining: "交接中（draining）",
+};
+
+/**
+ * 一個帳號的額度門檻（spec D-13）：狀態、進入的原因與當時用量、進入時間；
+ * 沒有紀錄（null）代表從未離開 open。停止派工或交接中時說明恢復條件（遲滯）與記下的重置時間。
+ */
+function AccountGate({ name, gate, timeZone }: { name: string; gate: QuotaGate | null; timeZone?: string }) {
+  const state = gate?.state ?? "open";
+  return (
+    <div className={`profile-gate profile-gate-${state}`} role="group" aria-label={`${name} 的額度門檻`}>
+      <span className="gate-state">
+        額度門檻：<strong>{GATE_STATE_LABELS[state]}</strong>
+      </span>
+      {gate && (
+        <span className="gate-reason">
+          原因：{GATE_REASON_LABELS[gate.reason] ?? gate.reason}
+          {gate.used !== null && `（當時用量 ${quotaLabel(gate.used)}）`}
+        </span>
+      )}
+      {gate && <span className="gate-since">自 {formatTimestamp(gate.since, timeZone)} 起</span>}
+      {gate && state !== "open" && (
+        <>
+          <span className="gate-hint">回到 60% 以下或重置後才恢復派工</span>
+          {gate.reset_at !== null && <span className="gate-reset">重置時間：{formatTimestamp(gate.reset_at, timeZone)}</span>}
+        </>
+      )}
+    </div>
   );
 }
 
