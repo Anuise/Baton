@@ -1621,6 +1621,51 @@
 - 影響：已用本票分支建過的開發資料庫，`lifecycle` 記在第 16 或 17 版，與整合後的編號不一致，需要刪除重建。
 - 審閱：未審
 
+### AI-180：Guard 在 Run 准入（派工交易）時檢查；擋下的 Task 以「Guard」等待原因留在佇列，不是 409
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：(1) 「相關 Task 准入時被檢查」實作為 `run::check_dispatch` 的一步（授權准入之後、相依之前），所以派工要求、佇列每次重試、排程總覽都經過同一個判定；pending → ready 的准入報告（`task::admission_report`）**不**檢查 Guard。(2) 違反時回 `RunError::GuardViolated`，Scheduler 把它轉成新的等待類別 `guard`（`code = guard_violated`，`WaitReason.guard` 帶 `guard_id`、`lesson_id`、`lesson_title`），派工回 202 並把 Task 留在佇列，不建立 Run、不啟動程序；修改契約（Task 退回 pending 而離開佇列）或停用 Guard（喚醒 Supervisor，佇列重試時自動派出）即解除。(3) Store 只在派工路徑載入「啟用且來源教訓現在有效」的 Guard（`Loaded.guards`），其他 Run 命令看到的是空清單。
+- 理由：票面寫「Run 准入時執行適用 Guard」，而重試政策依賴該 Task 的 Run 紀錄，只有在 Run 准入時才有意義；放在 `check_dispatch` 讓所有會建立 Run 的路徑共用一個判定（與授權重新准入 AI-61 同理）。以等待原因呈現可以直接沿用工作面板既有的排隊原因 UI，並讓停用 Guard 後自動恢復，與授權、相依的處理方式一致。
+- 替代方案：派工直接回 409 `guard_violated`、不排隊（UI 要另做錯誤呈現，停用 Guard 後要使用者重新派工）；同時在 pending → ready 檢查（重試政策在 ready 時無法判定，兩處檢查也可能不一致）；把違反當成 `task_admission_denied` 的缺項（會被當成契約缺漏，看不出來源教訓）。
+- 影響：被 Guard 擋下的 Task 狀態仍是 `ready`，工作面板以排隊原因顯示「Guard 擋下」與來源教訓。Context Builder（票 39）或 Controller（票 16、17）若有自己的派工路徑，必須經過 `check_dispatch` 才會檢查 Guard。
+- 審閱：未審
+
+### AI-181：第一版三種 Guard 規則：契約欄位必須提到文字、禁止要求某能力、目前契約版本失敗次數上限
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：票面的「啟動前檢查、工具限制或重試政策」各實作一種可機械判定的規則（`GuardRule`）：(1) `preflight`：六項契約欄位之一必須是「已填寫」且內容（不分大小寫）提到指定文字（1–200 字元）；(2) `tool_restriction`：Task 的 `required_capabilities` 不得含指定能力；(3) `retry_policy`：同一個 Task 在**目前契約版本**下 `failed` 的 Run 數達到上限（1–20）就不再派工，`interrupted`、`cancelled` 不算，改契約即重新計算。規則建立後不能修改（要換規則就停用舊的、建立新的）。spec 使用者故事 60 提到的「測試」形式不在第一版。
+- 理由：三種都只需要派工交易裡已有的事實（契約、能力、Run 紀錄），不需要 I/O，能放在純 Domain 判定；以「契約版本」計算失敗次數，使用者依教訓改了做法（改契約）就給新的機會，不會被舊失敗永遠擋住。中斷多半是額度交接、完全退出或基礎設施問題（AI-168），不代表做法錯了，所以不計入。
+- 替代方案：以正規表示式比對契約（彈性高但使用者難寫、也難解釋違反原因）；重試政策計算全部歷史失敗（改契約也無法解除）；把「測試」做成 Guard（需要在准入前執行命令，屬驗證 Adapter 的範圍）；在權限提示時攔截工具呼叫（屬操作時檢查，超出「Run 准入」）。
+- 影響：重試政策是使用者針對特定教訓設的上限，與 spec D-16 的全域修正預算（票 33 等）是兩件事，兩者都會阻擋派工。工具限制只看契約宣告的能力；Worker 執行中實際使用的工具仍由權限提示依授權判定。
+- 審閱：未審
+
+### AI-182：Guard 的生效條件與適用範圍：建立即啟用、只能來自有效教訓、教訓失效則 Guard 自動失效、範圍沿用教訓
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：(1) 只有桌面憑證能建立、啟用、停用 Guard（Agent 憑證 403）；使用者建立 Guard 的動作本身就是啟用，沒有「建立但未啟用」的草稿狀態。(2) 只有**有效**的教訓（`kind = lesson`、已驗證、在有效期間內）能轉成 Guard 或重新啟用，否則 409 `lesson_ineligible`。(3) Guard 生效 = 啟用 + 來源教訓**現在**有效；教訓被撤銷、淘汰、取代或過期後，Guard 自動不再檢查（列表標示 `active = false` 與原因），不需要使用者另外停用。(4) Guard 沒有自己的範圍，一律沿用來源教訓的範圍（全域、Workspace、Goal、Task，與 Agent 看得到的範圍相同的 `Audience::Run` 判定）。(5) Guard 不能刪除，只能停用；啟用與停用以 `expected_revision` 校驗。
+- 理由：D-28「Guard 一律由使用者啟用」的重點是 Agent 不能讓 Guard 生效；使用者主動建立已經是明確同意，再多一個啟用步驟只是多一次點擊。錯誤或過時的教訓不應繼續擋工作，讓生效條件直接依賴教訓狀態，就不會出現「教訓已撤銷、Guard 還在擋」的不一致。範圍沿用教訓，避免同一條經驗有兩套範圍。
+- 替代方案：建立後預設停用、另外按啟用（多一步，沒有額外保障）；教訓撤銷時連帶把 Guard 改成停用（多一個跨聚合的寫入，而且教訓狀態若之後改變不易還原）；Guard 自己可以收窄範圍（第一版不需要）。
+- 影響：候選教訓必須先確認才能轉成 Guard。延長已過期教訓的有效期限（修正）之後，原本的 Guard 會自動恢復生效。
+- 審閱：未審
+
+### AI-183：重犯事件與 Guard 成效的定義：被攔下的自動記錄、未攔下的由使用者回報，兩者都指向教訓
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：(1) 重犯事件（`lesson_recurrence`，追加式）一律指向來源教訓，分兩種：`prevented`（Guard 在 Run 准入時擋下，`Store::schedule` 在同一個交易中記錄，指向 Guard、Workspace、Task 與契約版本）與 `reported`（沒被攔下、使用者在知識分頁回報，說明必填，可指定 Task；教訓必須是已驗證的教訓，過期也可以）。(2) `prevented` 的識別由「Guard + Task + 契約版本」決定，佇列每秒重試看到同一個違反只記一次；改了契約仍違反就是新的一次。(3) 每筆同時追加 `lesson_recurrence_recorded` 事件（`aggregate_type = 'lesson_recurrence'`）供時間線追溯。(4) Guard 成效在 Guard 列表上顯示：`prevented_count`、`last_prevented_at`，以及 `reported_count`（Guard 建立之後，同一個教訓的使用者回報數）。
+- 理由：票面要求「記錄重犯事件與 Guard 成效」「重犯事件可追溯到教訓」；只記攔下次數看不出 Guard 是否有漏洞，加上使用者回報的漏網次數，才算得出 spec 使用者故事 93 的「教訓重犯率」。以契約版本去重，避免佇列重試把一次重犯算成上千次。
+- 替代方案：每次被擋都記一筆（數字被佇列重試灌大）；重犯事件掛在知識條目的事件流上（會讓條目的 `revision` 變動，干擾知識分頁的 `expected_revision` 校驗）；由 Agent 回報重犯（Agent 的判斷不可信，且 Agent 工具集未包含此項）。
+- 影響：成效目前只有次數，沒有比率或時間序列圖；觀測面板（spec 使用者故事 93）可由 `lesson_recurrence` 直接計算。被擋下的 Task 在依舊契約版本下停用 Guard 再重新啟用時，不會再記一次重犯。
+- 審閱：未審
+
+### AI-184：Guard API、資料表與桌面殼指令的形狀（migration 19 `guard`）
+- 重要度：低
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：管理 API（桌面憑證）：`GET /api/v1/guards?workspace_id=`（來源教訓是全域或屬於該 Workspace 的 Guard，附來源教訓、`active`、`inactive_reason`、`description` 與成效）、`POST /api/v1/guards`（`{ lesson_id, rule }`）、`POST /api/v1/guards/{id}/enable|disable`（`{ expected_revision }`）、`GET|POST /api/v1/knowledge/{id}/recurrences`。錯誤代碼：`guard_invalid`（400）、`guard_not_found`（404）、`lesson_ineligible`、`guard_revision_conflict`（409）。資料表 `guard`（觸發器禁止刪除）與 `lesson_recurrence`（追加式）放在第 19 個 migration。Tauri 指令 `guard_list`、`guard_create`、`guard_enable`、`guard_disable`（`id`、`expected_revision` 平鋪為參數）、`knowledge_recurrences`、`knowledge_report_recurrence`。Web UI 的工具限制下拉選單的能力名稱照抄 Rust `Capability::label`。
+- 理由：沿用知識 API 的分流、錯誤格式與 expected_revision 慣例；重犯事件屬於教訓，所以掛在知識條目之下。
+- 替代方案：Guard 掛在 `/api/v1/knowledge/{id}/guards` 之下（列表要跨教訓查詢，不自然）；Tauri 指令照 `knowledge_confirm` 以 `request` 物件包 `expected_revision`（兩種寫法都可，選了較短的）。
+- 影響：整合 rebuild/v1 時，若其他票先佔用第 19 個 migration，本票順延（與 AI-165 同）。能力名稱改動時 Web UI 的對照表要同步。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
