@@ -422,13 +422,18 @@ async fn note_login_boundary(
 
 /// 讓 Windows 的登入啟動登記與「登入時自動啟動」的偏好一致（票 33）：偏好是依據，登記被移除或殘留時補正。
 /// 失敗只記日誌（不影響工作；設定頁會顯示登記狀態）。完全退出不改變偏好，所以這裡也不因停止意圖而移除登記。
+/// 偏好為關閉時依值名稱判定歸屬：同名但命令列不同的值（例如舊安裝位置留下的）也移除。
 async fn sync_login_startup(store: &Store, ports: &Ports, log: &LogSink) -> Result<(), RuntimeError> {
     let enabled = store.login_startup().await?.enabled;
     let registration = ports.startup_registration.clone();
-    let synced = tokio::task::spawn_blocking(move || match registration.is_registered() {
-        Ok(registered) if registered == enabled => Ok(false),
-        Ok(_) => registration.set_registered(enabled).map(|()| true),
-        Err(error) => Err(error),
+    let synced = tokio::task::spawn_blocking(move || {
+        // 開啟時要是這個安裝位置的命令列；關閉時同名的值都不該留著
+        let present = if enabled { registration.is_registered() } else { registration.has_registration() };
+        match present {
+            Ok(present) if present == enabled => Ok(false),
+            Ok(_) => registration.set_registered(enabled).map(|()| true),
+            Err(error) => Err(error),
+        }
     })
     .await;
     match synced {
