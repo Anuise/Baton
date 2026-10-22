@@ -169,4 +169,5 @@
 | R165-54-verify | 54 | verify | Work-8 | 2026-10-23 06:27 | 2026-10-23 06:38 | PASS |
 | R166-53-verify | 53 | verify | Work-9 | 2026-10-23 06:33 | 2026-10-23 06:42 | PASS（基底早於票 54，依 AI-109 整合後合併） |
 | R167-53-integrate | 53 | integrate | Work-9 | 2026-10-23 06:42 | 2026-10-23 06:51 | DONE，依 AI-109 直接合併 |
-| R168-fix-d | final-d | final-fix | Work-8 | 2026-10-23 06:51 | | |
+| R168-fix-d | final-d | final-fix | Work-8 | 2026-10-23 06:51 | 2026-10-23 07:10 | DONE（ee64f68..b77a737） |
+| R169-final-verify-d | final-d | final-verify | Work-3 | 2026-10-23 07:10 | | |
