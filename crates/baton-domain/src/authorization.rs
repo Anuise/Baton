@@ -254,6 +254,8 @@ pub enum AuthorizationError {
     RiskNotAcknowledged,
     #[error("這次修改會擴大 Workspace 授權（新增能力、目標資源或移除限制），必須先看過新增的能力與影響並明確確認")]
     ExpansionNotAcknowledged,
+    #[error("授權已被更新（目前 revision {}，編輯時是 revision {expected}），請重新載入後再確認", .current.map_or("無".to_string(), |r| r.to_string()))]
+    RevisionConflict { expected: i64, current: Option<i64> },
 }
 
 impl AuthorizationError {
@@ -266,6 +268,7 @@ impl AuthorizationError {
             AuthorizationError::DuplicateCapability(_) | AuthorizationError::MissingTarget(_) => "authorization_invalid",
             AuthorizationError::RiskNotAcknowledged => "risk_acknowledgement_required",
             AuthorizationError::ExpansionNotAcknowledged => "authorization_expansion_not_acknowledged",
+            AuthorizationError::RevisionConflict { .. } => "authorization_revision_conflict",
         }
     }
 }
@@ -455,6 +458,9 @@ pub struct ConfirmRequest {
     pub acknowledged_risk: bool,
     /// 使用者已看過「新增的能力與影響」並明確確認擴大授權（修改既有授權而且擴大時必須為真）。
     pub acknowledged_expansion: bool,
+    /// 使用者編輯時看到的目前 revision（確認摘要的 `base_revision`）。有值時必須與目前生效的相同，
+    /// 另一個視窗先確認過就拒絕；沒有值不檢查。
+    pub expected_revision: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -473,6 +479,9 @@ pub fn confirm(
 ) -> Result<ConfirmOutcome, AuthorizationError> {
     if workspace.status == WorkspaceStatus::Archived {
         return Err(AuthorizationError::WorkspaceArchived(workspace.id.clone()));
+    }
+    if let Some(expected) = request.expected_revision.filter(|e| current.map(|c| c.revision) != Some(*e)) {
+        return Err(AuthorizationError::RevisionConflict { expected, current: current.map(|c| c.revision) });
     }
     let template = match request.template_id {
         None => None,
@@ -604,7 +613,13 @@ mod tests {
     }
 
     fn request(template_id: Option<&str>, grants: Vec<Grant>, acknowledged: bool) -> ConfirmRequest {
-        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: acknowledged, acknowledged_expansion: true }
+        ConfirmRequest {
+            template_id: template_id.map(Into::into),
+            grants,
+            acknowledged_risk: acknowledged,
+            acknowledged_expansion: true,
+            expected_revision: None,
+        }
     }
 
     fn created(outcome: ConfirmOutcome) -> (AuthorizationRevision, DomainEvent) {
@@ -983,5 +998,22 @@ mod tests {
         for capability in Capability::ALL {
             assert_eq!(serde_json::to_value(capability).unwrap(), capability.as_str());
         }
+    }
+
+    #[test]
+    fn a_confirmation_based_on_a_stale_revision_is_rejected() {
+        // R151 第 28 項：兩個視窗同時編輯，後送出的不能悄悄移除先確認的能力
+        let first = confirm_template(TEMPLATE_TRUSTED_DEV);
+        let narrower: Vec<Grant> = first.grants[1..].to_vec();
+        let (second, _) = created(confirm(&workspace(), Some(&first), request(None, narrower, true), T2).unwrap());
+
+        let mut stale = request(Some(TEMPLATE_TRUSTED_DEV), first.grants.clone(), true);
+        stale.expected_revision = Some(first.revision);
+        let error = confirm(&workspace(), Some(&second), stale.clone(), T2).unwrap_err();
+        assert_eq!(error, AuthorizationError::RevisionConflict { expected: first.revision, current: Some(second.revision) });
+        assert_eq!(error.code(), "authorization_revision_conflict");
+
+        stale.expected_revision = Some(second.revision);
+        assert!(confirm(&workspace(), Some(&second), stale, T2).is_ok(), "以目前的 revision 為基準就可以保存");
     }
 }

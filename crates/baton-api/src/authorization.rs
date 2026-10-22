@@ -87,6 +87,9 @@ pub struct ConfirmAuthorizationRequest {
     /// 使用者已看過確認摘要中「新增的能力與影響」並明確確認擴大授權；修改既有授權而且擴大時必須為真。
     #[serde(default)]
     pub acknowledged_expansion: bool,
+    /// 編輯時看到的目前 revision（確認摘要的 `changes.base_revision`）；與目前生效的不同時回 409。省略不檢查。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,7 +106,7 @@ impl From<AuthorizationError> for ApiError {
     fn from(error: AuthorizationError) -> Self {
         let status = match &error {
             AuthorizationError::WorkspaceNotFound(_) => StatusCode::NOT_FOUND,
-            AuthorizationError::WorkspaceArchived(_) => StatusCode::CONFLICT,
+            AuthorizationError::WorkspaceArchived(_) | AuthorizationError::RevisionConflict { .. } => StatusCode::CONFLICT,
             AuthorizationError::UnknownTemplate(_)
             | AuthorizationError::DuplicateCapability(_)
             | AuthorizationError::MissingTarget(_)
@@ -208,6 +211,7 @@ pub(crate) async fn confirm(
         grants: request.grants,
         acknowledged_risk: request.acknowledged_risk,
         acknowledged_expansion: request.acknowledged_expansion,
+        expected_revision: request.expected_revision,
     };
     Ok(match state.store.confirm_authorization(id, request, state.clock.now()).await? {
         ConfirmOutcome::Created { revision, .. } => (StatusCode::CREATED, Json(revision)),
