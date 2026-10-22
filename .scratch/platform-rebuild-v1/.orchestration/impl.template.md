@@ -15,7 +15,7 @@
 2. 以 TDD 實作（有 `tdd` skill 就用它；沒有就照 red-green-refactor）。滿足票上全部驗收條件；不做票以外的功能。
 3. 只在這個 worktree 內修改檔案。不要修改票檔的 `Status:` 行或勾選框，那由主控處理。
 4. 程式碼註解用繁體中文；識別字用英文。
-5. 遇到不明確之處自己決定、繼續做，並在 `ai-decisions.md` 的「## Spec 決策審閱紀錄」之前追加新條目（AI-NN 接續最大編號，格式照檔頭），標明重要度與「票 {{NN}} 實作」。不能修改既有條目。
+5. 遇到不明確之處自己決定、繼續做，並在 `ai-decisions.md` 的「## Spec 決策審閱紀錄」之前追加新條目（AI-NN 接續最大編號，格式照檔頭），標明重要度與「票 {{NN}} 實作」，最後一行一律是 `- 審閱：未審`。不能修改既有條目。
 6. 小步 commit 到 `{{BRANCH}}`，訊息用 conventional commits 格式，結尾加上 `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`。
 7. 結束前：`git merge rebuild/v1`（若整合分支有新 commit），解決衝突，確認全部測試通過，工作樹乾淨。
 8. 不要 push，不要動 `main` 或 `rebuild/v1`。
