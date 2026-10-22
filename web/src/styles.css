@@ -325,6 +325,34 @@ body {
   color: #9a6700;
 }
 
+.task-verification,
+.task-verification-failed {
+  display: grid;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+
+.task-verification {
+  background: #ddf4ff;
+  border: 1px solid #54aeff;
+}
+
+.task-verification-failed {
+  background: #ffebe9;
+  border: 1px solid #ff8182;
+}
+
+.task-verification ul,
+.task-verification-failed ul {
+  padding-left: 18px;
+}
+
+.task-verification label {
+  display: grid;
+  gap: 4px;
+}
+
 .task-actions {
   display: flex;
   flex-wrap: wrap;

@@ -832,6 +832,12 @@ fn render_prompt(title: &str, content: &ContractContent) -> String {
         };
         prompt.push_str(&format!("\n\n{}：{text}", name.label()));
     }
+    if !content.verification_checks.is_empty() {
+        prompt.push_str("\n\n確定性檢查（你結束後由 Runtime 逐項執行，全部通過 Task 才算完成）：");
+        for check in &content.verification_checks {
+            prompt.push_str(&format!("\n- {}", check.describe()));
+        }
+    }
     prompt
 }
 

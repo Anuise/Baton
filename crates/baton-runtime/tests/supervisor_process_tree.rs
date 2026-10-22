@@ -16,7 +16,7 @@ use baton_client::{DispatchOutcome, RuntimeClient};
 use baton_domain::run::RunStatus;
 use baton_domain::task::{ContractContent, ContractField, TaskStatus};
 use baton_ports::*;
-use baton_runtime::production_ports::{LocalWorkspaceFs, SystemClock};
+use baton_runtime::production_ports::{LocalCommandRunner, LocalWorkspaceFs, SystemClock};
 use baton_runtime::windows_platform::WindowsPlatformInfo;
 use baton_runtime::windows_process::WindowsProcessControl;
 use baton_runtime::{Runtime, RuntimeConfig, RuntimeOptions};
@@ -164,6 +164,7 @@ fn complete() -> ContractContent {
         done_criteria: filled("五個產品"),
         blocker_handling: filled("回報"),
         required_capabilities: vec![],
+        verification_checks: vec![],
     }
 }
 
@@ -182,6 +183,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         platform_info: Arc::new(WindowsPlatformInfo),
         secret_protector: protector.clone(),
         claude_env: Arc::new(NativeLoginEnv),
+        command_runner: Arc::new(LocalCommandRunner),
         user_settings: Arc::new(baton_ports::DirUserSettingsSource::new("unused", "unused")),
     };
     let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };

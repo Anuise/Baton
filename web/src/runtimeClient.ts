@@ -303,17 +303,92 @@ export const CONTRACT_FIELDS = [
 
 export type ContractFieldName = (typeof CONTRACT_FIELDS)[number];
 
+/** 契約宣告的確定性檢查（對應 Rust 的 VerificationCheck）；`sha256` 為 null 代表只檢查存在。 */
+export type VerificationCheck =
+  | { kind: "command"; program: string; args: string[]; expected_exit_code: number }
+  /** `path` 是工作目錄內的相對路徑。 */
+  | { kind: "file"; path: string; sha256: string | null }
+  /** `name` 是這個 Task 登記的成果名稱。 */
+  | { kind: "artifact"; name: string; sha256: string | null };
+
 export type ContractInput = { [K in ContractFieldName]?: ContractField | null } & {
   required_capabilities?: Capability[];
+  /** 省略時視為空陣列。 */
+  verification_checks?: VerificationCheck[];
 };
 
 export type TaskContract = { [K in ContractFieldName]: ContractField | null } & {
   task_id: string;
   version: number;
   required_capabilities: Capability[];
+  verification_checks: VerificationCheck[];
   note: string | null;
   created_at: number;
 };
+
+/** 單項檢查的結果與證據。 */
+export interface CheckResult {
+  check: VerificationCheck;
+  status: "passed" | "failed";
+  detail: string;
+}
+
+/** 成果 manifest 的一項：成果的某個版本與它的雜湊。 */
+export interface ManifestEntry {
+  artifact_id: string;
+  name: string;
+  version: number;
+  sha256: string;
+}
+
+export interface ManifestRef {
+  artifact_id: string;
+  version: number;
+}
+
+/** 接受交易的依據：Runtime 以它校驗 Run 世代、契約版本與成果 manifest，不符回 409。 */
+export interface AcceptanceBasis {
+  run_id: string;
+  generation: number;
+  contract_version: number;
+  artifacts: ManifestRef[];
+}
+
+/** 驗證紀錄（對應 Rust 的 VerificationRecord）；`decided_at` 是 UTC 毫秒。 */
+export interface VerificationRecord {
+  id: string;
+  workspace_id: string;
+  task_id: string;
+  run_id: string;
+  generation: number;
+  contract_version: number;
+  method: "checks" | "manual";
+  outcome: "passed" | "failed";
+  checks: CheckResult[];
+  artifacts: ManifestEntry[];
+  accepted_by: string | null;
+  note: string | null;
+  decided_at: number;
+}
+
+/** 驗證畫面需要的資料（對應 Rust 的 VerificationView）。 */
+export interface VerificationView {
+  task_id: string;
+  status: TaskStatus;
+  basis: AcceptanceBasis | null;
+  checks: VerificationCheck[];
+  artifacts: ManifestEntry[];
+  /** true：Runtime 會自動執行檢查；false：只能手動接受。 */
+  automatic: boolean;
+  /** 由舊到新。 */
+  records: VerificationRecord[];
+}
+
+/** 手動接受成果：`basis` 原樣送回 Runtime 取得的值。 */
+export interface AcceptTaskRequest {
+  basis: AcceptanceBasis;
+  note?: string | null;
+}
 
 export interface MissingItem {
   code:
@@ -467,6 +542,8 @@ export interface TaskBoard {
   /** Workspace 全部 Run，依建立順序。 */
   runs: RunView[];
   capabilities: { capability: Capability; label: string; high_risk: boolean }[];
+  /** Workspace 全部驗證紀錄，由舊到新。 */
+  verifications: VerificationRecord[];
 }
 
 export interface TaskDetail {
@@ -501,6 +578,10 @@ export interface TaskClient {
   dispatchTask(workspaceId: string, taskId: string): Promise<DispatchResult>;
   /** 要求取消 Run；已啟動的 Run 要等程序確認停止才會變 cancelled。 */
   cancelRun(workspaceId: string, runId: string): Promise<RunView>;
+  /** verifying 的 Task 目前的驗證資料：宣告的檢查、成果 manifest、接受依據與驗證紀錄。 */
+  taskVerification(workspaceId: string, taskId: string): Promise<VerificationView>;
+  /** 手動接受成果；依據過期時 Runtime 回 409。 */
+  acceptTask(workspaceId: string, taskId: string, request: AcceptTaskRequest): Promise<VerificationView>;
 }
 
 /** 裁定請求的種類：Agent 主動請求，或工具權限提示。 */
@@ -988,6 +1069,9 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       send(`${PROFILES_PATH}/${encodeURIComponent(profileId)}/quota-limits`, { method: "PUT", body: limits }),
     cancelRun: (workspaceId, runId) =>
       send(`${workspacePath(workspaceId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
+    taskVerification: (workspaceId, taskId) => send(`${taskPath(workspaceId, taskId)}/verification`),
+    acceptTask: (workspaceId, taskId, { basis, note }) =>
+      send(`${taskPath(workspaceId, taskId)}/verification/accept`, { method: "POST", body: { basis, note } }),
     listDecisions: (workspaceId) => send(`${workspacePath(workspaceId)}/decisions`),
     getDecision: (workspaceId, requestId) => send(decisionPath(workspaceId, requestId)),
     answerDecision: (workspaceId, requestId, optionId, note) =>
@@ -1058,6 +1142,9 @@ export function createTauriClient(invoke: Invoke): AppClient {
     setSchedulingMode: (mode) => call<SchedulingOverview>("scheduling_set_mode", { mode }),
     setQuotaLimits: (id, limits) => call<SchedulingOverview>("profile_set_quota_limits", { id, limits }),
     cancelRun: (workspaceId, runId) => call<RunView>("run_cancel", { workspaceId, runId }),
+    taskVerification: (workspaceId, taskId) => call<VerificationView>("task_verification", { workspaceId, taskId }),
+    acceptTask: (workspaceId, taskId, { basis, note }) =>
+      call<VerificationView>("task_accept", { workspaceId, taskId, request: { basis, note } }),
     listDecisions: (workspaceId) => call<DecisionList>("decision_list", { workspaceId }),
     getDecision: (workspaceId, requestId) => call<DecisionRequestView>("decision_detail", { workspaceId, requestId }),
     answerDecision: (workspaceId, requestId, optionId, note) =>

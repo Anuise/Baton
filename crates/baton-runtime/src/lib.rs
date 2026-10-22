@@ -10,6 +10,7 @@ pub mod log;
 pub mod production_ports;
 pub mod single_instance;
 pub mod supervisor;
+pub mod verifier;
 pub mod windows_platform;
 #[cfg(windows)]
 pub mod windows_process;
@@ -116,6 +117,7 @@ impl Runtime {
             runtime_url,
             run_settings.clone(),
             options.stop_grace,
+            config.data_dir.join(baton_domain::artifact::ARTIFACTS_DIR),
         );
         let supervising = options
             .background_supervisor

@@ -34,6 +34,7 @@ mod runs;
 mod scheduling;
 mod shared_settings;
 mod tasks;
+mod verification;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, PendingByWorkspace};
@@ -45,6 +46,7 @@ pub use scheduling::{
     QueuedRequest, ScheduleOutcome, ScheduleRequest, SchedulingSnapshot, StartedRun, WaitingTask,
 };
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
+pub use verification::{AcceptanceApplyError, PendingVerification};
 
 /// 控制資料庫檔名，位於資料目錄之下。
 pub const DB_FILE_NAME: &str = "control.sqlite";
@@ -524,6 +526,28 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可更新'); END;
         CREATE TRIGGER decision_approval_use_no_delete BEFORE DELETE ON decision_approval_use
         BEGIN SELECT RAISE(ABORT, 'decision_approval_use 是追加式資料表，不可刪除'); END;",
+    },
+    Migration {
+        // 票 13：成果接受與驗證紀錄。同一個 Run 最多一筆紀錄、同一個 Task 最多一筆「通過」
+        name: "task_verification",
+        sql: "CREATE TABLE task_verification (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            run_id TEXT NOT NULL UNIQUE REFERENCES run (id),
+            generation INTEGER NOT NULL,
+            contract_version INTEGER NOT NULL,
+            method TEXT NOT NULL CHECK (method IN ('checks', 'manual')),
+            outcome TEXT NOT NULL CHECK (outcome IN ('passed', 'failed')),
+            evidence TEXT NOT NULL,
+            decided_at INTEGER NOT NULL
+        );
+        CREATE INDEX task_verification_workspace ON task_verification (workspace_id);
+        CREATE UNIQUE INDEX task_verification_one_pass ON task_verification (task_id) WHERE outcome = 'passed';
+        CREATE TRIGGER task_verification_no_update BEFORE UPDATE ON task_verification
+        BEGIN SELECT RAISE(ABORT, 'task_verification 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER task_verification_no_delete BEFORE DELETE ON task_verification
+        BEGIN SELECT RAISE(ABORT, 'task_verification 是追加式資料表，不可刪除'); END;",
     },
     // 票 14：Workspace 依角色的模型覆寫（spec D-30）與 Run 綁定的原生 Session
     Migration {

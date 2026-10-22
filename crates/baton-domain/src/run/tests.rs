@@ -22,6 +22,7 @@ fn complete(capabilities: Vec<Capability>) -> ContractContent {
         done_criteria: filled("五個產品"),
         blocker_handling: filled("回報"),
         required_capabilities: capabilities,
+        verification_checks: vec![],
     }
 }
 
