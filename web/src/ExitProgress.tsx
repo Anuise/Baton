@@ -49,10 +49,10 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-const seconds = (ms: number) => Math.max(0, Math.ceil(ms / 1000));
+export const seconds = (ms: number) => Math.max(0, Math.ceil(ms / 1000));
 
 /** 「停止異常：原因（說明）」；沒有原因或說明時省略。 */
-function outcomeText(run: ExitRunResult): string {
+export function outcomeText(run: ExitRunResult): string {
   const detail = [run.anomaly && ANOMALY_LABELS[run.anomaly], run.message].filter(Boolean).join("：");
   return detail === "" ? OUTCOME_LABELS[run.outcome] : `${OUTCOME_LABELS[run.outcome]}（${detail}）`;
 }

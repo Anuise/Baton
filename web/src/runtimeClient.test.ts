@@ -610,6 +610,49 @@ describe("Runtime 用戶端", () => {
     ]);
   });
 
+  it("HTTP 版讀取更新狀態，同意更新時以 JSON 送出使用者看到的版本", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.updateStatus();
+    await client.applyUpdate("0.2.0");
+
+    expect(fetchFn.mock.calls).toEqual([
+      ["/api/v1/updates"],
+      [
+        "/api/v1/updates/apply",
+        { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ version: "0.2.0" }) },
+      ],
+    ]);
+  });
+
+  it("HTTP 版同意更新但下載或驗證失敗時，以 Runtime 的說明當成錯誤訊息", async () => {
+    const body = { error: "update_download_failed", message: "無法下載或驗證安裝程式（工作沒有停止）：簽章不符" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 502 }));
+
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).applyUpdate("0.2.0")).rejects.toThrow(
+      "無法下載或驗證安裝程式（工作沒有停止）：簽章不符",
+    );
+  });
+
+  it("HTTP 版沒有桌面殼可以執行安裝程式：安裝更新直接失敗，不送請求", async () => {
+    const fetchFn = vi.fn();
+
+    await expect(createHttpClient(fetchFn as unknown as typeof fetch).installUpdate()).rejects.toThrow("桌面 App");
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("Tauri 版以 update_status、update_apply 與 update_install 指令操作更新", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.updateStatus();
+    await client.applyUpdate("0.2.0");
+    await client.installUpdate();
+
+    expect(invoke.mock.calls).toEqual([["update_status"], ["update_apply", { version: "0.2.0" }], ["update_install"]]);
+  });
+
   it("Tauri 版監聽系統匣的完全退出事件，取消訂閱時解除監聽", async () => {
     const unlisten = vi.fn();
     let emit: () => void = () => {};

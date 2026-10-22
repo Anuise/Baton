@@ -3,7 +3,14 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { authorityTable, conversationView, decisionView, lifecycleStatus, metricsResponse } from "./fixtures";
+import {
+  authorityTable,
+  availableUpdateStatus,
+  conversationView,
+  decisionView,
+  lifecycleStatus,
+  metricsResponse,
+} from "./fixtures";
 import type { AppClient, Workspace } from "./runtimeClient";
 
 const workspace: Workspace = {
@@ -54,6 +61,8 @@ const client = {
   timeline: vi.fn(async () => ({ workspace_id: "ws_1", task_id: null, events: [] })),
   metrics: vi.fn(async () => metricsResponse()),
   getConversation: vi.fn(async () => conversationView()),
+  updateStatus: vi.fn(async () => availableUpdateStatus()),
+  applyUpdate: vi.fn(),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({
@@ -86,6 +95,14 @@ describe("App", () => {
 
     expect(await screen.findByRole("dialog", { name: "完全退出" })).toHaveTextContent("停止中");
     expect(client.requestFullExit).toHaveBeenCalledTimes(1);
+  });
+
+  it("有新版本時在主畫面通知、在設定區顯示更新狀態，不會自己開始更新（spec D-19）", async () => {
+    render(<App />);
+
+    expect(await screen.findByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+    expect(await screen.findByText("狀態：有新版本 0.2.0")).toBeInTheDocument();
+    expect(client.applyUpdate).not.toHaveBeenCalled();
   });
 
   it("「裁定」入口開啟裁定中心，並在狀態列與側欄顯示待裁定數", async () => {
