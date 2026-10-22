@@ -1190,7 +1190,7 @@ Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`�
 Controller 依工作情境選 Playbook，Runtime 依**證據**推進 Stage。規則在 `baton_domain::workflow`（內建內容在 `workflow/builtin.rs`），持久化在 `baton-store` 的 `workflows.rs`（migration 39 `methods_and_workflows`），端點在 `baton-api` 的 `workflows.rs`。細節與取捨見 ai-decisions 的票 43 條目。
 
 - **Method Registry 與 Playbook 版本**：Runtime 啟動時登錄內建的 12 個方法與 issue §9.1 的七個 Playbook（`ambiguous`、`feature`、`defect`、`migration`、`performance`、`investigation`、`exploratory_testing`），內容與上一個內建版本不同時才追加新版本。`method_version`、`playbook_version` 以 trigger 禁止更新與刪除（**不可原地覆寫**），識別是 `mtv_<key>_v<版本>`／`pbv_<key>_v<版本>`。使用者以 `POST /api/v1/playbooks` 發布既有 Playbook 的新版本（不能改情境）：先驗證（每個 Stage 至少一項 exit check、key 不重複、失敗去向指到存在的 Stage、方法已登錄、預算 1～10、裁定 Gate 要求裁定證據），通過才追加；內容相同回 200 `created: false`，否則 201。
-- **Stage 契約**：每個 Stage 宣告 `entry_conditions`、`expected_outputs`、`allowed_actions`、`budget.max_attempts`、`exit_checks`（每項要求一種證據：`artifact`、`decision`、`task_accepted`）、`failure_route`（`retry`、`return_to`、`block`）與 `gate`（`none`、`decision` 裁定 Gate、`safety` 安全 Gate）。
+- **Stage 契約**：每個 Stage 宣告 `entry_conditions`、`expected_outputs`、`allowed_actions`、`budget.max_attempts`、`exit_checks`（每項要求一種證據：`artifact`、`decision`、`task_accepted`，以及票 45 的 `verification`）、`failure_route`（`retry`、`return_to`、`block`）與 `gate`（`none`、`decision` 裁定 Gate、`safety` 安全 Gate）。
 - **Router**（`start_workflow`）：依 `situation` 選該情境 Playbook 的最新版本，把理由（情境、Playbook 與版本、適用條件、Controller 的 `rationale`）與版本記在 Workflow 上。綁定的 Task 是研究或文件時，開發流程（`feature`、`defect`、`migration`、`performance`、`exploratory_testing`）回 422 `playbook_not_applicable`。同一個 Task 同時只有一個未完成的 Workflow（409 `workflow_exists`）。
 - **依證據推進**（`record_stage_result`）：只能回報目前 Stage（409 `stage_not_current`）並帶讀到的 `revision`（409 `workflow_revision_mismatch`）。`outcome: passed` 時 Runtime 在同一個交易中查驗每項證據（成果在這個 Workspace 已登記、裁定已回答、Task 已通過成果接受）：全部 exit check 都有有效證據才 `passed` 並前進；有裁定尚未回答記 `blocked`（Workflow 阻擋）；其餘記 `incomplete`（留在原 Stage，`missing` 列出缺什麼）。`failed`／`blocked` 需要 `note`；`failed` 依 `failure_route` 處理，累計失敗達 `max_attempts` 時阻擋。每次回報都追加一筆 `stage_attempt`（含查驗結果、記錄者與它的帳號）。
 - **跳過**：只有使用者能在桌面（`POST …/workflows/{workflow_id}/skip`，`{ stage, expected_revision, reason }`）附原因跳過一般 Stage；裁定與安全 Gate 回 409 `stage_not_skippable`，原因空白回 422。
@@ -1206,6 +1206,28 @@ Controller 依工作情境選 Playbook，Runtime 依**證據**推進 Stage。規
 Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`）：`start_workflow` `{ situation, task_id?, goal_id?, rationale }`（`task_id`、`goal_id` 至少一個）回 Workflow；`record_stage_result` `{ workflow_id, stage, expected_revision, outcome, evidence: [{ check, artifact_id | decision_request_id | task_id }], note }` 回 `{ attempt, workflow }`；`get_workflows` `{}` 回 `{ playbooks, workflows }`。桌面殼指令：`workspace_workflows`、`workflow_skip_stage`。UI 在側欄的「流程」（`web/src/WorkflowPage.tsx`）。
 
 測試：`crates/baton-harness/tests/methods_playbooks_stages.rs`（情境測試）、`crates/baton-domain/src/workflow/tests.rs`、`crates/baton-client/tests/workflows_client.rs`、`web/src/WorkflowPage.test.tsx`。
+
+### Verification Profile 與 CLI／API 驗證 Adapter（票 45）
+
+驗證檢查的是真實介面的行為，不是 Worker 的說法（spec D-29）。規則在 `baton_domain::verification_profile`，Port 是 `baton_ports::VerificationDriver`（正式實作 `baton_runtime::verification_driver::LocalVerificationDriver`，harness 是 `FakeVerificationDriver`），Adapter 在 `baton-runtime` 的 `verification_adapter.rs`，持久化在 `baton-store` 的 `verification_profiles.rs`（migration 40 `verification_profiles`），端點在 `baton-api` 的 `verification_profiles.rs`。細節與取捨見 ai-decisions 的票 45 條目。
+
+- **Profile**（每個 Workspace 一個，版本只追加）：`interface`（目前只有 `cli_api`）、`build`（選填：輸出最後一行是 build 識別）、`doctor`、`start`（長駐服務）、`readiness`（有斷言的步驟 + `attempts`、`interval_ms`）、`setup`、`journeys`（`key`、`title`、`representative`、`steps`）、`teardown`、`evidence`（`output_max_chars`、`redact`）、`budget.max_operations`、`feature_map`（功能、驗收準則、對應旅程）與 `uncovered`（明確宣告的未覆蓋範圍）。步驟是 `operation`（`command`、`http`、`manual`）加 `assertions`（`exit_code`、`status`、`contains`、`not_contains`、`json_equals`）；自動化的步驟至少一個程式斷言，至少一條代表旅程。操作中可用 `{{run_id}}`（驗證要求識別）與 `{{state_dir}}`（`<資料目錄>\verification\<驗證要求>`，本次專屬的狀態目錄）。只有使用者能從桌面發布。
+- **執行**：要求（桌面或 Controller 的 `run_verification`）固定當時的 Profile 版本與旅程；版本還沒被證明可用時一定加入代表旅程。Supervisor 依序執行：準備狀態目錄 → build → doctor → 啟動服務 → 就緒（重試、間隔經由 Port 等待）→ 資料準備 → 旅程 → teardown → 停止服務 → 移除狀態目錄，結果在一個交易中寫入 Evidence Bundle 並把要求標為完成。Runtime 中途當掉時要求仍是 `queued`，下次重新執行。
+- **判定**：每步驟保存 `verdict`（`passed`、`product_failure`、`inconclusive`、`environment_blocked`、`auth_blocked`、`budget_exhausted`、`automation_unsupported`）、`reason_code`（例如 `assertion_failed`、`not_ready`、`endpoint_unreachable`、`http_unauthorized`、`operation_timed_out`、`not_executed`）與來源引擎的 `engine_code`（`exit:1`、`http:404`、`timeout`…）。只有旅程中的斷言不符才是產品缺陷；doctor、就緒、資料準備未通過是環境阻礙，前置受阻時旅程不執行；旅程中一步沒通過，後面的步驟不執行，旅程不會被拼成通過。整份判定：有產品缺陷 → `product_failure`；否則第一個受阻的前置步驟或第一條沒通過的旅程決定；沒有旅程 → `inconclusive`。teardown 只記在 `cleanup.problems`，不改變判定。
+- **Evidence Bundle**：綁定 `build`、`candidate_revision`（受驗目錄的 Git HEAD）、`requirement_version`（受驗 Task 的契約版本）、`profile_version`，記下 `covered_features` 與這次的 `uncovered`；只追加、不可修改。輸出與實際值依 `evidence.redact` 遮蔽並截斷。
+- **代表旅程與覆蓋**：Profile 版本要有一份 Bundle 的代表旅程 `passed` 才算已證明可用（概況的 `proven_by`）；新版本要重新證明。
+- **作為 Stage 證據**：exit check 的 `requires: "verification"` 以 `evidence_bundle_id` 提供；Bundle 必須是 `passed`、依據 Workspace 目前的 Profile 版本，綁定 Task 時契約版本未變，否則記為 `not_passed`。
+
+| 端點（桌面） | 說明 |
+| --- | --- |
+| `GET /api/v1/workspaces/{id}/verification` | `{ workspace_id, profile, proven_by, uncovered, requests, bundles }`（要求與 Bundle 各最近 20 筆，新的在前） |
+| `POST /api/v1/workspaces/{id}/verification/profile` | 發布新版本（body 是 Profile 定義），新增回 201、內容相同回 200 `{ profile, created }`；不合格 422 `verification_profile_invalid` |
+| `POST /api/v1/workspaces/{id}/verification/runs` | `{ task_id?, journeys? }` 回 201 驗證要求；沒有 Profile 404 `verification_profile_not_found`，未知旅程 422 `verification_request_invalid`，Task 不在這個 Workspace 404 `task_not_found` |
+| `GET /api/v1/workspaces/{id}/verification/bundles/{bundle_id}` | 一份 Evidence Bundle；找不到 404 `evidence_bundle_not_found` |
+
+Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journeys? }` 回 201 驗證要求；`get_verification` `{}` 回與桌面相同的概況。桌面殼指令：`workspace_verification`、`verification_publish_profile`、`verification_run`、`verification_bundle`。UI 在側欄的「驗證」（`web/src/VerificationPage.tsx`）：Profile 狀態與是否已證明可用、Feature Map 與未覆蓋範圍、以 JSON 發布新版本、要求執行、Evidence Bundle 與每個步驟的判定。
+
+測試：`crates/baton-harness/tests/verification_profile_cli_api.rs`（情境測試）、`crates/baton-harness/tests/verification_real_adapter.rs`（正式 Port 對真實程序與 HTTP 服務）、`crates/baton-runtime/tests/verification_driver.rs`、`crates/baton-domain/src/verification_profile/tests.rs`、`crates/baton-client/tests/verification_profiles_client.rs`、`web/src/VerificationPage.test.tsx`。
 
 ### 本機 API 的存取防護
 

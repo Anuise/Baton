@@ -3546,6 +3546,101 @@
 - 影響：無行為差異。
 - 審閱：未審
 
+### AI-391：Verification Profile 只有使用者能從桌面發布；Controller 只能要求驗證與讀取結果
+- 重要度：高
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：Profile（含 Feature Map 與斷言）只能經桌面管理 API `POST …/verification/profile` 發布，發布者記為桌面憑證指紋。Controller 只有 `run_verification` 與 `get_verification` 兩個工具；需要修改 Profile 時以 `propose_decision_request` 向使用者提出。Worker 不能要求驗證（`controller_only`）。
+- 理由：Profile 決定「怎麼驗收」，Feature Map 直接對應驗收準則；spec D-15 把「修改完成條件或驗收標準」列為必須送裁定的事項。讓 Agent 能改斷言，就能把驗證改鬆來讓自己的成果通過（也是票 50 要防的情況）。
+- 替代方案：Controller 以工具發布 Profile，版本與發布者照樣留下。較自動，但 Agent 可以自行放寬驗收。
+- 影響：每個 Workspace 的第一份 Profile 要由使用者在「驗證」頁以 JSON 撰寫；Controller 的角色說明已告知這條規則。
+- 審閱：未審
+
+### AI-392：驗證結果不直接改變 Task 狀態，而是作為 Stage 的 `verification` 證據
+- 重要度：中
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：Evidence Bundle 不接進票 13 的成果接受（Task 的 `verifying → completed` 仍只看契約的確定性檢查或使用者手動接受）。新增 exit check 證據種類 `verification`（`record_stage_result` 的 `evidence_bundle_id`）。Bundle 只有同時滿足以下條件才有效：判定為 `passed`、依據的是 Workspace 目前的 Profile 版本、綁定 Task 時那個 Task 的契約版本與驗證當時相同。否則查驗結果是新的 `not_passed`。內建 Playbook 的內容不變（仍以成果作為證據），使用者可以發布要求 `verification` 的 Playbook 新版本。
+- 理由：票 43 已把「真實介面驗證」定為 Stage／Gate，接在 Gate 上不必改動成果接受交易、整合佇列與預算這些已經穩定的路徑。版本條件讓舊 Profile 或舊需求下的通過不會被沿用，這也是票 50 的前置條件。
+- 替代方案：把 Profile 旅程加進 Task 契約，成果接受時一起執行。需要修改契約格式與接受交易，而且與票 13、20、36 的行為交織，風險高。
+- 影響：只有走 Playbook 的工作會被 Bundle 擋住；內建「功能開發」的真實介面驗證 Stage 目前仍接受成果作為證據，要等使用者（或後續的票）發布新版本才改用 `verification`。
+- 審閱：未審
+
+### AI-393：verdict、reason_code 與 engine_code 的區分及判定規則
+- 重要度：中
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：
+  - 三個欄位：`verdict` 是票面的七種判定；`reason_code` 是更細的原因（`assertion_failed`、`doctor_failed`、`not_ready`、`setup_failed`、`endpoint_unreachable`、`operation_not_started`、`http_unauthorized`、`http_forbidden`、`operation_timed_out`、`operation_terminated`、`manual_step`、`operation_budget_exhausted`、`not_executed`、`blocked_by_prerequisite` 等）；來源引擎的原始代碼另存為 `engine_code`（`exit:1`、`http:404`、`timeout`）。
+  - 判定規則：只有旅程中的斷言不符才是 `product_failure`。build、doctor、就緒、資料準備的斷言不符是 `environment_blocked`，找不到程式或連不上也是。401／403 是 `auth_blocked`，除非該步驟的斷言明確預期這個狀態碼。逾時與被終止是 `inconclusive`。`manual` 步驟是 `automation_unsupported`。
+  - 預算以操作次數計：含就緒重試，不含 teardown 與人工步驟，預設 200 次。用盡後的步驟記為 `budget_exhausted`。
+  - 整份判定的優先順序：有旅程是產品缺陷就是 `product_failure`；否則由第一個受阻的前置步驟決定；再否則由第一條沒通過的旅程決定；沒有任何旅程時是 `inconclusive`。旅程中一步沒通過，之後的步驟不執行（`not_executed`），旅程不會被拼成通過。
+- 理由：票面列出的七個值就是 verdict；「reason_code」若也只有這七個值會與 verdict 重複，細分的原因對使用者排查更有用。前置階段失敗屬於環境問題，不能算成產品缺陷。
+- 替代方案：reason_code 也用這七個值，另加 detail 文字。資訊重複，而且機器無法分辨失敗的原因。
+- 影響：web Adapter（票 46）與交接（票 49）沿用同一組 verdict 與 reason_code 的命名方式。
+- 審閱：未審
+
+### AI-394：「新 Profile 至少實際跑過一條代表旅程」以 `proven_by` 表達，未覆蓋範圍分三種來源
+- 重要度：中
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：
+  - 發布條件：Profile 至少要有一條 `representative` 旅程，代表旅程至少有一個可自動化的步驟；每個自動化步驟至少要有一個程式斷言（只執行操作不算驗證）。
+  - `proven_by`：某個版本只有在出現一份代表旅程 `passed` 的 Bundle 之後才算已證明可用，概況以 `proven_by` 顯示那份 Bundle。版本未證明時，任何驗證要求都會自動加入代表旅程。發布新版本後要重新證明。
+  - 未覆蓋範圍有三種來源：Feature Map 中沒有旅程的功能、Profile 明確宣告的 `uncovered`、這次驗證沒有執行到對應旅程的功能。前兩種顯示在概況，三種都記在每份 Bundle。
+  - 實際執行：正式 Port 在測試中對本機真實的 HTTP 服務與作業系統 shell 跑過代表旅程（`verification_real_adapter.rs`）。
+- 理由：讓「跑過」是 Runtime 查驗得到的事實，不是勾選框；新版本的斷言可能寫錯，必須重新證明。
+- 替代方案：發布時同步執行代表旅程，失敗就拒絕發布。這會讓發布依賴受驗環境當下是否可用，而且發布 API 要等待長時間的操作。
+- 影響：Profile 剛發布時 `proven_by` 是 null，UI 會明確提示這個版本還不能當作驗證證據。由於 Stage 證據要求 Bundle 為 passed，而未證明的版本一定會跑代表旅程，未證明版本的 Bundle 不可能被當作有效證據。
+- 審閱：未審
+
+### AI-395：清理範圍以「本次驗證的狀態目錄與它啟動的服務」界定；teardown 與清理一定執行
+- 重要度：中
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：
+  - 隔離方式：每個驗證要求有專屬的狀態目錄 `<資料目錄>\verification\<驗證要求>`，以佔位字 `{{state_dir}}` 交給操作；`{{run_id}}` 是驗證要求識別。Profile 應把測試資料寫在這個目錄，或用這個識別標記測試資料。
+  - 清理順序：不論判定為何，依序執行 teardown、停止本次啟動的服務、移除本次的狀態目錄，不碰其他驗證的目錄與受驗專案的檔案。
+  - 失敗處理：teardown 或清理失敗只記在 Bundle 的 `cleanup.problems`，不改變判定。證據存在控制資料庫的 Evidence Bundle（只追加、不可修改），不放在狀態目錄。
+  - 執行方式：驗證由 Supervisor 在驗證工作中依序執行。中途當掉時要求仍是 `queued`，重啟後重新執行，並先清空同一個要求留下的狀態目錄。
+  - 服務程序：以子程序啟動，停止時只終止直接啟動的那個程序，不放進 Job Object，與票 13 的驗證命令相同。
+- 理由：「只移除本 Run 的狀態」需要一個可以機械判斷的界線；以驗證要求為單位的目錄加上識別，最容易保證不誤刪。
+- 替代方案：讓 teardown 自行負責全部清理。Runtime 無法確認清理範圍，也無法保證失敗時的清理。
+- 影響：服務自己再開的子孫程序，以及 Runtime 當掉時仍在執行的服務，不保證會被終止（Runtime 正常結束時會隨之終止）。Profile 必須使用佔位字，才能讓應用程式本身的資料與其他驗證隔離。未實作帳號權限參照與秘密參照，測試權杖只能以 `evidence.redact` 遮蔽（秘密參照屬於票 46）。
+- 審閱：未審
+
+### AI-396：build 識別、candidate revision 與需求版本的取得方式
+- 重要度：低
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：candidate revision 是受驗目錄的 `git rev-parse --verify HEAD`（不是 Git repo 時為 null）。build 是 Profile 的 `build` 命令輸出的最後一行；沒有設定時是 `revision:<HEAD>`；命令失敗則判定為 `environment_blocked`（`build_unidentified`）。需求版本是受驗 Task 執行時的契約版本，同時記下 Task 最新的 Run 與世代。受驗目錄是 Task 已登記的工作目錄，沒有 Task 或沒有工作目錄時是 Workspace 目錄。
+- 理由：CLI／API 專案沒有統一的 build 號；讓專案自己宣告，並以 revision 作為預設。
+- 替代方案：計算受驗目錄的檔案雜湊作為 build。成本高，而且不一定等於實際被執行的產物。
+- 影響：worktree 中未提交的變更不會反映在 revision 上。
+- 審閱：未審
+
+### AI-397：新增 `VerificationDriver` Port，不重用 CommandRunner 或 ProcessControl
+- 重要度：低
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：CLI／API Adapter 的全部副作用集中在一個新 Port：命令、HTTP、啟動與停止服務、就緒重試的等待、Git HEAD、狀態目錄的建立與移除。正式實作的命令沿用票 13 的 `LocalCommandRunner`；HTTP 使用 reqwest，不跟隨轉址，本文最多保留開頭 256 KB。fake 依「程式＋引數」或「方法＋網址」腳本化回應，等待時推進 fake 時鐘。
+- 理由：Port 必須讓驗證的 fake 能依引數分別回應，而且等待不能用真實的 sleep。ProcessControl 是為 Claude Run 與 Job Object 設計的，接受驗證服務會影響既有的程序核對。
+- 替代方案：擴充既有的 CommandRunner 與 ProcessControl。會改動多個票共用的介面與 fake。
+- 影響：harness 可以用 `HarnessBuilder::verification_driver` 換上正式實作，對真實服務做情境測試。
+- 審閱：未審
+
+### AI-398：驗證的資料形狀、API、錯誤碼、migration 40 與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-23，票 45 實作
+- 決策：
+  - migration 40：`verification_profiles` 建立三張表。`verification_profile_version` 以 Workspace 與版本識別，只追加。`verification_request` 的狀態只有 `queued` 與 `completed`。`evidence_bundle` 的內容存成 JSON，只追加。
+  - 桌面 API：
+    - `GET /api/v1/workspaces/{id}/verification`：概況，最近 20 個要求與 20 份 Bundle。
+    - `POST …/verification/profile`
+    - `POST …/verification/runs`
+    - `GET …/verification/bundles/{bundle_id}`
+  - Controller 工具：`run_verification`、`get_verification`。
+  - 錯誤碼：`verification_profile_invalid`、`verification_profile_not_found`、`verification_request_invalid`、`evidence_bundle_not_found`。
+  - 介面範圍：`interface` 只有 `cli_api`；web 屬於票 46。
+  - UI：在側欄每個 Workspace 的「驗證」。
+- 理由：沿用票 42、43 的模式，即 Controller 工具加上桌面檢視 API 與側欄入口。
+- 替代方案：把驗證結果放進「成果與驗證」分頁的 Task 詳細面板。沒有綁定 Task 的驗證會沒有地方顯示。
+- 影響：與同時進行的票整合時，migration 與 AI 編號可能需要順延。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
