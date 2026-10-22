@@ -375,6 +375,16 @@
 - **關係**：暫停、交接、失敗、取消與完全退出都不觸發清理；只移除平台建立並登記的目標；研究與文件 Task 改用獨立輸出目錄。位置是 `<Workspace>\.baton\worktrees\<Task>`，簽出平台分支 `baton/<Task>`；同一個 Task 的每個 Run 都在同一個 worktree 中執行。
 - **避免使用**：checkout、workdir、sandbox（不構成安全隔離）。
 
+### 備份（Backup）
+- **定義**：控制資料庫的一致快照（SQLite Online Backup API）加上快照中登記的成果檔案與 manifest，存放在 `<資料目錄>\backups\`。觸發原因是每日、migration 前，或重要裁定／Stage 完成（同一小時內合併為一次）；保留 7 份每日與 4 份每週。
+- **關係**：不含任何憑證與登入資料（Profile 原生設定目錄、桌面憑證檔不在其中，快照中的憑證表已清空）。只能還原到乾淨的目錄；還原時，備份當下尚未結束的 Run 一律結束，不自動重做外部操作。
+- **避免使用**：snapshot（指 Run 設定快照或資料庫快照本身）、checkpoint（Run 的進度保存）、匯出。
+
+### 還原演練（Restore Drill）
+- **定義**：每週一次，把最新的備份還原到隔離目錄，核對資料庫完整性、外鍵關聯、成果雜湊，以及資料庫登記的成果版本與 manifest 一致；結果顯示在設定頁。
+- **關係**：只證明備份可用，不改變正式資料目錄；任一項核對沒通過就是不通過。
+- **避免使用**：restore test（泛稱）、驗證（另指 Verification Profile 的驗證）。
+
 ### 輸出目錄（output directory）
 - **定義**：研究與文件 Task 專用的獨立目錄（`<Workspace>\.baton\outputs\<Task>`），Workspace 不必是 Git repo。
 - **關係**：與 Worktree 合稱 Task 的「工作目錄」：派工前由平台建立並登記，不可用時不派工並顯示原因；Worker 的程序以它為工作目錄。

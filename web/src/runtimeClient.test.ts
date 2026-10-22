@@ -285,6 +285,24 @@ describe("Runtime 用戶端", () => {
     expect(invoke.mock.calls).toEqual([["scheduling_overview"], ["scheduling_set_mode", { mode: "reserve_handoff" }]]);
   });
 
+  it("HTTP 版向 /api/v1/backups 取得備份狀態", async () => {
+    const status = { backups: [], latest_drill: null };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(status), { status: 200 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    expect(await client.backupStatus()).toEqual(status);
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/backups");
+  });
+
+  it("Tauri 版透過 backup_status 指令取得備份狀態", async () => {
+    const invoke = vi.fn(async () => ({ backups: [], latest_drill: null }));
+    const client = createTauriClient(invoke as never);
+
+    await client.backupStatus();
+
+    expect(invoke.mock.calls).toEqual([["backup_status"]]);
+  });
+
   it("HTTP 版設定方案上限：PUT 到 Profile 的 quota-limits，未設定的視窗送 null", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);
