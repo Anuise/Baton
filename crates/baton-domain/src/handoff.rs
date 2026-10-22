@@ -5,7 +5,7 @@
 //! **帳號的額度門檻（遲滯）**：每個帳號一個 `QuotaGate`，依額度判斷（`quota::assess`）推進：
 //! - 用量（兩個視窗中較緊者）≥ 75% → `paused`：不再派新 Run 給它；
 //! - ≥ 85%，或目前有 CLI 的限流警告（或已達上限）→ `draining`：除了不派新工作，進行中的 Run 要交接出去；
-//! - 回到 < 60%、用量變成未知（訊號已在重置時間失效），或已過進入時記下的重置時間 → 回到 `open`。
+//! - 回到 < 60%、用量變成未知（訊號已在重置時間失效），或已過進入時記下的重置時間（只記已觀測來源的）→ 回到 `open`。
 //!   60%～75% 之間維持原狀（遲滯），避免在門檻附近來回切換。
 //!
 //! **交接**：issue §5.2 的五個步驟以 phase 狀態機表達，每一個 phase 持久化之後才做下一步的外部副作用：
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{ReportContent, ReportRecord};
 use crate::event::DomainEvent;
-use crate::quota::{LimitStatus, QuotaAssessment};
+use crate::quota::{LimitStatus, QuotaAssessment, QuotaSource};
 use crate::run::{Run, RunStatus};
 use crate::scheduler::{WaitReason, QUOTA_STOP_DISPATCH_RATIO};
 use crate::task::{Task, TaskStatus, Versioned};
@@ -132,7 +132,7 @@ pub struct QuotaGate {
     pub reason: String,
     /// 轉換當下的判斷用量。
     pub used: Option<f64>,
-    /// 進入 paused／draining 時記下的重置時間；過了這個時間就視為已重置。
+    /// 進入 paused／draining 時記下的重置時間（只有判斷採用已觀測來源時才有）；過了這個時間就視為已重置。
     pub reset_at: Option<Timestamp>,
     pub since: Timestamp,
     pub version: i64,
@@ -192,7 +192,12 @@ pub fn evaluate_gate(
         state,
         reason: reason.to_string(),
         used,
-        reset_at: if state == GateState::Open { None } else { assessment.reset_at },
+        // 只記已觀測來源的重置時間：推估的重置時間只是滾動視窗中最早一筆用量滑出的時間，不代表帳號真的重置（D-13 遲滯）
+        reset_at: if state == GateState::Open {
+            None
+        } else {
+            assessment.reset_at.filter(|_| assessment.source == Some(QuotaSource::Observed))
+        },
         since: now,
         version,
     };
