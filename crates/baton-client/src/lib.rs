@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    admission_check_path, artifact_content_path, artifact_preview_path, artifacts_path, authorization_path,
+    admission_check_path, artifact_content_path, conversation_messages_path, conversation_path, PostMessageRequest,
+    PostedMessage, artifact_preview_path, artifacts_path, authorization_path,
     authorization_summary_path, decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path,
     decision_path, decisions_path, goals_path, run_cancel_path, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
     MergeResponse, UpdateAuthorityRequest, DECISIONS_BATCH_PATH,
@@ -35,6 +36,7 @@ use baton_api::{
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
 };
 use baton_domain::authority::AuthorityTable;
+use baton_domain::conversation::ConversationView;
 use baton_domain::decision::DecisionView;
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
@@ -312,6 +314,17 @@ impl RuntimeClient {
     /// 上限不是正整數或 Profile 已封存時回傳 `ClientError::Rejected`。
     pub async fn set_quota_limits(&self, profile_id: &str, limits: &PlanLimits) -> Result<SchedulingOverview, ClientError> {
         self.send_json(reqwest::Method::PUT, &plan_limits_path(profile_id), Some(limits)).await
+    }
+
+    /// Workspace 與 Controller 的長期對話（票 16）。
+    pub async fn conversation(&self, workspace_id: &str) -> Result<ConversationView, ClientError> {
+        self.get_json(&conversation_path(workspace_id)).await
+    }
+
+    /// 送出一則使用者訊息；Controller 忙碌時同樣保存為「已收到／待處理」。空白或過長時回傳 `ClientError::Rejected`。
+    pub async fn send_conversation_message(&self, workspace_id: &str, text: &str) -> Result<PostedMessage, ClientError> {
+        let request = PostMessageRequest { text: text.to_string() };
+        self.send_json(reqwest::Method::POST, &conversation_messages_path(workspace_id), Some(&request)).await
     }
 
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。
