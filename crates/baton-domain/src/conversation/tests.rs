@@ -403,3 +403,17 @@ fn a_new_session_is_rebuilt_from_decisions_and_checkpoints_but_a_resumed_one_is_
     let resumed = build_prompt(&state, &inputs, true, None, &background);
     assert!(!resumed.contains("SQLite") && !resumed.contains("完成三家"), "原生接續時不重送背景：{resumed}");
 }
+
+#[test]
+fn a_new_session_tells_the_controller_how_to_use_the_shared_tools() {
+    let mut state = start("ws_1", T0);
+    input(&mut state, TurnKind::UserMessage, "第一則", T0);
+    let background = ControllerBackground { decisions: Vec::new(), checkpoints: Vec::new(), workflows: Vec::new() };
+
+    let prompt = build_prompt(&state, &state.turns.clone(), false, None, &background);
+
+    // 票 54：Controller 的共同工具與它的收件地址
+    for text in ["search_knowledge", "send_message", "read_inbox", "controller", "record_lesson_candidate", "accept_artifact"] {
+        assert!(prompt.contains(text), "缺少 {text}：{prompt}");
+    }
+}

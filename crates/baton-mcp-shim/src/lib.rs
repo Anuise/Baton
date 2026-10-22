@@ -46,6 +46,8 @@ use baton_domain::workflow::{
     Situation, EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
     TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
 };
+use baton_domain::decision::REASON_MAX_CHARS as DECISION_REASON_MAX_CHARS;
+use baton_domain::verification::TOOL_ACCEPT_ARTIFACT;
 use baton_domain::verification_profile::{
     LIST_MAX as PROFILE_LIST_MAX, TEXT_MAX_CHARS as PROFILE_TEXT_MAX_CHARS, TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION,
 };
@@ -282,7 +284,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_SEND_MESSAGE,
-            "description": "寄訊息給同一個 Workspace 的其他 Task（收件人用 task id）。收件人要到下次讀取收件匣時才看得到，Runtime 不會中途插話；訊息不能改變任何 Task 的契約、範圍或歸屬；重送同一個 message_id 只會交付一次。",
+            "description": "寄訊息給同一個 Workspace 的其他 Task（收件人用 task id）或這個 Workspace 的 Controller（收件人寫 controller）。Worker 與 Controller 都能使用；Controller 寄出的訊息寄件地址是 controller，收件人以 controller 回覆。別的 Workspace 的 Task 寄不到（recipient_not_found）。收件人要到下次讀取收件匣時才看得到，Runtime 不會中途插話；訊息不能改變任何 Task 的契約、範圍或歸屬（Controller 要改 Task 請用 update_task）；重送同一個 message_id 只會交付一次。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -291,7 +293,7 @@ fn tool_definitions() -> Value {
                         "items": { "type": "string" },
                         "minItems": 1,
                         "maxItems": MAX_RECIPIENTS,
-                        "description": "收件 Task 的 task id（同一個 Workspace）",
+                        "description": "收件 Task 的 task id（同一個 Workspace），或 controller（這個 Workspace 的 Controller）",
                     },
                     "kind": {
                         "type": "string",
@@ -317,7 +319,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_READ_INBOX,
-            "description": "讀取寄給這個 Task 的訊息；回傳的未讀訊息會被標為已讀。建議在 save_checkpoint 與開始新階段前呼叫。",
+            "description": "讀取寄給自己的訊息；回傳的未讀訊息會被標為已讀。Worker 讀寄給這個 Task 的訊息，建議在 save_checkpoint 與開始新階段前呼叫；Controller 讀寄給這個 Workspace 的 Controller 的訊息（收件匣屬於 Workspace，上一輪沒讀的訊息這一輪讀得到），建議每一輪開始時呼叫。寄件者是 Controller 的訊息 from_task_id 為 controller。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -361,7 +363,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_RECORD_LESSON_CANDIDATE,
-            "description": "提交一則候選教訓（踩過的坑、根因與解法）。提交後只是「候選」，不會被當作已驗證的知識，需使用者在知識分頁確認後才會生效；適用範圍由這個 Run 的 Task 決定。",
+            "description": "提交一則候選教訓（踩過的坑、根因與解法）。提交後只是「候選」，不會被當作已驗證的知識，需使用者在知識分頁確認後才會生效。Worker 呼叫時適用範圍由這個 Run 的 Task 決定（task_id 會被忽略）；Controller 呼叫時必須以 task_id 指定教訓來源的 Task（這個 Workspace 內），範圍依那個 Task 解析，並依決策權限表判定：Workspace 要求先裁定時回 requires_decision 並建立裁定請求，使用者核准後以相同內容再呼叫一次。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -399,6 +401,10 @@ fn tool_definitions() -> Value {
                         "enum": ["task", "goal", "workspace"],
                         "default": "task",
                         "description": "適用範圍：這個 Task（預設）、所屬 Goal 或整個 Workspace",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Controller 必填：教訓來源的 Task（這個 Workspace 內）；Worker 不需要填",
                     },
                 },
                 "required": ["title"],
@@ -906,6 +912,23 @@ fn tool_definitions() -> Value {
             "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：讀取這個 Workspace 的探索概況：各探索 Task 目前的章程，以及全部疑點（新的在前）與它們的重現紀錄。疑點狀態是 suspected（疑點）、confirmed（已確認缺陷）、unverified_risk（未驗風險）、excluded（已排除）、fixed（已修復，納入回歸）或 regressed（回歸失敗）。",
             "inputSchema": { "type": "object", "properties": {} },
         },
+        {
+            "name": TOOL_ACCEPT_ARTIFACT,
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：接受這個 Workspace 內一個 verifying Task 的成果，仍受驗證 Gate 約束。契約宣告了確定性檢查的 Task 由 Runtime 執行檢查、全部通過才接受，Controller 不能以接受取代檢查（verification_gate_pending）；不在驗證中的 Task 回 task_not_verifying。沒有宣告檢查的 Task 原本只能由使用者手動接受，所以 Controller 接受等同略過驗證 Gate，一定要經使用者裁定：Runtime 回 requires_decision 並建立裁定請求（綁定這一次的 Run、契約版本與成果雜湊），等待裁定、不要繞過；使用者核准後以相同內容再呼叫一次才會接受（沒有核准時回 decision_denied）。成功時回應是這個 Task 的驗證狀況（status 為 completed，開發 Task 則排入整合佇列）。",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "要接受成果的 Task（這個 Workspace 內、狀態為 verifying）" },
+                    "reason": {
+                        "type": "string",
+                        "maxLength": DECISION_REASON_MAX_CHARS,
+                        "description": "為什麼這份成果符合完成條件（會顯示在裁定請求中）",
+                    },
+                    "note": { "type": "string", "description": "記在驗證紀錄上的附註（選填，預設用 reason）" },
+                },
+                "required": ["task_id", "reason"],
+            },
+        },
     ])
 }
 
@@ -986,6 +1009,7 @@ async fn call_tool(client: &reqwest::Client, config: &ShimConfig, params: &Value
         TOOL_TRIAGE_EXPLORATION_FINDING,
         TOOL_REPRODUCE_EXPLORATION_FINDING,
         TOOL_GET_EXPLORATION,
+        TOOL_ACCEPT_ARTIFACT,
     ];
     if !known.contains(&name) {
         return Err((INVALID_PARAMS, format!("未知的工具：{name}")));

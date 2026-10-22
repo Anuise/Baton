@@ -29,6 +29,7 @@ use baton_domain::workflow::{
     EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
     TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
 };
+use baton_domain::verification::TOOL_ACCEPT_ARTIFACT;
 use baton_domain::verification_profile::{
     Verdict, LIST_MAX as PROFILE_LIST_MAX, TEXT_MAX_CHARS as PROFILE_TEXT_MAX_CHARS, TOOL_GET_VERIFICATION,
     TOOL_RUN_VERIFICATION,
@@ -142,7 +143,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_thirty_eight_tools_with_their_required_fields() {
+async fn tools_list_has_the_thirty_nine_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -188,6 +189,7 @@ async fn tools_list_has_the_thirty_eight_tools_with_their_required_fields() {
             TOOL_TRIAGE_EXPLORATION_FINDING,
             TOOL_REPRODUCE_EXPLORATION_FINDING,
             TOOL_GET_EXPLORATION,
+            TOOL_ACCEPT_ARTIFACT,
         ]
     );
     for tool in tools {
@@ -300,9 +302,24 @@ async fn tools_list_has_the_thirty_eight_tools_with_their_required_fields() {
         TOOL_TRIAGE_EXPLORATION_FINDING,
         TOOL_REPRODUCE_EXPLORATION_FINDING,
         TOOL_GET_EXPLORATION,
+        TOOL_ACCEPT_ARTIFACT,
     ] {
         let tool = tools.iter().find(|t| t["name"] == name).unwrap();
         assert!(tool["description"].as_str().unwrap().contains("Controller 專屬"), "{name}");
+    }
+    // 票 54：Controller 也能用的共同工具，說明要寫明 Controller 的範圍與用法
+    let description = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["description"].as_str().unwrap().to_string();
+    for name in [TOOL_SEND_MESSAGE, TOOL_READ_INBOX, TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE] {
+        assert!(description(name).contains("Controller"), "{name}");
+    }
+    assert!(description(TOOL_SEND_MESSAGE).contains("controller"), "收件人寫 controller 寄給 Controller");
+    assert!(send["properties"]["to"]["description"].as_str().unwrap().contains("controller"));
+    assert_eq!(lesson["properties"]["task_id"]["type"], "string");
+    assert!(lesson.get("required") == Some(&json!(["title"])), "task_id 只有 Controller 必填，schema 不列為必填");
+    let accept = schema(TOOL_ACCEPT_ARTIFACT);
+    assert_eq!(accept["required"], json!(["task_id", "reason"]));
+    for text in ["verification_gate_pending", "requires_decision"] {
+        assert!(description(TOOL_ACCEPT_ARTIFACT).contains(text), "{text}");
     }
     let propose = schema(TOOL_PROPOSE_TASK);
     assert_eq!(propose["required"], json!(["title"]));
@@ -490,6 +507,7 @@ async fn controller_tools_forward_to_their_paths_with_credentials_and_unchanged_
         (TOOL_ADD_DEPENDENCY, json!({"task_id":"t2","depends_on":"t1"}), r#"{"created":true}"#),
         (TOOL_DISPATCH_TASK, json!({"task_id":"t1","priority":5}), r#"{"status":"queued"}"#),
         (TOOL_CANCEL_TASK, json!({"task_id":"t2"}), r#"{"status":"cancelled"}"#),
+        (TOOL_ACCEPT_ARTIFACT, json!({"task_id":"t1","reason":"報告符合完成條件"}), r#"{"status":"completed"}"#),
         (
             TOOL_PROPOSE_DECISION_REQUEST,
             json!({"question":"要哪一家雲端？","reason":"影響成本","options":[{"id":"a","label":"甲"},{"id":"b","label":"乙"}],"blocking":["t1"]}),
