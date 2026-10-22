@@ -17,6 +17,7 @@ pub mod decision;
 pub mod event;
 pub mod external_operation;
 pub mod guard;
+pub mod guardian;
 pub mod integration;
 pub mod knowledge;
 pub mod lifecycle;
