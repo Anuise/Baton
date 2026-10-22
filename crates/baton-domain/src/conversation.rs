@@ -703,7 +703,11 @@ pub fn build_prompt(
              以 get_reviews 查看審查與偏離。\n\
              真實介面驗證：以 run_verification 依 Workspace 的 Verification Profile 驗證（可指定 task_id 與旅程），\
              以 get_verification 查看判定與 Evidence Bundle；只有判定為 passed 的 Bundle 能當作驗證證據，\
-             證據不足、環境或授權阻礙都不是通過。Profile 由使用者維護，需要修改時以 propose_decision_request 提出。\n",
+             證據不足、環境或授權阻礙都不是通過。Profile 由使用者維護，需要修改時以 propose_decision_request 提出。\n\
+             Gate 失效與重驗：規格、build、Verification Profile 改變或假設被推翻時，Runtime 會讓受影響的 Gate 失效、\
+             把 Workflow 退回該 Stage（工作事件會說明原因；驗證 Gate 會自動排入重驗），請以新的證據重新回報，舊的證據不會再算數；\
+             其他仍有效的 Gate 會被沿用。照提問的建議先做某個 Task 時，在它的 inputs 以 kind 為 decision 的引用指向那個裁定請求；\
+             使用者的答案與建議不同時，這個 Task 不能派工、Gate 不能通過，請依答案更新契約。\n",
         );
         if let Some(gap) = history_gap {
             prompt.push_str(&format!("\n注意：{gap}\n"));
