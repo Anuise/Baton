@@ -1,6 +1,6 @@
 # 49: 驗證中的額度交接
 
-Status: ready-for-agent
+Status: in_progress（Work-9，run R144-49-impl，2026-10-23 02:26）
 Blocked by: 46, 28
 
 **What to build:** 驗證 Run 納入帳號額度與交接：每個可恢復步驟記錄已完成操作與判定；交接先停止舊測試程序，承接者以安全的測試 Session 參照查驗現況；無法移轉的瀏覽器 Session 從隔離 fixture 或最近確認邊界重跑；單一案例未完成不得拼接為 passed。全帳號受限時只執行不需模型的斷言或重播。
