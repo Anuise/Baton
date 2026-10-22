@@ -86,10 +86,11 @@ async fn launch_intent_receipt_and_outbox_acknowledgement_are_persisted_step_by_
     run_cmd(&store, RunCommand::RecordReceipt { run_id: "r1".into(), process: process.clone() }, T2).await.unwrap();
     let running = store.executing_runs().await.unwrap();
 
-    assert_eq!((starting[0].run.status, starting[0].run.command_id.as_deref()), (RunStatus::Starting, Some("cmd-1")));
-    assert!(starting[0].run.process.is_none(), "回執寫回之前沒有程序身分");
-    assert_eq!(running[0].run.process, Some(process));
-    assert_eq!(running[0].run.started_at, Some(T2));
+    let (starting, running) = (&starting[0].view.run, &running[0].view.run);
+    assert_eq!((starting.status, starting.command_id.as_deref()), (RunStatus::Starting, Some("cmd-1")));
+    assert!(starting.process.is_none(), "回執寫回之前沒有程序身分");
+    assert_eq!(running.process, Some(process));
+    assert_eq!(running.started_at, Some(T2));
     assert!(store.pending_launches().await.unwrap().is_empty(), "回執寫回後 Outbox 項目視為處理完畢");
 }
 

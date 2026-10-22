@@ -1,0 +1,332 @@
+//! Supervisor：launch intent → 啟動 → 回執 → 就緒 → 停止；程序身分核對（spec 「程序與模組架構」）。
+//!
+//! 每次 `tick` 依序做四件事，而且每一件都是冪等的、只信任資料庫中持久化的狀態：
+//! 1. **啟動**派工 Outbox 裡的 Run：先在交易中持久化 launch intent 與 command_id，才在交易外 spawn，
+//!    再把回執寫回。Runtime 在中間任何一點當掉，下一次 tick 都用 command_id 找回原程序，**絕不重新啟動**；
+//!    找不到程序時把 Run 標為 interrupted，交給使用者重新派工，而不是猜測「應該沒啟動」。
+//! 2. **收事件**：接上 Adapter 的事件串流，heartbeat 續約 lease，結束事件只讓 Run 結束，不把 Task 標為 completed。
+//! 3. **取消**：對要求取消的 Run 停止整個程序樹；確認停止之後才完成取消、釋放寫入所有權。
+//! 4. **核對 lease**：lease 過期只是「該去看看」：向 ProcessControl 查證，確認死亡才中斷 Run，存活就續約，不確定就維持原狀。
+//!
+//! 正式執行時由背景迴圈呼叫 `tick`（有新的派工或取消時會被喚醒）；測試 harness 不啟動背景迴圈，
+//! 由測試在想要的時刻呼叫 `tick`，搭配 fake Clock 就能完全決定性地重現任何時序。
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use baton_api::LogSink;
+use baton_domain::run::{ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus};
+use baton_ports::{
+    AdapterEvent, AgentHandle, Liveness, Ports, ProcessIdentity, RunSpec, SpawnSpec, StopResult,
+};
+use baton_store::{ExecutingRun, PendingLaunch, Store};
+use futures::stream::BoxStream;
+use futures::{FutureExt, StreamExt};
+use tokio::sync::{watch, Mutex, Notify};
+use tokio::task::JoinHandle;
+
+/// 受控停止的寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
+pub const STOP_GRACE: Duration = Duration::from_secs(30);
+
+/// 背景迴圈沒有被喚醒時，最久多久檢查一次。
+const BACKGROUND_INTERVAL: Duration = Duration::from_secs(1);
+
+pub struct Supervisor {
+    store: Store,
+    ports: Ports,
+    log: LogSink,
+    /// 同一時間只有一個 tick 在進行（背景迴圈與測試呼叫不會交錯）。
+    tick_lock: Mutex<()>,
+    /// 已接上的事件串流；Runtime 重建後是空的，下一次 tick 會重新接上。
+    streams: Mutex<HashMap<String, BoxStream<'static, AdapterEvent>>>,
+    /// 這個 Runtime 實例已經向 ProcessControl 「找回」過（取得管理權）的 Run。
+    adopted: Mutex<HashSet<String>>,
+}
+
+impl Supervisor {
+    pub fn new(store: Store, ports: Ports, log: LogSink) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            ports,
+            log,
+            tick_lock: Mutex::new(()),
+            streams: Mutex::new(HashMap::new()),
+            adopted: Mutex::new(HashSet::new()),
+        })
+    }
+
+    /// 背景迴圈：有人喚醒或每秒一次就 `tick`，Runtime 開始停止時結束。
+    pub fn spawn_background(self: &Arc<Self>, wake: Arc<Notify>, mut stop: watch::Receiver<bool>) -> JoinHandle<()> {
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = stop.wait_for(|stopping| *stopping) => break,
+                    _ = wake.notified() => {}
+                    _ = tokio::time::sleep(BACKGROUND_INTERVAL) => {}
+                }
+                supervisor.tick().await;
+            }
+        })
+    }
+
+    /// 處理目前所有待辦；每個步驟的失敗只記日誌，下一次 tick 會自然重試。
+    pub async fn tick(&self) {
+        let _serial = self.tick_lock.lock().await;
+        self.launch_pending().await;
+        self.pump_events().await;
+        self.process_cancellations().await;
+        self.check_leases().await;
+    }
+
+    fn note(&self, message: &str) {
+        (self.log)(&format!("Supervisor：{message}"));
+    }
+
+    /// 套用一個 Run 命令；被 Domain 拒絕（例如已經被別的路徑結束）只記日誌，下一次 tick 以最新狀態重新判斷。
+    async fn apply(&self, run: &Run, command: RunCommand) {
+        if let Err(error) = self.store.apply_run_command(run.workspace_id.clone(), command, self.ports.clock.now()).await {
+            self.note(&format!("Run {} 的命令沒有套用：{error}", run.id));
+        }
+    }
+
+    // ------------------------------------------------------------ 啟動
+
+    async fn launch_pending(&self) {
+        let pending = match self.store.pending_launches().await {
+            Ok(pending) => pending,
+            Err(error) => return self.note(&format!("無法讀取派工 Outbox：{error}")),
+        };
+        for item in pending {
+            match item.run.status {
+                RunStatus::Queued => self.launch(item).await,
+                RunStatus::Starting => self.recover_launch(item).await,
+                // 其他狀態的 Outbox 項目都已經在轉換時一併標為處理完畢，不會出現在這裡
+                _ => {}
+            }
+        }
+    }
+
+    fn run_spec(&self, item: &PendingLaunch, command_id: &str) -> RunSpec {
+        run_spec_of(&item.run.id, &item.payload.task_id, command_id, &item.payload.prompt, &item.payload.working_dir)
+    }
+
+    async fn launch(&self, item: PendingLaunch) {
+        let Some(command_id) = new_command_id() else {
+            return self.note(&format!("Run {} 無法取得系統亂數，不啟動程序", item.run.id));
+        };
+        // 1. 先持久化 launch intent 與 command_id；這一步完成之前不會有任何程序被啟動
+        let begin = RunCommand::BeginLaunch { run_id: item.run.id.clone(), command_id: command_id.clone() };
+        if let Err(error) = self.store.apply_run_command(item.run.workspace_id.clone(), begin, self.ports.clock.now()).await {
+            return self.note(&format!("Run {} 無法寫入 launch intent，不啟動程序：{error}", item.run.id));
+        }
+        // 2. 交易外啟動程序
+        let spec = self.ports.agent_adapter.spawn_spec(&self.run_spec(&item, &command_id));
+        match self.ports.process_control.spawn(spec).await {
+            // 3. 回執寫回；寫回之前當掉的話，下一次 tick 以 command_id 找回
+            Ok(receipt) => {
+                let command = RunCommand::RecordReceipt {
+                    run_id: item.run.id.clone(),
+                    process: process_record(&receipt.identity),
+                };
+                self.apply(&item.run, command).await;
+                self.adopted.lock().await.insert(item.run.id.clone());
+            }
+            Err(error) => {
+                let command = RunCommand::LaunchFailed { run_id: item.run.id.clone(), reason: error.to_string() };
+                self.apply(&item.run, command).await;
+            }
+        }
+    }
+
+    /// Run 停在 `starting`：上一次啟動被中斷，結果不明。以 command_id 找回原程序，找到就補寫回執；
+    /// 找不到就中斷這個 Run，不自動重新啟動（結果不明的外部操作不重送）。
+    async fn recover_launch(&self, item: PendingLaunch) {
+        let Some(command_id) = item.run.command_id.clone() else { return };
+        let spec = self.ports.agent_adapter.spawn_spec(&self.run_spec(&item, &command_id));
+        match self.ports.process_control.find(&spec).await {
+            Ok(Some(receipt)) => {
+                self.note(&format!("Run {} 以 command_id 找回原程序 {}，補寫回執，不重複啟動", item.run.id, receipt.identity.pid));
+                let command =
+                    RunCommand::RecordReceipt { run_id: item.run.id.clone(), process: process_record(&receipt.identity) };
+                self.apply(&item.run, command).await;
+                self.adopted.lock().await.insert(item.run.id.clone());
+            }
+            Ok(None) => {
+                let reason = "launch_outcome_unknown：找不到 command_id 對應的程序，不自動重新啟動".to_string();
+                self.apply(&item.run, RunCommand::Interrupt { run_id: item.run.id.clone(), reason }).await;
+            }
+            Err(error) => self.note(&format!("Run {} 暫時無法核對程序，稍後重試：{error}", item.run.id)),
+        }
+    }
+
+    // ------------------------------------------------------------ 事件
+
+    async fn pump_events(&self) {
+        let executing = match self.store.executing_runs().await {
+            Ok(executing) => executing,
+            Err(error) => return self.note(&format!("無法讀取執行中的 Run：{error}")),
+        };
+        for item in executing.into_iter().filter(|e| e.view.run.status == RunStatus::Running) {
+            let run_id = item.view.run.id.clone();
+            let existing = self.streams.lock().await.remove(&run_id);
+            let mut stream = match existing {
+                Some(stream) => stream,
+                None => match self.attach(&item).await {
+                    Some(stream) => stream,
+                    None => continue,
+                },
+            };
+            let mut finished = false;
+            // 只處理目前已經到達的事件，不等待；之後的事件由下一次 tick 處理
+            while let Some(next) = stream.next().now_or_never() {
+                let Some(event) = next else {
+                    finished = true; // 串流自行結束
+                    break;
+                };
+                match event {
+                    AdapterEvent::Heartbeat => {
+                        let command = RunCommand::Heartbeat { run_id: run_id.clone(), generation: item.view.run.generation };
+                        self.apply(&item.view.run, command).await;
+                    }
+                    AdapterEvent::Exited { success } => {
+                        // 程序結束只產生 Run 結束事件；Task 是否完成由後續的驗證決定
+                        let outcome = if success {
+                            RunOutcome::Succeeded
+                        } else {
+                            RunOutcome::Failed { reason: "程序以失敗結束".into() }
+                        };
+                        let command =
+                            RunCommand::Finish { run_id: run_id.clone(), generation: item.view.run.generation, outcome };
+                        self.apply(&item.view.run, command).await;
+                        finished = true;
+                        break;
+                    }
+                    // 原生 Session、訊息與限流由後續的票處理
+                    AdapterEvent::Started { .. } | AdapterEvent::Message { .. } | AdapterEvent::RateLimited { .. } => {}
+                }
+            }
+            if !finished {
+                self.streams.lock().await.insert(run_id, stream);
+            }
+        }
+    }
+
+    /// 接上（或在 Runtime 重建後重新接上）一個 Run 的事件串流。
+    async fn attach(&self, item: &ExecutingRun) -> Option<BoxStream<'static, AdapterEvent>> {
+        let run = &item.view.run;
+        let command_id = run.command_id.clone()?;
+        let spec = run_spec_of(&run.id, &item.payload.task_id, &command_id, &item.payload.prompt, &item.payload.working_dir);
+        match self.ports.agent_adapter.launch(spec).await {
+            Ok(handle) => Some(self.ports.agent_adapter.events(&AgentHandle(handle.0))),
+            Err(error) => {
+                self.note(&format!("Run {} 無法接上事件串流：{error}", run.id));
+                None
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ 取消
+
+    async fn process_cancellations(&self) {
+        let executing = match self.store.executing_runs().await {
+            Ok(executing) => executing,
+            Err(error) => return self.note(&format!("無法讀取執行中的 Run：{error}")),
+        };
+        for item in executing {
+            let run = &item.view.run;
+            let (true, Some(process)) = (run.cancel_requested_at.is_some(), run.process.as_ref()) else { continue };
+            self.ensure_managed(&item).await;
+            let identity = identity_of(process);
+            match self.ports.process_control.stop(&identity, STOP_GRACE).await {
+                Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
+                    self.streams.lock().await.remove(&run.id);
+                    self.apply(run, RunCommand::ConfirmCancelled { run_id: run.id.clone() }).await;
+                }
+                // 程序還在：保留寫入所有權，下一次 tick 再試；這段期間不會有第二個 writer
+                Ok(StopResult::StillAlive) => self.note(&format!("Run {} 的程序沒有停止，保留寫入所有權並稍後重試", run.id)),
+                Err(error) => self.note(&format!("Run {} 停止程序失敗：{error}", run.id)),
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ lease
+
+    async fn check_leases(&self) {
+        let executing = match self.store.executing_runs().await {
+            Ok(executing) => executing,
+            Err(error) => return self.note(&format!("無法讀取執行中的 Run：{error}")),
+        };
+        let now = self.ports.clock.now();
+        for item in executing {
+            let expired = item.view.lease.as_ref().is_some_and(|l| l.is_held() && l.is_expired(now));
+            let Some(process) = item.view.run.process.as_ref().filter(|_| expired) else { continue };
+            self.ensure_managed(&item).await;
+            // 過期只觸發核對：向 ProcessControl 查證，不確定就不下結論
+            let observed = match self.ports.process_control.inspect(&identity_of(process)).await {
+                Ok(Liveness::Alive) => ProcessObservation::Alive,
+                Ok(Liveness::Dead) => ProcessObservation::Dead,
+                Ok(Liveness::Unknown) => ProcessObservation::Unknown,
+                Err(error) => {
+                    self.note(&format!("Run {} 無法核對程序：{error}", item.view.run.id));
+                    ProcessObservation::Unknown
+                }
+            };
+            self.apply(&item.view.run, RunCommand::ReconcileLease { run_id: item.view.run.id.clone(), observed }).await;
+        }
+    }
+
+    /// Runtime 重建後，ProcessControl 需要先「找回」程序才能 inspect／stop 它；每個 Run 每個 Runtime 實例只做一次。
+    async fn ensure_managed(&self, item: &ExecutingRun) {
+        let run = &item.view.run;
+        if self.adopted.lock().await.contains(&run.id) {
+            return;
+        }
+        let Some(command_id) = run.command_id.clone() else { return };
+        let spec: SpawnSpec = self.ports.agent_adapter.spawn_spec(&run_spec_of(
+            &run.id,
+            &item.payload.task_id,
+            &command_id,
+            &item.payload.prompt,
+            &item.payload.working_dir,
+        ));
+        if self.ports.process_control.find(&spec).await.is_ok() {
+            self.adopted.lock().await.insert(run.id.clone());
+        }
+    }
+}
+
+fn run_spec_of(run_id: &str, task_id: &str, command_id: &str, prompt: &str, working_dir: &str) -> RunSpec {
+    RunSpec {
+        run_id: run_id.to_string(),
+        task_id: task_id.to_string(),
+        command_id: command_id.to_string(),
+        prompt: prompt.to_string(),
+        working_dir: Some(working_dir.to_string()),
+    }
+}
+
+fn process_record(identity: &ProcessIdentity) -> ProcessRecord {
+    ProcessRecord {
+        pid: identity.pid,
+        created_at_millis: identity.created_at_millis,
+        command_hash: identity.command_hash.clone(),
+    }
+}
+
+fn identity_of(process: &ProcessRecord) -> ProcessIdentity {
+    ProcessIdentity {
+        pid: process.pid,
+        created_at_millis: process.created_at_millis,
+        command_hash: process.command_hash.clone(),
+    }
+}
+
+/// 每次啟動的識別：96 位元隨機值；取不到系統亂數時回傳 `None`。
+fn new_command_id() -> Option<String> {
+    let mut entropy = [0u8; 12];
+    getrandom::fill(&mut entropy).ok()?;
+    let hex: String = entropy.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("cmd_{hex}"))
+}

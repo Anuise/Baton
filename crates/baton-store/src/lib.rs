@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 
 mod runs;
 mod tasks;
-pub use runs::{PendingLaunch, RunApplyError};
+pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 
 /// 控制資料庫檔名，位於資料目錄之下。

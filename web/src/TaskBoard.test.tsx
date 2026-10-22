@@ -9,6 +9,8 @@ import {
   type ContractInput,
   type Goal,
   type MissingItem,
+  type RunStatus,
+  type RunView,
   type TaskBoard as TaskBoardData,
   type TaskClient,
   type TaskContract,
@@ -88,11 +90,35 @@ const filledContract = (id: string, overrides: Partial<TaskContract> = {}) =>
     ...overrides,
   } as Partial<TaskContract>);
 
+function run(id: string, taskId: string, status: RunStatus, overrides: Partial<RunView> = {}): RunView {
+  return {
+    id,
+    workspace_id: workspace.id,
+    task_id: taskId,
+    status,
+    version: 1,
+    generation: 1,
+    contract_version: 1,
+    authorization_revision: null,
+    command_id: null,
+    process: null,
+    cancel_requested_at: null,
+    end_reason: null,
+    created_at: T0,
+    updated_at: T0,
+    started_at: null,
+    ended_at: null,
+    lease: null,
+    ...overrides,
+  };
+}
+
 /** 以記憶體模擬 Runtime 的 Task 行為，讓測試只看使用者可見的流程。 */
-function fakeClient(initial: { goals?: Goal[]; tasks?: TaskView[]; history?: TaskContract[] } = {}) {
+function fakeClient(initial: { goals?: Goal[]; tasks?: TaskView[]; runs?: RunView[]; history?: TaskContract[] } = {}) {
   let goals = initial.goals ?? [goal("goal_1", "整理文件")];
   let tasks = initial.tasks ?? [];
-  const board = (): TaskBoardData => ({ workspace_id: workspace.id, goals, tasks, capabilities: CAPABILITIES });
+  let runs = initial.runs ?? [];
+  const board = (): TaskBoardData => ({ workspace_id: workspace.id, goals, tasks, runs, capabilities: CAPABILITIES });
   const replace = (id: string, patch: Partial<TaskView>) => {
     tasks = tasks.map((t) => (t.id === id ? { ...t, ...patch } : t));
     return tasks.find((t) => t.id === id)!;
@@ -136,6 +162,23 @@ function fakeClient(initial: { goals?: Goal[]; tasks?: TaskView[]; history?: Tas
       return replace(id, { status: "ready", missing: [] });
     }),
     cancelTask: vi.fn(async (_ws: string, id: string) => replace(id, { status: "cancelled", missing: [] })),
+    dispatchTask: vi.fn(async (_ws: string, id: string) => {
+      const current = tasks.find((t) => t.id === id)!;
+      if (current.status !== "ready") throw new Error("Task 不是 ready，不能派工");
+      const created = run(`run_${runs.length + 1}`, id, "queued", { generation: runs.filter((r) => r.task_id === id).length + 1 });
+      runs = [...runs, created];
+      replace(id, { status: "running" });
+      return created;
+    }),
+    cancelRun: vi.fn(async (_ws: string, runId: string) => {
+      const current = runs.find((r) => r.id === runId)!;
+      // 尚未啟動的 Run 立即取消、Task 回到 ready；已啟動的只記錄取消要求
+      const next: RunView =
+        current.status === "queued" ? { ...current, status: "cancelled", ended_at: T0 } : { ...current, cancel_requested_at: T0 };
+      runs = runs.map((r) => (r.id === runId ? next : r));
+      if (next.status === "cancelled") replace(current.task_id, { status: "ready" });
+      return next;
+    }),
   };
   return client;
 }
@@ -296,6 +339,181 @@ describe("工作面板", () => {
     render(<TaskBoard client={client} workspace={workspace} />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("connection refused");
+  });
+});
+
+describe("派工與 Run", () => {
+  const readyTask = (id = "task_1", title = "部署") => task(id, title, { status: "ready", contract: filledContract(id) });
+  const runStatus = (title: string) => within(card(title)).getByRole("group", { name: "Run 狀態" });
+
+  it("ready 的卡片可派工：呼叫 client，Task 移到「執行中」並顯示排隊中的 Run", async () => {
+    const client = fakeClient({ tasks: [readyTask()] });
+    const user = await renderBoard(client);
+
+    await user.click(within(card("部署")).getByRole("button", { name: "派工" }));
+
+    expect(client.dispatchTask).toHaveBeenCalledWith("ws_1", "task_1");
+    const running = await within(column("執行中（1）")).findByRole("article", { name: "部署" });
+    expect(within(running).getByRole("group", { name: "Run 狀態" })).toHaveTextContent("排隊中");
+    expect(within(running).queryByRole("button", { name: "派工" })).not.toBeInTheDocument();
+    expect(within(running).getByRole("button", { name: "取消 Run" })).toBeInTheDocument();
+  });
+
+  it("非 ready 的卡片沒有「派工」", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "待處理"), task("task_2", "執行中", { status: "running" }), task("task_3", "驗證", { status: "verifying" })],
+        runs: [run("run_1", "task_2", "running"), run("run_2", "task_3", "succeeded")],
+      }),
+    );
+
+    for (const title of ["待處理", "執行中", "驗證"]) {
+      expect(within(card(title)).queryByRole("button", { name: "派工" })).not.toBeInTheDocument();
+    }
+  });
+
+  it("從未派工的 Task 沒有 Run 狀態列", async () => {
+    await renderBoard(fakeClient({ tasks: [readyTask()] }));
+
+    expect(within(card("部署")).queryByRole("group", { name: "Run 狀態" })).not.toBeInTheDocument();
+  });
+
+  it.each<[RunStatus, string]>([
+    ["queued", "排隊中"],
+    ["starting", "啟動中"],
+    ["running", "執行中"],
+    ["succeeded", "成功"],
+    ["failed", "失敗"],
+    ["interrupted", "中斷"],
+    ["cancelled", "已取消"],
+  ])("Run 狀態 %s 顯示為「%s」", async (status, label) => {
+    await renderBoard(fakeClient({ tasks: [task("task_1", "部署", { status: "running" })], runs: [run("run_1", "task_1", status)] }));
+
+    expect(runStatus("部署")).toHaveTextContent(label);
+  });
+
+  it("只顯示 generation 最大的 Run，並顯示 pid、結束原因與最後心跳（當地時間）", async () => {
+    const lease = {
+      run_id: "run_2",
+      task_id: "task_1",
+      generation: 2,
+      acquired_at: T0,
+      last_heartbeat_at: T0 + 3_600_000,
+      expires_at: T0 + 7_200_000,
+      released_at: null,
+      release_reason: null,
+    };
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "blocked" })],
+        runs: [
+          run("run_2", "task_1", "failed", {
+            generation: 2,
+            process: { pid: 4321, created_at_millis: T0, command_hash: "h" },
+            end_reason: "程序結束碼 1",
+            lease,
+          }),
+          run("run_1", "task_1", "succeeded", { generation: 1, end_reason: "舊的原因" }),
+        ],
+      }),
+    );
+
+    const status = runStatus("部署");
+    expect(status).toHaveTextContent("失敗");
+    expect(status).toHaveTextContent("pid 4321");
+    expect(status).toHaveTextContent("結束原因：程序結束碼 1");
+    expect(status).toHaveTextContent("最後心跳：2023/11/14 23:13");
+    expect(status).not.toHaveTextContent("舊的原因");
+    expect(status).not.toHaveTextContent("成功");
+  });
+
+  it("沒有 pid、結束原因與 lease 時不顯示這些欄位", async () => {
+    await renderBoard(fakeClient({ tasks: [task("task_1", "部署", { status: "running" })], runs: [run("run_1", "task_1", "queued")] }));
+
+    const status = runStatus("部署");
+    expect(status).not.toHaveTextContent("pid");
+    expect(status).not.toHaveTextContent("結束原因");
+    expect(status).not.toHaveTextContent("最後心跳");
+  });
+
+  it("進行中的 Run 可取消：尚未啟動的立即變已取消，Task 回到「可派工」", async () => {
+    const client = fakeClient({ tasks: [task("task_1", "部署", { status: "running" })], runs: [run("run_1", "task_1", "queued")] });
+    const user = await renderBoard(client);
+
+    await user.click(within(card("部署")).getByRole("button", { name: "取消 Run" }));
+
+    expect(client.cancelRun).toHaveBeenCalledWith("ws_1", "run_1");
+    const ready = await within(column("可派工（1）")).findByRole("article", { name: "部署" });
+    expect(within(ready).getByRole("group", { name: "Run 狀態" })).toHaveTextContent("已取消");
+    expect(within(ready).queryByRole("button", { name: "取消 Run" })).not.toBeInTheDocument();
+    expect(within(ready).getByRole("button", { name: "派工" })).toBeInTheDocument();
+  });
+
+  it("已要求取消的 Run 顯示「取消中，等待程序停止…」，不再有取消按鈕", async () => {
+    const client = fakeClient({
+      tasks: [task("task_1", "部署", { status: "running" })],
+      runs: [run("run_1", "task_1", "running", { process: { pid: 7, created_at_millis: T0, command_hash: "h" } })],
+    });
+    const user = await renderBoard(client);
+
+    await user.click(within(card("部署")).getByRole("button", { name: "取消 Run" }));
+
+    expect(await within(card("部署")).findByText("取消中，等待程序停止…")).toBeInTheDocument();
+    expect(runStatus("部署")).toHaveTextContent("執行中");
+    expect(within(card("部署")).queryByRole("button", { name: "取消 Run" })).not.toBeInTheDocument();
+  });
+
+  it("載入時 cancel_requested_at 已有值的 Run 直接顯示「取消中」", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "running" })],
+        runs: [run("run_1", "task_1", "starting", { cancel_requested_at: T0 })],
+      }),
+    );
+
+    expect(within(card("部署")).getByText("取消中，等待程序停止…")).toBeInTheDocument();
+    expect(within(card("部署")).queryByRole("button", { name: "取消 Run" })).not.toBeInTheDocument();
+  });
+
+  it("已結束的 Run 沒有取消按鈕；成功的 Run 之後 Task 在「驗證中」而不是已完成", async () => {
+    await renderBoard(fakeClient({ tasks: [task("task_1", "部署", { status: "verifying" })], runs: [run("run_1", "task_1", "succeeded")] }));
+
+    expect(within(card("部署")).queryByRole("button", { name: "取消 Run" })).not.toBeInTheDocument();
+    expect(within(column("驗證中（1）")).getByRole("article", { name: "部署" })).toBeInTheDocument();
+    expect(column("已完成（0）")).toBeInTheDocument();
+  });
+
+  it("已結束的 Run 不顯示「取消中」，即使有 cancel_requested_at", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [task("task_1", "部署", { status: "cancelled" })],
+        runs: [run("run_1", "task_1", "cancelled", { cancel_requested_at: T0 })],
+      }),
+    );
+
+    expect(within(card("部署")).queryByText("取消中，等待程序停止…")).not.toBeInTheDocument();
+  });
+
+  it("派工被拒絕時顯示 Runtime 的說明並重新載入看板", async () => {
+    const client = fakeClient({ tasks: [readyTask()] });
+    vi.mocked(client.dispatchTask).mockRejectedValueOnce(new Error("相依的 Task 尚未完成，不能派工"));
+    const user = await renderBoard(client);
+
+    await user.click(within(card("部署")).getByRole("button", { name: "派工" }));
+
+    expect(await within(card("部署")).findByRole("alert")).toHaveTextContent("相依的 Task 尚未完成，不能派工");
+    expect(client.getTaskBoard).toHaveBeenCalledTimes(2);
+    expect(column("可派工（1）")).toBeInTheDocument();
+  });
+
+  it("取消 Run 失敗時顯示 Runtime 的說明", async () => {
+    const client = fakeClient({ tasks: [task("task_1", "部署", { status: "running" })], runs: [run("run_1", "task_1", "running")] });
+    vi.mocked(client.cancelRun).mockRejectedValueOnce(new Error("Runtime 無法連線"));
+    const user = await renderBoard(client);
+
+    await user.click(within(card("部署")).getByRole("button", { name: "取消 Run" }));
+
+    expect(await within(card("部署")).findByRole("alert")).toHaveTextContent("Runtime 無法連線");
   });
 });
 

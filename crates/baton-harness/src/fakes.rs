@@ -67,6 +67,7 @@ struct ProcessState {
     stop_calls: Vec<ProcessIdentity>,
     inspect_count: usize,
     hang: Option<HangPoint>,
+    fail_spawn: Option<String>,
 }
 
 impl Default for FakeProcessControl {
@@ -81,6 +82,7 @@ impl Default for FakeProcessControl {
                 stop_calls: Vec::new(),
                 inspect_count: 0,
                 hang: None,
+                fail_spawn: None,
             }),
         }
     }
@@ -98,6 +100,11 @@ impl FakeProcessControl {
     /// 下一次 `spawn` 在指定的點永遠不回來（只生效一次）。
     pub fn hang_next_spawn_at(&self, point: HangPoint) {
         lock(&self.state).hang = Some(point);
+    }
+
+    /// 下一次 `spawn` 失敗（沒有啟動任何程序），只生效一次。
+    pub fn fail_next_spawn(&self, reason: &str) {
+        lock(&self.state).fail_spawn = Some(reason.to_string());
     }
 
     pub fn spawn_count(&self) -> usize {
@@ -137,6 +144,9 @@ impl ProcessControl for FakeProcessControl {
     async fn spawn(&self, spec: SpawnSpec) -> PortResult<Receipt> {
         if self.take_hang(HangPoint::BeforeSpawn) {
             std::future::pending::<()>().await;
+        }
+        if let Some(reason) = lock(&self.state).fail_spawn.take() {
+            return Err(PortError::Failed(reason));
         }
         let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
         let identity =

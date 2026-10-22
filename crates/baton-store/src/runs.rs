@@ -35,6 +35,13 @@ pub struct PendingLaunch {
     pub payload: LaunchPayload,
 }
 
+/// 已經啟動（starting、running）的 Run、它的 lease，以及當初派工時固定下來的啟動資訊。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutingRun {
+    pub view: RunView,
+    pub payload: LaunchPayload,
+}
+
 impl Store {
     /// 套用一個 Run 命令：Domain 拒絕或沒有任何變動（冪等）時不寫入任何東西。
     pub async fn apply_run_command(
@@ -105,19 +112,26 @@ impl Store {
         .await
     }
 
-    /// 已經啟動（starting、running）的 Run 與它們的 lease（跨 Workspace，依建立順序）。
-    pub async fn executing_runs(&self) -> StoreResult<Vec<RunView>> {
+    /// 已經啟動（starting、running）的 Run（跨 Workspace，依建立順序）。
+    pub async fn executing_runs(&self) -> StoreResult<Vec<ExecutingRun>> {
         self.read(|conn| {
             let sql = format!(
-                "SELECT {RUN_COLUMNS_QUALIFIED} FROM run r WHERE r.status IN ('starting', 'running') ORDER BY r.rowid"
+                "SELECT {RUN_COLUMNS_QUALIFIED}, o.payload FROM run r
+                 JOIN outbox o ON o.run_id = r.id AND o.kind = ?1
+                 WHERE r.status IN ('starting', 'running') ORDER BY r.rowid"
             );
-            let runs = conn.prepare(&sql)?.query_map([], run_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut views = Vec::with_capacity(runs.len());
-            for run in runs {
+            let rows = conn
+                .prepare(&sql)?
+                .query_map([run::OUTBOX_LAUNCH_RUN], |r| {
+                    Ok((run_row(r)?, json_column::<LaunchPayload>(RUN_COLUMN_COUNT, &r.get::<_, String>(RUN_COLUMN_COUNT)?)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut executing = Vec::with_capacity(rows.len());
+            for (run, payload) in rows {
                 let lease = load_lease(conn, &run.id)?;
-                views.push(RunView { run, lease });
+                executing.push(ExecutingRun { view: RunView { run, lease }, payload });
             }
-            Ok(views)
+            Ok(executing)
         })
         .await
     }
