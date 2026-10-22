@@ -9,7 +9,9 @@
 //! - 無事件時不產生 Controller Run：`without_events_no_controller_run_...`
 //! - 換 Session 後 conversation 與未處理指示保留且不重複執行：`a_session_replacement_keeps_...`
 //! - 在喚起與結果保存邊界中斷後，未完成事件可找回：`a_crash_before_the_controller_process_...`、
-//!   `a_crash_after_the_controller_process_...`、`a_crash_before_the_result_is_saved_...`
+//!   `a_crash_after_the_controller_process_...`、`a_crash_before_the_result_is_saved_...`、
+//!   `a_controller_that_dies_without_exiting_...`（程序沒有結束事件就死亡，含 Runtime 重建）、
+//!   `a_result_that_arrives_after_the_process_is_found_dead_...`、`controller_wakes_wait_while_crash_recovery_...`
 //! - 暫停／取消不排隊（DR-20261022-01）：`cancel_takes_effect_while_the_controller_is_busy`、
 //!   `full_exit_stops_the_controller_and_keeps_its_inputs_pending`
 
@@ -17,9 +19,9 @@ use std::time::Duration;
 
 use baton_domain::storage_health::StorageFaultKind;
 use baton_domain::Timestamp;
-use baton_harness::fakes::HangPoint;
+use baton_harness::fakes::{FakeStop, HangPoint};
 use baton_harness::Harness;
-use baton_ports::{AdapterEvent, Capability, Liveness};
+use baton_ports::{AdapterEvent, Capability, Liveness, StopResult};
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
@@ -31,6 +33,8 @@ const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
 const WINDOW_MS: i64 = 5_000;
 /// 上一輪沒有完成時，重新交付的第一次退避。
 const BACKOFF_MS: i64 = 60_000;
+/// 進行中的一輪多久沒有事件就向 ProcessControl 查證程序（沿用 execution lease 的 60 秒，spec D-31）。
+const LIVENESS_CHECK_MS: i64 = 60_000;
 
 // --- 共用輔助 ---
 
@@ -466,6 +470,127 @@ async fn a_crash_before_the_result_is_saved_finds_the_unfinished_inputs_again() 
     let replies: Vec<&Value> = view["turns"].as_array().unwrap().iter().filter(|t| t["kind"] == "controller_reply").collect();
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["content"], "進度整理好了");
+}
+
+/// Controller 程序送出 `Started` 之後沒有 `Exited` 就死亡（崩潰、被終止、整機重開）。`restart` 時 Runtime 也重建；
+/// 重新接上的串流同樣不會結束（真實 Adapter 讀到 `Exited` 之前會一直追蹤 stream 檔）。
+async fn a_controller_that_dies_without_exiting_is_found_and_its_inputs_redelivered(restart: bool) {
+    let (mut harness, ws, _) = start().await;
+    let u1 = send(&harness, &ws, "請整理目前進度").await;
+    advance(&harness, WINDOW_MS);
+    harness.supervise().await;
+    let lost = latest_run(&harness, &ws).await;
+    let lost_id = lost["id"].as_str().unwrap().to_string();
+    harness.agent_adapter.emit(&lost_id, AdapterEvent::Started { native_session_id: Some("native-ctl-1".into()) });
+    harness.agent_adapter.emit(&lost_id, AdapterEvent::Message { text: "整理到一半".into() });
+    harness.supervise().await;
+    let identity = harness.process_control.identity_of(lost["command_id"].as_str().unwrap()).unwrap();
+    if restart {
+        harness.restart().await;
+        harness.supervise().await;
+    }
+
+    // 無法確定程序在不在：不下結論，這一輪維持進行中
+    harness.process_control.script_liveness(&identity, Liveness::Unknown);
+    advance(&harness, 10 * 3_600_000);
+    harness.supervise().await;
+    harness.supervise().await;
+    let view = conversation(&harness, &ws).await;
+    assert_eq!(view["runs"][0]["status"], "running", "{view}");
+    assert_eq!(turn(&view, &turn_id(&u1))["status"], "processing");
+
+    // 確認程序已不在：串流沒有結束事件也找得回來
+    harness.process_control.script_liveness(&identity, Liveness::Dead);
+    advance(&harness, LIVENESS_CHECK_MS);
+    harness.supervise().await;
+    harness.supervise().await;
+    let view = conversation(&harness, &ws).await;
+    let interrupted = &view["runs"][0];
+    assert_eq!(interrupted["status"], "interrupted", "{view}");
+    assert!(interrupted["end_reason"].as_str().unwrap().contains("程序已不在"), "{interrupted}");
+    assert_eq!(turn(&view, &turn_id(&u1))["status"], "pending", "未完成的輸入找回為待處理");
+    assert_eq!(view["busy"], false);
+    assert!(view["turns"].as_array().unwrap().iter().all(|t| t["kind"] != "controller_reply"), "沒有保存的回覆不出現");
+
+    // 退避後重新交付，Prompt 註明可能已部分處理
+    advance(&harness, BACKOFF_MS);
+    harness.supervise().await;
+    let retry = latest_run(&harness, &ws).await;
+    let retry_id = retry["id"].as_str().unwrap().to_string();
+    assert_ne!(retry_id, lost_id);
+    assert_eq!(retry["input_turn_ids"], json!([turn_id(&u1)]));
+    assert!(prompt_of(&harness, &ws, &retry_id).await.contains("可能已部分處理"));
+    reply_and_exit(&harness, &retry_id, "native-ctl-2", "進度整理好了");
+    harness.supervise().await;
+    let view = conversation(&harness, &ws).await;
+    let done = turn(&view, &turn_id(&u1));
+    assert_eq!((done["status"].as_str(), done["attempts"].as_i64()), (Some("processed"), Some(2)), "{done}");
+    let replies: Vec<&Value> = view["turns"].as_array().unwrap().iter().filter(|t| t["kind"] == "controller_reply").collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["content"], "進度整理好了");
+    assert_eq!(controller_spawns(&harness), 2);
+}
+
+#[tokio::test]
+async fn a_controller_that_dies_without_exiting_is_interrupted_and_redelivered() {
+    a_controller_that_dies_without_exiting_is_found_and_its_inputs_redelivered(false).await;
+}
+
+#[tokio::test]
+async fn a_controller_that_dies_without_exiting_across_a_restart_is_interrupted_and_redelivered() {
+    a_controller_that_dies_without_exiting_is_found_and_its_inputs_redelivered(true).await;
+}
+
+#[tokio::test]
+async fn a_result_that_arrives_after_the_process_is_found_dead_is_still_saved() {
+    let (harness, ws, _) = start().await;
+    let u1 = send(&harness, &ws, "請整理目前進度").await;
+    advance(&harness, WINDOW_MS);
+    harness.supervise().await;
+    let run = latest_run(&harness, &ws).await;
+    let run_id = run["id"].as_str().unwrap().to_string();
+    let identity = harness.process_control.identity_of(run["command_id"].as_str().unwrap()).unwrap();
+
+    // 程序寫完結果就結束，但 Adapter 還沒讀到時，Supervisor 先查證到程序已不在
+    harness.process_control.script_liveness(&identity, Liveness::Dead);
+    advance(&harness, LIVENESS_CHECK_MS);
+    harness.supervise().await;
+    assert_eq!(latest_run(&harness, &ws).await["status"], "running", "確認不在之後再讀一次串流才下結論");
+    reply_and_exit(&harness, &run_id, "native-ctl-1", "進度整理好了");
+    harness.supervise().await;
+
+    let view = conversation(&harness, &ws).await;
+    assert_eq!(view["runs"][0]["status"], "succeeded", "{view}");
+    assert_eq!(turn(&view, &turn_id(&u1))["status"], "processed");
+    assert_eq!(controller_spawns(&harness), 1);
+}
+
+#[tokio::test]
+async fn controller_wakes_wait_while_crash_recovery_blocks_dispatch() {
+    let (mut harness, ws, _) = start().await;
+    let (_, worker) = dispatched_task(&harness, &ws, "長時間研究").await;
+    harness.supervise().await;
+    let (_, run) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/runs/{worker}"), None).await;
+    let identity = harness.process_control.identity_of(run["command_id"].as_str().unwrap()).unwrap();
+    harness.process_control.script_stop(&identity, FakeStop::Result(StopResult::StillAlive));
+    send(&harness, &ws, "請評估進度").await;
+
+    // 崩潰恢復無法確認舊 Worker 停止：退避期間不派工，也不喚起 Controller
+    harness.crash_restart().await;
+    advance(&harness, WINDOW_MS);
+    harness.supervise().await;
+    harness.supervise().await;
+    let (_, recovery) = harness.send_json(Method::GET, "/api/v1/recovery", None).await;
+    assert_eq!(recovery["blocking"]["code"], "crash_recovery_pending", "{recovery}");
+    assert_eq!(controller_spawns(&harness), 0);
+    assert_eq!(conversation(&harness, &ws).await["busy"], false);
+
+    // 恢復完成（進入穩定觀察）後才喚起
+    harness.process_control.script_stop(&identity, FakeStop::Result(StopResult::ForceKilled));
+    advance(&harness, 30_000);
+    harness.supervise().await;
+    harness.supervise().await;
+    assert_eq!(controller_spawns(&harness), 1);
 }
 
 #[tokio::test]

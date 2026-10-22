@@ -2628,10 +2628,10 @@
 - 影響：帳號長期無法使用時每 10 分鐘會有一次失敗的輪次（在 claude 開始對話前失敗的不耗額度）；無可用帳號時根本不喚起（見 AI-293）。
 - 審閱：未審
 
-### AI-292：回覆在記憶體累積、程序結束時一次保存；重建後沒有結束事件時查證程序
+### AI-292：回覆在記憶體累積、程序結束時一次保存；沒有結束事件的一輪由存活核對找回（見 AI-299）
 - 重要度：中
 - 時間／階段：2026-10-22，票 16 實作（run R093-16-impl）
-- 決策：一輪的回覆是 Adapter `Message` 文字依序以空行串接，收到 `Exited` 後在「結果保存」交易中一次寫入（輸入標為已處理、回覆成為一則 turn、Session 暫停）。保存失敗時結果留在記憶體、下一次 tick 重試。Runtime 重建後重新接上的串流若沒有結束事件，就向 ProcessControl 查證，確認程序已不在才以中斷結束；不確定時維持原狀。Controller 的原生對話紀錄（transcript）本票不匯入，回覆以 conversation_turn 保存。
+- 決策：一輪的回覆是 Adapter `Message` 文字依序以空行串接，收到 `Exited` 後在「結果保存」交易中一次寫入（輸入標為已處理、回覆成為一則 turn、Session 暫停）。保存失敗時結果留在記憶體、下一次 tick 重試。程序沒有送出 `Exited` 就不在（崩潰、被終止、Runtime 一起當掉，不論 Runtime 是否重建）時，由 AI-299 的存活核對找回：確認程序已不在、串流再讀乾淨一次仍沒有結束事件，才以中斷結束；不確定時維持原狀。（修正 run R102-16-fix 更正：原本寫「重建後重新接上的串流沒有結束事件時查證」，但真實 Adapter 讀到 `Exited` 之前不會結束串流，那個條件在真實環境不會成立。）Controller 的原生對話紀錄（transcript）本票不匯入，回覆以 conversation_turn 保存。
 - 理由：真實 Adapter 重新接上時從頭重播 stream 檔，回覆可以完整重建；不逐筆持久化回覆片段可避免重播造成重複。`transcript_segment.run_id` 以外鍵指向 `run`，不能直接記 Controller Run。
 - 替代方案：每個 `Message` 都持久化並以 Transcript 位置去重；為 Controller Run 另建 transcript 表。
 - 影響：Controller 的完整原生對話紀錄目前只在原生 Session 中；日後需要稽核時再補匯入。
@@ -2688,7 +2688,17 @@
 - 決策：(1) 整合分支先後併入票 36（第 27 個 migration `retry_budgets`，AI-273～AI-279）與票 31（第 28 個 `crash_recovery`，AI-280～AI-286）。本票的 `conversation_and_controller_run` 順延為第 29 個、排在 `crash_recovery` 之後；彼此沒有共用的資料表，都會套用。migration 註解、開發指南的本票章節與 AI-287 中的序號改為 29。(2) 本票條目原本寫成 AI-273～AI-283、後改 AI-280～AI-290，現改為 AI-287～AI-297，移到 AI-286 之後，條目內引用本票編號之處一併更新（AI-291 中的「見 AI-293」）；整合分支的條目逐字未動。本票第一次整合時寫的整合條目（原 AI-291）由這一條取代。(3) 衝突合併：Supervisor 同時保留票 36 的 `quota_limited`（突然限流判定）與本票的 `controller_streams`，Worker 事件中的額度訊號先記下突然限流、再以帳號與 Run 識別記錄額度觀測（本票把 `record_quota_event` 改為接受帳號與 Run 識別，Controller Run 共用）；Supervisor 的 import 同時保留本票的 `scheduler` 與票 31 的 `recovery`；開發指南目錄表以整合分支的敘述為底補上本票的 `conversation.rs`、`conversations.rs`；前端 `runtimeClient.ts` 與 `styles.css` 兩邊新增的型別與樣式都保留（`AppClient` 同時含 `RecoveryClient` 與 `ConversationClient`），fixtures 同時保留兩邊新增的匯入與測試資料。
 - 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票。
 - 替代方案：無（編號規則已定）。
+- 補充（修正 run R102-16-fix）：(4) 票 31 的恢復門檻（`lifecycle::launch_halted_in` 已納入恢復事件）同樣擋住 Controller 的喚起，不需另外改動，以情境測試 `controller_wakes_wait_while_crash_recovery_blocks_dispatch` 確認；崩潰恢復本身不停止 Controller 的輪次，見 AI-299。
 - 影響：用本票分支（本次合併前）建過的開發資料庫，`conversation_and_controller_run` 記在第 27 或 28 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-273～AI-291 與 migration 27、28 是改號前的編號。
+- 審閱：未審
+
+### AI-299：進行中的 Controller 輪次以「60 秒沒有事件就查證程序」做存活核對；確認不在後再讀一次串流才中斷
+- 重要度：高
+- 時間／階段：2026-10-22，票 16 實作（修正 run R102-16-fix，依驗證 R098-16-verify）
+- 決策：Controller Run 沒有 execution lease，原本只在事件串流結束時查證程序，但真實 `ClaudeCodeAdapter::events` 讀到 `Exited` 之前一直追蹤 stream 檔、不會結束，程序沒寫出結果就死掉時這一輪會永遠停在 `running`、B1 擋住之後所有輪次。改為：Supervisor 每次處理進行中的一輪時，串流已結束、或距離最後一次收到事件超過 execution lease 的 60 秒（`LEASE_DURATION_MS`，spec D-31），就以 ProcessControl 查證程序（Runtime 重建後先以 command_id 找回）。`Alive` 或 `Unknown` 不下結論，計時重新起算，60 秒後再查；`Dead` 時先不結束，下一次 tick 把串流讀乾淨，有 `Exited` 就照常保存結果，仍沒有才以 `interrupted`（「結果沒有保存而程序已不在」）結束、輸入退回待處理，之後依 AI-291 退避重新交付並註明可能已部分處理。計時只在記憶體（`ControllerStream`），Runtime 重建後從重新接上時起算。崩潰恢復（票 31）只停止 Worker Run，不停止 Controller 的輪次；重建後的 Controller 程序仍活著就繼續收事件，死了由這個核對找回。
+- 理由：沿用 Worker 已驗收的 lease 長度與「過期只觸發核對、不確定不下結論」原則（票 10）；查證只是讀程序狀態，成本低。真實 Adapter 每 250 毫秒才讀一次 stream 檔，程序寫完結果立刻結束時，查證可能早於 Adapter 讀到結果；多等一個 tick（1 秒）再讀一次，避免把已完成的一輪誤判為中斷而重複交付。
+- 替代方案：(a) 每次 tick 只要沒有結束事件就查證：每秒查一次，沒有必要。(b) 為 Controller Run 持久化 lease 並由 `check_leases` 處理：要在 `controller_run` 加欄位並複製 Run 的 lease 狀態機，改動面大，效果相同。(c) 確認不在就立即中斷：有上述競態。(d) 崩潰恢復一併停止 Controller 的輪次：Controller 沒有 Agent 憑證、不經工具寫資料（AI-294），停止只會讓一輪白做；Controller 的交接屬於票 30。
+- 影響：程序死掉到這一輪被找回最多約 60 秒加一次 tick。Controller 若超過 60 秒沒有任何輸出，每 60 秒會被查證一次（存活就繼續）。票 30 若要讓崩潰恢復也處置 Controller 的輪次，需要另外決定。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

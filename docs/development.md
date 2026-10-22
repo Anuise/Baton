@@ -861,7 +861,9 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 | 邊界 | 同一個交易中持久化 | 之後中斷時 |
 | --- | --- | --- |
 | 喚起 | Controller Run（`starting`，含 command_id 與 Prompt）、輸入標為 `processing`、沿用或建立 Session | 下一次 tick 以 command_id 找回原程序就補寫回執、繼續；找不到就以 `interrupted`（`launch_outcome_unknown`）結束，輸入退回 `pending` |
-| 結果保存 | Controller Run 結束、輸入標為 `processed`、回覆（`Message` 文字依序以空行串接）成為一則 turn、Session 暫停 | 保存失敗時結果留在記憶體、下一次 tick 重試；Runtime 已重建而重新接上的串流沒有結束事件時查證程序，確定不在才以 `interrupted` 結束，輸入退回 `pending` |
+| 結果保存 | Controller Run 結束、輸入標為 `processed`、回覆（`Message` 文字依序以空行串接）成為一則 turn、Session 暫停 | 保存失敗時結果留在記憶體、下一次 tick 重試 |
+
+**進行中的一輪的存活核對**：真實 Adapter 讀到 `Exited` 之前不會結束事件串流，程序沒寫出結果就死掉（崩潰、被終止、整機重開、Runtime 一起當掉）時串流只會停住。所以 Supervisor 在串流結束、或超過 execution lease（60 秒）沒有收到任何事件時，向 ProcessControl 查證程序（Runtime 重建後先以 command_id 找回）。存活或無法確定時不下結論，再等 60 秒才查證下一次；確認不在時，下一次 tick 再把串流讀乾淨一次（Adapter 可能還沒讀到最後寫出的結果），有結束事件就照常保存，仍沒有才以 `interrupted` 結束、輸入退回 `pending`。崩潰恢復（票 31）不停止 Controller 的輪次，由這個核對找回；恢復門檻擋住派工時也不喚起 Controller。
 
 退回 `pending` 的輸入（中斷或程序以失敗結束）在上一輪結束後退避重新交付（1、2、4… 分鐘，上限 10 分鐘），Prompt 註明「可能已部分處理，請先核對目前狀態」。完全退出時 Controller 的輪次與 Worker 一起在寬限期內停止，確認停止的同樣以 `interrupted` 結束、輸入退回 `pending`，重新開啟後再喚起。
 

@@ -61,7 +61,7 @@ use baton_domain::quota::{LimitStatus, RateLimitSignal};
 use baton_domain::scheduler::{self, Capacity, Placement, SlotKind};
 use baton_domain::recovery::{self, AffectedRun, RecoveryCommand, RecoveryStatus, RunDisposition};
 use baton_domain::run::{
-    LaunchPayload, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
+    LaunchPayload, LEASE_DURATION_MS, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
 };
 use baton_domain::session::{
     self, ResumeCapability, ResumeCheck, SegmentAvailability, SegmentPlan, TranscriptEntry, TranscriptSegment,
@@ -1248,9 +1248,12 @@ impl Supervisor {
         }
     }
 
-    /// 收一輪 Controller 的事件；程序結束時保存結果（結果保存的邊界）。保存失敗時把結果留在記憶體，下一次 tick 重試；
-    /// Runtime 在保存前當掉時，重新接上的串流若沒有結束事件，就查證程序，確定不在才中斷這一輪、輸入退回待處理。
+    /// 收一輪 Controller 的事件；程序結束時保存結果（結果保存的邊界）。保存失敗時把結果留在記憶體，下一次 tick 重試。
+    /// 真實 Adapter 讀到 `Exited` 之前不會結束串流，所以不能等串流結束：串流結束、或超過 execution lease（60 秒）
+    /// 沒有任何事件時，向 ProcessControl 查證程序。確認不在之後，下一次 tick 再把串流讀乾淨一次（Adapter 可能還沒讀到
+    /// 最後寫出的結果），仍沒有結束事件才中斷這一輪、輸入退回待處理；不確定時不下結論。
     async fn pump_controller(&self, run: &ControllerRun) {
+        let now = self.ports.clock.now();
         let existing = self.controller_streams.lock().await.remove(&run.id);
         let mut stream = match existing {
             Some(stream) => stream,
@@ -1260,7 +1263,7 @@ impl Supervisor {
                     Err(error) => Err(error),
                 };
                 match attached {
-                    Ok(handle) => ControllerStream::new(self.ports.agent_adapter.events(&handle)),
+                    Ok(handle) => ControllerStream::new(self.ports.agent_adapter.events(&handle), now),
                     Err(error) => return self.note(&format!("Controller Run {} 無法接上事件串流：{error}", run.id)),
                 }
             }
@@ -1273,9 +1276,9 @@ impl Supervisor {
                 ended = true;
                 break;
             };
+            stream.quiet_since = now;
             match event {
                 AdapterEvent::Started { native_session_id: Some(native_session_id) } => {
-                    let now = self.ports.clock.now();
                     if let Err(error) = self.store.bind_controller_native_session(&run.id, native_session_id, now).await {
                         self.note(&format!("Controller Run {} 的原生 Session 沒有綁定：{error}", run.id));
                     }
@@ -1304,10 +1307,16 @@ impl Supervisor {
                 Ok(_) => return,
                 Err(error) => self.note(&format!("Controller Run {} 的結果沒有保存，稍後重試：{error}", run.id)),
             }
-        } else if ended && self.controller_process_is_dead(run).await {
-            // 串流結束卻沒有結束事件（例如重建後重新接上）而程序確定不在：結果沒有保存，中斷這一輪
-            let reason = "結果沒有保存而程序已不在：輸入退回待處理".to_string();
-            return self.finish_controller(run, TurnOutcome::Interrupted { reason }).await;
+        } else if stream.process_gone || ended {
+            // 程序確定不在而串流已讀乾淨（或已結束），仍沒有結束事件：結果不會再來，中斷這一輪
+            if stream.process_gone || self.controller_process_is_dead(run).await {
+                let reason = "結果沒有保存而程序已不在：輸入退回待處理".to_string();
+                return self.finish_controller(run, TurnOutcome::Interrupted { reason }).await;
+            }
+        } else if now >= stream.quiet_since.plus_millis(LEASE_DURATION_MS) {
+            // 存活中或無法確定時，再等一個 lease 才查證下一次
+            stream.quiet_since = now;
+            stream.process_gone = self.controller_process_is_dead(run).await;
         }
         self.controller_streams.lock().await.insert(run.id.clone(), stream);
     }
@@ -1655,11 +1664,15 @@ struct ControllerStream {
     last_error: Option<String>,
     /// 已收到結束事件、等待保存的結果。
     outcome: Option<TurnOutcome>,
+    /// 最後一次收到事件（或查證程序）的時間；超過 execution lease 就查證程序。
+    quiet_since: Timestamp,
+    /// ProcessControl 已確認程序不在；下一次讀乾淨串流仍沒有結束事件就中斷這一輪。
+    process_gone: bool,
 }
 
 impl ControllerStream {
-    fn new(events: BoxStream<'static, AdapterEvent>) -> Self {
-        Self { events, reply: Vec::new(), last_error: None, outcome: None }
+    fn new(events: BoxStream<'static, AdapterEvent>, now: Timestamp) -> Self {
+        Self { events, reply: Vec::new(), last_error: None, outcome: None, quiet_since: now, process_gone: false }
     }
 }
 
