@@ -57,5 +57,6 @@
 | R053-22-integrate | 22 | integrate | Work-8 | 2026-10-22 17:15 | 2026-10-22 17:20 | DONE，依 AI-109 直接合併 |
 | R054-13-fix | 13 | fix | Work-8 | 2026-10-22 17:15 | | |
 | R055-40-impl | 40 | impl | Work-9 | 2026-10-22 17:15 | | |
-| R056-37-integrate | 37 | integrate | Work-3 | 2026-10-22 17:15 | | |
+| R056-37-integrate | 37 | integrate | Work-3 | 2026-10-22 17:15 | 2026-10-22 17:28 | DONE（fef7786..539a156） |
 | R057-23-impl | 23 | impl | Work-8 | 2026-10-22 17:21 | | |
+| R058-37-verify | 37 | verify | Work-3 | 2026-10-22 17:28 | | |
