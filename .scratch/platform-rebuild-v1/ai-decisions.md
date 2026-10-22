@@ -3259,7 +3259,88 @@
 - 影響：用本票較早的分支（migration 35 是 `cross_login_startup`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R120）提到的 AI-350～AI-355、migration 35 是改號前的編號，分別對應現在的 AI-355～AI-360、migration 36。
 - 審閱：未審
 
-### AI-362：更新的檢查、下載與驗章由 Runtime 負責（UpdateSource Port），桌面殼只執行已驗證的安裝程式；不使用 tauri-plugin-updater
+### AI-362：「已確認」必須有 Runtime 查驗過的來源；找不到的來源一律拒絕，沒指定狀態就是假說
+- 重要度：高
+- 時間／階段：2026-10-22，票 42 實作
+- 決策：專案理解的每一項有四種狀態：`confirmed`、`hypothesis`、`unknown`、`retired`。(1) `confirmed` 至少要有一個來源，否則 422 `understanding_unverified_claim`（資料表另有 CHECK）。(2) 來源二擇一：Workspace 內的檔案（相對路徑，可附行號），或外部來源（`reference` + 必填的 `version`）。檔案來源由 Runtime 經 WorkspaceFs 讀取，版本 = 內容 SHA-256、查驗時間 = 現在，Agent 無法自報；找不到的檔案不論宣稱什麼狀態都拒絕（422 `understanding_source_not_found`），目錄或 Workspace 外的路徑回 422 `understanding_invalid`。(3) `record_understanding` 沒給 `status` 時是 `hypothesis`。(4) 外部來源 Runtime 無法讀取，只記下提供者標明的版本與記錄時間。
+- 理由：驗收條件「未知資訊不被寫成已確認事實」要由程式擋住，不能只靠 Prompt；版本與查驗時間由 Runtime 產生，才能確定來源在記錄當時存在。預設成假說，忘了填狀態也不會被當作事實。
+- 替代方案：找不到的來源時自動降為假說（Controller 可能沒注意到路徑寫錯）；不限制 `confirmed`、只在 UI 標示來源數（資料仍會被當事實投影出去）；允許目錄當來源（目錄沒有單一內容版本，無法偵測變更）。
+- 影響：Controller 寫 Project Map 時要指向模組裡的代表檔案（例如 `lib.rs`），不能指向目錄。外部來源的「已確認」仍取決於 Controller 自己標的版本。
+- 審閱：未審
+
+### AI-363：投影檔被外部修改、刪除或接入前就存在時，不覆寫而開啟協調；由使用者選擇覆寫或保留外部版本
+- 重要度：高
+- 時間／階段：2026-10-22，票 42 實作
+- 決策：每個投影檔記下 Baton 最後寫入（或採用）的整個檔案雜湊（`baseline_hash`）。比對時檔案仍是基準才寫入；已經是要產生的內容只更新基準；其他情況（修改、刪除、接入前就存在的同名檔）一律**不寫入**，投影轉為 `conflict`，記事件 `understanding_projection_conflict_detected`，並在同一個交易中讓 Controller 對話收到一則工作事件（請它讀檔、把外部修改吸收進專案理解；同一個協調只通知一次，檔案又被改時只再記事件）。只有使用者（桌面憑證）能協調：`overwrite` 以目前的 Baton 內容覆寫並回到 `in_sync`；`keep_external` 轉為 `detached`，Baton 停止寫入與比對這個檔，之後使用者仍可改選 `overwrite`。協調要帶使用者檢視時的檔案雜湊 `expected_external_hash`，與目前檔案不同回 409 `projection_changed`。接入前就存在、Baton 從未寫入過的檔案在協調中的版本記為 0（UI 顯示「Baton 尚未寫入」）。
+- 理由：驗收條件要求「產生協調事件而非靜默覆寫」；repo 內的 GLOSSARY.md、ADR 常是使用者手寫的（本 repo 自己就有），覆寫等於刪掉別人的工作。由使用者決定，Controller 不能自行覆寫使用者的修改。「保留外部版本」若只是把外部內容當新基準，下一次投影仍會整個覆寫掉它，所以改為停止寫入。
+- 替代方案：自動三方合併（Markdown 結構化合併不可靠）；由 Controller 決定覆寫（越過使用者）；以外部內容為新基準繼續投影（下一次變更就會覆寫外部修改）。
+- 影響：讀檔與寫檔之間仍有極短的競態窗口（同一把鎖內先讀後寫，外部程式恰好在這之間寫入會被覆寫）；Windows 上沒有可攜的條件寫入，接受這個風險。`detached` 的檔案不再反映專案理解的變更，直到使用者改選覆寫。
+- 審閱：未審
+
+### AI-364：投影的範圍：只在 Git repo；Glossary → `GLOSSARY.md`，Workspace 範圍的決策 → `docs/adr/baton-<條目識別>.md`；Brief 與 Map 不投影
+- 重要度：中
+- 時間／階段：2026-10-22，票 42 實作
+- 決策：(1) 只有 Workspace 目錄是 Git repo（`WorkspaceFs::inspect_git`）時才產生 repo 內的投影；研究、文件 Workspace 的專案理解只存在控制資料庫與 UI。(2) `GLOSSARY.md`（repo 根目錄）由 Glossary 項目產生：有過 Glossary 項目（或已投影過）才產生；已確認與假說依名稱排序並標示狀態與來源，未知的名詞列在「待確認（未知）」。(3) ADR 由票 37 的知識條目產生：`kind = decision`、範圍是 Workspace、非候選；每個條目一個 `docs/adr/baton-<條目識別>.md`，內容標明狀態（已採用、已撤銷、已淘汰、已被取代）、來源條目與版本、生效時間、內文與證據。決策被撤銷或淘汰時更新檔案內容，不刪除檔案。(4) Project Brief 與 Project Map 不投影成 repo 檔案。(5) 投影檔內的時間一律寫 UTC。
+- 理由：票面寫明「repo 內的 GLOSSARY／ADR」。決策已由票 37 的知識條目保存（含版本、撤銷與取代），ADR 只是它的輸出，不另建一份決策。ADR 檔名用條目識別而不是遞增編號：不會與 repo 既有的 `NNNN-*.md` 撞號，也不必在多個 Workspace 間協調編號。
+- 替代方案：投影成 `docs/adr/NNNN-<slug>.md`（中文標題做 slug 不穩定，編號要與 repo 既有 ADR 協調）；非 Git 目錄也寫入（使用者沒預期研究資料夾會多出檔案）；Brief、Map 也投影成 `docs/project-brief.md` 等（票面沒要求）。
+- 影響：Goal 或 Task 範圍的決策不會成為 ADR。repo 若已有 `GLOSSARY.md`，第一次投影就會進入協調（AI-363），使用者可保留自己的版本。
+- 審閱：未審
+
+### AI-365：「Workspace 首次接入」不自動喚起 Controller，而是寫進 Controller 的角色說明
+- 重要度：中
+- 時間／階段：2026-10-22，票 42 實作
+- 決策：新 Session 的 Controller Prompt（`conversation::build_prompt` 的角色說明）加上：先以 `get_project_understanding` 查看；沒有任何項目（首次接入）時，先從 repo 與文件找答案，以 `record_understanding` 逐項建立 Project Brief、Glossary 與 Project Map 並持續維護；只有被來源支持的描述才標 confirmed，推測與未確認的關係標 hypothesis、不知道的標 unknown。建立 Workspace 時不自動喚起 Controller，也不由 Runtime 自動產生任何專案理解。
+- 理由：票 16 的規則是 Workspace 還沒有對話時不建立 Controller 輪次（避免無人要求的用量）；使用者第一次找 Controller 時，Controller 會看到這個指示並先建立專案理解。專案理解需要閱讀與判斷，由 Controller（Claude Code）做，Runtime 只負責驗證來源。
+- 替代方案：建立 Workspace 時自動送一則工作事件喚起 Controller（每個 Workspace 一建立就消耗額度）；派一個 Worker 專做專案理解（Worker 沒有這些工具，且票面寫明由 Controller 透過工具建立）。
+- 影響：沿用原生 Session 的 Controller 只在第一次建立 Session 時看到這段說明；換帳號或替代 Session 時會再看到一次。
+- 審閱：未審
+
+### AI-366：專案理解的資料模型與權限：（文件別, 名稱）識別、關係寫在名稱裡；工具只給 Controller；使用者在 UI 只能檢視與協調投影
+- 重要度：中
+- 時間／階段：2026-10-22，票 42 實作
+- 決策：(1) 一張 `understanding_item` 表放三種文件的項目，以（Workspace, `section`, `key`）唯一；重複記錄同一個名稱就是更新，內容與來源都相同不產生新版本，否則 `revision` 加 1 並把完整內容記在事件 `understanding_item_recorded`（歷史）。Project Map 的關係不另建型別，名稱寫成「A → B」。不再適用的項目標 `retired`（沿用原描述與來源，不刪除，不出現在投影）。(2) `record_understanding` 與 `get_project_understanding` 列入 `CONTROLLER_TOOLS`，Worker 憑證呼叫回 403 `controller_only`；這一輪結束後憑證失效。(3) 使用者在「專案理解」分頁只能檢視、重新檢查與協調投影，不能直接新增、修改或確認項目（要改請在對話中告訴 Controller）。
+- 理由：票面寫明由 Controller 透過工具建立並維護；Worker 的 Context 由票 39 的 Context Builder 負責，這張票不擴大 Worker 的工具集。最少的資料結構就能表達 Brief 段落、名詞與 Map 的模組／關係。
+- 替代方案：三種文件各一張表、關係另存 from／to（目前沒有需要依關係查詢的功能）；讓 Worker 也能讀取（屬於 Context Builder 的範圍）；讓使用者在 UI 直接確認假說（需要另一套「人工來源」與權限規則，票面沒要求）。
+- 影響：日後若要讓 Worker 拿到 Glossary，可由 Context Builder 從 `understanding_item` 讀取，或另開工具。
+- 審閱：未審
+
+### AI-367：投影比對的時機與並行；來源變更（stale）只在查看時計算
+- 重要度：低
+- 時間／階段：2026-10-22，票 42 實作
+- 決策：(1) 比對投影發生在：`record_understanding` 有變更之後、Workspace 範圍的決策被建立／確認／修正／撤銷／淘汰之後、以及桌面 `POST …/understanding/sync`（「專案理解」分頁開啟時與「重新檢查」按鈕）。Supervisor 不定期巡查。(2) 比對與寫入以 `ApiState::projection_lock`（全域一把 tokio Mutex）序列化；寫回投影狀態時以比對時讀到的 `revision` 做條件寫入。(3) 變更之後的比對失敗（例如寫檔失敗）只記 Runtime 日誌，不讓變更本身失敗，下一次比對再試。(4) 查看專案理解時（桌面視圖、`get_project_understanding`、`record_understanding` 的回應）重新讀取每個檔案來源：內容已與查驗時不同或檔案不見時 `changed: true`，已確認的項目 `stale: true`；不持久化、不自動改變狀態，也不反映在投影檔中。
+- 理由：外部編輯只要在使用者打開分頁或 Baton 要寫入前被偵測到即可，不需要背景輪詢檔案系統；寫入前一定先比對，所以不會靜默覆寫。stale 是隨檔案即時變化的衍生資訊，持久化反而會過時。
+- 替代方案：檔案監看（Windows 上需要另一個 Port 與背景工作）；Supervisor 每輪比對所有 Workspace（無謂的 I/O）；stale 時自動把項目降為假說（會在 Controller 重新查驗前改變使用者看到的內容與投影）。
+- 影響：使用者沒打開分頁、Baton 也沒有要寫入時，外部編輯要等下一次比對才會產生協調事件。
+- 審閱：未審
+
+### AI-368：專案理解的 API 形狀、錯誤碼、桌面殼指令與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-22，票 42 實作
+- 決策：桌面端點 `GET /api/v1/workspaces/{id}/understanding`、`POST …/understanding/sync`、`POST …/understanding/projections/reconcile`，都回 `{ workspace_id, projection_enabled, items, projections }`。來源與查驗相關的拒絕用 422（`understanding_invalid`、`understanding_unverified_claim`、`understanding_source_not_found`），協調狀態不符或檔案又被改用 409（`projection_transition_invalid`、`projection_changed`），找不到用 404（`projection_not_found`、`workspace_not_found`）。`record_understanding` 回 `{ item, changed, projections }`（讓 Controller 立即看到協調中的投影）。桌面殼指令 `workspace_understanding`、`workspace_understanding_sync`、`workspace_projection_reconcile`。UI 在側欄每個 Workspace 加「專案理解」按鈕（spec D-21 第四階段的專案理解視圖），開啟時呼叫 sync。
+- 理由：沿用其他 Workspace 分頁（時間線、知識）的路徑、錯誤格式與側欄入口慣例；422 區分「內容不可接受」與 400 的格式錯誤。
+- 替代方案：開啟分頁只 GET（看不到尚未偵測的外部編輯）；把 sync 併入 GET（GET 有寫入副作用）。
+- 影響：分頁不會自動更新，重新開啟或按「重新檢查」才重新比對。
+- 審閱：未審
+
+### AI-369：票 42 整合 rebuild/v1（票 30、39、33）：`project_understanding` 順延為第 37 個 migration、AI 編號改為 AI-362～AI-369
+- 重要度：低
+- 時間／階段：2026-10-22，票 42 實作（run R118-42-impl）
+- 決策：(1) 整合分支先後併入票 30（第 34 個 migration `controller_handoff`，AI-344～AI-349）、票 39（第 35 個 `context_receipt`，AI-350～AI-354）與票 33（第 36 個 `cross_login_startup`，AI-355～AI-361）。本票的 migration 原為第 34 個，改為第 37 個並排在 `cross_login_startup` 之後。(2) 本票條目原寫成 AI-350～AI-357（中途一度改為 AI-355～AI-362），與已合併的條目同號，現改為 AI-362～AI-369，移到票 33 的 AI-361 之後；條目內互相引用的編號一併改正，整合分支的條目逐字未動。本票程式碼沒有引用這些編號；較早的 commit 訊息提到的 AI-350～AI-357、AI-355～AI-362 都是改號前的編號。(3) 衝突在 migration 清單、桌面殼的 import 與開發指南的目錄表／測試清單：都以整合分支為底，補回本票的項目。Controller 角色說明（`conversation.rs`）由 git 自動合併，本票加入的專案理解指示仍在。
+- 理由：已進入整合分支的 migration 與 AI 編號不可改動，順延尚未合併的本票。
+- 替代方案：無（編號規則已定）。
+- 影響：無。
+- 審閱：未審
+
+### AI-370：已保留外部版本（`detached`）的投影檔仍追蹤目前雜湊，覆寫一律核對 `external_hash`
+- 重要度：中
+- 時間／階段：2026-10-22，票 42 實作（修正 run R124-42-fix，回應驗證 R123）
+- 決策：比對時遇到 `detached` 的檔案仍不寫入、不記事件、不通知 Controller，但檔案內容（或存在與否）與記下的不同時，把目前的雜湊寫進 `external_hash`（`revision` 加 1）。`keep_external` 轉為 `detached` 時也把當下的雜湊記在 `external_hash`（`baseline_hash` 照舊）。UI 的「以 Baton 版本覆寫」不論協調中或已保留外部版本，一律送 `external_hash` 作為 `expected_external_hash`；API 契約不變，只是 `external_hash` 的語意從「協調中的外部雜湊」擴大為「協調中或已保留外部版本時，最後一次比對讀到的雜湊」。
+- 理由：原本 `detached` 完全不比對，UI 只能送保留當下的 `baseline_hash`；使用者保留後只要再編輯該檔，覆寫就永遠回 409，連「重新檢查」都救不回來（驗證 R123 重現）。改為重新比對時更新雜湊，「重新檢查」後視圖帶的就是檔案目前的版本，覆寫仍只會蓋掉使用者在視圖中看過的版本。
+- 替代方案：視圖即時讀檔算出目前雜湊（每次檢視都要讀所有 detached 檔，且 Controller 與桌面視圖都要加欄位）；放寬 `detached` 覆寫不核對雜湊（可能蓋掉使用者沒看過的內容）。
+- 影響：`detached` 檔被改動時投影的 `revision` 會增加但沒有對應事件（這不是 Baton 需要記錄的狀態轉移）；檢視後檔案又被改仍回 409，使用者按「重新檢查」後即可覆寫。
+- 審閱：未審
+
+### AI-371：更新的檢查、下載與驗章由 Runtime 負責（UpdateSource Port），桌面殼只執行已驗證的安裝程式；不使用 tauri-plugin-updater
 - 重要度：高
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：Runtime 新增 `UpdateSource` Port（`latest`、`download`），由 `UpdateService` 在啟動時與每 24 小時檢查一次，結果只存在記憶體，只顯示通知。使用者同意後，`POST /api/v1/updates/apply` 先下載安裝程式並以 minisign 公鑰驗證簽章（與 Tauri 更新程式相同的格式，`minisign-verify` crate），通過才開始維護；桌面殼的 `update_install` 只等 Runtime 結束，再以 `/P /UPDATE /R` 執行這個已驗證的檔案並結束 App。不加入 `tauri-plugin-updater`。
@@ -3268,7 +3349,7 @@
 - 影響：Runtime 新增 `reqwest`（native-tls）、`minisign-verify`、`base64` 相依。安裝程式的 `/P /UPDATE /R` 參數取自 Tauri 2.12 的 NSIS 樣板（`.onInstSuccess` 的 `/R` 重新開啟、`/UPDATE` 保留捷徑與 HKCU Run 值），屬 Validation Required。
 - 審閱：未審
 
-### AI-363：更新清單網址與簽章公鑰在建置時設定；沒有設定就是「未設定更新來源」
+### AI-372：更新清單網址與簽章公鑰在建置時設定；沒有設定就是「未設定更新來源」
 - 重要度：中
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：正式版更新來源讀取建置時的環境變數 `BATON_UPDATE_ENDPOINT`（Tauri 格式 `latest.json` 的網址，平台鍵 `windows-x86_64-nsis` 或 `windows-x86_64`）與 `BATON_UPDATE_PUBKEY`（`tauri signer generate` 的公鑰，base64），以 `option_env!` 編進 Runtime。任一個沒有設定時，Port 回 `NotImplemented`，更新狀態是 `unconfigured`，不連線、不能套用。單元測試用 `tauri signer` 產生的測試公鑰與簽章（私鑰產生後即刪除、沒有進 repo）。
@@ -3277,7 +3358,7 @@
 - 影響：在發行流程建立之前，所有建置都顯示「未設定更新來源」，更新流程只在 harness 與單元測試中被驗證。發行者需要保管簽章私鑰並託管 `latest.json`（尚未決定，已記在開發指南的 Validation Required）。
 - 審閱：未審
 
-### AI-364：更新的維護順序：下載驗章 → 同一交易持久化維護與停止意圖 → 停止流程 → 更新前備份 → 準備套用；備份失敗就不套用
+### AI-373：更新的維護順序：下載驗章 → 同一交易持久化維護與停止意圖 → 停止流程 → 更新前備份 → 準備套用；備份失敗就不套用
 - 重要度：高
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：`maintenance` 單列表（migration 37）記錄進行中的維護（`kind`、`phase = stopping | ready | failed`、來源與目標版本、安裝程式路徑、備份識別、訊息）與最近一次結束的結果。開始維護與 `lifecycle::request_exit` 在同一個交易；生命週期檔一律由 `Store::lifecycle_mirror` 產生，維護中的每次鏡像都帶著維護抑制（修正 AI-315 提到的覆蓋問題）。停止流程沿用完全退出（30 + 10 秒、Run 以 `interrupted` 結束、Task 重新排隊）。之後更新做一份觸發原因 `pre_update` 的備份（依一般保留規則），成功進入 `ready`，失敗進入 `failed` 且不套用；Runtime 照完全退出的規則再提供 API 5 秒後結束。完全退出進行中不能開始維護（409 `stop_intent_active`）；同一種維護的重複要求是冪等的，另一種維護進行中回 409 `maintenance_in_progress`。停止異常不阻擋更新：Web UI 列出異常，要使用者按「仍要安裝更新並重新開啟」才安裝；沒有異常就自動安裝。
@@ -3286,7 +3367,7 @@
 - 影響：備份失敗時 Baton 仍會完全退出，下次手動開啟依完全退出的規則續跑。更新前備份與更新後第一次啟動的 migration 前備份內容相同，同一天只保留較新的那份。
 - 審閱：未審
 
-### AI-365：只有手動開啟（含安裝程式代為開啟）才結束維護；結束後依 DR-01 重新開啟
+### AI-374：只有手動開啟（含安裝程式代為開啟）才結束維護；結束後依 DR-01 重新開啟
 - 重要度：高
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：維護抑制一直留在生命週期檔，直到使用者手動開 App（或安裝程式以 `/R` 代為開啟）啟動的 Runtime 結束維護。這時 Runtime 記下結果：來源版本、執行中的版本，以及是否已套用（有目標版本時以「執行中的版本 = 目標版本」判斷；安裝程式直接要求的更新以「版本有變」判斷；解除安裝為 `null`）。接著依資料庫重寫生命週期檔以清除維護抑制，並刪除 `<資料目錄>\updates`。停止意圖仍在，之後由 Supervisor 依 DR-01 核對，再依各 Workspace 的「完全退出後自動續跑」續跑，不因為是更新就全部續跑。監護與登入啟動入口看到維護抑制都不拉起 Runtime；兩者並存時，`guardian::suppression_of` 改為優先回報較具體的 `Maintenance`。
@@ -3295,7 +3376,7 @@
 - 影響：安裝程式被取消、而使用者遲遲沒有開 App 時，登入啟動會一直受抑制，直到下次手動開啟。升級前的版本沒有這張表，第一次啟動時 migration 37 建立空表。
 - 審閱：未審
 
-### AI-366：解除安裝由 NSIS hook 執行 `baton-runtime.exe maintenance prepare-uninstall`；登入啟動的偏好保留在資料目錄中
+### AI-375：解除安裝由 NSIS hook 執行 `baton-runtime.exe maintenance prepare-uninstall`；登入啟動的偏好保留在資料目錄中
 - 重要度：中
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：
@@ -3321,7 +3402,7 @@
   - 重新安裝並開啟後，若偏好是開啟，會自動恢復登入啟動。
 - 審閱：未審
 
-### AI-367：安裝資料夾沿用 Tauri 的預設 `%LOCALAPPDATA%\Baton`，與資料目錄相同
+### AI-376：安裝資料夾沿用 Tauri 的預設 `%LOCALAPPDATA%\Baton`，與資料目錄相同
 - 重要度：中
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：不自訂 NSIS 樣板，單使用者安裝的預設安裝資料夾維持 Tauri 的 `$LOCALAPPDATA\${PRODUCTNAME}`。這個位置與 spec D-17 的資料目錄預設 `%LOCALAPPDATA%\Baton` 相同。
@@ -3330,7 +3411,7 @@
 - 影響：資料目錄裡會混著執行檔。日後若 Tauri 的解除安裝程式改成遞迴刪除安裝資料夾，資料會被刪掉；升級 Tauri 時必須重新確認（已記在開發指南）。
 - 審閱：未審
 
-### AI-368：維護與更新的 API、事件、資料形狀與 harness 擴充
+### AI-377：維護與更新的 API、事件、資料形狀與 harness 擴充
 - 重要度：低
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：
@@ -3345,7 +3426,7 @@
 - 影響：其他平行的票若也新增第 37 個 migration，整合時依編號規則順延後合併的那一個。
 - 審閱：未審
 
-### AI-369：桌面殼套用更新時記住最後看到的「準備套用」安裝程式；等 Runtime 結束逾時也繼續
+### AI-378：桌面殼套用更新時記住最後看到的「準備套用」安裝程式；等 Runtime 結束逾時也繼續
 - 重要度：中
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：`update_install` 先向 Runtime 讀更新狀態；Runtime 已不回應時，改用殼在 `update_status` 最後一次看到的「準備套用」的安裝程式路徑（只接受 Runtime 回報過的路徑，Web UI 不能指定）。之後等 Runtime 不再回應最多 20 秒，逾時也照樣以 `/P /UPDATE /R` 執行安裝程式（PREINSTALL hook 會再等 Runtime 與監護結束），然後結束 App。
@@ -3354,7 +3435,7 @@
 - 影響：App 在「準備套用」之後被關掉再開，就需要重新開啟（結束維護）後再更新一次。
 - 審閱：未審
 
-### AI-370：建置與安裝程式冒煙測試的細節
+### AI-379：建置與安裝程式冒煙測試的細節
 - 重要度：低
 - 時間／階段：2026-10-22，票 34 實作（run R122-34-impl）
 - 決策：
@@ -3364,6 +3445,15 @@
 - 理由：沒有設定更新來源的建置不應產生半套的更新設定。冒煙測試會動到真實使用者的登錄，必須避開已有的安裝。
 - 替代方案：冒煙測試直接寫 HKCU Run：可能被 Runtime 啟動時的補正改掉，與真實情境不同。
 - 影響：本機已在 2026-10-22 實際執行，安裝、啟動、解除安裝、Run 值移除、資料保留都通過。無法分辨 Run 值是被我們的 hook 移除，還是被 Tauri 解除安裝程式本身移除，但 `lifecycle.json` 留下的 `maintenance: uninstall` 證明 hook 有執行。
+- 審閱：未審
+
+### AI-380：票 34 整合 rebuild/v1（票 42）：`maintenance` 順延為第 38 個 migration、AI 編號改為 AI-371～AI-379
+- 重要度：中
+- 時間／階段：2026-10-22，票 34 整合（run R128-34-integrate）
+- 決策：(1) 整合分支併入票 42，第 37 個 migration 是 `project_understanding`（新建 `understanding_item`、`understanding_projection` 與一個觸發器）。本票的 `maintenance` 順延為第 38 個、排在 `project_understanding` 之後；兩者沒有共用的資料表，都不需要 `foreign_keys=OFF`，都會套用。migration 註解與開發指南（目錄表與〈更新與解除安裝〉一節）的「migration 37」改為 38。(2) 本票條目原寫成 AI-362～AI-370，與票 42 的 AI-362～AI-370 同號，現改為 AI-371～AI-379，移到票 42 的 AI-370 之後；條目內文沒有引用本票自己的編號，本票的程式碼、文件與票面也沒有引用。git 自動合併時把原 AI-370 的 `- 審閱：未審` 行併掉了，改以本票分支上的原文為準補回。整合分支的條目逐字未動。(3) 衝突處理：`baton-api` 的模組宣告與 `ApiState` 欄位、`baton-runtime` 組裝 `ApiState` 的欄位、`baton-store` 的 migration 清單、Web 的 `RuntimeClient` 型別交集與 `App.test.tsx` 的 fixture 匯入、桌面殼的 `baton_api` 匯入，都是兩邊並列保留；開發指南的目錄表以整合分支的列為底，補回本票在 `baton-domain`（`maintenance.rs`）、`baton-ports`（`UpdateSource`）、`baton-store`（`maintenance`）與 `baton-api`（`/api/v1/updates`、`/api/v1/maintenance`）的描述。其餘檔案由 git 自動合併。本次只整合、不新增行為。
+- 理由：依編號規則，後合併的票順延到整合分支的最大編號之後；不修改整合分支已有的 migration 與條目。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票較早的分支（migration 37 是 `maintenance`）建過的開發資料庫需要刪除重建。本票較早的 commit 與驗證報告（R127）提到的 AI-362～AI-370、migration 37 是改號前的編號，分別對應現在的 AI-371～AI-379、migration 38。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

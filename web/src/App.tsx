@@ -11,6 +11,7 @@ import { ExitProgress } from "./ExitProgress";
 import { KnowledgePage } from "./KnowledgePage";
 import { LoginStartupSettings } from "./LoginStartupSettings";
 import { PlatformPage } from "./PlatformPage";
+import { ProjectUnderstandingPage } from "./ProjectUnderstandingPage";
 import { RecoveryPanel } from "./RecoveryPanel";
 import { SchedulingSettings } from "./SchedulingSettings";
 import { SetupWizard } from "./SetupWizard";
@@ -23,9 +24,9 @@ import { UpdateNotice } from "./UpdateNotice";
 import { UpdateSettings } from "./UpdateSettings";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識或時間線。 */
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、對話、工作面板、裁定中心、成果與驗證、知識、時間線或專案理解。 */
 type Opened = {
-  view: "authorization" | "conversation" | "tasks" | "decisions" | "artifacts" | "knowledge" | "timeline";
+  view: "authorization" | "conversation" | "tasks" | "decisions" | "artifacts" | "knowledge" | "timeline" | "understanding";
   workspace: Workspace;
 };
 
@@ -63,6 +64,7 @@ export function App() {
             onOpenArtifacts={(workspace) => setOpened({ view: "artifacts", workspace })}
             onOpenKnowledge={(workspace) => setOpened({ view: "knowledge", workspace })}
             onOpenTimeline={(workspace) => setOpened({ view: "timeline", workspace })}
+            onOpenUnderstanding={(workspace) => setOpened({ view: "understanding", workspace })}
           />
         )}
         <main className="main">
@@ -94,6 +96,10 @@ export function App() {
           {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 的 Task 過濾 */}
           {client && opened?.view === "timeline" && (
             <TimelinePage key={opened.workspace.id} client={client} workspace={opened.workspace} />
+          )}
+          {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 的協調提示與錯誤 */}
+          {client && opened?.view === "understanding" && (
+            <ProjectUnderstandingPage key={opened.workspace.id} client={client} workspace={opened.workspace} />
           )}
           {client && <PlatformPage client={client} />}
         </main>

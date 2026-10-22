@@ -37,7 +37,7 @@ fn api_error(status: StatusCode, code: &'static str, message: &str) -> ApiError 
 }
 
 /// 不是 Controller 憑證就拒絕；在解析請求之前檢查，Worker 不論送什麼內容都得到同一個答案。
-fn require_controller(record: &CredentialRecord) -> Result<ControllerScope, ApiError> {
+pub(crate) fn require_controller(record: &CredentialRecord) -> Result<ControllerScope, ApiError> {
     record.controller.clone().ok_or_else(|| {
         api_error(
             StatusCode::FORBIDDEN,
@@ -48,7 +48,7 @@ fn require_controller(record: &CredentialRecord) -> Result<ControllerScope, ApiE
 }
 
 /// Controller 憑證的範圍；Worker 憑證、聲稱別的 Workspace 或已經結束的一輪都拒絕。
-async fn controller_scope(state: &ApiState, record: &CredentialRecord, claims: &Claims) -> Result<ControllerScope, ApiError> {
+pub(crate) async fn controller_scope(state: &ApiState, record: &CredentialRecord, claims: &Claims) -> Result<ControllerScope, ApiError> {
     let scope = require_controller(record)?;
     let foreign = |claimed: &Option<String>, actual: &str| claimed.as_deref().is_some_and(|c| c != actual);
     if foreign(&claims.workspace_id, &scope.workspace_id) || foreign(&claims.run_id, &scope.controller_run_id) {

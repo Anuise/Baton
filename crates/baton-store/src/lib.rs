@@ -51,6 +51,7 @@ mod sessions;
 mod shared_settings;
 mod tasks;
 mod timeline;
+mod understanding;
 mod verification;
 mod workdirs;
 pub use agent::AgentContext;
@@ -81,6 +82,7 @@ pub use scheduling::{
 };
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 pub use timeline::TimelineError;
+pub use understanding::UnderstandingApplyError;
 pub use verification::{AcceptanceApplyError, PendingVerification};
 pub use workdirs::WorkdirCandidate;
 
@@ -1346,7 +1348,45 @@ const MIGRATIONS: &[Migration] = &[
             updated_at INTEGER NOT NULL
         );",
     },
-    // 更新與解除安裝的維護（票 34，spec D-19）：只有一列；進行中與最近一次結束的維護以 JSON 保存（Domain 型別）。
+    // 專案理解（票 42，第 37 個 migration）：Project Brief、Glossary、Project Map 的項目，每個 Workspace 內以（文件別, 名稱）識別；
+    // 每一版的完整內容保存在追加式的 event（understanding_item_recorded）。投影檔記下最後寫入（或採用）的雜湊與協調狀態。
+    Migration {
+        name: "project_understanding",
+        sql: "CREATE TABLE understanding_item (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            section TEXT NOT NULL CHECK (section IN ('brief', 'glossary', 'map')),
+            key TEXT NOT NULL,
+            text TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('confirmed', 'hypothesis', 'unknown', 'retired')),
+            sources TEXT NOT NULL CHECK (json_valid(sources)),
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            recorded_by TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            -- 已確認一定有來源（Domain 另外要求來源已查驗）
+            CHECK (status <> 'confirmed' OR json_array_length(sources) > 0),
+            UNIQUE (workspace_id, section, key)
+        );
+        CREATE TRIGGER understanding_item_no_delete BEFORE DELETE ON understanding_item
+        BEGIN SELECT RAISE(ABORT, 'understanding_item 不可刪除'); END;
+        CREATE TABLE understanding_projection (
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            path TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('glossary', 'adr')),
+            -- 0 表示還沒有寫入過（接入前就已存在的檔案，開啟協調時）
+            version INTEGER NOT NULL CHECK (version >= 0),
+            body_hash TEXT NOT NULL,
+            baseline_hash TEXT,
+            status TEXT NOT NULL CHECK (status IN ('in_sync', 'conflict', 'detached')),
+            external_hash TEXT,
+            detected_at INTEGER,
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, path)
+        );",
+    },
+    // 更新與解除安裝的維護（票 34，第 38 個 migration，spec D-19）：只有一列；進行中與最近一次結束的維護以 JSON 保存（Domain 型別）。
     Migration {
         name: "maintenance",
         sql: "CREATE TABLE maintenance (

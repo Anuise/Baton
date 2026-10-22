@@ -26,6 +26,8 @@ interface Props {
   onOpenKnowledge?: (workspace: Workspace) => void;
   /** 使用者要開啟某個 Workspace 的時間線與觀測指標。 */
   onOpenTimeline?: (workspace: Workspace) => void;
+  /** 使用者要開啟某個 Workspace 的專案理解。 */
+  onOpenUnderstanding?: (workspace: Workspace) => void;
 }
 
 function reasonOf(error: unknown): string {
@@ -51,6 +53,7 @@ export function WorkspaceSidebar({
   onOpenArtifacts,
   onOpenKnowledge,
   onOpenTimeline,
+  onOpenUnderstanding,
 }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
@@ -217,6 +220,13 @@ export function WorkspaceSidebar({
                 </button>
                 <button type="button" aria-label={`時間線 ${workspace.name}`} onClick={() => onOpenTimeline?.(workspace)}>
                   時間線
+                </button>
+                <button
+                  type="button"
+                  aria-label={`專案理解 ${workspace.name}`}
+                  onClick={() => onOpenUnderstanding?.(workspace)}
+                >
+                  專案理解
                 </button>
                 <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
                   封存

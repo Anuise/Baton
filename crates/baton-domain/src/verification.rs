@@ -108,7 +108,7 @@ pub fn normalize_checks(checks: Vec<VerificationCheck>) -> Result<Vec<Verificati
 }
 
 /// 工作目錄內的相對路徑，統一以 `/` 分隔；不可是絕對路徑、不可含磁碟代號（`:`）、`.`、`..` 或空的段落。
-fn relative_path(raw: &str) -> Option<String> {
+pub(crate) fn relative_path(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() || raw.starts_with(['/', '\\']) || raw.contains(':') || raw.chars().any(char::is_control) {
         return None;

@@ -18,6 +18,7 @@ use baton_api::{
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
     RecoveryStatusView, MetricsResponse, TimelineResponse, RunContextView, UpdateStatusView,
+    ReconcileRequest, UnderstandingView,
 };
 use baton_client::{
     ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, ClientError, Connection,
@@ -1163,6 +1164,37 @@ async fn workspace_metrics(link: State<'_, RuntimeLink>, workspace_id: String) -
     link.client.metrics(&workspace_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 的專案理解分頁：Project Brief、Glossary、Project Map 與投影檔狀態。
+#[tauri::command]
+async fn workspace_understanding(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<UnderstandingView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.project_understanding(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的專案理解分頁：重新比對投影檔（偵測外部編輯）。
+#[tauri::command]
+async fn workspace_understanding_sync(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<UnderstandingView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.sync_understanding(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 的專案理解分頁：協調一個投影檔（覆寫或保留外部版本）。
+#[tauri::command]
+async fn workspace_projection_reconcile(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    request: ReconcileRequest,
+) -> Result<UnderstandingView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.reconcile_projection(&workspace_id, &request).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 回報一次沒被 Guard 攔下的重犯。
 #[tauri::command]
 async fn knowledge_report_recurrence(
@@ -1260,7 +1292,10 @@ fn main() {
             knowledge_recurrences,
             knowledge_report_recurrence,
             workspace_timeline,
-            workspace_metrics
+            workspace_metrics,
+            workspace_understanding,
+            workspace_understanding_sync,
+            workspace_projection_reconcile
         ])
         // 關閉主視窗只隱藏到系統匣：Runtime 是獨立程序，工作繼續；只有完全退出流程的 `app_quit` 才結束 App
         .on_window_event(|window, event| {
