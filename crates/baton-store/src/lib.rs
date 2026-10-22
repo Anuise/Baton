@@ -1911,6 +1911,16 @@ impl Store {
         &self,
         work: impl FnOnce(&Transaction<'_>) -> StoreResult<T> + Send + 'static,
     ) -> StoreResult<T> {
+        self.write_job(work, false).await
+    }
+
+    /// `write` 的實作。`clears_fault`：提交成功時在寫入執行緒上清除儲存故障（試寫用）；
+    /// 在佇列中依序清除，不會蓋掉下一個寫入剛記下的新故障。
+    async fn write_job<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Transaction<'_>) -> StoreResult<T> + Send + 'static,
+        clears_fault: bool,
+    ) -> StoreResult<T> {
         let (reply, result) = oneshot::channel();
         let (health, injected) = (self.inner.health.clone(), self.inner.injected.clone());
         let job: Job = Box::new(move |conn| {
@@ -1922,6 +1932,8 @@ impl Store {
             // 儲存故障記下來，讓 Supervisor 停止新派工、UI 顯示原因（票 26）
             if let Some(fault) = outcome.as_ref().err().and_then(health::classify) {
                 *health.lock().unwrap_or_else(|e| e.into_inner()) = Some(fault);
+            } else if clears_fault && outcome.is_ok() {
+                *health.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
             let _ = reply.send(outcome);
         });
