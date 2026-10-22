@@ -169,17 +169,53 @@ describe("完全退出進度", () => {
     expect(client.quitApp).toHaveBeenCalledTimes(1);
   });
 
-  it("輪詢時連不上 Runtime 視為已結束，結束 App", async () => {
+  it("輪詢時連續 3 次連不上 Runtime 視為已結束，結束 App", async () => {
     const { client, emitFullExit } = fakeClient(stopping(), new Error("connection refused"));
     render(<ExitProgress client={client} quitDelayMs={1000} />);
     await emitFullExit();
+    await settle(1000);
+
+    expect(screen.getByRole("dialog")).not.toHaveTextContent("Runtime 已結束");
+
     await settle(500);
 
+    expect(client.lifecycleStatus).toHaveBeenCalledTimes(3);
     expect(screen.getByRole("dialog")).toHaveTextContent("Runtime 已結束，正在關閉 Baton…");
 
     await settle(1000);
 
     expect(client.quitApp).toHaveBeenCalledTimes(1);
+  });
+
+  it("輪詢暫時失敗一次不算 Runtime 已結束，之後回報的停止異常照樣列出、不自動結束", async () => {
+    const { client, emitFullExit } = fakeClient(
+      stopping(),
+      new Error("connection reset"),
+      stopped({ runs: [exitRun({ outcome: "anomaly", anomaly: "stop_failed", message: "拒絕存取" })] }),
+    );
+    render(<ExitProgress client={client} quitDelayMs={1000} />);
+    await emitFullExit();
+    await settle(500);
+    await settle(500);
+    await settle(3000);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("筆記 · run_1：停止異常（停止失敗：拒絕存取）");
+    expect(client.quitApp).not.toHaveBeenCalled();
+  });
+
+  it("讀到一次生命週期就重新計算連續失敗次數", async () => {
+    const error = new Error("connection reset");
+    const { client, emitFullExit } = fakeClient(stopping(), error, error, stopping(), error);
+    render(<ExitProgress client={client} quitDelayMs={1000} />);
+    await emitFullExit();
+    await settle(2500);
+
+    expect(client.lifecycleStatus).toHaveBeenCalledTimes(5);
+    expect(screen.getByRole("dialog")).toHaveTextContent("停止中");
+
+    await settle(500);
+
+    expect(screen.getByRole("dialog")).toHaveTextContent("Runtime 已結束，正在關閉 Baton…");
   });
 
   it("要求完全退出失敗時顯示原因，不結束 App；可以重試", async () => {
