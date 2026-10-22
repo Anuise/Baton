@@ -13,7 +13,7 @@ use rusqlite::ErrorCode;
 use super::{Store, StoreError, StoreResult};
 
 /// 依 SQLite 的錯誤代碼判斷是不是儲存故障。
-pub(crate) fn classify(error: &StoreError) -> Option<StorageFault> {
+pub fn classify(error: &StoreError) -> Option<StorageFault> {
     let StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, message)) = error else {
         return None;
     };

@@ -9,6 +9,7 @@ mod artifacts;
 mod authorization;
 mod backups;
 mod decisions;
+mod external_operations;
 mod guard;
 mod knowledge;
 mod lifecycle;
@@ -37,6 +38,8 @@ use baton_domain::agent::{
     TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
+use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT};
+use baton_domain::storage_health::StorageHealth;
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
@@ -55,6 +58,7 @@ pub use artifacts::{
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
 pub use backups::{BackupStatus, BackupSummary, BACKUPS_PATH};
+pub use external_operations::{external_operations_path, BeginResponse, ExternalOperationList, RecordResponse};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
@@ -117,6 +121,9 @@ pub struct HealthResponse {
     pub started_at: Timestamp,
     /// 執行 Runtime 的程序識別碼（診斷與冒煙測試用）。
     pub pid: u32,
+    /// 控制資料庫是否可寫；磁碟滿或被鎖住時新派工停止，附原因與處理方式（票 26）。舊版 Runtime 沒有這個欄位。
+    #[serde(default)]
+    pub storage: StorageHealth,
 }
 
 /// 請求被拒絕時的回應內容；Runtime 與用戶端共用。`error` 是穩定的機器可讀代碼。
@@ -205,6 +212,7 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
+        .route(external_operations::EXTERNAL_OPERATIONS_ROUTE, get(external_operations::list))
         .route(LIFECYCLE_PATH, get(lifecycle::status))
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))
@@ -238,6 +246,8 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))
         .route(&tool_path(TOOL_RECORD_LESSON_CANDIDATE), post(knowledge::record_lesson_candidate))
         .route(&tool_path(TOOL_SEARCH_KNOWLEDGE), post(knowledge::search_knowledge))
+        .route(&tool_path(TOOL_BEGIN_EXTERNAL_OPERATION), post(external_operations::begin))
+        .route(&tool_path(TOOL_RECORD_EXTERNAL_OPERATION_RESULT), post(external_operations::record_result))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)
@@ -261,6 +271,7 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<HealthResponse> {
         boot_count: state.boot_count,
         started_at: state.started_at,
         pid: std::process::id(),
+        storage: state.store.storage_health(),
     })
 }
 

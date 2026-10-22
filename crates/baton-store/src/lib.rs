@@ -45,6 +45,7 @@ pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, PendingByWorkspace};
 pub use external_operations::ExternalApplyError;
+pub use health::classify as storage_fault_of;
 pub use knowledge::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, ScopeRequest};
 pub use lifecycle::{
     lifecycle_file_path, read_lifecycle_file, write_lifecycle_file, LifecycleApplyError, LifecycleSnapshot,

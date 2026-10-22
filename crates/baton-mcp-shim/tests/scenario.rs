@@ -6,6 +6,7 @@ use axum::extract::Request;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Router;
+use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT};
 use baton_domain::agent::{
     AGENT_TOKEN_ENV, AGENT_TOOLS_PREFIX, RUNTIME_URL_ENV, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT,
     TOOL_READ_INBOX, TOOL_REPORT_BLOCKED, TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT,
@@ -122,7 +123,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_eleven_tools_with_their_required_fields() {
+async fn tools_list_has_the_thirteen_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -141,6 +142,8 @@ async fn tools_list_has_the_eleven_tools_with_their_required_fields() {
             TOOL_REGISTER_ARTIFACT,
             TOOL_RECORD_LESSON_CANDIDATE,
             TOOL_SEARCH_KNOWLEDGE,
+            TOOL_BEGIN_EXTERNAL_OPERATION,
+            TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
         ]
     );
     for tool in tools {
@@ -153,6 +156,10 @@ async fn tools_list_has_the_eleven_tools_with_their_required_fields() {
     assert_eq!(schema(TOOL_SAVE_CHECKPOINT)["required"], json!(["summary"]));
     assert_eq!(schema(TOOL_SAVE_CHECKPOINT)["properties"]["details"]["type"], "string");
     assert_eq!(schema(TOOL_REPORT_BLOCKED)["required"], json!(["reason"]));
+    assert_eq!(schema(TOOL_BEGIN_EXTERNAL_OPERATION)["required"], json!(["idempotency_key", "operation", "target"]));
+    let record = schema(TOOL_RECORD_EXTERNAL_OPERATION_RESULT);
+    assert_eq!(record["required"], json!(["idempotency_key", "result"]));
+    assert_eq!(record["properties"]["result"]["enum"], json!(["succeeded", "failed", "unknown"]));
 
     let decision = schema(TOOL_REQUEST_DECISION);
     assert_eq!(decision["required"], json!(["question", "reason", "options"]));
@@ -510,3 +517,30 @@ fn config_requires_both_variables_and_never_shows_the_token() {
     assert!(ShimConfig::from_lookup(|_| Some(String::new())).is_err());
 }
 
+
+#[tokio::test]
+async fn external_operation_tools_forward_to_their_paths_unchanged() {
+    let cases = [
+        (
+            TOOL_BEGIN_EXTERNAL_OPERATION,
+            json!({"idempotency_key":"deploy-1","operation":"deploy","target":"production","request":{"version":"1.2.3"}}),
+            r#"{"operation_id":"extop_1","status":"proceed","attempt":1,"existing":false,"message":"可以送出"}"#,
+        ),
+        (
+            TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
+            json!({"idempotency_key":"deploy-1","result":"unknown","reason":"逾時"}),
+            r#"{"operation_id":"extop_1","status":"unknown","decision_request_id":"d1","message":"等待查證"}"#,
+        ),
+    ];
+    for (tool, arguments, response) in cases {
+        let (url, log) = spawn_stub(200, response).await;
+
+        let reply = call(&url, tool_call(12, tool, arguments.clone())).await;
+
+        assert_eq!(reply["result"]["isError"], false, "{tool}");
+        assert_eq!(reply["result"]["content"][0]["text"], response);
+        let log = log.lock().unwrap();
+        assert_eq!(log[0].path, format!("{AGENT_TOOLS_PREFIX}/{tool}"));
+        assert_eq!(serde_json::from_slice::<Value>(&log[0].body).unwrap(), arguments);
+    }
+}
