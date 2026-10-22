@@ -1863,46 +1863,76 @@ impl Supervisor {
     }
 
     /// 依 Verification Profile 執行等待中的驗證要求（票 45），保存 Evidence Bundle；呼叫端負責持有 `verify_lock`。
-    /// Runtime 在執行途中當掉時沒有任何紀錄，要求仍是 queued，下一次重新執行（狀態目錄重新準備，不猜測結果）。
+    /// 每個要求以一次或多次嘗試執行（票 49）：語意 judge 限流而另有帳號可用時，那次嘗試停止它的測試程序後交接，
+    /// 立刻以另一個帳號開始新的嘗試。Runtime 在執行途中當掉時要求仍是 queued，那次嘗試仍是執行中；下一次開始新的嘗試時
+    /// 把它記為中斷，承接者依它的日誌停止留下的測試程序、沿用已完成的旅程、不重送已開始的外部操作。
     async fn run_requested_verifications(&self) {
         let pending = match self.store.pending_verification_runs().await {
             Ok(pending) => pending,
             Err(error) => return self.note(&format!("無法讀取等待執行的驗證要求：{error}")),
         };
         for item in pending {
-            let Some(bundle_id) = new_prefixed_id("evb") else {
-                self.note("無法取得系統亂數，驗證稍後重試");
-                continue;
+            self.run_verification_request(&item).await;
+        }
+    }
+
+    /// 執行一個驗證要求直到產生 Bundle，或這次無法繼續（下一次 tick 再接手）。每次交接都排除限流的帳號，
+    /// 所以交接次數不超過帳號數。
+    async fn run_verification_request(&self, item: &baton_store::PendingVerificationRun) {
+        let request_id = item.request.id.as_str();
+        loop {
+            let previous = match self.store.verification_attempts(request_id).await {
+                Ok(previous) => previous,
+                Err(error) => return self.note(&format!("無法讀取驗證要求 {request_id} 的嘗試：{error}")),
             };
+            let excluded = baton_domain::verification_attempt::rate_limited_accounts(&previous);
+            let judge_account = match crate::verification_adapter::judge_accounts(&self.store, &excluded).await {
+                Ok(accounts) => accounts.into_iter().next(),
+                Err(error) => {
+                    self.note(&format!("無法讀取帳號與額度門檻，語意判斷無法使用：{error}"));
+                    None
+                }
+            };
+            let Some(bundle_id) = new_prefixed_id("evb") else {
+                return self.note("無法取得系統亂數，驗證稍後重試");
+            };
+            let judge_profile_id = judge_account.as_ref().map(|a| a.profile_id.clone());
+            let (attempt, previous) =
+                match self.store.begin_verification_attempt(request_id, judge_profile_id, self.ports.clock.now()).await {
+                    Ok(Some(begun)) => begun,
+                    Ok(None) => return,
+                    Err(error) => return self.note(&format!("驗證要求 {request_id} 無法開始新的嘗試：{error}")),
+                };
             let context = crate::verification_adapter::ExecutionContext {
                 ports: &self.ports,
                 data_dir: &self.data_dir,
                 artifacts_root: &self.artifacts_root,
-                judge_account: self.judge_account().await,
+                judge_account,
+                store: &self.store,
+                attempt: &attempt,
+                previous: &previous,
             };
-            let bundle = crate::verification_adapter::execute(context, &item, bundle_id).await;
-            let (request_id, verdict) = (item.request.id.clone(), bundle.verdict);
-            match self.store.record_evidence_bundle(bundle).await {
-                Ok(true) => self.note(&format!("驗證要求 {request_id} 完成：{}", verdict.as_str())),
-                Ok(false) => self.note(&format!("驗證要求 {request_id} 已經完成過，這次的結果不保存")),
-                Err(error) => self.note(&format!("驗證要求 {request_id} 的 Evidence Bundle 沒有保存：{error}")),
+            match crate::verification_adapter::execute(context, item, bundle_id).await {
+                crate::verification_adapter::AttemptOutcome::Completed(bundle) => {
+                    let verdict = bundle.verdict;
+                    match self.store.record_evidence_bundle(*bundle).await {
+                        Ok(true) => self.note(&format!("驗證要求 {request_id} 完成：{}", verdict.as_str())),
+                        Ok(false) => self.note(&format!("驗證要求 {request_id} 已經完成過，這次的結果不保存")),
+                        Err(error) => self.note(&format!("驗證要求 {request_id} 的 Evidence Bundle 沒有保存：{error}")),
+                    }
+                    return;
+                }
+                crate::verification_adapter::AttemptOutcome::HandedOff { reason } => {
+                    let now = self.ports.clock.now();
+                    match self.store.hand_off_verification_attempt(request_id, attempt.attempt, reason, now).await {
+                        Ok(true) => self.note(&format!("驗證要求 {request_id} 的第 {} 次嘗試交接（{reason}）", attempt.attempt)),
+                        // 交接沒有記下：那次嘗試仍是執行中，下一次 tick 把它記為中斷再由新的嘗試接手
+                        Ok(false) => return,
+                        Err(error) => return self.note(&format!("驗證要求 {request_id} 的交接沒有記下：{error}")),
+                    }
+                }
             }
         }
-    }
-
-    /// 語意 judge 使用的帳號（票 46）：第一個可派工的帳號；沒有時為 `None`。
-    async fn judge_account(&self) -> Option<baton_ports::JudgeAccount> {
-        let profiles = match self.store.list_profiles().await {
-            Ok(profiles) => profiles,
-            Err(error) => {
-                self.note(&format!("無法讀取帳號，語意判斷無法使用：{error}"));
-                return None;
-            }
-        };
-        baton_domain::scheduler::usable_profiles(&profiles).first().map(|p| baton_ports::JudgeAccount {
-            profile_id: p.id.clone(),
-            config_dir: PathBuf::from(&p.config_dir),
-        })
     }
 
     // ------------------------------------------------------------ 整合

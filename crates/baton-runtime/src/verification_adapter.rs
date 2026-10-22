@@ -5,19 +5,30 @@
 //! `baton_domain::verification_profile`。順序：
 //! 準備本次專屬的狀態目錄 → build 識別 → doctor → 啟動服務 → 就緒（重試）→ 資料準備 → 旅程 → teardown → 停止服務 →
 //! 移除狀態目錄。前置階段受阻時旅程不執行；旅程中一步沒有通過，之後的步驟不執行；teardown 與清理一定執行，
-//! 清理只碰本次驗證的狀態目錄與它啟動的服務，證據保存在回傳的 Bundle。這裡不寫入控制資料庫。
+//! 清理只碰本次驗證的狀態目錄與它啟動的服務，證據保存在回傳的 Bundle。控制資料庫只寫入這次嘗試的驗證日誌。
 //!
 //! web（票 46）：
 //! - 每條旅程一個隔離的瀏覽器 Session；旅程綁定登入身分時，先執行該身分的登入步驟，再以 `check` 核對實際登入的身分，
 //!   都通過才執行旅程步驟。persona 只作為 judge 的領域背景，不決定以誰登入。
 //! - 秘密：開始時解析 Profile 宣告的參照，值只在交給 Runner 的操作中代入；證據的文字、judge 的輸入都以值遮蔽，
 //!   證據檔案含有值或可能記錄了輸入的秘密時不保存。
-//! - 語意 judge：輸入只有當前畫面與 Profile 中的固定預期；模型限流之後同一次驗證不再呼叫模型。
+//! - 語意 judge：輸入只有當前畫面與 Profile 中的固定預期；模型限流之後同一次嘗試不再呼叫模型。
+//!
+//! 嘗試與交接（票 49，規則在 `baton_domain::verification_attempt`）：
+//! - 每個完成的步驟與判定、build、啟動的服務與瀏覽器 Session（只有識別）、證據檔案、完成的旅程都依序寫入這次嘗試的日誌；
+//!   外部操作（`external` 的旅程步驟）在送出前寫入，寫不進去就不送出。
+//! - 語意 judge 限流而另有帳號可用（額度門檻 open、這個要求中沒有限流過）時，在那個步驟之後停止旅程，照常 teardown、
+//!   停止服務、移除狀態目錄，回傳 `AttemptOutcome::HandedOff`，由 Supervisor 以另一個帳號開始新的嘗試。
+//!   沒有其他帳號時留在原地繼續，之後的語意判斷不呼叫模型（只執行不需模型的斷言）。
+//! - 承接的嘗試先以日誌中的參照停止前一次留下的服務與瀏覽器 Session，無法確認停止時不執行任何操作；
+//!   旅程依 `plan_journey` 沿用、從新的 fixture 整條重跑，或不重送已開始的外部操作。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use baton_domain::artifact::sha256_hex;
+use baton_domain::handoff::GateState;
+use baton_domain::verification_attempt::{self as va, Attempt, AttemptStatus, JournalEntry, JourneyPlan, Takeover};
 use baton_domain::verification_profile::{
     self as vp, Assertion, BrowserAction, CleanupRecord, EvidenceArtifact, EvidenceArtifactKind, EvidenceBundle,
     EvidencePolicy, Interface, Journey, Judgement, Observation, Operation, Phase, ProfileDefinition, ScreenshotPolicy,
@@ -27,7 +38,7 @@ use baton_ports::{
     BrowserCommand, BrowserOutcome, BrowserSession, BrowserSessionRequest, BrowserStep, CommandOutput, CommandRequest,
     HttpOutcome, HttpRequest, JudgeAccount, JudgeOutcome, JudgeRequest, PageSnapshot, Ports, ServiceHandle, ServiceRequest,
 };
-use baton_store::PendingVerificationRun;
+use baton_store::{PendingVerificationRun, Store, StoreResult};
 
 /// 本次驗證專屬的狀態目錄：`<資料目錄>\verification\<驗證要求>`。
 pub fn state_dir(data_dir: &Path, request_id: &str) -> PathBuf {
@@ -42,6 +53,33 @@ pub struct ExecutionContext<'a> {
     pub artifacts_root: &'a Path,
     /// 語意 judge 使用的帳號；沒有可用帳號時為 `None`（需要 judge 的斷言無法判定）。
     pub judge_account: Option<JudgeAccount>,
+    /// 控制資料庫：寫入這次嘗試的日誌、判斷有沒有承接帳號（票 49）。
+    pub store: &'a Store,
+    /// 這次嘗試（已在控制資料庫開始）。
+    pub attempt: &'a Attempt,
+    /// 同一個要求先前的嘗試與日誌（依嘗試順序）。
+    pub previous: &'a [Attempt],
+}
+
+/// 一次嘗試的結果。
+#[derive(Debug)]
+pub enum AttemptOutcome {
+    Completed(Box<EvidenceBundle>),
+    /// 在步驟邊界交接：這次的測試程序已停止，由新的嘗試接手。
+    HandedOff { reason: &'static str },
+}
+
+/// 語意 judge 可以使用的帳號（票 49）：可派工、額度門檻 open（spec D-13；paused 與 draining 都不再接新的模型呼叫），
+/// 而且不在 `excluded`（這個要求中限流過的帳號）。依帳號的建立順序。
+pub async fn judge_accounts(store: &Store, excluded: &[String]) -> StoreResult<Vec<JudgeAccount>> {
+    let profiles = store.list_profiles().await?;
+    let gates = store.quota_gates().await?;
+    Ok(baton_domain::scheduler::usable_profiles(&profiles)
+        .into_iter()
+        .filter(|p| !excluded.contains(&p.id))
+        .filter(|p| gates.get(&p.id).is_none_or(|g| g.state == GateState::Open))
+        .map(|p| JudgeAccount { profile_id: p.id.clone(), config_dir: PathBuf::from(&p.config_dir) })
+        .collect())
 }
 
 /// 目前旅程的瀏覽器 Session。
@@ -71,8 +109,16 @@ struct Execution<'a> {
     /// 剩餘的模型呼叫次數。
     model_budget: u32,
     judge_account: Option<JudgeAccount>,
-    /// 這次驗證中模型已經限流：之後的語意判斷不再呼叫模型。
+    /// 這次嘗試中模型已經限流：之後的語意判斷不再呼叫模型。
     judge_rate_limited: bool,
+    store: &'a Store,
+    attempt: u32,
+    /// 這個要求中限流過的帳號（不能承接）。
+    excluded: Vec<String>,
+    /// 要交接（原因）：目前的步驟之後停止旅程。
+    handoff: Option<&'static str>,
+    /// 這次嘗試寫入的日誌（Bundle 的嘗試摘要使用）。
+    journal: Vec<JournalEntry>,
     /// 已解析的秘密 (識別, 值)；只在交給 Runner 的操作中代入。
     secrets: Vec<(String, String)>,
     /// 解析不到的秘密識別。
@@ -230,6 +276,7 @@ impl Execution<'_> {
             } else if self.model_budget == 0 {
                 Judgement::BudgetExhausted
             } else if let Some(account) = self.judge_account.clone() {
+                let profile_id = account.profile_id.clone();
                 self.model_budget -= 1;
                 let text: String = redact(&page.text, &self.policy).chars().take(vp::JUDGE_PAGE_TEXT_MAX_CHARS).collect();
                 let request = JudgeRequest {
@@ -244,6 +291,7 @@ impl Execution<'_> {
                     Ok(JudgeOutcome::Decided { satisfied, rationale }) => Judgement::Decided { satisfied, rationale },
                     Ok(JudgeOutcome::RateLimited { .. }) => {
                         self.judge_rate_limited = true;
+                        self.hand_off_if_possible(profile_id).await;
                         Judgement::RateLimited
                     }
                     Ok(JudgeOutcome::Unavailable { reason }) => Judgement::Unavailable { reason },
@@ -266,11 +314,18 @@ impl Execution<'_> {
     async fn run_step(&mut self, phase: Phase, journey: Option<&str>, step: &Step) -> Verdict {
         let operation = self.bind(&step.operation);
         if operation.secret_keys().iter().any(|k| self.unresolved.contains(k)) {
-            return self.skip(phase, journey, step, Verdict::EnvironmentBlocked, "secret_unavailable");
+            return self.skip(phase, journey, step, Verdict::EnvironmentBlocked, "secret_unavailable").await;
         }
         let automated = !matches!(operation, Operation::Manual { .. });
         if automated && self.budget == 0 {
-            return self.skip(phase, journey, step, Verdict::BudgetExhausted, "operation_budget_exhausted");
+            return self.skip(phase, journey, step, Verdict::BudgetExhausted, "operation_budget_exhausted").await;
+        }
+        // 外部操作：送出前先寫入日誌；寫不進去就不送出（之後無法判斷送過沒有）
+        if let (true, Some(key)) = (step.external, journey) {
+            let entry = JournalEntry::ExternalStarted { journey: key.to_string(), step: step.key.clone() };
+            if !self.record(entry).await {
+                return self.skip(phase, journey, step, Verdict::Inconclusive, va::REASON_JOURNAL_UNAVAILABLE).await;
+            }
         }
         if automated {
             self.budget -= 1;
@@ -283,7 +338,7 @@ impl Execution<'_> {
                 self.store_artifact(EvidenceArtifactKind::Screenshot, journey, Some(&step.key), name, bytes, shows_secret).await;
             }
         }
-        self.push(record)
+        self.push(record).await
     }
 
     /// 就緒條件：最多嘗試 `attempts` 次，兩次之間等待 `interval_ms`；只保存最後一次的觀察與總次數。
@@ -292,28 +347,97 @@ impl Execution<'_> {
         let mut attempts = 0;
         loop {
             if self.budget == 0 {
-                return self.skip(Phase::Readiness, None, &readiness.step, Verdict::BudgetExhausted, "operation_budget_exhausted");
+                return self
+                    .skip(Phase::Readiness, None, &readiness.step, Verdict::BudgetExhausted, "operation_budget_exhausted")
+                    .await;
             }
             self.budget -= 1;
             attempts += 1;
             let (observation, _) = self.observe(&operation, &readiness.step.assertions).await;
             let record = vp::judge_step(Phase::Readiness, None, &readiness.step, &operation, observation, attempts, &self.policy);
             if record.verdict == Verdict::Passed || attempts >= readiness.attempts {
-                return self.push(record);
+                return self.push(record).await;
             }
             self.ports.verification_driver.pause(Duration::from_millis(readiness.interval_ms)).await;
         }
     }
 
-    fn skip(&mut self, phase: Phase, journey: Option<&str>, step: &Step, verdict: Verdict, reason: &str) -> Verdict {
+    async fn skip(&mut self, phase: Phase, journey: Option<&str>, step: &Step, verdict: Verdict, reason: &str) -> Verdict {
         let record = vp::not_run(phase, journey, step, verdict, reason, &self.policy);
-        self.push(record)
+        self.push(record).await
     }
 
-    fn push(&mut self, record: StepRecord) -> Verdict {
+    /// 保存一個步驟的紀錄，並寫入這次嘗試的日誌（已完成的操作與判定）。
+    async fn push(&mut self, record: StepRecord) -> Verdict {
         let verdict = record.verdict;
+        self.record(JournalEntry::StepCompleted { record: record.clone() }).await;
         self.steps.push(record);
         verdict
+    }
+
+    /// 寫入這次嘗試的日誌；寫不進去（控制資料庫故障，或這次嘗試已不是執行中）時記下問題並回傳 false。
+    async fn record(&mut self, entry: JournalEntry) -> bool {
+        let now = self.ports.clock.now();
+        match self.store.append_verification_journal(self.run_id, self.attempt, entry.clone(), now).await {
+            Ok(true) => {
+                self.journal.push(entry);
+                true
+            }
+            Ok(false) => {
+                self.problem("這次嘗試已不是執行中，驗證日誌沒有寫入".into());
+                false
+            }
+            Err(error) => {
+                self.problem(format!("驗證日誌沒有寫入：{error}"));
+                false
+            }
+        }
+    }
+
+    fn problem(&mut self, message: String) {
+        if !self.problems.contains(&message) {
+            self.problems.push(message);
+        }
+    }
+
+    /// 模型限流（票 49）：另有帳號可以接手時，這個步驟之後交接；沒有時留在原地，之後的語意判斷不呼叫模型。
+    async fn hand_off_if_possible(&mut self, limited: String) {
+        self.excluded.push(limited);
+        match judge_accounts(self.store, &self.excluded).await {
+            Ok(accounts) if !accounts.is_empty() => self.handoff = Some(va::REASON_JUDGE_RATE_LIMITED),
+            Ok(_) => {}
+            Err(error) => self.problem(format!("無法判斷有沒有承接帳號，不交接：{error}")),
+        }
+    }
+
+    /// 承接（票 49）：以先前嘗試日誌中的參照停止留下的服務與瀏覽器 Session，記下停止了什麼、哪些無法確認。
+    async fn take_over(&mut self, takeover: &mut Takeover, previous: &[Attempt]) {
+        let left = va::leftovers(previous);
+        for handle in left.services {
+            match self.ports.verification_driver.stop_service(&ServiceHandle(handle.clone())).await {
+                Ok(()) => {
+                    self.record(JournalEntry::ServiceStopped { handle: handle.clone() }).await;
+                    takeover.stopped_services.push(handle);
+                }
+                Err(error) => {
+                    let message = format!("無法確認服務「{handle}」已停止：{error}");
+                    takeover.problems.push(vp::sanitize(&message, &self.policy));
+                }
+            }
+        }
+        for session in left.sessions {
+            // 未完成旅程的 trace 與錄影不保存：那個案例會重跑，或標為未完成
+            match self.ports.browser_driver.close(&BrowserSession(session.clone())).await {
+                Ok(_) => {
+                    self.record(JournalEntry::BrowserClosed { session: session.clone() }).await;
+                    takeover.closed_sessions.push(session);
+                }
+                Err(error) => {
+                    let message = format!("無法確認瀏覽器 Session「{session}」已關閉：{error}");
+                    takeover.problems.push(vp::sanitize(&message, &self.policy));
+                }
+            }
+        }
     }
 
     /// 前置階段的步驟：受阻之後不再執行。
@@ -336,8 +460,12 @@ impl Execution<'_> {
         on_failure: &'static str,
     ) -> Option<&'static str> {
         for step in steps {
+            // 要交接：目前的旅程停在這裡，由承接的嘗試從新的 fixture 整條重跑
+            if self.handoff.is_some() {
+                break;
+            }
             if let Some(reason) = stopped {
-                self.skip(phase, Some(journey), step, Verdict::Inconclusive, reason);
+                self.skip(phase, Some(journey), step, Verdict::Inconclusive, reason).await;
             } else if self.run_step(phase, Some(journey), step).await != Verdict::Passed {
                 stopped = Some(on_failure);
             }
@@ -356,8 +484,10 @@ impl Execution<'_> {
             if p.description.trim().is_empty() { p.title.clone() } else { format!("{}：{}", p.title, p.description) }
         });
         let mut stopped = None;
+        let mut opened = true;
         if definition.interface == Interface::Web && !self.open_browser(key).await {
             stopped = Some("blocked_by_prerequisite");
+            opened = false;
         }
         // 登入身分：先登入，再核對實際登入的是誰；persona 不參與
         if let Some(identity) = journey.identity.as_deref().and_then(|i| definition.identity(i)) {
@@ -368,6 +498,10 @@ impl Execution<'_> {
         self.run_steps(Phase::Journey, key, &journey.steps, stopped, "not_executed").await;
         self.close_browser().await;
         self.persona = None;
+        // 旅程完整結束：最近確認的邊界，承接的嘗試可以沿用（瀏覽器沒有開啟的旅程沒有真的執行，不算）
+        if self.handoff.is_none() && opened {
+            self.record(JournalEntry::JourneyCompleted { journey: key.to_string() }).await;
+        }
     }
 
     /// 為旅程開啟隔離的瀏覽器 Session；無法開啟時記為環境阻礙並回傳 false。
@@ -380,6 +514,7 @@ impl Execution<'_> {
         };
         match self.ports.browser_driver.open(request).await {
             Ok(session) => {
+                self.record(JournalEntry::BrowserOpened { journey: journey.to_string(), session: session.0.clone() }).await;
                 let mask = self.policy.mask.clone();
                 let journey = journey.to_string();
                 self.browser = Some(Browser { session, journey, secret_entered: false, secret_shown: false, mask });
@@ -389,7 +524,7 @@ impl Execution<'_> {
                 let mut record =
                     system_record(Phase::Start, "browser", "啟動瀏覽器", "browser_unavailable", error.to_string(), &self.policy);
                 record.journey = Some(journey.to_string());
-                self.steps.push(record);
+                self.push(record).await;
                 false
             }
         }
@@ -400,6 +535,7 @@ impl Execution<'_> {
         let Some(browser) = self.browser.take() else { return };
         match self.ports.browser_driver.close(&browser.session).await {
             Ok(files) => {
+                self.record(JournalEntry::BrowserClosed { session: browser.session.0.clone() }).await;
                 // 關閉後 Session 已不存在，保存時仍需知道它輸入過秘密
                 let secret_shown = browser.secret_shown;
                 self.browser = Some(Browser { mask: Vec::new(), ..browser });
@@ -439,8 +575,7 @@ impl Execution<'_> {
         };
         if let Some(reason) = vp::withhold_reason(kind, &bytes, &self.policy.redact, secret_entered, secret_shown) {
             artifact.withheld = Some(reason.into());
-            self.artifacts.push(artifact);
-            return;
+            return self.keep_artifact(artifact).await;
         }
         let sha256 = sha256_hex(&bytes);
         let extension = match kind {
@@ -460,6 +595,12 @@ impl Execution<'_> {
                 self.problems.push(format!("證據檔案「{}」無法保存：{error}", artifact.name));
             }
         }
+        self.keep_artifact(artifact).await;
+    }
+
+    /// 記下一個證據檔案（含沒有保存的原因），並寫入日誌：沿用旅程時連同它的證據一起沿用。
+    async fn keep_artifact(&mut self, artifact: EvidenceArtifact) {
+        self.record(JournalEntry::ArtifactStored { artifact: artifact.clone() }).await;
         self.artifacts.push(artifact);
     }
 
@@ -511,10 +652,11 @@ fn system_record(phase: Phase, key: &str, title: &str, reason_code: &str, output
     }
 }
 
-/// 依 Profile 執行一個驗證要求，回傳 Evidence Bundle（`bundle_id` 由呼叫端產生）。
-pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRun, bundle_id: String) -> EvidenceBundle {
+/// 依 Profile 執行驗證要求的一次嘗試（`bundle_id` 由呼叫端產生）：完成時回傳 Evidence Bundle；
+/// 語意 judge 限流而另有帳號可以接手時，停止這次的測試程序後回傳交接（票 49）。
+pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRun, bundle_id: String) -> AttemptOutcome {
     let ports = context.ports;
-    let started_at = ports.clock.now();
+    let started_at = context.previous.first().map_or_else(|| ports.clock.now(), |a| a.started_at);
     let definition = &item.profile.definition;
     let request = &item.request;
     let state = state_dir(context.data_dir, &request.id);
@@ -548,6 +690,11 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         model_budget: definition.budget.max_model_calls,
         judge_account: context.judge_account,
         judge_rate_limited: false,
+        store: context.store,
+        attempt: context.attempt.attempt,
+        excluded: va::rate_limited_accounts(context.previous),
+        handoff: None,
+        journal: Vec::new(),
         secrets,
         unresolved,
         browser: None,
@@ -558,10 +705,22 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         blocked: false,
     };
 
+    // 承接：先以日誌中的安全參照停止前一次留下的測試程序；無法確認停止時不執行任何操作（舊程序可能仍在回應）
+    let mut takeover = context.previous.last().map(|last| Takeover { from_attempt: last.attempt, ..Takeover::default() });
+    if let Some(takeover) = takeover.as_mut() {
+        run.take_over(takeover, context.previous).await;
+        if !takeover.problems.is_empty() {
+            run.blocked = true;
+            let output = takeover.problems.join("；");
+            let reason = va::REASON_PREVIOUS_SESSION_UNCONFIRMED;
+            run.push(system_record(Phase::Start, "takeover", "停止前一次嘗試的測試程序", reason, output, &run.policy)).await;
+        }
+    }
+
     if let Err(error) = driver.prepare_state_dir(&state).await {
         run.blocked = true;
         let record = system_record(Phase::Start, "state-dir", "準備狀態目錄", "state_dir_unavailable", error.to_string(), &run.policy);
-        run.steps.push(record);
+        run.push(record).await;
     }
     let candidate_revision = match driver.revision(&run.subject_dir).await {
         Ok(revision) => revision,
@@ -585,6 +744,8 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
             build = record.output.lines().map(str::trim).filter(|l| !l.is_empty()).last().map(str::to_string);
         }
     }
+    let build = build.map(|b| vp::sanitize(&b, &run.policy));
+    run.record(JournalEntry::Build { candidate_revision: candidate_revision.clone(), build: build.clone() }).await;
     for step in &definition.doctor {
         run.prerequisite(Phase::Doctor, step).await;
     }
@@ -596,11 +757,14 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
             working_dir: run.subject_dir.clone(),
         };
         match driver.start_service(request).await {
-            Ok(handle) => service = Some(handle),
+            Ok(handle) => {
+                run.record(JournalEntry::ServiceStarted { handle: handle.0.clone() }).await;
+                service = Some(handle);
+            }
             Err(error) => {
                 run.blocked = true;
                 let record = system_record(Phase::Start, "start", "啟動服務", "service_not_started", error.to_string(), &run.policy);
-                run.steps.push(record);
+                run.push(record).await;
             }
         }
     }
@@ -612,19 +776,68 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
     for step in &definition.setup {
         run.prerequisite(Phase::Setup, step).await;
     }
+
+    // 旅程：承接時依先前的日誌沿用已完成的、不重送已開始的外部操作，其餘從新的 fixture 整條執行
     let journeys: Vec<&Journey> = definition.journeys.iter().filter(|j| request.journeys.contains(&j.key)).collect();
-    for journey in &journeys {
-        run.journey(journey).await;
+    let plans: Vec<JourneyPlan> = journeys
+        .iter()
+        .map(|j| match context.previous {
+            [] => JourneyPlan::Run,
+            previous => va::plan_journey(j, previous, candidate_revision.as_deref(), build.as_deref()),
+        })
+        .collect();
+    if let Some(takeover) = takeover.as_mut() {
+        for (journey, plan) in journeys.iter().zip(&plans) {
+            match plan {
+                JourneyPlan::Run => {}
+                JourneyPlan::Reuse { .. } => takeover.reused_journeys.push(journey.key.clone()),
+                JourneyPlan::NotResent { attempt, step, reason, .. } => takeover.not_resent.push(va::NotResent {
+                    journey: journey.key.clone(),
+                    step: step.clone(),
+                    reason: reason.to_string(),
+                    attempt: *attempt,
+                }),
+            }
+        }
+        run.record(JournalEntry::TakenOver { takeover: takeover.clone() }).await;
+    }
+    // (旅程, 結果採用自哪一次嘗試) 與不重跑的旅程
+    let mut sources: Vec<(String, u32)> = Vec::new();
+    let mut not_resent: Vec<(String, &'static str)> = Vec::new();
+    for (journey, plan) in journeys.iter().zip(plans) {
+        if run.handoff.is_some() {
+            break;
+        }
+        match plan {
+            JourneyPlan::Run => {
+                run.journey(journey).await;
+                sources.push((journey.key.clone(), run.attempt));
+            }
+            JourneyPlan::Reuse { attempt, steps, artifacts } => {
+                run.steps.extend(steps);
+                run.artifacts.extend(artifacts);
+                sources.push((journey.key.clone(), attempt));
+            }
+            JourneyPlan::NotResent { attempt, step, reason, steps, artifacts } => {
+                run.steps.extend(va::not_resent_records(journey, &steps, &step, reason, &run.policy));
+                run.artifacts.extend(artifacts);
+                sources.push((journey.key.clone(), attempt));
+                not_resent.push((journey.key.clone(), reason));
+            }
+        }
     }
 
-    // 清理：一定執行，只碰本次驗證的狀態
+    // 清理：一定執行（交接前也是，先停止舊的測試程序），只碰本次驗證的狀態
     for (index, operation) in definition.teardown.iter().enumerate() {
         run.teardown(index, operation).await;
     }
     let service_stopped = match &service {
         None => None,
         Some(handle) => match driver.stop_service(handle).await {
-            Ok(()) => Some(true),
+            Ok(()) => {
+                run.record(JournalEntry::ServiceStopped { handle: handle.0.clone() }).await;
+                Some(true)
+            }
             Err(error) => {
                 run.problems.push(format!("無法停止服務：{error}"));
                 Some(false)
@@ -638,12 +851,29 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
             false
         }
     };
+    if let Some(reason) = run.handoff {
+        return AttemptOutcome::HandedOff { reason };
+    }
 
-    let results: Vec<_> = journeys.iter().map(|j| vp::judge_journey(j, &run.steps)).collect();
+    let results: Vec<_> = journeys
+        .iter()
+        .map(|j| match not_resent.iter().find(|(key, _)| *key == j.key) {
+            Some((_, reason)) => va::not_resent_result(j, &run.steps, reason),
+            None => vp::judge_journey(j, &run.steps),
+        })
+        .collect();
     let (verdict, reason_code) = vp::aggregate(&run.steps, &results);
     let planned: Vec<String> = journeys.iter().map(|j| j.key.clone()).collect();
     let problems: Vec<String> = run.problems.iter().map(|p| vp::sanitize(p, &run.policy)).collect();
-    EvidenceBundle {
+    let finished_at = ports.clock.now();
+    let current = Attempt {
+        status: AttemptStatus::Completed,
+        ended_at: Some(finished_at),
+        journal: std::mem::take(&mut run.journal),
+        ..context.attempt.clone()
+    };
+    let attempts: Vec<Attempt> = context.previous.iter().cloned().chain(std::iter::once(current)).collect();
+    AttemptOutcome::Completed(Box::new(EvidenceBundle {
         id: bundle_id,
         workspace_id: request.workspace_id.clone(),
         request_id: request.id.clone(),
@@ -654,7 +884,7 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         profile_version_id: item.profile.id.clone(),
         profile_version: item.profile.version,
         candidate_revision,
-        build: build.map(|b| vp::sanitize(&b, &run.policy)),
+        build,
         subject_dir: item.subject_dir.clone(),
         covered_features: vp::covered_features(definition, &planned),
         uncovered: vp::uncovered_by_run(definition, &planned),
@@ -664,8 +894,8 @@ pub async fn execute(context: ExecutionContext<'_>, item: &PendingVerificationRu
         reason_code,
         cleanup: CleanupRecord { state_dir: run.state_dir, state_dir_removed, service_stopped, problems },
         artifacts: run.artifacts,
-        attempts: Vec::new(),
+        attempts: va::summarize(&attempts, &sources),
         started_at,
-        finished_at: ports.clock.now(),
-    }
+        finished_at,
+    }))
 }

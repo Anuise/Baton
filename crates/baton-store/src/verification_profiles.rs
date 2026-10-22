@@ -368,7 +368,7 @@ impl Store {
         .await
     }
 
-    /// 保存 Evidence Bundle 並把要求標為完成；要求已經完成時不寫入，回傳 `false`。
+    /// 保存 Evidence Bundle 並把要求與執行中的嘗試（票 49）標為完成；要求已經完成時不寫入，回傳 `false`。
     pub async fn record_evidence_bundle(&self, bundle: EvidenceBundle) -> StoreResult<bool> {
         self.write(move |tx| {
             let updated = tx.execute(
@@ -379,6 +379,7 @@ impl Store {
             if updated == 0 {
                 return Ok(false);
             }
+            super::verification_attempts::complete_running_attempt(tx, &bundle.request_id, bundle.finished_at)?;
             tx.execute(
                 "INSERT INTO evidence_bundle (id, workspace_id, request_id, task_id, profile_version_id, verdict, content, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",

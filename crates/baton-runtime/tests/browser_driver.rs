@@ -5,7 +5,9 @@
 use std::time::Duration;
 
 use axum::response::Html;
-use baton_ports::{BrowserCommand, BrowserDriver, BrowserOutcome, BrowserSessionRequest, BrowserStep, PageSnapshot, PortError};
+use baton_ports::{
+    BrowserCommand, BrowserDriver, BrowserOutcome, BrowserSession, BrowserSessionRequest, BrowserStep, PageSnapshot, PortError,
+};
 use baton_runtime::browser_driver::LocalBrowserDriver;
 
 const PASSWORD: &str = "s3cr3t-Pass!";
@@ -199,4 +201,12 @@ async fn opening_without_playwright_in_the_project_explains_what_to_install() {
             driver.close(&session).await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn a_session_opened_by_another_runtime_cannot_be_confirmed_closed() {
+    // 承接者（票 49）以前一個 Runtime 留下的識別關閉 Session：不是這個 Runtime 開啟的，不能回報已關閉
+    let driver = LocalBrowserDriver::default();
+    let error = driver.close(&BrowserSession("browser-1-1-1".into())).await.unwrap_err();
+    assert!(error.to_string().contains("無法確認已關閉"), "{error}");
 }

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use baton_ports::{CommandOutput, CommandRequest, HttpOutcome, HttpRequest, ServiceRequest, VerificationDriver};
+use baton_ports::{CommandOutput, CommandRequest, HttpOutcome, HttpRequest, ServiceHandle, ServiceRequest, VerificationDriver};
 use baton_runtime::verification_driver::LocalVerificationDriver;
 
 fn http(url: String, timeout: Duration) -> HttpRequest {
@@ -103,4 +103,12 @@ async fn the_state_dir_is_recreated_empty_and_removal_of_a_missing_dir_is_not_an
     driver.remove_state_dir(&state).await.unwrap();
     assert!(!state.exists());
     driver.remove_state_dir(&state).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_service_started_by_another_runtime_cannot_be_confirmed_stopped() {
+    // 承接者（票 49）以前一個 Runtime 留下的識別停止服務：不是這個 Runtime 啟動的，不能回報已停止
+    let driver = LocalVerificationDriver::default();
+    let error = driver.stop_service(&ServiceHandle("svc-1-1-1".into())).await.unwrap_err();
+    assert!(error.to_string().contains("無法確認已停止"), "{error}");
 }

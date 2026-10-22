@@ -1436,6 +1436,8 @@ pub struct FakeVerificationDriver {
     next_service: AtomicU32,
     operations: Mutex<Vec<String>>,
     http_requests: Mutex<Vec<HttpRequest>>,
+    hangs: Mutex<HashSet<(String, String)>>,
+    stop_failures: Mutex<HashMap<String, String>>,
 }
 
 impl FakeVerificationDriver {
@@ -1450,7 +1452,20 @@ impl FakeVerificationDriver {
             next_service: AtomicU32::new(1),
             operations: Mutex::default(),
             http_requests: Mutex::default(),
+            hangs: Mutex::default(),
+            stop_failures: Mutex::default(),
         }
+    }
+
+    /// 之後停止這個服務都失敗（服務仍在執行），例如它是前一個 Runtime 啟動、無法確認的程序（票 49）。
+    pub fn fail_stop(&self, handle: &str, reason: &str) {
+        lock(&self.stop_failures).insert(handle.to_string(), reason.to_string());
+    }
+
+    /// 下一次送往這個端點的請求送出後永遠不回來（已記錄為送出）；測試以 `timeout` 丟棄該次處理再重啟，
+    /// 即等同 Runtime 在請求送出之後、拿到結果之前崩潰（票 49）。
+    pub fn hang_next_http(&self, method: &str, url: &str) {
+        lock(&self.hangs).insert((method.to_string(), url.to_string()));
     }
 
     fn command_key(program: &str, args: &[&str]) -> String {
@@ -1536,6 +1551,9 @@ impl VerificationDriver for FakeVerificationDriver {
         lock(&self.operations).push(format!("http {} {}", request.method, request.url));
         let key = (request.method.clone(), request.url.clone());
         lock(&self.http_requests).push(request);
+        if lock(&self.hangs).remove(&key) {
+            std::future::pending::<()>().await;
+        }
         let outcome = lock(&self.http).get_mut(&key).and_then(Self::next);
         Ok(outcome.unwrap_or(HttpOutcome::Unreachable { reason: "連線被拒（沒有服務在這個位址）".into() }))
     }
@@ -1553,6 +1571,9 @@ impl VerificationDriver for FakeVerificationDriver {
 
     async fn stop_service(&self, handle: &ServiceHandle) -> PortResult<()> {
         lock(&self.operations).push(format!("stop {}", handle.0));
+        if let Some(reason) = lock(&self.stop_failures).get(&handle.0).cloned() {
+            return Err(PortError::Failed(reason));
+        }
         lock(&self.running).remove(&handle.0);
         Ok(())
     }
