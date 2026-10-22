@@ -1158,6 +1158,24 @@ impl SecretProtector for FakeSecretProtector {
     }
 }
 
+/// 監護程序是否還在（票 32）：Harness 的程序內監護啟動時設為 true，被殺掉時設為 false。
+#[derive(Debug, Default)]
+pub struct FakeGuardianProbe {
+    running: std::sync::atomic::AtomicBool,
+}
+
+impl FakeGuardianProbe {
+    pub fn set_running(&self, running: bool) {
+        self.running.store(running, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl GuardianProbe for FakeGuardianProbe {
+    fn guardian_running(&self) -> bool {
+        self.running.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 pub struct FakePorts {
     pub clock: Arc<FakeClock>,
     pub process_control: Arc<FakeProcessControl>,
@@ -1169,6 +1187,7 @@ pub struct FakePorts {
     pub claude_env: Arc<FakeClaudeEnvironment>,
     pub command_runner: Arc<FakeCommandRunner>,
     pub user_settings: Arc<FakeUserSettings>,
+    pub guardian_probe: Arc<FakeGuardianProbe>,
 }
 
 impl FakePorts {
@@ -1184,6 +1203,7 @@ impl FakePorts {
             claude_env: Arc::default(),
             command_runner: Arc::default(),
             user_settings: Arc::default(),
+            guardian_probe: Arc::default(),
         }
     }
 
@@ -1200,6 +1220,7 @@ impl FakePorts {
             claude_env: self.claude_env.clone(),
             command_runner: self.command_runner.clone(),
             user_settings: self.user_settings.clone(),
+            guardian_probe: self.guardian_probe.clone(),
         }
     }
 }

@@ -306,6 +306,7 @@ dependencies = [
  "baton-client",
  "baton-credential",
  "baton-domain",
+ "baton-guardian",
  "baton-ports",
  "baton-store",
  "futures",

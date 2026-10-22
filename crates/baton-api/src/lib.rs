@@ -43,11 +43,14 @@ use baton_domain::agent::{
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::external_operation::{TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT};
+use baton_domain::guardian::GuardianStatus;
 use baton_domain::storage_health::StorageHealth;
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
-use baton_ports::{ClaudeEnvironment, Clock, PlatformInfo, QuotaObserver, UserSettingsSource, WorkspaceFs};
+use baton_ports::{
+    ClaudeEnvironment, Clock, GuardianProbe, PlatformInfo, QuotaObserver, UserSettingsSource, WorkspaceFs,
+};
 use baton_store::Store;
 use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -137,6 +140,9 @@ pub struct HealthResponse {
     /// 控制資料庫是否可寫；磁碟滿或被鎖住時新派工停止，附原因與處理方式（票 26）。舊版 Runtime 沒有這個欄位。
     #[serde(default)]
     pub storage: StorageHealth,
+    /// 監護程序的狀態（票 32）：不在時工作照常，只是沒有自動重啟保護。舊版 Runtime 沒有這個欄位。
+    #[serde(default)]
+    pub guardian: GuardianStatus,
 }
 
 /// 請求被拒絕時的回應內容；Runtime 與用戶端共用。`error` 是穩定的機器可讀代碼。
@@ -175,6 +181,8 @@ pub struct ApiState {
     pub quota_observer: Arc<dyn QuotaObserver>,
     /// 使用者平常使用的 Claude Code 設定（唯讀；共同設定匯入的來源）。
     pub user_settings: Arc<dyn UserSettingsSource>,
+    /// 監護程序是否還在（票 32）：健康查詢回報自動重啟保護是否降級。
+    pub guardian_probe: Arc<dyn GuardianProbe>,
     /// Run 設定快照；與 Supervisor 共用同一個實例，同一個 Run 的快照請求才會依序處理。
     pub run_settings: Arc<RunSettings>,
     pub log: LogSink,
@@ -302,6 +310,7 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<HealthResponse> {
         started_at: state.started_at,
         pid: std::process::id(),
         storage: state.store.storage_health(),
+        guardian: GuardianStatus::of(state.guardian_probe.guardian_running()),
     })
 }
 

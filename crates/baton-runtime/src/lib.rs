@@ -51,10 +51,13 @@ pub enum RuntimeError {
     CredentialFile(#[from] baton_credential::CredentialFileError),
     #[error("無法開啟日誌：{0}")]
     Log(std::io::Error),
+    /// 監護拉起的 Runtime 發現停止意圖仍生效（完全退出優先，票 32）：不提供服務、直接結束，等使用者手動開 App。
+    #[error("停止意圖仍生效（完全退出），監護啟動的 Runtime 不提供服務")]
+    SuppressedByStopIntent,
 }
 
 /// 啟動 Runtime 的選項；預設值就是正式執行的行為。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RuntimeOptions {
     /// 是否啟動 Supervisor 的背景迴圈。測試 harness 關閉它，改由測試在想要的時刻呼叫 `Supervisor::tick`，
     /// 才能用 fake Clock 決定性地重現任何時序。
@@ -70,6 +73,9 @@ pub struct RuntimeOptions {
     pub exit_linger: Option<Duration>,
     /// 是否嘗試使用全文檢索（spec D-26）。關閉時視同 FTS5 不可用：知識搜尋退回 LIKE 並標示降級（測試降級情境用）。
     pub full_text_search: bool,
+    /// 監護拉起這個 Runtime 時交付的嘗試識別（票 32；環境變數 `BATON_GUARDIAN_ATTEMPT`）。
+    /// 有值時這個 Runtime 接續監護已計次的那次嘗試；停止意圖仍生效則不提供服務。使用者或 App 啟動時為 `None`。
+    pub guardian_attempt: Option<String>,
 }
 
 impl Default for RuntimeOptions {
@@ -81,6 +87,7 @@ impl Default for RuntimeOptions {
             exit_timing: ExitTiming::default(),
             exit_linger: Some(DEFAULT_EXIT_LINGER),
             full_text_search: true,
+            guardian_attempt: None,
         }
     }
 }
@@ -130,7 +137,16 @@ impl Runtime {
         }
 
         let reopen_from = reconcile_stop_intent(&store, &config.data_dir, options.exit_timing, &ports, &log).await?;
-        note_crash_recovery(&store, previous_unclean, &ports, &log).await?;
+        // 監護日誌先匯入，才做崩潰判定與任何恢復副作用（spec D-24）
+        import_guardian_journal(&store, &config.data_dir, &ports, &log).await?;
+        if options.guardian_attempt.is_some() && reopen_from.is_some() {
+            (log)("監護：停止意圖仍生效，完全退出優先；監護啟動的 Runtime 不提供服務，等使用者手動開 App");
+            write_recovery_mirror(&store, &config.data_dir, &ports, &log).await;
+            store.mark_clean_shutdown(ports.clock.now()).await?;
+            return Err(RuntimeError::SuppressedByStopIntent);
+        }
+        note_crash_recovery(&store, previous_unclean, options.guardian_attempt.clone(), &ports, &log).await?;
+        write_recovery_mirror(&store, &config.data_dir, &ports, &log).await;
 
         let (stop_tx, stop_rx) = watch::channel(false);
         let stop_tx = Arc::new(stop_tx);
@@ -189,6 +205,7 @@ impl Runtime {
             claude_env: ports.claude_env.clone(),
             quota_observer: ports.quota_observer.clone(),
             user_settings: ports.user_settings.clone(),
+            guardian_probe: ports.guardian_probe.clone(),
             run_settings,
             log,
             supervisor_wake,
@@ -256,11 +273,53 @@ async fn reconcile_stop_intent(
     Ok(state.stop_intent_active().then_some(state.version))
 }
 
+/// 匯入監護日誌（票 32；spec D-24）：已匯入的嘗試識別略過，其餘在同一個交易中計入恢復事件（或記下撤回、不計的原因）。
+/// 讀不到日誌時只記日誌：監護寫下的嘗試留到下次啟動再匯入，Runtime 照常以自己的判定恢復。
+async fn import_guardian_journal(store: &Store, data_dir: &std::path::Path, ports: &Ports, log: &LogSink) -> Result<(), RuntimeError> {
+    let dir = data_dir.to_path_buf();
+    let journal = match tokio::task::spawn_blocking(move || baton_guardian::files::read_journal(&dir)).await {
+        Ok(Ok(journal)) => journal,
+        Ok(Err(error)) => {
+            (log)(&format!("監護：無法讀取監護日誌，這次不匯入：{error}"));
+            return Ok(());
+        }
+        Err(error) => {
+            (log)(&format!("監護：無法讀取監護日誌，這次不匯入：{error}"));
+            return Ok(());
+        }
+    };
+    for (attempt_id, disposition) in store.import_guardian_journal(journal, ports.clock.now()).await? {
+        (log)(&format!("監護：匯入嘗試 {attempt_id}（{}）", disposition.as_str()));
+    }
+    Ok(())
+}
+
+/// 把恢復狀態鏡像給監護（票 32）；失敗只記日誌（監護看到的是較舊的狀態，計次仍以控制資料庫為準）。
+pub(crate) async fn write_recovery_mirror(store: &Store, data_dir: &std::path::Path, ports: &Ports, log: &LogSink) {
+    let mirror = match store.recovery_mirror(ports.clock.now()).await {
+        Ok(mirror) => mirror,
+        Err(error) => return (log)(&format!("監護：無法讀取恢復狀態，沒有更新鏡像：{error}")),
+    };
+    let dir = data_dir.to_path_buf();
+    match tokio::task::spawn_blocking(move || baton_guardian::files::write_recovery_mirror(&dir, &mirror)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => (log)(&format!("監護：無法寫入恢復狀態鏡像：{error}")),
+        Err(error) => (log)(&format!("監護：無法寫入恢復狀態鏡像：{error}")),
+    }
+}
+
 /// 崩潰恢復的啟動判定（票 31）：停止意圖已核對之後、任何程序副作用之前。上一次沒有正常結束、也沒有停止意圖時，
 /// 建立或沿用恢復事件；上一次留下的進行中嘗試記為失敗。之後由 Supervisor 在退避期滿時做下一次嘗試。
-async fn note_crash_recovery(store: &Store, previous_unclean: bool, ports: &Ports, log: &LogSink) -> Result<(), RuntimeError> {
+/// 監護拉起的 Runtime（`own_attempt`）接續監護已計次的那次嘗試，不把它記為失敗（票 32）。
+async fn note_crash_recovery(
+    store: &Store,
+    previous_unclean: bool,
+    own_attempt: Option<String>,
+    ports: &Ports,
+    log: &LogSink,
+) -> Result<(), RuntimeError> {
     let event_id = supervisor::new_prefixed_id("rec").ok_or_else(|| RuntimeError::Entropy("無法產生恢復事件識別".into()))?;
-    let event = store.note_runtime_start(previous_unclean, event_id, ports.clock.now()).await?;
+    let event = store.note_runtime_start_owning(previous_unclean, own_attempt, event_id, ports.clock.now()).await?;
     match event.filter(|event| event.is_open()) {
         Some(event) if event.status == RecoveryStatus::Exhausted => (log)(&format!(
             "崩潰恢復：事件 {} 的恢復額度已用盡，不自動恢復也不派工，等使用者從恢復介面重新嘗試",
