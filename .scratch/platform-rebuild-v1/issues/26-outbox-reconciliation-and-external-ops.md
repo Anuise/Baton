@@ -1,6 +1,6 @@
 # 26: Outbox 交付、程序核對與外部操作追蹤
 
-Status: ready-for-agent
+Status: in_progress（Work-9，run R072-26-impl，2026-10-22 18:04）
 Blocked by: 25
 
 **What to build:** Outbox Dispatcher 至少一次交付、以 command_id 去重，每條路徑都先檢查停止意圖與有效准入；無法證明程序是否已啟動時進入 reconciliation 而非重派。實作 external_operations：冪等鍵、要求雜湊、回執與「結果未知」狀態；未知時阻擋相關 Task 並建立裁定請求，不盲目重送。SQLite busy 或磁碟滿時停止新派工並顯示原因。
