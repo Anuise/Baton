@@ -19,3 +19,5 @@ Blocked by: 09
 - [ ] 以主要 seam（Runtime harness，spec D-04）撰寫的情境測試涵蓋本票行為並通過；本票所做的 AI 決策已追加至 ai-decisions.md
 
 ## Comments
+
+- 2026-10-22 主控：票 06 已提供 Domain `authorization::admit` 與 `Store::check_admission`（AI-53）。本票的派工交易必須呼叫同一個 `admit`，不要另寫准入邏輯。

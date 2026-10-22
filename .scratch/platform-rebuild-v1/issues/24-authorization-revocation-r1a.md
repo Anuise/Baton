@@ -17,3 +17,5 @@ Blocked by: 23, 19
 - [ ] 以主要 seam（Runtime harness，spec D-04）撰寫的情境測試涵蓋本票行為並通過；本票所做的 AI 決策已追加至 ai-decisions.md
 
 ## Comments
+
+- 2026-10-22 主控：票 06 的 `check_admission` 走唯讀連線（AI-53）；本票建立撤銷與准入的持久化順序時，要把它移進寫入佇列的交易。
