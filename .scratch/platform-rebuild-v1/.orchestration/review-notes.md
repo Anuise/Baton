@@ -54,3 +54,7 @@
 
 ## 14. 交接時程序樹確認（票 28，AI-283）
 - Worker 自行結束時收到 `Exited` 就轉移，未先用 ProcessControl 確認整個程序樹結束；程序樹殘留子程序時可能短暫出現第二個 writer。轉移前先 `inspect`。
+
+## 15. 監護程序的邊界（票 32）
+- 監護寫下 Attempt 後、寫入 Withdrawn 前，若 App 拉起的 Runtime 先匯入日誌，撤回的嘗試會被多算一次（`crates/baton-guardian/src/lib.rs:152-165`、`import_guardian_journal`）。
+- `crates/baton-guardian/src/process.rs:265-267` 的 `OpenProcess` 失敗（例如權限不足）被當成程序已結束，與「只認確認過的終止」不一致。
