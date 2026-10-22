@@ -462,13 +462,27 @@ pub fn launch_halted(state: &LifecycleState, workspace: &WorkspaceLifecycle) -> 
 /// 生命週期檔的格式版本。
 pub const LIFECYCLE_FILE_VERSION: u32 = 1;
 
+/// 生命週期檔的檔名（位於資料目錄）。
+pub const LIFECYCLE_FILE_NAME: &str = "lifecycle.json";
+
 /// 生命週期檔：停止意圖的鏡像（spec D-25），讓 launcher 不開資料庫就能判斷是否受停止抑制。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleFile {
     pub version: u32,
     /// 停止抑制：有值代表停止意圖生效中。
     pub stop: Option<StopSuppression>,
+    /// 維護抑制（更新、解除安裝；由票 34 的流程寫入）：有值時監護與登入啟動都不拉起 Runtime（票 32）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<MaintenanceSuppression>,
     pub updated_at: Timestamp,
+}
+
+/// 維護抑制的內容。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaintenanceSuppression {
+    /// `update`、`uninstall` 等。
+    pub kind: String,
+    pub requested_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,7 +498,7 @@ impl LifecycleFile {
             requested_at: state.last_exit.as_ref().map(|r| r.requested_at).unwrap_or(now),
             reason: "full_exit".to_string(),
         });
-        Self { version: LIFECYCLE_FILE_VERSION, stop, updated_at: now }
+        Self { version: LIFECYCLE_FILE_VERSION, stop, maintenance: None, updated_at: now }
     }
 }
 

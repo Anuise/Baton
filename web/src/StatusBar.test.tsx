@@ -194,6 +194,69 @@ describe("頂部狀態列", () => {
     });
   });
 
+  describe("監護狀態", () => {
+    function clientWithGuardian(guardian: HealthResponse["guardian"]): RuntimeClient {
+      return {
+        ...clientReturning("ok"),
+        getHealth: vi.fn(async () => (guardian === undefined ? health : { ...health, guardian })),
+      };
+    }
+
+    it("監護運作中時顯示「監護：運作中」", async () => {
+      render(<StatusBar client={clientWithGuardian({ state: "active", message: null })} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.getByText("監護：運作中")).toBeInTheDocument();
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("監護不在時以警示顯示 Runtime 回傳的降級訊息，Runtime 仍顯示運作中", async () => {
+      const guardian = { state: "unavailable", message: "工作繼續，自動重啟保護不可用" } as const;
+      render(<StatusBar client={clientWithGuardian(guardian)} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.getByRole("alert")).toHaveTextContent("工作繼續，自動重啟保護不可用");
+      expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+    });
+
+    it("監護不在但沒有訊息時退回固定文字", async () => {
+      render(<StatusBar client={clientWithGuardian({ state: "unavailable", message: null })} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.getByRole("alert")).toHaveTextContent("工作繼續，自動重啟保護不可用");
+    });
+
+    it("舊版 Runtime 沒有 guardian 欄位時不顯示監護狀態", async () => {
+      render(<StatusBar client={clientWithGuardian(undefined)} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.queryByText(/監護/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/自動重啟保護/)).not.toBeInTheDocument();
+      expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+    });
+
+    it("監護狀態未知時不顯示，避免誤報", async () => {
+      render(<StatusBar client={clientWithGuardian({ state: "unknown", message: null })} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.queryByText(/監護/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/自動重啟保護/)).not.toBeInTheDocument();
+    });
+
+    it("Runtime 未連線時不顯示監護狀態", async () => {
+      render(<StatusBar client={clientReturning(new Error("down"))} pollMs={5000} />);
+
+      await settle();
+
+      expect(screen.queryByText(/監護/)).not.toBeInTheDocument();
+    });
+  });
+
   describe("控制資料庫儲存故障", () => {
     const diskFull: HealthResponse["storage"] = {
       dispatch_halted: true,

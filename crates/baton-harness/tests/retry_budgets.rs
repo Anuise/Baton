@@ -310,14 +310,15 @@ async fn quota_handoff_recovery_and_cancellation_never_increase_any_counter() {
     harness.agent_adapter.emit(&rid, limited);
     harness.agent_adapter.emit(&rid, AdapterEvent::Error { message: "usage limit reached".into() });
     exits(&harness, &rid, false).await;
-    let run = latest_run(&harness, &ws, &tid).await;
+    let run = runs_of(&harness, &ws, &tid).await.into_iter().find(|r| r["id"] == rid.as_str()).unwrap();
     assert_eq!(run["status"], "interrupted", "限流而結束的 Run 是中斷，不是失敗：{run}");
-    assert_eq!(task_status(&harness, &ws, &tid).await, "ready");
     assert_eq!(counts(&harness, &ws, &tid).await, (0, 0, 0), "交接不增加任何計數");
 
-    // 由另一個帳號接手，這次正常結束
-    let second = start_run(&harness, &ws, &tid).await;
-    assert_ne!(latest_run(&harness, &ws, &tid).await["profile_id"], run["profile_id"], "換到有額度的帳號");
+    // 由另一個帳號的 successor 自動接手（票 29），這次正常結束
+    let successor = latest_run(&harness, &ws, &tid).await;
+    assert_eq!(successor["status"], "running", "{successor}");
+    assert_ne!(successor["profile_id"], run["profile_id"], "換到有額度的帳號");
+    let second = successor["id"].as_str().unwrap().to_string();
     harness.command_runner.script_exit("cargo", 101, "FAILED");
     exits(&harness, &second, true).await;
     harness.supervise().await;

@@ -1141,7 +1141,76 @@ const MIGRATIONS: &[Migration] = &[
         );
         CREATE INDEX conversation_turn_pending ON conversation_turn (conversation_id) WHERE status = 'pending';",
     },
-    // 票 30（第 31 個 migration）：Controller 跨帳號交接。conversation 記下沒有可用帳號時的等待原因（下一輪開始時清除）；
+    // 票 32（第 31 個 migration）：監護日誌的匯入紀錄。每個嘗試識別只匯入一次（去重），連同處置一起保存：
+    // 計入恢復事件、被監護撤回、因停止意圖或已用盡而不計。監護本身不寫控制資料庫，這張表只由 Runtime 寫入
+    Migration {
+        name: "guardian_journal",
+        sql: "CREATE TABLE guardian_journal_import (
+            attempt_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            round INTEGER NOT NULL CHECK (round >= 1),
+            seq INTEGER NOT NULL,
+            detected_at INTEGER NOT NULL,
+            recorded_at INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            disposition TEXT NOT NULL
+                CHECK (disposition IN ('counted', 'withdrawn', 'ignored_stop_intent', 'ignored_exhausted')),
+            imported_at INTEGER NOT NULL
+        );",
+    },
+    // 票 29（第 32 個 migration）：突然限流後所有合適帳號都受限時，交接停在 `waiting_resource`（Task 在 waiting_resource），
+    // 記下預計重新評估的時間、退避次數、依據的重置時間與等待原因。phase 的 CHECK 要加一個值，所以重建 `handoff`；
+    // 同一個 Task 任何時刻最多一個進行中或等待資源的交接。
+    Migration {
+        name: "handoff_waiting_resource",
+        sql: "CREATE TABLE handoff_next (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            from_run_id TEXT NOT NULL REFERENCES run (id),
+            from_profile_id TEXT NOT NULL,
+            from_generation INTEGER NOT NULL,
+            to_profile_id TEXT NOT NULL,
+            to_run_id TEXT REFERENCES run (id),
+            to_generation INTEGER,
+            phase TEXT NOT NULL
+                CHECK (phase IN ('requested', 'stopping', 'transferred', 'confirmed', 'abandoned', 'waiting_resource')),
+            reason TEXT NOT NULL,
+            checkpoint TEXT,
+            stop_outcome TEXT,
+            confirmation TEXT,
+            abandoned_reason TEXT,
+            requested_at INTEGER NOT NULL,
+            stopping_at INTEGER,
+            transferred_at INTEGER,
+            confirmed_at INTEGER,
+            waiting_at INTEGER,
+            next_check_at INTEGER,
+            wait_attempts INTEGER NOT NULL DEFAULT 0 CHECK (wait_attempts >= 0),
+            wait_reset_at INTEGER,
+            wait_reasons TEXT NOT NULL DEFAULT '[]',
+            updated_at INTEGER NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            CHECK ((to_run_id IS NOT NULL) = (phase IN ('transferred', 'confirmed'))),
+            CHECK (phase <> 'waiting_resource' OR next_check_at IS NOT NULL)
+        );
+        INSERT INTO handoff_next (id, workspace_id, task_id, from_run_id, from_profile_id, from_generation, to_profile_id,
+            to_run_id, to_generation, phase, reason, checkpoint, stop_outcome, confirmation, abandoned_reason, requested_at,
+            stopping_at, transferred_at, confirmed_at, updated_at, version)
+        SELECT id, workspace_id, task_id, from_run_id, from_profile_id, from_generation, to_profile_id,
+            to_run_id, to_generation, phase, reason, checkpoint, stop_outcome, confirmation, abandoned_reason, requested_at,
+            stopping_at, transferred_at, confirmed_at, updated_at, version
+        FROM handoff ORDER BY rowid;
+        DROP TABLE handoff;
+        ALTER TABLE handoff_next RENAME TO handoff;
+        CREATE INDEX handoff_workspace ON handoff (workspace_id);
+        CREATE INDEX handoff_task ON handoff (task_id);
+        CREATE INDEX handoff_to_run ON handoff (to_run_id);
+        CREATE UNIQUE INDEX handoff_one_in_flight_per_run ON handoff (from_run_id) WHERE phase IN ('requested', 'stopping');
+        CREATE UNIQUE INDEX handoff_one_in_flight_per_task ON handoff (task_id)
+            WHERE phase IN ('requested', 'stopping', 'waiting_resource');",
+    },
+    // 票 30（第 33 個 migration）：Controller 跨帳號交接。conversation 記下沒有可用帳號時的等待原因（下一輪開始時清除）；
     // controller_run 記下承接換帳號的那一輪的來源帳號、上一輪與原因
     Migration {
         name: "controller_handoff",

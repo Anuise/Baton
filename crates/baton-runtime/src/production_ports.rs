@@ -184,6 +184,18 @@ pub fn production_ports(data_dir: &Path) -> Ports {
         claude_env: Arc::new(ClaudeCli),
         command_runner: Arc::new(LocalCommandRunner),
         user_settings: Arc::new(user_settings_source()),
+        guardian_probe: Arc::new(GuardianInstanceProbe { data_dir: data_dir.to_path_buf() }),
+    }
+}
+
+/// 以監護記下的程序身分判斷監護是否還在（票 32）。
+struct GuardianInstanceProbe {
+    data_dir: std::path::PathBuf,
+}
+
+impl GuardianProbe for GuardianInstanceProbe {
+    fn guardian_running(&self) -> bool {
+        baton_guardian::files::instance_alive(&baton_guardian::files::guardian_instance_path(&self.data_dir))
     }
 }
 

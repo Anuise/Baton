@@ -565,6 +565,28 @@ fn a_hand_off_ends_the_run_as_interrupted_not_failed_and_frees_the_writer_slot()
 }
 
 #[test]
+fn parking_for_resource_ends_the_run_and_leaves_the_task_waiting_without_charging_any_budget() {
+    let mut world = World::new(&["t1"]);
+    let run_id = world.running("t1", T0);
+
+    let command = RunCommand::ParkForResource { run_id: run_id.clone(), handoff_id: "hof_1".into() };
+    let change = world.step(command, later(1_000)).unwrap();
+
+    let run = world.run(&run_id);
+    assert_eq!(run.status, RunStatus::Interrupted, "突然限流不是失敗");
+    assert_eq!(run.end_reason.as_deref(), Some(crate::handoff::HANDED_OFF_WAITING_REASON));
+    assert!(!world.lease(&run_id).is_held(), "舊 writer 已確認停止，釋放寫入所有權");
+    assert_eq!(world.task("t1").status, TaskStatus::WaitingResource);
+    let event = change.events.iter().find(|e| e.event_type == EVENT_RUN_HANDED_OFF).unwrap();
+    assert_eq!(event.payload["handoff_id"], "hof_1");
+    assert_eq!((change.budget, change.requeue), (None, false));
+    assert_eq!(world.dispatch("t1", later(2_000)).unwrap_err().code(), "task_not_ready", "等待資源期間不派工");
+
+    let again = world.step(RunCommand::ParkForResource { run_id, handoff_id: "hof_1".into() }, later(2_000));
+    assert_eq!(again.unwrap_err().code(), "run_transition_invalid");
+}
+
+#[test]
 fn a_failed_exit_returns_the_task_to_ready_and_frees_it_for_another_run() {
     let mut world = World::new(&["t1"]);
     let run_id = world.running("t1", T0);
@@ -832,6 +854,7 @@ enum Op {
     RequestCancel(usize),
     ConfirmCancel(usize),
     HandOff(usize),
+    Park(usize),
     MakeReady(usize),
     CancelTask(usize),
     Advance(u32),
@@ -850,6 +873,7 @@ fn op() -> impl Strategy<Value = Op> {
         (0..6usize).prop_map(Op::RequestCancel),
         (0..6usize).prop_map(Op::ConfirmCancel),
         (0..6usize).prop_map(Op::HandOff),
+        (0..6usize).prop_map(Op::Park),
         (0..3usize).prop_map(Op::MakeReady),
         (0..3usize).prop_map(Op::CancelTask),
         (1..90_000u32).prop_map(Op::Advance),
@@ -936,6 +960,10 @@ proptest! {
                 Op::ConfirmCancel(i) => match run_of(&world, i) { Some((run_id, _)) => RunCommand::ConfirmCancelled { run_id }, None => continue },
                 Op::HandOff(i) => match run_of(&world, i) {
                     Some((run_id, _)) => RunCommand::HandOff { run_id, handoff_id: "hof".into() },
+                    None => continue,
+                },
+                Op::Park(i) => match run_of(&world, i) {
+                    Some((run_id, _)) => RunCommand::ParkForResource { run_id, handoff_id: "hof".into() },
                     None => continue,
                 },
             };
