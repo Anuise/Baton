@@ -710,8 +710,34 @@ pub async fn ensure_runtime(
     Err(stale_credential.unwrap_or(ClientError::StartTimeout(wait)))
 }
 
+/// 確保監護程序在執行（票 32，ADR-0006 M1）：開 App 時只補缺少的元件。
+///
+/// 依 `ensure_runtime` 回傳的健康狀態判斷：監護回報 `Active` 就不做事（回 `Ok(false)`）；
+/// `Unavailable` 或舊版 Runtime 的 `Unknown` 才呼叫 `start_guardian` 補啟動監護（回 `Ok(true)`）。
+/// 不會重啟已在執行的 Runtime，也不重設任何次數；已有監護時多啟動的那個會因具名 mutex 自行結束。
+pub fn ensure_guardian(
+    health: &HealthResponse,
+    start_guardian: impl FnOnce() -> std::io::Result<()>,
+) -> Result<bool, ClientError> {
+    if health.guardian.state == baton_domain::guardian::GuardianState::Active {
+        return Ok(false);
+    }
+    start_guardian().map_err(ClientError::Spawn)?;
+    Ok(true)
+}
+
 /// 以脫離本程序的方式啟動 Runtime 執行檔；關閉 App 後 Runtime 仍會繼續執行。
 pub fn spawn_runtime_process(exe: &Path, envs: &[(String, String)]) -> std::io::Result<std::process::Child> {
+    spawn_detached(exe, envs)
+}
+
+/// 以脫離本程序的方式啟動監護執行檔（與 Runtime 相同：無視窗、關閉 App 後仍繼續執行）。
+pub fn spawn_guardian_process(exe: &Path, envs: &[(String, String)]) -> std::io::Result<std::process::Child> {
+    spawn_detached(exe, envs)
+}
+
+/// 啟動與 App 脫離的背景程序：不接標準輸入輸出、獨立的程序群組、不開主控台視窗。
+fn spawn_detached(exe: &Path, envs: &[(String, String)]) -> std::io::Result<std::process::Child> {
     use std::process::{Command, Stdio};
 
     let mut command = Command::new(exe);

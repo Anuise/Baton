@@ -19,7 +19,10 @@ use baton_api::{
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
     RecoveryStatusView, MetricsResponse, TimelineResponse,
 };
-use baton_client::{ensure_runtime, spawn_runtime_process, Connection, DispatchOutcome, RuntimeClient};
+use baton_client::{
+    ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, Connection, DispatchOutcome,
+    RuntimeClient,
+};
 use baton_credential::DpapiProtector;
 use baton_store::{AnswerResult, DecisionList};
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
@@ -64,6 +67,9 @@ const FULL_EXIT_FALLBACK: Duration = Duration::from_secs(60);
 /// Runtime 執行檔與桌面殼放在同一個資料夾。
 const RUNTIME_EXE: &str = "baton-runtime.exe";
 
+/// 監護執行檔與 Runtime 放在同一個資料夾（票 32）。
+const GUARDIAN_EXE: &str = "baton-guardian.exe";
+
 struct RuntimeLink {
     /// 每次呼叫都重新讀取 DPAPI 保護的桌面憑證；憑證只在殼內處理，不交給 Web UI
     client: RuntimeClient,
@@ -93,14 +99,18 @@ impl RuntimeLink {
                 // 資料目錄在網路共享或雲端同步資料夾時，先把原因說清楚，而不是等 Runtime 啟動逾時（spec D-17）
                 baton_store::check_data_dir(&self.data_dir).map_err(|e| e.to_string())?;
                 let exe = runtime_exe_path().map_err(|e| e.to_string())?;
-                ensure_runtime(
+                let (connection, health) = ensure_runtime(
                     &self.client,
                     || spawn_runtime_process(&exe, &self.envs).map(drop),
                     START_WAIT,
                 )
                 .await
-                .map(|(connection, _health)| connection)
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+                // 只補缺少的元件：監護不在才啟動（ADR-0006 M1）。補不起來只是少了自動重啟保護，
+                // 工作照常、狀態列會顯示降級，所以不讓 App 因此啟動失敗
+                let guardian_exe = exe.with_file_name(GUARDIAN_EXE);
+                let _ = ensure_guardian(&health, || spawn_guardian_process(&guardian_exe, &self.envs).map(drop));
+                Ok(connection)
             })
             .await
     }

@@ -64,7 +64,7 @@ use baton_domain::lifecycle::{
 use baton_domain::handoff::{GateState, HandoffPhase};
 use baton_domain::quota::{LimitStatus, RateLimitSignal};
 use baton_domain::scheduler::{self, Capacity, Placement, SlotKind};
-use baton_domain::recovery::{self, AffectedRun, RecoveryCommand, RecoveryStatus, RunDisposition};
+use baton_domain::recovery::{self, AffectedRun, RecoveryCommand, RecoveryEvent, RecoveryStatus, RunDisposition};
 use baton_domain::run::{
     LaunchPayload, LEASE_DURATION_MS, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
 };
@@ -134,6 +134,8 @@ pub struct Supervisor {
     reopen_from: Mutex<Option<i64>>,
     /// 完全退出的停止流程正在等待或進行：握著 tick 鎖、可能久等的步驟（取消時的停止程序）看到就讓出，交給停止流程。
     exiting: watch::Sender<bool>,
+    /// 最近一次寫給監護的恢復事件（識別與版本，票 32）；事件有變動才重寫鏡像。
+    mirrored: Mutex<Option<(String, i64)>>,
 }
 
 /// Supervisor 的生命週期參數（票 25）。
@@ -176,6 +178,7 @@ impl Supervisor {
             data_dir: lifecycle.data_dir,
             reopen_from: Mutex::new(lifecycle.reopen_from),
             exiting: watch::Sender::new(false),
+            mirrored: Mutex::new(None),
         })
     }
 
@@ -503,39 +506,68 @@ impl Supervisor {
         }
     }
 
-    /// 處理未結束的恢復事件：觀察期滿就持久化成功；等待中且退避期滿就做一次嘗試。
+    /// 處理未結束的恢復事件：觀察期滿就持久化成功；等待中且退避期滿就做一次嘗試；
+    /// 監護已計次的嘗試（啟動時匯入、狀態是嘗試中）由這個 Runtime 接續完成（票 32）。
     async fn recover_after_crash(&self) {
         let event = match self.store.recovery_event().await {
             Ok(Some(event)) => event,
             Ok(None) => return,
             Err(error) => return self.note(&format!("無法讀取恢復事件：{error}")),
         };
+        // 使用者「重新嘗試恢復」等 API 路徑的變動也要讓監護看到
+        self.mirror_recovery(&event).await;
         let now = self.ports.clock.now();
         match event.status {
             RecoveryStatus::Observing if event.observe_until.is_some_and(|until| now >= until) => {
                 match self.store.apply_recovery(RecoveryCommand::Observe, now).await {
-                    Ok(done) if done.status == RecoveryStatus::Succeeded => {
-                        self.note(&format!("恢復事件 {} 已穩定 10 分鐘，恢復成功", done.id))
+                    Ok(done) => {
+                        if done.status == RecoveryStatus::Succeeded {
+                            self.note(&format!("恢復事件 {} 已穩定 10 分鐘，恢復成功", done.id));
+                        }
+                        self.mirror_recovery(&done).await;
                     }
-                    Ok(_) => {}
                     Err(error) => self.note(&format!("恢復事件 {} 的成功沒有寫入，下次再試：{error}", event.id)),
                 }
             }
             RecoveryStatus::Waiting if event.next_attempt_at.is_none_or(|at| now >= at) => self.attempt_recovery().await,
+            // 啟動時沒有被記為失敗的進行中嘗試，就是監護交給這個 Runtime 的那一次
+            RecoveryStatus::Attempting if self.may_attempt_recovery().await => {
+                self.note(&format!("恢復事件 {} 接續監護已計次的第 {} 次嘗試", event.id, event.attempts_used));
+                self.carry_out_attempt().await;
+            }
             _ => {}
         }
     }
 
-    /// 一次完整的恢復嘗試。嘗試序號持久化之前不碰任何程序；中途當掉時，下次啟動會把這次嘗試記為失敗。
-    async fn attempt_recovery(&self) {
-        // 無法寫入或停止意圖生效（完全退出優先）時不開始
+    /// 控制資料庫無法寫入或停止意圖生效（完全退出優先）時不做恢復嘗試。
+    async fn may_attempt_recovery(&self) -> bool {
         if self.store.storage_health().dispatch_halted {
-            return;
+            return false;
         }
         match self.store.lifecycle_state().await {
-            Ok(state) if !state.stop_intent_active() => {}
-            Ok(_) => return,
-            Err(error) => return self.note(&format!("無法讀取停止意圖，恢復嘗試稍後再開始：{error}")),
+            Ok(state) => !state.stop_intent_active(),
+            Err(error) => {
+                self.note(&format!("無法讀取停止意圖，恢復嘗試稍後再開始：{error}"));
+                false
+            }
+        }
+    }
+
+    /// 把恢復事件鏡像給監護（票 32）；這個版本已經寫過就略過。
+    async fn mirror_recovery(&self, event: &RecoveryEvent) {
+        let key = (event.id.clone(), event.version);
+        let mut mirrored = self.mirrored.lock().await;
+        if mirrored.as_ref() == Some(&key) {
+            return;
+        }
+        crate::write_recovery_mirror(&self.store, &self.data_dir, &self.ports, &self.log).await;
+        *mirrored = Some(key);
+    }
+
+    /// 一次完整的恢復嘗試。嘗試序號持久化之前不碰任何程序；中途當掉時，下次啟動會把這次嘗試記為失敗。
+    async fn attempt_recovery(&self) {
+        if !self.may_attempt_recovery().await {
+            return;
         }
         let Some(attempt_id) = new_prefixed_id("rcv") else {
             return self.note("無法取得系統亂數，恢復嘗試稍後再開始");
@@ -553,6 +585,12 @@ impl Supervisor {
             event.attempts_used,
             recovery::MAX_ATTEMPTS
         ));
+        self.mirror_recovery(&event).await;
+        self.carry_out_attempt().await;
+    }
+
+    /// 嘗試序號已持久化之後的處置：盤點核對、受控停止舊程序、記下結果。
+    async fn carry_out_attempt(&self) {
         // 2. 盤點並核對：以 command_id 找回啟動中（回執未寫回）的程序，收下已到達的回報（保存證據；已自行結束的 Run 正常結束）
         self.reconcile_starting().await;
         self.pump_events().await;
@@ -564,15 +602,20 @@ impl Supervisor {
             Some(reason) => RecoveryCommand::Fail { reason: reason.clone(), affected },
         };
         match self.store.apply_recovery(command, self.ports.clock.now()).await {
-            Ok(event) => match event.status {
-                RecoveryStatus::Observing => self.note(&format!("恢復事件 {} 的處置完成，開始穩定觀察 10 分鐘", event.id)),
-                RecoveryStatus::Exhausted => self.note(&format!(
-                    "恢復事件 {} 三次嘗試都沒有成功，停止自動恢復與派工，等使用者從恢復介面重新嘗試：{}",
-                    event.id,
-                    failure.unwrap_or_default()
-                )),
-                _ => self.note(&format!("恢復事件 {} 的這次嘗試失敗，退避後再試：{}", event.id, failure.unwrap_or_default())),
-            },
+            Ok(event) => {
+                let failure = failure.unwrap_or_default();
+                match event.status {
+                    RecoveryStatus::Observing => {
+                        self.note(&format!("恢復事件 {} 的處置完成，開始穩定觀察 10 分鐘", event.id))
+                    }
+                    RecoveryStatus::Exhausted => self.note(&format!(
+                        "恢復事件 {} 三次嘗試都沒有成功，停止自動恢復與派工，等使用者從恢復介面重新嘗試：{failure}",
+                        event.id
+                    )),
+                    _ => self.note(&format!("恢復事件 {} 的這次嘗試失敗，退避後再試：{failure}", event.id)),
+                }
+                self.mirror_recovery(&event).await;
+            }
             Err(error) => self.note(&format!("恢復嘗試的結果沒有寫入：{error}")),
         }
     }

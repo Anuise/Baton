@@ -8,6 +8,18 @@ export interface HealthResponse {
   pid: number;
   /** 控制資料庫儲存狀態；舊版 Runtime 沒有這個欄位，視為正常。 */
   storage?: StorageHealth;
+  /** 監護程序狀態；舊版 Runtime 沒有這個欄位，視為未知。 */
+  guardian?: GuardianStatus;
+}
+
+/** 監護程序狀態：`active` 執行中、`unavailable` 不在、`unknown` 舊版 Runtime 沒有回報。 */
+export type GuardianState = "active" | "unavailable" | "unknown";
+
+/** 監護程序狀態（對應 Rust 的 `baton_domain::guardian::GuardianStatus`）。 */
+export interface GuardianStatus {
+  state: GuardianState;
+  /** 給使用者看的降級提示；只有 `unavailable` 時才有。 */
+  message: string | null;
 }
 
 /** 控制資料庫的儲存健康狀態（對應 Rust 的 StorageHealth）。 */
