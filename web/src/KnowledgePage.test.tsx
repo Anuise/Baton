@@ -22,6 +22,7 @@ const workspace: Workspace = {
   version: 1,
   created_at: 1_700_000_000_000,
   archived_at: null,
+  model_overrides: { controller: null, worker: null, reviewer: null },
 };
 
 /** 2023-11-14 22:13:20 UTC（台北是隔天 06:13）。 */

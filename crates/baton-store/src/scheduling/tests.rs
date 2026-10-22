@@ -54,7 +54,7 @@ async fn add_profile(store: &Store, id: &str) {
         account: Some(format!("{id}@example.com")),
         config_dir: Some(format!("C:\\baton\\profiles\\{id}")),
     };
-    store.apply_profile_command(ProfileCommand::RecordVerification { id: id.into(), report }, T1).await.unwrap();
+    store.apply_profile_command(ProfileCommand::RecordVerification { id: id.into(), report, cli_version: Some("2.1.307 (Claude Code)".into()) }, T1).await.unwrap();
 }
 
 fn request(task_id: &str, priority: i32) -> Option<ScheduleRequest> {

@@ -4,6 +4,7 @@ import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { BackupSettings } from "./BackupSettings";
+import { ModelOverridesPanel } from "./ModelOverridesPanel";
 import { DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
 import { KnowledgePage } from "./KnowledgePage";
@@ -16,7 +17,7 @@ import { createRuntimeClient, type AppClient, type HealthResponse, type PendingD
 import { TaskBoard } from "./TaskBoard";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 使用者選到某個 Workspace 後，主區顯示它的授權設定、工作面板、裁定中心、成果與驗證或知識。 */
+/** 使用者選取某個 Workspace 後，主畫面顯示它的授權與模型設定、工作面板、裁定中心、成果與驗證或知識。 */
 type Opened = { view: "authorization" | "tasks" | "decisions" | "artifacts" | "knowledge"; workspace: Workspace };
 
 export function App() {
@@ -62,6 +63,7 @@ export function App() {
           {client && <SharedSettingsPage client={client} />}
           {client && <BackupSettings client={client} />}
           {client && opened?.view === "authorization" && <AuthorizationPanel client={client} workspace={opened.workspace} />}
+          {client && opened?.view === "authorization" && <ModelOverridesPanel client={client} workspace={opened.workspace} />}
           {client && opened?.view === "tasks" && <TaskBoard client={client} workspace={opened.workspace} />}
           {client && opened?.view === "decisions" && (
             <DecisionCenter

@@ -97,6 +97,7 @@ fn failed_run(id: &str, contract_version: i64) -> Run {
         updated_at: T0,
         started_at: None,
         ended_at: Some(T0),
+        native_session_id: None,
     }
 }
 

@@ -622,6 +622,12 @@ const MIGRATIONS: &[Migration] = &[
             updated_at INTEGER NOT NULL
         );",
     },
+    // 票 14：Workspace 依角色的模型覆寫（spec D-30）與 Run 綁定的原生 Session
+    Migration {
+        name: "model_overrides_and_native_session",
+        sql: "ALTER TABLE workspace ADD COLUMN model_overrides TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(model_overrides));
+        ALTER TABLE run ADD COLUMN native_session_id TEXT;",
+    },
     // Guard 與重犯事件（票 38）：Guard 只能停用、不能刪除；重犯事件是追加式。
     // 被 Guard 攔下的重犯以「Guard + Task + 契約版本」決定識別，佇列重試不會重複記錄
     Migration {
@@ -1009,7 +1015,7 @@ fn applied_version(conn: &Connection) -> StoreResult<usize> {
 
 fn load_workspaces(conn: &Connection) -> rusqlite::Result<Vec<Workspace>> {
     let mut statement = conn.prepare(
-        "SELECT id, name, path, status, version, created_at, archived_at FROM workspace ORDER BY rowid",
+        "SELECT id, name, path, status, version, created_at, archived_at, model_overrides FROM workspace ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |r| {
         let status: String = r.get(3)?;
@@ -1023,6 +1029,7 @@ fn load_workspaces(conn: &Connection) -> rusqlite::Result<Vec<Workspace>> {
             version: r.get(4)?,
             created_at: Timestamp::from_millis(r.get(5)?),
             archived_at: r.get::<_, Option<i64>>(6)?.map(Timestamp::from_millis),
+            model_overrides: json_column(7, &r.get::<_, String>(7)?)?,
         })
     })?;
     rows.collect()
@@ -1030,11 +1037,12 @@ fn load_workspaces(conn: &Connection) -> rusqlite::Result<Vec<Workspace>> {
 
 fn save_workspace(tx: &Transaction<'_>, workspace: &Workspace) -> rusqlite::Result<()> {
     tx.execute(
-        "INSERT INTO workspace (id, name, path, status, version, created_at, archived_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO workspace (id, name, path, status, version, created_at, archived_at, model_overrides)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name, path = excluded.path, status = excluded.status,
-           version = excluded.version, archived_at = excluded.archived_at",
+           version = excluded.version, archived_at = excluded.archived_at,
+           model_overrides = excluded.model_overrides",
         rusqlite::params![
             workspace.id,
             workspace.name,
@@ -1043,6 +1051,7 @@ fn save_workspace(tx: &Transaction<'_>, workspace: &Workspace) -> rusqlite::Resu
             workspace.version,
             workspace.created_at.as_millis(),
             workspace.archived_at.map(|t| t.as_millis()),
+            serde_json::to_string(&workspace.model_overrides).expect("ModelOverrides 可序列化"),
         ],
     )?;
     Ok(())
