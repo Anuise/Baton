@@ -1,6 +1,6 @@
 # 44: 雙軸 Review、獨立 reviewer 與設計偏離
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R130-44-impl，2026-10-23 00:32）
 Blocked by: 43
 
 **What to build:** Review 分 Standards 與 Spec 兩軸保存，固定 base／candidate revision 與規格版本；高風險工作需要非作者的 reviewer，缺席時 Gate 保持關閉；Controller 依證據分類 finding（駁回須送裁定）。實作偏離 Design Package 時保存 deviation、原因與接受者，接受後更新設計版本。
