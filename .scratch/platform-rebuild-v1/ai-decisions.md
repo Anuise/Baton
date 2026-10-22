@@ -4925,6 +4925,45 @@
 - 影響：無行為差異。
 - 審閱：未審
 
+### AI-503：UI E2E 的測試專用 Runtime 組態：fake Port 的 Harness 加上扮演桌面殼的轉送伺服器，只存在於 `baton-harness` 的測試目標
+- 重要度：中
+- 時間／階段：2026-10-23，票 53 實作
+- 決策：
+  - Runtime 沿用 `Harness`（真實 Domain、Store、Supervisor 與 Axum API，Port 全是 fake），不新增 Runtime 執行檔或 feature flag。
+  - 瀏覽器連的是測試內的轉送伺服器（`crates/baton-harness/tests/ui_e2e/server.rs`）：提供 `web/dist`，把 `/api/` 轉給 Runtime，轉送時帶上桌面憑證與固定標頭、不帶瀏覽器的 Origin，也就是桌面殼的角色。Runtime 的 API 防護完全不放寬。Web UI 因不在 Tauri 內，走 `createHttpClient`（真實 HTTP）。
+  - 驅動瀏覽器的是 Rust 測試：`driver.mjs` 以 JSON 行協定操作 Playwright + Chromium，使用者動作一律經畫面；Worker／Controller 的行為與 Supervisor 的推進在 Rust 端以 harness 的 fake 進行。
+  - 「不進入正式建置」以 `tests/test_only_config.rs` 證明：以 `cargo metadata` 從安裝程式打包的 `baton-runtime`、`baton-guardian` 與 `baton-desktop` 沿一般與建置相依展開，到不了 `baton-harness`；`baton-harness` 只有函式庫與測試目標；安裝程式設定只打包這兩個 sidecar 與 `web/dist`，沒有其他資源，Web UI 原始碼不引用測試組態。
+- 理由：票要求「以 fake Port 啟動真實 Runtime 與 API」並讓 UI 透過真實 HTTP 操作。轉送伺服器不需要測試版的桌面殼或放寬 API 防護（AI-498 擔心的「繞過只認桌面憑證的 API 保護」），而且整個組態只是測試 crate 的測試目標，不可能被正式建置帶進去。
+- 替代方案：`baton-runtime` 加 `--fake-ports` 旗標或 cargo feature（要另外證明正式建置沒開，風險較高）；在桌面殼（Tauri）內連 fake Runtime（需要另一份殼的建置，且 WebView2 自動化較脆弱）；在 Runtime 的防護加測試例外（削弱被測的產品行為）。
+- 影響：E2E 測的是瀏覽器模式的 HTTP 用戶端，不是 Tauri 指令的對應；殼的指令層仍由 `scripts/smoke-desktop.mjs` 與元件測試涵蓋。轉送伺服器在啟動時讀一次桌面憑證，E2E 中途重啟 Runtime 時要重新啟動它。
+- 審閱：未審
+
+### AI-504：UI E2E 標為 `#[ignore]`，由 `scripts/test-e2e.mjs` 執行；找不到 Playwright 時結果列為「略過」，並以專用 TEMP 檢查遺留
+- 重要度：中
+- 時間／階段：2026-10-23，票 53 實作
+- 決策：
+  - `ui_e2e` 的測試都標為 `#[ignore]`，一般的 `cargo test` 顯示 ignored；`pnpm test` 多一個「UI E2E」步驟（`runUiE2e`），`pnpm test:e2e` 單獨執行。
+  - 腳本依序從 `BATON_PLAYWRIGHT_DIR`、repo 根目錄、`web/` 找 Playwright：找不到時印出「UI E2E 略過」，`pnpm test` 的結果列為「UI E2E：略過（…）」，結束碼不受影響；設定了 `BATON_PLAYWRIGHT_DIR` 卻找不到時失敗（同 AI-497）。直接以 `--ignored` 執行而找不到 Playwright 時，測試 panic（失敗），不會顯示通過。
+  - 腳本先建置 `web/dist`、先編譯測試，再以新建的專用 TEMP／TMP 執行，結束後除了 harness 共用的空 `baton-harness` 目錄之外有任何遺留就失敗，最後刪除這個目錄。每個測試結尾關閉瀏覽器，driver 以 `launchServer` 取得 Chromium 的 PID 並回報它已結束、Rust 端斷言 driver 正常結束。
+  - driver 不以 `kill_on_drop` 啟動：測試 panic 時 driver 讀到 stdin 結束會自行關閉瀏覽器再結束，直接終止它反而會留下 Chromium。
+- 理由：libtest 沒有執行期的「略過」狀態，在測試內提早 return 會顯示通過，違反驗收條件；`#[ignore]` 加腳本的結果列可以明確區分。Harness 的資料目錄要等測試的 tokio runtime 結束才刪得掉（AI-500），只能在程序結束後檢查，所以放在腳本裡。
+- 替代方案：在測試內提早 return 並印出訊息（會顯示通過，與既有的 `web_verification_real_browser.rs` 相同的問題）；以 `@playwright/test` 寫 JS 端測試（要另外裝 test runner，且 fake Port 在 Rust 端，需要額外的控制通道）。
+- 影響：沒有 Playwright 的開發機與 CI 上 `pnpm test` 仍是綠燈，但結果列明確寫著略過；要實測必須設定 `BATON_PLAYWRIGHT_DIR`。CI 設定沒有改，所以 CI 不會實際跑 UI E2E。
+- 審閱：未審
+
+### AI-505：兩條 UI E2E 旅程的劃分：使用者動作經畫面、前置與 Agent 行為在 Rust 端；裁定批次含 Controller 請求
+- 重要度：低
+- 時間／階段：2026-10-23，票 53 實作
+- 決策：
+  - 共同：帳號 Profile 以 `harness.add_account` 備妥（首次精靈與帳號頁由 `smoke-desktop.mjs` 以真實 App 涵蓋）。Worker／Controller 的回報以 Agent 憑證 `call_tool`，Supervisor 以 `supervise()` 推進；API 只用來讀取佐證與查識別。工作面板、側欄、裁定中心都沒有輪詢，要看到推進後的狀態時切換視圖或重新載入頁面，這是既有 UI 行為，不是缺陷。
+  - 派工到完成：Workspace、授權（「研究／文件」範本，不需風險確認）、Goal、Task（六項契約、確定性檢查 `artifact: report.md`、所需能力在範本範圍內）、標記可派工、派工全部經 UI；Worker 以 `report_progress` 與 `register_artifact` 回報後正常結束，Runtime 的自動檢查通過後 UI 的「已完成」欄顯示 Task 與「已通過驗證（自動檢查）」。選自動檢查而不是手動接受，因為契約編輯器可以宣告檢查，且票寫的是「經驗證後」完成。
+  - 裁定中心批次處理：前置（Workspace、「可信專案開發」授權、三個執行中的 Task）以 API 建立，派工流程已由上一條旅程經 UI 涵蓋；四筆請求是兩個 Worker 對同一個範圍外操作的權限提示、一筆 `request_decision`、一筆被權限表攔下的 `controller_action`，涵蓋票寫的「Worker／Controller」。第三個同時執行的 Run 需要第二個帳號的並行名額。批次在 UI 中逐項選擇處理方式後送出；新 Run 以 Agent 憑證證明每項批准只放行自己的那一次，新的請求出現在 UI 的裁定中心。
+  - `browser.rs` 的 `label()` 是完全相符：`<label>` 包住 `<select>` 時 Playwright 算出的標籤含選項文字，所以下拉選單以 `role("combobox", 名稱)` 定位；問題文字相同的請求以 `nth` 區分。
+- 理由：讓每條旅程聚焦在票指定的使用者動作，同時避免重複經 UI 建立前置而拉長、增加脆弱性。
+- 替代方案：裁定旅程的前置也全部經 UI（重複上一條旅程）；只用 Worker 的請求（不涵蓋 Controller）。
+- 影響：裁定旅程依賴問題文字相同時清單的排列順序（可處理在前、已結束在後）；畫面排序改變時要調整 `nth`。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam
