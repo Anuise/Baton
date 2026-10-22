@@ -88,4 +88,4 @@
 | R084-35-integrate | 35 | integrate | Work-3 | 2026-10-22 18:34 | 2026-10-22 18:41 | DONE，依 AI-109 直接合併 |
 | R085-24-integrate | 24 | integrate | Work-3 | 2026-10-22 18:41 | | |
 | R086-36-impl | 36 | impl | Work-8 | 2026-10-22 18:41 | | |
-| R087-26-verify | 26 | verify | Work-9 | 2026-10-22 18:41 | | |
+| R087-26-verify | 26 | verify | Work-9 | 2026-10-22 18:41 | 2026-10-22 18:47 | PASS（等 24 合併後整合） |
