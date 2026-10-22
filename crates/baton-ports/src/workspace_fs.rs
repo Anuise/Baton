@@ -24,6 +24,8 @@ pub enum DirectoryState {
 pub trait WorkspaceFs: Send + Sync {
     /// 建立 Workspace 前確認目錄存在；目錄不必是 Git repo。
     async fn inspect_directory(&self, path: &Path) -> PortResult<DirectoryState>;
+    /// 建立目錄（含上層）；已存在時不是錯誤。用於 Profile 專屬的設定目錄。
+    async fn ensure_directory(&self, path: &Path) -> PortResult<()>;
     async fn create_worktree(&self, repo: &Path, branch: &str, target: &Path) -> PortResult<()>;
     async fn remove_worktree(&self, target: &Path) -> PortResult<()>;
     async fn inspect_dirty(&self, target: &Path) -> PortResult<DirtyState>;

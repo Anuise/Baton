@@ -4,6 +4,7 @@
 //! 型別形狀依 spec 的「Port」草圖；欄位只放目前需要的最小集合，後續票再擴充。
 
 mod agent;
+mod claude_env;
 mod clock;
 mod platform;
 mod process;
@@ -14,6 +15,7 @@ mod workspace_fs;
 use std::sync::Arc;
 
 pub use agent::{AdapterEvent, AgentAdapter, AgentHandle, Capability, RunSpec, SessionRef};
+pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, ToolProbe};
 pub use clock::Clock;
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
@@ -43,4 +45,5 @@ pub struct Ports {
     pub workspace_fs: Arc<dyn WorkspaceFs>,
     pub platform_info: Arc<dyn PlatformInfo>,
     pub secret_protector: Arc<dyn SecretProtector>,
+    pub claude_env: Arc<dyn ClaudeEnvironment>,
 }

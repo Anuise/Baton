@@ -357,6 +357,10 @@ impl WorkspaceFs for FakeWorkspaceFs {
         baton_ports::directory_state(path)
     }
 
+    async fn ensure_directory(&self, path: &Path) -> PortResult<()> {
+        tokio::fs::create_dir_all(path).await.map_err(|e| PortError::Failed(e.to_string()))
+    }
+
     async fn create_worktree(&self, _repo: &Path, _branch: &str, target: &Path) -> PortResult<()> {
         tokio::fs::create_dir_all(target).await.map_err(|e| PortError::Failed(e.to_string()))?;
         lock(&self.worktrees).insert(target.to_path_buf());
@@ -425,6 +429,176 @@ impl PlatformInfo for FakePlatformInfo {
     }
 }
 
+/// 可腳本化的 Claude Code 與 Git 環境：工具是否存在與版本、各設定目錄的原生登入、環境變數覆蓋。
+///
+/// 模擬真實 Claude Code 的行為：原生登入的資料（token）放在 Profile 自己的設定目錄
+/// （`.credentials.json`），核對結果只回報認證來源與帳號，不含 token；環境變數覆蓋時沒有帳號。
+pub struct FakeClaudeEnvironment {
+    state: Mutex<ClaudeEnvState>,
+}
+
+struct ClaudeEnvState {
+    claude: ToolProbe,
+    git: ToolProbe,
+    tool_probe_failure: Option<String>,
+    auth_failure: Option<String>,
+    /// 設定目錄（正規化後）→ 原生登入的帳號。
+    logins: HashMap<String, String>,
+    env_override: Option<(AuthSource, Option<String>)>,
+    /// 開啟登入終端機時，模擬使用者在其中完成登入的帳號。
+    terminal_login: Option<String>,
+    terminals: Vec<PathBuf>,
+    auth_checks: usize,
+    secrets_issued: u32,
+}
+
+impl Default for FakeClaudeEnvironment {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ClaudeEnvState {
+                claude: ToolProbe::Found { version_output: Some("2.1.307 (Claude Code)".into()) },
+                git: ToolProbe::Found { version_output: Some("git version 2.54.0.windows.1".into()) },
+                tool_probe_failure: None,
+                auth_failure: None,
+                logins: HashMap::new(),
+                env_override: None,
+                terminal_login: None,
+                terminals: Vec::new(),
+                auth_checks: 0,
+                secrets_issued: 0,
+            }),
+        }
+    }
+}
+
+fn dir_key(dir: &Path) -> String {
+    dir.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+impl FakeClaudeEnvironment {
+    pub fn set_claude(&self, probe: ToolProbe) {
+        lock(&self.state).claude = probe;
+    }
+
+    pub fn set_git(&self, probe: ToolProbe) {
+        lock(&self.state).git = probe;
+    }
+
+    /// 之後所有工具探測都失敗（例如逾時）。
+    pub fn fail_tool_probes(&self, reason: &str) {
+        lock(&self.state).tool_probe_failure = Some(reason.to_string());
+    }
+
+    /// 之後所有認證核對都失敗（例如 claude 沒有回應）。
+    pub fn fail_auth_checks(&self, reason: &str) {
+        lock(&self.state).auth_failure = Some(reason.to_string());
+    }
+
+    /// 在設定目錄完成原生登入：記錄帳號，並像真實的 Claude Code 一樣把登入資料寫進該目錄。
+    /// 回傳寫入的登入資料（測試用來確認它不會出現在資料庫、日誌或 API 回應）。
+    pub fn log_in(&self, config_dir: &Path, account: &str) -> String {
+        let mut state = lock(&self.state);
+        state.secrets_issued += 1;
+        let secret = format!("fake-oauth-secret-{}-{:x}", state.secrets_issued, account.len() * 7919);
+        std::fs::create_dir_all(config_dir).expect("無法建立設定目錄");
+        std::fs::write(
+            config_dir.join(".credentials.json"),
+            format!(r#"{{"claudeAiOauth":{{"accessToken":"{secret}"}}}}"#),
+        )
+        .expect("無法寫入登入資料");
+        state.logins.insert(dir_key(config_dir), account.to_string());
+        secret
+    }
+
+    /// 模擬環境變數或 credential helper 覆蓋了認證來源（`None` 表示移除覆蓋）。
+    pub fn set_env_override(&self, source: Option<(AuthSource, Option<&str>)>) {
+        lock(&self.state).env_override = source.map(|(s, detail)| (s, detail.map(str::to_string)));
+    }
+
+    /// 之後開啟登入終端機時，模擬使用者在其中以這個帳號完成登入。
+    pub fn script_terminal_login(&self, account: &str) {
+        lock(&self.state).terminal_login = Some(account.to_string());
+    }
+
+    /// 已開啟的登入終端機（依序記錄各自使用的 `CLAUDE_CONFIG_DIR`）。
+    pub fn login_terminals(&self) -> Vec<PathBuf> {
+        lock(&self.state).terminals.clone()
+    }
+
+    pub fn auth_check_count(&self) -> usize {
+        lock(&self.state).auth_checks
+    }
+
+    pub fn reset_auth_check_count(&self) {
+        lock(&self.state).auth_checks = 0;
+    }
+}
+
+#[async_trait]
+impl ClaudeEnvironment for FakeClaudeEnvironment {
+    async fn probe_claude(&self) -> PortResult<ToolProbe> {
+        let state = lock(&self.state);
+        match &state.tool_probe_failure {
+            Some(reason) => Err(PortError::Failed(reason.clone())),
+            None => Ok(state.claude.clone()),
+        }
+    }
+
+    async fn probe_git(&self) -> PortResult<ToolProbe> {
+        let state = lock(&self.state);
+        match &state.tool_probe_failure {
+            Some(reason) => Err(PortError::Failed(reason.clone())),
+            None => Ok(state.git.clone()),
+        }
+    }
+
+    async fn auth_status(&self, config_dir: &Path) -> PortResult<AuthReport> {
+        let mut state = lock(&self.state);
+        state.auth_checks += 1;
+        if let Some(reason) = &state.auth_failure {
+            return Err(PortError::Failed(reason.clone()));
+        }
+        let config_dir_reported = Some(config_dir.to_string_lossy().into_owned());
+        if let Some((source, detail)) = &state.env_override {
+            return Ok(AuthReport {
+                logged_in: true,
+                source: *source,
+                source_detail: detail.clone(),
+                account: None,
+                config_dir: config_dir_reported,
+            });
+        }
+        Ok(match state.logins.get(&dir_key(config_dir)) {
+            Some(account) => AuthReport {
+                logged_in: true,
+                source: AuthSource::NativeLogin,
+                source_detail: None,
+                account: Some(account.clone()),
+                config_dir: config_dir_reported,
+            },
+            None => AuthReport {
+                logged_in: false,
+                source: AuthSource::None,
+                source_detail: None,
+                account: None,
+                config_dir: config_dir_reported,
+            },
+        })
+    }
+
+    async fn open_login_terminal(&self, config_dir: &Path) -> PortResult<()> {
+        let scripted = {
+            let mut state = lock(&self.state);
+            state.terminals.push(config_dir.to_path_buf());
+            state.terminal_login.clone()
+        };
+        if let Some(account) = scripted {
+            self.log_in(config_dir, &account);
+        }
+        Ok(())
+    }
+}
+
 /// 一組 fake Port 的具體型別，測試可直接操作腳本與讀取紀錄。
 /// 可逆但不是明文的保護器：以固定前綴加逐位元 XOR 模擬 DPAPI，不依賴作業系統。
 #[derive(Default)]
@@ -456,6 +630,7 @@ pub struct FakePorts {
     pub workspace_fs: Arc<FakeWorkspaceFs>,
     pub platform_info: Arc<FakePlatformInfo>,
     pub secret_protector: Arc<FakeSecretProtector>,
+    pub claude_env: Arc<FakeClaudeEnvironment>,
 }
 
 impl FakePorts {
@@ -468,6 +643,7 @@ impl FakePorts {
             workspace_fs: Arc::default(),
             platform_info: Arc::default(),
             secret_protector: Arc::default(),
+            claude_env: Arc::default(),
         }
     }
 
@@ -481,6 +657,7 @@ impl FakePorts {
             workspace_fs: self.workspace_fs.clone(),
             platform_info: self.platform_info.clone(),
             secret_protector: self.secret_protector.clone(),
+            claude_env: self.claude_env.clone(),
         }
     }
 }

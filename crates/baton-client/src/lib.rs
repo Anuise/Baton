@@ -13,16 +13,24 @@ use baton_api::{
     task_admission_check_path, task_cancel_path, task_contract_path, task_dependencies_path, task_dispatch_path,
     task_path, task_ready_path, tasks_path,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AuthorizationView, ConfirmAuthorizationRequest,
-    CreateGoalRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse, PlatformResponse,
-    SummaryRequest, TaskBoard, TaskDetail, UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE,
-    HEALTH_PATH, PLATFORM_PATH, WORKSPACES_PATH,
+    CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest, ErrorBody, HealthResponse,
+    LoginTerminalResponse, PlatformResponse, ProfileList, SetupStatus, SummaryRequest, TaskBoard, TaskDetail,
+    UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PLATFORM_PATH, PROFILES_PATH,
+    SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, WORKSPACES_PATH,
 };
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
+use baton_domain::profile::ProfileView;
 use baton_domain::run::RunView;
 use baton_domain::task::{ContractContent, Goal, TaskView};
 use baton_domain::workspace::Workspace;
 use baton_credential::CredentialFileError;
 use baton_ports::SecretProtector;
+
+/// 一般請求等待回應的上限。
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 需要在本機執行 `claude`、`git` 的請求（核對登入、精靈檢查）等待回應的上限。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 連線方式：連回既有的，或由本次呼叫啟動。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +96,45 @@ impl RuntimeClient {
 
     pub async fn archive_workspace(&self, id: &str) -> Result<Workspace, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &format!("{WORKSPACES_PATH}/{id}/archive"), None).await
+    }
+
+    /// 列出全部帳號 Profile（含已封存）與可派工判定。
+    pub async fn profiles(&self) -> Result<ProfileList, ClientError> {
+        self.get_json(PROFILES_PATH).await
+    }
+
+    /// 新增帳號 Profile；Runtime 為它建立獨立的設定目錄。
+    pub async fn create_profile(&self, request: &CreateProfileRequest) -> Result<ProfileView, ClientError> {
+        self.send_json(reqwest::Method::POST, PROFILES_PATH, Some(request)).await
+    }
+
+    /// 重新核對 Profile 的登入狀態、認證來源與帳號身分。
+    pub async fn verify_profile(&self, id: &str) -> Result<ProfileView, ClientError> {
+        self.send_json_within::<(), _>(reqwest::Method::POST, &format!("{PROFILES_PATH}/{id}/verify"), None, PROBE_TIMEOUT)
+            .await
+    }
+
+    /// 開啟終端機，以該 Profile 自己的設定目錄執行原生登入。
+    pub async fn open_login_terminal(&self, id: &str) -> Result<LoginTerminalResponse, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &format!("{PROFILES_PATH}/{id}/login-terminal"), None).await
+    }
+
+    pub async fn archive_profile(&self, id: &str) -> Result<ProfileView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &format!("{PROFILES_PATH}/{id}/archive"), None).await
+    }
+
+    /// 首次啟動精靈的狀態（重新探測 Claude Code 與 Git）。
+    pub async fn setup(&self) -> Result<SetupStatus, ClientError> {
+        self.send_json_within::<(), _>(reqwest::Method::GET, SETUP_PATH, None, PROBE_TIMEOUT).await
+    }
+
+    /// 「重新檢查」：重新探測工具並重新核對每個使用中的 Profile。
+    pub async fn recheck_setup(&self) -> Result<SetupStatus, ClientError> {
+        self.send_json_within::<(), _>(reqwest::Method::POST, SETUP_RECHECK_PATH, None, PROBE_TIMEOUT).await
+    }
+
+    pub async fn acknowledge_background_notice(&self) -> Result<SetupStatus, ClientError> {
+        self.send_json_within::<(), _>(reqwest::Method::POST, SETUP_ACK_PATH, None, PROBE_TIMEOUT).await
     }
 
     /// 讀取 Workspace 的授權設定：目前生效的 revision、歷史、建議範本與能力清單。
@@ -197,6 +244,17 @@ impl RuntimeClient {
         path: &str,
         body: Option<&B>,
     ) -> Result<T, ClientError> {
+        self.send_json_within(method, path, body, REQUEST_TIMEOUT).await
+    }
+
+    /// 與 `send_json` 相同，但等待回應的上限由呼叫端決定（會去執行 claude 的端點需要較久）。
+    async fn send_json_within<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&B>,
+        timeout: Duration,
+    ) -> Result<T, ClientError> {
         let token = baton_credential::read_desktop_credential(&self.data_dir, &*self.protector)?;
         let unreachable = |e: reqwest::Error| ClientError::Unreachable(e.to_string());
         // Windows 連到未監聽的 loopback 埠要等約 2 秒才失敗；連線逾時設短一點，連不上時才能快速判斷
@@ -207,7 +265,7 @@ impl RuntimeClient {
             .request(method, format!("http://{}{path}", self.addr))
             .bearer_auth(token)
             .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
-            .timeout(Duration::from_secs(2));
+            .timeout(timeout);
         if let Some(body) = body {
             request = request.json(body);
         }

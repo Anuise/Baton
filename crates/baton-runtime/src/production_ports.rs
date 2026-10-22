@@ -1,6 +1,6 @@
 //! 正式執行環境使用的 Port。
 //!
-//! 目前只有系統時鐘、平台辨識、DPAPI 憑證保護與目錄檢查是真實實作；其餘 Port 的正式版由後續的票提供，
+//! 目前只有系統時鐘、平台辨識、DPAPI 憑證保護、目錄檢查與建立、Claude Code／Git 環境探測是真實實作；其餘 Port 的正式版由後續的票提供，
 //! 在那之前呼叫它們會得到 `NotImplemented`，不會悄悄做出任何副作用。
 
 use std::path::Path;
@@ -12,6 +12,7 @@ use baton_domain::Timestamp;
 use baton_ports::*;
 use futures::stream::BoxStream;
 
+use crate::claude_cli::ClaudeCli;
 use crate::windows_platform::WindowsPlatformInfo;
 
 pub struct SystemClock;
@@ -77,6 +78,9 @@ impl WorkspaceFs for LocalWorkspaceFs {
     async fn inspect_directory(&self, path: &Path) -> PortResult<DirectoryState> {
         baton_ports::directory_state(path)
     }
+    async fn ensure_directory(&self, path: &Path) -> PortResult<()> {
+        tokio::fs::create_dir_all(path).await.map_err(|e| PortError::Failed(format!("無法建立目錄 {}：{e}", path.display())))
+    }
     async fn create_worktree(&self, _repo: &Path, _branch: &str, _target: &Path) -> PortResult<()> {
         Err(PortError::NotImplemented("WorkspaceFs::create_worktree"))
     }
@@ -108,5 +112,6 @@ pub fn production_ports() -> Ports {
         platform_info: Arc::new(WindowsPlatformInfo),
         // DPAPI 是真實實作：桌面憑證檔一定要受保護
         secret_protector: Arc::new(baton_credential::DpapiProtector),
+        claude_env: Arc::new(ClaudeCli),
     }
 }

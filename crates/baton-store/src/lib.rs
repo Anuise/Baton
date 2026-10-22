@@ -24,8 +24,10 @@ use baton_domain::Timestamp;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use tokio::sync::oneshot;
 
+mod profiles;
 mod runs;
 mod tasks;
+pub use profiles::ProfileApplyError;
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use tasks::{TaskApplyError, TaskBoardData, TaskDetailData};
 
@@ -244,6 +246,26 @@ const MIGRATIONS: &[Migration] = &[
             created_at INTEGER NOT NULL,
             delivered_at INTEGER,
             UNIQUE (kind, run_id)
+        );",
+    },
+    // 只保存核對結果（登入與否、認證來源、帳號身分），不保存任何登入資料；設定目錄不重複（不分大小寫）
+    Migration {
+        name: "account_profile_and_setup_state",
+        sql: "CREATE TABLE account_profile (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            config_dir TEXT NOT NULL,
+            expected_account TEXT,
+            status TEXT NOT NULL CHECK (status IN ('active', 'archived')),
+            verification TEXT CHECK (verification IS NULL OR json_valid(verification)),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL,
+            archived_at INTEGER
+        );
+        CREATE UNIQUE INDEX account_profile_config_dir ON account_profile (lower(config_dir));
+        CREATE TABLE setup_state (
+            key TEXT PRIMARY KEY,
+            acknowledged_at INTEGER NOT NULL
         );",
     },
 ];
