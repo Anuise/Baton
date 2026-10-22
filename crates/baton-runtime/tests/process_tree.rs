@@ -31,6 +31,7 @@ fn cmd_spec(command_id: &str, args: &[&str]) -> SpawnSpec {
         working_dir: None,
         command_id: command_id.to_string(),
         env: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -252,6 +253,7 @@ async fn spawn_of_missing_program_fails_without_leftovers() {
         working_dir: None,
         command_id: id.clone(),
         env: Vec::new(),
+        ..Default::default()
     };
 
     assert!(control.spawn(spec.clone()).await.is_err());

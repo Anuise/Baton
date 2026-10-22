@@ -51,6 +51,7 @@ impl AgentAdapter for Unavailable {
             working_dir: spec.working_dir.clone(),
             command_id: spec.command_id.clone(),
             env: Vec::new(),
+            ..Default::default()
         }
     }
     async fn launch(&self, _spec: RunSpec) -> PortResult<AgentHandle> {
