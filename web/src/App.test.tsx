@@ -41,6 +41,7 @@ const client = {
   pendingDecisions: vi.fn(async () => ({ pending_count: 1, by_workspace: [{ workspace_id: "ws_1", pending_count: 1 }] })),
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
   listKnowledge: vi.fn(async () => ({ search_mode: "full_text", entries: [] })),
+  listGuards: vi.fn(async () => ({ guards: [] })),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({
