@@ -9,14 +9,14 @@
 //!   60%～75% 之間維持原狀（遲滯），避免在門檻附近來回切換。
 //!
 //! **交接**：issue §5.2 的五個步驟以 phase 狀態機表達，每一個 phase 持久化之後才做下一步的外部副作用：
-//! 1. `requested`：帳號進入 draining，已選定承接帳號（可派工、額度未達門檻、名額夠，可用交接保留槽）。
+//! 1. `requested`（步驟 1）：帳號進入 draining，已選定承接帳號（可派工、額度未達門檻、名額夠，可用交接保留槽）。
 //!    Worker 的回報回應會帶 `stop_requested`，請它保存 checkpoint 並結束。
-//! 2. `stopping`：到了安全邊界（舊 Run 在要求之後保存了 checkpoint，或等滿 `CHECKPOINT_WAIT_MS`）而且承接帳號仍有名額，
+//! 2. `stopping`（步驟 2）：到了安全邊界（舊 Run 在要求之後保存了 checkpoint，或等滿 `CHECKPOINT_WAIT_MS`）而且承接帳號仍有名額，
 //!    記下要延續的 checkpoint，之後 Supervisor 才要求舊程序停止。
-//! 3. `transferred`：舊程序**確認停止**（或自行結束）之後，在同一個交易中：舊 Run 以 `interrupted`（`handed_off`）結束並釋放
+//! 3. `transferred`（步驟 3、4）：舊程序**確認停止**（或自行結束）之後，在同一個交易中：舊 Run 以 `interrupted`（`handed_off`）結束並釋放
 //!    寫入所有權、以條件更新把世代轉給新建立的 successor Run（Prompt 附上 checkpoint 與交接說明）。
 //!    舊程序停不下來就一直停在 `stopping`，successor 不會被建立，所以不會有兩個 writer。
-//! 4. `confirmed`：successor Worker 以 `confirm_handoff` 確認已完成、未完成與未知副作用。
+//! 4. `confirmed`（步驟 5）：successor Worker 以 `confirm_handoff` 確認已完成、未完成與未知副作用。
 //! - `abandoned`：舊 Run 已由別的路徑結束（取消、程序消失、完全退出），或轉移時沒有承接帳號；Task 依原本的流程處理。
 //!
 //! 交接不是失敗：舊 Run 以 `handed_off` 結束，不計入任何修正或重試預算（spec D-16）。同一個 Task 兩次換帳號至少間隔
@@ -458,7 +458,7 @@ pub fn begin_stop(
     Ok(Some((next, event)))
 }
 
-/// 步驟 3：舊程序已確認停止，世代轉給 successor Run。
+/// 步驟 3、4：舊程序已確認停止，世代轉給 successor Run。
 pub fn transfer(
     handoff: &Handoff,
     successor: &Run,
@@ -500,7 +500,7 @@ pub fn abandon(handoff: &Handoff, reason: &str, now: Timestamp) -> Result<(Hando
     Ok((next, event))
 }
 
-/// 步驟 4：successor Worker 確認接手。同一個 Run 重複確認是冪等的（回傳 `None`）。
+/// 步驟 5：successor Worker 確認接手。同一個 Run 重複確認是冪等的（回傳 `None`）。
 pub fn confirm(
     handoff: &Handoff,
     run_id: &str,

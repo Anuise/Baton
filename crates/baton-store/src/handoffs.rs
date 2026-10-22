@@ -195,7 +195,7 @@ impl Store {
         outcome
     }
 
-    /// 步驟 3：舊程序已確認停止（`stop_outcome`）。單一交易：舊 Run 以 `handed_off` 結束並釋放寫入所有權，
+    /// 步驟 3、4：舊程序已確認停止（`stop_outcome`）。單一交易：舊 Run 以 `handed_off` 結束並釋放寫入所有權，
     /// 以條件更新（舊 Run 仍持有 `from_generation` 的 lease）把世代轉給新建立的 successor Run，交接進入 `transferred`。
     /// 舊 Run 已由別的路徑結束、或沒有承接帳號時放棄交接（後者把 Task 排回派工佇列）。已轉移過時原樣回傳（冪等）。
     pub async fn transfer_handoff(
@@ -305,7 +305,7 @@ impl Store {
         .await
     }
 
-    /// 步驟 4：successor Worker 確認接手（範圍取自憑證）。只有仍是寫入所有者的 successor 可以確認。
+    /// 步驟 5：successor Worker 確認接手（範圍取自憑證）。只有仍是寫入所有者的 successor 可以確認。
     pub async fn confirm_handoff(
         &self,
         scope: &AgentScope,
