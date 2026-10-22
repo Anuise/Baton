@@ -168,6 +168,7 @@ name = "baton-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "baton-domain",
  "baton-ports",
  "baton-store",
@@ -232,6 +233,7 @@ name = "baton-harness"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "baton-api",
  "baton-credential",
  "baton-domain",
@@ -269,6 +271,7 @@ dependencies = [
  "futures",
  "serde",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

@@ -91,9 +91,23 @@ impl WorkspaceFs for LocalWorkspaceFs {
     async fn inspect_dirty(&self, _target: &Path) -> PortResult<DirtyState> {
         Err(PortError::NotImplemented("WorkspaceFs::inspect_dirty"))
     }
-    async fn write_artifact_atomic(&self, _path: &Path, _bytes: &[u8]) -> PortResult<()> {
-        Err(PortError::NotImplemented("WorkspaceFs::write_artifact_atomic"))
+    async fn write_artifact_atomic(&self, path: &Path, bytes: &[u8]) -> PortResult<()> {
+        let (path, bytes) = (path.to_path_buf(), bytes.to_vec());
+        blocking(move || write_file_atomic(&path, &bytes)).await
     }
+    async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>> {
+        let path = path.to_path_buf();
+        blocking(move || read_file_if_exists(&path)).await
+    }
+    async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
+        let dir = dir.to_path_buf();
+        blocking(move || list_files_recursive(&dir)).await
+    }
+}
+
+/// 檔案系統操作是阻塞的（含 fsync），放到阻塞執行緒池，不卡住 Runtime 的非同步工作。
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> PortResult<T> + Send + 'static) -> PortResult<T> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| PortError::Failed(format!("檔案工作被中斷：{e}")))?
 }
 
 /// 組出正式執行用的 Port 組合。

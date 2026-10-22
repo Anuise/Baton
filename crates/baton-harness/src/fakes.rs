@@ -334,12 +334,24 @@ impl QuotaObserver for FakeQuotaObserver {
     }
 }
 
-/// 在暫存目錄中運作的 WorkspaceFs：成果寫入是真實的原子寫入，
+/// 模擬 Runtime 在成果寫入的某一點當掉：到了那一點就永遠不回來（呼叫端的 future 被丟棄即等同崩潰）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactWritePoint {
+    /// 暫存檔只寫了一半（沒有 fsync、沒有改名）。
+    MidWrite,
+    /// 暫存檔已完整寫入並 fsync，但還沒改名。
+    BeforeRename,
+    /// 已經原子改名，但呼叫端還沒拿到結果（所以 manifest 不會被提交）。
+    AfterRename,
+}
+
+/// 在暫存目錄中運作的 WorkspaceFs：成果寫入是真實的原子寫入（步驟與正式版相同），
 /// worktree 只在記憶體中追蹤（不依賴 git）。
 #[derive(Default)]
 pub struct FakeWorkspaceFs {
     worktrees: Mutex<HashSet<PathBuf>>,
     dirty: Mutex<HashSet<PathBuf>>,
+    artifact_hang: Mutex<Option<ArtifactWritePoint>>,
 }
 
 impl FakeWorkspaceFs {
@@ -349,6 +361,22 @@ impl FakeWorkspaceFs {
 
     pub fn has_worktree(&self, target: &Path) -> bool {
         lock(&self.worktrees).contains(target)
+    }
+
+    /// 下一次成果寫入在指定的點永遠不回來（只生效一次）。
+    pub fn hang_next_artifact_write_at(&self, point: ArtifactWritePoint) {
+        *lock(&self.artifact_hang) = Some(point);
+    }
+
+    /// 若下一次成果寫入被設定在這一點當掉，這裡就永遠不回來。
+    async fn crash_point(&self, point: ArtifactWritePoint) {
+        let hang = {
+            let mut armed = lock(&self.artifact_hang);
+            (*armed == Some(point)).then(|| armed.take())
+        };
+        if hang.is_some() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -388,13 +416,28 @@ impl WorkspaceFs for FakeWorkspaceFs {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(io)?;
         }
-        // 先寫暫存檔並 fsync，再改名，讀取端不會看到寫到一半的檔案
-        let temp = path.with_extension("tmp-write");
+        // 與正式版相同的步驟：先寫暫存檔並 fsync，再改名，讀取端不會看到寫到一半的目標檔；各步驟之間可以模擬崩潰
+        let temp = baton_ports::partial_path(path);
         let mut file = tokio::fs::File::create(&temp).await.map_err(io)?;
-        file.write_all(bytes).await.map_err(io)?;
+        let (first, rest) = bytes.split_at(bytes.len() / 2);
+        file.write_all(first).await.map_err(io)?;
+        file.flush().await.map_err(io)?;
+        self.crash_point(ArtifactWritePoint::MidWrite).await;
+        file.write_all(rest).await.map_err(io)?;
         file.sync_all().await.map_err(io)?;
         drop(file);
-        tokio::fs::rename(&temp, path).await.map_err(io)
+        self.crash_point(ArtifactWritePoint::BeforeRename).await;
+        tokio::fs::rename(&temp, path).await.map_err(io)?;
+        self.crash_point(ArtifactWritePoint::AfterRename).await;
+        Ok(())
+    }
+
+    async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>> {
+        baton_ports::read_file_if_exists(path)
+    }
+
+    async fn list_artifact_files(&self, dir: &Path) -> PortResult<Vec<FileEntry>> {
+        baton_ports::list_files_recursive(dir)
     }
 }
 

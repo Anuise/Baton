@@ -27,6 +27,7 @@ const client = {
     throw new Error("授權讀取失敗");
   }),
   getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [] })),
+  listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({
@@ -47,5 +48,18 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "授權設定 筆記" }));
     expect(await screen.findByText(/授權讀取失敗/)).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "工作面板：筆記" })).not.toBeInTheDocument();
+  });
+
+  it("可從 Workspace 清單開啟成果與驗證，並切回其他檢視", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "成果與驗證 筆記" }));
+    expect(await screen.findByRole("heading", { name: "成果與驗證：筆記" })).toBeInTheDocument();
+    expect(client.listArtifacts).toHaveBeenCalledWith("ws_1");
+
+    await user.click(screen.getByRole("button", { name: "工作面板 筆記" }));
+    expect(await screen.findByRole("heading", { name: "工作面板：筆記" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "成果與驗證：筆記" })).not.toBeInTheDocument();
   });
 });

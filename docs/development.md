@@ -6,10 +6,10 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限） |
-| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs、PlatformInfo、SecretProtector、ClaudeEnvironment |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表 |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task 與 Run）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`） |
+| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`）、PlatformInfo、SecretProtector、ClaudeEnvironment；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、成果 manifest（`artifact`、`artifact_version`） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run 與成果瀏覽）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `register_artifact`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
 | `crates/baton-runtime` | Runtime 組裝（`Runtime::start`）、Supervisor（`supervisor.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe` |
 | `crates/baton-mcp-shim` | MCP 工具 shim（`baton-mcp-shim.exe`）：Claude Code 以 stdio 啟動，把工具呼叫轉送到 Runtime 的 Agent API；只依賴 `baton-domain` |
@@ -187,6 +187,7 @@ Worker 不直接碰資料庫或管理 API：它的程序啟動時帶著一組**�
 | `report_progress` | `{ "summary" }` | 記錄最新進度 |
 | `save_checkpoint` | `{ "summary", "details"? }` | 記錄 checkpoint；`details` 只存在稽核紀錄，事件只記摘要 |
 | `report_blocked` | `{ "reason" }` | Task 從 `running` 進入 `blocked`；Run 本身不結束，Task 已不是 `running` 時不動 |
+| `register_artifact` | `{ "name", "description"?, "content"? \| "content_base64"? }` | 登記成果並回 201 `{ artifact_id, version, name, size_bytes, sha256, created }`；內容以參數內嵌傳入、不讀取任何路徑。細節見〈成果儲存與成果瀏覽〉 |
 
 三個回報工具成功時回 `{ "accepted": true, "kind" }`，同時續約 lease，並追加 Run 事件 `run_progress_reported`、`run_checkpoint_saved`、`run_blocked_reported`。錯誤：內容無效 400 `report_invalid`（空白或超過上限；上限 `SUMMARY_MAX_CHARS`、`REASON_MAX_CHARS`、`DETAILS_MAX_BYTES` 見 `baton_domain::agent`）、JSON 不合法 400 `bad_request`。
 
@@ -195,6 +196,65 @@ Worker 不直接碰資料庫或管理 API：它的程序啟動時帶著一組**�
 **面板**：`RunView`（`GET runs`、`GET tasks` 的 `runs`）多了 `latest_progress`、`latest_checkpoint`、`blocked`，各取該 Run 最新一筆**被接受**的回報；工作面板（`TaskBoard.tsx`）的卡片顯示它們。
 
 **MCP shim**（`crates/baton-mcp-shim`）：手寫的 stdio JSON-RPC 2.0（逐行；stdout 只輸出協定訊息，日誌走 stderr），只依賴 `baton-domain`，不依賴 `baton-api` 或 Runtime。`serve(input, output, ShimConfig)` 可在程序內以任意讀寫串流測試。啟動時從環境變數讀 `BATON_AGENT_TOKEN`、`BATON_RUNTIME_URL`，缺少或空白時只印變數名稱並以 exit code 2 結束；輸出（含錯誤與 `Debug`）不含憑證。
+
+### 成果儲存與成果瀏覽
+
+Worker 產生的成果（Artifact）由 Runtime 保管內容與 manifest。規則在 `baton_domain::artifact`（純邏輯：登記請求驗證、版本遞增、未登記檔案辨識、預覽判定），持久化在 `baton-store`，端點在 `baton-api`（Agent 端 `agent.rs`、桌面端成果瀏覽），檔案存取走 `WorkspaceFs` Port。
+
+**儲存位置**：`<資料目錄>\artifacts\<workspace_id>\<blob 檔名>`。檔名是 `blob_<隨機>`，**每個版本一個獨立檔案、不用成果名稱當檔名**，所以新版本不會覆寫舊版本。manifest 在控制資料庫的兩張追加式表：
+
+- `artifact`：一個成果（同 Workspace、同 Task、同名 = 同一個成果）。
+- `artifact_version`：成果的每個版本，觸發器禁止更新與刪除。欄位：版本、描述、大小、SHA-256、相對於成果儲存根目錄的 `storage_path`（以 `/` 分隔）、產生者 Run 與世代、時間。
+
+**寫入順序**（spec D-17）：
+
+1. 寫暫存檔 `<blob 檔名>.partial`；
+2. fsync；
+3. 原子改名為 `<blob 檔名>`；
+4. 在**單一交易**提交 manifest，並追加事件 `artifact_registered`（`aggregate_type = 'artifact'`，聚合版本 = 成果版本號）。
+
+所以「已登記」一定表示內容完整。Runtime 在中途崩潰只會留下**未登記**檔案，它們不是成果、**不會被自動刪除**，由成果列表的 `unregistered_files` 顯示，恢復時可辨識：
+
+| `kind` | 狀態 | 意義 |
+| --- | --- | --- |
+| `staging` | 檔名以 `.partial` 結尾 | 寫入尚未完成就中斷，內容不完整，不可使用 |
+| `unregistered` | 已改名、沒有任何 manifest 引用 | 內容完整，但 manifest 還沒提交就中斷（或登記被拒）；仍不算成果 |
+
+辨識由 `artifact::classify_stored_files` 完成：成果儲存內沒有被任何 `artifact_version.storage_path` 引用的檔案才會列出。
+
+**Agent 工具 `register_artifact`**（`POST /agent/v1/tools/register_artifact`，只接受 Agent 憑證）：
+
+- 請求 `{ name, description?, content? | content_base64? }`，內容二選一。**內容以參數內嵌傳入**，Runtime 不讀取 Worker 指定的任何路徑，避免 Worker 藉登記讀走工作目錄以外的檔案。
+- 限制：名稱是檔名（不含路徑分隔字元與控制字元，≤ 200 字元，`NAME_MAX_CHARS`）、描述 ≤ 1000 字元（`DESCRIPTION_MAX_CHARS`）、解碼後內容 ≤ 10 MiB（`ARTIFACT_MAX_BYTES`）。
+- 成功回 201 `{ artifact_id, version, name, size_bytes, sha256, created }`（`created` 表示是否建立了新成果，false 為既有成果追加新版本）。
+- 產生者與 Task 關聯一律取自憑證（Workspace、Run、世代；Task 取自 Run）；請求帶的 `workspace_id`／`run_id` 與憑證不符回 403 `agent_scope_mismatch`。
+- 登記**不改變 Task 狀態**；成果是否被接受屬於後續的驗證 Gate（票 13）。
+
+| 錯誤 | 狀態碼 |
+| --- | --- |
+| `artifact_invalid`（名稱、描述或內容欄位不合規） | 400 |
+| `artifact_too_large`（超過 `ARTIFACT_MAX_BYTES`） | 413 |
+| `run_report_stale`（Run 已結束或被接替；**不寫入任何檔案與 manifest**） | 409 |
+| `agent_scope_mismatch` | 403 |
+| `bad_request`（JSON 不合法） | 400 |
+
+**桌面端點**（桌面憑證；Agent 憑證得到 403、無憑證 401，與其他管理 API 相同）都在 `/api/v1/workspaces/{id}/` 之下。成果一律以 Workspace 為界，跨 Workspace 取用回 404：
+
+| 端點 | 用途 |
+| --- | --- |
+| `GET artifacts` | 成果與全部版本；每個版本帶 `file_status`（`ok`／`missing`／`size_mismatch`，**只比對存在與大小**），另有 `unregistered_files` |
+| `GET artifacts/{artifact_id}/versions/{version}/preview` | `{ "preview": {"kind":"text","text","truncated"} \| {"kind":"binary"} }`；文字最多 64 KiB（`PREVIEW_MAX_BYTES`），在字元邊界截斷；含 NUL 或不是有效 UTF-8 的內容是 `binary` |
+| `GET artifacts/{artifact_id}/versions/{version}/content` | 下載，原始位元組，標頭 `Content-Disposition: attachment` 與 `X-Baton-Sha256` |
+
+預覽與下載都先**重新計算 SHA-256 與大小**，與 manifest 不符回 409 `artifact_integrity_failed`；檔案不存在回 409 `artifact_file_missing`；不存在的成果或版本回 404 `artifact_not_found`。完整的雜湊核對只發生在預覽與下載，列表的 `file_status` 為了成本只看存在與大小。
+
+Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 Workspace 清單進入）列出成果與版本、預覽文字、下載，並顯示未登記檔案。
+
+**已知限制**：
+
+- 登記被拒絕（過期世代）不留稽核紀錄，這點與三個回報工具不同。
+- 同一個 Run 重送相同內容會產生新版本（不去重）。
+- 真正的「接受成果」與驗證 Gate 在票 13；目前登記只代表內容完整落地並有 manifest。
 
 ### 帳號 Profile 與首次啟動精靈
 
@@ -283,9 +343,10 @@ let (status, body) = harness.send_json(Method::POST, "/api/v1/workspaces", Some(
 - `harness.send_json(method, path, body)`：帶桌面憑證發出請求並回傳 `(狀態碼, JSON)`，用來斷言拒絕情境的錯誤代碼；`harness.db()`：以唯讀方式開啟控制資料庫，只用來確認「事件有追加、時間以 UTC 存放」這類必須看落地內容的事實。
 - `Harness::builder().prepare_data_dir(..).try_start()`：Runtime 第一次啟動前先整理資料目錄（例如放入較新版本的資料庫），並回傳啟動錯誤而不是 panic。
 - `harness.supervise()`：讓 Supervisor 處理一次（Harness 不啟動背景迴圈，何時發生由測試決定）；`process_control.hang_next_spawn_at(HangPoint::…)` 讓下一次 spawn 在「啟動前／啟動後回執前」永遠不回來，測試以 `timeout` 丟棄該次處理即等同 Runtime 在那一點崩潰；`agent_adapter.emit(run_id, event)`、`script_next_run(events)` 推送 Adapter 事件。
+- `harness.workspace_fs.hang_next_artifact_write_at(ArtifactWritePoint::MidWrite | BeforeRename | AfterRename)`：讓下一次成果寫入在「寫到一半／改名前／改名後（manifest 提交前）」永遠不回來；測試以 `timeout` 丟棄該請求、再 `harness.restart()`，即等同 Runtime 在那一點崩潰。`harness.artifacts_dir()` 回傳成果儲存根目錄（`<資料目錄>\artifacts`），用來確認磁碟上留下哪些檔案。
 - `harness.restart()`：模擬重啟。舊的 Runtime 被丟棄（原位址不再回應），資料目錄與全部 fake 都保留。
 - `harness.clock`、`process_control`、`agent_adapter`、`quota_observer`、`workspace_fs`、`platform_info`、`secret_protector`、`claude_env`：具體的 fake，可腳本化回應並讀取呼叫紀錄。`claude_env` 可設定 Claude Code／Git 是否存在與版本（`set_claude`、`set_git`、`fail_tool_probes`）、在某個設定目錄完成原生登入（`log_in`，會像真實的 Claude Code 一樣把登入資料寫進該目錄）、模擬環境變數覆蓋（`set_env_override`）、讓開啟登入終端機時順便登入（`script_terminal_login`），並記錄開啟過的終端機（`login_terminals`）。
-- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）。
+- 示範測試：`crates/baton-harness/tests/health_demo.rs`；本機 API 防護情境：`crates/baton-harness/tests/api_auth.rs`；帳號 Profile 與首次啟動精靈情境：`crates/baton-harness/tests/profiles_and_first_run.rs`；Workspace 與控制資料庫情境：`crates/baton-harness/tests/workspaces.rs`；Task 與契約情境：`crates/baton-harness/tests/tasks.rs`；Supervisor、Run、程序身分與取消情境：`crates/baton-harness/tests/runs.rs`；Agent API、範圍憑證與 MCP shim 情境：`crates/baton-harness/tests/agent_api.rs`（以 `tokio::io::duplex` 當 stdio，在程序內跑真正的 shim 對真實 API 回報）；Artifact 儲存、manifest、中斷恢復與下載驗證情境：`crates/baton-harness/tests/artifacts.rs`。
 
 後續的票撰寫情境測試時，一律透過這個 harness 操作真實 API；不要直接呼叫內部函式或斷言資料表欄位。
 

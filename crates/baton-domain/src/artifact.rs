@@ -44,6 +44,10 @@ pub enum ArtifactError {
     DescriptionTooLong,
     #[error("成果內容最多 {ARTIFACT_MAX_BYTES} 位元組")]
     TooLarge,
+    #[error("必須擇一提供 content（文字）或 content_base64，不可兩者都給或都沒有")]
+    ContentSource,
+    #[error("content_base64 不是有效的 Base64")]
+    ContentNotBase64,
 }
 
 impl ArtifactError {
