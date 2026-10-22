@@ -211,5 +211,5 @@ async fn try_start_runtime(data_dir: &Path, ports: &Ports) -> Result<RunningRunt
         bind: "127.0.0.1:0".parse().expect("固定位址"),
     };
     // 測試自己決定何時讓 Supervisor 動作（`Harness::supervise`），所以不啟動背景迴圈
-    Runtime::start_with(config, ports.clone(), RuntimeOptions { background_supervisor: false }).await
+    Runtime::start_with(config, ports.clone(), RuntimeOptions { background_supervisor: false, ..RuntimeOptions::default() }).await
 }

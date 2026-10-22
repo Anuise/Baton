@@ -26,8 +26,8 @@ use futures::{FutureExt, StreamExt};
 use tokio::sync::{watch, Mutex, Notify};
 use tokio::task::JoinHandle;
 
-/// 受控停止的寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
-pub const STOP_GRACE: Duration = Duration::from_secs(30);
+/// 受控停止的預設寬限期（spec D-11）；逾時由 ProcessControl 以 Job Object 強制終止整個程序樹。
+pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(30);
 
 /// 背景迴圈沒有被喚醒時，最久多久檢查一次。
 const BACKGROUND_INTERVAL: Duration = Duration::from_secs(1);
@@ -36,6 +36,8 @@ pub struct Supervisor {
     store: Store,
     ports: Ports,
     log: LogSink,
+    /// 要求程序停止時給它的寬限期。
+    stop_grace: Duration,
     /// 同一時間只有一個 tick 在進行（背景迴圈與測試呼叫不會交錯）。
     tick_lock: Mutex<()>,
     /// 已接上的事件串流；Runtime 重建後是空的，下一次 tick 會重新接上。
@@ -45,11 +47,12 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
-    pub fn new(store: Store, ports: Ports, log: LogSink) -> Arc<Self> {
+    pub fn new(store: Store, ports: Ports, log: LogSink, stop_grace: Duration) -> Arc<Self> {
         Arc::new(Self {
             store,
             ports,
             log,
+            stop_grace,
             tick_lock: Mutex::new(()),
             streams: Mutex::new(HashMap::new()),
             adopted: Mutex::new(HashSet::new()),
@@ -239,7 +242,7 @@ impl Supervisor {
             let (true, Some(process)) = (run.cancel_requested_at.is_some(), run.process.as_ref()) else { continue };
             self.ensure_managed(&item).await;
             let identity = identity_of(process);
-            match self.ports.process_control.stop(&identity, STOP_GRACE).await {
+            match self.ports.process_control.stop(&identity, self.stop_grace).await {
                 Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
                     self.streams.lock().await.remove(&run.id);
                     self.apply(run, RunCommand::ConfirmCancelled { run_id: run.id.clone() }).await;

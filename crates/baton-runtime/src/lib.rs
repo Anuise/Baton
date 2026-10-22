@@ -14,6 +14,7 @@ pub mod windows_process;
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use baton_api::ApiState;
 use baton_ports::Ports;
@@ -51,11 +52,13 @@ pub struct RuntimeOptions {
     /// 是否啟動 Supervisor 的背景迴圈。測試 harness 關閉它，改由測試在想要的時刻呼叫 `Supervisor::tick`，
     /// 才能用 fake Clock 決定性地重現任何時序。
     pub background_supervisor: bool,
+    /// 要求 Run 的程序停止時給它的寬限期（spec D-11 的 30 秒）；逾時強制終止整個程序樹。
+    pub stop_grace: Duration,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        Self { background_supervisor: true }
+        Self { background_supervisor: true, stop_grace: supervisor::DEFAULT_STOP_GRACE }
     }
 }
 
@@ -96,7 +99,7 @@ impl Runtime {
 
         let (stop_tx, stop_rx) = watch::channel(false);
         let supervisor_wake = Arc::new(Notify::new());
-        let supervisor = Supervisor::new(store.clone(), ports.clone(), log.clone());
+        let supervisor = Supervisor::new(store.clone(), ports.clone(), log.clone(), options.stop_grace);
         let supervising = options
             .background_supervisor
             .then(|| supervisor.spawn_background(supervisor_wake.clone(), stop_rx.clone()));
