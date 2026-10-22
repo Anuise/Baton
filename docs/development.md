@@ -1366,6 +1366,8 @@ pnpm --filter web test
 
 桌面殼 `baton-desktop` 編譯時需要已建置的 `web/dist`，所以不在預設的 `cargo test` 範圍內；`pnpm build` 會編譯它。殼本身的單元測試（只快取成功的啟動、可取消的完全退出後備計時器）在 `pnpm --filter web build` 之後以 `cargo test -p baton-desktop`（經 `with-msvc.ps1`）執行。
 
+Runtime harness 的資料目錄建在暫存區的 `baton-harness\` 之下（`h<亂數>`，旁邊有同名的 `.lock` 鎖檔），整個 `Harness` 結束時刪除，重建 Runtime 時保留。Windows 上 Runtime 的背景工作要等測試的 tokio runtime 結束才會關閉控制資料庫與日誌，所以刪除交給背景執行緒重試；程序在刪完之前就結束時，鎖檔不再有人持有，之後任何一個 harness 啟動時會清掉（`crates/baton-harness/src/data_dir.rs`，測試 `crates/baton-harness/tests/harness_cleanup.rs`）。暫存區根目錄的 `.tmp*` 是修正前留下的，可以在沒有測試執行時手動刪除。
+
 ### 桌面 App 冒煙測試
 
 `pnpm build` 之後可執行：
