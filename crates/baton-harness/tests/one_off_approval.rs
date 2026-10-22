@@ -139,9 +139,12 @@ async fn decision(harness: &Harness, ws: &str, rid: &str) -> Value {
     view
 }
 
+/// 以目前看到的內容版本接受某個選項（票 35 起提交必須帶 `expected_revision`）。
 async fn answer(harness: &Harness, ws: &str, rid: &str, option: &str) {
     let path = format!("{WORKSPACES}/{ws}/decisions/{rid}/answer");
-    let (status, result) = harness.send_json(Method::POST, &path, Some(json!({ "option_id": option }))).await;
+    let (_, view) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/decisions/{rid}"), None).await;
+    let body = json!({ "option_id": option, "expected_revision": view["revision"] });
+    let (status, result) = harness.send_json(Method::POST, &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{result}");
 }
 

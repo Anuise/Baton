@@ -2,6 +2,7 @@ import type {
   AccountProfile,
   AccountRun,
   AccountScheduling,
+  AuthorityTable,
   BackupStatus,
   BackupSummary,
   DrillReport,
@@ -144,10 +145,34 @@ export function decisionView(overrides: Partial<DecisionRequestView> = {}): Deci
     urgency: "normal",
     deadline_at: null,
     overdue: false,
+    revision: 1,
+    deferred_until: null,
+    deferred: false,
+    merged_into: null,
+    status_reason: null,
+    links: [],
+    merged_from: [],
     blocking: [{ task_id: "task_1", task_title: "整理文件", task_status: "waiting_decision" }],
     permission: null,
+    authority: null,
+    target: { task_id: "task_1", contract_version: 1, authorization_revision: 1 },
+    allowed_actions: ["accept", "modify", "answer", "investigate", "defer", "reject"],
     created_at: CHECKED_AT,
     decision: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的決策權限表：一項內建可自主、一項已收窄、一項內建必須送裁定、一項只能人工發起。 */
+export function authorityTable(overrides: Partial<AuthorityTable> = {}): AuthorityTable {
+  return {
+    revision: 1,
+    entries: [
+      { matter: "split_task", label: "拆分、合併、排序 Task", builtin: "autonomous", effective: "autonomous", narrowed: false },
+      { matter: "retry_task", label: "重試 Task", builtin: "autonomous", effective: "requires_decision", narrowed: true },
+      { matter: "change_acceptance", label: "修改完成條件或驗收標準", builtin: "requires_decision", effective: "requires_decision", narrowed: false },
+      { matter: "retry_after_recovery_failures", label: "三次恢復失敗後的重試", builtin: "human_only", effective: "human_only", narrowed: false },
+    ],
     ...overrides,
   };
 }
