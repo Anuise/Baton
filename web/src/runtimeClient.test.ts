@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createHttpClient, createTauriClient } from "./runtimeClient";
 
-const health = { status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0 };
+const health = { status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 };
 
 describe("Runtime 用戶端", () => {
   it("HTTP 版向 /api/v1/health 取得健康狀態", async () => {

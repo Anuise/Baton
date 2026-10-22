@@ -24,6 +24,8 @@ pub struct HealthResponse {
     pub boot_count: u64,
     /// 本次 Runtime 的啟動時間（Clock Port 取得，UTC）。
     pub started_at: Timestamp,
+    /// 執行 Runtime 的程序識別碼（診斷與冒煙測試用）。
+    pub pid: u32,
 }
 
 /// Router 需要的執行期狀態。
@@ -46,5 +48,6 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         boot_count: state.boot_count,
         started_at: state.started_at,
+        pid: std::process::id(),
     })
 }

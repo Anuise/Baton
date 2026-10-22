@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StatusBar } from "./StatusBar";
 import type { RuntimeClient } from "./runtimeClient";
 
-const health = { status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0 };
+const health = { status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 };
 
 function clientReturning(...results: Array<"ok" | Error>): RuntimeClient {
   const queue = [...results];

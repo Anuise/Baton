@@ -4,3 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+baton-api = { path = "../crates/baton-api" }
+baton-client = { path = "../crates/baton-client" }
+baton-domain = { path = "../crates/baton-domain" }
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["sync"] }

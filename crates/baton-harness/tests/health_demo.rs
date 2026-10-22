@@ -17,6 +17,16 @@ async fn health_endpoint_reports_ok_over_real_http() {
 }
 
 #[tokio::test]
+async fn health_reports_the_pid_of_the_process_hosting_the_runtime() {
+    let harness = Harness::start().await;
+
+    let health: HealthResponse = harness.get_json(HEALTH_PATH).await;
+
+    // harness 在測試程序內啟動 Runtime，所以回報的 pid 就是測試程序自己
+    assert_eq!(health.pid, std::process::id());
+}
+
+#[tokio::test]
 async fn health_started_at_comes_from_the_injected_clock() {
     let harness = Harness::builder().clock_at(Timestamp::from_millis(1_700_000_000_000)).start().await;
 

@@ -5,6 +5,7 @@ export interface HealthResponse {
   version: string;
   boot_count: number;
   started_at: number;
+  pid: number;
 }
 
 export interface RuntimeClient {
