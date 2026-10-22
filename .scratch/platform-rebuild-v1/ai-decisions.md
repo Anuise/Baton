@@ -4233,6 +4233,164 @@
   - Bundle 的 `actions` 與 `usage` 只來自最後一次嘗試：交接前那次嘗試的動作紀錄與用量不計入，從先前嘗試沿用的旅程也沒有動作紀錄，所以那些旅程中被證明的動作這次不錄製（保守：不會錄製未經確認的動作）。同理，那些旅程中重播被推翻而要標為 stale 的錄製這次也不會標記；下次重播仍會實際執行並重新檢查後置條件，到時再標為 stale，不會被當成成功。之後需要跨嘗試的用量或錄製時，要把它們寫入驗證日誌。
 - 審閱：未審
 
+### AI-439：疑點升為 confirmed 的唯一路徑：Runtime 在 Profile 環境中執行重現案例，並以代表旅程當對照
+- 重要度：高
+- 時間／階段：2026-10-23，票 47 實作
+- 決策：
+  - 重現案例的格式：與 Verification Profile 旅程相同（操作加程式斷言），由 Controller 以 `reproduce_exploration_finding` 提出。檢查規則與 Profile 旅程相同，另外要求至少一個可自動化的步驟。
+  - 執行方式：Runtime 以目前的 Profile 排入驗證要求，同時執行 Profile 的代表旅程當對照，並沿用 Profile 的 doctor、就緒、資料準備、登入身分、秘密與 teardown。
+  - 判定：
+    - 對照全部 `passed`，而且案例是 `product_failure`：升為 `confirmed`，記下案例、Bundle 與失敗的步驟。
+    - 案例 `passed`：無法重現，保留為 `unverified_risk`，不駁回。
+    - 其他情況狀態不變，記為 `inconclusive`。包括環境、授權、證據不足、預算用盡、無法自動化、對照未通過，以及案例沒有執行。
+  - 沒有任何 API 或工具能直接把疑點設為 `confirmed`。資料表的 CHECK 也要求只有帶重現案例的疑點能是缺陷狀態。
+- 理由：
+  - issue #3 §10.3 要求「確認以產品行為斷言失敗才升級」；AI-393 已規定只有旅程中的斷言不符才是 `product_failure`，直接沿用就不會把環境故障記成缺陷。
+  - 對照旅程用來證明這次的環境確實可用。seed 資料錯、服務設定錯時，案例的斷言也可能失敗；對照沒過就不能把失敗算在產品上。
+  - 案例只能由 Controller 提出、由 Runtime 執行，所以 Worker 或 Controller 的說法都不能升級疑點。
+- 替代方案：
+  - 由 Controller 附 Evidence Bundle 宣告確認。Bundle 可能來自無關的旅程，無法對應原症狀。
+  - 不跑對照。環境的半故障（例如資料錯誤）會被誤判為產品缺陷。
+  - 把案例加進 Profile 再重現。Profile 只有使用者能發布（AI-391），每個疑點都要使用者介入。
+- 影響：
+  - 每次重現多執行代表旅程，耗時與操作次數增加。
+  - 代表旅程本身壞掉時，任何疑點都無法確認，要先修好環境或代表旅程。
+  - 「排除 seed data」只能靠 Profile 的資料準備與 Controller 的分流，Runtime 不另外判斷。
+- 審閱：未審
+
+### AI-440：已確認的缺陷不能排除、降級或換案例；修復後的案例納入每一次一般驗證
+- 重要度：高
+- 時間／階段：2026-10-23，票 47 實作
+- 決策：
+  - 鎖定：`confirmed`、`fixed`、`regressed` 不能排除、不能改為未驗風險，也不能更換確認時的案例（`exploration_defect_locked`）。修復只能以同一個案例驗證，通過才成為 `fixed`。
+  - 正常回歸：`fixed` 與 `regressed` 的案例在每一個一般驗證要求中都會執行，包括桌面、`run_verification` 與 Gate 重驗。案例由 Runtime 加入，要求中指定旅程也排除不掉，直接指定案例的識別會被拒絕。
+    - 回歸案例 `product_failure`：缺陷改為 `regressed`，仍留在回歸範圍內。
+    - 回歸案例再通過：改回 `fixed`。
+  - 診斷與 release gate 分開：還沒修好的 `confirmed` 案例不加入一般驗證。重現與修復驗證的 Bundle 不能作為 Stage 的 `verification` 證據（查驗為 `not_passed`）。
+  - 資料庫層：疑點與重現紀錄不可刪除；回報內容與確認時的案例不可更改；「有案例 ⇔ 是缺陷」「已排除 ⇔ 有排除原因」由 CHECK 保證。
+  - 案例有對應的功能（`feature`）時，執行時一併加進 Feature Map，讓 Bundle 的 `covered_features` 維持需求到測試的追蹤。
+- 理由：
+  - issue #3 §10.3 要求「失敗重現用於診斷，不讓新加入的已知失敗案例混淆既有 release gate」，以及「修復後納入正常回歸，不能藉由排除標籤掩蓋未修缺陷」。
+  - 回歸範圍若由請求者挑選，選一個子集合就能讓缺陷消失，所以由 Runtime 強制加入。
+  - 回歸失敗後若退出回歸範圍，會變成「失敗一次就被移除」，所以 `regressed` 仍要執行。
+  - 修復驗證的 Bundle 只有案例與對照兩種旅程；若能當作 Gate 證據，會變成用一條自選的旅程開啟 Gate。
+- 替代方案：
+  - 把修復後的案例寫進 Profile 的新版本。Profile 只有使用者能發布，而且使用者發布新版本就能移除案例。
+  - 只在「執行全部旅程」時加入回歸案例。指定旅程就能略過。
+- 影響：
+  - 修復的缺陷越多，每次驗證越久。
+  - 第一版沒有任何退役回歸案例的途徑，使用者也不行。功能被移除、案例永久無法執行時，該 Workspace 的驗證會一直不通過；需要時另開票，設計由使用者在桌面退役並保留紀錄的流程。
+- 審閱：未審
+
+### AI-441：回歸案例與目前的 Profile 不相容時，以無法自動化的替代旅程執行
+- 重要度：中
+- 時間／階段：2026-10-23，票 47 實作
+- 決策：執行一般驗證前，以目前的 Profile 重新檢查每個回歸案例。不相容時改執行只有一個人工步驟的替代旅程，判定為 `automation_unsupported`，說明列出不相容的原因。這次驗證因此不會通過，缺陷狀態不變。不相容的例子：引用的登入身分或秘密已不存在、介面改成 CLI／API 卻含瀏覽器操作。
+- 理由：
+  - 不能靜默略過，否則等於刪除案例。
+  - 照原樣執行也不行：沒有登入身分時，斷言會因未登入而失敗，被誤判成 `regressed`。
+  - `automation_unsupported` 不是通過，也不是產品缺陷，符合 AI-393 的分類。
+- 替代方案：
+  - 驗證要求在建立時就拒絕。會讓 Gate 重驗與一般驗證都無法排入，使用者也看不到原因。
+  - 另加一個新的 verdict 或 reason_code。要改動票 45／46 的判定與 UI。
+- 影響：替代旅程的 `reason_code` 是 `manual_step`，要看步驟說明才知道是不相容；使用者要調整 Profile，讓案例重新可執行。
+- 審閱：未審
+
+### AI-442：排除原因分四種；「預期設計」送裁定，其他三種由 Controller 自主，排除可以重新開啟
+- 重要度：中
+- 時間／階段：2026-10-23，票 47 實作
+- 決策：
+  - `triage_exploration_finding` 有三種動作：
+    - `exclude`：原因是 `environment`、`seed_data`、`tool_limitation` 或 `expected_design`，必須附理由。
+    - `mark_unverified`：只有疑點可以，例如環境一直無法驗證時。
+    - `reopen`：只有已排除的疑點可以。
+  - 送裁定：`expected_design` 依決策權限表的「產品方向」（`product_direction`）送裁定，沿用票 44 的模式，使用者核准後以相同內容再呼叫一次才排除，並記下裁定請求。其他三種原因 Controller 可以自主處理。
+  - 先檢查再送裁定：已確認的缺陷、狀態不符、理由空白會先被 Domain 拒絕，不會建立注定無效的裁定請求。
+  - 保留紀錄：排除不是刪除，紀錄與重現紀錄都保留，UI 有獨立的「已排除」區。
+- 理由：
+  - 「這是預期設計」等於決定產品行為，spec D-15 列為必須送裁定。
+  - 環境、資料與工具限制是可以查證的技術判斷，屬於 Controller 的自主範圍（同建立調查 Task）。
+- 替代方案：
+  - 所有排除都送裁定。使用者會被大量環境問題打擾。
+  - 新增一個決策權限事項。要改動權限表、Workspace 收窄設定與 UI。
+- 影響：
+  - Controller 可以把真正的缺陷誤排為環境問題。這只適用於尚未重現的疑點，紀錄保留且可以重新開啟。
+  - 已重現確認的缺陷不受影響（AI-440）。
+- 審閱：未審
+
+### AI-443：章程由 Controller 定義、只追加版本；上限套用在 Runtime 執行的重現，並交給 Worker 的 Prompt
+- 重要度：中
+- 時間／階段：2026-10-23，票 47 實作
+- 決策：
+  - 定義與內容：章程以 Task 為單位，由 Controller 以 `define_exploration_charter` 定義，內容相同不新增版本。欄位有區域、使用者角色、目標、禁止的副作用（至少一項）、步數上限（1～1000）、成本上限（0～100）。成本上限以模型呼叫次數計。
+  - 前置條件：Task 沒有章程時，Worker 不能回報疑點。
+  - Worker 的 Prompt：Context Builder 把目前的章程列為必要項目，放在 Stage 之後，context receipt 的種類是 `charter`。
+  - 上限的執行：Runtime 執行這個 Task 的疑點的重現與修復驗證時，操作次數與模型呼叫次數取章程與 Profile 預算中較小者。
+- 理由：
+  - issue #3 §10.3 要求探索先定章程。
+  - Runtime 看不到 Worker 自己操作受驗介面的步數與花費，只能做到兩件事：讓 Worker 在 Prompt 中看到邊界，並在 Runtime 自己執行的重現上強制上限。
+  - 只追加版本，可以追溯每個疑點回報時依據的章程（疑點記下章程版本）。
+- 替代方案：
+  - 讓 Worker 經由 Runtime 的工具操作受驗介面，以便計步。需要互動式的瀏覽器工具，範圍遠超過本票。
+  - 以 Run 的用量推估成本並中止 Run。用量推估只對帳號有意義，而且中止探索 Run 需要另一套交接處理。
+- 影響：Worker 探索時的步數與成本上限只是指示，Runtime 不會強制。禁止的副作用同樣只交給 Worker，Runtime 不攔截（同 spec 的 Out of Scope：不保證攔截可信專案內部的副作用）。
+- 審閱：未審
+
+### AI-444：探索的工具分工、資料形狀、API、錯誤碼、migration 45 與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-23，票 47 實作
+- 決策：
+  - Worker 工具：`report_exploration_finding`，只能在自己的 Task 下回報，呼叫者必須仍是寫入所有者。`feature` 必須在目前 Profile 的 Feature Map 中；`evidence` 必須是這個 Workspace 已登記的成果或 Evidence Bundle。
+  - Controller 工具：`define_exploration_charter`、`triage_exploration_finding`、`reproduce_exploration_finding`（`task_id` 預設是回報疑點的 Task；驗證修復時可指定修復的 Task）、`get_exploration`。Worker 不能要求重現，同 AI-391。
+  - 案例的識別：`finding.<疑點>`。Profile 的旅程識別不能含 `.`，所以不會撞名。
+  - migration 45 `exploration_findings`：`exploration_charter`、`exploration_finding`、`exploration_attempt` 三張表。主鍵是驗證要求加疑點，一個一般驗證要求可以有多個回歸案例。
+  - 事件：
+    - 疑點聚合：回報、狀態變更。
+    - 重現聚合：`exploration_attempt`，排入是第 1 版，判定是第 2 版。
+  - 桌面 API：`GET /api/v1/workspaces/{id}/exploration`，桌面殼指令 `workspace_exploration`，UI 在側欄的「探索」。
+  - 錯誤碼：`exploration_invalid`、`exploration_finding_not_found`、`exploration_charter_required`、`exploration_defect_locked`、`exploration_transition_refused`、`exploration_reproduction_pending`。
+  - MCP shim 工具數由 33 增為 38，`CONTROLLER_TOOLS` 由 16 增為 20。
+- 理由：
+  - 沿用票 44、45 的模式：Worker 與 Controller 工具，加上桌面唯讀檢視與側欄入口。
+  - 「finding」已被雙軸審查使用（`review_finding`、`finding_not_found`），所以探索的名稱一律加 `exploration` 前綴。
+- 替代方案：把疑點放進「驗證」頁。驗證頁以 Profile 與 Bundle 為中心，而疑點有自己的狀態與分流。
+- 影響：與同時進行的票整合時，migration 與 AI 編號可能需要順延。
+- 審閱：未審
+
+### AI-445：票 47 整合 rebuild/v1（票 49）：`exploration_findings` 順延為第 44 個 migration、AI 編號改為 AI-431～AI-436
+- 重要度：低
+- 時間／階段：2026-10-23，票 47 實作（R142-47-impl 結束前合併整合分支）
+- 決策：
+  - 票 49 先合併進整合分支，佔用了第 43 個 migration（`verification_attempts`）與 AI-425～AI-430。本票的 migration 改排在它之後成為第 44 個；AI 決策改編為 AI-431～AI-436（原 AI-425～AI-430 依序加 6），移到票 49 條目之後，條目間的互相引用一併改號。
+  - `crates/baton-store/src/lib.rs` 的模組清單與 `web/src/fixtures.ts` 的衝突是兩票各自新增，兩邊都保留；`docs/development.md` 中本票的段落移到票 46 與票 49 之間，依票號排列。
+- 理由：已合併的 migration 順序與整合分支已有的條目都不能改，只能移動本票的內容。
+- 替代方案：無。
+- 影響：無行為差異；本票的 commit 訊息中的「AI-425～AI-430」指改號前的條目。
+- 審閱：未審
+
+### AI-446：疑點有排隊中的重現時拒絕任何分流（exploration_reproduction_pending）
+- 重要度：中
+- 時間／階段：2026-10-23，票 47 實作（R149-47-fix，修正 R148 驗證指出的缺口）
+- 決策：
+  - 疑點有排隊中（`outcome` 為 NULL）的重現或修復驗證時，`triage_exploration_finding` 的排除、改為未驗風險與重新開啟一律回 409 `exploration_reproduction_pending`。Store 在分流的寫入交易內檢查（與 `reproduce_exploration_finding` 共用同一個查詢），先檢查後寫入之間不會被重現插隊。
+  - API 在送裁定之前也先以疑點的重現紀錄檢查，`expected_design` 不會為注定被拒的排除建立裁定請求。
+  - 錯誤訊息改為「請等結果出來再要求重現或分流」，同時適用重現與分流。
+- 理由：原本重現排隊中可以先排除疑點；結果出來時 `judge_bundle` 只在疑點仍是疑點或未驗風險時才改狀態，Runtime 證實的缺陷就會留在「已排除」，等於以排除標籤掩蓋缺陷。拒絕分流只需一個檢查，比在判定時清掉排除、改寫已排除的疑點簡單，也不會讓 Controller 的排除被靜悄悄推翻。
+- 替代方案：重現結果是 `reproduced` 而疑點已排除時仍升為 confirmed（同一交易內清掉排除）——需要改判定規則、處理已綁定的裁定請求，未採用。只擋排除、不擋改為未驗風險——改為未驗風險在等待重現時沒有意義，一併擋下規則較單純。
+- 影響：Controller 要等重現結果出來才能分流；重現卡在佇列時疑點維持原狀，不會被排除或降級。情境測試 `a_suspicion_cannot_be_triaged_away_while_its_reproduction_is_queued`。
+- 審閱：未審
+
+### AI-447：票 47 整合 rebuild/v1（票 48）：`exploration_findings` 順延為第 45 個 migration、AI 編號改為 AI-439～AI-445
+- 重要度：低
+- 時間／階段：2026-10-23，票 47 實作（R149-47-fix 開始修正後，整合分支併入票 48）
+- 決策：
+  - 票 48 先合併進整合分支，佔用了第 44 個 migration（`verified_action_replay`）與 AI-431～AI-438。本票的 migration 改排在它之後成為第 45 個；本票原 AI-431～AI-436 依序加 8 改編為 AI-439～AI-444、原 AI-437 改為 AI-445（內容保留當時的紀錄），移到票 48 條目之後，條目間的互相引用一併改號。
+  - `verification_profiles.rs` 的衝突：待執行的驗證要求同時帶票 48 的錄製（`replay`）與本票的回歸案例（`augment_pending`）；保存 Evidence Bundle 時依序判定探索重現與更新錄製，兩者都在同一個交易內。`fixtures.ts`、`styles.css` 是兩票各自新增，兩邊都保留。
+- 理由：已合併的 migration 順序與整合分支已有的條目都不能改，只能移動本票的內容。
+- 替代方案：無。
+- 影響：無行為差異；本票先前 commit 訊息中的「AI-431～AI-437」指改號前的條目。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

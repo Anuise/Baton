@@ -165,7 +165,7 @@ fn apply_replay_updates(tx: &Transaction<'_>, bundle: &EvidenceBundle) -> rusqli
     Ok(())
 }
 
-fn latest_profile(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Option<ProfileVersion>> {
+pub(crate) fn latest_profile(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Option<ProfileVersion>> {
     conn.query_row(
         &format!("SELECT {PROFILE_COLUMNS} FROM verification_profile_version WHERE workspace_id = ?1 ORDER BY version DESC LIMIT 1"),
         [workspace_id],
@@ -226,7 +226,9 @@ pub(crate) fn verification_evidence_status(
         }
         None => None,
     };
+    // 探索的重現與修復驗證只用於診斷（票 47），不能作為 Gate 的驗證證據
     let valid = bundle.verdict == Verdict::Passed
+        && !super::exploration::is_diagnostic_request(conn, &bundle.request_id)?
         && current_profile.as_deref() == Some(bundle.profile_version_id.as_str())
         && current_requirement == bundle.requirement_version;
     if !valid {
@@ -263,10 +265,11 @@ pub(crate) fn queue_reverification(
 ) -> rusqlite::Result<Option<String>> {
     let Some(profile) = latest_profile(tx, &workflow.workspace_id)? else { return Ok(None) };
     let is_proven = proven(tx, &profile)?.is_some();
+    let journeys = super::exploration::without_cases(journeys);
     let journeys = verification_profile::plan_journeys(&profile.definition, &journeys, is_proven)
         .or_else(|_| verification_profile::plan_journeys(&profile.definition, &[], is_proven))
         .unwrap_or_default();
-    let request = VerificationRequest {
+    let mut request = VerificationRequest {
         id,
         workspace_id: workflow.workspace_id.clone(),
         task_id: workflow.task_id.clone(),
@@ -279,11 +282,11 @@ pub(crate) fn queue_reverification(
         created_at: now,
         no_live_model: false,
     };
-    insert_request(tx, &request)?;
+    super::exploration::insert_request_with_regressions(tx, &mut request)?;
     Ok(Some(request.id))
 }
 
-fn insert_request(tx: &Transaction<'_>, request: &VerificationRequest) -> rusqlite::Result<()> {
+pub(crate) fn insert_request(tx: &Transaction<'_>, request: &VerificationRequest) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO verification_request
             (id, workspace_id, task_id, profile_version_id, journeys, requested_by, status, created_at, no_live_model)
@@ -380,7 +383,7 @@ impl Store {
                     Ok(journeys) => journeys,
                     Err(rejected) => return Ok(Err(rejected.into())),
                 };
-                let request = VerificationRequest {
+                let mut request = VerificationRequest {
                     id,
                     workspace_id: workspace_id.clone(),
                     task_id,
@@ -393,7 +396,8 @@ impl Store {
                     created_at: now,
                     no_live_model,
                 };
-                insert_request(tx, &request)?;
+                // 已修復缺陷的案例納入正常回歸：每一個一般驗證要求都會執行（票 47）
+                super::exploration::insert_request_with_regressions(tx, &mut request)?;
                 Ok(Ok(request))
             })
             .await?;
@@ -436,7 +440,9 @@ impl Store {
                         .optional()?;
                 }
                 let replay = load_replay(conn, &request.workspace_id)?;
-                pending.push(PendingVerificationRun { request, profile, subject_dir, requirement_version, run, replay });
+                let mut item = PendingVerificationRun { request, profile, subject_dir, requirement_version, run, replay };
+                super::exploration::augment_pending(conn, &mut item)?;
+                pending.push(item);
             }
             Ok(pending)
         })
@@ -470,6 +476,7 @@ impl Store {
                 ],
             )?;
             append_event(tx, &verification_profile::completed_event(&bundle))?;
+            super::exploration::judge_bundle(tx, &bundle)?;
             apply_replay_updates(tx, &bundle)?;
             Ok(true)
         })

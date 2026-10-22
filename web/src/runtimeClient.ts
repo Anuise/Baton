@@ -2855,6 +2855,124 @@ export interface VerificationProfileClient {
   evidenceArtifact(workspaceId: string, bundleId: string, index: number): Promise<EvidenceArtifactContent>;
 }
 
+/** 探索 Task 的一個章程版本（對應 Rust 的 CharterView）。 */
+export interface ExplorationCharter {
+  id: string;
+  workspace_id: string;
+  task_id: string;
+  version: number;
+  /** 要探索的區域。 */
+  area: string;
+  /** 扮演的使用者角色。 */
+  role: string;
+  goal: string;
+  forbidden_side_effects: string[];
+  /** 步數上限。 */
+  max_steps: number;
+  /** 成本上限：模型呼叫次數。 */
+  max_model_calls: number;
+  defined_by: string;
+  created_at: number;
+  task_title: string | null;
+}
+
+/** 疑點狀態：只有 confirmed、fixed、regressed 是經過重現確認的缺陷。 */
+export type ExplorationFindingStatus = "suspected" | "confirmed" | "unverified_risk" | "excluded" | "fixed" | "regressed";
+
+/** 排除原因；expected_design（預期設計）必須由使用者裁定。 */
+export type ExclusionReason = "environment" | "seed_data" | "tool_limitation" | "expected_design";
+
+export interface ExplorationExclusion {
+  reason: ExclusionReason;
+  rationale: string;
+  /** 排除為預期設計時的裁定請求。 */
+  decision_request_id?: string;
+}
+
+/** 確認缺陷時的重現案例。 */
+export interface ReproductionCase {
+  journey: VerificationJourney;
+  request_id: string;
+  /** 確認它的 Evidence Bundle。 */
+  bundle_id: string;
+  /** 失敗的步驟。 */
+  failed_step?: string;
+  confirmed_at: number;
+}
+
+export type ReproductionPurpose = "reproduce" | "verify_fix" | "regression";
+
+export type ReproductionOutcome =
+  | "reproduced"
+  | "not_reproduced"
+  | "inconclusive"
+  | "fix_verified"
+  | "still_failing"
+  | "regressed"
+  | "regression_passed";
+
+/** 一次重現紀錄（對應 Rust 的 ReproductionAttempt）；沒有 outcome 表示還在排隊。 */
+export interface ReproductionAttempt {
+  finding_id: string;
+  request_id: string;
+  purpose: ReproductionPurpose;
+  journey: VerificationJourney;
+  bundle_id?: string;
+  /** 案例的判定。 */
+  verdict?: VerificationVerdict;
+  reason_code?: string;
+  /** 對照（代表旅程）的判定。 */
+  control_verdict?: VerificationVerdict;
+  outcome?: ReproductionOutcome;
+  requested_by: string;
+  created_at: number;
+  finished_at?: number;
+}
+
+/** 一個疑點與它的重現紀錄（對應 Rust 的 FindingView）。 */
+export interface ExplorationFinding {
+  id: string;
+  workspace_id: string;
+  task_id: string;
+  charter_id: string;
+  charter_version: number;
+  title: string;
+  /** 對應的功能（Feature Map 的 key）。 */
+  feature?: string;
+  /** 重現步驟。 */
+  steps: string[];
+  expected: string;
+  actual: string;
+  environment: string;
+  /** 證據識別。 */
+  evidence: string[];
+  status: ExplorationFindingStatus;
+  exclusion?: ExplorationExclusion;
+  unverified_reason?: string;
+  case?: ReproductionCase;
+  /** 回報者：Worker Run。 */
+  reported_by: string;
+  version: number;
+  created_at: number;
+  updated_at: number;
+  task_title: string | null;
+  /** 新的在前。 */
+  attempts: ReproductionAttempt[];
+}
+
+/** Workspace 的探索概況（對應 Rust 的 ExplorationOverview）。 */
+export interface ExplorationOverview {
+  workspace_id: string;
+  charters: ExplorationCharter[];
+  /** 新的在前。 */
+  findings: ExplorationFinding[];
+}
+
+/** 探索測試（唯讀）。 */
+export interface ExplorationClient {
+  explorationOverview(workspaceId: string): Promise<ExplorationOverview>;
+}
+
 export type AppClient = RuntimeClient &
   WorkspaceClient &
   AuthorizationClient &
@@ -2874,6 +2992,7 @@ export type AppClient = RuntimeClient &
   WorkflowClient &
   ReviewClient &
   VerificationProfileClient &
+  ExplorationClient &
   ConversationClient &
   UpdateClient;
 
@@ -3129,6 +3248,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
       send(`${workspacePath(workspaceId)}/verification/bundles/${encodeURIComponent(bundleId)}`),
     evidenceArtifact: (workspaceId, bundleId, index) =>
       send(`${workspacePath(workspaceId)}/verification/bundles/${encodeURIComponent(bundleId)}/artifacts/${index}`),
+    explorationOverview: (workspaceId) => send(`${workspacePath(workspaceId)}/exploration`),
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
@@ -3280,6 +3400,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     evidenceBundle: (workspaceId, bundleId) => call<EvidenceBundle>("verification_bundle", { workspaceId, bundleId }),
     evidenceArtifact: (workspaceId, bundleId, index) =>
       call<EvidenceArtifactContent>("verification_artifact", { workspaceId, bundleId, index }),
+    explorationOverview: (workspaceId) => call<ExplorationOverview>("workspace_exploration", { workspaceId }),
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),

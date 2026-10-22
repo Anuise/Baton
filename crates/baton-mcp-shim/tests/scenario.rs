@@ -29,7 +29,14 @@ use baton_domain::workflow::{
     EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
     TEXT_MAX_CHARS as WORKFLOW_TEXT_MAX_CHARS, TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW,
 };
-use baton_domain::verification_profile::{Verdict, TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION};
+use baton_domain::verification_profile::{
+    Verdict, LIST_MAX as PROFILE_LIST_MAX, TEXT_MAX_CHARS as PROFILE_TEXT_MAX_CHARS, TOOL_GET_VERIFICATION,
+    TOOL_RUN_VERIFICATION,
+};
+use baton_domain::exploration::{
+    FindingStatus, MAX_MODEL_CALLS_LIMIT, MAX_STEPS_LIMIT, TOOL_DEFINE_EXPLORATION_CHARTER, TOOL_GET_EXPLORATION,
+    TOOL_REPORT_EXPLORATION_FINDING, TOOL_REPRODUCE_EXPLORATION_FINDING, TOOL_TRIAGE_EXPLORATION_FINDING,
+};
 use baton_mcp_shim::{serve, ShimConfig};
 use serde_json::{json, Value};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -135,7 +142,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_thirty_three_tools_with_their_required_fields() {
+async fn tools_list_has_the_thirty_eight_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -176,6 +183,11 @@ async fn tools_list_has_the_thirty_three_tools_with_their_required_fields() {
             TOOL_GET_REVIEWS,
             TOOL_RUN_VERIFICATION,
             TOOL_GET_VERIFICATION,
+            TOOL_DEFINE_EXPLORATION_CHARTER,
+            TOOL_REPORT_EXPLORATION_FINDING,
+            TOOL_TRIAGE_EXPLORATION_FINDING,
+            TOOL_REPRODUCE_EXPLORATION_FINDING,
+            TOOL_GET_EXPLORATION,
         ]
     );
     for tool in tools {
@@ -284,6 +296,10 @@ async fn tools_list_has_the_thirty_three_tools_with_their_required_fields() {
         TOOL_GET_REVIEWS,
         TOOL_RUN_VERIFICATION,
         TOOL_GET_VERIFICATION,
+        TOOL_DEFINE_EXPLORATION_CHARTER,
+        TOOL_TRIAGE_EXPLORATION_FINDING,
+        TOOL_REPRODUCE_EXPLORATION_FINDING,
+        TOOL_GET_EXPLORATION,
     ] {
         let tool = tools.iter().find(|t| t["name"] == name).unwrap();
         assert!(tool["description"].as_str().unwrap().contains("Controller 專屬"), "{name}");
@@ -393,6 +409,73 @@ async fn tools_list_has_the_thirty_three_tools_with_their_required_fields() {
         assert!(run_description.contains(verdict), "{verdict}");
     }
     assert_eq!(schema(TOOL_GET_VERIFICATION), json!({"type":"object","properties":{}}));
+
+    // 探索測試：章程欄位全部必填，上限取自 domain 常數
+    let description = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["description"].as_str().unwrap().to_string();
+    let charter = schema(TOOL_DEFINE_EXPLORATION_CHARTER);
+    assert_eq!(
+        charter["required"],
+        json!(["task_id", "area", "role", "goal", "forbidden_side_effects", "max_steps", "max_model_calls"])
+    );
+    for field in ["task_id", "area", "role", "goal"] {
+        assert_eq!(charter["properties"][field]["type"], "string", "{field}");
+    }
+    let side_effects = &charter["properties"]["forbidden_side_effects"];
+    assert_eq!(side_effects["type"], "array");
+    assert_eq!(side_effects["items"]["type"], "string");
+    assert_eq!(side_effects["minItems"], 1);
+    assert_eq!(side_effects["maxItems"], PROFILE_LIST_MAX);
+    assert_eq!(charter["properties"]["max_steps"]["type"], "integer");
+    assert_eq!(charter["properties"]["max_steps"]["minimum"], 1);
+    assert_eq!(charter["properties"]["max_steps"]["maximum"], MAX_STEPS_LIMIT);
+    assert_eq!(charter["properties"]["max_model_calls"]["type"], "integer");
+    assert_eq!(charter["properties"]["max_model_calls"]["minimum"], 0);
+    assert_eq!(charter["properties"]["max_model_calls"]["maximum"], MAX_MODEL_CALLS_LIMIT);
+
+    // 回報疑點是 Worker 工具：不是 Controller 專屬，說明要寫明 worker_only 與「一律先是疑點」
+    let report_description = description(TOOL_REPORT_EXPLORATION_FINDING);
+    assert!(!report_description.contains("Controller 專屬"));
+    for text in ["worker_only", "suspected"] {
+        assert!(report_description.contains(text), "{text}");
+    }
+    let report = schema(TOOL_REPORT_EXPLORATION_FINDING);
+    assert_eq!(report["required"], json!(["title", "steps", "expected", "actual"]));
+    assert_eq!(report["properties"]["steps"]["type"], "array");
+    assert_eq!(report["properties"]["steps"]["minItems"], 1);
+    for field in ["title", "feature", "expected", "actual", "environment"] {
+        assert_eq!(report["properties"][field]["type"], "string", "{field}");
+        assert_eq!(report["properties"][field]["maxLength"], PROFILE_TEXT_MAX_CHARS, "{field}");
+    }
+    assert_eq!(report["properties"]["evidence"]["type"], "array");
+    assert_eq!(report["properties"]["evidence"]["items"]["type"], "string");
+
+    let triage = schema(TOOL_TRIAGE_EXPLORATION_FINDING);
+    assert_eq!(triage["required"], json!(["finding_id", "action", "rationale"]));
+    assert_eq!(triage["properties"]["action"]["enum"], json!(["exclude", "mark_unverified", "reopen"]));
+    assert_eq!(
+        triage["properties"]["reason"]["enum"],
+        json!(["environment", "seed_data", "tool_limitation", "expected_design"])
+    );
+    let triage_description = description(TOOL_TRIAGE_EXPLORATION_FINDING);
+    for text in ["exploration_defect_locked", "requires_decision", "expected_design", "reopen", "confirmed", "fixed", "regressed"] {
+        assert!(triage_description.contains(text), "{text}");
+    }
+
+    let reproduce = schema(TOOL_REPRODUCE_EXPLORATION_FINDING);
+    assert_eq!(reproduce["required"], json!(["finding_id"]));
+    assert_eq!(reproduce["properties"]["journey"]["type"], "object");
+    assert!(reproduce["properties"]["journey"]["description"].as_str().unwrap().contains("finding."));
+    assert_eq!(reproduce["properties"]["task_id"]["type"], "string");
+    let reproduce_description = description(TOOL_REPRODUCE_EXPLORATION_FINDING);
+    for text in ["代表旅程", "product_failure", "confirmed", "unverified_risk", "fixed", "regressed", "診斷", "get_exploration"] {
+        assert!(reproduce_description.contains(text), "{text}");
+    }
+
+    assert_eq!(schema(TOOL_GET_EXPLORATION), json!({"type":"object","properties":{}}));
+    let overview_description = description(TOOL_GET_EXPLORATION);
+    for status in FindingStatus::ALL.map(FindingStatus::as_str) {
+        assert!(overview_description.contains(status), "{status}");
+    }
 }
 
 #[tokio::test]
@@ -446,6 +529,30 @@ async fn controller_tools_forward_to_their_paths_with_credentials_and_unchanged_
             r#"{"id":"vreq_1","journeys":["login"],"status":"queued"}"#,
         ),
         (TOOL_GET_VERIFICATION, json!({}), r#"{"profile":null,"requests":[],"bundles":[]}"#),
+        (
+            TOOL_DEFINE_EXPLORATION_CHARTER,
+            json!({"task_id":"task_9","area":"結帳","role":"一般會員","goal":"找出折扣計算錯誤","forbidden_side_effects":["不得送出真實付款"],"max_steps":40,"max_model_calls":5}),
+            r#"{"charter":{"task_id":"task_9","version":1},"created":true}"#,
+        ),
+        (
+            TOOL_TRIAGE_EXPLORATION_FINDING,
+            json!({"finding_id":"xf_1","action":"exclude","reason":"expected_design","rationale":"規格寫明折扣不疊加"}),
+            r#"{"error":"requires_decision","decision_request_id":"d2"}"#,
+        ),
+        (
+            TOOL_REPRODUCE_EXPLORATION_FINDING,
+            json!({
+                "finding_id": "xf_1",
+                "task_id": "task_10",
+                "journey": {
+                    "key": "case",
+                    "title": "折扣碼套用兩次",
+                    "steps": [{"key":"apply","operation":{"kind":"http","method":"POST","url":"http://127.0.0.1:8080/cart/discount"},"assertions":[{"kind":"status","equals":200}]}]
+                }
+            }),
+            r#"{"request":{"id":"vreq_2","journeys":["smoke","finding.xf_1"],"status":"queued"},"message":"已排入重現"}"#,
+        ),
+        (TOOL_GET_EXPLORATION, json!({}), r#"{"workspace_id":"w1","charters":[],"findings":[]}"#),
     ];
     for (tool, arguments, response) in cases {
         let (url, log) = spawn_stub(200, response).await;
@@ -790,6 +897,52 @@ async fn external_operation_tools_forward_to_their_paths_unchanged() {
         assert_eq!(log[0].path, format!("{AGENT_TOOLS_PREFIX}/{tool}"));
         assert_eq!(serde_json::from_slice::<Value>(&log[0].body).unwrap(), arguments);
     }
+}
+
+#[tokio::test]
+async fn report_exploration_finding_is_forwarded_to_its_tool_path_unchanged() {
+    let arguments = json!({
+        "title": "折扣碼可以重複套用",
+        "feature": "checkout.discount",
+        "steps": ["加入商品", "輸入折扣碼 SAVE10 兩次"],
+        "expected": "第二次被拒絕",
+        "actual": "總價被折扣兩次",
+        "environment": "build abc123、Chromium",
+        "evidence": ["art_7", "vbun_3"]
+    });
+    let response = r#"{"id":"xf_1","status":"suspected"}"#;
+    let (url, log) = spawn_stub(201, response).await;
+
+    let reply = call(&url, tool_call(17, TOOL_REPORT_EXPLORATION_FINDING, arguments.clone())).await;
+
+    assert_eq!(reply["result"]["isError"], false);
+    assert_eq!(reply["result"]["content"][0]["text"], response);
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].method, "POST");
+    assert_eq!(log[0].path, format!("{AGENT_TOOLS_PREFIX}/{TOOL_REPORT_EXPLORATION_FINDING}"));
+    assert_eq!(log[0].headers["authorization"], format!("Bearer {TOKEN}"));
+    assert_eq!(serde_json::from_slice::<Value>(&log[0].body).unwrap(), arguments);
+}
+
+#[tokio::test]
+async fn exploration_runtime_errors_become_tool_errors_with_the_error_code() {
+    let (url, _) = spawn_stub(
+        409,
+        r#"{"error":"exploration_defect_locked","message":"疑點 xf_1 已經過重現確認為缺陷（confirmed）"}"#,
+    )
+    .await;
+
+    let reply = call(
+        &url,
+        tool_call(18, TOOL_TRIAGE_EXPLORATION_FINDING, json!({"finding_id":"xf_1","action":"mark_unverified","rationale":"無法重現"})),
+    )
+    .await;
+
+    assert_eq!(reply["result"]["isError"], true);
+    assert!(reply.get("error").is_none());
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("exploration_defect_locked") && text.contains("409"), "{text}");
 }
 
 #[tokio::test]

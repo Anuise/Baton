@@ -54,6 +54,7 @@ mod tasks;
 mod timeline;
 mod understanding;
 mod verification;
+mod exploration;
 mod verification_attempts;
 mod verification_profiles;
 mod workdirs;
@@ -79,6 +80,7 @@ pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
 pub use recovery::RecoveryApplyError;
+pub use exploration::{ExplorationApplyError, ExplorationData, FindingRecord};
 pub use reviews::{ReviewApplyError, ReviewRecord, ReviewsData};
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use sessions::TranscriptProgress;
@@ -1706,6 +1708,75 @@ const MIGRATIONS: &[Migration] = &[
             -- stale 一定附原因，valid 沒有原因
             CHECK ((status = 'stale') = (json_array_length(stale_reasons) > 0))
         );",
+    },
+    // 探索測試到可重現缺陷（票 47，第 45 個 migration）：章程只追加版本；疑點不可刪除，回報內容與確認時的重現案例
+    // 都不可更改，已確認的缺陷不能回到非缺陷狀態；重現紀錄只追加，結果只能補上一次。
+    Migration {
+        name: "exploration_findings",
+        sql: "CREATE TABLE exploration_charter (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            content TEXT NOT NULL CHECK (json_valid(content)),
+            created_at INTEGER NOT NULL,
+            UNIQUE (task_id, version)
+        );
+        CREATE TRIGGER exploration_charter_no_update BEFORE UPDATE ON exploration_charter
+        BEGIN SELECT RAISE(ABORT, 'exploration_charter 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER exploration_charter_no_delete BEFORE DELETE ON exploration_charter
+        BEGIN SELECT RAISE(ABORT, 'exploration_charter 是追加式資料表，不可刪除'); END;
+        CREATE TABLE exploration_finding (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            charter_id TEXT NOT NULL REFERENCES exploration_charter (id),
+            report TEXT NOT NULL CHECK (json_valid(report)),
+            status TEXT NOT NULL CHECK (status IN ('suspected', 'confirmed', 'unverified_risk', 'excluded', 'fixed', 'regressed')),
+            exclusion TEXT CHECK (exclusion IS NULL OR json_valid(exclusion)),
+            unverified_reason TEXT,
+            reproduction_case TEXT CHECK (reproduction_case IS NULL OR json_valid(reproduction_case)),
+            reported_by TEXT NOT NULL,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            -- 只有經過重現確認的缺陷有案例；有案例就一定是缺陷（不能被排除或降為未驗風險）
+            CHECK ((status IN ('confirmed', 'fixed', 'regressed')) = (reproduction_case IS NOT NULL)),
+            -- 排除一定附原因
+            CHECK ((status = 'excluded') = (exclusion IS NOT NULL))
+        );
+        CREATE INDEX exploration_finding_workspace ON exploration_finding (workspace_id, created_at);
+        CREATE TRIGGER exploration_finding_guard BEFORE UPDATE ON exploration_finding
+        WHEN NEW.report IS NOT OLD.report
+            OR NEW.task_id IS NOT OLD.task_id
+            OR (OLD.reproduction_case IS NOT NULL AND NEW.reproduction_case IS NOT OLD.reproduction_case)
+            OR NEW.version <= OLD.version
+        BEGIN SELECT RAISE(ABORT, 'exploration_finding 的回報內容與重現案例不可更改'); END;
+        CREATE TRIGGER exploration_finding_no_delete BEFORE DELETE ON exploration_finding
+        BEGIN SELECT RAISE(ABORT, 'exploration_finding 不可刪除'); END;
+        CREATE TABLE exploration_attempt (
+            request_id TEXT NOT NULL REFERENCES verification_request (id),
+            finding_id TEXT NOT NULL REFERENCES exploration_finding (id),
+            purpose TEXT NOT NULL CHECK (purpose IN ('reproduce', 'verify_fix', 'regression')),
+            journey TEXT NOT NULL CHECK (json_valid(journey)),
+            requested_by TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            bundle_id TEXT,
+            verdict TEXT,
+            reason_code TEXT,
+            control_verdict TEXT,
+            outcome TEXT CHECK (outcome IS NULL OR outcome IN
+                ('reproduced', 'not_reproduced', 'inconclusive', 'fix_verified', 'still_failing', 'regressed', 'regression_passed')),
+            finished_at INTEGER,
+            PRIMARY KEY (request_id, finding_id),
+            CHECK ((outcome IS NULL) = (finished_at IS NULL))
+        );
+        CREATE INDEX exploration_attempt_finding ON exploration_attempt (finding_id, created_at);
+        CREATE TRIGGER exploration_attempt_once BEFORE UPDATE ON exploration_attempt
+        WHEN OLD.outcome IS NOT NULL OR NEW.journey IS NOT OLD.journey OR NEW.purpose IS NOT OLD.purpose
+        BEGIN SELECT RAISE(ABORT, 'exploration_attempt 只能補上一次結果'); END;
+        CREATE TRIGGER exploration_attempt_no_delete BEFORE DELETE ON exploration_attempt
+        BEGIN SELECT RAISE(ABORT, 'exploration_attempt 不可刪除'); END;",
     },
 ];
 

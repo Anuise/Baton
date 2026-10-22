@@ -13,6 +13,11 @@ import type {
   DrillReport,
   DecisionRequestView,
   ExitRunResult,
+  ExplorationCharter,
+  ExplorationFinding,
+  ExplorationOverview,
+  ReproductionAttempt,
+  VerificationJourney,
   Handoff,
   LifecycleStatus,
   ImportPreview,
@@ -1516,6 +1521,26 @@ export function webEvidenceBundle(overrides: Partial<EvidenceBundle> = {}): Evid
   });
 }
 
+/** 測試用的探索章程：探索結帳 Task 的第 2 版。 */
+export function explorationCharter(overrides: Partial<ExplorationCharter> = {}): ExplorationCharter {
+  return {
+    id: "xch_1",
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    version: 2,
+    area: "結帳流程",
+    role: "一般顧客",
+    goal: "找出金額計算錯誤",
+    forbidden_side_effects: ["不得送出真實付款", "不得寄出通知信"],
+    max_steps: 40,
+    max_model_calls: 5,
+    defined_by: "crun_1",
+    created_at: CHECKED_AT,
+    task_title: "探索結帳",
+    ...overrides,
+  };
+}
+
 /**
  * 測試用的含重播 Evidence Bundle（票 48，搭配 web Profile）：「管理訂單」的「確認訂單」由模型即時決定並錄製；
  * 「瀏覽商品」的「加入購物車」重播已驗證的錄製；「結帳」的錄製因引擎與資料相容性改變而標為 stale，
@@ -1632,6 +1657,215 @@ export function verificationAttempt(overrides: Partial<VerificationAttempt> = {}
     takeover: null,
     started_at: CHECKED_AT,
     ended_at: CHECKED_AT + 5_000,
+    ...overrides,
+  };
+}
+
+/** 測試用的重現案例旅程：對應原症狀的一條 HTTP 旅程。 */
+export function reproductionJourney(findingId: string): VerificationJourney {
+  return {
+    key: `finding.${findingId}`,
+    title: "重現原症狀",
+    representative: false,
+    steps: [
+      {
+        key: "total",
+        title: "讀取折扣後總額",
+        operation: { kind: "http", method: "GET", url: "http://127.0.0.1:3000/cart/total", headers: [] },
+        assertions: [{ kind: "status", equals: 200 }],
+      },
+    ],
+  };
+}
+
+/** 測試用的重現紀錄：確認重現、已重現（案例以產品行為斷言失敗，對照通過）。 */
+export function reproductionAttempt(overrides: Partial<ReproductionAttempt> = {}): ReproductionAttempt {
+  return {
+    finding_id: "xf_2",
+    request_id: "vreq_11",
+    purpose: "reproduce",
+    journey: reproductionJourney("xf_2"),
+    bundle_id: "evb_11",
+    verdict: "product_failure",
+    reason_code: "assertion_failed",
+    control_verdict: "passed",
+    outcome: "reproduced",
+    requested_by: "crun_1",
+    created_at: CHECKED_AT,
+    finished_at: CHECKED_AT + 60_000,
+    ...overrides,
+  };
+}
+
+/** 測試用的疑點：剛回報、尚未重現。 */
+export function explorationFinding(overrides: Partial<ExplorationFinding> = {}): ExplorationFinding {
+  return {
+    id: "xf_1",
+    workspace_id: "ws_1",
+    task_id: "task_1",
+    charter_id: "xch_1",
+    charter_version: 2,
+    title: "優惠碼欄位接受負數",
+    feature: "checkout",
+    steps: ["加入一件商品", "在優惠碼欄位輸入 -50", "按下套用"],
+    expected: "拒絕負數優惠碼",
+    actual: "總額增加 50 元",
+    environment: "本機 dev server",
+    evidence: ["art_1", "art_2"],
+    status: "suspected",
+    reported_by: "run_1",
+    version: 1,
+    created_at: CHECKED_AT,
+    updated_at: CHECKED_AT,
+    task_title: "探索結帳",
+    attempts: [],
+    ...overrides,
+  };
+}
+
+/** 測試用的探索概況：涵蓋疑點的每一種狀態（新的在前）。 */
+export function explorationOverview(overrides: Partial<ExplorationOverview> = {}): ExplorationOverview {
+  const caseOf = (findingId: string, bundleId: string, requestId: string) => ({
+    journey: reproductionJourney(findingId),
+    request_id: requestId,
+    bundle_id: bundleId,
+    failed_step: "total",
+    confirmed_at: CHECKED_AT + 60_000,
+  });
+  return {
+    workspace_id: "ws_1",
+    charters: [explorationCharter()],
+    findings: [
+      explorationFinding({
+        attempts: [
+          reproductionAttempt({
+            finding_id: "xf_1",
+            request_id: "vreq_13",
+            journey: reproductionJourney("xf_1"),
+            bundle_id: undefined,
+            verdict: undefined,
+            reason_code: undefined,
+            control_verdict: undefined,
+            outcome: undefined,
+            finished_at: undefined,
+          }),
+          reproductionAttempt({
+            finding_id: "xf_1",
+            request_id: "vreq_12",
+            journey: reproductionJourney("xf_1"),
+            bundle_id: "evb_12",
+            verdict: "environment_blocked",
+            reason_code: "service_unreachable",
+            control_verdict: "environment_blocked",
+            outcome: "inconclusive",
+          }),
+        ],
+      }),
+      explorationFinding({
+        id: "xf_2",
+        title: "折扣後總額少算",
+        steps: ["加入兩件商品", "套用折扣碼"],
+        expected: "總額為 180",
+        actual: "總額顯示 160",
+        evidence: ["art_3"],
+        status: "confirmed",
+        case: caseOf("xf_2", "evb_11", "vreq_11"),
+        version: 3,
+        attempts: [reproductionAttempt()],
+      }),
+      explorationFinding({
+        id: "xf_3",
+        title: "運費重複計算",
+        feature: undefined,
+        steps: ["加入商品", "選擇宅配", "回到購物車再結帳"],
+        expected: "運費 60",
+        actual: "運費 120",
+        evidence: [],
+        status: "regressed",
+        case: caseOf("xf_3", "evb_21", "vreq_21"),
+        version: 6,
+        attempts: [
+          reproductionAttempt({ finding_id: "xf_3", request_id: "vreq_23", purpose: "regression", bundle_id: "evb_23", outcome: "regressed" }),
+          reproductionAttempt({
+            finding_id: "xf_3",
+            request_id: "vreq_22",
+            purpose: "verify_fix",
+            bundle_id: "evb_22",
+            verdict: "passed",
+            reason_code: undefined,
+            outcome: "fix_verified",
+          }),
+          reproductionAttempt({ finding_id: "xf_3", request_id: "vreq_21", bundle_id: "evb_21" }),
+        ],
+      }),
+      explorationFinding({
+        id: "xf_4",
+        title: "大量商品時結帳變慢",
+        steps: ["加入 200 件商品", "按下結帳"],
+        expected: "三秒內完成",
+        actual: "等了二十秒",
+        status: "unverified_risk",
+        unverified_reason: "重現時沒有出現原症狀",
+        attempts: [
+          reproductionAttempt({
+            finding_id: "xf_4",
+            request_id: "vreq_31",
+            bundle_id: "evb_31",
+            verdict: "passed",
+            reason_code: undefined,
+            outcome: "not_reproduced",
+          }),
+        ],
+      }),
+      explorationFinding({
+        id: "xf_5",
+        title: "稅額四捨五入錯誤",
+        steps: ["加入單價 33 元的商品三件", "查看稅額"],
+        expected: "稅額 5",
+        actual: "稅額 4",
+        status: "fixed",
+        case: caseOf("xf_5", "evb_41", "vreq_41"),
+        version: 5,
+        attempts: [
+          reproductionAttempt({
+            finding_id: "xf_5",
+            request_id: "vreq_43",
+            purpose: "regression",
+            bundle_id: "evb_43",
+            verdict: "passed",
+            reason_code: undefined,
+            outcome: "regression_passed",
+          }),
+          reproductionAttempt({
+            finding_id: "xf_5",
+            request_id: "vreq_42",
+            purpose: "verify_fix",
+            bundle_id: "evb_42",
+            verdict: "product_failure",
+            outcome: "still_failing",
+          }),
+          reproductionAttempt({ finding_id: "xf_5", request_id: "vreq_41", bundle_id: "evb_41" }),
+        ],
+      }),
+      explorationFinding({
+        id: "xf_6",
+        title: "測試站台連線逾時",
+        steps: ["開啟結帳頁"],
+        expected: "頁面載入",
+        actual: "連線逾時",
+        status: "excluded",
+        exclusion: { reason: "environment", rationale: "測試站台當時正在重新部署" },
+      }),
+      explorationFinding({
+        id: "xf_7",
+        title: "折扣碼不能疊加",
+        steps: ["套用折扣碼 A", "再套用折扣碼 B"],
+        expected: "兩個折扣都生效",
+        actual: "只有第二個折扣生效",
+        status: "excluded",
+        exclusion: { reason: "expected_design", rationale: "產品規則是一次只能用一個折扣碼", decision_request_id: "dreq_1" },
+      }),
+    ],
     ...overrides,
   };
 }

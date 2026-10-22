@@ -544,6 +544,30 @@ describe("左側 Workspace 清單", () => {
     expect(onOpenWorkflows).not.toHaveBeenCalled();
   });
 
+  it("每個 Workspace 都有「探索」入口，不會觸發驗證或審查", async () => {
+    const onSelect = vi.fn();
+    const onOpenReviews = vi.fn();
+    const onOpenVerification = vi.fn();
+    const onOpenExploration = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <WorkspaceSidebar
+        client={fakeClient([workspace()])}
+        onSelect={onSelect}
+        onOpenReviews={onOpenReviews}
+        onOpenVerification={onOpenVerification}
+        onOpenExploration={onOpenExploration}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "探索 筆記" }));
+
+    expect(onOpenExploration).toHaveBeenCalledWith(workspace());
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenReviews).not.toHaveBeenCalled();
+    expect(onOpenVerification).not.toHaveBeenCalled();
+  });
+
   it("每個 Workspace 都有「對話」入口，不會觸發其他檢視", async () => {
     const onSelect = vi.fn();
     const onOpenTasks = vi.fn();

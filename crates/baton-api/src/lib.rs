@@ -17,6 +17,7 @@ mod guards;
 mod knowledge;
 mod lifecycle;
 mod messages;
+mod exploration;
 mod profiles;
 pub mod quota;
 mod recovery;
@@ -60,6 +61,10 @@ use baton_domain::review::{
     TOOL_CLASSIFY_FINDING, TOOL_GET_REVIEWS, TOOL_REPORT_DESIGN_DEVIATION, TOOL_RESOLVE_DESIGN_DEVIATION, TOOL_SUBMIT_REVIEW,
 };
 use baton_domain::verification_profile::{TOOL_GET_VERIFICATION, TOOL_RUN_VERIFICATION};
+use baton_domain::exploration::{
+    TOOL_DEFINE_EXPLORATION_CHARTER, TOOL_GET_EXPLORATION, TOOL_REPORT_EXPLORATION_FINDING, TOOL_REPRODUCE_EXPLORATION_FINDING,
+    TOOL_TRIAGE_EXPLORATION_FINDING,
+};
 use baton_domain::workflow::{TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_START_WORKFLOW};
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
@@ -130,6 +135,10 @@ pub use timeline::{metrics_path, timeline_path, MetricsResponse, ServerQuota, Ti
 pub use understanding::{
     projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, RecordUnderstandingResponse,
     SourceView, UnderstandingItemView, UnderstandingView,
+};
+pub use exploration::{
+    workspace_exploration_path, CharterView, DefineCharterResponse, ExplorationOverview, FindingView, ReproduceFindingResponse,
+    TriageFindingResponse,
 };
 pub use reviews::{
     reviews_path, AxisView, ClassifyFindingResponse, DeviationView, ResolveDeviationResponse, ReviewList, ReviewView,
@@ -307,6 +316,7 @@ pub fn router(state: ApiState) -> Router {
         .route(workflows::WORKFLOWS_ROUTE, get(workflows::list))
         .route(workflows::SKIP_ROUTE, post(workflows::skip))
         .route(reviews::REVIEWS_ROUTE, get(reviews::list))
+        .route(exploration::EXPLORATION_ROUTE, get(exploration::overview))
         .route(verification_profiles::VERIFICATION_ROUTE, get(verification_profiles::overview))
         .route(verification_profiles::PROFILE_ROUTE, post(verification_profiles::publish))
         .route(verification_profiles::RUNS_ROUTE, post(verification_profiles::run))
@@ -380,6 +390,11 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_GET_REVIEWS), post(reviews::get_reviews))
         .route(&tool_path(TOOL_RUN_VERIFICATION), post(verification_profiles::run_verification))
         .route(&tool_path(TOOL_GET_VERIFICATION), post(verification_profiles::get_verification))
+        .route(&tool_path(TOOL_DEFINE_EXPLORATION_CHARTER), post(exploration::define_exploration_charter))
+        .route(&tool_path(TOOL_REPORT_EXPLORATION_FINDING), post(exploration::report_exploration_finding))
+        .route(&tool_path(TOOL_TRIAGE_EXPLORATION_FINDING), post(exploration::triage_exploration_finding))
+        .route(&tool_path(TOOL_REPRODUCE_EXPLORATION_FINDING), post(exploration::reproduce_exploration_finding))
+        .route(&tool_path(TOOL_GET_EXPLORATION), post(exploration::get_exploration))
         // 套在 Router 上，所以也涵蓋未知路徑與不支援的方法
         .layer(middleware::from_fn_with_state(state.clone(), guard::guard))
         .with_state(state)

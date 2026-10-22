@@ -30,6 +30,7 @@ use baton_api::{
     evidence_artifact_path, evidence_bundle_path, verification_profile_path, verification_runs_path,
     workspace_verification_path, EvidenceArtifactContent, PublishProfileResponse, RunVerificationRequest,
     VerificationOverviewView,
+    workspace_exploration_path, ExplorationOverview,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
     ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
@@ -703,6 +704,11 @@ impl RuntimeClient {
     /// 驗證概況（票 45）：最新的 Verification Profile、是否已被證明可用、未覆蓋範圍、最近的要求與 Evidence Bundle。
     pub async fn verification_overview(&self, workspace_id: &str) -> Result<VerificationOverviewView, ClientError> {
         self.get_json(&workspace_verification_path(workspace_id)).await
+    }
+
+    /// 探索概況（票 47）：各探索 Task 目前的章程，以及疑點、已確認缺陷、未驗風險與它們的重現紀錄（唯讀）。
+    pub async fn exploration_overview(&self, workspace_id: &str) -> Result<ExplorationOverview, ClientError> {
+        self.get_json(&workspace_exploration_path(workspace_id)).await
     }
 
     /// 使用者發布 Verification Profile 的新版本（內容與最新版本相同時不新增）。

@@ -1227,6 +1227,22 @@ describe("Runtime 用戶端", () => {
     expect(invoke.mock.calls).toEqual([["workspace_reviews", { workspaceId: "ws_1" }]]);
   });
 
+  it("HTTP 版讀取探索概況", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+
+    await createHttpClient(fetchFn as unknown as typeof fetch).explorationOverview("ws/1");
+
+    expect(fetchFn.mock.calls).toEqual([["/api/v1/workspaces/ws%2F1/exploration"]]);
+  });
+
+  it("Tauri 版以指令與 camelCase 參數讀取探索概況", async () => {
+    const invoke = vi.fn(async () => ({}));
+
+    await createTauriClient(invoke as never).explorationOverview("ws_1");
+
+    expect(invoke.mock.calls).toEqual([["workspace_exploration", { workspaceId: "ws_1" }]]);
+  });
+
   it("HTTP 版讀取驗證概況與 Evidence Bundle，並以 JSON 發布 Profile 與要求執行", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);

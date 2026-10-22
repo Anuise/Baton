@@ -203,7 +203,7 @@ impl From<ReviewApplyError> for ApiError {
     }
 }
 
-fn internal(message: &str) -> ApiError {
+pub(crate) fn internal(message: &str) -> ApiError {
     ApiError { status: StatusCode::INTERNAL_SERVER_ERROR, code: "internal_error", message: message.to_string() }
 }
 
@@ -220,7 +220,7 @@ async fn workspace_path(state: &ApiState, id: &str) -> Result<std::path::PathBuf
 
 /// 依決策權限表判定 Controller 的動作（事項與對象由 Runtime 推導）。
 #[allow(clippy::too_many_arguments)]
-async fn decide(
+pub(crate) async fn decide(
     state: &ApiState,
     scope: &ControllerScope,
     matter: Matter,
@@ -238,7 +238,7 @@ async fn decide(
     Ok(outcome)
 }
 
-fn requires_decision(matter: Matter, request_id: String, existing: bool, what: &str) -> ControllerToolError {
+pub(crate) fn requires_decision(matter: Matter, request_id: String, existing: bool, what: &str) -> ControllerToolError {
     ControllerToolError::RequiresDecision {
         matter,
         message: format!(
@@ -251,7 +251,7 @@ fn requires_decision(matter: Matter, request_id: String, existing: bool, what: &
     }
 }
 
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     if text.chars().count() > max {
         format!("{}…", text.chars().take(max).collect::<String>())
     } else {
