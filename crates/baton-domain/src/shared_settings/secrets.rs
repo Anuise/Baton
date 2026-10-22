@@ -63,9 +63,21 @@ pub(crate) fn contains_secret_value(text: &str) -> bool {
         let next = words.get(index + 1).copied();
         word_looks_secret(word)
             || header_has_secret(word, next)
+            || flag_has_secret(word, next)
             || ((word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic"))
                 && next.is_some_and(|n| n.chars().count() >= 16 && !is_reference(n)))
     })
+}
+
+/// `--名稱 值` 這種旗標與值分成兩個字詞的寫法（例如 `--token abcd…`，或 args 陣列中相鄰的兩個元素）：
+/// 旗標名稱像秘密，下一個字詞是夠長、不是另一個旗標、也不是環境變數參照的值。
+pub(super) fn flag_has_secret(word: &str, next: Option<&str>) -> bool {
+    let name = word.trim_start_matches('-');
+    word.starts_with('-')
+        && !name.is_empty()
+        && !name.contains('=')
+        && is_secret_key(name)
+        && next.is_some_and(|value| !value.starts_with('-') && value.chars().count() >= 6 && !is_reference(value))
 }
 
 /// `名稱: 值` 或 `名稱:值` 的標頭形式（例如 `x-api-key: …`）：名稱像秘密，值是夠長、英數混合的 token。
@@ -189,12 +201,13 @@ pub(crate) fn redact_secrets(text: &str, replacement: &str) -> (String, u64) {
             masked[piece] = true;
             continue;
         }
-        // 秘密在下一個片段：`Bearer <token>` 或 `名稱: <值>`
+        // 秘密在下一個片段：`Bearer <token>`、`名稱: <值>` 或 `--名稱 <值>`
         let Some(&next_piece) = words.get(index + 1) else { continue };
         let next = pieces[next_piece].1;
         let scheme = word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic");
         if (scheme && next.chars().count() >= 16 && !is_reference(next))
             || (word.ends_with(':') && header_has_secret(word, Some(next)))
+            || flag_has_secret(word, Some(next))
         {
             masked[next_piece] = true;
         }

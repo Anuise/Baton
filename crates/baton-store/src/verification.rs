@@ -2,7 +2,8 @@
 //!
 //! 規則都在 Domain（`baton_domain::verification`）；這裡只做「在同一個交易中載入 Task、Run、成果 manifest →
 //! 交給 Domain 校驗與判定 → 寫入 Task 新狀態、驗證紀錄與事件」，以及給 Supervisor 與面板的唯讀查詢。
-//! 驗證紀錄是追加式資料表（觸發器禁止更新與刪除）；同一個 Run 最多一筆紀錄，同一個 Task 最多一筆「通過」。
+//! 驗證紀錄是追加式資料表（觸發器禁止更新與刪除）；同一個 Run 最多一筆有結論的紀錄（通過或未通過）；
+//! 同一個 Task 可以有多筆「通過」（整合失敗後重做的 Run 再通過，R151 第 1 項）。
 //! 開發 Task 通過時，排入整合佇列的項目也在同一個交易寫入（票 20）。
 
 use baton_domain::artifact::Artifact;
@@ -224,4 +225,34 @@ pub(crate) fn load_verifications(conn: &Connection, workspace_id: &str) -> rusql
         })
     })?
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const T1: Timestamp = Timestamp::from_millis(1_000);
+
+    /// 直接寫入驗證紀錄，確認資料表層級的保證：同一個 Run 最多一筆有結論的紀錄；
+    /// 同一個 Task 的不同 Run 各自可以通過（整合失敗後重做的 Run 再通過，R151 第 1 項）。
+    #[tokio::test]
+    async fn each_run_may_pass_once_and_a_redone_run_of_the_same_task_may_pass_again() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(Store::open(dir.path(), T1).await.unwrap());
+        let conn = Connection::open(dir.path().join(DB_FILE_NAME)).unwrap();
+        let insert = |id: &str, run: &str, outcome: &str| {
+            conn.execute(
+                "INSERT INTO task_verification
+                 (id, workspace_id, task_id, run_id, generation, contract_version, method, outcome, evidence, decided_at)
+                 VALUES (?1, 'w', 't', ?2, 1, 1, 'checks', ?3, '{}', 1)",
+                [id, run, outcome],
+            )
+        };
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+
+        insert("v1", "r1", "passed").unwrap();
+        insert("v2", "r2", "passed").expect("重做的 Run 再通過不應被拒絕");
+        assert!(insert("v3", "r2", "failed").is_err(), "同一個 Run 第二筆有結論的紀錄應被唯一索引拒絕");
+        insert("v4", "r2", "inconclusive").unwrap();
+    }
 }

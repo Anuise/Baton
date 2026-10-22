@@ -36,6 +36,7 @@ async fn app_confirms_the_p3_template_and_only_then_runs_needing_build_are_admit
                 grants,
                 acknowledged_risk: true,
                 acknowledged_expansion: false,
+                expected_revision: None,
             },
         )
         .await

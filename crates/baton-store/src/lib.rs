@@ -1778,6 +1778,13 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER exploration_attempt_no_delete BEFORE DELETE ON exploration_attempt
         BEGIN SELECT RAISE(ABORT, 'exploration_attempt 不可刪除'); END;",
     },
+    // 最終 review 修正（R151 第 1 項，第 46 個 migration）：開發 Task 通過驗證後整合失敗會回到 ready 重做，
+    // 重做的 Run 必須能再通過，所以「同一個 Task 最多一筆通過」放寬為「同一個 Run 最多一筆通過」；
+    // 後者已由 task_verification_one_conclusion（每個 Run 最多一筆有結論的紀錄）保證，只要移除舊索引。
+    Migration {
+        name: "verification_pass_per_run",
+        sql: "DROP INDEX task_verification_one_pass;",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
@@ -1911,6 +1918,16 @@ impl Store {
         &self,
         work: impl FnOnce(&Transaction<'_>) -> StoreResult<T> + Send + 'static,
     ) -> StoreResult<T> {
+        self.write_job(work, false).await
+    }
+
+    /// `write` 的實作。`clears_fault`：提交成功時在寫入執行緒上清除儲存故障（試寫用）；
+    /// 在佇列中依序清除，不會蓋掉下一個寫入剛記下的新故障。
+    async fn write_job<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Transaction<'_>) -> StoreResult<T> + Send + 'static,
+        clears_fault: bool,
+    ) -> StoreResult<T> {
         let (reply, result) = oneshot::channel();
         let (health, injected) = (self.inner.health.clone(), self.inner.injected.clone());
         let job: Job = Box::new(move |conn| {
@@ -1922,6 +1939,8 @@ impl Store {
             // 儲存故障記下來，讓 Supervisor 停止新派工、UI 顯示原因（票 26）
             if let Some(fault) = outcome.as_ref().err().and_then(health::classify) {
                 *health.lock().unwrap_or_else(|e| e.into_inner()) = Some(fault);
+            } else if clears_fault && outcome.is_ok() {
+                *health.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
             let _ = reply.send(outcome);
         });
@@ -1930,6 +1949,7 @@ impl Store {
     }
 
     /// 唯讀查詢：使用獨立的唯讀連線，不經過寫入佇列。
+    /// 整個查詢包在一個讀取交易中，其中的多個 SELECT 讀到同一個快照，不會混到其間提交的寫入。
     async fn read<T: Send + 'static>(
         &self,
         query: impl FnOnce(&Connection) -> StoreResult<T> + Send + 'static,
@@ -1937,7 +1957,9 @@ impl Store {
         let reader = self.inner.reader.clone();
         tokio::task::spawn_blocking(move || {
             let conn = reader.lock().unwrap_or_else(|e| e.into_inner());
-            query(&conn)
+            // 只讀不寫：交易結束時直接回滾（drop），不需要 commit
+            let tx = conn.unchecked_transaction()?;
+            query(&tx)
         })
         .await
         .map_err(|_| StoreError::Join)?
@@ -2424,6 +2446,27 @@ mod tests {
 
         let second = open(dir.path()).await;
         assert_eq!(second.record_boot(Timestamp::from_millis(2)).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn one_read_sees_a_single_snapshot_even_if_a_write_commits_in_between() {
+        // R151 第 16 項：同一個查詢中的多個 SELECT 不能讀到交易提交前後混在一起的狀態
+        let dir = tempfile::tempdir().unwrap();
+        let store = open(dir.path()).await;
+        store.record_boot(T0).await.unwrap();
+        let path = dir.path().to_path_buf();
+        let (before, after) = store
+            .read(move |conn| {
+                let count = |c: &Connection| c.query_row("SELECT COUNT(*) FROM runtime_boot", [], |r| r.get::<_, i64>(0));
+                let before = count(conn)?;
+                raw(&path).execute("INSERT INTO runtime_boot (started_at) VALUES (1)", [])?;
+                let after = count(conn)?;
+                Ok((before, after))
+            })
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(store.read(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM runtime_boot", [], |r| r.get::<_, i64>(0))?)).await.unwrap(), 2);
     }
 
     #[tokio::test]
@@ -2932,7 +2975,13 @@ mod tests {
     // --- 授權 revision ---
 
     fn confirm_request(template_id: Option<&str>, grants: Vec<authorization::Grant>) -> ConfirmRequest {
-        ConfirmRequest { template_id: template_id.map(Into::into), grants, acknowledged_risk: true, acknowledged_expansion: true }
+        ConfirmRequest {
+            template_id: template_id.map(Into::into),
+            grants,
+            acknowledged_risk: true,
+            acknowledged_expansion: true,
+            expected_revision: None,
+        }
     }
 
     fn research_grants(path: &str) -> Vec<authorization::Grant> {

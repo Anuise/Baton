@@ -221,3 +221,89 @@ async fn failed_pre_migration_backup_leaves_the_database_unmigrated() {
     let conn = Connection::open(dir.path().join(DB_FILE_NAME)).unwrap();
     assert_eq!(applied_version(&conn).unwrap(), older);
 }
+
+#[tokio::test]
+async fn first_start_after_restoring_a_regular_backup_is_not_a_crash() {
+    // 一般備份的快照中，備份當下那次啟動還沒正常結束（R151 第 15 項）
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path()).await;
+    store.record_boot(T0).await.unwrap();
+    let manifest = store.create_backup(BackupTrigger::Daily, T0).await.unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let restored_dir = target.path().join("restored");
+
+    restore_backup(&backups_root(dir.path()).join(&manifest.id), &restored_dir, T0).unwrap();
+
+    let restored = Store::open(&restored_dir, T0).await.unwrap();
+    restored.record_boot(T0).await.unwrap();
+    assert_eq!(restored.previous_boot_ended_cleanly().await.unwrap(), Some(true));
+}
+
+/// 改寫備份 manifest（測試用）。
+fn rewrite_manifest(backup_dir: &Path, change: impl FnOnce(&mut BackupManifest)) {
+    let mut manifest = read_manifest(backup_dir).unwrap();
+    change(&mut manifest);
+    std::fs::write(backup_dir.join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn a_backup_from_a_newer_schema_is_not_restored() {
+    // R151 第 18 項：舊版程式不能改寫新版 schema 的資料
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path()).await;
+    let manifest = store.create_backup(BackupTrigger::Daily, T0).await.unwrap();
+    let backup_dir = backups_root(dir.path()).join(&manifest.id);
+
+    // manifest 宣告較新的 schema
+    rewrite_manifest(&backup_dir, |m| m.schema_version = MIGRATIONS.len() + 1);
+    let target = tempfile::tempdir().unwrap();
+    let result = restore_backup(&backup_dir, &target.path().join("a"), T0);
+    assert!(matches!(result, Err(BackupError::Store(StoreError::IncompatibleSchema { .. }))), "{result:?}");
+    assert!(!target.path().join("a").exists(), "被拒絕時不寫入任何檔案");
+
+    // manifest 照舊，但快照本身被較新的版本升級過
+    let snapshot = backup_dir.join(DB_FILE_NAME);
+    let conn = Connection::open(&snapshot).unwrap();
+    conn.execute("INSERT INTO schema_migrations (version, name, applied_at) VALUES (999, 'future', 0)", []).unwrap();
+    drop(conn);
+    let sha = sha256_hex(&std::fs::read(&snapshot).unwrap());
+    rewrite_manifest(&backup_dir, |m| {
+        m.schema_version = MIGRATIONS.len();
+        m.database_sha256 = sha;
+    });
+    let result = restore_backup(&backup_dir, &target.path().join("b"), T0);
+    assert!(matches!(result, Err(BackupError::Store(StoreError::IncompatibleSchema { found: 999, .. }))), "{result:?}");
+}
+
+#[tokio::test]
+async fn manifest_paths_that_escape_the_restore_target_are_rejected() {
+    // review-notes #5：storage_path 不能帶 `..` 或絕對路徑；成果副本的雜湊也只能是檔名
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(dir.path()).await;
+    let manifest = store.create_backup(BackupTrigger::Daily, T0).await.unwrap();
+    let backup_dir = backups_root(dir.path()).join(&manifest.id);
+    let blob = b"escaped";
+    let sha = sha256_hex(blob);
+    let blobs = backups_root(dir.path()).join(BLOBS_DIR);
+    std::fs::create_dir_all(&blobs).unwrap();
+    std::fs::write(blobs.join(&sha), blob).unwrap();
+
+    let outside = tempfile::tempdir().unwrap();
+    let absolute = outside.path().join("evil.txt").to_string_lossy().into_owned();
+    let cases = [
+        ("../../evil.txt".to_string(), sha.clone()),
+        ("ws/../../evil.txt".to_string(), sha.clone()),
+        (absolute.clone(), sha.clone()),
+        ("ws/ok.txt".to_string(), format!("../{}", manifest.id)),
+    ];
+    for (index, (storage_path, entry_sha)) in cases.into_iter().enumerate() {
+        rewrite_manifest(&backup_dir, |m| {
+            m.artifacts = vec![ArtifactFileEntry { storage_path: storage_path.clone(), size_bytes: 7, sha256: entry_sha }]
+        });
+        let target = dir.path().join(format!("restore-{index}"));
+        let result = restore_backup(&backup_dir, &target, T0);
+        assert!(matches!(result, Err(BackupError::InvalidBackup(..))), "{storage_path}: {result:?}");
+        assert!(!target.exists(), "{storage_path}: 被拒絕時不寫入任何檔案");
+    }
+    assert!(!dir.path().join("evil.txt").exists() && !std::path::Path::new(&absolute).exists());
+}

@@ -304,13 +304,14 @@ async fn a_stop_intent_that_only_reached_the_database_keeps_the_guardian_started
     let spawned_before = harness.process_control.spawn_count();
 
     // 停止意圖寫進資料庫，但生命週期檔沒寫成（之後 Runtime 就被殺掉）：監護從檔案看不出已完全退出
-    let blocker = harness.data_dir().join(format!("{LIFECYCLE_FILE_NAME}.tmp"));
-    std::fs::create_dir(&blocker).unwrap();
+    // 生命週期檔的位置被一個非空目錄佔住：每次寫入的暫存檔都改名不過去（暫存檔名每次不同，不能只佔住暫存檔）
+    let blocker = harness.lifecycle_file_path();
+    std::fs::create_dir_all(blocker.join("blocked")).unwrap();
     let (status, body) = harness.send_json(Method::POST, "/api/v1/lifecycle/exit", None).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     harness.wait_for_exit().await;
-    assert!(!harness.lifecycle_file_path().exists());
-    std::fs::remove_dir(&blocker).unwrap();
+    assert!(!harness.lifecycle_file_path().is_file());
+    std::fs::remove_dir_all(&blocker).unwrap();
     kill_and_observe(&mut harness).await;
 
     // 監護啟動了程序，但 Runtime 看到資料庫的停止意圖：完全退出優先，不提供服務、不續跑工作，並把停止意圖補進檔案

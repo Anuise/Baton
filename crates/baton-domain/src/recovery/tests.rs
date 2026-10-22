@@ -241,7 +241,7 @@ fn guardian_attempt(event: &str, seq: u32, id: &str, at: Timestamp) -> crate::gu
 
 #[test]
 fn importing_a_guardian_attempt_without_event_creates_the_event_and_begins_that_attempt() {
-    let imported = import_guardian_attempt(None, &guardian_attempt("rec_g", 1, "rcv_g1", T0), false);
+    let imported = import_guardian_attempt(None, &guardian_attempt("rec_g", 1, "rcv_g1", T0), false, false);
     assert_eq!(imported.disposition, ImportDisposition::Counted);
     let event = imported.change.unwrap().event;
     assert_eq!((event.id.as_str(), event.round, event.attempts_used, event.status), ("rec_g", 1, 1, RecoveryStatus::Attempting));
@@ -254,7 +254,7 @@ fn importing_fails_the_attempt_in_flight_and_ignores_runtime_backoff() {
     // Runtime 自己做第 1 次，觀察中當掉；監護在退避期滿後啟動第 2 次
     let observing = apply(&begin(&crashed_at(T0), "rcv_1", T0), RecoveryCommand::Complete { affected: vec![] }, T0);
     let at = T0.plus_millis(BACKOFF_BEFORE_SECOND_MS + 1_000);
-    let imported = import_guardian_attempt(Some(&observing), &guardian_attempt("rec_1", 2, "rcv_g2", at), false);
+    let imported = import_guardian_attempt(Some(&observing), &guardian_attempt("rec_1", 2, "rcv_g2", at), false, false);
     assert_eq!(imported.disposition, ImportDisposition::Counted);
     let event = imported.change.unwrap().event;
     assert_eq!((event.attempts_used, event.status), (2, RecoveryStatus::Attempting));
@@ -265,17 +265,17 @@ fn importing_fails_the_attempt_in_flight_and_ignores_runtime_backoff() {
 #[test]
 fn importing_counts_by_the_database_even_when_the_guardian_numbered_differently() {
     // 早期失敗：第 1 次的 Runtime 沒有匯入就當掉；之後一次匯入兩筆
-    let first = import_guardian_attempt(None, &guardian_attempt("rec_g", 1, "rcv_g1", T0), false).change.unwrap().event;
-    let second = import_guardian_attempt(Some(&first), &guardian_attempt("rec_g", 2, "rcv_g2", T0.plus_millis(31_000)), false);
+    let first = import_guardian_attempt(None, &guardian_attempt("rec_g", 1, "rcv_g1", T0), false, false).change.unwrap().event;
+    let second = import_guardian_attempt(Some(&first), &guardian_attempt("rec_g", 2, "rcv_g2", T0.plus_millis(31_000)), false, false);
     let event = second.change.unwrap().event;
     assert_eq!(event.attempts_used, 2);
     assert_eq!(event.attempts[0].outcome, AttemptOutcome::Failed, "啟動早期失敗也計次");
     // 監護的計數落後（鏡像過期）時，也不會出現第四次：已用盡就只記下、不開始
-    let third = import_guardian_attempt(Some(&event), &guardian_attempt("rec_g", 3, "rcv_g3", T0.plus_millis(200_000)), false)
+    let third = import_guardian_attempt(Some(&event), &guardian_attempt("rec_g", 3, "rcv_g3", T0.plus_millis(200_000)), false, false)
         .change
         .unwrap()
         .event;
-    let fourth = import_guardian_attempt(Some(&third), &guardian_attempt("rec_g", 3, "rcv_g4", T0.plus_millis(400_000)), false);
+    let fourth = import_guardian_attempt(Some(&third), &guardian_attempt("rec_g", 3, "rcv_g4", T0.plus_millis(400_000)), false, false);
     assert_eq!(fourth.disposition, ImportDisposition::IgnoredExhausted);
     let event = fourth.change.unwrap().event;
     assert_eq!((event.status, event.attempts_used, event.attempts.len()), (RecoveryStatus::Exhausted, 3, 3));
@@ -283,21 +283,32 @@ fn importing_counts_by_the_database_even_when_the_guardian_numbered_differently(
 
 #[test]
 fn importing_under_stop_intent_or_after_exhaustion_counts_nothing() {
-    let ignored = import_guardian_attempt(None, &guardian_attempt("rec_g", 1, "rcv_g1", T0), true);
+    let ignored = import_guardian_attempt(None, &guardian_attempt("rec_g", 1, "rcv_g1", T0), true, false);
     assert_eq!((ignored.disposition, ignored.change), (ImportDisposition::IgnoredStopIntent, None), "完全退出優先");
 
     let mut exhausted = crashed_at(T0);
     exhausted.status = RecoveryStatus::Exhausted;
-    let ignored = import_guardian_attempt(Some(&exhausted), &guardian_attempt(&exhausted.id, 1, "rcv_g1", T0), false);
+    let ignored = import_guardian_attempt(Some(&exhausted), &guardian_attempt(&exhausted.id, 1, "rcv_g1", T0), false, false);
     assert_eq!((ignored.disposition, ignored.change), (ImportDisposition::IgnoredExhausted, None));
 }
 
 #[test]
 fn the_runtime_started_for_a_guardian_attempt_keeps_that_attempt_instead_of_failing_it() {
-    let event = import_guardian_attempt(None, &guardian_attempt("rec_g", 1, "rcv_g1", T0), false).change.unwrap().event;
+    let event = import_guardian_attempt(None, &guardian_attempt("rec_g", 1, "rcv_g1", T0), false, false).change.unwrap().event;
     assert!(on_start_owning(Some(&event), true, Some("rcv_g1"), "rec_x", T0).is_none(), "這次啟動就是為了這次嘗試");
     let failed = on_start_owning(Some(&event), true, Some("rcv_other"), "rec_x", T0).unwrap().event;
     assert_eq!((failed.status, failed.attempts_used), (RecoveryStatus::Waiting, 1), "不是自己的嘗試照舊記為失敗");
     let failed = on_start(Some(&event), true, "rec_x", T0).unwrap().event;
     assert_eq!(failed.attempts[0].outcome, AttemptOutcome::Failed, "手動開 App 啟動的 Runtime 不接手監護的嘗試");
+}
+
+#[test]
+fn importing_an_attempt_whose_event_id_is_taken_starts_a_new_event_under_the_attempt_id() {
+    // 監護的鏡像過期：rec_g 已成功結束，監護仍以 rec_g 寫下新的嘗試（R151 第 2 項）
+    let mut succeeded = crashed_at(T0);
+    succeeded.status = RecoveryStatus::Succeeded;
+    let imported = import_guardian_attempt(Some(&succeeded), &guardian_attempt(&succeeded.id, 1, "rcv_g2", T0), false, true);
+    assert_eq!(imported.disposition, ImportDisposition::Counted);
+    let event = imported.change.unwrap().event;
+    assert_eq!((event.id.as_str(), event.attempts_used, event.status), ("rcv_g2", 1, RecoveryStatus::Attempting));
 }

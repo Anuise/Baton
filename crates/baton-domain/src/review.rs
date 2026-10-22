@@ -178,9 +178,57 @@ pub fn normalize_path(raw: &str) -> String {
 }
 
 /// 變更的檔案是否落在審過的範圍內（不分大小寫；範圍是目錄時含其下所有檔案）。寧可多判為受影響，也不漏判。
+/// 檔名含 `"`、`\`、控制字元等時 git 即使設 `core.quotepath=false` 仍會加 C 風格引號：先還原再比對，
+/// 無法還原的引號路徑一律視為受影響（review-notes #22）。
 fn touches(changed: &str, reviewed: &str) -> bool {
-    let (changed, reviewed) = (normalize_path(changed).to_lowercase(), reviewed.to_lowercase());
+    let Some(changed) = unquote_git_path(changed) else { return true };
+    let (changed, reviewed) = (normalize_path(&changed).to_lowercase(), reviewed.to_lowercase());
     reviewed == WHOLE_REPOSITORY || changed == reviewed || changed.starts_with(&format!("{reviewed}/"))
+}
+
+/// 還原 git 的 C 風格引號路徑（`"…"`，跳脫 `\"`、`\\`、`\a` `\b` `\t` `\n` `\v` `\f` `\r` 與三位八進位的位元組 `\ooo`，
+/// 位元組組回 UTF-8）。沒有引號的路徑原樣傳回；格式不對或不是合法的 UTF-8 時回 `None`。
+fn unquote_git_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('"') {
+        return Some(raw.to_string());
+    }
+    let inner = trimmed.strip_prefix('"')?.strip_suffix('"')?.as_bytes();
+    let mut bytes = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        let byte = inner[i];
+        i += 1;
+        match byte {
+            b'"' => return None,
+            b'\\' => {
+                let escaped = *inner.get(i)?;
+                i += 1;
+                bytes.push(match escaped {
+                    b'"' => b'"',
+                    b'\\' => b'\\',
+                    b'a' => 0x07,
+                    b'b' => 0x08,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'v' => 0x0b,
+                    b'f' => 0x0c,
+                    b'r' => b'\r',
+                    b'0'..=b'3' => {
+                        let digits = inner.get(i..i + 2)?;
+                        if !digits.iter().all(|d| (b'0'..=b'7').contains(d)) {
+                            return None;
+                        }
+                        i += 2;
+                        (escaped - b'0') * 64 + (digits[0] - b'0') * 8 + (digits[1] - b'0')
+                    }
+                    _ => return None,
+                });
+            }
+            other => bytes.push(other),
+        }
+    }
+    String::from_utf8(bytes).ok()
 }
 
 // ---------------------------------------------------------------- 提交

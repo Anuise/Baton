@@ -191,6 +191,38 @@ fn superseding_marks_the_old_entry_and_links_both_ways() {
 }
 
 #[test]
+fn a_replacement_cannot_have_a_narrower_scope_than_the_entry_it_supersedes() {
+    // R151 第 25 項：在 Workspace B 建一個 B 範圍的條目，不能讓全域教訓對所有 Workspace 失效
+    let mut global = new("g", KnowledgeKind::Lesson, KnowledgeSource::User);
+    global.scope = KnowledgeScope::global();
+    let global = create(global, None, T0).unwrap().entries.remove(0);
+    let error = create(new("narrow", KnowledgeKind::Lesson, KnowledgeSource::User), Some(&global), T1).unwrap_err();
+    assert_eq!(error.code(), "knowledge_supersede_invalid");
+
+    let other_workspace = created("w1", KnowledgeKind::Lesson, KnowledgeSource::User);
+    let mut elsewhere = new("w2", KnowledgeKind::Lesson, KnowledgeSource::User);
+    elsewhere.scope = workspace_scope("ws_2");
+    assert_eq!(create(elsewhere, Some(&other_workspace), T1).unwrap_err().code(), "knowledge_supersede_invalid");
+
+    let task = KnowledgeScope {
+        kind: ScopeKind::Task,
+        workspace_id: Some("ws_1".into()),
+        goal_id: Some("goal_1".into()),
+        task_id: Some("task_1".into()),
+    };
+    let mut task_entry = new("t", KnowledgeKind::Lesson, KnowledgeSource::User);
+    task_entry.scope = task.clone();
+    let task_entry = create(task_entry, None, T0).unwrap().entries.remove(0);
+    let workspace = workspace_scope("ws_1");
+    assert!(workspace.covers(&task) && !task.covers(&workspace));
+    // 同範圍或更寬的範圍可以取代
+    assert!(create(new("wide", KnowledgeKind::Lesson, KnowledgeSource::User), Some(&task_entry), T1).is_ok());
+    let mut wider = new("wider", KnowledgeKind::Lesson, KnowledgeSource::User);
+    wider.scope = KnowledgeScope::global();
+    assert!(create(wider, Some(&global), T1).is_ok());
+}
+
+#[test]
 fn only_verified_entries_of_the_same_kind_can_be_superseded_and_only_by_users() {
     let candidate = created("c", KnowledgeKind::Lesson, agent());
     let error = create(new("n1", KnowledgeKind::Lesson, KnowledgeSource::User), Some(&candidate), T1).unwrap_err();

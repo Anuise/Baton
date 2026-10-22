@@ -317,9 +317,16 @@ pub fn apply_retention(data_dir: &Path) -> BackupResult<Vec<String>> {
 ///
 /// 核對：資料庫快照的雜湊、`integrity_check`、`foreign_key_check`、每個成果檔案的大小與雜湊、資料庫登記的成果版本與 manifest 一致。
 /// 資料庫完整時接著套用 migration，並結束備份當下尚未結束的 Run（不自動重做外部操作）。
-/// 核對沒通過不是錯誤（結果在 `checks` 裡）；只有前提不成立（目標不是空目錄、備份讀不到）或 I/O 失敗才回傳錯誤。
+/// 核對沒通過不是錯誤（結果在 `checks` 裡）；只有前提不成立（目標不是空目錄、備份讀不到、備份的 schema 比程式新、
+/// manifest 的路徑會跑出還原目錄）或 I/O 失敗才回傳錯誤。
 pub fn restore_backup(backup_dir: &Path, target: &Path, now: Timestamp) -> BackupResult<RestoreReport> {
     let manifest = read_manifest(backup_dir)?;
+    if manifest.schema_version > MIGRATIONS.len() {
+        return Err(StoreError::IncompatibleSchema { found: manifest.schema_version, supported: MIGRATIONS.len() }.into());
+    }
+    for entry in &manifest.artifacts {
+        check_manifest_entry(backup_dir, entry)?;
+    }
     if std::fs::read_dir(target).is_ok_and(|mut entries| entries.next().is_some()) {
         return Err(BackupError::TargetNotEmpty(target.to_path_buf()));
     }
@@ -375,6 +382,8 @@ pub fn restore_backup(backup_dir: &Path, target: &Path, now: Timestamp) -> Backu
     checks.extend(backup::check_artifacts(&manifest.artifacts, &recorded, &restored));
 
     let interrupted_runs = if integrity == "ok" {
+        // manifest 可能與快照不符：以快照實際的版本為準，較新就不套用 migration、不改寫任何資料
+        ensure_compatible(&conn)?;
         migrate(&mut conn, now, None)?;
         end_unfinished_runs(&mut conn, now)?
     } else {
@@ -383,9 +392,32 @@ pub fn restore_backup(backup_dir: &Path, target: &Path, now: Timestamp) -> Backu
     Ok(RestoreReport { manifest, checks, interrupted_runs })
 }
 
+/// 成果路徑只能是還原目錄底下的相對路徑（不含 `..`、根目錄或磁碟代號），成果副本的雜湊只能是 64 位十六進位檔名。
+fn check_manifest_entry(backup_dir: &Path, entry: &ArtifactFileEntry) -> BackupResult<()> {
+    use std::path::Component;
+    let path = Path::new(&entry.storage_path);
+    let relative = !entry.storage_path.is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)));
+    if !relative {
+        let message = format!("成果路徑 {} 不在成果目錄內", entry.storage_path);
+        return Err(BackupError::InvalidBackup(backup_dir.to_path_buf(), message));
+    }
+    if entry.sha256.len() != 64 || !entry.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        let message = format!("成果 {} 的雜湊 {} 格式不正確", entry.storage_path, entry.sha256);
+        return Err(BackupError::InvalidBackup(backup_dir.to_path_buf(), message));
+    }
+    Ok(())
+}
+
 /// 結束備份當下尚未結束的 Run：已啟動的標為中斷、還沒啟動的取消；兩者都釋放寫入所有權並讓 Task 回到 ready。
+/// 同一個交易中把快照裡最後一次（備份當下）尚未結束的啟動記為正常結束：還原不是崩潰，還原後第一次啟動不觸發崩潰恢復。
 fn end_unfinished_runs(conn: &mut Connection, now: Timestamp) -> BackupResult<usize> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    ensure_compatible(&tx)?;
+    tx.execute(
+        "UPDATE runtime_boot SET ended_cleanly_at = ?1
+         WHERE id = (SELECT MAX(id) FROM runtime_boot) AND ended_cleanly_at IS NULL",
+        [now.as_millis()],
+    )?;
     let mut ended = 0;
     for run in load_active_runs(&tx)? {
         let command = if run.status == RunStatus::Queued {

@@ -94,6 +94,32 @@ fn passing_the_recorded_reset_time_reopens_the_account() {
     assert_eq!(after.reason, "reset_observed");
 }
 
+/// 只有本機推估（五小時視窗、方案上限 1000 token）時的判斷；`usage` 是（分鐘, token）。
+fn estimated(usage: &[(i64, u64)], now: Timestamp) -> QuotaAssessment {
+    let records: Vec<quota::UsageRecord> = usage
+        .iter()
+        .enumerate()
+        .map(|(i, (minutes, tokens))| quota::UsageRecord { seq: i as i64, tokens: *tokens, reported_at: at(*minutes) })
+        .collect();
+    let limits = quota::PlanLimits { five_hour_tokens: Some(1000), seven_day_tokens: None };
+    quota::assess(&[quota::estimate("p1", QuotaWindow::FiveHour, &records, &limits, now)], now)
+}
+
+#[test]
+fn an_estimated_reset_time_is_not_an_observed_reset_and_keeps_the_hysteresis() {
+    // 最早一筆用量在 1 分鐘後滑出視窗：推估的「重置時間」只是滑動視窗的邊界，不是帳號真的重置（R151 第 7 項）
+    let usage = [(-299, 100), (0, 700)];
+    let entering = estimated(&usage, at(0));
+    assert_eq!((entering.used, entering.reset_at), (Some(0.8), Some(at(1))));
+
+    let paused = walk(&[(entering.clone(), at(0)), (estimated(&usage, at(2)), at(2))]);
+    assert_eq!(state(&paused), GateState::Paused, "推估 70% 仍在遲滯區間，只能等用量低於 60% 才恢復");
+
+    let draining_usage = [(-299, 100), (0, 800)];
+    let draining = walk(&[(estimated(&draining_usage, at(0)), at(0)), (estimated(&draining_usage, at(2)), at(2))]);
+    assert_eq!(state(&draining), GateState::Draining, "推估 80% 的 draining 帳號沒有觀測到重置前不退回 paused");
+}
+
 #[test]
 fn a_signal_that_expired_at_its_reset_leaves_usage_unknown_and_reopens() {
     let reset = at(30);

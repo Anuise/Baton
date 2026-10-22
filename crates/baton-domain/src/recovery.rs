@@ -351,7 +351,15 @@ pub struct GuardianImport {
 ///
 /// 監護只在確認 Runtime 意外終止後才寫下嘗試，所以當時進行中或觀察中的嘗試一律失敗；接著以監護的嘗試識別開始下一次，
 /// 序號以控制資料庫的計數為準。退避由監護遵守（它在退避期滿才寫下），這裡不再擋；但用盡之後不會開始第四次。
-pub fn import_guardian_attempt(current: Option<&RecoveryEvent>, attempt: &GuardianAttempt, stop_intent: bool) -> GuardianImport {
+///
+/// `event_id_taken`：嘗試指向的事件識別已被某個（已結束的）事件用過。監護的鏡像過期時會發生（例如觀察期滿成功後、
+/// 鏡像寫出前當掉）；這時改以嘗試識別作為新事件的識別，不覆寫已結束的事件。
+pub fn import_guardian_attempt(
+    current: Option<&RecoveryEvent>,
+    attempt: &GuardianAttempt,
+    stop_intent: bool,
+    event_id_taken: bool,
+) -> GuardianImport {
     if stop_intent {
         return GuardianImport { disposition: ImportDisposition::IgnoredStopIntent, change: None };
     }
@@ -359,8 +367,9 @@ pub fn import_guardian_attempt(current: Option<&RecoveryEvent>, attempt: &Guardi
     let mut event = match current.filter(|e| e.is_open()) {
         Some(event) => event.clone(),
         None => {
+            let id = if event_id_taken { &attempt.attempt_id } else { &attempt.event_id };
             let created = new_event(
-                &attempt.event_id,
+                id,
                 attempt.detected_at,
                 serde_json::json!({ "round": 1, "detected_by": "guardian" }),
             );

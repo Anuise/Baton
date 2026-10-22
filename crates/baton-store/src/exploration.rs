@@ -2,7 +2,8 @@
 //!
 //! - 章程只追加版本；疑點不可刪除，回報內容與確認時的重現案例不可更改（資料表 trigger 與 CHECK 另外把關）。
 //! - 重現：在同一個交易中排入驗證要求（代表旅程當對照，加上案例）並記下重現紀錄。
-//! - 回歸：已修復與回歸失敗的缺陷，案例在每一個一般驗證要求中都會執行（排入要求時加入，不能被排除）。
+//! - 回歸：已修復與回歸失敗的缺陷，案例在每一個受驗目錄包含修復的一般驗證要求中都會執行（排入要求時加入，
+//!   不能被排除）；修復還沒整合進來的分支不執行，以免把缺陷改回 regressed（R151 第 14 項）。
 //! - 執行前（`augment_pending`）把要求中的案例加入 Profile 的旅程，診斷用的重現套用章程的步數與成本上限；
 //!   回歸案例與目前的 Profile 不相容時，以無法自動化的替代旅程執行，讓驗證不能通過、也不會誤判為產品缺陷。
 //! - Evidence Bundle 寫入的同一個交易中（`judge_bundle`）判定每一個重現紀錄並更新疑點。
@@ -239,6 +240,7 @@ fn evidence_exists(conn: &Connection, workspace_id: &str, id: &str) -> rusqlite:
 
 /// 在一般驗證要求中加入回歸案例（已修復與回歸失敗的缺陷）：先把案例識別加進要求的旅程，寫入要求後再記下重現紀錄。
 /// 使用者或 Controller 指定的旅程中若含案例識別，一律先去掉（案例由這裡加入，不能被指定或排除）。
+/// 只加入受驗目錄包含修復的案例（[`subject_has_fix`]）：修復還沒整合時，其他分支的驗證不能把缺陷改回 regressed。
 pub(crate) fn insert_request_with_regressions(tx: &Transaction<'_>, request: &mut VerificationRequest) -> rusqlite::Result<()> {
     let cases: Vec<(String, String)> = tx
         .prepare(
@@ -247,8 +249,12 @@ pub(crate) fn insert_request_with_regressions(tx: &Transaction<'_>, request: &mu
         )?
         .query_map([&request.workspace_id], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    let subject = request_subject(tx, &request.workspace_id, request.task_id.as_deref())?;
     let mut attempts = Vec::with_capacity(cases.len());
     for (finding_id, raw) in cases {
+        if !subject_has_fix(tx, &finding_id, &subject)? {
+            continue;
+        }
         let case: ReproductionCase = json_column(1, &raw)?;
         request.journeys.push(exploration::case_key(&finding_id));
         attempts.push(ReproductionAttempt {
@@ -271,6 +277,60 @@ pub(crate) fn insert_request_with_regressions(tx: &Transaction<'_>, request: &mu
         insert_attempt(tx, attempt)?;
     }
     Ok(())
+}
+
+/// 驗證要求的受驗目錄（與 `pending_verification_runs` 相同：Task 已登記的工作目錄，否則是 Workspace 目錄），
+/// 以及它若是平台的 worktree，第一次建立的時間（共用的 checkout 與輸出目錄為 `None`）。
+fn request_subject(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -> rusqlite::Result<(String, Option<i64>)> {
+    if let Some(task_id) = task_id {
+        let workdir: Option<(String, String, Option<i64>)> = conn
+            .query_row(
+                "SELECT path, kind, ready_at FROM task_workdir WHERE task_id = ?1 AND status = 'ready'",
+                [task_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((path, kind, ready_at)) = workdir {
+            return Ok((path, (kind == "worktree").then(|| ready_at.unwrap_or(0))));
+        }
+    }
+    Ok((conn.query_row("SELECT path FROM workspace WHERE id = ?1", [workspace_id], |r| r.get(0))?, None))
+}
+
+/// 受驗目錄是否包含缺陷最近一次通過修復驗證的修復（R151 第 14 項）。Store 無法查 Git 的祖先關係，改以目錄判斷：
+/// - 就是修復驗證時的受驗目錄：包含（之後的提交都在修復之上）。
+/// - 修復在平台 worktree 中驗證：那個 Task 的分支整合進目標分支之後，共用的 checkout 與之後才建立的 worktree 包含。
+/// - 修復在共用的 checkout（或輸出目錄）中驗證：共用的 checkout 與修復之後才建立的 worktree 包含。
+/// - 沒有修復驗證的紀錄（不應發生）：照舊執行。
+fn subject_has_fix(conn: &Connection, finding_id: &str, subject: &(String, Option<i64>)) -> rusqlite::Result<bool> {
+    let fix: Option<(Option<String>, i64)> = conn
+        .query_row(
+            "SELECT json_extract(b.content, '$.subject_dir'), b.created_at
+             FROM exploration_attempt a JOIN evidence_bundle b ON b.id = a.bundle_id
+             WHERE a.finding_id = ?1 AND a.outcome = 'fix_verified' ORDER BY a.finished_at DESC, a.rowid DESC LIMIT 1",
+            [finding_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((Some(fix_dir), fixed_at)) = fix else { return Ok(true) };
+    let (dir, worktree_ready_at) = subject;
+    if dir.eq_ignore_ascii_case(&fix_dir) {
+        return Ok(true);
+    }
+    let fix_task: Option<String> = conn
+        .query_row("SELECT task_id FROM task_workdir WHERE path = ?1 COLLATE NOCASE AND kind = 'worktree'", [&fix_dir], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    let shared_since: Option<i64> = match fix_task {
+        Some(task_id) => conn.query_row(
+            "SELECT MIN(finished_at) FROM integration_entry WHERE task_id = ?1 AND status = 'integrated' AND finished_at >= ?2",
+            rusqlite::params![task_id, fixed_at],
+            |r| r.get(0),
+        )?,
+        None => Some(fixed_at),
+    };
+    Ok(shared_since.is_some_and(|since| worktree_ready_at.is_none_or(|ready_at| ready_at >= since)))
 }
 
 /// 去掉旅程清單中的案例識別（案例只能由 Runtime 加入）。
@@ -622,5 +682,138 @@ impl Store {
             Ok(ExplorationData { charters, findings })
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use baton_domain::task::{ContractContent, ContractField, TaskCommand};
+    use baton_domain::workdir::TaskKind;
+    use baton_domain::workspace::WorkspaceCommand;
+
+    use super::*;
+
+    const T1: Timestamp = Timestamp::from_millis(1_000);
+    const WORKSPACE_DIR: &str = "C:\\work\\app";
+
+    fn filled(text: &str) -> Option<ContractField> {
+        Some(ContractField::Filled { text: text.into(), references: vec![] })
+    }
+
+    fn worktree(task: &str) -> String {
+        format!("{WORKSPACE_DIR}\\.baton\\worktrees\\{task}")
+    }
+
+    /// 一個 Workspace、三個開發 Task（fix 修復缺陷，old 在修復整合前、late 在修復整合後建立 worktree），
+    /// 一份 Profile，以及一個在 fix 的 worktree 中驗證修復通過的缺陷 xf_1。
+    async fn store_with_fixed_defect(dir: &std::path::Path) -> Store {
+        let store = Store::open(dir, T1).await.unwrap();
+        let create = WorkspaceCommand::Create { id: "w1".into(), name: None, path: WORKSPACE_DIR.into() };
+        store.apply_workspace_command(create, T1).await.unwrap();
+        store.apply_task_command("w1".into(), TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() }, T1).await.unwrap();
+        for task in ["fix", "old", "late"] {
+            let contract = ContractContent {
+                objective: filled("修正"),
+                inputs: Some(ContractField::NotApplicable { reason: "沒有輸入".into() }),
+                scope: filled("結帳"),
+                deliverables: filled("修正"),
+                done_criteria: filled("通過"),
+                blocker_handling: filled("回報"),
+                required_capabilities: vec![],
+                verification_checks: vec![],
+            };
+            let command = TaskCommand::CreateTask {
+                id: task.into(),
+                goal_id: "g1".into(),
+                title: task.into(),
+                kind: TaskKind::Development,
+                contract,
+            };
+            store.apply_task_command("w1".into(), command, T1).await.unwrap();
+        }
+        let profile = serde_json::json!({
+            "interface": "cli_api",
+            "journeys": [{ "key": "browse", "title": "瀏覽", "representative": true, "steps": [{
+                "key": "list",
+                "operation": { "kind": "http", "method": "GET", "url": "http://127.0.0.1:8080/items" },
+                "assertions": [{ "kind": "status", "equals": 200 }],
+            }] }],
+            "feature_map": [{ "key": "items", "title": "項目", "criterion": "可以列出項目", "journeys": ["browse"] }],
+        });
+        let profile = serde_json::from_value(profile).unwrap();
+        store.publish_verification_profile("w1", profile, "desk".into(), T1).await.unwrap();
+
+        let case = ReproductionCase {
+            journey: serde_json::from_value(serde_json::json!({ "key": "finding.xf_1", "title": "案例", "steps": [] })).unwrap(),
+            request_id: "vreq_confirm".into(),
+            bundle_id: "b_confirm".into(),
+            failed_step: None,
+            confirmed_at: T1,
+        };
+        let conn = Connection::open(dir.join(DB_FILE_NAME)).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        for (task, ready_at) in [("fix", 100), ("old", 50), ("late", 500)] {
+            conn.execute(
+                "INSERT INTO task_workdir (task_id, workspace_id, kind, path, branch, base_branch, status, version, attempted_at, ready_at)
+                 VALUES (?1, 'w1', 'worktree', ?2, 'baton/' || ?1, 'main', 'ready', 1, ?3, ?3)",
+                rusqlite::params![task, worktree(task), ready_at],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO exploration_finding (id, workspace_id, task_id, charter_id, report, status, reproduction_case,
+               reported_by, version, created_at, updated_at)
+             VALUES ('xf_1', 'w1', 'fix', 'xch', '{}', 'fixed', ?1, 'run', 3, 1, 200)",
+            [serde_json::to_string(&case).unwrap()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO evidence_bundle (id, workspace_id, request_id, task_id, profile_version_id, verdict, content, created_at)
+             VALUES ('b_fix', 'w1', 'vreq_fix', 'fix', 'pv', 'passed', json_object('subject_dir', ?1), 200)",
+            [worktree("fix")],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO exploration_attempt (request_id, finding_id, purpose, journey, requested_by, created_at, bundle_id,
+               verdict, outcome, finished_at)
+             VALUES ('vreq_fix', 'xf_1', 'verify_fix', '{}', 'controller', 150, 'b_fix', 'passed', 'fix_verified', 200);",
+        )
+        .unwrap();
+        store
+    }
+
+    async fn runs_regression(store: &Store, task: Option<&str>, id: &str) -> bool {
+        let request = store
+            .request_verification("w1", task.map(str::to_string), Vec::new(), false, "desk".into(), id.into(), T1)
+            .await
+            .unwrap();
+        request.journeys.contains(&exploration::case_key("xf_1"))
+    }
+
+    /// R151 第 14 項：修復還沒整合時，其他分支的驗證不執行回歸案例（不會把缺陷改回 regressed）；
+    /// 修復所在的 worktree 一直執行，整合之後共用的 checkout 與之後建立的 worktree 也執行。
+    #[tokio::test]
+    async fn regression_cases_only_run_on_subjects_that_contain_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_fixed_defect(dir.path()).await;
+
+        assert!(runs_regression(&store, Some("fix"), "v1").await, "修復所在的 worktree 要執行回歸");
+        assert!(!runs_regression(&store, Some("old"), "v2").await, "修復整合前建立的分支不含修復");
+        assert!(!runs_regression(&store, Some("late"), "v3").await, "修復還沒整合");
+        assert!(!runs_regression(&store, None, "v4").await, "修復還沒整合進共用的 checkout");
+
+        let conn = Connection::open(dir.path().join(DB_FILE_NAME)).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO integration_entry (id, workspace_id, task_id, run_id, generation, branch, target_branch,
+               status, version, checks, queued_at, finished_at)
+             VALUES ('int_fix', 'w1', 'fix', 'r_fix', 1, 'baton/fix', 'main', 'integrated', 5, '[]', 250, 300);",
+        )
+        .unwrap();
+
+        assert!(runs_regression(&store, None, "v5").await, "整合後共用的 checkout 含修復");
+        assert!(runs_regression(&store, Some("late"), "v6").await, "整合後才建立的 worktree 含修復");
+        assert!(!runs_regression(&store, Some("old"), "v7").await, "整合前建立的分支仍不含修復");
+        assert!(runs_regression(&store, Some("fix"), "v8").await);
     }
 }

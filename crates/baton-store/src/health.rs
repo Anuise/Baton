@@ -42,19 +42,20 @@ impl Store {
         StorageHealth::from_fault(self.inner.health.lock().unwrap_or_else(|e| e.into_inner()).clone())
     }
 
-    /// 試寫一次：成功就解除故障；失敗時回傳錯誤（故障由寫入佇列記下）。
+    /// 試寫一次：提交成功就在寫入佇列中解除故障；失敗時回傳錯誤（故障由寫入佇列記下）。
     pub async fn probe_storage(&self, now: Timestamp) -> StoreResult<()> {
-        self.write(move |tx| {
-            tx.execute(
-                "INSERT INTO storage_probe (id, probed_at) VALUES (1, ?1)
-                 ON CONFLICT(id) DO UPDATE SET probed_at = excluded.probed_at",
-                [now.as_millis()],
-            )?;
-            Ok(())
-        })
-        .await?;
-        *self.inner.health.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        Ok(())
+        self.write_job(
+            move |tx| {
+                tx.execute(
+                    "INSERT INTO storage_probe (id, probed_at) VALUES (1, ?1)
+                     ON CONFLICT(id) DO UPDATE SET probed_at = excluded.probed_at",
+                    [now.as_millis()],
+                )?;
+                Ok(())
+            },
+            true,
+        )
+        .await
     }
 
     /// 測試用的故障注入：`Some` 之後每個寫入工作都以該種故障失敗（不執行工作本身），`None` 恢復正常。
@@ -75,6 +76,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path(), T0).await.unwrap();
         (dir, store)
+    }
+
+    #[tokio::test]
+    async fn a_fault_recorded_by_the_next_queued_write_survives_the_probe_that_ran_before_it() {
+        // R151 第 19 項：試寫成功後、清除故障前，佇列中的下一個寫入記下了新的故障；不能被試寫蓋掉
+        let (_dir, store) = store().await;
+        let mut probe = std::pin::pin!(store.probe_storage(T0));
+        // 只 poll 一次：試寫排進佇列，但還沒看到結果
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(probe.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let failed = store.write(|_| Err::<(), _>(injected_error(StorageFaultKind::DiskFull))).await;
+        assert!(failed.is_err());
+
+        probe.await.unwrap();
+        assert!(store.storage_health().dispatch_halted, "較晚的故障仍然有效");
     }
 
     #[tokio::test]

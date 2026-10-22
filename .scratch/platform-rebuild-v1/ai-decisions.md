@@ -4400,7 +4400,238 @@
 - 影響：三個修正 run 之間仍可能改到共用檔案（例如 `crates/baton-store/src/lib.rs`、`docs/development.md`），需要整合 run；低嚴重度項目也會被處理，額度消耗較大。
 - 審閱：未審
 
-### AI-449：Run 結束前收尾整個程序樹；根程序繼承唯讀 Job handle，Runtime 重建後仍能找回 Job
+### AI-449：驗證紀錄由「同一個 Task 最多一筆通過」放寬為「同一個 Run 最多一筆通過」
+- 重要度：高
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：新增第 46 個 migration `verification_pass_per_run`，移除 `task_verification_one_pass` 唯一索引。每個 Run 最多一筆有結論的紀錄，繼續由 `task_verification_one_conclusion` 保證。Domain 的接受交易本來就只看受驗 Run，不用改。
+- 理由：開發 Task 第一次驗證通過後若整合失敗，會回到 ready 重做。重做的 Run 再通過時，第二筆 passed 撞上舊索引，交易失敗，Task 永遠停在 verifying，連手動接受也失敗（R151 第 1 項）。「每個 Task 一筆通過」的假設只出現在索引上：TaskAccepted 證據的查詢有多筆也正常，其他程式沒有依賴它。
+- 替代方案：派出新 Run 時讓前一筆 passed 失效。但驗證紀錄是追加式資料表（禁止更新），得另外加失效紀錄，複雜度高，效果卻一樣。
+- 影響：同一個 Task 的驗證歷史可能有多筆 passed，每筆屬於不同的 Run。TaskAccepted 證據的語意不變：仍是「目前契約版本下有任何一筆 passed」。
+- 審閱：未審
+
+### AI-450：Controller 提出的重現案例不能超出使用者發布的 Profile
+- 重要度：高
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`check_case` 在原本與 Profile 旅程相同的檢查之外，再加三條：(1) 命令步驟必須和 Profile 中某個操作（doctor、readiness、setup、旅程步驟、teardown）完全相同；(2) 引用 `{{secret:…}}` 的操作也必須和 Profile 中某個操作完全相同；(3) HTTP 和瀏覽器前往的網址，來源（小寫的 scheme 與主機，加上埠，省略時補預設埠）必須在 Profile 的網址中出現過。網址帶使用者資訊（`@`）或佔位字時，視為沒有可確定的來源，只有完全相同的操作能用。修正 AI-439「檢查規則與 Profile 相同」的範圍。
+- 理由：案例由 Controller 提出、Runtime 執行；依 AI-440，修復後每次一般驗證還會再執行它。被 prompt injection 的 Controller 原本可以讓 Runtime 執行任意程式，或把秘密送到任意主機，違反 AI-391（Profile 只有使用者能發布）與 AI-416（秘密只交給使用者定義的操作）的信任邊界（R151 第 3 項）。允許「完全相同」而不是完全禁止命令，是因為 CLI 產品的重現案例仍需要重用使用者已授權的命令（斷言可以不同）。
+- 替代方案：完全禁止命令（CLI 產品幾乎無法重現缺陷）；案例先送使用者裁定才排入（每個疑點都要使用者介入，AI-439 已否決）。
+- 影響：Controller 提出的案例若用了新命令、新主機，或在其他操作中用秘密，會收到 `exploration_invalid`，錯誤訊息說明原因。殘留風險：案例可以先點擊產品內的外部連結離開，再執行與 Profile 相同、含秘密的輸入操作；這需要產品本身連到攻擊者的頁面，而且 selector 要相符。新限制尚未寫進 mcp-shim 的工具說明。
+- 審閱：未審
+
+### AI-451：回歸案例只在受驗目錄包含修復時執行
+- 重要度：高
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：排入一般驗證要求時，只加入「受驗目錄包含修復」的回歸案例。Store 無法查 Git 的祖先關係，也不新增欄位，改用既有資料判斷：取缺陷最近一次 `fix_verified` 的 Bundle，用它的 `subject_dir` 與建立時間，按以下規則判斷：
+  - 受驗目錄就是修復驗證時的受驗目錄：包含。
+  - 修復在平台 worktree 中驗證：那個 Task 有 `integrated` 的整合項目（完成時間不早於修復）之後，共用的 checkout 與之後才建立（`ready_at`）的 worktree 包含。
+  - 修復在共用的 checkout 或輸出目錄中驗證：共用的 checkout，以及修復之後才建立的 worktree 包含。
+  - 沒有修復紀錄：照舊執行。
+
+  修正 AI-440「每一個一般驗證要求都會執行」的範圍。
+- 理由：修復還沒整合時，其他分支的驗證會把缺陷改回 regressed，狀態在 fixed／regressed 之間反覆，無關的 Task 也過不了 Gate（R151 第 14 項）。只比對「candidate revision 相同」太嚴，修復之後只要有新提交，回歸就再也偵測不到。真正的祖先查詢需要改 Port 與 Runtime（R155 的範圍）。
+- 替代方案：Runtime 執行前以 `git merge-base --is-ancestor` 判斷（較精確，但需要修改 Port、Runtime 與 fake）；只比對 revision 相同（幾乎失去回歸能力）。
+- 影響：修復整合前建立的 worktree 不執行回歸案例。Worker 若在 worktree 中自行 reset 掉修復，同一目錄仍會被當成包含。之後若要精確判斷，可以改用 Runtime 的祖先查詢。
+- 審閱：未審
+
+### AI-452：監護日誌指向已結束的恢復事件時，以嘗試識別建立新事件
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：匯入監護日誌時，若沒有進行中的恢復事件，而嘗試記下的 `event_id` 已被某個（已結束的）事件用過，就以這筆嘗試的識別（`attempt_id`）作為新事件的識別，不再沿用 `event_id`。是否用過由 Store 在同一個交易中查 `recovery_event`，以 `event_id_taken` 交給 Domain 的 `import_guardian_attempt` 判定。
+- 理由：監護的鏡像可能過期（觀察期滿成功後、寫出鏡像前當掉，或鏡像寫入失敗），這時監護仍以舊事件的識別寫下嘗試。沿用舊識別會以 ON CONFLICT 把已成功的事件改回 waiting，接著撞上 `recovery_attempt` 與 `event` 的唯一約束，整個匯入交易回滾；日誌只追加不清除，之後每次啟動都會失敗（R151 第 2 項）。嘗試識別本身唯一（匯入以它去重），拿來當新事件識別不需要額外的識別產生器。
+- 替代方案：把這筆嘗試標成已處理並略過（但監護確實觀察到一次意外終止，略過就少算一次恢復）；只比對最新事件（較舊的事件被指到時仍會失敗）。
+- 影響：這種情況下新事件的識別是 `rcv_…` 形狀，而不是 `rec_…`；已結束的事件維持原狀。
+- 審閱：未審
+
+### AI-453：取消意圖優先於失敗類的 Run 結束路徑
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：Run 有 `cancel_requested_at` 時，啟動失敗（LaunchFailed）、lease 過期後核對到程序已死（ReconcileLease Dead）、Worker 以失敗或突然限流結束（Finish Failed／QuotaLimited）都改為完成取消。Run 以 `cancelled` 結束，結束原因是 `cancelled_by_user`，不計任何預算、不建立預算裁定、不重新排隊，Task 回到 ready。Worker 成功結束（Succeeded）不受影響，照常進入 verifying。交接也一樣：交接進入 stopping 前若發現舊 Run 已被要求取消，就放棄交接（`from_run_cancel_requested`），由取消流程停止程序；轉移時舊程序已確認停止，就在同一個交易中執行 ConfirmCancelled 並放棄交接，不派接手的 Run。
+- 理由：AI-241 把「取消 Run」定義為暫停：Task 回到可派工，但不自動重派。程序被要求停止後，常常會以失敗碼結束，或在核對時已經不在；計入預算或重新排隊，會讓使用者的暫停變成一次失敗加自動重派（R151 第 4、5 項）。完全退出與恢復的路徑（`stop_run_and_requeue`）原本就以 ConfirmCancelled 優先，這次讓其餘路徑一致。
+- 替代方案：只不計預算、仍然重新排隊（違反 AI-241）；交接轉移時只放棄交接、讓取消流程稍後確認（中間會有舊 Run 已停止、卻仍持有 lease 的空窗）。
+- 影響：取消後程序以失敗結束時，Run 狀態顯示 cancelled 而不是 failed；原本的失敗原因不寫進 `end_reason`。
+- 審閱：未審
+
+### AI-454：額度門檻只把已觀測來源的重置時間當成「觀測到重置」
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`evaluate_gate` 進入 paused／draining 時，只有判斷採用的觀測來源是 Observed（CLI 訊號或外部觀測器的已觀測樣本），才記下 `reset_at`。推估來源的 `reset_at` 不記。只靠推估進入門檻的帳號，只能等用量回到 60% 以下才恢復。
+- 理由：推估的 reset_at 只是滾動視窗裡最早一筆用量滑出的時間，不代表帳號真的重置。把它當成重置，用量在 60%～75% 時就會恢復派工，破壞 D-13 的遲滯，門檻會來回切換（R151 第 7 項）。QuotaGate 沒有來源欄位，直接不記比新增欄位加 migration 簡單。
+- 替代方案：照樣記下 reset_at，另外新增來源欄位（需要 migration）；推估的 reset_at 改為只用來排定重新評估的時間。
+- 影響：等待資源的交接（`blocking_resets`）不再拿推估的重置時間排定重新評估，改走 5～60 分鐘退避。突然限流的門檻來自已觀測的 Exhausted 訊號，不受影響。
+- 審閱：未審
+
+### AI-455：同一事項的既有請求與單次核准要比對提出者
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`controller_action`／`ControllerGate` 判斷「同一個操作」時，除了 `<事項>:<task_id>[:<subject>]` 指紋，還要求 `origin` 相同。Worker 與 Controller 各自建立請求、各自用掉自己的核准；回答時只喚醒原本的提出者。Runtime 在預算用盡時建立的請求 origin 是 worker，因此 Controller 對同一事項送裁定時會另外建立自己的請求。
+- 理由：只看指紋的話，Worker 可以用掉 Controller 的核准，Controller 拿到 Worker 建立的請求也不會被喚醒（R151 第 8 項）。
+- 替代方案：合併時把兩邊都列為喚醒對象。這樣仍然無法決定核准該由誰用掉，所以不採用。
+- 影響：同一事項可能同時有一個 Worker 請求和一個 Controller 請求在裁定中心等待。
+- 審閱：未審
+
+### AI-456：預算用盡的裁定請求不因契約改版而過期
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`stale_reason` 對「目前用盡預算的那一個請求」（`TaskBudget.exhausted` 有值，而且 `request_id` 相符）只在目標 Task 結束或不存在時才過期，不比對契約版本，也略過依據被推翻的檢查。已經不是目前用盡的那個請求時照舊過期。
+- 理由：選項文字本來就引導使用者「可以修改契約」；改完契約後請求過期，就再也無法核准重設，Task 會卡在 blocked（R151 第 10 項）。另一個方案「改版時清除用盡標記」不採用，因為 Controller 也能改契約，等於讓 Controller 不經裁定就重設預算，又繞過 D-15。
+- 替代方案：契約改版時清除用盡標記（上述理由不採用）。
+- 影響：使用者先改契約再核准時，Task 從 blocked 直接回到 ready（驗證預算則回到 verifying），沿用改版後的契約，准入在派工時才重新檢查。
+- 審閱：未審
+
+### AI-457：Controller 取消預算已用盡的 Task 要送「預算用盡後的下一步」裁定
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：Controller 的 `cancel_task` 遇到預算已用盡（`exhausted` 有值）、尚未結束的 Task 時，先以 `NextStepAfterBudget` 依決策權限表送 Gate；使用者核准前回 409 `requires_decision`，核准用掉一次才真的取消。桌面端的取消不受影響。
+- 理由：取消後另建相同契約的 Task 會拿到全新的 3/2/5 次預算，繞過 D-15（R151 第 9 項）。建議中的「Domain 層拒絕 Controller 取消」做不到：`TaskCommand::Cancel` 沒有呼叫者身分，桌面和 Controller 共用同一個命令。在 Controller 工具入口加 Gate，與既有的 ExceedAuthorization、ModifyDoneCriteria Gate 做法一致。
+- 替代方案：新 Task 繼承同一 Goal 下的用盡狀態。要判斷「相同契約」，邊界不清楚。
+- 影響：Gate 和取消分屬兩個交易，有很小的競態窗口（讀取之後才剛好用盡）。跨範圍修改了 `crates/baton-api/src/controller.rs`。
+- 審閱：未審
+
+### AI-458：已完成或取消的 Task 不因依據被推翻而讓 Workflow 退回
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：Store 給 Workflow 的 `basis_overturned` 事實，在綁定 Task 已完成或已取消時回 `None`：Gate 不因此失效，回報也不會被要求「先更新契約」。准入檢查與裁定請求的過期判斷不變。
+- 理由：已結束的 Task 不能改契約，Workflow 退回後就永遠卡住（R151 第 12 項）。之後要不要依新答案另開 Task，交給 Controller 和使用者決定（他們會收到假設被推翻的工作事件）。
+- 替代方案：提供結束 Workflow 的途徑。需要新的 API 與 UI，範圍較大。
+- 影響：已完成的 Task 的 Workflow 可以在被推翻的前提下走完；使用者仍會看到「假設被推翻」的通知。
+- 審閱：未審
+
+### AI-459：審查證據比對 candidate 與受驗目錄目前的 build
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：Gate 查驗審查證據時，兩軸都通過之外，審查的 `candidate_revision` 必須等於受驗目錄目前的 revision，否則判 `build_changed`。candidate 寫成 7 位以上十六進位的縮寫，而且是目前 commit 的前綴時，也視為相同；觀察不到 build 時不比較。
+- 理由：比照驗證證據（AI-409）。原本記下的 build 是回報當下的 HEAD，審查之後才提交的改動不會讓 Gate 失效（R151 第 13 項）。接受縮寫是因為 reviewer 常填短 SHA，全部判失效會讓 Gate 永遠打不開；`HEAD`、分支名稱這類會移動的名稱則不接受。
+- 替代方案：只比對完整字串。reviewer 填短 SHA 時會誤判。
+- 影響：reviewer 必須填被審 commit 的 SHA；填分支名稱的審查無法開啟 Gate。
+- 審閱：未審
+
+### AI-460：Stage 預算用盡後只能經使用者裁定繼續
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：Stage 失敗用盡預算而阻擋後，Controller 附齊證據回報 passed 時，Runtime 在同一個交易中以 Controller 那一輪的身分送 `NextStepAfterBudget` 的 ControllerGate。目標是 Workflow 綁定的 Task，subject 是 `stage:<workflow_id>:<stage>`，所以同一個 Stage 回到同一個請求。沒有核准時這次記為 blocked，阻擋原因附上裁定請求編號；核准在這次回報用掉後才前進。缺證據的回報照舊不解除阻擋，也不建立裁定。取代 AI-384 中「只有附齊證據的 passed 才繼續」的部分。
+- 理由：spec D-15 把「預算用盡後的下一步」列為必須送裁定（review-notes #20）。放在同一個交易中，核准不會因為回報失敗而白白用掉，也不需要改 API。
+- 替代方案：新增桌面「解除 Stage 阻擋」端點。需要新的 API 與 UI。
+- 影響：只綁定 Goal 的 Workflow 沒有 Task 可以掛裁定請求，用盡後會一直阻擋，阻擋原因會說明這一點。綁定的 Task 是 running 時，這個請求會像其他 Controller Gate 一樣讓它轉為 waiting_decision。
+- 審閱：未審
+
+### AI-461：Stage 的驗證與成果接受證據只接受綁定 Task 的
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：Workflow 綁定 Task 時，Evidence Bundle 的 task_id、`task_accepted` 的 task_id 不是那個 Task，就判 `other_subject`（incomplete，原因是「證據屬於其他 Task」）。只綁定 Goal 的 Workflow 不限制。
+- 理由：review-notes #21 第一點；與審查證據既有的 `other_subject` 規則一致。
+- 替代方案：無。
+- 影響：用其他 Task 的成果開 Gate 的做法不再可行。
+- 審閱：未審
+
+### AI-462：承接驗證旅程時，觀察不到 build 不沿用；已送出的外部操作不因 build 改變而重送
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`plan_journey` 在這次的 candidate revision 與 build 都是 `None` 時不沿用任何舊結果（補足 AI-427）。旅程已完整結束、但 build 不同而不能沿用時，若其中有已開始的外部操作，改走 NotResent（`external_already_sent`），旅程結果是證據不足，不整條重跑（把 AI-428「已開始的不重送」套用到完整結束的旅程）。
+- 理由：兩邊都是 `None` 時無法證明驗證的是同一個版本（R151 第 23 項）。AI-428 規定同一個驗證要求的所有嘗試都不重送外部操作；原本只檢查沒有完成的旅程，完整結束的旅程換了 build 會重送寄信、付款這類操作（review-notes #25 第一點）。
+- 替代方案：結果已知的外部操作允許以新 build 重送（原本的行為，可能重複付款）。
+- 影響：非 Git 的受驗目錄（沒有 revision、也沒有 build 命令）交接後一律整條重跑。build 在同一個驗證要求的兩次嘗試之間改變時，含外部操作的旅程不會是通過，要重新要求驗證。
+- 審閱：未審
+
+### AI-463：外部操作查證後的恢復方式維持重新派工（review-notes #10 不改）
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：已成功、在 verifying 的 Task 留下未回報的外部操作時，查證後仍回到 ready、重新派工，不改成只重新驗證。已因其他原因等待裁定的 Task，也維持不加入「結果未知」請求的阻擋範圍。
+- 理由：未回報的操作在 Run 結束的同一個交易中轉成結果未知，Task 這時還沒有任何驗證紀錄。改成只重驗，需要修改 decision.rs 的恢復路徑與 Run／Task 狀態機，而 Worker 是否在操作之後還有未完成的工作也無從判斷，重新派工比較保守。第二點目前已經安全（新 Run 登記同一個鍵時會被擋下），代價只是多跑一次。AI-449 修好後，重做的 Run 可以照常通過，不會卡死；store 測試覆蓋了這條路徑。
+- 替代方案：恢復到 verifying 直接重驗（省一次執行，但可能把操作後還沒完成的工作當成完成）；回答其他裁定時一併檢查結果未知的鍵（需要修改 decision.rs）。
+- 影響：這種情況下整件工作會重做一次，消耗額外額度。
+- 審閱：未審
+
+### AI-464：寫入 launch intent 時重新檢查帳號額度門檻；突然限流的退路重新排隊
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`RunContext` 新增 `launch_gate`（只有 BeginLaunch 使用，其他命令填 Open），Store 在同一個交易中讀取 Run 帳號的門檻。先做授權准入，再檢查門檻。門檻不是 open 時，Run 以 `interrupted`（`quota_gate_closed：<state>`）結束：不寫 launch intent、不建 Session、不計預算，並設 `requeue = true`，由排程交給其他帳號。另外，`RunOutcome::QuotaLimited` 結束時也設 `requeue = true`（已要求取消的除外）。
+- 理由：帳號可能在派工之後才進入 paused／draining 或撞上限，排隊中的 Run 不該再啟動一次 CLI（R151 第 20 項）。Run 綁定帳號，留在佇列只會一直等原帳號，所以結束並重新排隊。QuotaLimited 的註解本來就寫「等其他帳號接手」，卻沒有排隊，Task 會停在 ready（R151 第 21 項）。
+- 替代方案：讓 Run 留在 queued、等門檻恢復（會卡住 Task，也佔用全域名額）；在 Store 把命令改寫成 Interrupt（規則就不在 Domain 了）。
+- 影響：Supervisor 收到這種結果時，會沿用「沒有通過啟動准入」的訊息並附上結束原因。
+- 審閱：未審
+
+### AI-465：MarkReady 只接受 pending 與 blocked
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`TaskCommand::MarkReady` 只接受 `pending` 與 `blocked`（AI-276：預算用盡後仍可手動標回）。running、verifying、waiting_decision、waiting_resource 一律回 `TransitionInvalid`。狀態表本身不變，其他流程仍可把 Task 轉到 ready。
+- 理由：進行中或驗證中的 Task 被標成 ready，舊 Run 的結果會被忽略、整件工作重做（R151 第 22 項）。等待中的 Task 應由裁定或資源恢復的流程離開。
+- 替代方案：只擋 running／verifying，放行等待中的狀態。
+- 影響：`POST …/tasks/{id}/ready` 對上述狀態回錯誤。Web 只在 pending 顯示按鈕，Controller 只對 pending 呼叫，都不受影響。
+- 審閱：未審
+
+### AI-466：原生識別已屬於其他平台 Session 時一律要求 Run 停止
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：Worker Run 回報的原生 Session 識別，若在同一帳號內已由另一個平台 Session 綁定（`InUse`），不論那個 Session 是否有 Run 在驅動，都不綁定（`run.native_session_id` 維持空的，改記 `run_native_session_conflict`），並要求這個 Run 取消（原因 `native_session_in_use`）。Controller Run 原本就不綁定 InUse 的識別；它沒有取消機制，所以這次不加停止。
+- 理由：暫停中的 Session 之後可能被另一個 Run 以 `--resume` 接續，那時就會有兩個程序驅動同一個原生 Session（review-notes #11）。只拒絕綁定並不能防止這件事，要讓後到的 Run 停下。
+- 替代方案：把暫停中的那個 Session 標為不可用，讓新 Run 繼續（舊 Session 就失去接續能力，而新 Run 的平台 Session 仍然沒有原生識別）；替 Controller Run 加取消機制（改動大，不在本次範圍）。
+- 影響：遇到這種情況，Task 會停在 ready，等使用者重新派工（取消＝暫停）。Controller 在這個邊界仍可能與暫停中的 Session 共用原生 Session，屬於剩餘風險。
+- 審閱：未審
+
+### AI-467：驗證不完整的重驗維持不加延遲（review-notes #12 第二點不改）
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：維持 AI-274。驗證結果是 inconclusive 時，Supervisor 下一次處理就立即重驗，不另設延遲。
+- 理由：spec 只對基礎設施重試規定退避。兩次重驗很快用完時，會建立「預算用盡後的下一步」裁定，由使用者處理環境問題，不會無限重試。加延遲需要替驗證另外保存一個期限欄位（migration），收益不大。
+- 替代方案：比照基礎設施重試，給驗證重驗加上 retry_not_before 退避。
+- 影響：機器暫時忙碌造成的逾時，可能在數秒內用完兩次重驗並轉成裁定。日後若觀察到太常發生，再加退避。
+- 審閱：未審
+
+### AI-468：整合項目的 Run 已不是 Task 受驗的 Run 時直接失敗、不改變 Task
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`IntegrationContext` 加上 `subject_run`（Store 以 `verification::subject_run` 計算）。開始合併時，若受驗的已不是這個項目的 Run，項目以失敗結束，原因寫明目前受驗的 Run。整合完成或失敗時，也只有受驗 Run 仍是這個項目的 Run 才改變 Task。
+- 理由：函式說明本來就寫了這項檢查，實作沒有做。較舊的項目可能用沒驗證過的分支內容完成 Task，讓較新的項目失敗；清理只看最新的項目，worktree 會永遠留著（R151 第 24 項）。
+- 替代方案：比較同一個 Task 有沒有 seq 更大的項目（擋不住較新的 Run 已在 verifying、但還沒排入整合的情況）。
+- 影響：舊項目失敗不會把 Task 拉回 ready；Task 的結果由較新 Run 的項目決定。
+- 審閱：未審
+
+### AI-469：含本次驗證佔位字的目標導向步驟不錄製；只把驗證開始前就有的錄製標為 stale
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`ReplayIdentity` 新增 `run_scoped` 欄位（serde 預設 false，序列化時省略 false）。目標或參數含 `{{run_id}}`／`{{state_dir}}` 時為 true，`decide` 一律走即時模型，`updates` 不保存它的錄製。`apply_replay_updates` 標記 stale 時加上 `recorded_at <= bundle.started_at`，只推翻這次驗證開始前就有的錄製。
+- 理由：錄製身分用的是原文，錄下的動作卻是代換後的值，重播會帶入舊的 run_id（review-notes #26）。同一個 Workspace 兩個驗證同時跑時，較早開始、較晚結束的驗證，會把另一個驗證剛錄下的新動作標為 stale。
+- 替代方案：Profile 驗證禁止在目標導向步驟中使用這些佔位字（限制使用者）；錄製時把值反向代換回佔位字（容易誤換，例如值剛好出現在其他文字中）。
+- 影響：這類步驟每次都呼叫模型；`no_live_model` 時無法執行。新錄製仍以最後寫入為準（兩個錄製都被證明過）。Runtime 仍會在 Bundle 的 `ActionRecord.recorded` 填入這類步驟的錄製（Store 不保存），要改需動 `baton-runtime/src/verification_adapter.rs`。
+- 審閱：未審
+
+### AI-470：變更路徑比對先還原 git 引號，無法還原就視為受影響
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：Domain 的 `touches` 先還原 git 的 C 風格引號路徑（\" \\ \a \b \t \n \v \f \r、三位八進位位元組組回 UTF-8）再比對；格式不對或不是合法 UTF-8 的引號路徑一律視為受影響，不沿用審查。git 呼叫（baton-ports/git.rs）不改。
+- 理由：review-notes #22。git.rs 不在本 run 範圍，另一個 run 可能正在修改；在 Domain 端處理，不論 Port 是否改用 `-z` 都安全。
+- 替代方案：改用 `git diff -z`（屬於 baton-ports）。
+- 影響：還原後路徑裡的 `\` 仍照 `normalize_path` 的規則當成目錄分隔。
+- 審閱：未審
+
+### AI-471：確認授權的 expected_revision 為選填，Web UI 尚未送出
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`ConfirmRequest`（Domain）、`ConfirmAuthorizationRequest`（API）與桌面殼的 `workspace_authorization_confirm` 指令新增選填的 `expected_revision`。有值時必須等於目前生效的 revision，否則回 409 `authorization_revision_conflict`；省略時不檢查。Web UI（`AuthorizationPanel.tsx`、`runtimeClient.ts`）這次沒有改成送出它。
+- 理由：檢查規則放在 Domain，API 與殼只轉送，用戶端之後只要把確認摘要的 `changes.base_revision` 帶回來就生效。Web UI 屬於同時進行的 R156 修正範圍，而且 R156 正在修改 `AuthorizationPanel.tsx` 的載入流程，在這裡一起改容易衝突；改成必填則會讓尚未更新的用戶端全部失敗。
+- 替代方案：API 改為必填（需要同時改 Web、Client 與殼，跨三個範圍）；本次完全不處理。
+- 影響：在 Web UI 送出 `expected_revision` 之前，兩個視窗同時編輯仍可能由後送出的覆蓋先確認的授權；整合時或後續請在 Web 的確認呼叫帶上 `expected_revision: summary.changes?.base_revision`。
+- 審閱：未審
+
+### AI-472：知識條目取代只加範圍檢查，不要求被取代條目的 revision
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：建立條目並指定 `supersedes` 時，新條目的適用範圍必須涵蓋被取代的條目（`KnowledgeScope::covers`：全域涵蓋一切、Workspace 涵蓋同一 Workspace 內的任何範圍、Goal 涵蓋同一 Goal 與其 Task、Task 只涵蓋自己），否則回 `knowledge_supersede_invalid`。審查建議的「被取代條目也要帶 `expected_revision`」不實作。
+- 理由：範圍檢查就擋住了報告中的情境（在 Workspace B 建 B 範圍的條目，讓全域教訓與以它為來源的 Guard 對所有 Workspace 失效）。並行取代同一個條目已經會被擋下：被取代的條目必須是已驗證，第一次取代後它就變成「被取代」。要求 revision 需要同時改 API、Client、Web 與 harness 測試，跨多個範圍，而剩下的情境（使用者看著舊版本內容決定取代）影響很小。
+- 替代方案：API 新增必填的 `supersedes_revision`。
+- 影響：使用者看到的內容若在取代前被別人修正過，取代仍會成功。
+- 審閱：未審
+
+### AI-473：還原備份時把備份當下那次啟動記為正常結束
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R154-fix-a）
+- 決策：`restore_backup` 在結束未完成 Run 的同一個交易中，把快照裡最後一筆 `runtime_boot`（備份當下那次啟動）的 `ended_cleanly_at` 補上還原時間；較早的啟動紀錄不改。還原前也先比較 manifest 的 schema 版本，套用 migration 前再以快照實際的版本確認，比程式新就回 `IncompatibleSchema`；manifest 的成果路徑必須是不含 `..`、根目錄或磁碟代號的相對路徑，成果副本的雜湊必須是 64 位十六進位，否則回 `InvalidBackup`，而且在寫入任何檔案前就檢查。
+- 理由：一般備份是在 Runtime 執行中建立的，快照中那次啟動一定還沒結束；還原後第一次啟動會被當成崩潰，建立不存在的恢復事件並暫停派工。還原本身已把未結束的 Run 結束，不是崩潰。
+- 替代方案：備份時在快照中補上（快照是 Online Backup 的結果，要再開一次連線改寫，而且演練也會用到同一份快照）。
+- 影響：還原後第一次啟動不觸發崩潰恢復。
+- 審閱：未審
+
+### AI-474：Run 結束前收尾整個程序樹；根程序繼承唯讀 Job handle，Runtime 重建後仍能找回 Job
 - 重要度：高
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 1、4 項、review-notes #14）
 - 決策：
@@ -4414,7 +4645,7 @@
 - 影響：Worker 正常結束時最多多等 5 秒（通常數十毫秒），殘留的背景程序會被終止。Worker 的子孫若以不繼承 handle 的方式建立，根程序結束且 Runtime 重建後仍可能找不回 Job（此時退回以 PID 判斷）。測試：`run_process_release.rs`、`process_tree.rs` 的 `find_resumes_control_after_the_spawning_instance_is_gone` 等、`supervisor_process_tree.rs::a_finished_worker_leaves_nothing_running_in_its_job`。
 - 審閱：未審
 
-### AI-450：取消 Run 時 Worker 的回報回應帶 `stop_requested`；多個取消同時停止
+### AI-475：取消 Run 時 Worker 的回報回應帶 `stop_requested`；多個取消同時停止
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 2 項）
 - 決策：Agent 回報的回應在 Run 已要求取消（`cancel_requested_at` 有值）時也帶 `stop_requested: true`；`process_cancellations` 改為所有被取消的 Run 同時呼叫 `stop`（同 `stop_old_writers`），完全退出開始時仍立即讓出 tick 鎖。
@@ -4423,7 +4654,7 @@
 - 影響：tick 鎖最多握一個寬限期加確認上限；Worker 下一次回報就會知道要停。
 - 審閱：未審
 
-### AI-451：支援 npm 安裝的 `claude.cmd`：經 `cmd.exe /d /v:off /c call` 啟動並拒絕會被 cmd 重新解讀的引數
+### AI-476：支援 npm 安裝的 `claude.cmd`：經 `cmd.exe /d /v:off /c call` 啟動並拒絕會被 cmd 重新解讀的引數
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 3 項）
 - 決策：新增 `claude_cli::claude_program()`：PATH 上任一處有 `claude.exe` 就維持以 `claude` 啟動（雜湊不變）；只有批次檔時用第一個 `claude.cmd`／`claude.bat` 的完整路徑，Worker、Controller 經 `%SystemRoot%\System32\cmd.exe /d /v:off /c call <路徑> <引數>` 啟動，`prepare` 拒絕含 `" % ! ^ & | < > ( )` 或控制字元的引數（結果是 LaunchFailed 並附原因）。語意 judge、`--version` 探測與 `auth status` 用同一個程式。AI-196 中「目前不支援 claude.cmd」的說法以本條為準。
@@ -4432,7 +4663,7 @@
 - 影響：只有 `.cmd` 的環境，啟動指令雜湊含完整路徑；Runtime 重建期間若重新安裝到別處，雜湊會不一致。
 - 審閱：未審
 
-### AI-452：驗證命令放進匿名、KILL_ON_JOB_CLOSE 的 Job；路徑經連結指向工作目錄外判為不通過
+### AI-477：驗證命令放進匿名、KILL_ON_JOB_CLOSE 的 Job；路徑經連結指向工作目錄外判為不通過
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，R152 第 7、8 項、review-notes #3）
 - 決策：驗證命令以暫停狀態建立、放進匿名且設 KILL_ON_JOB_CLOSE 的 Job 後才執行；等命令本身結束（不等輸出管道關閉），輸出由背景執行緒分開讀，逾時保留已讀到的部分；命令結束或逾時都終止整個 Job。檔案檢查以 `WorkspaceFs::read_file_within` 正規化路徑，指向工作目錄外的連結不讀內容，Domain 新增 `Observation::FileOutsideWorkdir` 判為 Failed。`write_readonly_files` 改在阻塞執行緒執行。
@@ -4441,7 +4672,7 @@
 - 影響：命令刻意留在背景的子程序會在命令結束時被終止。標準函式庫的 `main_thread_handle` 尚未穩定，主執行緒以 ToolHelp 執行緒快照找出。跨範圍修改 baton-domain（新增 Observation 變體）。
 - 審閱：未審
 
-### AI-453：快照檔參數由 RunSpec 的 `settings_files` 決定；不在每次啟動前比對 CLI 版本
+### AI-478：快照檔參數由 RunSpec 的 `settings_files` 決定；不在每次啟動前比對 CLI 版本
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #6）
 - 決策：`RunSpec` 新增 `settings_files`，由 Supervisor 從綁定的快照版本渲染出快照裡有的檔名，Adapter 只依它決定傳哪些參數，不再以 `is_file()` 判斷，`command_hash` 不再依賴檔案系統狀態。不在每次啟動前比對 CLI 版本（不修）。
@@ -4450,7 +4681,7 @@
 - 影響：降版之後到下次核對前啟動的 Run 仍以舊版執行。
 - 審閱：未審
 
-### AI-454：監護寫下 Attempt 到撤回之間鎖住日誌；OpenProcess 失敗只有程序不存在才算已結束
+### AI-479：監護寫下 Attempt 到撤回之間鎖住日誌；OpenProcess 失敗只有程序不存在才算已結束
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #15、R152 第 11 項）
 - 決策：新增 `guardian/journal.lock`。監護從寫下 Attempt、最後核對到寫入 Withdrawn 都持有這把鎖，決定要啟動時才放開；Runtime 匯入日誌改呼叫 `read_journal_for_import`，在同一把鎖內讀。日誌格式與 store 都不變。`OpenProcess` 失敗時只有 `ERROR_INVALID_PARAMETER`（程序不存在）才算已結束，存取被拒等其他錯誤一律視為仍在，開啟權限降為 `PROCESS_QUERY_LIMITED_INFORMATION`。
@@ -4459,7 +4690,7 @@
 - 影響：仍有更窄的空檔：監護核對時 App 拉起的 Runtime 還沒記下程序身分，監護決定啟動、它拉起的 Runtime 再因單實例鎖自行結束，這次嘗試仍被計次（單實例模型本身的限制）。存取被拒時安裝程式的維護準備會等到逾時；結束碼剛好是 259（STILL_ACTIVE）的已結束程序會被當成仍在。
 - 審閱：未審
 
-### AI-455：重犯回報只帶 `workspace_id` 時保存 Workspace，不回 400
+### AI-480：重犯回報只帶 `workspace_id` 時保存 Workspace，不回 400
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #7）
 - 決策：Domain 的 `guard::report` 多一個 `workspace_id` 參數；Store 的 `report_recurrence` 改收 `(workspace_id, 選填的 task_id)` 並核對 Workspace 存在，不存在回 400 `guard_invalid`。
@@ -4468,7 +4699,7 @@
 - 影響：跨範圍修改 baton-domain `guard.rs` 與 baton-store `guards.rs` 的函式簽名；重犯事件的 payload 沒有加 `workspace_id`。
 - 審閱：未審
 
-### AI-456：主控台 Ctrl-C 與完全退出後服務自行結束都走正常結束（補充 AI-280）
+### AI-481：主控台 Ctrl-C 與完全退出後服務自行結束都走正常結束（補充 AI-280）
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #13、#5 第二點）
 - 決策：`RunningRuntime::wait` 換成 `serve_until(interrupt)`：收到主控台 Ctrl-C 或服務自行結束時呼叫 `shutdown()`，記下正常結束；無法接收 Ctrl-C 時只等服務自行結束。程序被終止、登出、重開機仍判為崩潰。`baton-runtime restore` 失敗的訊息改以「還原失敗：」開頭。
@@ -4477,7 +4708,7 @@
 - 影響：Ctrl-C 之後再啟動，仍在執行的 Worker 照一般重啟的方式找回並核對。票 33 只以「跨登入暫停 Workspace」處理跨登入（AI-355／356），重開機後自啟動仍會建立恢復事件，本條沒有改變這點。
 - 審閱：未審
 
-### AI-457：兩個偶發失敗測試的根因：派工請求套用 2 秒上限、Job 內的 conhost.exe
+### AI-482：兩個偶發失敗測試的根因：派工請求套用 2 秒上限、Job 內的 conhost.exe
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #2、R152 第 10 項）
 - 決策：
@@ -4489,7 +4720,7 @@
 - 影響：派工遇到大 repo 時 App 最多等 60 秒。`web/src/App.test.tsx` 的偶發失敗不在本範圍。
 - 審閱：未審
 
-### AI-458：登入啟動登記依值名稱判定歸屬
+### AI-483：登入啟動登記依值名稱判定歸屬
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #19）
 - 決策：`StartupRegistration` 新增有預設實作的 `has_registration`（預設等同 `is_registered`）；Windows 版只要名為 `Baton` 的值存在就算。偏好為關閉時 `sync_login_startup` 以它判斷要不要移除。
@@ -4498,7 +4729,7 @@
 - 影響：使用者若手動以 `Baton` 為名登記了別的程式，偏好關閉時也會被移除。
 - 審閱：未審
 
-### AI-459：驗證承接者無法確認舊程序已停止時，完全不碰狀態目錄也不 teardown
+### AI-484：驗證承接者無法確認舊程序已停止時，完全不碰狀態目錄也不 teardown
 - 重要度：高
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #25 第二點）
 - 決策：承接受阻（blocked）時不準備狀態目錄、不執行 teardown、不移除狀態目錄；Bundle 的 `cleanup.state_dir_removed` 記為 false 並寫明原因。讀取 Git revision 是唯讀，保留。行為與 AI-429「不執行任何操作」一致。
@@ -4507,7 +4738,7 @@
 - 影響：狀態目錄會留下，等使用者確認舊服務已結束後再處理。情境測試 `verification_takeover_blocked.rs`（harness 新檔；driver 層的測試跑不到 Adapter 的 `execute`）。
 - 審閱：未審
 
-### AI-460：畫面秘密偵測一併讀取輸入欄位的值；trace 改寫為不壓縮，讓既有的內容檢查涵蓋中間畫面
+### AI-485：畫面秘密偵測一併讀取輸入欄位的值；trace 改寫為不壓縮，讓既有的內容檢查涵蓋中間畫面
 - 重要度：高
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #24）
 - 決策：Runner 觀察畫面時另外讀取所有 input／textarea 的值（含開放的 shadow DOM；密碼與隱藏欄位不列入），經 `PageSnapshot.fields` 交回 Runtime，只用來判斷畫面是否顯示秘密，不交給斷言或 judge。Runner 關閉時把 trace 改寫成不壓縮的 zip，一閃而過的中間畫面留在 trace 的 DOM 快照與網路紀錄裡，Runtime 既有的「檔案內容含秘密就不保存」檢查就能找到並扣下。
@@ -4516,7 +4747,7 @@
 - 影響：trace 檔變大（上限仍是 50MB），改寫失敗（例如 zip64）時不交出 trace。仍有限制：錄影與 trace 內的截圖是影像，無法偵測；秘密在 JSON 中被跳脫的形式不會被找到；不檢查 iframe 與封閉的 shadow DOM。
 - 審閱：未審
 
-### AI-461：動作規劃限流也交接維持不變；Bundle 的用量與動作只計最後一次嘗試，不修
+### AI-486：動作規劃限流也交接維持不變；Bundle 的用量與動作只計最後一次嘗試，不修
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #27）
 - 決策：確認 AI-438 整合時加入的「規劃收到 RateLimited 也走 `hand_off_if_possible`」合理（規劃與 judge 共用帳號與限流狀態；那一步記為 `planner_rate_limited`，不執行任何動作，旅程不記為完成，承接者整條重跑），不改程式。Bundle 的 `usage` 與 `actions` 只計最後一次嘗試的問題不修。
@@ -4525,7 +4756,7 @@
 - 影響：交接過的驗證，報告上的用量與動作紀錄偏少；沿用舊嘗試的旅程中被證明的動作不錄製、被推翻的重播不標 stale。
 - 審閱：未審
 
-### AI-462：Controller 可用 `search_knowledge`（全域加整個 Workspace）；其餘共同工具與 `accept_artifact`、Controller 版 `record_lesson_candidate` 留待後續
+### AI-487：Controller 可用 `search_knowledge`（全域加整個 Workspace）；其餘共同工具與 `accept_artifact`、Controller 版 `record_lesson_candidate` 留待後續
 - 重要度：中
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #16）
 - 決策：入口防護新增 Controller 可用的共同工具清單，開放 `search_knowledge`：以既有的 Controller 範圍檢查（這一輪仍在進行、聲稱的 Workspace 一致）查全域加上這個 Workspace 內所有範圍的有效條目。`send_message`、`read_inbox`、`accept_artifact` 與 Controller 版 `record_lesson_candidate` 不實作（不修）。
@@ -4534,7 +4765,7 @@
 - 影響：spec D-05 列為共同工具的 `send_message`、`read_inbox` 對 Controller 仍回 `worker_only`，`accept_artifact` 與 Controller 版 `record_lesson_candidate` 仍不存在，需要另開票。
 - 審閱：未審
 
-### AI-463：Controller 交接的承接判斷不計 Worker 並行量、驗證與整合共用 `verify_lock`，都維持不變
+### AI-488：Controller 交接的承接判斷不計 Worker 並行量、驗證與整合共用 `verify_lock`，都維持不變
 - 重要度：低
 - 時間／階段：2026-10-23，最終 review 修正（R155-fix-b，review-notes #18 第一點、#21 第二點）
 - 決策：
@@ -4543,6 +4774,16 @@
 - 理由：見上。
 - 替代方案：交接判斷計入 Worker 並行量（與 AI-305 矛盾）；依 repo 分鎖讓驗證與整合平行。
 - 影響：長時間的驗證會延後整合。
+### AI-489：R155-fix-b 合併整合分支：決策編號順延為 AI-474～AI-488；review-notes #22 在 Ports 改用 `git diff -z`
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R155-fix-b 結束前合併 rebuild/v1）
+- 決策：
+  - 修正 A（R154）先合併進整合分支，佔用了 AI-449～AI-473。本 run 原寫的 AI-449～AI-463 依序加 25 改編為 AI-474～AI-488，移到修正 A 的條目之後；本 run 先前 commit 訊息中的「AI-449～AI-463」指改號前的條目。
+  - review-notes #22 兩個 run 各修一層：修正 A 在 Domain 比對前還原 git 的引號路徑、無法還原就視為受影響（AI-470）；本 run 在 `crates/baton-ports/src/git.rs` 改以 `git diff -z` 取得 NUL 分隔、不加引號的路徑。兩者並存：正式版不再收到加引號的路徑，Domain 的還原只在其他來源仍帶引號時生效。
+  - `crates/baton-domain/src/guard.rs` 的衝突：修正 A 為 `report` 加上教訓範圍檢查、本 run 加上 `workspace_id` 參數（AI-480），兩者都保留，說明文字合併。
+- 理由：已合併的條目編號不能改，只能移動本 run 的內容。
+- 替代方案：無。
+- 影響：無行為差異。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄
