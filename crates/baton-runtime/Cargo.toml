@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 baton-api = { path = "../baton-api" }
+# 安裝程式的準備步驟（票 34）以桌面用戶端要求執行中的 Runtime 進入維護
+baton-client = { path = "../baton-client" }
 baton-credential = { path = "../baton-credential" }
 baton-domain = { path = "../baton-domain" }
 baton-guardian = { path = "../baton-guardian" }
@@ -33,6 +35,5 @@ axum = "0.8"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_SystemInformation"] }
 
 [dev-dependencies]
-baton-client = { path = "../baton-client" }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

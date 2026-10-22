@@ -7,6 +7,7 @@ pub mod backup;
 pub mod claude_adapter;
 pub mod claude_cli;
 pub mod credentials;
+pub mod installer;
 pub mod log;
 mod maintenance;
 pub mod production_ports;

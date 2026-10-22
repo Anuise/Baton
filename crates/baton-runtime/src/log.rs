@@ -19,7 +19,7 @@ pub fn log_path(data_dir: &Path) -> PathBuf {
 }
 
 /// 開啟日誌並回傳寫入函式。
-pub(crate) fn open_log(data_dir: &Path, clock: Arc<dyn Clock>) -> std::io::Result<LogSink> {
+pub fn open_log(data_dir: &Path, clock: Arc<dyn Clock>) -> std::io::Result<LogSink> {
     let path = log_path(data_dir);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

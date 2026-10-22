@@ -6,6 +6,7 @@ use baton_runtime::single_instance::InstanceGuard;
 use baton_domain::guardian::GUARDIAN_ATTEMPT_ENV;
 use baton_domain::login::{START_SOURCE_ENV, START_SOURCE_LOGIN};
 use baton_guardian::files::{self, InstanceRecord};
+use baton_runtime::installer;
 use baton_runtime::{Runtime, RuntimeConfig, RuntimeOptions};
 
 #[tokio::main]
@@ -23,6 +24,9 @@ async fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("restore") {
         return restore(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some(installer::MAINTENANCE_COMMAND) {
+        return prepare_for_installer(&args[1..]).await;
     }
     let config = RuntimeConfig::from_lookup(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;
 
@@ -71,4 +75,45 @@ fn restore(args: &[String]) -> Result<(), String> {
     } else {
         Err("還原完成，但有核對沒有通過；請不要使用這個目錄".into())
     }
+}
+
+/// `baton-runtime maintenance prepare-update | prepare-uninstall`：安裝程式在覆蓋安裝與解除安裝前執行（票 34）。
+/// 讓執行中的 Runtime 完成維護的停止流程並結束、在生命週期檔留下維護抑制、等監護結束；解除安裝另移除登入啟動登記。
+/// 資料目錄與埠取自環境變數（沒有設定時是預設值）；遇到問題只印出來，不讓安裝程式失敗。
+async fn prepare_for_installer(args: &[String]) -> Result<(), String> {
+    let usage = || {
+        format!(
+            "用法：baton-runtime {} {}|{}",
+            installer::MAINTENANCE_COMMAND,
+            installer::PREPARE_UPDATE_ARG,
+            installer::PREPARE_UNINSTALL_ARG
+        )
+    };
+    let [action] = args else { return Err(usage()) };
+    let kind = installer::kind_of_arg(action).ok_or_else(usage)?;
+    let config = RuntimeConfig::from_lookup(|key| std::env::var(key).ok()).map_err(|e| e.to_string())?;
+    let clock = std::sync::Arc::new(SystemClock);
+    let log = baton_runtime::log::open_log(&config.data_dir, clock.clone()).unwrap_or_else(|_| std::sync::Arc::new(|_: &str| {}));
+    let client = baton_client::RuntimeClient::new(
+        config.bind,
+        config.data_dir.clone(),
+        std::sync::Arc::new(baton_credential::DpapiProtector),
+    );
+    // 登記的值名稱固定是產品名稱，移除時不看命令列內容
+    let ports = production_ports(&config.data_dir, config.bind.port());
+    let report = installer::prepare(
+        kind,
+        &config.data_dir,
+        &client,
+        &*ports.startup_registration,
+        &*clock,
+        installer::PrepareTiming::default(),
+        &log,
+    )
+    .await;
+    println!("{:?}；登入啟動登記{}", report.prepared, if report.registration_removed { "已移除" } else { "未變更" });
+    for note in &report.notes {
+        println!("注意：{note}");
+    }
+    Ok(())
 }

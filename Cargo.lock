@@ -256,6 +256,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "baton-api",
+ "baton-client",
  "baton-credential",
  "baton-domain",
  "baton-guardian",
