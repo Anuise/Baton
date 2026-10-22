@@ -26,11 +26,13 @@ use tokio::sync::oneshot;
 
 mod agent;
 mod profiles;
+mod quota;
 mod runs;
 mod scheduling;
 mod tasks;
 pub use agent::AgentContext;
 pub use profiles::ProfileApplyError;
+pub use quota::{AccountQuota, QuotaApplyError};
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use scheduling::{
     QueuedRequest, ScheduleOutcome, ScheduleRequest, SchedulingSnapshot, StartedRun, WaitingTask,
@@ -319,6 +321,50 @@ const MIGRATIONS: &[Migration] = &[
             mode TEXT NOT NULL CHECK (mode IN ('reserve_handoff', 'higher_concurrency')),
             version INTEGER NOT NULL CHECK (version >= 1),
             updated_at INTEGER NOT NULL
+        );",
+    },
+    // 額度觀測（票 27）：每筆觀測的來源、時間、可信度與原始資料參照；本機 Run 回報的用量（推估的依據）；
+    // 使用者設定的方案上限；外部觀測器的輪詢時間。觀測不到的值存 NULL（未知），不填零。
+    // 超過七日視窗的觀測與用量在輪詢時刪除（保留 8 天）
+    Migration {
+        name: "quota",
+        sql: "CREATE TABLE quota_observation (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id TEXT NOT NULL,
+            origin TEXT NOT NULL CHECK (origin IN ('adapter', 'estimate', 'observer')),
+            source TEXT NOT NULL CHECK (source IN ('observed', 'estimated')),
+            quota_window TEXT CHECK (quota_window IN ('five_hour', 'seven_day')),
+            status TEXT CHECK (status IN ('allowed', 'warning', 'exhausted')),
+            used REAL CHECK (used IS NULL OR used >= 0),
+            tokens INTEGER CHECK (tokens IS NULL OR tokens >= 0),
+            limit_tokens INTEGER CHECK (limit_tokens IS NULL OR limit_tokens > 0),
+            reset_at INTEGER,
+            observed_at INTEGER NOT NULL,
+            confidence TEXT NOT NULL CHECK (confidence IN ('observed', 'estimated', 'unknown')),
+            raw_ref TEXT NOT NULL,
+            raw TEXT
+        );
+        CREATE INDEX quota_observation_latest ON quota_observation (profile_id, origin, quota_window, seq);
+        CREATE INDEX quota_observation_time ON quota_observation (observed_at);
+        CREATE TABLE quota_usage (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            profile_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            tokens INTEGER NOT NULL CHECK (tokens >= 0),
+            reported_at INTEGER NOT NULL,
+            raw TEXT NOT NULL
+        );
+        CREATE INDEX quota_usage_profile ON quota_usage (profile_id, reported_at);
+        CREATE TABLE quota_plan_limit (
+            profile_id TEXT PRIMARY KEY,
+            five_hour_tokens INTEGER CHECK (five_hour_tokens IS NULL OR five_hour_tokens > 0),
+            seven_day_tokens INTEGER CHECK (seven_day_tokens IS NULL OR seven_day_tokens > 0),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE quota_poll (
+            profile_id TEXT PRIMARY KEY,
+            polled_at INTEGER NOT NULL
         );",
     },
 ];

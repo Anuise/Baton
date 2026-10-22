@@ -13,6 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::event::DomainEvent;
 use crate::scheduler::QUOTA_STOP_DISPATCH_RATIO;
 use crate::Timestamp;
 
@@ -245,6 +246,32 @@ impl PlanLimits {
         }
         Ok(())
     }
+}
+
+/// 變更一個 Profile 的方案上限：檢查後回傳 `quota_plan_limits_changed` 事件（版本為 `version + 1`）；
+/// 與目前相同時回傳 `None`，不寫入。
+pub fn change_plan_limits(
+    profile_id: &str,
+    current: &PlanLimits,
+    version: i64,
+    next: PlanLimits,
+    now: Timestamp,
+) -> Result<Option<DomainEvent>, PlanLimitError> {
+    next.validate()?;
+    if *current == next {
+        return Ok(None);
+    }
+    Ok(Some(DomainEvent {
+        aggregate_type: "quota_plan_limit",
+        aggregate_id: profile_id.to_string(),
+        aggregate_version: version + 1,
+        event_type: "quota_plan_limits_changed",
+        occurred_at: now,
+        payload: serde_json::json!({
+            "five_hour_tokens": next.five_hour_tokens,
+            "seven_day_tokens": next.seven_day_tokens,
+        }),
+    }))
 }
 
 /// 一個 Run 的結果訊息回報的用量。

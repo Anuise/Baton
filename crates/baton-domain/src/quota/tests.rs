@@ -92,6 +92,21 @@ fn plan_limits_must_be_positive() {
     assert_eq!(limits(Some(1), Some(2)).validate(), Ok(()));
 }
 
+#[test]
+fn changing_plan_limits_produces_a_versioned_event_and_unchanged_limits_write_nothing() {
+    let event = change_plan_limits("p1", &PlanLimits::default(), 0, limits(Some(10), None), NOW).unwrap().unwrap();
+    assert_eq!(event.event_type, "quota_plan_limits_changed");
+    assert_eq!(event.aggregate_id, "p1");
+    assert_eq!(event.aggregate_version, 1);
+    assert_eq!(event.payload, serde_json::json!({ "five_hour_tokens": 10, "seven_day_tokens": null }));
+
+    assert_eq!(change_plan_limits("p1", &limits(Some(10), None), 1, limits(Some(10), None), NOW), Ok(None));
+    assert_eq!(
+        change_plan_limits("p1", &PlanLimits::default(), 0, limits(Some(0), None), NOW),
+        Err(PlanLimitError::NotPositive)
+    );
+}
+
 // --- 已觀測 ---
 
 #[test]
