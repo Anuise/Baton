@@ -698,3 +698,41 @@ async fn a_deny_decision_is_reported_to_the_worker_once() {
     assert_eq!(denied["decision_request_id"], rid);
     assert_eq!(task_status(&harness, &p.ws, &p.a).await, "running", "拒絕不會讓 Task 再次卡住");
 }
+
+#[tokio::test]
+async fn under_the_trusted_dev_template_disguised_out_of_scope_operations_still_ask() {
+    let harness = harness().await;
+    let p = two_running_tasks(&harness).await;
+    confirm_dev_template(&harness, &p.ws).await;
+    let ws_path = workspace_path(&harness, &p.ws).await;
+
+    // 驗證報告列出的繞過手法：改寫 Git 歷史、寫到 Workspace 外、全域安裝、寫進 .git、建置其他專案
+    let cases = [
+        ("Bash", json!({ "command": "git commit --amend --no-edit" }), None),
+        ("Bash", json!({ "command": "git diff --output=C:/Users/me/AppData/Roaming/evil.txt" }), None),
+        ("Bash", json!({ "command": "npm install --location=global typescript" }), Some("global_install")),
+        ("Bash", json!({ "command": "npm install --global=true typescript" }), Some("global_install")),
+        ("Bash", json!({ "command": "npm install --prefix C:/other typescript" }), None),
+        ("Bash", json!({ "command": "cargo test --manifest-path C:/other/Cargo.toml" }), None),
+        ("Write", json!({ "file_path": format!(r"{ws_path}\.git.\hooks\pre-commit") }), Some("write_files")),
+        ("Write", json!({ "file_path": ".git /config" }), Some("write_files")),
+    ];
+    for (tool, input, capability) in cases.clone() {
+        let (status, response) = prompt(&harness, &p.token_a, tool, input.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{tool} {input}：{response}");
+        assert_eq!(response["behavior"], "deny", "{tool} {input}：{response}");
+        assert_eq!(response["status"], "waiting_decision", "{tool} {input}：{response}");
+        let view = decision(&harness, &p.ws, response["decision_request_id"].as_str().unwrap()).await;
+        assert_eq!(view["kind"], "permission");
+        assert_eq!(view["permission"]["capability"], json!(capability), "{tool} {input}");
+    }
+    assert_eq!(decision_list(&harness, &p.ws).await["pending_count"], cases.len());
+    assert_eq!(task_status(&harness, &p.ws, &p.a).await, "waiting_decision");
+    assert_eq!(task_status(&harness, &p.ws, &p.b).await, "running");
+
+    // 對照組：一般的建置與 commit 仍然自動允許
+    for command in ["cargo test --workspace", "git commit -m \"fix: 修正 --amend 的說明\""] {
+        let (_, allowed) = prompt(&harness, &p.token_b, "Bash", json!({ "command": command })).await;
+        assert_eq!(allowed["behavior"], "allow", "{command}：{allowed}");
+    }
+}
