@@ -49,6 +49,7 @@ const client = {
   listArtifacts: vi.fn(async () => ({ artifacts: [], unregistered_files: [] })),
   backupStatus: vi.fn(async () => ({ backups: [], latest_drill: null })),
   listKnowledge: vi.fn(async () => ({ search_mode: "full_text", entries: [] })),
+  listGuards: vi.fn(async () => ({ guards: [] })),
 } as unknown as AppClient;
 
 vi.mock("./runtimeClient", async (importOriginal) => ({

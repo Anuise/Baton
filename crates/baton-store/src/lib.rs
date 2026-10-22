@@ -28,6 +28,7 @@ mod agent;
 mod artifacts;
 pub mod backup;
 mod decisions;
+mod guards;
 mod knowledge;
 mod lifecycle;
 mod messages;
@@ -41,6 +42,7 @@ mod verification;
 pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
+pub use guards::{GuardApplyError, GuardOverview};
 pub use knowledge::{KnowledgeApplyError, KnowledgeAudience, NewKnowledgeRequest, ScopeRequest};
 pub use lifecycle::{
     lifecycle_file_path, read_lifecycle_file, write_lifecycle_file, LifecycleApplyError, LifecycleSnapshot,
@@ -626,7 +628,41 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE workspace ADD COLUMN model_overrides TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(model_overrides));
         ALTER TABLE run ADD COLUMN native_session_id TEXT;",
     },
-    // 完整裁定中心（票 35，第 20 個 migration）：裁定請求加上目標版本、內容版本、延後、合併與過期，裁定加上處理方式與批次識別。
+    // Guard 與重犯事件（票 38）：Guard 只能停用、不能刪除；重犯事件是追加式。
+    // 被 Guard 攔下的重犯以「Guard + Task + 契約版本」決定識別，佇列重試不會重複記錄
+    Migration {
+        name: "guard",
+        sql: "CREATE TABLE guard (
+            id TEXT PRIMARY KEY,
+            lesson_id TEXT NOT NULL REFERENCES knowledge_entry (id),
+            rule TEXT NOT NULL CHECK (json_valid(rule)),
+            status TEXT NOT NULL CHECK (status IN ('enabled', 'disabled')),
+            revision INTEGER NOT NULL CHECK (revision >= 1),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX guard_lesson ON guard (lesson_id);
+        CREATE TRIGGER guard_no_delete BEFORE DELETE ON guard
+        BEGIN SELECT RAISE(ABORT, 'guard 不可刪除：只能停用'); END;
+        CREATE TABLE lesson_recurrence (
+            id TEXT PRIMARY KEY,
+            lesson_id TEXT NOT NULL REFERENCES knowledge_entry (id),
+            guard_id TEXT REFERENCES guard (id),
+            workspace_id TEXT REFERENCES workspace (id),
+            task_id TEXT REFERENCES task (id),
+            contract_version INTEGER,
+            kind TEXT NOT NULL CHECK (kind IN ('prevented', 'reported')),
+            message TEXT NOT NULL,
+            occurred_at INTEGER NOT NULL,
+            CHECK ((kind = 'prevented') = (guard_id IS NOT NULL))
+        );
+        CREATE INDEX lesson_recurrence_lesson ON lesson_recurrence (lesson_id);
+        CREATE TRIGGER lesson_recurrence_no_update BEFORE UPDATE ON lesson_recurrence
+        BEGIN SELECT RAISE(ABORT, 'lesson_recurrence 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER lesson_recurrence_no_delete BEFORE DELETE ON lesson_recurrence
+        BEGIN SELECT RAISE(ABORT, 'lesson_recurrence 是追加式資料表，不可刪除'); END;",
+    },
+    // 完整裁定中心（票 35，第 21 個 migration）：裁定請求加上目標版本、內容版本、延後、合併與過期，裁定加上處理方式與批次識別。
     // SQLite 不能修改既有的 CHECK 約束，所以重建票 22 的四張表：這四張表只互相參照、沒有其他表參照它們，
     // 先建新表、搬資料、由子到父刪除舊表，再改名（外鍵參照會隨改名更新）。既有請求的目標版本取該 Task 目前的契約版本
     // （權限提示另取 Workspace 目前的授權 revision）

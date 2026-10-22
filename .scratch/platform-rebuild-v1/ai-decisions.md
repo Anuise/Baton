@@ -1873,7 +1873,70 @@
 - 影響：無行為變更。
 - 審閱：未審
 
-### AI-208：Controller 動作以 `controller_action` 工具「事前判定」；必須送裁定的動作被拒絕並轉成單次核准的裁定請求
+### AI-208：Guard 在 Run 准入（派工交易）時檢查；擋下的 Task 以「Guard」等待原因留在佇列，不是 409
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：(1) 「相關 Task 准入時被檢查」實作為 `run::check_dispatch` 的一步（授權准入之後、相依之前），所以派工要求、佇列每次重試、排程總覽都經過同一個判定；pending → ready 的准入報告（`task::admission_report`）**不**檢查 Guard。(2) 違反時回 `RunError::GuardViolated`，Scheduler 把它轉成新的等待類別 `guard`（`code = guard_violated`，`WaitReason.guard` 帶 `guard_id`、`lesson_id`、`lesson_title`），派工回 202 並把 Task 留在佇列，不建立 Run、不啟動程序；修改契約（Task 退回 pending 而離開佇列）或停用 Guard（喚醒 Supervisor，佇列重試時自動派出）即解除。(3) Store 只在派工路徑載入「啟用且來源教訓現在有效」的 Guard（`Loaded.guards`），其他 Run 命令看到的是空清單。
+- 理由：票面寫「Run 准入時執行適用 Guard」，而重試政策依賴該 Task 的 Run 紀錄，只有在 Run 准入時才有意義；放在 `check_dispatch` 讓所有會建立 Run 的路徑共用一個判定（與授權重新准入 AI-61 同理）。以等待原因呈現可以直接沿用工作面板既有的排隊原因 UI，並讓停用 Guard 後自動恢復，與授權、相依的處理方式一致。
+- 替代方案：派工直接回 409 `guard_violated`、不排隊（UI 要另做錯誤呈現，停用 Guard 後要使用者重新派工）；同時在 pending → ready 檢查（重試政策在 ready 時無法判定，兩處檢查也可能不一致）；把違反當成 `task_admission_denied` 的缺項（會被當成契約缺漏，看不出來源教訓）。
+- 影響：被 Guard 擋下的 Task 狀態仍是 `ready`，工作面板以排隊原因顯示「Guard 擋下」與來源教訓。Context Builder（票 39）或 Controller（票 16、17）若有自己的派工路徑，必須經過 `check_dispatch` 才會檢查 Guard。
+- 審閱：未審
+
+### AI-209：第一版三種 Guard 規則：契約欄位必須提到文字、禁止要求某能力、目前契約版本失敗次數上限
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：票面的「啟動前檢查、工具限制或重試政策」各實作一種可機械判定的規則（`GuardRule`）：(1) `preflight`：六項契約欄位之一必須是「已填寫」且內容（不分大小寫）提到指定文字（1–200 字元）；(2) `tool_restriction`：Task 的 `required_capabilities` 不得含指定能力；(3) `retry_policy`：同一個 Task 在**目前契約版本**下 `failed` 的 Run 數達到上限（1–20）就不再派工，`interrupted`、`cancelled` 不算，改契約即重新計算。規則建立後不能修改（要換規則就停用舊的、建立新的）。spec 使用者故事 60 提到的「測試」形式不在第一版。
+- 理由：三種都只需要派工交易裡已有的事實（契約、能力、Run 紀錄），不需要 I/O，能放在純 Domain 判定；以「契約版本」計算失敗次數，使用者依教訓改了做法（改契約）就給新的機會，不會被舊失敗永遠擋住。中斷多半是額度交接、完全退出或基礎設施問題（AI-168），不代表做法錯了，所以不計入。
+- 替代方案：以正規表示式比對契約（彈性高但使用者難寫、也難解釋違反原因）；重試政策計算全部歷史失敗（改契約也無法解除）；把「測試」做成 Guard（需要在准入前執行命令，屬驗證 Adapter 的範圍）；在權限提示時攔截工具呼叫（屬操作時檢查，超出「Run 准入」）。
+- 影響：重試政策是使用者針對特定教訓設的上限，與 spec D-16 的全域修正預算（票 33 等）是兩件事，兩者都會阻擋派工。工具限制只看契約宣告的能力；Worker 執行中實際使用的工具仍由權限提示依授權判定。
+- 審閱：未審
+
+### AI-210：Guard 的生效條件與適用範圍：建立即啟用、只能來自有效教訓、教訓失效則 Guard 自動失效、範圍沿用教訓
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：(1) 只有桌面憑證能建立、啟用、停用 Guard（Agent 憑證 403）；使用者建立 Guard 的動作本身就是啟用，沒有「建立但未啟用」的草稿狀態。(2) 只有**有效**的教訓（`kind = lesson`、已驗證、在有效期間內）能轉成 Guard 或重新啟用，否則 409 `lesson_ineligible`。(3) Guard 生效 = 啟用 + 來源教訓**現在**有效；教訓被撤銷、淘汰、取代或過期後，Guard 自動不再檢查（列表標示 `active = false` 與原因），不需要使用者另外停用。(4) Guard 沒有自己的範圍，一律沿用來源教訓的範圍（全域、Workspace、Goal、Task，與 Agent 看得到的範圍相同的 `Audience::Run` 判定）。(5) Guard 不能刪除，只能停用；啟用與停用以 `expected_revision` 校驗。
+- 理由：D-28「Guard 一律由使用者啟用」的重點是 Agent 不能讓 Guard 生效；使用者主動建立已經是明確同意，再多一個啟用步驟只是多一次點擊。錯誤或過時的教訓不應繼續擋工作，讓生效條件直接依賴教訓狀態，就不會出現「教訓已撤銷、Guard 還在擋」的不一致。範圍沿用教訓，避免同一條經驗有兩套範圍。
+- 替代方案：建立後預設停用、另外按啟用（多一步，沒有額外保障）；教訓撤銷時連帶把 Guard 改成停用（多一個跨聚合的寫入，而且教訓狀態若之後改變不易還原）；Guard 自己可以收窄範圍（第一版不需要）。
+- 影響：候選教訓必須先確認才能轉成 Guard。延長已過期教訓的有效期限（修正）之後，原本的 Guard 會自動恢復生效。
+- 審閱：未審
+
+### AI-211：重犯事件與 Guard 成效的定義：被攔下的自動記錄、未攔下的由使用者回報，兩者都指向教訓
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：(1) 重犯事件（`lesson_recurrence`，追加式）一律指向來源教訓，分兩種：`prevented`（Guard 在 Run 准入時擋下，`Store::schedule` 在同一個交易中記錄，指向 Guard、Workspace、Task 與契約版本）與 `reported`（沒被攔下、使用者在知識分頁回報，說明必填，可指定 Task；教訓必須是已驗證的教訓，過期也可以）。(2) `prevented` 的識別由「Guard + Task + 契約版本」決定，佇列每秒重試看到同一個違反只記一次；改了契約仍違反就是新的一次。(3) 每筆同時追加 `lesson_recurrence_recorded` 事件（`aggregate_type = 'lesson_recurrence'`）供時間線追溯。(4) Guard 成效在 Guard 列表上顯示：`prevented_count`、`last_prevented_at`，以及 `reported_count`（Guard 建立之後，同一個教訓的使用者回報數）。
+- 理由：票面要求「記錄重犯事件與 Guard 成效」「重犯事件可追溯到教訓」；只記攔下次數看不出 Guard 是否有漏洞，加上使用者回報的漏網次數，才算得出 spec 使用者故事 93 的「教訓重犯率」。以契約版本去重，避免佇列重試把一次重犯算成上千次。
+- 替代方案：每次被擋都記一筆（數字被佇列重試灌大）；重犯事件掛在知識條目的事件流上（會讓條目的 `revision` 變動，干擾知識分頁的 `expected_revision` 校驗）；由 Agent 回報重犯（Agent 的判斷不可信，且 Agent 工具集未包含此項）。
+- 影響：成效目前只有次數，沒有比率或時間序列圖；觀測面板（spec 使用者故事 93）可由 `lesson_recurrence` 直接計算。被擋下的 Task 在依舊契約版本下停用 Guard 再重新啟用時，不會再記一次重犯。
+- 審閱：未審
+
+### AI-212：Guard API、資料表與桌面殼指令的形狀（migration 20 `guard`）
+- 重要度：低
+- 時間／階段：2026-10-22，票 38 實作
+- 決策：管理 API（桌面憑證）：`GET /api/v1/guards?workspace_id=`（來源教訓是全域或屬於該 Workspace 的 Guard，附來源教訓、`active`、`inactive_reason`、`description` 與成效）、`POST /api/v1/guards`（`{ lesson_id, rule }`）、`POST /api/v1/guards/{id}/enable|disable`（`{ expected_revision }`）、`GET|POST /api/v1/knowledge/{id}/recurrences`。錯誤代碼：`guard_invalid`（400）、`guard_not_found`（404）、`lesson_ineligible`、`guard_revision_conflict`（409）。資料表 `guard`（觸發器禁止刪除）與 `lesson_recurrence`（追加式）放在第 20 個 migration。Tauri 指令 `guard_list`、`guard_create`、`guard_enable`、`guard_disable`（`id`、`expected_revision` 平鋪為參數）、`knowledge_recurrences`、`knowledge_report_recurrence`。Web UI 的工具限制下拉選單的能力名稱照抄 Rust `Capability::label`。
+- 理由：沿用知識 API 的分流、錯誤格式與 expected_revision 慣例；重犯事件屬於教訓，所以掛在知識條目之下。
+- 替代方案：Guard 掛在 `/api/v1/knowledge/{id}/guards` 之下（列表要跨教訓查詢，不自然）；Tauri 指令照 `knowledge_confirm` 以 `request` 物件包 `expected_revision`（兩種寫法都可，選了較短的）。
+- 影響：整合 rebuild/v1 時，若其他票先佔用第 20 個 migration，本票順延（與 AI-165 同）。能力名稱改動時 Web UI 的對照表要同步。
+- 審閱：未審
+
+### AI-213：票 38 整合 rebuild/v1（票 23、40）：AI 編號順延為 AI-208～AI-212；migration 不變
+- 重要度：低
+- 時間／階段：2026-10-22，票 38 實作（結束前合併 rebuild/v1）
+- 決策：整合分支在本票實作期間併入票 23（AI-180～AI-185）與票 40（AI-186～AI-195），本票條目原本的 AI-180～AI-184 順延為 AI-208～AI-212，移到票 40 條目之後；條目之間沒有互相引用，程式碼、文件與票面也沒有引用這些編號。兩張票都沒有新增 migration，本票的 `guard` 維持第 19 版。其餘衝突兩邊都保留：`baton-api` 的模組說明（備份狀態與 Guard 端點）、Web UI `AppClient` 的型別組合（`BackupClient` 與 `GuardClient`）、開發指南的 crate 表與情境測試清單。本次只整合、不新增行為。
+- 理由：已進入整合分支的條目編號不可改動，順延尚未合併的本票（與 AI-165、AI-175、AI-179 同）。
+- 替代方案：無（編號規則已定）。
+- 影響：無資料庫影響。
+- 審閱：未審
+
+### AI-214：票 38 整合 rebuild/v1（票 14）：migration 順延為第 20 版、AI 編號再順延為 AI-208～AI-213
+- 重要度：中
+- 時間／階段：2026-10-22，票 38 整合 run R078-38-integrate
+- 決策：(1) 整合分支已併入票 14，第 19 個 migration 是 `model_overrides_and_native_session`，本票的 `guard` 順延為第 20 個，排在最後；兩者沒有共用資料表（票 14 只對 `workspace`、`run` 加欄，本票新建 `guard`、`lesson_recurrence`），都會套用；開發指南的「migration 19 `guard`」同步改為 20。(2) 整合分支已用到 AI-207（票 14 的 AI-196～AI-207），本票條目 AI-196～AI-201 順延為 AI-208～AI-213，移到 AI-207 之後；條目內引用本票編號之處（AI-213 的「順延為 AI-208～AI-212」）與 AI-212 的 migration 序號（第 20 個）一併更新，因此 AI-213 內文寫的是現行編號，當時實際使用的是 AI-196～AI-200；AI-213 的「`guard` 維持第 19 版」是當時的事實，保留原文。依驗證 R075 的意見補上 AI-212、AI-213 缺的 `- 審閱：未審` 行與條目間空行；票 14 的條目逐字未動。程式碼與票面沒有引用這些編號。(3) 自動合併的 `run.rs` 已核對：票 14 只在 Run 加上 `native_session_id`、新增 `BindNativeSession` 命令、在派工的啟動內容加上 Worker 角色的模型覆寫；設定快照准入在 API 與 Supervisor 的啟動前（AI-202），不在 `check_dispatch`。Guard 檢查仍在 `check_dispatch` 內，順序維持「授權准入之後、相依檢查之前」；`baton-store` 的 `runs.rs` 同時讀寫 `native_session_id` 並在派工時載入 Guard，`scheduler.rs` 同時有本票的 `guard` 等待類別與票 14 的 `cli_version_unknown`。`Run` 多了 `native_session_id` 欄位，本票 `guard/tests.rs` 建立失敗 Run 的測試輔助函式補上 `native_session_id: None`（與票 14 對其他測試的處理相同）。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-206、AI-207 同）。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票分支建過的開發資料庫，`guard` 記在第 19 版，與整合後的編號不一致，需要刪除重建。
+- 審閱：未審
+
+### AI-215：Controller 動作以 `controller_action` 工具「事前判定」；必須送裁定的動作被拒絕並轉成單次核准的裁定請求
 - 重要度：高
 - 時間／階段：2026-10-22，票 35 實作
 - 決策：(1) 決策權限表（`baton_domain::authority`）把 spec D-15 列成 17 個事項：7 個可自主處理（拆分合併排序重試 Task、選 Playbook、派研究 Worker、把 finding 分類為修正、預算內重派、建立調查 Task、提交候選教訓）、9 個必須送裁定（產品方向與範圍取捨、修改完成條件或驗收標準、超出授權、外部寫入／部署／發訊／付費／刪除正式資料、駁回 finding、跳過 Stage 或 Gate、結果未知外部操作的處置、接受設計偏離、預算用盡後的下一步）、1 個只能人工發起（三次恢復失敗後的重試）。(2) 新增 Agent 工具 `controller_action {matter, task_id?, summary, reason, evidence?, urgency?}`：**工具本身不執行任何動作**，只依 Workspace 目前生效的權限表判定並回 `allowed`／`requires_decision`／`approved`／`denied`／`human_only`。必須送裁定時建立 `kind: "authority"` 的裁定請求（選項 `approve`「核准這一次」、`reject`「不核准」，阻擋目標 Task；目標 Task 是 `running` 時轉 `waiting_decision`，與 AI-140 相同）；同一 Task 同一事項仍待處理時回既有請求。使用者以「接受」或「修改條件」選 `approve` 才算核准，下一次同一 Task 同一事項的呼叫消耗一次（`approved`，修改條件時帶 `conditions`）；其他處理方式（駁回、選 `reject`、回答、要求調查）一律在下一次呼叫回 `denied` 並消耗。只能人工發起的事項回 `human_only`，不建立請求。自主與人工發起的判定各追加一筆 `authority_audit` 稽核事件。(3) 目前沒有 Controller 身分（票 16、17 未做），比照 AI-161 暫時開放給所有 Agent 憑證。
@@ -1882,7 +1945,7 @@
 - 影響：`matter` 是 Agent 自報的，自報「可自主處理」的事項就會得到 `allowed`；這只是判定，真正的變更仍要經過各自的工具。**票 16、17 實作 Controller 變更工具時，必須由 Runtime 依實際變更推導事項（例如契約的 `done_criteria`／`verification_checks` 改變 → `modify_done_criteria`）再呼叫 `authority` 判定，不能信任自報的 `matter`**，並在 Controller 有專屬憑證後把 `controller_action` 收回為 Controller 專屬。
 - 審閱：未審
 
-### AI-209：Workspace 收窄權限表的形狀：取代式設定、revision 校驗、只記被收窄的事項
+### AI-216：Workspace 收窄權限表的形狀：取代式設定、revision 校驗、只記被收窄的事項
 - 重要度：中
 - 時間／階段：2026-10-22，票 35 實作
 - 決策：`GET／PUT /api/v1/workspaces/{id}/decision-authority`。`PUT {expected_revision, entries: [{matter, effective}]}` 是取代式（沒列出的事項回到內建值），`revision` 從 0 起、每次成功加一，不符回 409 `authority_revision_mismatch`。任何一項比內建寬（例如把「修改完成條件」設為可自主），或調整「只能人工發起」的事項，整個請求 400 `authority_widening_refused`、什麼都不寫。可自主處理的事項設為「必須送裁定」或「只能人工發起」都記成「收窄為必須送裁定」。資料存在 `decision_authority_policy`（每個 Workspace 一列，只記被收窄的事項清單），變更追加 `decision_authority_changed` 事件。收窄不影響已建立的請求與已給出的核准。
@@ -1891,7 +1954,7 @@
 - 影響：未知的 `matter` 在 JSON 解析就被拒（400）。權限表目前只約束 `controller_action`，其他既有路徑（例如 Worker 的 `request_decision`）不受影響。
 - 審閱：未審
 
-### AI-210：「目標版本」與過期的定義：目標 Task 與契約版本；過期在開啟裁定中心、查詢待裁定數與提交時標記；過期會恢復只被它阻擋的 Task
+### AI-217：「目標版本」與過期的定義：目標 Task 與契約版本；過期在開啟裁定中心、查詢待裁定數與提交時標記；過期會恢復只被它阻擋的 Task
 - 重要度：高
 - 時間／階段：2026-10-22，票 35 實作
 - 決策：(1) 每個請求記下 `target {task_id, contract_version, authorization_revision}`：Agent 與權限提示的目標是提出者的 Task，Controller 動作的目標是 `task_id` 指定的 Task。目標 Task 的契約版本改變、Task 已結束（completed／cancelled）或不存在時，請求就「目標版本已變更」。(2) 權限提示另外記下判定當時的授權 revision 只供查閱，**授權變更不會讓請求過期**：修改授權與回答請求是兩回事（票 23 的情境測試即如此），單次批准在執行時逐項核對綁定（AI-180～AI-182）。(3) 過期的請求標為 `superseded`（記 `status_reason`、`revision` 加一、事件 `decision_superseded`），不能再套用；只被它阻擋、仍在 `waiting_decision` 的 Task 回到 `ready` 並在同一個交易重新排隊，喚醒 Outbox 帶 `superseded: true`，提出者重新開工後可依新契約再提出。(4) 標記時機：開啟裁定中心（清單／詳情）、查詢待裁定數（狀態列）、提交處理時；**不**在修改契約的交易裡連動。提交時發現過期：過期標記與 Task 恢復照常寫入，API 回 409 `decision_superseded`。
@@ -1900,7 +1963,7 @@
 - 影響：契約更新後到有人開啟裁定中心之前，Task 仍停在 `waiting_decision`、Agent 不會被喚醒；Controller 事件迴圈（票 16 之後）若需要即時反應，可在讀取時呼叫同一個重新整理命令（`DecisionCommand::Refresh`）。GET 端點會寫入資料（標記過期）。
 - 審閱：未審
 
-### AI-211：`expected_revision` 必填；內容版本在延後、合併、過期、回答時加一，連結不加；已回答的同樣處理重送仍冪等
+### AI-218：`expected_revision` 必填；內容版本在延後、合併、過期、回答時加一，連結不加；已回答的同樣處理重送仍冪等
 - 重要度：中
 - 時間／階段：2026-10-22，票 35 實作
 - 決策：處理請求（單筆與批次）一律帶 `expected_revision`，缺少 400、不符 409 `decision_revision_mismatch` 且不寫入任何東西。`revision` 從 1 起，延後、被合併進來（阻擋範圍變大）、被合併出去、過期、回答時加一；新增連結不加（決定的內容沒有變）。已回答的請求收到「同樣的處理方式與選項」視為冪等 200，不比對 revision；不同的處理 409 `decision_already_answered`。檢查順序：找不到 → 已結束（冪等／已回答／已過期／已合併）→ 目標版本已變更 → revision → 處理方式與欄位驗證。既有的票 22 用戶端與測試改為帶 revision。
@@ -1909,7 +1972,7 @@
 - 影響：舊版 App 不帶 revision 會被拒；App 與 Runtime 同版發佈，沒有相容問題。
 - 審閱：未審
 
-### AI-212：六種處理方式的語意：延後不結束請求；回答與要求調查結束請求並恢復工作；權限提示只有接受、延後、駁回
+### AI-219：六種處理方式的語意：延後不結束請求；回答與要求調查結束請求並恢復工作；權限提示只有接受、延後、駁回
 - 重要度：高
 - 時間／階段：2026-10-22，票 35 實作
 - 決策：`action` 為 `accept`（選一個選項）、`modify`（選一個選項＋必填修改後的條件）、`answer`（必填回答文字，不選選項）、`investigate`（必填要調查的事）、`defer`（`defer_minutes` 1 分鐘到 30 天，預設 1 天）、`reject`（理由選填）。除了延後，其他五種都寫一筆裁定（`decision.action` 記處理方式，選項只在接受與修改條件時保存）並結束請求、恢復受阻的 Task，喚醒 Outbox 帶 `action`、`option_id`、`note`，由提出者依內容繼續（例如要求調查時先調查再視需要重新提出）。延後**不是裁定**：請求仍待處理、Task 仍等待、只記 `deferred_until` 並把它排在可處理的請求之後，時間到只是恢復顯示順序，不會發生任何狀態變化。權限提示只允許接受、延後、駁回（駁回視同「拒絕」，下一次同一操作的提示回 `denied`），其他三種 400 `decision_action_not_allowed`。
@@ -1918,7 +1981,7 @@
 - 影響：Worker／Controller 收到的回答文字只在喚醒 Outbox 中（目前沒有消費者，AI-142）；Context Builder（票 39）載入決策時要讀 `decision.action` 與 `note`。資料庫以 CHECK 保證只有接受與修改條件有選項、修改條件／回答／要求調查一定有文字。
 - 審閱：未審
 
-### AI-213：批次處理逐項各自一個交易；`batch_id` 只做稽核；最多 50 項、可跨 Workspace
+### AI-220：批次處理逐項各自一個交易；`batch_id` 只做稽核；最多 50 項、可跨 Workspace
 - 重要度：中
 - 時間／階段：2026-10-22，票 35 實作
 - 決策：`POST /api/v1/decisions/batch {items}`，每一項與單筆處理相同（含 `workspace_id`、`expected_revision`），依序各自一個交易套用；一項失敗（例如 revision 不符、已過期）不影響其他項，回應逐項列出 `ok` 或錯誤代碼。批次產生一個 `batch_id` 記在該批每一筆裁定上，**只用於稽核**，不存在任何批次層級的授權紀錄。空批次、超過 50 項、同一請求出現兩次，整批 400 `decision_batch_invalid`。任何一項成為正式裁定就要求一次重要裁定備份（票 40，同一小時內合併）。UI 的批次面板只提供逐項選擇，沒有「全部套用同一個答案」。
@@ -1927,7 +1990,7 @@
 - 影響：批次不是原子的，部分成功是預期結果，UI 要逐項顯示。
 - 審閱：未審
 
-### AI-214：相似問題的判定、自動連結與合併的限制
+### AI-221：相似問題的判定、自動連結與合併的限制
 - 重要度：中
 - 時間／階段：2026-10-22，票 35 實作
 - 決策：(1) 相似鍵：同種類，Agent 請求比較「問題」正規化後的文字（只保留字母、數字與各種文字，英文轉小寫），權限提示比較操作指紋（工具＋輸入），Controller 動作比較「事項＋摘要」。(2) 新請求建立時，與同 Workspace 相似鍵相同的**待處理**請求自動互相連結（雙向、存在 `decision_request_link`）；使用者也可以手動連結任意兩個請求。連結只是提示，不改變任何行為與 revision。(3) 合併：使用者把 A 合併到 B，A 變成 `merged`（`merged_into = B`），A 的阻擋 Task 加入 B 的阻擋範圍，兩者 revision 各加一並互相連結；之後處理 B 就恢復兩者的 Task，並各自叫醒 A、B 的 Run。只能合併同種類、都待處理的請求，**權限提示不能合併**（單次批准綁定 Task 與操作，合併會讓一個批准用在兩個 Task 上）；處理已合併的 A 回 409 `decision_merged`。
@@ -1936,22 +1999,32 @@
 - 影響：同一個 Run 重複提出完全相同的問題仍回到既有請求（AI-143），不會產生連結。正規化是保守的，措辭不同的同一問題不會被自動連結，要靠使用者手動連結或合併。
 - 審閱：未審
 
-### AI-215：migration 20 以「建新表、搬資料、由子到父刪舊表、改名」重建裁定四張表
+### AI-222：migration 21 以「建新表、搬資料、由子到父刪舊表、改名」重建裁定四張表
 - 重要度：中
 - 時間／階段：2026-10-22，票 35 實作
-- 決策：SQLite 不能修改 CHECK 約束，而 `decision_request` 的種類與狀態、`decision` 的 `option_id NOT NULL` 都要放寬，所以 migration 20（`decision_center_full`）重建 `decision_request`、`decision_request_block`、`decision`、`decision_approval_use`：先建 `*_next` 新表並搬資料，再由子到父 `DROP` 舊表，最後改名。這四張表只互相參照、沒有其他表參照它們，所以在 `foreign_keys=ON` 的 migration 交易內可行（實測：直接重建單一父表或改名舊表，外鍵檢查會失敗或參照被改寫）。既有資料：目標 Task 取原 Task、契約版本取該 Task 目前的版本，權限提示的授權 revision 取 Workspace 目前的版本；處理方式一律記為 `accept`；revision 待處理為 1、已回答為 2。新表的觸發器：只有待處理的請求能更新、只能改狀態／revision／延後／合併／原因、revision 只增不減；阻擋範圍與連結不可刪除；裁定與消耗紀錄維持追加式。另建 `decision_request_link` 與 `decision_authority_policy`。
+- 決策：SQLite 不能修改 CHECK 約束，而 `decision_request` 的種類與狀態、`decision` 的 `option_id NOT NULL` 都要放寬，所以 migration 21（`decision_center_full`）重建 `decision_request`、`decision_request_block`、`decision`、`decision_approval_use`：先建 `*_next` 新表並搬資料，再由子到父 `DROP` 舊表，最後改名。這四張表只互相參照、沒有其他表參照它們，所以在 `foreign_keys=ON` 的 migration 交易內可行（實測：直接重建單一父表或改名舊表，外鍵檢查會失敗或參照被改寫）。既有資料：目標 Task 取原 Task、契約版本取該 Task 目前的版本，權限提示的授權 revision 取 Workspace 目前的版本；處理方式一律記為 `accept`；revision 待處理為 1、已回答為 2。新表的觸發器：只有待處理的請求能更新、只能改狀態／revision／延後／合併／原因、revision 只增不減；阻擋範圍與連結不可刪除；裁定與消耗紀錄維持追加式。另建 `decision_request_link` 與 `decision_authority_policy`。
 - 理由：保留票 22 的資料與追加式保證，同時讓新的狀態在資料庫層也受約束。
 - 替代方案：另開「狀態」側表，讓舊欄位的 `answered` 代表「已結束」（兩個狀態欄位語意不一致）；暫時關閉外鍵（migration 在交易內，無法切換 `foreign_keys`）。
 - 影響：之後其他票若新增參照這四張表的外鍵，未來再重建時要一併處理。migration 前備份（票 40）照常涵蓋這次重建。
 - 審閱：未審
 
-### AI-216：票 35 整合 rebuild/v1（票 25、23、40、14）：migration 順延為第 20 個、AI 編號順延為 AI-208～AI-216、移植票 23 的綁定判定
+### AI-223：票 35 整合 rebuild/v1（票 25、23、40、14）：migration 順延為第 20 個、AI 編號順延為 AI-215～AI-223、移植票 23 的綁定判定
 - 重要度：低
 - 時間／階段：2026-10-22，票 35 實作
-- 決策：(1) 票 25 的 `lifecycle` 是第 18 個 migration、票 14 的 `model_overrides_and_native_session` 是第 19 個，本票的 `decision_center_full` 順延為第 20 個；本票條目原本的 AI-196～AI-204 與票 14 的條目撞號，順延為 AI-208～AI-216 並移到 AI-207 之後，條目內與開發指南的引用一併改成新編號。(2) 票 23 改寫的 `permission_prompt`（單次批准綁定、結果未知要先查證、選項文字）移植到本票改寫後的結構：答案是否核准改以「接受且選 `allow_once`」判定，駁回視同拒絕；事件版本改用請求聚合的接續版本而非固定的 3；`DecisionView` 的權限細節保留票 23 的 `binding`、`prior_use`、`rejected_approval`、`approval_use`。(3) 依票 23 已驗收的行為，授權變更不讓權限提示過期（見 AI-210），本票原本的對應情境測試改為驗證「仍可回答」。(4) 票 40 的「正式裁定要求備份」套用到單筆與批次處理，延後不觸發。(5) 票 23、40 的情境測試回答時補上 `expected_revision`。前端衝突以本票的新版面為主體，整合票 23 的單次批准綁定顯示與「修改 Workspace 授權」入口。開發指南中「權限提示的 CLI 相容性待驗證」一句改用票 14 已實測的說明。
+- 決策：(1) 票 25 的 `lifecycle` 是第 18 個 migration、票 14 的 `model_overrides_and_native_session` 是第 19 個，本票的 `decision_center_full` 順延為第 20 個；本票條目原本的 AI-196～AI-204 與票 14 的條目撞號，順延為 AI-215～AI-223 並移到 AI-207 之後，條目內與開發指南的引用一併改成新編號。(2) 票 23 改寫的 `permission_prompt`（單次批准綁定、結果未知要先查證、選項文字）移植到本票改寫後的結構：答案是否核准改以「接受且選 `allow_once`」判定，駁回視同拒絕；事件版本改用請求聚合的接續版本而非固定的 3；`DecisionView` 的權限細節保留票 23 的 `binding`、`prior_use`、`rejected_approval`、`approval_use`。(3) 依票 23 已驗收的行為，授權變更不讓權限提示過期（見 AI-217），本票原本的對應情境測試改為驗證「仍可回答」。(4) 票 40 的「正式裁定要求備份」套用到單筆與批次處理，延後不觸發。(5) 票 23、40 的情境測試回答時補上 `expected_revision`。前端衝突以本票的新版面為主體，整合票 23 的單次批准綁定顯示與「修改 Workspace 授權」入口。開發指南中「權限提示的 CLI 相容性待驗證」一句改用票 14 已實測的說明。
 - 理由：整合分支上已驗收的行為優先；只做必要的移植，不改變票 23、25、40 的語意。
 - 替代方案：保留「授權變更使權限提示過期」並修改票 23 的測試（推翻已驗收的行為）。
 - 影響：本票沒有新增其他行為。本票較早的 commit 訊息（含第一次合併 commit）提到的 AI-196～AI-204、migration 19 是改號前的編號。
+- 審閱：未審
+### AI-224：票 35 整合 rebuild/v1（票 38）：migration 再順延為第 21 個、AI 編號再順延為 AI-215～AI-223
+- 重要度：中
+- 時間／階段：2026-10-22，票 35 整合 run R082-35-integrate
+- 決策：(1) 整合分支已併入票 38，第 20 個 migration 是 `guard`（新建 `guard`、`lesson_recurrence`），本票的 `decision_center_full` 順延為第 21 個，排在最後；兩者沒有共用資料表（`guard` 只參照 `knowledge_entry`、`workspace`、`task`，不參照本票重建的四張裁定表），都會套用。開發指南「migration 20 重建」與 AI-222 的 migration 序號同步改為 21。(2) 整合分支已用到 AI-214（票 38 的 AI-208～AI-214），本票條目 AI-208～AI-216 順延為 AI-215～AI-223，移到 AI-214 之後；條目內引用本票編號之處（AI-223 的「順延為 AI-215～AI-223」「見 AI-217」）與開發指南裁定中心段落的引用一併更新，因此 AI-223 內文寫的是現行編號，當時實際使用的是 AI-208～AI-216；AI-223 的「migration 順延為第 20 個」是當時的事實，保留原文。補上 AI-223 原本缺的 `- 審閱：未審` 行。票 38 的條目逐字未動。(3) 衝突處兩邊都保留：`baton-store` 的匯出（本票的 `DecisionOverview` 與票 38 的 `GuardApplyError`、`GuardOverview`）、開發指南的 crate 表（本票的決策權限表、裁定 API 與票 38 的 Guard 模組、`/api/v1/guards`）與情境測試清單（`decision_center_full.rs` 與 `guards.rs`）。本次只整合、不新增行為。
+- 理由：已進入整合分支的 migration 與條目編號不可改動，順延尚未合併的本票（與 AI-214、AI-223 同）。
+- 替代方案：無（編號規則已定）。
+- 影響：用本票分支建過的開發資料庫，`decision_center_full` 記在第 20 版，與整合後的編號不一致，需要刪除重建。本票較早的 commit 訊息提到的 AI-208～AI-216、migration 20 是本次改號前的編號。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

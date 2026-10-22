@@ -2,6 +2,8 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::authorization::Capability;
+use crate::guard::{self, ActiveGuard, GuardRule};
+use crate::knowledge::{self, KnowledgeContent, KnowledgeKind, KnowledgeScope, KnowledgeSource, NewKnowledge};
 use crate::task::{
     ContractField, Dependency, Goal, TaskChange, TaskCommand, TaskContract,
 };
@@ -36,6 +38,7 @@ struct World {
     contracts: Vec<TaskContract>,
     runs: Vec<Run>,
     leases: Vec<ExecutionLease>,
+    guards: Vec<ActiveGuard>,
     next_run: u32,
 }
 
@@ -51,6 +54,7 @@ impl World {
             contracts: vec![],
             runs: vec![],
             leases: vec![],
+            guards: vec![],
             next_run: 0,
         };
         world.task_command(TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() }).unwrap();
@@ -99,7 +103,7 @@ impl World {
 
     fn decide(&self, command: RunCommand, now: Timestamp) -> Result<RunChange, RunError> {
         let task = self.task_ctx();
-        decide(&RunContext { task: &task, runs: &self.runs, leases: &self.leases }, command, now)
+        decide(&RunContext { task: &task, runs: &self.runs, leases: &self.leases, guards: &self.guards }, command, now)
     }
 
     /// 判定並套用；被拒絕時狀態完全不變。
@@ -228,6 +232,48 @@ fn dispatch_re_checks_admission_so_a_missing_capability_blocks_it() {
 
     assert!(matches!(result, Err(RunError::AdmissionDenied(ref missing)) if !missing.is_empty()), "{result:?}");
     assert_eq!(world.task("t1").status, TaskStatus::Ready, "被拒絕時 Task 不變");
+}
+
+/// 一個 Workspace 範圍的有效教訓轉成的 Guard。
+fn workspace_guard(id: &str, rule: GuardRule) -> ActiveGuard {
+    let content = KnowledgeContent::new(KnowledgeKind::Lesson, "部署要先備份", "", &[], &[], None).unwrap();
+    let new = NewKnowledge {
+        id: format!("lesson-{id}"),
+        kind: KnowledgeKind::Lesson,
+        scope: KnowledgeScope { kind: knowledge::ScopeKind::Workspace, workspace_id: Some("w1".into()), goal_id: None, task_id: None },
+        content,
+        source: KnowledgeSource::User,
+        valid_from: None,
+        valid_until: None,
+    };
+    let lesson = knowledge::create(new, None, T0).unwrap().entries.remove(0);
+    let guard = guard::create(id.into(), &lesson, rule, T0).unwrap().guard;
+    ActiveGuard { guard, lesson }
+}
+
+#[test]
+fn dispatch_runs_the_applicable_guards_and_a_violation_blocks_it_with_the_source_lesson() {
+    let mut world = World::new(&["t1"]);
+    world.guards.push(workspace_guard(
+        "g1",
+        GuardRule::Preflight { field: ContractFieldName::DoneCriteria, must_mention: "備份".into() },
+    ));
+
+    let result = world.dispatch("t1", T0);
+
+    let Err(RunError::GuardViolated(violations)) = &result else { panic!("{result:?}") };
+    assert_eq!(violations.len(), 1);
+    assert_eq!((violations[0].guard_id.as_str(), violations[0].lesson_title.as_str()), ("g1", "部署要先備份"));
+    assert_eq!(result.as_ref().unwrap_err().code(), "guard_violated");
+    assert!(world.runs.is_empty() && world.leases.is_empty(), "被 Guard 擋下時什麼都不寫");
+    assert_eq!(world.task("t1").status, TaskStatus::Ready);
+
+    // 符合規則的 Guard 不擋
+    world.guards[0] = workspace_guard(
+        "g1",
+        GuardRule::Preflight { field: ContractFieldName::DoneCriteria, must_mention: "五個".into() },
+    );
+    assert!(world.dispatch("t1", T0).is_ok());
 }
 
 #[test]

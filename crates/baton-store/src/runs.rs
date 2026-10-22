@@ -58,7 +58,11 @@ impl Store {
                 {
                     return Ok(Err(RunError::LaunchHalted));
                 }
-                let loaded = load(tx, &workspace_id)?;
+                let mut loaded = load(tx, &workspace_id)?;
+                // 派工是 Run 准入：載入要檢查的 Guard（票 38）
+                if matches!(command, RunCommand::Dispatch { .. }) {
+                    loaded.guards = super::guards::load_active_guards(tx, &workspace_id, now)?;
+                }
                 match decide_in(&loaded, &workspace_id, &loaded.tasks, command, now) {
                     Err(rejected) => Ok(Err(rejected)),
                     Ok(mut change) => {
@@ -155,7 +159,8 @@ pub(crate) fn decide_in(
 ) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
-    run::decide(&RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases }, command, now)
+    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, guards: &loaded.guards };
+    run::decide(&ctx, command, now)
 }
 
 /// 取消 Task 之後，同一個交易中要求取消它還在進行的 Run。
