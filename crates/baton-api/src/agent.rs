@@ -19,9 +19,10 @@ use baton_domain::authority::{Authority, Matter};
 use baton_domain::decision::{
     ActionContent, ControllerOutcome, DecisionOption, DecisionOutcome, PermissionOutcome, RequestContent, Urgency,
 };
+use baton_domain::handoff::{Handoff, HandoffConfirmation};
 use baton_domain::run::RunError;
 use baton_domain::task::ContractContent;
-use baton_store::RunApplyError;
+use baton_store::{HandoffApplyError, RunApplyError};
 use serde::{Deserialize, Serialize};
 
 use crate::authorization::bad_json;
@@ -82,9 +83,13 @@ pub struct TaskContractResponse {
 pub struct ReportAck {
     pub accepted: bool,
     pub kind: ReportKind,
-    /// Runtime 正在完全退出（票 25）：Worker 應儘快保存 checkpoint 並結束；寬限期過後程序樹會被終止。
+    /// Runtime 正在完全退出（票 25），或這個 Run 正在被交接到其他帳號（票 28）：Worker 應儘快保存 checkpoint 並結束；
+    /// 寬限期過後程序樹會被終止。
     #[serde(default)]
     pub stop_requested: bool,
+    /// 停止的原因是交接（帳號額度接近上限）：保存的 checkpoint 會交給接手的 Worker。
+    #[serde(default)]
+    pub handoff_requested: bool,
 }
 
 fn api_error(status: StatusCode, code: &'static str, message: &str) -> ApiError {
@@ -171,9 +176,10 @@ async fn report(
     let content = content?;
     let kind = content.kind();
     state.store.apply_agent_report(&scope, content, state.clock.now()).await?;
-    // 回報的回應是 Runtime 通知 Worker「保存進度並停止」的管道：停止意圖生效時告訴它
-    let stop_requested = state.store.lifecycle_state().await?.stop_intent_active();
-    Ok(Json(ReportAck { accepted: true, kind, stop_requested }))
+    // 回報的回應是 Runtime 通知 Worker「保存進度並停止」的管道：停止意圖生效或正在交接時告訴它
+    let handoff_requested = state.store.in_flight_handoff_of_run(&scope.run_id).await?.is_some();
+    let stop_requested = handoff_requested || state.store.lifecycle_state().await?.stop_intent_active();
+    Ok(Json(ReportAck { accepted: true, kind, stop_requested, handoff_requested }))
 }
 
 pub(crate) async fn report_progress(
@@ -456,4 +462,47 @@ pub(crate) async fn controller_action(
             "這個事項只能由使用者從對應介面（恢復介面）發起，Controller 不能提出，也不會建立裁定請求。",
         ),
     }))
+}
+
+// ---------------------------------------------------------------- 交接（票 28）
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConfirmHandoffRequest {
+    completed: String,
+    incomplete: String,
+    unknown_side_effects: String,
+    #[serde(flatten)]
+    claims: Claims,
+}
+
+/// `confirm_handoff` 的回應：交接紀錄（已確認）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmHandoffResponse {
+    pub confirmed: bool,
+    pub handoff: Handoff,
+}
+
+impl From<HandoffApplyError> for ApiError {
+    fn from(error: HandoffApplyError) -> Self {
+        match error {
+            HandoffApplyError::Rejected(rejected) => api_error(StatusCode::CONFLICT, rejected.code(), &rejected.to_string()),
+            HandoffApplyError::Run(rejected) => RunApplyError::Rejected(rejected).into(),
+            HandoffApplyError::Store(store) => store.into(),
+        }
+    }
+}
+
+/// successor Worker 確認接手：已完成、未完成與結果不明的副作用。只有仍是寫入所有者的 successor 可以確認。
+pub(crate) async fn confirm_handoff(
+    State(state): State<Arc<ApiState>>,
+    Extension(record): Extension<CredentialRecord>,
+    body: Result<Json<ConfirmHandoffRequest>, JsonRejection>,
+) -> Result<Json<ConfirmHandoffResponse>, ApiError> {
+    let Json(request) = body.map_err(bad_json)?;
+    let scope = scope_of(&record, &request.claims)?;
+    let confirmation =
+        HandoffConfirmation::new(&request.completed, &request.incomplete, &request.unknown_side_effects)
+            .map_err(|e| api_error(StatusCode::BAD_REQUEST, e.code(), &e.to_string()))?;
+    let handoff = state.store.confirm_handoff(&scope, confirmation, state.clock.now()).await?;
+    Ok(Json(ConfirmHandoffResponse { confirmed: true, handoff }))
 }

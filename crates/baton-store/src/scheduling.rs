@@ -14,6 +14,7 @@ use baton_domain::scheduler::{
 };
 
 use super::guards::{load_active_guards, record_prevented};
+use super::handoffs::load_gate_states;
 use super::lifecycle::halt_for;
 use super::profiles::load_profiles;
 use super::runs::{load_active_runs, save, RunApplyError};
@@ -87,6 +88,8 @@ impl Store {
             .write(move |tx| {
                 let profiles = load_profiles(tx)?;
                 let settings = load_settings(tx)?;
+                // 額度門檻（遲滯、draining，票 28）在同一個交易中讀取
+                let gates = load_gate_states(tx)?;
                 if let Some(request) = &request {
                     // 先用目前狀態判定一次：不可能派的要求不進佇列
                     let mut loaded = load(tx, &request.workspace_id)?;
@@ -96,7 +99,7 @@ impl Store {
                     loaded.guards = load_active_guards(tx, &request.workspace_id, now)?;
                     let active = load_active_runs(tx)?;
                     let halt = halt_for(tx, loaded.workspace.as_ref(), &request.workspace_id)?;
-                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
+                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt };
                     let task_ctx = loaded.ctx(&request.workspace_id);
                     let ctx = RunContext {
                         task: &task_ctx,
@@ -126,7 +129,7 @@ impl Store {
                     let active = load_active_runs(tx)?;
                     // 停止意圖或 Workspace 暫停：佇列重試與額度恢復都不派（票 25）
                     let halt = halt_for(tx, loaded.workspace.as_ref(), &entry.workspace_id)?;
-                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
+                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt };
                     let task_ctx = loaded.ctx(&entry.workspace_id);
                     let ctx = RunContext {
                         task: &task_ctx,
@@ -204,6 +207,7 @@ impl Store {
         self.read(move |conn| {
             let profiles = load_profiles(conn)?;
             let settings = load_settings(conn)?;
+            let gates = load_gate_states(conn)?;
             let active = load_active_runs(conn)?;
             let mut active_runs = Vec::with_capacity(active.len());
             for run in &active {
@@ -218,7 +222,7 @@ impl Store {
                 let mut loaded = load(conn, &entry.workspace_id)?;
                 loaded.guards = load_active_guards(conn, &entry.workspace_id, now)?;
                 let halt = halt_for(conn, loaded.workspace.as_ref(), &entry.workspace_id)?;
-                let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, halt };
+                let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt };
                 let task_ctx = loaded.ctx(&entry.workspace_id);
                 let ctx = RunContext {
                     task: &task_ctx,
@@ -274,7 +278,7 @@ impl Store {
 
 /// 派工前的檢查在排隊期間不再通過、又不是授權或相依這類可以等的原因（例如前一個 Run 還沒確認停止）：
 /// 保留在佇列並如實顯示，歸為「狀態不明」。
-fn failed_check(error: &RunError) -> WaitReason {
+pub(crate) fn failed_check(error: &RunError) -> WaitReason {
     WaitReason {
         category: WaitCategory::StateUnknown,
         code: error.code().to_string(),
@@ -284,7 +288,7 @@ fn failed_check(error: &RunError) -> WaitReason {
     }
 }
 
-fn load_settings(conn: &Connection) -> rusqlite::Result<SchedulerSettings> {
+pub(crate) fn load_settings(conn: &Connection) -> rusqlite::Result<SchedulerSettings> {
     let row = conn.query_row("SELECT mode, version, updated_at FROM scheduler_setting WHERE id = 1", [], |r| {
         let mode: String = r.get(0)?;
         Ok(SchedulerSettings {

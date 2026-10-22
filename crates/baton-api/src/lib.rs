@@ -37,7 +37,7 @@ use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use baton_domain::lifecycle::ExitTiming;
 use baton_domain::agent::{
-    TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
+    TOOL_CONFIRM_HANDOFF, TOOL_CONTROLLER_ACTION, TOOL_GET_TASK_CONTRACT, TOOL_PERMISSION_PROMPT, TOOL_READ_INBOX, TOOL_REPORT_BLOCKED,
     TOOL_REPORT_PROGRESS, TOOL_REQUEST_DECISION, TOOL_SAVE_CHECKPOINT, TOOL_SEND_MESSAGE,
 };
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
@@ -270,6 +270,7 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_REGISTER_ARTIFACT), post(artifacts::register).layer(artifacts::register_body_limit()))
         .route(&tool_path(TOOL_SEND_MESSAGE), post(messages::send_message))
         .route(&tool_path(TOOL_READ_INBOX), post(messages::read_inbox))
+        .route(&tool_path(TOOL_CONFIRM_HANDOFF), post(agent::confirm_handoff))
         .route(&tool_path(TOOL_RECORD_LESSON_CANDIDATE), post(knowledge::record_lesson_candidate))
         .route(&tool_path(TOOL_SEARCH_KNOWLEDGE), post(knowledge::search_knowledge))
         .route(&tool_path(TOOL_BEGIN_EXTERNAL_OPERATION), post(external_operations::begin))

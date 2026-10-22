@@ -9,6 +9,10 @@
 //! 3. **取消**：對要求取消的 Run 停止整個程序樹；確認停止之後才完成取消、釋放寫入所有權。
 //! 4. **核對 lease**：lease 過期只是「該去看看」：向 ProcessControl 查證，確認死亡才中斷 Run，存活就續約，不確定就維持原狀。
 //! 5. **額度**：輪詢到期（每個帳號每 5 分鐘）的外部額度觀測器並重新推估（票 27）。
+//! 5½. **交接**（票 28）：依最新的額度判斷推進帳號門檻；draining 帳號上執行中的 Run 建立交接（已選定承接帳號），
+//!    在安全邊界（舊 Worker 保存了 checkpoint 或等滿上限）先持久化 `stopping` 再要求舊程序停止，**確認停止**（或程序自行結束）
+//!    之後以單一交易結束舊 Run、建立 successor Run 並把世代轉給它；停不下來就留在 `stopping`，successor 不會被建立。
+//!    每個 phase 都先持久化，Runtime 在任何一點重建後都從持久化的 phase 繼續。
 //! 6. **排程**：前面幾步可能釋放了帳號與全域名額，於是讓佇列中等待的 Task 依優先序逐一嘗試派出（票 19）；
 //!    派出的 Run 在同一次 `tick` 就啟動。派出之前先為排隊的 Task 準備工作目錄（worktree 或輸出目錄，票 20），
 //!    目錄不可用時不派工，等待原因就是登記的失敗原因。
@@ -46,6 +50,7 @@ use baton_domain::lifecycle::{
     ExitReport, ExitTiming, LifecycleFile, LifecyclePhase, RunStopOutcome, RunStopRecord, StopAnomaly,
     RUN_GONE_AFTER_EXIT_REASON,
 };
+use baton_domain::handoff::HandoffPhase;
 use baton_domain::quota::RateLimitSignal;
 use baton_domain::run::{
     LaunchPayload, ProcessObservation, ProcessRecord, Run, RunCommand, RunOutcome, RunStatus, RunView,
@@ -59,7 +64,7 @@ use baton_ports::{
     AdapterEvent, AdvanceOutcome, AgentHandle, Capability, Liveness, MergeOutcome, Ports, ProcessIdentity, RunSpec,
     SessionRef, SpawnSpec, StopResult, WorktreeState,
 };
-use baton_store::{CleanupWork, ExecutingRun, IntegrationWork, PendingLaunch, Store};
+use baton_store::{CleanupWork, ExecutingRun, HandoffWork, IntegrationWork, PendingLaunch, Store};
 use futures::stream::{BoxStream, FuturesUnordered};
 use futures::{FutureExt, StreamExt};
 use tokio::sync::{watch, Mutex, Notify};
@@ -190,11 +195,14 @@ impl Supervisor {
         self.check_storage().await;
         self.reopen_if_pending().await;
         self.launch_pending().await;
-        self.pump_events().await;
+        let exited_into_handoff = self.pump_events().await;
         self.process_cancellations().await;
         self.check_leases().await;
         self.poll_quota().await;
-        if self.schedule_queue().await {
+        let handed_off = self.hand_off().await;
+        let scheduled = self.schedule_queue().await;
+        // 交接或排程派出的 Run 在同一次處理就啟動
+        if exited_into_handoff || handed_off || scheduled {
             self.launch_pending().await;
         }
     }
@@ -467,6 +475,144 @@ impl Supervisor {
         }
     }
 
+    // ------------------------------------------------------------ 交接（票 28）
+
+    /// 主動交接（issue §5.2）：推進額度門檻、為 draining 帳號上的 Run 建立交接、在安全邊界要求舊程序停止、
+    /// 確認停止後轉移給 successor。回傳這次有沒有建立 successor Run。
+    async fn hand_off(&self) -> bool {
+        // 控制資料庫無法寫入時不交接：phase 寫不進去就不能做下一步的外部副作用（票 26）
+        if self.store.storage_health().dispatch_halted {
+            return false;
+        }
+        let now = self.ports.clock.now();
+        let quota = match quota::current(&self.store, &*self.ports.quota_observer, now).await {
+            Ok(status) => quota::known_used(&status),
+            Err(error) => {
+                self.note(&format!("無法取得額度觀測，這次不交接：{error}"));
+                return false;
+            }
+        };
+        match self.store.request_handoffs(quota.clone(), now, || new_prefixed_id("hof")).await {
+            Ok(created) => {
+                for handoff in created {
+                    self.note(&format!(
+                        "帳號 {} 進入 draining：Run {} 開始交接，承接帳號 {}",
+                        handoff.from_profile_id, handoff.from_run_id, handoff.to_profile_id
+                    ));
+                }
+            }
+            Err(error) => self.note(&format!("無法建立交接：{error}")),
+        }
+        let works = match self.store.in_flight_handoffs().await {
+            Ok(works) => works,
+            Err(error) => {
+                self.note(&format!("無法讀取進行中的交接：{error}"));
+                return false;
+            }
+        };
+        let mut transferred = false;
+        for work in works {
+            let stopping = match work.handoff.phase {
+                HandoffPhase::Stopping => true,
+                HandoffPhase::Requested => match self.store.begin_handoff_stop(&work.handoff.id, quota.clone(), now).await {
+                    Ok(Some(next)) if next.phase == HandoffPhase::Stopping => true,
+                    Ok(Some(next)) => {
+                        let reason = next.abandoned_reason.unwrap_or_default();
+                        self.note(&format!("Run {} 的交接已放棄：{reason}", work.from_run.id));
+                        false
+                    }
+                    // 還沒到安全邊界或暫時沒有承接帳號：舊 Run 繼續執行
+                    Ok(None) => false,
+                    Err(error) => {
+                        self.note(&format!("Run {} 的交接沒有前進：{error}", work.from_run.id));
+                        false
+                    }
+                },
+                _ => false,
+            };
+            if stopping {
+                transferred |= self.stop_for_handoff(&work).await;
+            }
+        }
+        transferred
+    }
+
+    /// 要求交接中的舊程序停止；**確認停止**才轉移（停不下來或停止失敗就留在 stopping，下一次再試，不會有第二個 writer）。
+    async fn stop_for_handoff(&self, work: &HandoffWork) -> bool {
+        let run = &work.from_run;
+        // 舊 Run 已由別的路徑結束：轉移的交易會放棄這次交接
+        let (Some(process), Some(payload)) =
+            (run.process.as_ref().filter(|_| !run.status.is_terminal()), work.payload.as_ref())
+        else {
+            return self.transfer_handoff(&work.handoff.id, "already_ended").await;
+        };
+        let executing = ExecutingRun { view: RunView::new(run.clone(), None, &[]), payload: payload.clone() };
+        self.ensure_managed(&executing).await;
+        let identity = identity_of(process);
+        // 先查證：Runtime 重建前已經停下的程序不必再要求停止
+        let outcome = match self.ports.process_control.inspect(&identity).await {
+            Ok(Liveness::Dead) => "dead",
+            _ => {
+                // 停止最長要等寬限期加確認上限；完全退出開始時就不再等，改由停止流程處理
+                let mut exiting = self.exiting.subscribe();
+                let result = tokio::select! {
+                    result = self.ports.process_control.stop(&identity, self.stop_grace) => result,
+                    _ = exiting.wait_for(|exiting| *exiting) => {
+                        self.note(&format!("完全退出開始：Run {} 的交接停止改由停止流程處理", run.id));
+                        return false;
+                    }
+                };
+                match result {
+                    Ok(StopResult::StoppedGracefully) => "stopped_gracefully",
+                    Ok(StopResult::ForceKilled) => "force_killed",
+                    Ok(StopResult::StillAlive) => {
+                        self.note(&format!("Run {} 的程序沒有停止，交接停在 stopping，保留寫入所有權並稍後重試", run.id));
+                        return false;
+                    }
+                    Err(error) => {
+                        self.note(&format!("Run {} 停止程序失敗，交接停在 stopping：{error}", run.id));
+                        return false;
+                    }
+                }
+            }
+        };
+        self.streams.lock().await.remove(&run.id);
+        self.transfer_handoff(&work.handoff.id, outcome).await
+    }
+
+    /// 舊程序已確認停止：以單一交易結束舊 Run、建立 successor Run。回傳有沒有建立 successor。
+    async fn transfer_handoff(&self, handoff_id: &str, stop_outcome: &str) -> bool {
+        let now = self.ports.clock.now();
+        let quota = match quota::current(&self.store, &*self.ports.quota_observer, now).await {
+            Ok(status) => quota::known_used(&status),
+            Err(error) => {
+                self.note(&format!("無法取得額度觀測，交接 {handoff_id} 稍後再轉移：{error}"));
+                return false;
+            }
+        };
+        match self.store.transfer_handoff(handoff_id, stop_outcome, quota, now, new_run_id).await {
+            Ok(handoff) if handoff.phase == HandoffPhase::Transferred => {
+                self.note(&format!(
+                    "交接 {handoff_id}：Run {} 已停止（{stop_outcome}），由帳號 {} 的 Run {} 接手（第 {} 世代）",
+                    handoff.from_run_id,
+                    handoff.to_profile_id,
+                    handoff.to_run_id.as_deref().unwrap_or(""),
+                    handoff.to_generation.unwrap_or_default()
+                ));
+                true
+            }
+            Ok(handoff) => {
+                let reason = handoff.abandoned_reason.unwrap_or_default();
+                self.note(&format!("交接 {handoff_id} 沒有轉移（{}）：{reason}", handoff.phase.as_str()));
+                false
+            }
+            Err(error) => {
+                self.note(&format!("交接 {handoff_id} 無法轉移，稍後重試：{error}"));
+                false
+            }
+        }
+    }
+
     // ------------------------------------------------------------ 排程
 
     /// 讓佇列中等待的 Task 依序嘗試派出；回傳這次有沒有派出新的 Run。
@@ -715,10 +861,15 @@ impl Supervisor {
 
     // ------------------------------------------------------------ 事件
 
-    async fn pump_events(&self) {
+    /// 回傳這次有沒有因為交接中的 Worker 結束而建立 successor Run。
+    async fn pump_events(&self) -> bool {
+        let mut transferred = false;
         let executing = match self.store.executing_runs().await {
             Ok(executing) => executing,
-            Err(error) => return self.note(&format!("無法讀取執行中的 Run：{error}")),
+            Err(error) => {
+                self.note(&format!("無法讀取執行中的 Run：{error}"));
+                return false;
+            }
         };
         for item in executing.into_iter().filter(|e| e.view.run.status == RunStatus::Running) {
             let run_id = item.view.run.id.clone();
@@ -757,6 +908,19 @@ impl Supervisor {
                         self.last_errors.lock().await.insert(run_id.clone(), message);
                     }
                     AdapterEvent::Exited { success } => {
+                        // 交接中的 Worker 結束（多半是收到 stop_requested 後保存 checkpoint 並結束）：程序已經不在，
+                        // 視同舊程序確認停止，轉移給 successor；不論結束碼都不算失敗（票 28）
+                        match self.store.in_flight_handoff_of_run(&run_id).await {
+                            Ok(Some(handoff)) => {
+                                self.last_errors.lock().await.remove(&run_id);
+                                transferred |= self.transfer_handoff(&handoff.id, "exited").await;
+                                finished = true;
+                                break;
+                            }
+                            Ok(None) => {}
+                            // 讀不到交接紀錄：照一般的結束處理（Domain 仍以世代與狀態把關）
+                            Err(error) => self.note(&format!("Run {run_id} 無法確認是否在交接中，照一般結束處理：{error}")),
+                        }
                         // 程序結束只產生 Run 結束事件；Task 是否完成由後續的驗證決定
                         let last_error = self.last_errors.lock().await.remove(&run_id);
                         let outcome = if success {
@@ -785,6 +949,7 @@ impl Supervisor {
                 self.streams.lock().await.insert(run_id, stream);
             }
         }
+        transferred
     }
 
     /// 把一批對話紀錄匯入受控儲存（票 15）：已保存過的位置略過（重新接上串流時的重播）、跳號記為缺口，

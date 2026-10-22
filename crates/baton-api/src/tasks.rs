@@ -11,6 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use baton_domain::authorization::Capability;
+use baton_domain::handoff::Handoff;
 use baton_domain::run::RunView;
 use baton_domain::integration::IntegrationEntry;
 use baton_domain::verification::VerificationRecord;
@@ -109,6 +110,9 @@ pub struct TaskBoard {
     pub workdirs: Vec<WorkdirView>,
     /// 這個 Workspace 的整合項目，依排入順序（票 20）。
     pub integrations: Vec<IntegrationEntry>,
+    /// 這個 Workspace 的交接紀錄，依建立順序（票 28）；卡片上的交接狀態由它組出。
+    #[serde(default)]
+    pub handoffs: Vec<Handoff>,
     /// 契約「所需能力」可選的清單。
     pub capabilities: Vec<CapabilityInfo>,
     /// Workspace 目前生效的授權 revision；尚未確認為 `null`。Run 的 `authorization_revision` 比它舊時，
@@ -222,6 +226,7 @@ pub(crate) async fn board(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<TaskBoard>, TaskApiError> {
     let data = state.store.task_board(&id).await?;
+    let handoffs = state.store.handoffs(&id).await.map_err(ApiError::from)?;
     Ok(Json(TaskBoard {
         workspace_id: id,
         goals: data.goals,
@@ -231,6 +236,7 @@ pub(crate) async fn board(
         authorization_revision: data.authorization_revision,
         workdirs: data.workdirs,
         integrations: data.integrations,
+        handoffs,
         capabilities: Capability::ALL
             .into_iter()
             .map(|c| CapabilityInfo { capability: c, label: c.label().to_string(), high_risk: c.is_high_risk() })
