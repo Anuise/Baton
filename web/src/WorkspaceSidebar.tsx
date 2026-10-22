@@ -30,6 +30,8 @@ interface Props {
   onOpenUnderstanding?: (workspace: Workspace) => void;
   /** 使用者要開啟某個 Workspace 的流程（Workflow、Playbook、Stage 與 Gate）。 */
   onOpenWorkflows?: (workspace: Workspace) => void;
+  /** 使用者要開啟某個 Workspace 的審查與設計偏離。 */
+  onOpenReviews?: (workspace: Workspace) => void;
   /** 使用者要開啟某個 Workspace 的驗證（Verification Profile、Feature Map 與 Evidence Bundle）。 */
   onOpenVerification?: (workspace: Workspace) => void;
 }
@@ -59,6 +61,7 @@ export function WorkspaceSidebar({
   onOpenTimeline,
   onOpenUnderstanding,
   onOpenWorkflows,
+  onOpenReviews,
   onOpenVerification,
 }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
@@ -236,6 +239,9 @@ export function WorkspaceSidebar({
                 </button>
                 <button type="button" aria-label={`流程 ${workspace.name}`} onClick={() => onOpenWorkflows?.(workspace)}>
                   流程
+                </button>
+                <button type="button" aria-label={`審查 ${workspace.name}`} onClick={() => onOpenReviews?.(workspace)}>
+                  審查
                 </button>
                 <button type="button" aria-label={`驗證 ${workspace.name}`} onClick={() => onOpenVerification?.(workspace)}>
                   驗證

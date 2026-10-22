@@ -20,6 +20,7 @@ use baton_api::{
     RecoveryStatusView, MetricsResponse, TimelineResponse, RunContextView, UpdateStatusView,
     ReconcileRequest, UnderstandingView,
     SkipStageRequest, WorkflowList, WorkflowView,
+    ReviewList,
     EvidenceArtifactContent, PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
 };
 use baton_client::{
@@ -1207,6 +1208,15 @@ async fn workspace_workflows(link: State<'_, RuntimeLink>, workspace_id: String)
     link.client.workflows(&workspace_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 的審查分頁：Workspace 的雙軸審查、finding 與設計偏離（唯讀）。
+#[tauri::command]
+async fn workspace_reviews(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<ReviewList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.reviews(&workspace_id).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 的流程分頁：使用者附原因跳過目前 Stage（裁定與安全 Gate 由 Runtime 拒絕）。
 #[tauri::command]
 async fn workflow_skip_stage(
@@ -1389,6 +1399,7 @@ fn main() {
             workspace_projection_reconcile,
             workspace_workflows,
             workflow_skip_stage,
+            workspace_reviews,
             workspace_verification,
             verification_publish_profile,
             verification_run,

@@ -1,6 +1,6 @@
 # 50: Gate 失效與重驗
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R136-50-impl，2026-10-23 01:28）
 Blocked by: 44, 45
 
 **What to build:** 規格、build、Verification Profile 或政策改變時，依依賴使受影響 Gate 失效並建立重驗工作；使用者答案改變既有假設時，受影響 Task 與成果被阻擋或重驗，獨立工作繼續；不得改寫完成條件讓舊成果通過。

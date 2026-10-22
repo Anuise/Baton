@@ -208,7 +208,7 @@ pub fn builtin_methods() -> Vec<MethodDefinition> {
 
 /// 一個 exit check。
 fn check(key: &str, description: &str, requires: EvidenceKind) -> ExitCheck {
-    ExitCheck { key: key.into(), description: description.into(), requires }
+    ExitCheck { key: key.into(), description: description.into(), requires, reviewers: None }
 }
 
 fn artifact(key: &str, description: &str) -> ExitCheck {
@@ -269,7 +269,7 @@ const RECORD: &str = "登記成果";
 
 /// 內建的七個 Playbook（issue §9.1 的表格）。
 pub fn builtin_playbooks() -> Vec<PlaybookDefinition> {
-    use EvidenceKind::{Decision, TaskAccepted};
+    use EvidenceKind::{Decision, Review, TaskAccepted};
     use FailureRoute::{Block, Retry};
     use GateKind::{Decision as DecisionGate, None as Plain, Safety};
     vec![
@@ -297,7 +297,7 @@ pub fn builtin_playbooks() -> Vec<PlaybookDefinition> {
                 Stage { key: "slicing", title: "垂直切片與依賴", method: Some("vertical_slice"), entry: &["設計已登記"], outputs: &["切片清單與依賴"], actions: &[READ, "propose_task", RECORD], max_attempts: 3, checks: vec![artifact("slices", "切片清單與依賴")], failure: Retry, gate: Plain },
                 Stage { key: "tests_and_implementation", title: "行為測試及實作", method: Some("behavior_tests"), entry: &["切片已定義"], outputs: &["測試、實作與測試結果"], actions: &[READ, EDIT, TEST, RECORD], max_attempts: 3, checks: vec![artifact("test_results", "測試與實作的結果")], failure: Retry, gate: Plain },
                 Stage { key: "real_interface_verification", title: "真實介面驗證", method: Some("real_interface_verification"), entry: &["測試通過"], outputs: &["真實介面的驗證證據"], actions: &[READ, RUN_APP, TEST, RECORD], max_attempts: 3, checks: vec![artifact("verification", "真實介面的驗證證據")], failure: back_to("tests_and_implementation"), gate: Safety },
-                Stage { key: "independent_review", title: "獨立審查", method: Some("two_axis_review"), entry: &["真實介面驗證通過"], outputs: &["非作者的雙軸審查報告"], actions: &[READ, RECORD], max_attempts: 3, checks: vec![artifact("review", "非作者的審查報告")], failure: back_to("tests_and_implementation"), gate: Safety },
+                Stage { key: "independent_review", title: "獨立審查", method: Some("two_axis_review"), entry: &["真實介面驗證通過"], outputs: &["非作者的雙軸審查報告"], actions: &[READ, RECORD], max_attempts: 3, checks: vec![check("review", "非作者 reviewer 的雙軸審查（Standards 與 Spec）都通過", Review)], failure: back_to("tests_and_implementation"), gate: Safety },
                 Stage { key: "integration", title: "整合", method: None, entry: &["審查通過"], outputs: &["通過成果接受的 Task"], actions: &[READ, TEST], max_attempts: 3, checks: vec![check("accepted", "Task 已通過成果接受", TaskAccepted)], failure: back_to("tests_and_implementation"), gate: Safety },
             ],
         ),

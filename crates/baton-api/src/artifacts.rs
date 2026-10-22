@@ -110,11 +110,11 @@ fn decode_content(request: &RegisterRequest) -> Result<Vec<u8>, ArtifactError> {
     }
 }
 
-fn artifact_root(state: &ApiState) -> PathBuf {
+pub(crate) fn artifact_root(state: &ApiState) -> PathBuf {
     state.data_dir.join(ARTIFACTS_DIR)
 }
 
-fn storage_unavailable(error: impl std::fmt::Display) -> ApiError {
+pub(crate) fn storage_unavailable(error: impl std::fmt::Display) -> ApiError {
     self::error(StatusCode::INTERNAL_SERVER_ERROR, "artifact_storage_failed", format!("成果儲存發生錯誤：{error}"))
 }
 

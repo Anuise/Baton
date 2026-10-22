@@ -26,6 +26,7 @@ use baton_api::{
     metrics_path, timeline_path, MetricsResponse, TimelineResponse,
     projection_reconcile_path, understanding_path, understanding_sync_path, ReconcileRequest, UnderstandingView,
     workflow_skip_path, workflows_path, PlaybookCatalog, SkipStageRequest, WorkflowList, WorkflowView, PLAYBOOKS_PATH,
+    reviews_path, ReviewList,
     evidence_artifact_path, evidence_bundle_path, verification_profile_path, verification_runs_path,
     workspace_verification_path, EvidenceArtifactContent, PublishProfileResponse, RunVerificationRequest,
     VerificationOverviewView,
@@ -692,6 +693,11 @@ impl RuntimeClient {
         request: &SkipStageRequest,
     ) -> Result<WorkflowView, ClientError> {
         self.send_json(reqwest::Method::POST, &workflow_skip_path(workspace_id, workflow_id), Some(request)).await
+    }
+
+    /// 審查視圖（票 44）：這個 Workspace 的雙軸審查、finding 與設計偏離（唯讀）。
+    pub async fn reviews(&self, workspace_id: &str) -> Result<ReviewList, ClientError> {
+        self.get_json(&reviews_path(workspace_id)).await
     }
 
     /// 驗證概況（票 45）：最新的 Verification Profile、是否已被證明可用、未覆蓋範圍、最近的要求與 Evidence Bundle。

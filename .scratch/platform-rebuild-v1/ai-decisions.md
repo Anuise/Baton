@@ -3641,6 +3641,92 @@
 - 影響：與同時進行的票整合時，migration 與 AI 編號可能需要順延。
 - 審閱：未審
 
+### AI-399：作者以被審的 Task 認定，reviewer 必須是另一個 Task 的 Worker，也不能沿用作者的 Session
+- 重要度：高
+- 時間／階段：2026-10-23，票 44 實作
+- 決策：「作者」是被審的 Task：它的每一個 Run，以及這些 Run 用過的平台 Session、原生 Session、接續的原生 Session。reviewer 必須是另一個 Task 的 Worker Run（`submit_review` 是 Worker 工具），而且它的 Session 不能與作者的任何 Session 重疊；否則回 403 `reviewer_is_author`，資料表另有 `reviewer_task_id <> subject_task_id` 的 CHECK。Controller 不能提交審查（`worker_only`），它的評估不取代審查。這條規則不分風險高低一律適用。reviewer 的身分（計算人數用）也是 Task。
+- 理由：issue §11.4「原作者與 reviewer 的角色獨立性不能因改建 Session 而被重置」：身分跟著 Task 走，Session 重建、換帳號、交接都不會讓作者變成非作者；再加上 Session 交集，避免另一個 Task 接續作者的對話來審查。
+- 替代方案：以帳號或 Run 判定作者。同一個 Task 換帳號或交接後，新的 Run 會被誤當成非作者。
+- 影響：Controller 要另建審查用的 Task 並派出 Worker 擔任 reviewer；同一個 reviewer Task 交多份審查只算一位。
+- 審閱：未審
+
+### AI-400：「修正後可證明不受影響」以 Runtime 的 Git 變更與審查時記錄的範圍判定，一次沿用一軸
+- 重要度：高
+- 時間／階段：2026-10-23，票 44 實作
+- 決策：每一軸記錄審過的範圍（`paths`）。新的審查可以對某一軸指定 `reuse_from` 沿用先前審查的同一軸，Runtime 只在下列條件都成立時接受：同一個被審 Task；先前那一軸已通過（沒有 finding，或全部經使用者同意駁回）；輸入未變（Spec 軸的規格版本、Standards 軸的規範來源相同）；先前記錄了 `paths`；而且 Runtime 以 Workspace 的 Git（新的 Port `WorkspaceFs::changed_paths`，正式版 `git diff --name-only --no-renames`）算出兩個 candidate 之間變更的檔案都不在那些 `paths` 內（不分大小寫、目錄含其下所有檔案、`.` 是整個 repo）。算不出變更（不是 Git repo、revision 不存在）一律拒絕（`review_reuse_rejected`）。沿用的軸照抄原本的摘要與範圍，並記原本的 reviewer。
+- 理由：「可證明」不能採信 reviewer 或作者自報的變更範圍；兩個 commit 之間的檔案差異是 Runtime 能自己算、也能重現的事實。寧可多判為受影響（例如重新命名時新舊路徑都算），不漏判。
+- 替代方案：由修正的 Worker 宣告改了哪些檔案；或修正後一律全部重審（最安全，但違反「可沿用」的要求、浪費 reviewer 額度）。
+- 影響：不是 Git repo 的 Workspace 無法沿用審查，修正後一律重審；審查沒有記錄 `paths` 的軸之後也不能沿用。
+- 審閱：未審
+
+### AI-401：「高風險工作」由 Playbook 的審查 Gate 表達；人數依每一軸實際審查的 reviewer 計算
+- 重要度：中
+- 時間／階段：2026-10-23，票 44 實作
+- 決策：新增 exit check 證據種類 `review`（`review_id`）與選填的 `reviewers`（每一軸需要幾位不同的非作者 reviewer，預設 1，上限 5，只能用在 `review`）。帶有審查 Gate 的工作就是需要獨立審查的高風險工作；使用者可以發布把人數調高的 Playbook 新版本。內建功能開發 Playbook 的「獨立審查」由「登記成果」改為 `review`（既有資料庫在 Runtime 啟動時會追加新的內建版本，進行中的 Workflow 不受影響）；其他六個 Playbook 不變。人數以兩軸各自「實際審查的 reviewer」計算，取較少的一軸：沿用別人的一軸不算自己審過那一軸。
+- 理由：issue 沒有定義「高風險」；Stage／Gate 已是版本化、使用者可調的機制，比另外替 Task 加風險欄位簡單，也能用同一套證據查驗。依軸計算人數，避免第二位 reviewer 只沿用第一位的結果就湊足人數。
+- 替代方案：替 Task 加風險等級，或依授權的高風險能力自動判定。需要另訂判定規則與 UI。
+- 影響：遷移、缺陷等其他開發流程目前沒有審查 Gate，需要時由使用者發布新版本加上；票 43 的情境測試中「獨立審查」改為提交雙軸審查。
+- 審閱：未審
+
+### AI-402：缺少 reviewer 時 Gate 記為 blocked；審查未通過、過期或審錯 Task 時記為 incomplete
+- 重要度：中
+- 時間／階段：2026-10-23，票 44 實作
+- 決策：審查 exit check 的有效審查人數不足時：如果引用的審查都有效、只是人數不夠（包含完全沒有引用審查），這次 attempt 記 `blocked`，Workflow 阻擋，原因是「缺少非作者 reviewer 的雙軸審查：每一軸需要 N 位，目前 K 位」；如果引用的審查有未解決的 finding（`not_passed`）、已過期（`stale`）、審的不是這個 Workflow 的 Task（`other_subject`）或不存在，記 `incomplete`。兩者都不前進，也都不扣 Stage 預算。
+- 理由：issue §9.3「沒有 reviewer 時保留 blocked」、§15.1 第 7 點「必要獨立 reviewer 缺席時保持阻擋」；未通過的審查代表還有修正工作要做，與「等人」不同，沿用票 43 的 incomplete。
+- 替代方案：一律記 incomplete。無法在流程視圖上區分「缺人」與「要修正」。
+- 影響：補上足夠的有效審查後，以 passed 再回報即可解除阻擋（同票 43 的裁定 Gate）。
+- 審閱：未審
+
+### AI-403：finding 三種分類；駁回與需裁定都經「駁回 review finding」事項送裁定，使用者回答後由 Controller 再呼叫一次套用
+- 重要度：中
+- 時間／階段：2026-10-23，票 44 實作
+- 決策：`classify_review_finding` 的分類是 `fix`（修正，決策權限表 `classify_finding_as_fix`，預設自主，Workspace 可收窄）、`dismiss`（具理由駁回）與 `needs_decision`（Controller 無法判斷）。後兩者都依 `dismiss_review_finding` 送裁定（核准即駁回、不核准即修正），finding 標為 `awaiting_decision` 並回 `requires_decision`；使用者回答後 Controller 以相同內容再呼叫一次，消耗這次核准：核准 → `dismissed`（記裁定請求與裁定者 `desktop`），不核准 → `fix`。每次分類都要附理由（`reason`，可另附 `evidence`）。只有 `dismissed` 算解決，且是終態；`fix` 要等新的 candidate 重新審查。為了讓核准只對這一項 finding 有效，`ActionContent` 新增選填的操作對象 `subject`，指定時裁定的指紋是「事項:Task:對象」。
+- 理由：spec D-15 把「駁回 review finding」列為必須送裁定；沿用票 35 的「Controller 動作 → 裁定 → 再呼叫一次消耗核准」模式，不需要在回答裁定時另外掛副作用。原本的指紋只到 Task，會讓同一個 Task 的另一項 finding 用掉核准。
+- 替代方案：回答裁定時自動套用到 finding。需要裁定中心認識審查，耦合較高。
+- 影響：送裁定時被審 Task 如果正在執行，會依既有規則進入 `waiting_decision`（票 35 的行為）。
+- 審閱：未審
+
+### AI-404：規格版本是被審 Task 的契約版本；審查過期的兩種情況
+- 重要度：中
+- 時間／階段：2026-10-23，票 44 實作
+- 決策：審查的 `spec_version` 必須是被審 Task 提交當下的契約版本，否則拒絕（`review_spec_outdated`）。之後 Task 的契約改版，或同一個 Task 有了對較新 candidate 的審查，舊審查就過期（Gate 查驗為 `stale`，視圖顯示 `stale_reason`），過期的審查保留但不能開啟 Gate。base／candidate revision 是 reviewer 填的字串（不能含空白、不能以 `-` 開頭），Runtime 不另外核對它們是否等於分支的最新 commit。
+- 理由：契約是 Runtime 已有、有版本的規格；「需求改變使 Gate 失效、建立重驗工作」與「build 改變」的完整依賴判定屬於票 50，本票只做到「對照的規格或 candidate 已不是最新」就不算數。
+- 替代方案：以 Git 核對 candidate 是否等於 Task 分支的最新 commit。需要 Task 與分支的對應及 Git 呼叫，留給票 50 的 build 失效。
+- 影響：reviewer 若填錯 candidate，Runtime 不會發現；但修正後的新審查一定會讓舊審查過期。
+- 審閱：未審
+
+### AI-405：Design Package 是已登記的成果；接受偏離經使用者裁定後由 Runtime 追加設計的新版本
+- 重要度：中
+- 時間／階段：2026-10-23，票 44 實作
+- 決策：Design Package 以已登記的成果表示，設計版本就是成果版本。Worker 以 `report_design_deviation` 回報偏離：對照的版本必須是目前的最新版本（否則 `design_outdated`），保存偏離、原因、受影響契約與接受後的完整設計（`proposed_design`，最多 10 萬字元，存在控制資料庫）。Controller 以 `resolve_design_deviation` 處理：拒絕可自主；接受依 `accept_design_deviation` 送裁定（同 AI-403 的再呼叫模式），核准後 Runtime 把提議的設計寫成新檔案，在同一個交易中替同一個成果追加下一個版本（產生者記為回報偏離的 Run），並記下接受者（`desktop`）、裁定請求與新的設計版本；設計在回報後已有新版本時拒絕接受。之後派出的 Worker 由 Context Builder 的證據索引拿到最新版本。「反覆結構偏離需回到設計階段」本票不自動判定。
+- 理由：成果已有不可覆寫的版本與 Context 的載入機制，「更新同一份設計及其版本、再交給下一位 Worker」可以直接沿用，不必另建設計資料表。提議的設計先存在資料庫而不是先寫成成果，未接受前就不會被下一位 Worker 當成目前的設計。
+- 替代方案：另建 `design_package` 與版本表；或要 Worker 先登記新版本再申請接受（未接受的版本會先成為「最新」）。
+- 影響：設計的新版本出現在原本成果所屬的 Task 之下；反覆偏離目前只能由 Controller 自行判斷是否退回設計 Stage。
+- 審閱：未審
+
+### AI-406：審查與設計偏離的資料形狀、API、錯誤碼、migration 41 與 UI 位置
+- 重要度：低
+- 時間／階段：2026-10-23，票 44 實作
+- 決策：migration 41 `reviews_and_deviations` 建立 `review`（只追加；兩軸以 JSON 欄位保存）、`review_finding`（駁回後不可改）與 `design_deviation`（接受或拒絕後不可改；接受必須有裁定、接受者與新設計版本）。Worker 工具 `submit_review`、`report_design_deviation`；Controller 工具 `classify_review_finding`、`resolve_design_deviation`、`get_reviews`；桌面 `GET /api/v1/workspaces/{id}/reviews`。錯誤碼 `review_invalid`、`reviewer_is_author`、`review_spec_outdated`、`review_reuse_rejected`、`review_not_found`、`finding_not_found`、`finding_resolved`、`deviation_not_found`、`deviation_resolved`、`design_not_found`、`design_outdated`。Workflow 的證據查驗新增狀態 `not_passed`、`stale`、`other_subject`。UI 是側欄每個 Workspace 的「審查」（唯讀，兩軸分開顯示），桌面殼指令 `workspace_reviews`；裁定沿用裁定中心。Controller 的角色說明加入審查與偏離的做法。
+- 理由：沿用票 42、43 的模式（Worker／Controller 工具 + 桌面檢視 API + 側欄入口）。
+- 替代方案：把審查放進流程視圖的 Stage 詳細。一份審查可能被多個 attempt 引用、也可能不屬於任何 Workflow，獨立一頁較清楚。
+- 影響：與同時進行的票整合時，migration 編號與 AI 編號可能需要順延。
+- 審閱：未審
+
+### AI-407：票 44 整合 rebuild/v1（票 45）：`reviews_and_deviations` 順延為第 41 個 migration、AI 編號改為 AI-399～AI-406；兩票的證據種類並存
+- 重要度：中
+- 時間／階段：2026-10-23，票 44 整合（R135-44-integrate）
+- 決策：
+  - 票 45 先合併進整合分支，佔用了第 40 個 migration（`verification_profiles`）與 AI-391～AI-398。本票的 migration 改排在 `verification_profiles` 之後成為第 41 個；AI 決策改編為 AI-399～AI-406，移到票 45 條目之後，條目間的互相引用一併改號，AI-406 標題與內容的「migration 40」改為 41。自動合併時 AI-406 的 `- 審閱：` 行被併掉，已補回。
+  - `EvidenceStatus::NotPassed` 兩票都新增，序列化同為 `not_passed`，合併成一個變體並保留兩種意義（審查還有未解決的 finding；Evidence Bundle 未通過或版本已改變）。Gate 的判定不受影響：審查證據由 `review_shortfall` 處理，其他證據才走 `not_passed` 的驗證說明。
+  - 證據輸入同時接受 `review_id` 與 `evidence_bundle_id`，仍須剛好提供五種識別其中一個；工具說明與 Controller 角色說明兩段都保留。
+  - 工具總數 26 + 5（票 44）+ 2（票 45）= 33，`CONTROLLER_TOOLS` 11 + 3 + 2 = 16，測試斷言同步更新。
+  - Web 的檢視、側欄按鈕、桌面殼指令、fixture 與樣式兩邊都保留，側欄依「流程、審查、驗證」排列。
+- 理由：已合併的 migration 順序不能改變，否則既有資料庫的 `schema_migrations` 會對不上。兩票的變更彼此獨立，保留兩邊的行為即可。
+- 替代方案：替驗證另取一個狀態名稱（例如 `verification_not_passed`）。會改到整合分支已有的 API 輸出，沒有必要。
+- 影響：無行為差異；`pnpm test`、`pnpm build` 通過。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 ### D-04：主要測試 seam

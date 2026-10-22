@@ -522,3 +522,36 @@ fn a_controller_gate_needs_a_target_task() {
         DecisionOutcome::Controller { outcome: ControllerOutcome::Allowed, .. }
     ));
 }
+
+fn gate_on(matter: Matter, task_id: &str, subject: &str, request_id: &str) -> DecisionCommand {
+    DecisionCommand::ControllerGate {
+        request_id: request_id.into(),
+        audit_id: "audit".into(),
+        controller_run_id: "ctl_1".into(),
+        content: ActionContent::new(matter, Some(task_id), &format!("駁回 {subject}"), "不影響需求", vec![], None)
+            .unwrap()
+            .with_subject(subject),
+    }
+}
+
+#[test]
+fn a_controller_gate_with_a_subject_only_shares_requests_and_approvals_for_the_same_subject() {
+    let mut world = World::new(vec![task("t1", TaskStatus::Ready, 1)], vec![]);
+    let first = world.run(gate_on(Matter::DismissReviewFinding, "t1", "fnd_1", "dr1")).unwrap();
+    let created = first.created.clone().unwrap();
+    assert_eq!(created.authority.as_ref().unwrap().fingerprint, "dismiss_review_finding:t1:fnd_1");
+    world.requests.push(created);
+
+    // 同一個 Task 的另一個 finding：另建請求，不回到 fnd_1 的請求
+    let other = world.run(gate_on(Matter::DismissReviewFinding, "t1", "fnd_2", "dr2")).unwrap();
+    assert!(matches!(other.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { existing: false, .. }, .. }));
+
+    // fnd_1 的核准不能被 fnd_2 用掉
+    let answered = world.run(answer("dr1", 1, DecisionAction::Accept, Some(OPTION_APPROVE), None)).unwrap();
+    world.requests = answered.updated.clone();
+    world.decisions.push(answered.decision.clone().unwrap());
+    let other = world.run(gate_on(Matter::DismissReviewFinding, "t1", "fnd_2", "dr3")).unwrap();
+    assert!(matches!(other.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::RequiresDecision { existing: false, .. }, .. }));
+    let used = world.run(gate_on(Matter::DismissReviewFinding, "t1", "fnd_1", "dr4")).unwrap();
+    assert!(matches!(used.outcome, DecisionOutcome::Controller { outcome: ControllerOutcome::Approved { .. }, .. }));
+}

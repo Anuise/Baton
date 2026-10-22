@@ -46,6 +46,8 @@ pub const STAGES_MAX: usize = 20;
 pub const MAX_ATTEMPTS_LIMIT: u32 = 10;
 pub const EVIDENCE_MAX: usize = 20;
 pub const NOTE_MAX_CHARS: usize = 4_000;
+/// 一項審查 exit check 最多要求幾位 reviewer（票 44）。
+pub const REVIEWERS_MAX: u32 = 5;
 
 // ---------------------------------------------------------------- 情境
 
@@ -209,6 +211,8 @@ pub enum EvidenceKind {
     Decision,
     /// 已通過成果接受（最小完成驗證）的 Task。
     TaskAccepted,
+    /// 非作者 reviewer 的雙軸審查（票 44）：兩軸都通過、對照目前的規格版本、是這個 Task 最新 candidate 的審查。
+    Review,
     /// 判定為 passed、而且依據目前 Profile 版本與需求版本的 Evidence Bundle（票 45）。
     Verification,
 }
@@ -219,6 +223,16 @@ pub struct ExitCheck {
     pub key: String,
     pub description: String,
     pub requires: EvidenceKind,
+    /// 審查 exit check 需要幾位不同的非作者 reviewer（每一軸各自計算）；省略為 1。只用於 `review`（票 44）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewers: Option<u32>,
+}
+
+impl ExitCheck {
+    /// 審查 exit check 需要的 reviewer 人數。
+    pub fn required_reviewers(&self) -> usize {
+        self.reviewers.unwrap_or(1) as usize
+    }
 }
 
 /// 回報失敗時的去向。
@@ -422,6 +436,14 @@ pub fn validate_playbook(definition: &PlaybookDefinition, method_keys: &[&str]) 
             checks.push(&check.key);
             if check.description.trim().is_empty() || check.description.chars().count() > TEXT_MAX_CHARS {
                 return Err(playbook_invalid(format!("{at} 的 exit check {} 需要說明", check.key)));
+            }
+            if let Some(n) = check.reviewers {
+                if check.requires != EvidenceKind::Review || n == 0 || n > REVIEWERS_MAX {
+                    return Err(playbook_invalid(format!(
+                        "{at} 的 exit check {}：reviewers 只能用在 review，而且是 1～{REVIEWERS_MAX}",
+                        check.key
+                    )));
+                }
             }
         }
         if stage.gate == GateKind::Decision && !stage.exit_checks.iter().any(|c| c.requires == EvidenceKind::Decision) {
@@ -630,6 +652,7 @@ pub enum EvidenceRef {
     Artifact { artifact_id: String },
     Decision { decision_request_id: String },
     TaskAccepted { task_id: String },
+    Review { review_id: String },
     Verification { evidence_bundle_id: String },
 }
 
@@ -639,6 +662,7 @@ impl EvidenceRef {
             EvidenceRef::Artifact { .. } => EvidenceKind::Artifact,
             EvidenceRef::Decision { .. } => EvidenceKind::Decision,
             EvidenceRef::TaskAccepted { .. } => EvidenceKind::TaskAccepted,
+            EvidenceRef::Review { .. } => EvidenceKind::Review,
             EvidenceRef::Verification { .. } => EvidenceKind::Verification,
         }
     }
@@ -654,6 +678,8 @@ pub struct EvidenceInput {
     pub decision_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_bundle_id: Option<String>,
 }
@@ -677,8 +703,19 @@ pub enum EvidenceStatus {
     Pending,
     /// Task 還沒有通過成果接受。
     NotAccepted,
-    /// Evidence Bundle 的判定不是 passed，或它依據的 Profile 版本、需求版本已經不是目前的版本（票 45）。
+    /// 審查還有未解決的 finding（任一軸）；或 Evidence Bundle 的判定不是 passed，或它依據的 Profile 版本、需求版本已經不是目前的版本（票 45）。
     NotPassed,
+    /// 審查已過期：規格版本改變，或已有對較新 candidate 的審查。
+    Stale,
+    /// 審查審的不是這個 Workflow 的 Task。
+    OtherSubject,
+}
+
+/// 一份審查兩軸各自實際審查的 reviewer（Task 識別）；沿用的軸是原本的 reviewer。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AxisReviewers {
+    pub standards: String,
+    pub spec: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -686,6 +723,9 @@ pub struct CheckedEvidence {
     #[serde(flatten)]
     pub evidence: Evidence,
     pub status: EvidenceStatus,
+    /// 審查證據的 reviewer（Gate 依此計算人數）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewers: Option<AxisReviewers>,
 }
 
 /// 整理工具請求中的證據：每項剛好一個引用、數量有上限。
@@ -705,15 +745,17 @@ pub fn normalize_evidence(inputs: &[EvidenceInput]) -> Result<Vec<Evidence>, Wor
                 present(&input.artifact_id),
                 present(&input.decision_request_id),
                 present(&input.task_id),
+                present(&input.review_id),
                 present(&input.evidence_bundle_id),
             ) {
-                (Some(artifact_id), None, None, None) => EvidenceRef::Artifact { artifact_id },
-                (None, Some(decision_request_id), None, None) => EvidenceRef::Decision { decision_request_id },
-                (None, None, Some(task_id), None) => EvidenceRef::TaskAccepted { task_id },
-                (None, None, None, Some(evidence_bundle_id)) => EvidenceRef::Verification { evidence_bundle_id },
+                (Some(artifact_id), None, None, None, None) => EvidenceRef::Artifact { artifact_id },
+                (None, Some(decision_request_id), None, None, None) => EvidenceRef::Decision { decision_request_id },
+                (None, None, Some(task_id), None, None) => EvidenceRef::TaskAccepted { task_id },
+                (None, None, None, Some(review_id), None) => EvidenceRef::Review { review_id },
+                (None, None, None, None, Some(evidence_bundle_id)) => EvidenceRef::Verification { evidence_bundle_id },
                 _ => {
                     return Err(invalid(format!(
-                        "evidence {check} 必須剛好提供 artifact_id、decision_request_id、task_id 或 evidence_bundle_id 其中一個"
+                        "evidence {check} 必須剛好提供 artifact_id、decision_request_id、task_id、review_id 或 evidence_bundle_id 其中一個"
                     )))
                 }
             };
@@ -911,19 +953,29 @@ fn current_stage<'a>(
     playbook.definition.stage(current).ok_or_else(|| playbook_invalid(format!("Playbook 版本中沒有 Stage {current}")))
 }
 
-/// 依證據評估 exit check：全部有查驗通過的證據 → passed；有裁定還沒回答 → blocked；其餘 → incomplete。
-fn evaluate(stage: &StageDefinition, evidence: &[CheckedEvidence]) -> (AttemptOutcome, Vec<MissingCheck>) {
+/// 依證據評估 exit check：全部有查驗通過的證據 → passed；有裁定還沒回答、或缺少必要的非作者 reviewer → blocked
+/// （第三個值是阻擋原因）；其餘 → incomplete。
+fn evaluate(stage: &StageDefinition, evidence: &[CheckedEvidence]) -> (AttemptOutcome, Vec<MissingCheck>, Option<String>) {
     let mut missing = Vec::new();
-    let mut waiting_decision = false;
+    let mut blocked = None;
     for check in &stage.exit_checks {
         let offered: Vec<&CheckedEvidence> = evidence.iter().filter(|e| e.evidence.check == check.key).collect();
+        if check.requires == EvidenceKind::Review {
+            if let Some((reason, absent)) = review_shortfall(check, &offered) {
+                if absent && blocked.is_none() {
+                    blocked = Some(format!("Stage「{}」：{reason}", stage.title));
+                }
+                missing.push(MissingCheck { check: check.key.clone(), reason });
+            }
+            continue;
+        }
         if offered.iter().any(|e| e.status == EvidenceStatus::Valid) {
             continue;
         }
         let reason = if offered.is_empty() {
             format!("缺少證據：{}", check.description)
         } else if offered.iter().any(|e| e.status == EvidenceStatus::Pending) {
-            waiting_decision = true;
+            blocked = Some(format!("Stage「{}」等待裁定", stage.title));
             "裁定還沒有回答".to_string()
         } else if offered.iter().any(|e| e.status == EvidenceStatus::NotAccepted) {
             "Task 還沒有通過成果接受".to_string()
@@ -934,12 +986,40 @@ fn evaluate(stage: &StageDefinition, evidence: &[CheckedEvidence]) -> (AttemptOu
         };
         missing.push(MissingCheck { check: check.key.clone(), reason });
     }
-    let outcome = match (missing.is_empty(), waiting_decision) {
+    let outcome = match (missing.is_empty(), blocked.is_some()) {
         (true, _) => AttemptOutcome::Passed,
         (false, true) => AttemptOutcome::Blocked,
         (false, false) => AttemptOutcome::Incomplete,
     };
-    (outcome, missing)
+    (outcome, missing, blocked)
+}
+
+/// 審查 exit check 還差什麼：每一軸要有 `reviewers` 位不同的 reviewer 通過。沒有任何待處理的審查（只是 reviewer 不夠）
+/// 回 `(原因, true)`，Gate 保持關閉並阻擋；有審查但未通過、過期或不適用時回 `(原因, false)`，需要修正後重新審查。
+fn review_shortfall(check: &ExitCheck, offered: &[&CheckedEvidence]) -> Option<(String, bool)> {
+    let need = check.required_reviewers();
+    let valid: Vec<&AxisReviewers> =
+        offered.iter().filter(|e| e.status == EvidenceStatus::Valid).filter_map(|e| e.reviewers.as_ref()).collect();
+    let distinct = |pick: fn(&AxisReviewers) -> &str| {
+        let mut names: Vec<&str> = valid.iter().map(|r| pick(r)).collect();
+        names.sort_unstable();
+        names.dedup();
+        names.len()
+    };
+    let have = distinct(|r| &r.standards).min(distinct(|r| &r.spec));
+    if have >= need {
+        return None;
+    }
+    let reason = match offered.iter().map(|e| e.status).find(|s| *s != EvidenceStatus::Valid) {
+        Some(EvidenceStatus::NotPassed) => "審查還有未解決的 finding：Standards 與 Spec 兩軸都要通過".to_string(),
+        Some(EvidenceStatus::Stale) => "審查已過期（規格版本已改變，或已有對較新 candidate 的審查），請重新審查".to_string(),
+        Some(EvidenceStatus::OtherSubject) => "審查審的不是這個 Workflow 的 Task".to_string(),
+        Some(_) => "引用的審查在這個 Workspace 中不存在".to_string(),
+        None => {
+            return Some((format!("缺少非作者 reviewer 的雙軸審查：每一軸需要 {need} 位，目前 {have} 位"), true));
+        }
+    };
+    Some((reason, false))
 }
 
 fn next_attempt_no(prior: &[StageAttempt], stage: &str) -> i64 {
@@ -1012,13 +1092,13 @@ pub fn record_result(
         }
     }
     let mut next = workflow.clone();
-    let (outcome, missing) = match input.outcome {
+    let (outcome, missing, blocked_by) = match input.outcome {
         ClaimedOutcome::Passed => evaluate(stage, &input.evidence),
         ClaimedOutcome::Failed | ClaimedOutcome::Blocked if note.is_empty() => {
             return Err(invalid("回報失敗或阻擋時，請在 note 說明原因"));
         }
-        ClaimedOutcome::Failed => (AttemptOutcome::Failed, Vec::new()),
-        ClaimedOutcome::Blocked => (AttemptOutcome::Blocked, Vec::new()),
+        ClaimedOutcome::Failed => (AttemptOutcome::Failed, Vec::new(), None),
+        ClaimedOutcome::Blocked => (AttemptOutcome::Blocked, Vec::new(), None),
     };
     let failures = prior.iter().filter(|a| a.stage_key == stage.key && a.outcome == AttemptOutcome::Failed).count() as u32
         + u32::from(outcome == AttemptOutcome::Failed);
@@ -1027,11 +1107,7 @@ pub fn record_result(
         AttemptOutcome::Passed => advance(&mut next, playbook, &stage.key),
         AttemptOutcome::Blocked => {
             next.status = WorkflowStatus::Blocked;
-            next.blocked_reason = Some(if note.is_empty() {
-                format!("Stage「{}」等待裁定", stage.title)
-            } else {
-                format!("Stage「{}」：{note}", stage.title)
-            });
+            next.blocked_reason = Some(blocked_by.unwrap_or_else(|| format!("Stage「{}」：{note}", stage.title)));
         }
         AttemptOutcome::Failed if exhausted => {
             next.status = WorkflowStatus::Blocked;
@@ -1239,7 +1315,14 @@ impl WorkflowNote {
 /// 給 Worker 的 Stage 說明（Context Builder 的必要項目）：Run 換帳號交接後，successor 收到的是同一個 Stage。
 pub fn worker_stage_note(workflow: &WorkflowInstance, playbook: &PlaybookVersion) -> Option<String> {
     let stage = playbook.definition.stage(workflow.current_stage.as_deref()?)?;
-    let checks: Vec<String> = stage.exit_checks.iter().map(|c| c.description.clone()).collect();
+    let checks: Vec<String> = stage
+        .exit_checks
+        .iter()
+        .map(|c| match c.requires {
+            EvidenceKind::Review => format!("{}（由非作者的 reviewer 以 submit_review 提交；作者不能審查自己的工作）", c.description),
+            _ => c.description.clone(),
+        })
+        .collect();
     Some(format!(
         "\n\n目前的流程階段（Workflow {}，{} 第 {} 版）：Stage「{}」（{}）。\
          這個 Task 已完成的階段不要重做，只做這個階段的工作。\n\

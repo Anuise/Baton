@@ -45,6 +45,7 @@ mod messages;
 mod profiles;
 mod quota;
 mod recovery;
+mod reviews;
 mod runs;
 mod scheduling;
 mod sessions;
@@ -77,6 +78,7 @@ pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
 pub use recovery::RecoveryApplyError;
+pub use reviews::{ReviewApplyError, ReviewRecord, ReviewsData};
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
 pub use sessions::TranscriptProgress;
 pub use scheduling::{
@@ -1534,6 +1536,88 @@ const MIGRATIONS: &[Migration] = &[
         BEGIN SELECT RAISE(ABORT, 'evidence_bundle 是追加式資料表，不可更新'); END;
         CREATE TRIGGER evidence_bundle_no_delete BEFORE DELETE ON evidence_bundle
         BEGIN SELECT RAISE(ABORT, 'evidence_bundle 是追加式資料表，不可刪除'); END;",
+    },
+    // 雙軸 Review、獨立 reviewer 與設計偏離（票 44，第 41 個 migration）：審查只追加，兩軸各自保存並固定 revision 與規格版本；
+    // finding 只能改分類（駁回後不能再改），設計偏離接受或拒絕後不能再改。
+    Migration {
+        name: "reviews_and_deviations",
+        sql: "CREATE TABLE review (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            subject_task_id TEXT NOT NULL REFERENCES task (id),
+            reviewer_run_id TEXT NOT NULL REFERENCES run (id),
+            reviewer_task_id TEXT NOT NULL REFERENCES task (id),
+            base_revision TEXT NOT NULL,
+            candidate_revision TEXT NOT NULL,
+            spec_version INTEGER NOT NULL CHECK (spec_version >= 1),
+            standards_source TEXT NOT NULL,
+            standards TEXT NOT NULL CHECK (json_valid(standards)),
+            spec TEXT NOT NULL CHECK (json_valid(spec)),
+            created_at INTEGER NOT NULL,
+            -- 作者不能審查自己的工作
+            CHECK (reviewer_task_id <> subject_task_id)
+        );
+        CREATE INDEX review_subject ON review (subject_task_id, created_at);
+        CREATE TRIGGER review_no_update BEFORE UPDATE ON review
+        BEGIN SELECT RAISE(ABORT, 'review 是追加式資料表，不可更新'); END;
+        CREATE TRIGGER review_no_delete BEFORE DELETE ON review
+        BEGIN SELECT RAISE(ABORT, 'review 是追加式資料表，不可刪除'); END;
+        CREATE TABLE review_finding (
+            id TEXT PRIMARY KEY,
+            review_id TEXT NOT NULL REFERENCES review (id),
+            axis TEXT NOT NULL CHECK (axis IN ('standards', 'spec')),
+            title TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            location TEXT,
+            state TEXT NOT NULL CHECK (state IN ('open', 'fix', 'awaiting_decision', 'dismissed')),
+            classification TEXT CHECK (classification IN ('fix', 'dismiss', 'needs_decision')),
+            reason TEXT,
+            decision_request_id TEXT,
+            decided_by TEXT,
+            classified_by TEXT,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            -- 駁回一定經使用者裁定
+            CHECK (state <> 'dismissed' OR (decision_request_id IS NOT NULL AND decided_by IS NOT NULL))
+        );
+        CREATE INDEX review_finding_review ON review_finding (review_id);
+        CREATE TRIGGER review_finding_final BEFORE UPDATE ON review_finding
+        WHEN OLD.state = 'dismissed' OR NEW.review_id <> OLD.review_id OR NEW.axis <> OLD.axis OR NEW.version <= OLD.version
+        BEGIN SELECT RAISE(ABORT, 'review_finding 駁回後不可更改，所屬審查與軸不可更改'); END;
+        CREATE TRIGGER review_finding_no_delete BEFORE DELETE ON review_finding
+        BEGIN SELECT RAISE(ABORT, 'review_finding 不可刪除'); END;
+        CREATE TABLE design_deviation (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            task_id TEXT NOT NULL REFERENCES task (id),
+            reported_by_run_id TEXT NOT NULL REFERENCES run (id),
+            reported_generation INTEGER NOT NULL,
+            design_artifact_id TEXT NOT NULL REFERENCES artifact (id),
+            design_version INTEGER NOT NULL CHECK (design_version >= 1),
+            deviation TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            affected_contracts TEXT NOT NULL CHECK (json_valid(affected_contracts)),
+            proposed_design TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('proposed', 'awaiting_decision', 'accepted', 'rejected')),
+            resolution_reason TEXT,
+            decision_request_id TEXT,
+            accepted_by TEXT,
+            resolved_by TEXT,
+            accepted_design_version INTEGER,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            -- 接受一定經使用者裁定，並產生設計的新版本
+            CHECK (status <> 'accepted'
+                OR (accepted_by IS NOT NULL AND decision_request_id IS NOT NULL AND accepted_design_version IS NOT NULL))
+        );
+        CREATE INDEX design_deviation_workspace ON design_deviation (workspace_id, created_at);
+        CREATE TRIGGER design_deviation_final BEFORE UPDATE ON design_deviation
+        WHEN OLD.status IN ('accepted', 'rejected') OR NEW.version <= OLD.version
+        BEGIN SELECT RAISE(ABORT, 'design_deviation 處理後不可更改'); END;
+        CREATE TRIGGER design_deviation_no_delete BEFORE DELETE ON design_deviation
+        BEGIN SELECT RAISE(ABORT, 'design_deviation 不可刪除'); END;",
     },
 ];
 

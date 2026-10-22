@@ -20,6 +20,10 @@ use baton_domain::knowledge::{
     TOOL_SEARCH_KNOWLEDGE,
 };
 use baton_domain::message::{INBOX_MAX_LIMIT, MAX_RECIPIENTS};
+use baton_domain::review::{
+    CONTRACTS_MAX, DESIGN_MAX_CHARS, FINDINGS_MAX, PATHS_MAX, TOOL_CLASSIFY_FINDING, TOOL_GET_REVIEWS,
+    TOOL_REPORT_DESIGN_DEVIATION, TOOL_RESOLVE_DESIGN_DEVIATION, TOOL_SUBMIT_REVIEW,
+};
 use baton_domain::understanding::{TOOL_GET_PROJECT_UNDERSTANDING, TOOL_RECORD_UNDERSTANDING};
 use baton_domain::workflow::{
     EVIDENCE_MAX as WORKFLOW_EVIDENCE_MAX, NOTE_MAX_CHARS as WORKFLOW_NOTE_MAX_CHARS,
@@ -131,7 +135,7 @@ async fn initialize_falls_back_for_an_unknown_protocol_version() {
 }
 
 #[tokio::test]
-async fn tools_list_has_the_twenty_eight_tools_with_their_required_fields() {
+async fn tools_list_has_the_thirty_three_tools_with_their_required_fields() {
     let reply = call(UNUSED_URL, json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).await;
     let tools = reply["result"]["tools"].as_array().unwrap();
 
@@ -165,6 +169,11 @@ async fn tools_list_has_the_twenty_eight_tools_with_their_required_fields() {
             TOOL_START_WORKFLOW,
             TOOL_RECORD_STAGE_RESULT,
             TOOL_GET_WORKFLOWS,
+            TOOL_SUBMIT_REVIEW,
+            TOOL_REPORT_DESIGN_DEVIATION,
+            TOOL_CLASSIFY_FINDING,
+            TOOL_RESOLVE_DESIGN_DEVIATION,
+            TOOL_GET_REVIEWS,
             TOOL_RUN_VERIFICATION,
             TOOL_GET_VERIFICATION,
         ]
@@ -270,6 +279,9 @@ async fn tools_list_has_the_twenty_eight_tools_with_their_required_fields() {
         TOOL_START_WORKFLOW,
         TOOL_RECORD_STAGE_RESULT,
         TOOL_GET_WORKFLOWS,
+        TOOL_CLASSIFY_FINDING,
+        TOOL_RESOLVE_DESIGN_DEVIATION,
+        TOOL_GET_REVIEWS,
         TOOL_RUN_VERIFICATION,
         TOOL_GET_VERIFICATION,
     ] {
@@ -323,11 +335,54 @@ async fn tools_list_has_the_twenty_eight_tools_with_their_required_fields() {
     assert_eq!(stage["properties"]["evidence"]["type"], "array");
     assert_eq!(stage["properties"]["evidence"]["maxItems"], WORKFLOW_EVIDENCE_MAX);
     assert_eq!(stage["properties"]["evidence"]["items"]["required"], json!(["check"]));
-    for field in ["artifact_id", "decision_request_id", "task_id", "evidence_bundle_id"] {
+    for field in ["artifact_id", "decision_request_id", "task_id", "review_id", "evidence_bundle_id"] {
         assert_eq!(stage["properties"]["evidence"]["items"]["properties"][field]["type"], "string", "{field}");
     }
     assert_eq!(stage["properties"]["note"]["maxLength"], WORKFLOW_NOTE_MAX_CHARS);
     assert_eq!(schema(TOOL_GET_WORKFLOWS), json!({"type":"object","properties":{}}));
+
+    // 雙軸審查：Worker 工具不是 Controller 專屬；作者不能審查自己的工作要寫在說明裡
+    for name in [TOOL_SUBMIT_REVIEW, TOOL_REPORT_DESIGN_DEVIATION] {
+        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+        assert!(!tool["description"].as_str().unwrap().contains("Controller 專屬"), "{name}");
+    }
+    let review_tool = tools.iter().find(|t| t["name"] == TOOL_SUBMIT_REVIEW).unwrap();
+    let description = review_tool["description"].as_str().unwrap();
+    for code in ["reviewer_is_author", "review_spec_outdated", "review_reuse_rejected"] {
+        assert!(description.contains(code), "{code}");
+    }
+    let review = schema(TOOL_SUBMIT_REVIEW);
+    assert_eq!(
+        review["required"],
+        json!(["subject_task_id", "base_revision", "candidate_revision", "spec_version", "standards_source", "standards", "spec"])
+    );
+    assert_eq!(review["properties"]["spec_version"]["type"], "integer");
+    for axis in ["standards", "spec"] {
+        let properties = &review["properties"][axis]["properties"];
+        assert_eq!(review["properties"][axis]["type"], "object", "{axis}");
+        assert_eq!(properties["paths"]["maxItems"], PATHS_MAX, "{axis}");
+        assert_eq!(properties["findings"]["maxItems"], FINDINGS_MAX, "{axis}");
+        assert_eq!(properties["findings"]["items"]["required"], json!(["title"]), "{axis}");
+        for field in ["summary", "reuse_from"] {
+            assert_eq!(properties[field]["type"], "string", "{axis}.{field}");
+        }
+    }
+    let deviation = schema(TOOL_REPORT_DESIGN_DEVIATION);
+    assert_eq!(deviation["required"], json!(["design_artifact_id", "design_version", "deviation", "reason", "proposed_design"]));
+    assert_eq!(deviation["properties"]["design_version"]["type"], "integer");
+    assert_eq!(deviation["properties"]["affected_contracts"]["type"], "array");
+    assert_eq!(deviation["properties"]["affected_contracts"]["maxItems"], CONTRACTS_MAX);
+    assert_eq!(deviation["properties"]["proposed_design"]["maxLength"], DESIGN_MAX_CHARS);
+    let classify = schema(TOOL_CLASSIFY_FINDING);
+    assert_eq!(classify["required"], json!(["finding_id", "classification", "reason"]));
+    assert_eq!(classify["properties"]["classification"]["enum"], json!(["fix", "dismiss", "needs_decision"]));
+    assert_eq!(classify["properties"]["evidence"]["type"], "array");
+    let resolve = schema(TOOL_RESOLVE_DESIGN_DEVIATION);
+    assert_eq!(resolve["required"], json!(["deviation_id", "resolution", "reason"]));
+    assert_eq!(resolve["properties"]["resolution"]["enum"], json!(["accept", "reject"]));
+    let reviews = schema(TOOL_GET_REVIEWS);
+    assert!(reviews.get("required").is_none(), "task_id 可省略");
+    assert_eq!(reviews["properties"]["task_id"]["type"], "string");
     let run = schema(TOOL_RUN_VERIFICATION);
     assert_eq!(run["required"], Value::Null);
     assert_eq!(run["properties"]["task_id"]["type"], "string");
@@ -374,6 +429,17 @@ async fn controller_tools_forward_to_their_paths_with_credentials_and_unchanged_
             r#"{"outcome":"passed","current_stage":"diagnosis","revision":2}"#,
         ),
         (TOOL_GET_WORKFLOWS, json!({}), r#"{"playbooks":[],"workflows":[]}"#),
+        (
+            TOOL_CLASSIFY_FINDING,
+            json!({"finding_id":"fnd_1","classification":"dismiss","reason":"規格沒有要求","evidence":["契約第 2 版"]}),
+            r#"{"error":"requires_decision","decision_request_id":"d1"}"#,
+        ),
+        (
+            TOOL_RESOLVE_DESIGN_DEVIATION,
+            json!({"deviation_id":"dev_1","resolution":"reject","reason":"維持目前的介面"}),
+            r#"{"deviation":{"id":"dev_1","status":"rejected"},"message":"已拒絕偏離"}"#,
+        ),
+        (TOOL_GET_REVIEWS, json!({"task_id":"task_1"}), r#"{"workspace_id":"w1","reviews":[],"deviations":[]}"#),
         (
             TOOL_RUN_VERIFICATION,
             json!({"task_id":"task_1","journeys":["login"]}),
@@ -723,5 +789,43 @@ async fn external_operation_tools_forward_to_their_paths_unchanged() {
         let log = log.lock().unwrap();
         assert_eq!(log[0].path, format!("{AGENT_TOOLS_PREFIX}/{tool}"));
         assert_eq!(serde_json::from_slice::<Value>(&log[0].body).unwrap(), arguments);
+    }
+}
+
+#[tokio::test]
+async fn review_worker_tools_forward_to_their_paths_unchanged() {
+    let cases = [
+        (
+            TOOL_SUBMIT_REVIEW,
+            json!({
+                "subject_task_id": "task_1",
+                "base_revision": "abc123",
+                "candidate_revision": "def456",
+                "spec_version": 2,
+                "standards_source": "AGENTS.md@abc123",
+                "standards": {"summary":"對照 AGENTS.md","paths":["src"],"findings":[{"title":"缺少錯誤處理","location":"src/export.rs:42"}]},
+                "spec": {"reuse_from":"rev_0"}
+            }),
+            r#"{"id":"rev_1","passed":false}"#,
+        ),
+        (
+            TOOL_REPORT_DESIGN_DEVIATION,
+            json!({"design_artifact_id":"art_1","design_version":3,"deviation":"改用串流匯出","reason":"記憶體不足","affected_contracts":["export API"],"proposed_design":"# 設計
+改用串流"}),
+            r#"{"id":"dev_1","status":"open"}"#,
+        ),
+    ];
+    for (tool, arguments, response) in cases {
+        let (url, log) = spawn_stub(201, response).await;
+
+        let reply = call(&url, tool_call(16, tool, arguments.clone())).await;
+
+        assert_eq!(reply["result"]["isError"], false, "{tool}");
+        assert_eq!(reply["result"]["content"][0]["text"], response);
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 1, "{tool}");
+        assert_eq!(log[0].path, format!("{AGENT_TOOLS_PREFIX}/{tool}"));
+        assert_eq!(log[0].headers["authorization"], format!("Bearer {TOKEN}"));
+        assert_eq!(serde_json::from_slice::<Value>(&log[0].body).unwrap(), arguments, "{tool}");
     }
 }
