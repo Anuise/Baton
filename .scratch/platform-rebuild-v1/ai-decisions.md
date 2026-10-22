@@ -1171,7 +1171,79 @@
 - 影響：Controller 或其他畫面要讀額度時用同一個總覽。
 - 審閱：未審
 
-### AI-128：確定性檢查放在契約內，第一版三種：命令結束碼、工作目錄內檔案、Task 成果
+### AI-128：訊息的收件人是同一個 Workspace 的 Task；收件匣跟著 Task，不跟著 Run
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：`send_message` 的 `to` 是同一個 Workspace 內其他 Task 的 id（1 到 10 個，去除重複，不能含自己的 Task）；收件 Task 不必有進行中的 Run。每個收件 Task 一筆交付（主鍵 workspace＋message_id＋收件 Task）。`read_inbox` 只回傳寄給「憑證所屬 Run 的 Task」的訊息：交接或重試後的新 Run（新世代）會接到前一個 Run 沒讀完的訊息；自己寄出的訊息不在自己的收件匣。收件 Task 不存在或屬於別的 Workspace 一律回 404 `recipient_not_found`，不洩漏別的 Workspace 是否有那個 Task。`in_reply_to` 只能指向寄件者自己寄過或收到的訊息，否則回 404 `reply_target_not_found`。Controller 與使用者目前不是收件人（Controller 的訊息通道由後續票處理）。
+- 理由：Task 才是跨 Run 穩定的歸屬單位（glossary：交接會結束舊 Run 並建立 successor Run，兩者屬同一個 Task）；若收件匣綁 Run，交接時未讀訊息會遺失。Worker 不知道別人的 run id，用 Task id 也和 `get_task_contract` 回傳的 `task_id` 一致。
+- 替代方案：收件人用 run id（交接就遺失訊息、也要求收件人已經在跑）；廣播給整個 Workspace（Worker 會被無關訊息淹沒，也更難界定「自己範圍」）。
+- 影響：Worker 要知道對方的 task id（來源：Prompt 或 Controller 提供）；本票沒有「列出同 Workspace 的 Task」工具，由 Controller 在 Prompt 中提供。收件 Task 已完成或取消時訊息仍會存入但不會被讀到。
+- 審閱：未審
+
+### AI-129：`message_id` 是寄件者提供的冪等鍵，範圍是 Workspace
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：`message_id` 為選填（字元 `A-Za-z0-9_-.:`、1 到 128）。有提供時它就是去重鍵，唯一範圍是（Workspace、message_id）：同一個寄件 Task 以同一個 `message_id` 重送完全相同的內容（類型、主旨、本文、`in_reply_to`、收件人集合）→ 200 `duplicate: true`，回傳原本的訊息，不新增訊息或交付，寄件 Run 換世代重送也算；同一個 `message_id` 但內容不同、或是別的 Task 使用 → 409 `message_id_conflict`。沒有提供時 Runtime 產生 `msg_…`（這種請求每次都是新訊息，沒有重送保護）。不同 Workspace 可以使用相同的 `message_id`，彼此看不到對方。`thread_id` 由 Runtime 決定（新訊息＝自己的 `message_id`，回覆＝沿用被回覆訊息的 `thread_id`），`correlation_id` 可由寄件者指定，預設沿用被回覆訊息的、否則等於 `message_id`。
+- 理由：驗收條件「重複送出的訊息只交付一次」與「每個收件人以 message_id 去重」；Worker 重試工具呼叫（逾時、shim 重送）時需要穩定的冪等鍵，Runtime 無法替沒有鍵的請求猜測是不是重送。資料庫層以（workspace、message_id、收件 Task）主鍵保證同一則訊息對同一個收件人不可能有兩份。Workspace 為範圍與整個平台「所有範圍查詢都以 Workspace 為界」一致，也不會因 id 衝突洩漏別的 Workspace 的資訊。
+- 替代方案：全域唯一的 `message_id`（跨 Workspace 的衝突會洩漏存在性）；以內容雜湊自動去重（合法的連續相同訊息會被吞掉）；不允許 Worker 指定 `thread_id`（採用，避免加入別人的對話串）。
+- 影響：工具說明建議 Worker 重送時帶同一個 `message_id`。寄件 Task 相同但內容不同的重送會得到 409，而不是悄悄覆蓋。
+- 審閱：未審
+
+### AI-130：「以訊息變更範圍」的判定方式與處理：看類型與欄位名稱，200 忽略並轉成事件
+- 重要度：高
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：訊息本文是自由文字，Runtime 不解讀語意。被視為「想改變範圍或歸屬」的只有兩種明確訊號：`kind` 為 `scope_change`、`reassign`、`reassign_task`、`change_scope`、`update_contract`，或請求中出現 `task_id`、`contract`、`scope`、`assignee`、`assign_to`、`reassign_to`、`new_scope`、`owner` 任一欄位。這類請求：不儲存、不交付，HTTP 200 回 `{accepted:false, ignored:true, reason:"scope_change_not_allowed"}`，並追加一筆事件 `message_scope_change_ignored`（aggregate_type `message`，payload 含 workspace、run、寄件 Task、世代、嘗試的類型與欄位、收件人、主旨、本文前 500 字元）給 Controller。寄件 Run 已不是目前的寫入所有者時同樣回 409 `run_report_stale`，不記事件。正常訊息的合法類型只有 `note`、`question`、`answer`、`result`，其他值 400 `message_invalid`。訊息工具沒有任何路徑能修改 Task、契約、Run 或授權：訊息只寫 `message`、`message_delivery` 兩張表。
+- 理由：驗收條件要求「嘗試以訊息變更範圍時被忽略並轉為給 Controller 的事件」。從本文判斷語意不可靠（誤判合法協作、漏判改寫措辭），所以只處理結構上明確的嘗試；其餘訊息即使文字上在要求改範圍，也只是收件 Worker 讀到的文字，不會改變任何契約（範圍的唯一來源仍是 Task 契約，ADR-0011）。用 200 而不是錯誤，是讓 Worker 知道「沒有被執行」但不會把它當作故障重試。
+- 替代方案：用 4xx 拒絕（Worker 可能當成暫時性錯誤重試，而且不會產生 Controller 事件）；對本文做關鍵字偵測（誤判率高）；把嘗試存成一般訊息但標記（收件人仍會讀到，違反「被忽略」）。
+- 影響：Controller 消費 `message_scope_change_ignored` 事件的邏輯由 Controller 相關的票實作；本票只保證事件存在且內容足夠。訊息本文本身若含有誘導收件 Worker 超出範圍的文字，防護是 Worker 的契約與授權檢查，不在本票。
+- 審閱：未審
+
+### AI-131：交付狀態、Run 啟動時的未讀摘要與「不中途插話」
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：每筆交付有三種狀態：`pending`（已存入，收件人還沒看到）、`delivered`（出現在某個 Run 啟動時的未讀摘要裡）、`read`（收件人用 `read_inbox` 取走全文；`read_inbox` 直接讀取尚未 delivered 的訊息時一併補上 delivered 時間）。狀態由 `delivered_at`、`read_at` 兩個時間推導，不另存狀態欄。派工當下（`apply_run_command` 處理 Dispatch 的同一個交易）把收件 Task 的未讀訊息摘要附在 Prompt 末端：第一行 `未讀訊息：N 則（…）`，之後每則 `- [類型] 主旨（來自 Task「標題」，message_id）`，最多 10 則，超過加一行 `…另有 M 則`，**不含本文**；摘要列出的訊息標為 delivered；沒有未讀時 Prompt 不變。Prompt 在派工時固定並存入 Outbox（Runtime 重啟後重組出相同指令），所以派工之後才送來的訊息只能靠 `read_inbox` 取得；Runtime 不在 Worker 執行中途注入。`read_inbox` 預設只回未讀（依送出順序、最多 `limit`，預設 50、上限 100）並標為已讀；`include_read: true` 連已讀的一起回傳（每則有 `already_read`）；`unread_remaining` 是讀完之後仍未讀的數量。
+- 理由：D-27 規定拉取式交付與「Context Builder 在每次 Run 啟動時附上未讀摘要」。Context Builder 尚未存在（`render_prompt` 仍是最小版本，AI-73），所以摘要在 Store 派工交易內附加，與派工的其他寫入同一個交易、也和 Prompt 同時固定；Context Builder 加入後把這段納入它即可。摘要不含本文以免大量訊息撐大 Prompt，也避免把不受信任的訊息文字直接放進 Prompt 的指令區。
+- 替代方案：啟動時（Supervisor 啟動程序那一刻）才重新計算摘要（Prompt 不再固定，與「重啟後重組相同指令」衝突）；讀取時只記單一 `read` 狀態（無法區分「已提示」與「已取走」）。
+- 影響：派工到實際啟動之間送達的訊息不在摘要裡，Worker 開始工作前仍應呼叫 `read_inbox`（工具說明這麼寫）。派工交易需要查詢訊息表，多一次小查詢。
+- 審閱：未審
+
+### AI-132：訊息的其他限制與資料表命名
+- 重要度：低
+- 時間／階段：2026-10-22，票 18 實作
+- 決策：資料表命名沿用單數慣例：`message`（追加式，禁止更新與刪除）、`message_delivery`（禁止刪除，只會填入 `delivered_at`、`read_at`），不照票文的複數 `messages`／`message_deliveries`。限制：主旨 1 到 200 字元、本文最多 16 KiB、收件人最多 10 個。`send_message` 只接受目前仍是寫入所有者的 Run（已結束或被接替 → 409 `run_report_stale`，什麼都不儲存，也不留稽核）；`read_inbox` 在 Run 結束或被接替後 401 `credential_revoked` 且不改變已讀狀態；兩者都沿用「請求聲稱的 Workspace／Run 與憑證不一致 → 403 `agent_scope_mismatch`」。`send_message` 不續約 lease（只有回報進度、checkpoint、受阻才是存活訊號）。`read_inbox` 的 `include_read` 搭配 `limit` 時回傳最舊的幾則。
+- 理由：與既有資料表命名一致（`agent_report`、`event`、`run`）；上限與 Worker 回報的上限同量級，避免訊息成為塞大量資料的通道。寄出的訊息不是 Worker 在「做事」的證明，不該延長 lease；被接替的 Run 遲到的訊息沒有決策價值，所以不像回報那樣留稽核。
+- 替代方案：照票文用複數表名；過期世代的訊息也存稽核（會讓舊 Worker 的內容留在別人的收件匣旁邊，沒有明確用途）。
+- 影響：若之後需要稽核被拒絕的訊息，需另開票加入。
+- 審閱：未審
+
+### AI-133：票 18 整合：migration 與 AI 編號順延到票 19 之後；排程派工也附上未讀摘要
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 整合（R037-18-integrate）
+- 決策：整合 rebuild/v1（票 19 已合併）時，票 19 的 `scheduling` 維持第 10 個 migration，本票的 `message_and_delivery` 順延為第 11 個（排在 `scheduling` 之後；R048 再順延為第 14 個，見 AI-134）；本票的決策由 AI-95～AI-99 順延為 AI-103～AI-107（R048 再順延為 AI-128～AI-132，見 AI-134），移到 AI-102 之後並補上審閱行，內容不變。兩個 migration 互不相依（訊息表只參照 `workspace`、`run`、`task`，不涉及 `run.profile_id`），先後順序不影響 schema。票 19 之後派工 API 與 Supervisor 都改走 `Store::schedule`，不再經過 `apply_run_command`，所以在 `schedule` 派出 Run 的同一個交易裡也呼叫 `attach_unread_summary`，維持 AI-131 的「Run 啟動時附上未讀摘要」；`apply_run_command` 的呼叫保留（仍可直接派工）。本票的 harness 情境測試比照票 19 先建立可派工帳號；因單一帳號並行上限是 2，而部分情境同時有 3 個 Run，所以建立兩個帳號；Store 測試的 `RunCommand::Dispatch` 補上 `profile_id`。測試的斷言都沒有改。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。
+- 替代方案：讓本票保留第 10 個、把票 19 順延（會改動整合分支已存在的 migration 版本，已套用的開發資料庫版本號會錯位）。
+- 影響：本票程式碼與文件沒有引用 AI-95～AI-99 或 migration 編號，不需其他同步修改。只套用到第 10 版的資料庫開啟時會補套後續版本。之後若再新增派工路徑，要記得同樣附上未讀摘要（Context Builder 加入後應收斂到一處）。
+- 審閱：未審
+
+### AI-134：票 18 第二次整合 rebuild/v1：migration 第 14 版、AI 編號再順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 18 整合（R048-18-integrate）
+- 決策：rebuild/v1 已合併票 12（`artifact`，第 11 版）、票 08（`shared_settings_version`，第 12 版）、票 27（`quota`，第 13 版），本票的 `message_and_delivery` 順延為第 14 個 migration，排在 `quota` 之後；本票的決策由 AI-103～AI-108 順延為 AI-128～AI-133，移到 AI-127 之後，內容不變，只在 AI-133 的歷史說明加註再次順延，並把其中對 AI-106 的引用改為 AI-131。衝突合併方式：Agent 工具變成 7 個（原有 4 個＋票 12 的 `register_artifact`＋本票的 `send_message`、`read_inbox`），shim 的工具定義、已知工具清單與 API 路由三者都保留；shim 情境測試把兩邊的 schema 斷言放在同一個測試（改名為 `tools_list_has_the_seven_tools_with_their_required_fields`），stdio 測試的工具數改為 7；GLOSSARY 兩邊新增的詞條都保留。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。訊息表只參照 `workspace`、`run`、`task`，與成果、共同設定、額度的資料表互不相依，順序不影響 schema。
+- 替代方案：把本票的 migration 插在中間（會改動整合分支已存在的版本號，已套用的開發資料庫會錯位）。
+- 影響：本票程式碼與文件沒有引用 AI 編號或 migration 編號，不需其他同步修改。工具數量相關的斷言之後若再新增工具，要同時更新兩個 shim 測試。
+- 審閱：未審
+
+### AI-137：子代理建置關閉增量編譯與除錯資訊，閒置 worktree 的 target 隨時可刪
+- 重要度：中
+- 時間／階段：2026-10-22，票 13、14、22、25、37 進行中
+- 決策：`dispatch.sh` 為每個 run 設定 `CARGO_INCREMENTAL=0`、`CARGO_PROFILE_DEV_DEBUG=0`（只影響子代理的環境，不改 repo 的 Cargo.toml）。沒有 run 在執行的 worktree，主控可直接刪除其 `target/`；票結案時 close.sh 已會移除整個 worktree。
+- 理由：每個 worktree 各自編一份含完整除錯資訊與增量快取的 debug 版，單一 worktree 的 `target/debug` 達 32.8 GB，6 個 worktree 合計約 143 GB，C 槽一度歸零，R050、R051、R052 的建置都因 `os error 112` 失敗過。增量快取與除錯資訊是體積的大宗，對一次性的 run 沒有用處。
+- 替代方案：所有 worktree 共用一個 `CARGO_TARGET_DIR`（體積最小，但 cargo 會以檔案鎖讓並行建置排隊）；或每個 run 結束就 `cargo clean`（下一個 run 要整套重編）。
+- 影響：測試失敗時的 backtrace 只有函式名稱、沒有行號；每次建置都是非增量，第一次編譯時間不變、反覆修改時較慢。
+- 審閱：未審
+
+### AI-138：確定性檢查放在契約內，第一版三種：命令結束碼、工作目錄內檔案、Task 成果
 - 重要度：高
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：契約內容新增 `verification_checks`（與 `required_capabilities` 一樣隨契約版本保存，屬「完成與驗證條件」的機械可判定部分），最多 20 項，三種：(1) `command`：在受驗 Run 的工作目錄執行（不經過 shell），結束碼等於 `expected_exit_code`（預設 0）；(2) `file`：工作目錄內的相對路徑是存在的檔案，可選 `sha256`；(3) `artifact`：這個 Task 有這個名稱的成果，最新版本的檔案與 manifest 雜湊一致，可選 `sha256`。儲存契約時驗證（路徑不可含 `..`、磁碟代號、從根目錄開始；雜湊必須是 64 個十六進位字元並轉成小寫；成果名稱沿用成果登記的檔名規則），不合規回 400 `contract_invalid`。沒有宣告任何檢查不影響准入（`done_criteria` 文字仍必填），這種 Task 只能由使用者手動接受。Worker 的提示（`render_prompt`）會列出宣告的檢查。命令逾時 10 分鐘、被終止、無法啟動、檔案讀不到，一律判定「未通過」，不另分「環境故障」。
@@ -1180,7 +1252,7 @@
 - 影響：契約 JSON 多一個欄位（舊資料沒有這欄時視為空陣列）。暫時性的環境問題（例如工具一時不在 PATH）會讓 Task 回到 ready，需要使用者重新派工；細分判定留給票 45～50。
 - 審閱：未審
 
-### AI-129：驗證命令以使用者身分在工作目錄執行；契約目前只能由桌面憑證寫入
+### AI-139：驗證命令以使用者身分在工作目錄執行；契約目前只能由桌面憑證寫入
 - 重要度：高
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：新增 `CommandRunner` Port。正式版 `LocalCommandRunner` 以子程序直接執行（`CREATE_NO_WINDOW`、stdin 為 NUL、stdout／stderr 收集後保留結尾 16 KiB，證據再取結尾 4000 字元），逾時就丟棄等待並以 `kill_on_drop` 終止直接啟動的程序；**不放進 Job Object**，命令自己再開的子孫程序可能殘留。檔案檢查以 `WorkspaceFs::read_workspace_file` 讀取，只擋路徑字面上的逃逸，不處理工作目錄內指向外部的符號連結或 junction。命令輸出以 UTF-8 解讀（非 UTF-8 主控台輸出會變成替代字元）。
@@ -1189,7 +1261,7 @@
 - 影響：**Controller 的 `update_task`／`propose_task` 工具（票 17）若能寫入 `verification_checks`，等於讓 Agent 決定 Runtime 以使用者身分執行的命令**；屆時必須經過裁定或授權（D-15「修改完成條件或驗收標準」本來就必須送裁定）。
 - 審閱：未審
 
-### AI-130：成果接受交易的三項校驗與「受驗 Run」的定義
+### AI-140：成果接受交易的三項校驗與「受驗 Run」的定義
 - 重要度：高
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：受驗 Run = 該 Task 世代最大的 Run，而且它已 `succeeded`；沒有這樣的 Run 就沒有可接受的對象。接受基礎（basis）= 受驗 Run 的識別與世代、Task 目前的契約版本、成果 manifest（每個成果最新版本的 `artifact_id`＋版本）。自動檢查與手動接受都經同一個 Domain 判定（`verification::decide`）在單一寫入交易中校驗：Run 或世代不符 → 409 `acceptance_run_stale`；契約版本與檢視時不同，或不等於 Run 派工時的版本 → 409 `acceptance_contract_stale`；manifest 不同 → 409 `acceptance_manifest_stale`；拒絕時什麼都不寫。契約在 Run 派工後被改版時，Supervisor 不執行檢查，直接記一筆「未通過」（`note` 寫明版本），Task 回到 `ready`。資料庫另以唯一索引保證同一個 Run 最多一筆紀錄、同一個 Task 最多一筆「通過」。
@@ -1198,7 +1270,7 @@
 - 影響：手動接受的請求必須帶回檢視時的 `basis`（UI 原樣送回）。契約在 verifying 時被修改會讓這次成果作廢並需要重新派工。
 - 審閱：未審
 
-### AI-131：檢查未通過 Task 回到 ready，不自動重派；沒有「手動駁回」
+### AI-141：檢查未通過 Task 回到 ready，不自動重派；沒有「手動駁回」
 - 重要度：中
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：任何一項檢查未通過，Task 從 `verifying` 回到 `ready`（「可修正狀態」），證據（每項檢查的結果、輸出結尾、manifest）保存在驗證紀錄並顯示在工作面板。不自動放回派工佇列（沿用 AI-66、AI-96：沒有重試預算前不自動重派），也不計入任何預算（票 36）。重新派工時 Worker 的提示不含上次的失敗證據（Context Builder 屬票 39）。本票不提供「手動駁回」：沒有宣告檢查而成果不理想時，只能取消 Task 或修改契約。
@@ -1207,7 +1279,7 @@
 - 影響：失敗後要使用者再按一次派工；新的 Worker 不知道上次為什麼沒通過，直到票 39 把驗證紀錄放進 context。
 - 審閱：未審
 
-### AI-132：手動接受只記錄桌面憑證指紋；允許在自動檢查進行中手動接受
+### AI-142：手動接受只記錄桌面憑證指紋；允許在自動檢查進行中手動接受
 - 重要度：中
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：`POST …/tasks/{task_id}/verification/accept` 屬管理 API，guard 只接受桌面憑證（Agent 憑證 403、無憑證 401）。接受者記為「桌面憑證雜湊的前 16 個十六進位字元」，寫進驗證紀錄與事件 `task_verification_recorded` 的 `accepted_by`，不記錄憑證本身。宣告了檢查的 Task 也可以手動接受（使用者優先）；與 Supervisor 的檢查結果競態時，先提交者生效，後者因 Task 已不是 verifying 而被拒絕，只留日誌。附註最多 1000 字元。
@@ -1216,7 +1288,7 @@
 - 影響：目前只有一個桌面使用者，`accepted_by` 只能區分「哪一次啟動的桌面 App」；多使用者不在範圍內。
 - 審閱：未審
 
-### AI-133：驗證是 Supervisor 的最後一步；背景迴圈另開工作執行；崩潰後重新執行檢查
+### AI-143：驗證是 Supervisor 的最後一步；背景迴圈另開工作執行；崩潰後重新執行檢查
 - 重要度：中
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：Supervisor 新增「驗證」步驟（在排程之後），找出 `verifying`、有受驗 Run、契約宣告了檢查（或契約已改版）的 Task，在交易外逐項取得事實，再以成果接受交易提交。背景迴圈把這一步放在另一個 tokio 工作執行（`verify_lock` 保證同時只有一輪），長時間的檢查不擋住啟動、取消與 lease 核對；`Supervisor::tick`（harness 的 `supervise()`）則等它做完，測試保持決定性。檢查途中 Runtime 崩潰時沒有任何紀錄，重啟後**重新執行全部檢查**（命令若有副作用會被執行兩次）。驗證結果寫入失敗（儲存層錯誤）時下一輪也會重新執行。
@@ -1225,22 +1297,31 @@
 - 影響：完全退出（票 25）需要一併停止進行中的驗證命令；目前 Runtime 停止時只靠 `kill_on_drop`。
 - 審閱：未審
 
-### AI-134：驗證紀錄的資料模型與 API 形狀（migration 14）
+### AI-144：驗證紀錄的資料模型與 API 形狀（migration 15）
 - 重要度：低
 - 時間／階段：2026-10-22，票 13 實作
-- 決策：migration 14 `task_verification`（排在票 08 的 `shared_settings_version`、票 27 的 `quota` 之後）：識別、Workspace、Task、受驗 Run（唯一）、世代、契約版本、方式（`checks`／`manual`）、結果（`passed`／`failed`）、`evidence`（JSON：每項檢查結果、manifest、接受者、附註）、時間；觸發器禁止更新與刪除；部分唯一索引限制每個 Task 最多一筆 `passed`。端點：`GET …/tasks/{task_id}/verification`（`VerificationView`：basis、宣告的檢查、manifest、`automatic`、歷次紀錄）、`POST …/verification/accept`（`{ basis, note? }`）。工作面板 `GET …/tasks` 多回傳 `verifications`。Tauri 指令 `task_verification`、`task_accept`。驗證紀錄識別為 `ver_` 加 96 位元隨機值。
+- 決策：migration 15 `task_verification`（排在票 08 的 `shared_settings_version`、票 27 的 `quota`、票 18 的 `message_and_delivery` 之後）：識別、Workspace、Task、受驗 Run（唯一）、世代、契約版本、方式（`checks`／`manual`）、結果（`passed`／`failed`）、`evidence`（JSON：每項檢查結果、manifest、接受者、附註）、時間；觸發器禁止更新與刪除；部分唯一索引限制每個 Task 最多一筆 `passed`。端點：`GET …/tasks/{task_id}/verification`（`VerificationView`：basis、宣告的檢查、manifest、`automatic`、歷次紀錄）、`POST …/verification/accept`（`{ basis, note? }`）。工作面板 `GET …/tasks` 多回傳 `verifications`。Tauri 指令 `task_verification`、`task_accept`。驗證紀錄識別為 `ver_` 加 96 位元隨機值。
 - 理由：沿用 AI-74、AI-105 的追加式表與路徑慣例；把證據放在 JSON 欄位，避免為每項檢查另開一張表。
 - 替代方案：每項檢查一列（查詢單項較方便，但目前沒有這種查詢）。
-- 影響：本票原本是第 12 個 migration，整合 rebuild/v1（票 08、27）時順延為第 14 個；以本票分支（合併前）建立過的開發資料庫需刪除重建。
+- 影響：本票原本是第 12 個 migration，整合 rebuild/v1（票 08、27）時順延為第 14 個，再整合票 18 時順延為第 15 個（見 AI-146）；以本票分支（合併前）建立過的開發資料庫需刪除重建。
 - 審閱：未審
 
-### AI-135：契約編輯器以文字行宣告檢查，路徑與名稱不能含空白
+### AI-145：契約編輯器以文字行宣告檢查，路徑與名稱不能含空白
 - 重要度：低
 - 時間／階段：2026-10-22，票 13 實作
 - 決策：Web UI 契約編輯器的「確定性檢查」每行一項：`command: 程式 引數…`（預期結束碼 0）、`command[n]: …`（預期結束碼 n，可為負數）、`file: 相對路徑 [sha256]`、`artifact: 成果名稱 [sha256]`；引數以空白分隔、不支援引號，所以路徑、成果名稱與引數都不能含空白；大寫雜湊自動轉小寫；解析錯誤在送出時顯示且不送出；路徑是否在工作目錄內由 Runtime 判定。驗證失敗時 UI 只重新讀取驗證資料、不區分 409 的種類。
 - 理由：沿用契約引用以文字行輸入的做法（AI-65），不必為三種檢查各做一套表單。
 - 替代方案：結構化表單（含空白的路徑也能表達，但畫面複雜很多）。
 - 影響：需要含空白的路徑時只能直接呼叫 API。
+- 審閱：未審
+
+### AI-146：票 13 整合 rebuild/v1（票 18）：migration 第 15 版、AI 編號順延
+- 重要度：中
+- 時間／階段：2026-10-22，票 13 修正（R054-13-fix）
+- 決策：rebuild/v1 已合併票 18（`message_and_delivery`，第 14 版），本票的 `task_verification` 順延為第 15 個 migration，排在 `message_and_delivery` 之後；本票的決策由 AI-128～AI-135 順延為 AI-138～AI-145（整合分支已用到 AI-137），移到 AI-137 之後，內容不變，只把 AI-144 的 migration 編號改為 15 並在影響加註這次順延。`docs/development.md` 驗證紀錄段落的 migration 編號同步改為 15。其他檔案（API 路由、Domain 模組、GLOSSARY）由 git 自動合併，兩邊新增的內容都保留。
+- 理由：整合分支的條目與 migration 編號不能變動；本票尚未發布，順延不影響任何既有資料庫。驗證紀錄表只參照 `workspace`、`task`、`run`，與訊息表互不相依，先後順序不影響 schema。
+- 替代方案：把本票的 migration 插在 `message_and_delivery` 之前（會改動整合分支已存在的版本號，已套用的開發資料庫會錯位）。
+- 影響：以本票分支（合併前）建立過的開發資料庫需刪除重建。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

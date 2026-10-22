@@ -8,6 +8,7 @@ pub mod auth;
 pub mod authorization;
 pub mod config;
 pub mod event;
+pub mod message;
 pub mod platform;
 pub mod product;
 pub mod profile;

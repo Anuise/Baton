@@ -17,6 +17,8 @@ cd "$WD" || exit 3
 MSYS_NO_PATHCONV=1 env $CLEAN \
   CLAUDE_CONFIG_DIR="$(cygpath -w "$HOME/.claude-Work-$N")" \
   CLAUDE_CODE_RETRY_WATCHDOG=1 \
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_DEV_DEBUG=0 \
   CLAUDE_CODE_RETRY_WATCHDOG_MAX_USAGE_LIMIT_WAIT_MS=18000000 \
   claude -p --model claude-opus-5-5 --effort high \
     --permission-mode bypassPermissions \

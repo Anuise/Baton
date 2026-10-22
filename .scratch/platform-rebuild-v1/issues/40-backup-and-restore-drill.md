@@ -1,6 +1,6 @@
 # 40: 備份與還原演練
 
-Status: ready-for-agent
+Status: in_progress（Work-9，run R055-40-impl，2026-10-22 17:15）
 Blocked by: 12
 
 **What to build:** 依 spec D-18：以 SQLite Online Backup API 建立一致快照，連同被引用成果的 manifest；觸發時機為每日、migration 前、重要裁定或 Stage 完成後（每小時最多一次）；保留 7 份每日與 4 份每週；每週自動在隔離目錄還原並核對資料庫完整性、成果雜湊與關聯，結果顯示於設定頁。備份期間暫停成果清理；備份不含登入秘密。還原後舊 Run 不自動重做外部操作。
