@@ -46,6 +46,21 @@ impl baton_ports::StartupRegistration for NoStartup {
         Ok(())
     }
 }
+struct NoUpdates;
+
+#[async_trait::async_trait]
+impl baton_ports::UpdateSource for NoUpdates {
+    async fn latest(&self) -> baton_ports::PortResult<baton_domain::maintenance::ReleaseInfo> {
+        Err(baton_ports::PortError::NotImplemented("UpdateSource"))
+    }
+    async fn download(
+        &self,
+        _release: &baton_domain::maintenance::ReleaseInfo,
+        _dest_dir: &std::path::Path,
+    ) -> baton_ports::PortResult<std::path::PathBuf> {
+        Err(baton_ports::PortError::NotImplemented("UpdateSource"))
+    }
+}
 use baton_runtime::production_ports::{LocalCommandRunner, LocalWorkspaceFs, SystemClock};
 use baton_runtime::windows_platform::WindowsPlatformInfo;
 use baton_runtime::windows_process::WindowsProcessControl;
@@ -218,6 +233,7 @@ async fn cancelling_a_run_through_the_runtime_terminates_the_whole_process_tree(
         guardian_probe: Arc::new(NoGuardian),
         login_session: Arc::new(SameLogin),
         startup_registration: Arc::new(NoStartup),
+        update_source: Arc::new(NoUpdates),
     };
     let config = RuntimeConfig { data_dir: data_dir.path().to_path_buf(), bind: "127.0.0.1:0".parse().unwrap() };
     let runtime = Runtime::start_with(

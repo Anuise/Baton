@@ -35,6 +35,8 @@ pub enum BackupTrigger {
     PreMigration,
     /// 重要裁定或 Stage 完成。
     Milestone,
+    /// 套用更新之前（票 34，spec D-19）：在停止流程之後建立，依一般規則保留。
+    PreUpdate,
 }
 
 impl BackupTrigger {
@@ -43,6 +45,7 @@ impl BackupTrigger {
             BackupTrigger::Daily => "daily",
             BackupTrigger::PreMigration => "pre_migration",
             BackupTrigger::Milestone => "milestone",
+            BackupTrigger::PreUpdate => "pre_update",
         }
     }
 }

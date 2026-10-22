@@ -6,17 +6,17 @@ Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常
 
 | 路徑 | 內容 |
 | --- | --- |
-| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約、依賴未決答案的准入缺項（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、帳號額度門檻（遲滯、draining）與主動交接的 phase 狀態機、冷卻與安全邊界、突然限流與等待資源的重新評估時間（`handoff.rs`）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`：版本校驗、六種處理方式、合併與連結、Controller 動作判定、Controller 提出的請求）、決策權限表（`authority.rs`，spec D-15）、權限提示的歸類與授權判定（`permission.rs`）、單次批准（E1）的綁定與核對（`approval.rs`）、備份的觸發／保留／還原演練核對（`backup.rs`）、知識條目與教訓的可信狀態轉換、版本、取代關係、可見範圍與搜尋關鍵字（`knowledge.rs`）、Guard 規則、啟用停用、Run 准入時的違反判定與重犯事件（`guard.rs`）、Context Builder 的 Prompt 組裝、相關性排序、token 預算與 context receipt（`context.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔）、Task 工作目錄（worktree／輸出目錄）的位置與登記（`workdir.rs`）、單一整合佇列的狀態機（`integration.rs`）、外部操作的冪等鍵、要求雜湊、回執與結果未知（`external_operation.rs`）、控制資料庫寫入故障的種類與處理方式（`storage_health.rs`）、Agent Session 的沿用／替換決定、條件綁定與對話紀錄的去重和遮蔽（`session.rs`）、Controller 長期對話的輸入、喚起與輪次（`conversation.rs`）、修正與重試預算的計數／退避／重設（`budget.rs`，spec D-16）、Runtime 意外崩潰後的自動恢復（`recovery.rs`：恢復事件、每輪三次嘗試與退避、穩定觀察、用盡與人工重試的輪次、派工阻擋、監護嘗試的匯入）、監護程序的規則（`guardian.rs`：監護日誌紀錄、恢復狀態鏡像、抑制判定、重啟規劃、監護狀態）、跨 Windows 登入的啟動與續跑（`login.rs`：登入時自動啟動的偏好、各 Workspace 的跨登入自動續跑、登入邊界判定與暫停）、事件時間線的分類與依 Task 過濾（`timeline.rs`）、由時間線事件計算的觀測指標（`metrics.rs`）、專案理解項目的來源查驗規則與 GLOSSARY／ADR 投影的比對、協調與內容產生（`understanding.rs`） |
-| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`，以及 `write_readonly_files`：把一組檔案寫成唯讀目錄）、PlatformInfo、SecretProtector、ClaudeEnvironment、CommandRunner（驗證命令）、UserSettingsSource（唯讀讀取使用者平常使用的 Claude Code 設定，只有白名單內的三個檔案）、GuardianProbe（監護程序是否還在，只用於顯示降級）、LoginSession（目前 Windows 登入工作階段的識別）、StartupRegistration（登入時自動啟動的 HKCU Run 登記）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
-| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、額度門檻與交接紀錄（`handoffs.rs`：`quota_gate`、`handoff`）、裁定請求／裁定／單次批准／連結與 Workspace 決策權限表（`decisions.rs`）、備份／還原／還原演練（`backup.rs`）、知識條目與版本（`knowledge.rs`：`knowledge_entry`、`knowledge_entry_version`，以及每次開啟時重建的全文檢索索引 `knowledge_fts`）、Guard 與重犯事件（`guards.rs`：`guard`、`lesson_recurrence`）、Context Builder 的輸入取得與 context receipt（`context.rs`：`context_receipt`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`）、外部操作（`external_operations.rs`：`external_operation`，Run 結束與回答裁定的同一個交易中結算）、寫入故障的歸類與試寫（`health.rs`：`storage_probe`）、Agent Session 與對話紀錄段落（`sessions.rs`：`agent_session`、`session_events` 檢視、`transcript_segment`）、Controller 對話（`conversations.rs`：`conversation`、`conversation_turn`、`controller_run`）、修正與重試預算（`budgets.rs`：`task_budget`）、崩潰恢復事件與嘗試（`recovery.rs`：`recovery_event`、`recovery_attempt`，以及 `runtime_boot.ended_cleanly_at` 正常結束標記；監護日誌的匯入紀錄 `guardian_journal_import` 與給監護看的恢復狀態鏡像）、跨登入（`lifecycle.rs`：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`／`paused_by`、`login_startup`）、時間線的讀取與 Task 歸屬（`timeline.rs`，唯讀，沒有自己的資料表）、專案理解與投影檔狀態（`understanding.rs`：`understanding_item`、`understanding_projection`） |
-| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 的 context receipt、Run 設定快照、成果瀏覽與成果接受）、`/api/v1/scheduling`、`/api/v1/lifecycle`（含 `/api/v1/lifecycle/login-startup` 與 `/api/v1/workspaces/{id}/login-resume`）、`/api/v1/recovery`、`/api/v1/decisions/pending`、`/api/v1/decisions/batch`（與 `/api/v1/workspaces/{id}/decisions`、`/api/v1/workspaces/{id}/decision-authority`）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/backups`（備份與還原演練狀態）、`/api/v1/knowledge`、`/api/v1/guards`（與 `/api/v1/knowledge/{id}/recurrences`）、`/api/v1/workspaces/{id}/timeline` 與 `/api/v1/workspaces/{id}/metrics`、`/api/v1/workspaces/{id}/understanding`（含 `sync` 與 `projections/reconcile`）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `controller_action`、`register_artifact`、`confirm_handoff`；`knowledge.rs` 的 `record_lesson_candidate`、`search_knowledge`；`controller.rs` 的 Controller 專屬工具；`understanding.rs` 的 `record_understanding`、`get_project_understanding`） |
+| `crates/baton-domain` | Domain 核心（純邏輯、無 I/O）：產品名稱常數、時間戳、Runtime 設定解析、平台支援狀態判定與支援期限表（`platform.rs`）、Workspace 狀態機（`workspace.rs`：命令 → 新狀態 + 事件）、Workspace 授權範本／確認 revision／Run 准入檢查（`authorization.rs`）、Goal／Task 狀態機與六項最小派工契約、依賴未決答案的准入缺項（`task.rs`）、Run 狀態機／execution lease／派工 Outbox（`run.rs`）、多帳號排程與容量（`scheduler.rs`：選帳號、並行上限、交接槽、等待原因）、額度觀測與判斷（`quota.rs`：已觀測／推估、較保守者、觀測不完整）、帳號額度門檻（遲滯、draining）與主動交接的 phase 狀態機、冷卻與安全邊界、突然限流與等待資源的重新評估時間（`handoff.rs`）、account_profile 狀態機與可派工判定（`profile.rs`）、首次啟動精靈的工具檢查與背景行為告知（`setup.rs`）、資料目錄位置判定（`storage_location.rs`）、Agent 工具介面（`agent.rs`：環境變數名稱、MCP 設定、Worker 回報內容與長度上限）、Artifact 的登記驗證、版本 manifest、未登記檔案辨識與預覽判定（`artifact.rs`）、確定性檢查與成果接受交易（`verification.rs`）、共同設定的匯入、秘密遮蔽、差異、版本與 Run 快照渲染（`shared_settings.rs`，秘密辨識在 `shared_settings/secrets.rs`）、裁定請求與裁定的狀態機（`decision.rs`：版本校驗、六種處理方式、合併與連結、Controller 動作判定、Controller 提出的請求）、決策權限表（`authority.rs`，spec D-15）、權限提示的歸類與授權判定（`permission.rs`）、單次批准（E1）的綁定與核對（`approval.rs`）、備份的觸發／保留／還原演練核對（`backup.rs`）、知識條目與教訓的可信狀態轉換、版本、取代關係、可見範圍與搜尋關鍵字（`knowledge.rs`）、Guard 規則、啟用停用、Run 准入時的違反判定與重犯事件（`guard.rs`）、Context Builder 的 Prompt 組裝、相關性排序、token 預算與 context receipt（`context.rs`）、桌面生命週期與完全退出（`lifecycle.rs`：停止意圖、停止報告與停止異常、各 Workspace 的自動續跑與暫停、生命週期檔）、Task 工作目錄（worktree／輸出目錄）的位置與登記（`workdir.rs`）、單一整合佇列的狀態機（`integration.rs`）、外部操作的冪等鍵、要求雜湊、回執與結果未知（`external_operation.rs`）、控制資料庫寫入故障的種類與處理方式（`storage_health.rs`）、Agent Session 的沿用／替換決定、條件綁定與對話紀錄的去重和遮蔽（`session.rs`）、Controller 長期對話的輸入、喚起與輪次（`conversation.rs`）、修正與重試預算的計數／退避／重設（`budget.rs`，spec D-16）、Runtime 意外崩潰後的自動恢復（`recovery.rs`：恢復事件、每輪三次嘗試與退避、穩定觀察、用盡與人工重試的輪次、派工阻擋、監護嘗試的匯入）、監護程序的規則（`guardian.rs`：監護日誌紀錄、恢復狀態鏡像、抑制判定、重啟規劃、監護狀態）、跨 Windows 登入的啟動與續跑（`login.rs`：登入時自動啟動的偏好、各 Workspace 的跨登入自動續跑、登入邊界判定與暫停）、事件時間線的分類與依 Task 過濾（`timeline.rs`）、由時間線事件計算的觀測指標（`metrics.rs`）、專案理解項目的來源查驗規則與 GLOSSARY／ADR 投影的比對、協調與內容產生（`understanding.rs`）、更新檢查與更新／解除安裝的維護（`maintenance.rs`：版本比較、啟動時與每日檢查只通知、維護的開始／停止後／結束） |
+| `crates/baton-ports` | 所有外部副作用的 Port 介面：Clock、ProcessControl（含 `find`）、AgentAdapter（含 `spawn_spec`）、QuotaObserver、WorkspaceFs（含成果的 `write_artifact_atomic`、`read_artifact`、`list_artifact_files`，以及 `write_readonly_files`：把一組檔案寫成唯讀目錄）、PlatformInfo、SecretProtector、ClaudeEnvironment、CommandRunner（驗證命令）、UserSettingsSource（唯讀讀取使用者平常使用的 Claude Code 設定，只有白名單內的三個檔案）、GuardianProbe（監護程序是否還在，只用於顯示降級）、LoginSession（目前 Windows 登入工作階段的識別）、StartupRegistration（登入時自動啟動的 HKCU Run 登記）、UpdateSource（簽章更新的清單與安裝程式下載驗證）；`write_file_atomic`（暫存 → fsync → 原子改名）是成果寫入的真實實作 |
+| `crates/baton-store` | SQLite 存取：單一寫入佇列、PRAGMA 讀回驗證、`schema_migrations`、Workspace、account_profile、授權 revision、Goal／Task／契約版本／相依與事件表、Run／lease／Outbox 表、派工佇列與容量設定（`scheduling.rs`）、成果 manifest（`artifact`、`artifact_version`）、驗證紀錄（`task_verification`）、共同設定版本表 `shared_settings_version` 與 Run 設定快照綁定表 `run_settings_snapshot`（都是追加式）、額度觀測／本機用量／方案上限（`quota.rs`）、額度門檻與交接紀錄（`handoffs.rs`：`quota_gate`、`handoff`）、裁定請求／裁定／單次批准／連結與 Workspace 決策權限表（`decisions.rs`）、備份／還原／還原演練（`backup.rs`）、知識條目與版本（`knowledge.rs`：`knowledge_entry`、`knowledge_entry_version`，以及每次開啟時重建的全文檢索索引 `knowledge_fts`）、Guard 與重犯事件（`guards.rs`：`guard`、`lesson_recurrence`）、Context Builder 的輸入取得與 context receipt（`context.rs`：`context_receipt`）、停止意圖與 Workspace 生命週期設定、生命週期檔的原子讀寫（`lifecycle.rs`）、外部操作（`external_operations.rs`：`external_operation`，Run 結束與回答裁定的同一個交易中結算）、寫入故障的歸類與試寫（`health.rs`：`storage_probe`）、Agent Session 與對話紀錄段落（`sessions.rs`：`agent_session`、`session_events` 檢視、`transcript_segment`）、Controller 對話（`conversations.rs`：`conversation`、`conversation_turn`、`controller_run`）、修正與重試預算（`budgets.rs`：`task_budget`）、崩潰恢復事件與嘗試（`recovery.rs`：`recovery_event`、`recovery_attempt`，以及 `runtime_boot.ended_cleanly_at` 正常結束標記；監護日誌的匯入紀錄 `guardian_journal_import` 與給監護看的恢復狀態鏡像）、跨登入（`lifecycle.rs`：`runtime_boot.login_session`、`workspace_lifecycle.auto_resume_across_login`／`paused_by`、`login_startup`）、時間線的讀取與 Task 歸屬（`timeline.rs`，唯讀，沒有自己的資料表）、專案理解與投影檔狀態（`understanding.rs`：`understanding_item`、`understanding_projection`）、更新與解除安裝的維護（`maintenance.rs`：migration 38 `maintenance`、與停止意圖同一交易、帶維護抑制的生命週期檔鏡像） |
+| `crates/baton-api` | Axum 路由（`/api/v1/health`、`/api/v1/platform`、`/api/v1/workspaces`（含授權、准入檢查、Goal、Task、Run、Run 的 context receipt、Run 設定快照、成果瀏覽與成果接受）、`/api/v1/scheduling`、`/api/v1/lifecycle`（含 `/api/v1/lifecycle/login-startup` 與 `/api/v1/workspaces/{id}/login-resume`）、`/api/v1/updates`（含 `/apply`）與 `/api/v1/maintenance`（`updates.rs`）、`/api/v1/recovery`、`/api/v1/decisions/pending`、`/api/v1/decisions/batch`（與 `/api/v1/workspaces/{id}/decisions`、`/api/v1/workspaces/{id}/decision-authority`）、`/api/v1/profiles`、`/api/v1/setup`、`/api/v1/shared-settings`（共同設定的預覽、採用與版本）、`/api/v1/backups`（備份與還原演練狀態）、`/api/v1/knowledge`、`/api/v1/guards`（與 `/api/v1/knowledge/{id}/recurrences`）、`/api/v1/workspaces/{id}/timeline` 與 `/api/v1/workspaces/{id}/metrics`、`/api/v1/workspaces/{id}/understanding`（含 `sync` 與 `projections/reconcile`）、`/api/v1/events`）與入口防護 `guard`（憑證、角色、Host、Origin、CORS）；Agent API（`/agent/v1/tools/…`，`agent.rs`，含 `controller_action`、`register_artifact`、`confirm_handoff`；`knowledge.rs` 的 `record_lesson_candidate`、`search_knowledge`；`controller.rs` 的 Controller 專屬工具；`understanding.rs` 的 `record_understanding`、`get_project_understanding`） |
 | `crates/baton-credential` | 桌面憑證檔（`auth/desktop-credential.bin`）的讀寫與 DPAPI 保護 |
-| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`，`RuntimeOptions` 含 `full_text_search`；含啟動時核對停止意圖、判定上次是否意外終止，與完全退出的執行者）、Supervisor（`supervisor.rs`，含完全退出的停止流程與重新開啟、崩潰恢復的嘗試、主動交接）、Claude Code Adapter（`claude_adapter.rs`）、備份排程（`backup.rs`）、確定性檢查的執行（`verifier.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe`（`baton-runtime restore …` 還原備份） |
+| `crates/baton-runtime` | Runtime 組裝（`Runtime::start`，`RuntimeOptions` 含 `full_text_search`；含啟動時核對停止意圖、判定上次是否意外終止，與完全退出的執行者）、Supervisor（`supervisor.rs`，含完全退出的停止流程與重新開啟、崩潰恢復的嘗試、主動交接）、Claude Code Adapter（`claude_adapter.rs`）、備份排程（`backup.rs`）、確定性檢查的執行（`verifier.rs`）、Windows Job Object 的 ProcessControl（`windows_process.rs`）、單實例鎖、`baton-runtime.exe`（`baton-runtime restore …` 還原備份；`baton-runtime maintenance prepare-update|prepare-uninstall` 是安裝程式的準備步驟，`installer.rs`）、更新檢查（`updates.rs`）與正式版的更新來源（`update_source.rs`：Tauri 更新清單 + minisign 簽章）、停止流程之後的維護步驟與手動開啟時結束維護（`maintenance.rs`） |
 | `crates/baton-guardian` | 監護程序（`baton-guardian.exe`，票 32）：監護狀態機 `Guardian`（以 `RuntimeHost` 抽象 Runtime）、監護日誌／恢復狀態鏡像／生命週期檔／程序身分的檔案讀寫（`files.rs`）、以程序識別碼與記錄時間確認程序還在（`process.rs`）、正式版的 `ProcessHost`、登入啟動入口（`launcher.rs`，`baton-guardian.exe --login`，票 33）；不依賴 `baton-store`（不開控制資料庫） |
 | `crates/baton-mcp-shim` | MCP 工具 shim（`baton-mcp-shim.exe`）：Claude Code 以 stdio 啟動，把工具呼叫轉送到 Runtime 的 Agent API；只依賴 `baton-domain` |
 | `crates/baton-harness` | 測試 harness 與全部 Port 的 fake（主要測試 seam，spec D-04） |
 | `crates/baton-client` | 桌面殼用的 `RuntimeClient`（自動讀取憑證）與「連回既有 Runtime 或啟動新的」邏輯 |
-| `src-tauri` | Tauri 桌面殼（系統匣、關窗隱藏）與安裝設定（`tauri.conf.json`） |
+| `src-tauri` | Tauri 桌面殼（系統匣、關窗隱藏、執行已驗證的更新安裝程式）與安裝設定（`tauri.conf.json`；NSIS hook 在 `installer-hooks.nsh`） |
 | `web` | React + TypeScript + Vite 的 Web UI |
 | `scripts` | 建置、測試、冒煙測試腳本 |
 
@@ -58,6 +58,8 @@ pnpm build
 ```powershell
 pnpm build --bundle    # 輸出 target/release/bundle/nsis/*-setup.exe
 ```
+
+要讓建置出來的版本檢查並驗證簽章更新，建置時設定 `BATON_UPDATE_ENDPOINT`、`BATON_UPDATE_PUBKEY`（另以 `TAURI_SIGNING_PRIVATE_KEY` 產生安裝程式的簽章），見〈安裝、更新與解除安裝〉。
 
 開發時：
 
@@ -712,6 +714,46 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 **Validation Required**：HKCU Run 在真實 Windows 登入時是否執行啟動入口、登入識別在登出再登入與重新開機後是否改變、以系統管理員提升權限執行時是否被誤判為跨登入，都只有單元測試、harness 情境測試與真實程序測試，需在 Windows 上手動確認（開啟登入時自動啟動 → 登出再登入 → Runtime 與監護已在執行、沒開跨登入自動續跑的 Workspace 等「繼續工作」；完全退出 → 重新開機 → 登入後沒有任何 Baton 程序）。
 
+### 安裝、更新與解除安裝
+
+依 spec D-19、D-25。規則在 `baton_domain::maintenance`（純邏輯），持久化在 `baton-store` 的 `maintenance.rs`（migration 38：`maintenance`），端點在 `baton-api` 的 `updates.rs`，更新檢查在 `baton-runtime` 的 `updates.rs`，停止之後的步驟與結束維護在 `baton-runtime` 的 `maintenance.rs`，安裝程式的準備步驟在 `baton-runtime` 的 `installer.rs`。
+
+**安裝**：Tauri NSIS 單使用者安裝（`installMode: currentUser`，不需要系統管理員），預設安裝到 `%LOCALAPPDATA%\Baton`——與資料目錄的預設位置相同。Tauri 的解除安裝程式只刪除它安裝的檔案，再以不遞迴的 `RMDir` 移除安裝資料夾，所以資料（控制資料庫、成果、備份、日誌、生命週期檔）一律保留；勾選「刪除應用程式資料」也只會刪除 WebView 的 `%LOCALAPPDATA%\app.baton.desktop`。
+
+**更新檢查（只通知）**：Runtime 啟動時檢查一次，之後每 24 小時一次（背景迴圈每分鐘看一次是否到期；harness 以 `Harness::check_updates` 驅動）。看到較新的版本只記為「可更新」，Web UI 顯示通知；不會停止或啟動任何工作。檢查失敗保留之前看到的新版本，隔天再試。結果只存在記憶體，Runtime 每次啟動都重新檢查。
+
+- 更新來源是 Tauri 格式的 `latest.json`（`version`、`notes`、`pub_date`、`platforms["windows-x86_64-nsis" | "windows-x86_64"] = { url, signature }`）。
+- **建置時**以環境變數 `BATON_UPDATE_ENDPOINT`（清單網址）與 `BATON_UPDATE_PUBKEY`（`tauri signer generate` 產生的公鑰）設定，Runtime 以 `option_env!` 讀入；沒有設定的建置是「未設定更新來源」，不會連線，設定頁顯示「未設定」。產生安裝程式的 `.sig` 需要在 `pnpm build --bundle` 時設定 `TAURI_SIGNING_PRIVATE_KEY`（建置腳本會開啟 `createUpdaterArtifacts`）。
+
+**使用者同意更新**（Web UI 的「更新並重新開啟」→ `POST /api/v1/updates/apply`）：
+
+1. 下載安裝程式並以公鑰驗證 minisign 簽章；通過才以正式檔名留在 `<資料目錄>\updates\<版本>\`。下載或驗證失敗回 502 `update_download_failed`，**不停止任何工作**。
+2. 同一個交易持久化維護（`kind = update`、`phase = stopping`、來源與目標版本、安裝程式路徑）與完全退出的停止意圖（暫停每個使用中的 Workspace），再把生命週期檔寫成「停止抑制 + 維護抑制」。之後每次鏡像停止意圖都帶著維護抑制（`Store::lifecycle_mirror`），監護與登入啟動入口看到就不拉起 Runtime（兩者並存時回報 `Maintenance`）。
+3. 與完全退出相同的停止流程（30 秒寬限 + 10 秒確認，Run 以 `interrupted` 結束、Task 重新排隊）。
+4. 更新前備份（觸發原因 `pre_update`，依一般保留規則）。成功 → `phase = ready`；失敗 → `phase = failed`（不套用更新）。
+5. Runtime 提供 API 5 秒後結束。桌面殼（`update_install`）等 Runtime 不再回應（最多 20 秒，逾時也繼續；Runtime 已結束時用殼最後一次看到的「準備套用」路徑），以 `/P /UPDATE /R`（被動、更新模式、安裝後重新開啟 App）執行安裝程式並結束 App。安裝程式的 PREINSTALL hook 再執行舊版的 `baton-runtime.exe maintenance prepare-update`，確認 Runtime 與監護都已結束才複製檔案。
+6. 安裝程式重新開啟 App → App 啟動 Runtime：**只有手動開啟（含安裝程式代為開啟）才結束維護**——記下結果（`last_maintenance`：來源與執行中的版本、是否已套用）、清掉生命週期檔的維護抑制與下載的安裝程式，之後依 DR-01 先核對再依各 Workspace 的「完全退出後自動續跑」續跑。監護或登入啟動拉起的 Runtime 不結束維護。
+
+**解除安裝**：NSIS 的 PREUNINSTALL hook（更新模式除外）執行 `baton-runtime.exe maintenance prepare-uninstall`：
+
+- 有執行中的 Runtime：`POST /api/v1/maintenance`（`kind = uninstall`），Runtime 執行相同的停止流程、移除 HKCU Run 的登入啟動登記、進入 `ready` 後結束；準備步驟等它不再回應。
+- 沒有 Runtime：直接在生命週期檔加上維護抑制（保留既有的停止抑制；讀不懂的檔案另記為停止）。
+- 兩者最後都等 Runtime 與監護的程序結束，再移除一次登入啟動登記（Tauri 的解除安裝程式也會刪除 HKCU Run 的 `Baton` 值）。生命週期檔已有更新的維護時什麼都不做（安裝程式在更新中被執行的情形）。
+- 資料目錄與埠取自環境變數（沒有設定時是預設的 `%LOCALAPPDATA%\Baton` 與 47821）。
+- 「登入時自動啟動」的偏好保留在控制資料庫中：之後重新安裝並開啟 App，會依偏好重新登記。
+
+| 方法與路徑（桌面憑證） | 說明 |
+| --- | --- |
+| `GET /api/v1/updates` | `current_version`、`status`（`not_checked`／`up_to_date`／`available`／`unconfigured`／`failed`）、`available`（`version`、`notes`、`published_at`）、`checked_at`、`next_check_at`、`error`、進行中的 `maintenance`（`kind`、`phase`、`package_path`、`backup_id`、`message`…）與 `last_maintenance` |
+| `POST /api/v1/updates/apply` | `{ "version": "…" }`：下載、驗證後開始更新的維護，202；不是目前可更新的版本 409 `update_not_available`；未設定 503 `updates_unconfigured`；下載或簽章失敗 502 `update_download_failed`；完全退出中 409 `stop_intent_active`；另一種維護進行中 409 `maintenance_in_progress` |
+| `POST /api/v1/maintenance` | `{ "kind": "update" }` 或 `{ "kind": "uninstall" }`：安裝程式要求的維護（不下載），202；同一種維護重複要求是冪等的 |
+
+事件：`maintenance` 聚合有 `maintenance_requested`、`maintenance_ready`、`maintenance_failed`、`maintenance_finished`。桌面殼指令：`update_status`、`update_apply`、`update_install`。Web UI：主區頂端的更新通知（`UpdateNotice`）、更新進度（`UpdateProgress`）、設定區的 `UpdateSettings`。
+
+測試：`crates/baton-harness/tests/installer_and_updates.rs`（情境測試）、`crates/baton-domain/src/maintenance/tests.rs`、`crates/baton-runtime/src/update_source.rs`（以 `tauri signer` 產生的測試公鑰與簽章驗證，私鑰沒有保存）、`crates/baton-domain/tests/installer_config.rs`（安裝設定與 NSIS hook）、`web/src/Update*.test.tsx`。
+
+**Validation Required**：真實的 NSIS 安裝程式以一般使用者安裝、`/P /UPDATE /R` 更新後重新開啟、PREINSTALL／PREUNINSTALL hook 在真實安裝與解除安裝時的時序，只有設定檔測試與 `scripts/smoke-installer.mjs` 的手動驗收；更新清單的實際託管位置與簽章私鑰的保管尚未決定。
+
 ### 知識、教訓與全文檢索
 
 決策、教訓與一般知識都是 Knowledge Entry（spec D-26、D-28）。規則在 `baton_domain::knowledge`（純邏輯：內容驗證、狀態轉換、版本、取代關係、可見範圍、搜尋關鍵字解析），持久化與搜尋在 `baton-store` 的 `knowledge.rs`，端點在 `baton-api` 的 `knowledge.rs`（管理 API 與 Agent 工具 `record_lesson_candidate`、`search_knowledge`）。
@@ -1184,6 +1226,16 @@ node scripts/smoke-desktop.mjs
 ```
 
 它會以暫存資料目錄與隨機埠啟動真正的 `baton-desktop.exe`，經由 WebView2 遠端除錯埠讀取畫面，確認：狀態列顯示「Runtime 運作中」、首次設定精靈以本機真實的 `claude`、`git` 檢查、帳號頁新增 Profile 並以真實的 `claude auth status` 核對、第 9 個 Profile 被拒絕、App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以測試直接結束 App 程序）、再次開啟時連回同一個 Runtime、未帶憑證的請求被拒絕。這個測試會開啟視窗，所以不納入 `pnpm test`。
+
+### 安裝程式冒煙測試
+
+`pnpm build --bundle` 之後可執行：
+
+```powershell
+node scripts/smoke-installer.mjs
+```
+
+以目前的（非系統管理員）使用者把安裝程式靜默安裝到暫存資料夾，確認安裝成功、已安裝的 Runtime 能以暫存資料目錄啟動，再開啟「登入時自動啟動」後解除安裝，確認 Runtime 已結束、HKCU Run 的 `Baton` 值已移除、資料目錄與控制資料庫仍在。它會暫時寫入目前使用者的安裝紀錄（解除安裝時移除），所以已有 Baton 安裝、登入啟動登記或以系統管理員身分執行時拒絕執行；不納入 `pnpm test`。
 
 ### 測試 harness（主要測試 seam）
 

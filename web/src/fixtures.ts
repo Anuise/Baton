@@ -15,6 +15,8 @@ import type {
   Handoff,
   LifecycleStatus,
   ImportPreview,
+  Maintenance,
+  MaintenanceOutcome,
   Metrics,
   MetricsResponse,
   IntegrationEntry,
@@ -34,6 +36,7 @@ import type {
   UnderstandingItemView,
   UnderstandingView,
   ToolCheck,
+  UpdateStatusView,
   WorkspaceLifecycleView,
   VerificationRecord,
   VerificationView,
@@ -543,6 +546,62 @@ export function backupStatus(overrides: Partial<BackupStatus> = {}): BackupStatu
   return {
     backups: [backupSummary()],
     latest_drill: drillReport(),
+    ...overrides,
+  };
+}
+
+/** 測試用的更新狀態：0.1.0 已檢查過、是最新版本、沒有進行中或最近一次的維護。 */
+export function updateStatus(overrides: Partial<UpdateStatusView> = {}): UpdateStatusView {
+  return {
+    current_version: "0.1.0",
+    status: "up_to_date",
+    available: null,
+    checked_at: CHECKED_AT,
+    next_check_at: CHECKED_AT + 86_400_000,
+    error: null,
+    maintenance: null,
+    last_maintenance: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的可更新狀態：有 0.2.0 可以更新（附更新說明）。 */
+export function availableUpdateStatus(overrides: Partial<UpdateStatusView> = {}): UpdateStatusView {
+  return updateStatus({
+    status: "available",
+    available: { version: "0.2.0", notes: "修正完全退出的逾時", published_at: "2023-11-15T00:00:00Z" },
+    ...overrides,
+  });
+}
+
+/** 測試用的進行中維護：從 0.1.0 更新到 0.2.0，安裝程式已下載並驗證，停止中。 */
+export function maintenance(overrides: Partial<Maintenance> = {}): Maintenance {
+  return {
+    kind: "update",
+    phase: "stopping",
+    requested_at: CHECKED_AT,
+    from_version: "0.1.0",
+    target_version: "0.2.0",
+    package_path: "C:\\Baton\\updates\\Baton_0.2.0_x64-setup.exe",
+    backup_id: null,
+    message: null,
+    completed_at: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的最近一次維護：已從 0.1.0 更新到 0.2.0，在 CHECKED_AT 一分鐘後結束。 */
+export function maintenanceOutcome(overrides: Partial<MaintenanceOutcome> = {}): MaintenanceOutcome {
+  return {
+    kind: "update",
+    from_version: "0.1.0",
+    running_version: "0.2.0",
+    target_version: "0.2.0",
+    applied: true,
+    requested_at: CHECKED_AT,
+    finished_at: CHECKED_AT + 60_000,
+    backup_id: "bk_pre_update",
+    message: null,
     ...overrides,
   };
 }

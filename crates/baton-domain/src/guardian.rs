@@ -156,13 +156,12 @@ pub fn suppression_of(read: &LifecycleFileRead) -> Option<Suppression> {
     match read {
         LifecycleFileRead::Missing => None,
         LifecycleFileRead::Unreadable => Some(Suppression::Unknown),
-        LifecycleFileRead::Parsed(file) => {
-            if file.stop.is_some() {
-                Some(Suppression::FullExit)
-            } else {
-                file.maintenance.as_ref().map(|m| Suppression::Maintenance(m.kind.clone()))
-            }
-        }
+        // 維護（票 34）沿用完全退出的停止流程，兩者同時存在時回報較具體的維護
+        LifecycleFileRead::Parsed(file) => match (&file.maintenance, &file.stop) {
+            (Some(maintenance), _) => Some(Suppression::Maintenance(maintenance.kind.clone())),
+            (None, Some(_)) => Some(Suppression::FullExit),
+            (None, None) => None,
+        },
     }
 }
 

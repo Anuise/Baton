@@ -14,6 +14,7 @@ mod platform;
 mod process;
 mod quota;
 mod secret;
+mod update;
 mod user_settings;
 mod workspace_fs;
 
@@ -33,6 +34,7 @@ pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
 pub use secret::SecretProtector;
+pub use update::UpdateSource;
 pub use user_settings::{DirUserSettingsSource, SourceFile, SourceFiles, UserSettingsSource};
 pub use workspace_fs::{
     directory_state, list_files_recursive, partial_path, read_file_if_exists, write_file_atomic, write_readonly_tree,
@@ -71,4 +73,6 @@ pub struct Ports {
     pub login_session: Arc<dyn LoginSession>,
     /// 「登入時自動啟動」的 Windows 登記（票 33；HKCU Run 機碼）。
     pub startup_registration: Arc<dyn StartupRegistration>,
+    /// 簽章更新的來源（票 34）。
+    pub update_source: Arc<dyn UpdateSource>,
 }

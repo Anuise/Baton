@@ -71,7 +71,7 @@ impl BackupScheduler {
                 let requested = *self.pending();
                 if let Some(trigger) = backup::due_backup(latest, requested, now) {
                     // 只清除這份備份涵蓋得到的要求：備份進行中才到的要求留給下一份
-                    if self.back_up(trigger, now).await {
+                    if self.back_up(trigger, now).await.is_ok() {
                         let mut pending = self.pending();
                         if pending.is_some_and(|at| at <= now) {
                             *pending = None;
@@ -93,17 +93,24 @@ impl BackupScheduler {
         tokio::task::spawn_blocking(move || store_backup::list_backups(&data_dir)).await.map_err(|_| BackupError::Join)?
     }
 
-    /// 建立一份備份並套用保留規則；回傳備份是否成功。
-    async fn back_up(&self, trigger: BackupTrigger, now: Timestamp) -> bool {
-        match self.store.create_backup(trigger, now).await {
+    /// 立即建立一份備份並套用保留規則（更新前備份，票 34）；回傳備份識別，失敗時回傳原因。
+    pub async fn back_up_now(&self, trigger: BackupTrigger) -> Result<String, String> {
+        let _serial = self.tick_lock.lock().await;
+        self.back_up(trigger, self.clock.now()).await
+    }
+
+    /// 建立一份備份並套用保留規則；回傳備份識別，失敗時回傳原因。
+    async fn back_up(&self, trigger: BackupTrigger, now: Timestamp) -> Result<String, String> {
+        let id = match self.store.create_backup(trigger, now).await {
             Ok(manifest) => {
                 self.note(&format!("已建立備份 {}（{} 個成果檔案）", manifest.id, manifest.artifacts.len()));
+                manifest.id
             }
             Err(error) => {
                 self.note(&format!("{} 備份失敗：{error}", trigger.as_str()));
-                return false;
+                return Err(error.to_string());
             }
-        }
+        };
         let data_dir = self.data_dir.clone();
         match tokio::task::spawn_blocking(move || store_backup::apply_retention(&data_dir)).await {
             Ok(Ok(removed)) if !removed.is_empty() => self.note(&format!("依保留規則刪除 {} 份備份", removed.len())),
@@ -111,7 +118,7 @@ impl BackupScheduler {
             Ok(Err(error)) => self.note(&format!("套用保留規則失敗：{error}")),
             Err(_) => self.note("套用保留規則被中斷"),
         }
-        true
+        Ok(id)
     }
 
     async fn drill_if_due(&self, now: Timestamp) {

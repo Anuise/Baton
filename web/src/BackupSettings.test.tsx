@@ -75,6 +75,7 @@ describe("備份與還原演練", () => {
 
   it("依 Runtime 的順序列出備份的時間、觸發原因、成果檔案數與保留原因", async () => {
     const backups = [
+      backupSummary({ id: "b4", trigger: "pre_update", created_at: CHECKED_AT + 10_800_000, artifact_count: 1, retained_as: [] }),
       backupSummary({
         id: "b3",
         trigger: "milestone",
@@ -95,6 +96,7 @@ describe("備份與還原演練", () => {
 
     const list = await screen.findByRole("list", { name: "備份清單" });
     expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "2023/11/15 09:13・更新前・成果檔案 1 個",
       "2023/11/15 08:13・重要裁定／Stage 完成・成果檔案 5 個",
       "2023/11/15 07:13・migration 前・成果檔案 0 個・保留原因：最新的 migration 前備份",
       "2023/11/15 06:13・每日・成果檔案 2 個・保留原因：每日、每週",

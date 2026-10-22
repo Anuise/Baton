@@ -23,6 +23,7 @@ const TRIGGER_LABELS: Record<BackupTrigger, string> = {
   daily: "每日",
   pre_migration: "migration 前",
   milestone: "重要裁定／Stage 完成",
+  pre_update: "更新前",
 };
 
 const RETENTION_LABELS: Record<RetentionReason, string> = {

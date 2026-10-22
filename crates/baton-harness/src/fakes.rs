@@ -1255,6 +1255,75 @@ impl StartupRegistration for FakeStartupRegistration {
     }
 }
 
+/// 簽章更新的來源（票 34）。預設是「未設定更新來源」；`publish` 之後回報那個版本。
+#[derive(Default)]
+pub struct FakeUpdateSource {
+    latest: std::sync::Mutex<Option<baton_domain::maintenance::ReleaseInfo>>,
+    fail_next_check: std::sync::Mutex<Option<String>>,
+    reject_signature: std::sync::atomic::AtomicBool,
+    checks: std::sync::atomic::AtomicUsize,
+    downloads: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeUpdateSource {
+    /// 更新來源公布 `version` 為最新版本。
+    pub fn publish(&self, version: &str) {
+        *self.latest.lock().unwrap() = Some(baton_domain::maintenance::ReleaseInfo {
+            version: version.to_string(),
+            notes: Some(format!("Baton {version} 的更新說明")),
+            published_at: Some("2026-10-22T00:00:00Z".to_string()),
+            url: format!("https://updates.example.invalid/Baton_{version}_x64-setup.exe"),
+            signature: format!("fake-signature-{version}"),
+        });
+    }
+
+    /// 下一次查詢以這個原因失敗（例如離線）。
+    pub fn fail_next_check(&self, reason: &str) {
+        *self.fail_next_check.lock().unwrap() = Some(reason.to_string());
+    }
+
+    /// 之後下載的安裝程式簽章都不正確（被竄改或公鑰不符）。
+    pub fn reject_signature(&self, reject: bool) {
+        self.reject_signature.store(reject, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 查詢最新版本的次數。
+    pub fn checks(&self) -> usize {
+        self.checks.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 下載並通過簽章驗證的版本，依時間順序。
+    pub fn downloads(&self) -> Vec<String> {
+        self.downloads.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl UpdateSource for FakeUpdateSource {
+    async fn latest(&self) -> PortResult<baton_domain::maintenance::ReleaseInfo> {
+        self.checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(reason) = self.fail_next_check.lock().unwrap().take() {
+            return Err(PortError::Failed(reason));
+        }
+        self.latest.lock().unwrap().clone().ok_or(PortError::NotImplemented("UpdateSource"))
+    }
+
+    async fn download(
+        &self,
+        release: &baton_domain::maintenance::ReleaseInfo,
+        dest_dir: &Path,
+    ) -> PortResult<std::path::PathBuf> {
+        if self.reject_signature.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(PortError::Failed(format!("安裝程式 {} 的簽章驗證失敗", release.version)));
+        }
+        std::fs::create_dir_all(dest_dir).map_err(|e| PortError::Failed(e.to_string()))?;
+        let path = dest_dir.join(format!("Baton_{}_x64-setup.exe", release.version));
+        std::fs::write(&path, b"fake installer").map_err(|e| PortError::Failed(e.to_string()))?;
+        self.downloads.lock().unwrap().push(release.version.clone());
+        Ok(path)
+    }
+}
+
 pub struct FakePorts {
     pub clock: Arc<FakeClock>,
     pub process_control: Arc<FakeProcessControl>,
@@ -1269,6 +1338,7 @@ pub struct FakePorts {
     pub guardian_probe: Arc<FakeGuardianProbe>,
     pub login_session: Arc<FakeLoginSession>,
     pub startup_registration: Arc<FakeStartupRegistration>,
+    pub update_source: Arc<FakeUpdateSource>,
 }
 
 impl FakePorts {
@@ -1287,6 +1357,7 @@ impl FakePorts {
             guardian_probe: Arc::default(),
             login_session: Arc::default(),
             startup_registration: Arc::default(),
+            update_source: Arc::default(),
         }
     }
 
@@ -1306,6 +1377,7 @@ impl FakePorts {
             guardian_probe: self.guardian_probe.clone(),
             login_session: self.login_session.clone(),
             startup_registration: self.startup_registration.clone(),
+            update_source: self.update_source.clone(),
         }
     }
 }

@@ -25,6 +25,7 @@ pub mod integration;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod login;
+pub mod maintenance;
 pub mod message;
 pub mod metrics;
 pub mod permission;

@@ -33,6 +33,9 @@ use tempfile::TempDir;
 
 pub use fakes::FakePorts;
 
+/// Harness 中 Runtime 的預設版本（與正式建置的版本無關，測試以它比較更新）。
+pub const DEFAULT_APP_VERSION: &str = "0.1.0";
+
 /// 預設的 fake 時鐘起點（任意固定值，避免與真實時間混淆）。
 const DEFAULT_CLOCK_START: Timestamp = Timestamp::from_millis(1_000_000_000_000);
 
@@ -48,6 +51,7 @@ pub struct HarnessBuilder {
     adapter: Option<AdapterFactory>,
     exit_timing: ExitTiming,
     full_text_search: bool,
+    exit_linger: Option<Duration>,
 }
 
 impl HarnessBuilder {
@@ -60,6 +64,13 @@ impl HarnessBuilder {
     /// 測「停不下來」的情境時縮短，免得真的等 40 秒。
     pub fn exit_timing(mut self, timing: ExitTiming) -> Self {
         self.exit_timing = timing;
+        self
+    }
+
+    /// 完全退出（含更新、解除安裝的停止流程）結束後，Runtime 再提供這麼久的 API 就自行結束服務（與正式執行相同）。
+    /// 預設不自行結束；只有要讓「Runtime 之外的程式」（例如解除安裝程式的準備步驟）看到 Runtime 結束時才設定。
+    pub fn exit_linger(mut self, linger: Duration) -> Self {
+        self.exit_linger = Some(linger);
         self
     }
 
@@ -104,17 +115,10 @@ impl HarnessBuilder {
             full_text_search: self.full_text_search,
             guardian: None,
             guardian_script: GuardianScript::default(),
+            exit_linger: self.exit_linger,
+            app_version: DEFAULT_APP_VERSION.to_string(),
         };
-        harness.runtime = Some(
-            try_start_runtime(
-                harness.data_dir.path(),
-                &harness.ports(),
-                harness.exit_timing,
-                harness.full_text_search,
-                StartedBy::App,
-            )
-            .await?,
-        );
+        harness.runtime = Some(harness.launch(StartedBy::App).await?);
         Ok(harness)
     }
 }
@@ -133,6 +137,9 @@ pub struct Harness {
     /// 程序內的監護（票 32）；`None` 表示沒有監護（從未啟動或已被殺掉）。
     guardian: Option<Guardian>,
     guardian_script: GuardianScript,
+    exit_linger: Option<Duration>,
+    /// 下一次啟動的 Runtime 的版本（票 34）；`install_version` 模擬安裝程式換上新版本。
+    app_version: String,
 }
 
 /// 監護啟動 Runtime 的一筆紀錄（票 32）。
@@ -185,6 +192,7 @@ impl Harness {
             adapter: None,
             exit_timing: ExitTiming::default(),
             full_text_search: true,
+            exit_linger: None,
         }
     }
 
@@ -425,9 +433,7 @@ impl Harness {
     }
 
     async fn start_again(&mut self) {
-        let runtime =
-            try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search, StartedBy::App)
-                .await;
+        let runtime = self.launch(StartedBy::App).await;
         self.runtime = Some(runtime.unwrap_or_else(|e| panic!("Runtime 重啟失敗：{e}")));
         self.exits_seen.store(0, Ordering::SeqCst);
     }
@@ -437,14 +443,38 @@ impl Harness {
         if self.runtime.is_some() {
             return Err("已有 Runtime 在執行（單實例），本程序結束".to_string());
         }
-        let started =
-            try_start_runtime(self.data_dir.path(), &self.ports(), self.exit_timing, self.full_text_search, by).await;
-        started
+        self.launch(by)
+            .await
             .map(|runtime| {
                 self.runtime = Some(runtime);
                 self.exits_seen.store(0, Ordering::SeqCst);
             })
             .map_err(|e| e.to_string())
+    }
+
+    /// 以目前的設定啟動一個 Runtime；回傳的 future 不借用 Harness（監護的 `RuntimeHost` 需要 `Send`）。
+    fn launch(&self, by: StartedBy) -> impl std::future::Future<Output = Result<RunningRuntime, RuntimeError>> + Send + 'static {
+        let data_dir = self.data_dir.path().to_path_buf();
+        let ports = self.ports();
+        let launch = Launch {
+            exit_timing: self.exit_timing,
+            full_text_search: self.full_text_search,
+            exit_linger: self.exit_linger,
+            app_version: self.app_version.clone(),
+        };
+        async move { try_start_runtime(&data_dir, &ports, launch, by).await }
+    }
+
+    // ------------------------------------------------------------ 更新與解除安裝（票 34）
+
+    /// 讓更新檢查處理一次：該檢查（啟動後第一次、之後每 24 小時）就向 fake 更新來源查詢。時間由 fake Clock 決定。
+    pub async fn check_updates(&self) {
+        self.runtime.as_ref().expect("Runtime 尚未啟動").updates().tick().await;
+    }
+
+    /// 模擬安裝程式把程式換成 `version`：之後啟動的 Runtime 回報這個版本。
+    pub fn install_version(&mut self, version: &str) {
+        self.app_version = version.to_string();
     }
 
     // ------------------------------------------------------------ 跨 Windows 登入（票 33）
@@ -610,13 +640,15 @@ enum StartedBy {
     Login,
 }
 
-async fn try_start_runtime(
-    data_dir: &Path,
-    ports: &Ports,
+/// 啟動 Runtime 時沿用的 harness 設定。
+struct Launch {
     exit_timing: ExitTiming,
     full_text_search: bool,
-    by: StartedBy,
-) -> Result<RunningRuntime, RuntimeError> {
+    exit_linger: Option<Duration>,
+    app_version: String,
+}
+
+async fn try_start_runtime(data_dir: &Path, ports: &Ports, launch: Launch, by: StartedBy) -> Result<RunningRuntime, RuntimeError> {
     let (guardian_attempt, login_start) = match by {
         StartedBy::App => (None, false),
         StartedBy::Guardian(attempt_id) => (Some(attempt_id), false),
@@ -627,16 +659,18 @@ async fn try_start_runtime(
         // 埠 0 讓作業系統配置；每個 Harness 與每次重建都不會互相衝突
         bind: "127.0.0.1:0".parse().expect("固定位址"),
     };
-    // 測試自己決定何時讓 Supervisor 與備份排程動作（`Harness::supervise`、`Harness::run_backups`），所以不啟動背景迴圈；
-    // 完全退出後也不自行結束服務，由測試決定何時丟棄或重啟 Runtime
+    // 測試自己決定何時讓 Supervisor、備份排程與更新檢查動作（`Harness::supervise`、`Harness::run_backups`、
+    // `Harness::check_updates`），所以不啟動背景迴圈；完全退出後預設也不自行結束服務，由測試決定何時丟棄或重啟 Runtime
     let options = RuntimeOptions {
         background_supervisor: false,
         background_backup: false,
-        exit_timing,
-        exit_linger: None,
-        full_text_search,
+        background_update_check: false,
+        exit_timing: launch.exit_timing,
+        exit_linger: launch.exit_linger,
+        full_text_search: launch.full_text_search,
         guardian_attempt,
         login_start,
+        app_version: launch.app_version,
         ..RuntimeOptions::default()
     };
     Runtime::start_with(config, ports.clone(), options).await

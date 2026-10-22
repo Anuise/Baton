@@ -27,6 +27,7 @@ mod setup;
 mod shared_settings;
 mod tasks;
 mod timeline;
+mod updates;
 mod understanding;
 mod verification;
 pub mod workdirs;
@@ -102,6 +103,10 @@ pub use lifecycle::{
     LIFECYCLE_EXIT_PATH, LIFECYCLE_PATH, LOGIN_STARTUP_PATH,
 };
 pub use recovery::{RecoveryStatusView, RECOVERY_PATH, RECOVERY_RETRY_PATH};
+pub use updates::{
+    ApplyUpdateRequest, AvailableUpdateView, MaintenanceRequestBody, UpdateControl, UpdatePrepareError, UpdateStatusView,
+    MAINTENANCE_PATH, UPDATES_PATH, UPDATE_APPLY_PATH,
+};
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
 pub use sessions::{session_path, sessions_path, SessionList};
@@ -215,6 +220,10 @@ pub struct ApiState {
     pub exit_timing: ExitTiming,
     /// 停止意圖持久化之後通知 Runtime 開始停止 Run（票 25）。
     pub exit_signal: Arc<Notify>,
+    /// 這個 Runtime 的版本（票 34；維護記錄從哪個版本開始）。
+    pub app_version: String,
+    /// 更新檢查與下載（票 34）。
+    pub updates: Arc<dyn UpdateControl>,
     /// 專案理解投影檔的比對與寫入一次只做一個（票 42）。
     pub projection_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -278,6 +287,9 @@ pub fn router(state: ApiState) -> Router {
         .route(lifecycle::WORKSPACE_RESUME_ROUTE, post(lifecycle::resume_workspace))
         .route(LOGIN_STARTUP_PATH, axum::routing::put(lifecycle::update_login_startup))
         .route(lifecycle::WORKSPACE_LOGIN_RESUME_ROUTE, axum::routing::put(lifecycle::update_login_resume))
+        .route(UPDATES_PATH, get(updates::status))
+        .route(UPDATE_APPLY_PATH, post(updates::apply))
+        .route(MAINTENANCE_PATH, post(updates::request))
         .route(RECOVERY_PATH, get(recovery::status))
         .route(RECOVERY_RETRY_PATH, post(recovery::retry))
         .route(SCHEDULING_PATH, get(scheduling::view))
@@ -346,7 +358,7 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         product: product::PRODUCT_NAME.to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: state.app_version.clone(),
         boot_count: state.boot_count,
         started_at: state.started_at,
         pid: std::process::id(),
