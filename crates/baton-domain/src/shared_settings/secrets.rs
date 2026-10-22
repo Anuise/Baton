@@ -144,3 +144,86 @@ fn url_has_password(word: &str) -> bool {
     let Some((userinfo, _)) = authority.rsplit_once('@') else { return false };
     userinfo.split_once(':').is_some_and(|(_, password)| !password.is_empty() && !is_reference(password))
 }
+
+/// 把文字中看起來像秘密的片段換成 `replacement`，回傳遮蔽後的文字與遮蔽的數量（票 15：對話紀錄匯入）。
+///
+/// 辨識規則與 `contains_secret_value` 相同（已知金鑰格式、`名稱=值`、`名稱: 值`、`Bearer …`、含密碼的網址、私鑰區塊），
+/// 另外把 64 個十六進位字元的片段視為秘密：Runtime 簽發的憑證就是這個形狀（代價是 SHA-256 雜湊也會被遮蔽）。
+pub(crate) fn redact_secrets(text: &str, replacement: &str) -> (String, u64) {
+    let mut count = 0;
+    let mut text = text.to_string();
+    // 私鑰區塊可能跨行，先整段處理
+    while let Some(start) = text.find("-----BEGIN") {
+        let Some(marker) = text[start..].find("PRIVATE KEY-----") else { break };
+        let after_begin = start + marker + "PRIVATE KEY-----".len();
+        let end = match text[after_begin..].find("PRIVATE KEY-----") {
+            Some(offset) => after_begin + offset + "PRIVATE KEY-----".len(),
+            None => text.len(),
+        };
+        text.replace_range(start..end, replacement);
+        count += 1;
+    }
+
+    // 依分隔字元切成片段（保留分隔字元），逐一判斷
+    let mut pieces: Vec<(bool, &str)> = Vec::new();
+    let mut word_start = None;
+    for (at, c) in text.char_indices() {
+        if is_separator(c) {
+            if let Some(start) = word_start.take() {
+                pieces.push((true, &text[start..at]));
+            }
+            pieces.push((false, &text[at..at + c.len_utf8()]));
+        } else if word_start.is_none() {
+            word_start = Some(at);
+        }
+    }
+    if let Some(start) = word_start {
+        pieces.push((true, &text[start..]));
+    }
+
+    let words: Vec<usize> = pieces.iter().enumerate().filter(|(_, (is_word, _))| *is_word).map(|(i, _)| i).collect();
+    let mut masked = vec![false; pieces.len()];
+    for (index, &piece) in words.iter().enumerate() {
+        let word = pieces[piece].1;
+        if word_looks_secret(word) || has_token_hex(word) || header_has_secret(word, None) {
+            masked[piece] = true;
+            continue;
+        }
+        // 秘密在下一個片段：`Bearer <token>` 或 `名稱: <值>`
+        let Some(&next_piece) = words.get(index + 1) else { continue };
+        let next = pieces[next_piece].1;
+        let scheme = word.eq_ignore_ascii_case("bearer") || word.eq_ignore_ascii_case("basic");
+        if (scheme && next.chars().count() >= 16 && !is_reference(next))
+            || (word.ends_with(':') && header_has_secret(word, Some(next)))
+        {
+            masked[next_piece] = true;
+        }
+    }
+    let mut out = String::with_capacity(text.len());
+    for (index, (_, piece)) in pieces.iter().enumerate() {
+        if masked[index] {
+            out.push_str(replacement);
+            count += 1;
+        } else {
+            out.push_str(piece);
+        }
+    }
+    (out, count)
+}
+
+/// 含有恰好 64 個連續十六進位字元的片段（前後不是英數字元）。
+fn has_token_hex(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    let mut run = 0;
+    for (at, b) in bytes.iter().enumerate() {
+        if b.is_ascii_hexdigit() {
+            run += 1;
+            continue;
+        }
+        if run == 64 && !b.is_ascii_alphanumeric() && (at - run == 0 || !bytes[at - run - 1].is_ascii_alphanumeric()) {
+            return true;
+        }
+        run = 0;
+    }
+    run == 64 && (bytes.len() == 64 || !bytes[bytes.len() - 65].is_ascii_alphanumeric())
+}

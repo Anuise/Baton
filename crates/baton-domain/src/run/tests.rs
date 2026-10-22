@@ -36,6 +36,7 @@ struct World {
     contracts: Vec<TaskContract>,
     runs: Vec<Run>,
     leases: Vec<ExecutionLease>,
+    sessions: Vec<AgentSession>,
     next_run: u32,
 }
 
@@ -51,6 +52,7 @@ impl World {
             contracts: vec![],
             runs: vec![],
             leases: vec![],
+            sessions: vec![],
             next_run: 0,
         };
         world.task_command(TaskCommand::CreateGoal { id: "g1".into(), title: "目標".into() }).unwrap();
@@ -99,7 +101,7 @@ impl World {
 
     fn decide(&self, command: RunCommand, now: Timestamp) -> Result<RunChange, RunError> {
         let task = self.task_ctx();
-        decide(&RunContext { task: &task, runs: &self.runs, leases: &self.leases }, command, now)
+        decide(&RunContext { task: &task, runs: &self.runs, leases: &self.leases, sessions: &self.sessions }, command, now)
     }
 
     /// 判定並套用；被拒絕時狀態完全不變。
@@ -113,6 +115,9 @@ impl World {
         }
         if let Some(task) = &change.task {
             upsert(&mut self.tasks, task.clone(), |t| t.id.clone());
+        }
+        for session in &change.sessions {
+            upsert(&mut self.sessions, session.clone(), |s| s.id.clone());
         }
         Ok(change)
     }
@@ -139,9 +144,19 @@ impl World {
     /// 把 Run 推進到 running，回傳 Run 識別。
     fn running(&mut self, task_id: &str, now: Timestamp) -> String {
         let run_id = self.dispatch(task_id, now).unwrap();
-        self.step(RunCommand::BeginLaunch { run_id: run_id.clone(), command_id: format!("cmd-{run_id}") }, now).unwrap();
+        self.step(begin(&run_id, &format!("cmd-{run_id}")), now).unwrap();
         self.step(RunCommand::RecordReceipt { run_id: run_id.clone(), process: process(1) }, now).unwrap();
         run_id
+    }
+}
+
+/// 寫入 launch intent（沒有接續能力的查驗結果）。
+fn begin(run_id: &str, command_id: &str) -> RunCommand {
+    RunCommand::BeginLaunch {
+        run_id: run_id.into(),
+        command_id: command_id.into(),
+        working_dir: "C:\\work\\app".into(),
+        resume_check: None,
     }
 }
 
@@ -272,7 +287,7 @@ fn launch_intent_and_receipt_are_recorded_in_order_and_are_idempotent() {
     let mut world = World::new(&["t1"]);
     let run_id = world.dispatch("t1", T0).unwrap();
 
-    let begin = RunCommand::BeginLaunch { run_id: run_id.clone(), command_id: "cmd-1".into() };
+    let begin = begin(&run_id, "cmd-1");
     world.step(begin.clone(), later(1_000)).unwrap();
     let again = world.step(begin, later(2_000)).unwrap();
     let receipt = RunCommand::RecordReceipt { run_id: run_id.clone(), process: process(77) };
@@ -302,7 +317,7 @@ fn a_receipt_cannot_skip_the_launch_intent() {
 fn a_failed_launch_releases_the_lease_and_returns_the_task_to_ready() {
     let mut world = World::new(&["t1"]);
     let run_id = world.dispatch("t1", T0).unwrap();
-    world.step(RunCommand::BeginLaunch { run_id: run_id.clone(), command_id: "c".into() }, T0).unwrap();
+    world.step(begin(&run_id, "c"), T0).unwrap();
 
     world.step(RunCommand::LaunchFailed { run_id: run_id.clone(), reason: "找不到程式".into() }, T0).unwrap();
 
@@ -675,7 +690,7 @@ proptest! {
                     world.next_run += 1;
                     RunCommand::Dispatch { run_id: format!("run{}", world.next_run), task_id: task_ids[i % 3].into(), profile_id: "p1".into() }
                 }
-                Op::BeginLaunch(i) => match run_of(&world, i) { Some((run_id, _)) => RunCommand::BeginLaunch { command_id: format!("cmd-{run_id}"), run_id }, None => continue },
+                Op::BeginLaunch(i) => match run_of(&world, i) { Some((run_id, _)) => begin(&run_id, &format!("cmd-{run_id}")), None => continue },
                 Op::Receipt(i) => match run_of(&world, i) { Some((run_id, _)) => RunCommand::RecordReceipt { run_id, process: process(5) }, None => continue },
                 Op::LaunchFailed(i) => match run_of(&world, i) { Some((run_id, _)) => RunCommand::LaunchFailed { run_id, reason: "x".into() }, None => continue },
                 Op::Heartbeat(i, stale) => match run_of(&world, i) { Some((run_id, generation)) => RunCommand::Heartbeat { run_id, generation: generation + i64::from(stale) }, None => continue },
@@ -716,6 +731,10 @@ fn bind(world: &mut World, run_id: &str, session: &str) -> Result<RunChange, Run
     world.step(command, later(1_000))
 }
 
+fn run_events(change: &RunChange) -> Vec<&DomainEvent> {
+    change.events.iter().filter(|e| e.aggregate_type == RUN_AGGREGATE).collect()
+}
+
 #[test]
 fn the_first_native_session_id_is_bound_to_the_run_with_an_event() {
     let mut world = World::new(&["t1"]);
@@ -724,9 +743,11 @@ fn the_first_native_session_id_is_bound_to_the_run_with_an_event() {
     let change = bind(&mut world, &run_id, "sess-a").unwrap();
 
     assert_eq!(world.run(&run_id).native_session_id.as_deref(), Some("sess-a"));
-    assert_eq!(change.events.len(), 1);
-    assert_eq!(change.events[0].event_type, EVENT_RUN_NATIVE_SESSION_BOUND);
-    assert_eq!(change.events[0].payload["native_session_id"], "sess-a");
+    // 平台 Session 的綁定事件另外記在 Session 上（票 15）
+    let events = run_events(&change);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, EVENT_RUN_NATIVE_SESSION_BOUND);
+    assert_eq!(events[0].payload["native_session_id"], "sess-a");
 }
 
 #[test]
@@ -751,8 +772,9 @@ fn a_different_native_session_never_replaces_the_bound_one_and_the_conflict_is_r
     let change = bind(&mut world, &run_id, "sess-b").unwrap();
 
     assert_eq!(world.run(&run_id).native_session_id.as_deref(), Some("sess-a"), "不靜默改指其他原生 Session");
-    assert_eq!(change.events.len(), 1);
-    let event = &change.events[0];
+    let events = run_events(&change);
+    assert_eq!(events.len(), 1);
+    let event = events[0];
     assert_eq!(event.event_type, EVENT_RUN_NATIVE_SESSION_CONFLICT);
     assert_eq!((event.payload["bound"].as_str(), event.payload["reported"].as_str()), (Some("sess-a"), Some("sess-b")));
 }
@@ -796,4 +818,45 @@ fn launch_payloads_stored_before_models_existed_have_no_model() {
     let payload: LaunchPayload = serde_json::from_str(old).unwrap();
 
     assert_eq!(payload.model, None);
+}
+
+// ------------------------------------------------------------ Session（票 15）
+
+#[test]
+fn the_launch_intent_creates_the_session_and_a_run_ending_before_binding_leaves_it_unavailable() {
+    let mut world = World::new(&["t1"]);
+    let first = world.running("t1", T0);
+    let session_id = world.run(&first).agent_session_id.clone().unwrap();
+    let session = world.sessions.iter().find(|s| s.id == session_id).unwrap();
+    assert_eq!((session.state, session.driver_run_id.as_deref()), (session::SessionState::Allocating, Some(first.as_str())));
+
+    world.step(RunCommand::Interrupt { run_id: first.clone(), reason: "x".into() }, later(1_000)).unwrap();
+    let session = world.sessions.iter().find(|s| s.id == session_id).unwrap();
+    assert_eq!(session.state, session::SessionState::Unavailable);
+    assert_eq!(session.driver_run_id, None);
+
+    let second = world.running("t1", later(2_000));
+    let replacement = world.run(&second).agent_session_id.clone().unwrap();
+    assert_ne!(replacement, session_id);
+    let replacement = world.sessions.iter().find(|s| s.id == replacement).unwrap();
+    assert_eq!(replacement.predecessor_session_id.as_deref(), Some(session_id.as_str()));
+    assert!(replacement.history_gap.is_some());
+    assert_eq!(world.run(&second).resume_native_session_id, None);
+}
+
+#[test]
+fn a_run_reporting_a_native_session_driven_by_another_run_is_asked_to_stop() {
+    let mut world = World::new(&["t1", "t2"]);
+    let first = world.running("t1", T0);
+    let second = world.running("t2", T0);
+    bind(&mut world, &first, "sess-a").unwrap();
+
+    let change = bind(&mut world, &second, "sess-a").unwrap();
+
+    assert_eq!(world.run(&second).cancel_requested_at, Some(later(1_000)));
+    let cancel = run_events(&change).into_iter().find(|e| e.event_type == EVENT_RUN_CANCEL_REQUESTED).unwrap();
+    assert_eq!(cancel.payload["reason"], session::NATIVE_SESSION_IN_USE);
+    let second_session = world.run(&second).agent_session_id.clone().unwrap();
+    let second_session = world.sessions.iter().find(|s| s.id == second_session).unwrap();
+    assert_eq!(second_session.native_session_id, None, "同一個原生 Session 不會綁到第二個平台 Session");
 }

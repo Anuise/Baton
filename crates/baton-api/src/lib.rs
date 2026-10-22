@@ -17,6 +17,7 @@ mod profiles;
 pub mod quota;
 mod runs;
 mod scheduling;
+mod sessions;
 mod setup;
 mod shared_settings;
 mod tasks;
@@ -77,6 +78,7 @@ pub use lifecycle::{
 };
 pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
+pub use sessions::{session_path, sessions_path, SessionList};
 pub use runs::{run_cancel_path, run_path, runs_path, task_dispatch_path, DispatchRequest, QueuedDispatch, RunList};
 pub use scheduling::{
     AccountRun, AccountScheduling, CapacityModeInfo, CapacityView, QueueEntryView, SchedulingOverview,
@@ -208,6 +210,8 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUNS_ROUTE, get(runs::list))
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
+        .route(sessions::SESSIONS_ROUTE, get(sessions::list))
+        .route(sessions::SESSION_ROUTE, get(sessions::detail))
         .route(LIFECYCLE_PATH, get(lifecycle::status))
         .route(LIFECYCLE_EXIT_PATH, post(lifecycle::request_exit))
         .route(lifecycle::WORKSPACE_LIFECYCLE_ROUTE, axum::routing::put(lifecycle::update_workspace))

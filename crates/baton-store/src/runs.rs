@@ -58,7 +58,12 @@ impl Store {
                 {
                     return Ok(Err(RunError::LaunchHalted));
                 }
-                let loaded = load(tx, &workspace_id)?;
+                let mut loaded = load(tx, &workspace_id)?;
+                // 原生識別的命名空間不以 Workspace 為界：綁定前一併載入其他 Workspace 中綁定了同一個識別的 Session
+                if let RunCommand::BindNativeSession { native_session_id, .. } = &command {
+                    let others = super::sessions::load_other_sessions_with_native(tx, &workspace_id, native_session_id)?;
+                    loaded.sessions.extend(others);
+                }
                 match decide_in(&loaded, &workspace_id, &loaded.tasks, command, now) {
                     Err(rejected) => Ok(Err(rejected)),
                     Ok(mut change) => {
@@ -155,7 +160,8 @@ pub(crate) fn decide_in(
 ) -> Result<RunChange, RunError> {
     let ctx = loaded.ctx(workspace_id);
     let task_ctx = TaskContext { tasks, ..ctx };
-    run::decide(&RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases }, command, now)
+    let ctx = RunContext { task: &task_ctx, runs: &loaded.runs, leases: &loaded.leases, sessions: &loaded.sessions };
+    run::decide(&ctx, command, now)
 }
 
 /// 取消 Task 之後，同一個交易中要求取消它還在進行的 Run。
@@ -194,11 +200,12 @@ pub(crate) fn views(loaded: &Loaded) -> Vec<RunView> {
 
 const RUN_COLUMNS: &str = "id, workspace_id, task_id, status, version, generation, contract_version, \
      authorization_revision, command_id, pid, process_created_at, command_hash, cancel_requested_at, end_reason, \
-     created_at, updated_at, started_at, ended_at, profile_id, native_session_id";
+     created_at, updated_at, started_at, ended_at, profile_id, native_session_id, agent_session_id, resume_native_session_id";
 const RUN_COLUMNS_QUALIFIED: &str = "r.id, r.workspace_id, r.task_id, r.status, r.version, r.generation, \
      r.contract_version, r.authorization_revision, r.command_id, r.pid, r.process_created_at, r.command_hash, \
-     r.cancel_requested_at, r.end_reason, r.created_at, r.updated_at, r.started_at, r.ended_at, r.profile_id, r.native_session_id";
-const RUN_COLUMN_COUNT: usize = 20;
+     r.cancel_requested_at, r.end_reason, r.created_at, r.updated_at, r.started_at, r.ended_at, r.profile_id, r.native_session_id, \
+     r.agent_session_id, r.resume_native_session_id";
+const RUN_COLUMN_COUNT: usize = 22;
 
 const LEASE_COLUMNS: &str =
     "run_id, task_id, generation, acquired_at, last_heartbeat_at, expires_at, released_at, release_reason";
@@ -236,6 +243,8 @@ fn run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
         // 票 19 之前建立的 Run 沒有帳號
         profile_id: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
         native_session_id: r.get(19)?,
+        agent_session_id: r.get(20)?,
+        resume_native_session_id: r.get(21)?,
     })
 }
 
@@ -303,6 +312,10 @@ fn load_lease(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<Execut
 
 /// 把 Domain 的結果寫進同一個交易：Run、lease、Outbox、Task 與事件。
 pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> rusqlite::Result<()> {
+    // Session 先寫：Run 以外鍵引用它
+    for session in &change.sessions {
+        super::sessions::save_session(tx, session)?;
+    }
     if let Some(run) = &change.run {
         let (pid, process_created_at, command_hash) = match &run.process {
             Some(p) => (Some(p.pid), Some(p.created_at_millis), Some(p.command_hash.as_str())),
@@ -311,14 +324,15 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
         let millis = |t: Option<Timestamp>| t.map(|t| t.as_millis());
         tx.execute(
             &format!(
-                "INSERT INTO run ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                "INSERT INTO run ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                  ON CONFLICT(id) DO UPDATE SET
                    status = excluded.status, version = excluded.version, command_id = excluded.command_id,
                    pid = excluded.pid, process_created_at = excluded.process_created_at,
                    command_hash = excluded.command_hash, cancel_requested_at = excluded.cancel_requested_at,
                    end_reason = excluded.end_reason, updated_at = excluded.updated_at,
                    started_at = excluded.started_at, ended_at = excluded.ended_at,
-                   native_session_id = excluded.native_session_id"
+                   native_session_id = excluded.native_session_id, agent_session_id = excluded.agent_session_id,
+                   resume_native_session_id = excluded.resume_native_session_id"
             ),
             rusqlite::params![
                 run.id,
@@ -341,6 +355,8 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
                 millis(run.ended_at),
                 run.profile_id,
                 run.native_session_id,
+                run.agent_session_id,
+                run.resume_native_session_id,
             ],
         )?;
     }

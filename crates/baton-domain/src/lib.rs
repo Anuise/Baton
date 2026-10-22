@@ -23,6 +23,7 @@ pub mod quota;
 pub mod setup;
 pub mod run;
 pub mod scheduler;
+pub mod session;
 pub mod shared_settings;
 pub mod storage_location;
 pub mod task;

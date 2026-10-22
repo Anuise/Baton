@@ -35,6 +35,7 @@ mod profiles;
 mod quota;
 mod runs;
 mod scheduling;
+mod sessions;
 mod shared_settings;
 mod tasks;
 mod verification;
@@ -50,6 +51,7 @@ pub use messages::{Inbox, MessageApplyError, SendOutcome};
 pub use profiles::ProfileApplyError;
 pub use quota::{AccountQuota, QuotaApplyError};
 pub use runs::{ExecutingRun, PendingLaunch, RunApplyError};
+pub use sessions::TranscriptProgress;
 pub use scheduling::{
     QueuedRequest, ScheduleOutcome, ScheduleRequest, SchedulingSnapshot, StartedRun, WaitingTask,
 };
@@ -625,6 +627,63 @@ const MIGRATIONS: &[Migration] = &[
         name: "model_overrides_and_native_session",
         sql: "ALTER TABLE workspace ADD COLUMN model_overrides TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(model_overrides));
         ALTER TABLE run ADD COLUMN native_session_id TEXT;",
+    },
+    // 票 15：平台 Session、原生 Session 與程序身分分開保存（issue §3.1～3.2）。
+    // 原生識別的唯一性以「執行工具 + 帳號」為範圍；同一個平台 Session 任何時刻最多一個未結束的 Run 驅動它。
+    // session_events 是事件表中 Session 聚合的檢視；transcript_segments 只記位置、雜湊與保存進度，內容在成果儲存
+    Migration {
+        name: "agent_session_and_transcript",
+        sql: "CREATE TABLE agent_session (
+            id TEXT PRIMARY KEY,
+            runtime_type TEXT NOT NULL,
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            role TEXT NOT NULL CHECK (role IN ('controller', 'worker', 'reviewer')),
+            task_id TEXT REFERENCES task (id),
+            conversation_id TEXT,
+            profile_id TEXT NOT NULL,
+            working_directory TEXT NOT NULL,
+            native_session_id TEXT,
+            state TEXT NOT NULL CHECK (state IN ('allocating', 'active', 'suspended', 'closed', 'unavailable')),
+            state_reason TEXT,
+            version INTEGER NOT NULL CHECK (version >= 1),
+            driver_run_id TEXT,
+            predecessor_session_id TEXT REFERENCES agent_session (id),
+            replacement_reason TEXT,
+            history_gap TEXT,
+            resume_capability TEXT CHECK (resume_capability IN ('resumable', 'not_resumable', 'unknown')),
+            capability_checked_at INTEGER,
+            created_at INTEGER NOT NULL,
+            last_activity_at INTEGER NOT NULL,
+            CHECK ((driver_run_id IS NOT NULL) = (state IN ('allocating', 'active')))
+        );
+        CREATE INDEX agent_session_workspace ON agent_session (workspace_id);
+        CREATE UNIQUE INDEX agent_session_native ON agent_session (runtime_type, profile_id, native_session_id)
+            WHERE native_session_id IS NOT NULL;
+        CREATE UNIQUE INDEX agent_session_one_driver ON agent_session (driver_run_id) WHERE driver_run_id IS NOT NULL;
+        ALTER TABLE run ADD COLUMN agent_session_id TEXT REFERENCES agent_session (id);
+        ALTER TABLE run ADD COLUMN resume_native_session_id TEXT;
+        CREATE UNIQUE INDEX run_one_active_per_session ON run (agent_session_id)
+            WHERE agent_session_id IS NOT NULL AND status IN ('starting', 'running');
+        CREATE VIEW session_events AS
+            SELECT seq, aggregate_id AS agent_session_id, aggregate_version, event_type, occurred_at, payload
+            FROM event WHERE aggregate_type = 'agent_session';
+        CREATE TABLE transcript_segment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_session_id TEXT NOT NULL REFERENCES agent_session (id),
+            run_id TEXT NOT NULL REFERENCES run (id),
+            first_position INTEGER NOT NULL CHECK (first_position >= 1),
+            last_position INTEGER NOT NULL CHECK (last_position >= first_position),
+            availability TEXT NOT NULL CHECK (availability IN ('stored', 'missing')),
+            storage_path TEXT,
+            sha256 TEXT,
+            byte_len INTEGER,
+            entry_count INTEGER NOT NULL,
+            redactions INTEGER NOT NULL,
+            recorded_at INTEGER NOT NULL,
+            CHECK ((availability = 'stored') = (storage_path IS NOT NULL AND sha256 IS NOT NULL)),
+            UNIQUE (run_id, first_position)
+        );
+        CREATE INDEX transcript_segment_session ON transcript_segment (agent_session_id);",
     },
 ];
 
