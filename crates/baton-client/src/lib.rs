@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use baton_api::{
     admission_check_path, artifact_content_path,
-    controller_cli_end_path, controller_cli_path, ControllerCliView, OpenControllerCliRequest,
+    controller_cli_end_path, controller_cli_path, controller_cli_switch_path, ControllerCliView, OpenControllerCliRequest,
     artifact_preview_path, artifacts_path, authorization_path,
     authorization_summary_path, decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path,
     decision_path, decisions_path, goals_path, run_cancel_path, run_context_path, RunContextView, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
@@ -359,6 +359,13 @@ impl RuntimeClient {
     /// 要求結束開著的 Controller CLI；沒有開著的時回傳 `ClientError::Rejected`。
     pub async fn end_controller_cli(&self, workspace_id: &str) -> Result<ControllerCliView, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &controller_cli_end_path(workspace_id), None).await
+    }
+
+    /// 換帳號重開：結束目前的 Controller CLI，Runtime 結束後以 `profile_id` 開新的 Run（不接續原生 Session）。
+    /// 沒有開著的、與目前帳號相同、已在結束中或 Profile 不可用時回傳 `ClientError::Rejected`。
+    pub async fn switch_controller_cli(&self, workspace_id: &str, profile_id: &str) -> Result<ControllerCliView, ClientError> {
+        let request = OpenControllerCliRequest { profile_id: profile_id.to_string() };
+        self.send_json(reqwest::Method::POST, &controller_cli_switch_path(workspace_id), Some(&request)).await
     }
 
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。

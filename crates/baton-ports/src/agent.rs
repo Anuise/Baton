@@ -98,4 +98,9 @@ pub trait AgentAdapter: Send + Sync {
     fn events(&self, handle: &AgentHandle) -> BoxStream<'static, AdapterEvent>;
     /// 能否以原生方式接續這個 Session；判斷不了時回 `Unknown`（Runtime 不會把 `Unknown` 當成可接續）。
     async fn resume_capability(&self, session: &SessionRef) -> PortResult<Capability>;
+    /// 能否以 `--continue` 接回工作目錄在這個帳號（`CLAUDE_CONFIG_DIR`）下最近的原生 Session（desktop-controller-cli 票 05）：
+    /// 確定沒有任何原生 Session 時回 `NotResumable`，判斷不了時回 `Unknown`。
+    async fn continue_capability(&self, _config_dir: &str, _working_dir: &str) -> PortResult<Capability> {
+        Ok(Capability::Unknown)
+    }
 }

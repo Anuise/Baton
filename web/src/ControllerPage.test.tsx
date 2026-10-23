@@ -1,10 +1,25 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CONTROLLER_REFRESH_INTERVAL_MS, ControllerPage } from "./ControllerPage";
-import { CHECKED_AT, controllerCliRun, profile } from "./fixtures";
-import type { AccountProfile, ControllerCliRun, ControllerCliView, Workspace } from "./runtimeClient";
+import {
+  CHECKED_AT,
+  accountScheduling,
+  controllerCliRun,
+  profile,
+  quotaAssessment,
+  quotaObservation,
+  schedulingOverview,
+} from "./fixtures";
+import type {
+  AccountProfile,
+  AccountScheduling,
+  ControllerCliRun,
+  ControllerCliView,
+  SchedulingOverview,
+  Workspace,
+} from "./runtimeClient";
 
 const workspace: Workspace = {
   id: "ws_1",
@@ -26,9 +41,40 @@ const notLoggedIn = profile({
   blockers: [{ code: "unverified", message: "尚未核對登入狀態；請完成原生登入後按「重新核對」" }],
 });
 
+/** 第二個可用的 Profile。 */
+const spare = profile({ id: "prof_2", name: "第二帳號" });
+
 const viewOf = (run: ControllerCliRun | null): ControllerCliView => ({ workspace_id: "ws_1", run, playbook_version: "1" });
 
-function fakeClient(run: ControllerCliRun | null = null, profiles: AccountProfile[] = [notLoggedIn, profile()]) {
+/** 排程總覽裡的帳號：5h／7d 已用比例（null 是未知）與執行中 Worker 數。 */
+function accountWith(
+  profileId: string,
+  fiveHourUsed: number | null,
+  sevenDayUsed: number | null,
+  running: number,
+  overrides: Partial<AccountScheduling> = {},
+): AccountScheduling {
+  const observed = (window: "five_hour" | "seven_day", used: number | null) =>
+    used === null ? null : quotaObservation({ profile_id: profileId, window, used });
+  return accountScheduling({
+    profile_id: profileId,
+    running,
+    quota: quotaAssessment({
+      windows: [
+        { window: "five_hour", label: "五小時", effective: observed("five_hour", fiveHourUsed), observed: null, estimated: null },
+        { window: "seven_day", label: "七日", effective: observed("seven_day", sevenDayUsed), observed: null, estimated: null },
+      ],
+    }),
+    ...overrides,
+  });
+}
+
+function fakeClient(
+  run: ControllerCliRun | null = null,
+  profiles: AccountProfile[] = [notLoggedIn, profile()],
+  // 預設排程總覽沒有帳號資料：選項只顯示名稱
+  overview: SchedulingOverview = schedulingOverview({ accounts: [] }),
+) {
   return {
     getControllerCli: vi.fn(async () => viewOf(run)),
     openControllerCli: vi.fn(async (_workspaceId: string, profileId: string) =>
@@ -44,7 +90,11 @@ function fakeClient(run: ControllerCliRun | null = null, profiles: AccountProfil
       ),
     ),
     endControllerCli: vi.fn(async () => viewOf(controllerCliRun({ end_requested_at: CHECKED_AT + 60_000 }))),
+    switchControllerCli: vi.fn(async (_workspaceId: string, profileId: string) =>
+      viewOf(controllerCliRun({ end_requested_at: CHECKED_AT + 60_000, switch_to_profile_id: profileId })),
+    ),
     listProfiles: vi.fn(async () => ({ profiles, limit: 8 })),
+    schedulingOverview: vi.fn(async () => overview),
   };
 }
 
@@ -64,7 +114,8 @@ describe("ControllerPage", () => {
     renderPage(fakeClient(null, [notLoggedIn, profile(), archived]));
 
     expect(await screen.findByRole("heading", { name: "Controller：筆記" })).toBeInTheDocument();
-    expect(fact("狀態")).toHaveTextContent("未開啟");
+    // 標題不等狀態讀回就會出現：等狀態區出現再斷言
+    await waitFor(() => expect(fact("狀態")).toHaveTextContent("未開啟"));
     const select = await screen.findByLabelText("Controller 帳號");
     expect(select).toHaveValue("prof_1");
     expect(screen.getByRole("option", { name: "備用帳號（尚未核對）" })).toBeDisabled();
@@ -208,17 +259,6 @@ describe("ControllerPage", () => {
     expect(fact("狀態")).toHaveTextContent("中斷");
   });
 
-  it("接續原生 Session 時在狀態區顯示，沒有接續時不顯示", async () => {
-    const { unmount } = renderPage(fakeClient(controllerCliRun({ continue_session: true })));
-    expect(await screen.findByText("執行中")).toBeInTheDocument();
-    expect(fact("原生 Session")).toHaveTextContent("接續上次");
-    unmount();
-
-    renderPage(fakeClient(controllerCliRun()));
-    expect(await screen.findByText("執行中")).toBeInTheDocument();
-    expect(screen.queryByText("原生 Session", { selector: "dt" })).not.toBeInTheDocument();
-  });
-
   describe("帳號預設選最近一次 Run 的帳號（同帳號重開才會接續原生 Session）", () => {
     const second = profile({ id: "prof_2", name: "第二帳號", config_dir: "C:\Baton\profiles\prof_2" });
     const lastRun = controllerCliRun({
@@ -319,5 +359,132 @@ describe("ControllerPage", () => {
     act(() => vi.advanceTimersByTime(CONTROLLER_REFRESH_INTERVAL_MS * 3));
     expect(client.getControllerCli).toHaveBeenCalledTimes(1);
     expect(within(screen.getByRole("region", { name: "Controller" })).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("帳號選單顯示每個可用帳號的 5h／7d 剩餘額度與執行中 Worker 數，未知額度顯示未知", async () => {
+    const overview = schedulingOverview({ accounts: [accountWith("prof_1", 0.4, 0.15, 1), accountWith("prof_2", null, 0.5, 0)] });
+    const client = fakeClient(null, [notLoggedIn, profile(), spare], overview);
+    renderPage(client);
+
+    expect(await screen.findByRole("option", { name: "主要帳號（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "第二帳號（5h 未知｜7d 剩 50%｜執行中 Worker 0）" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "備用帳號（尚未核對）" })).toBeDisabled();
+    expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("額度讀取失敗時仍可開啟，只提示無法取得額度", async () => {
+    const client = fakeClient();
+    client.schedulingOverview.mockRejectedValue(new Error("Runtime 離線"));
+    renderPage(client);
+
+    expect(await screen.findByText("無法取得額度：Runtime 離線")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "主要帳號" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "開啟" })).toBeEnabled();
+  });
+
+  it("開著時顯示 Controller 帳號的額度與執行中 Worker 數，輪詢時一起更新", async () => {
+    const overview = schedulingOverview({ accounts: [accountWith("prof_1", 0.3, 0.2, 0)] });
+    const client = fakeClient(controllerCliRun(), [profile(), spare], overview);
+    // 輪詢讀到的新額度等確認過第一次的顯示後才放行
+    let release = () => {};
+    const released = new Promise<void>((resolve) => (release = resolve));
+    client.schedulingOverview.mockResolvedValueOnce(overview).mockImplementation(async () => {
+      await released;
+      return schedulingOverview({ accounts: [accountWith("prof_1", 0.55, 0.25, 2)] });
+    });
+    // 用很短的輪詢間隔與真實計時器，避免假計時器在負載下多跑一輪
+    renderPage(client, 50);
+
+    const quota = await screen.findByRole("group", { name: "Controller 帳號額度" });
+    expect(quota).toHaveTextContent("5h 剩 70%｜7d 剩 80%｜執行中 Worker 0");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+    release();
+    expect(await screen.findByText("5h 剩 45%｜7d 剩 75%｜執行中 Worker 2")).toBeInTheDocument();
+    expect(client.schedulingOverview.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("Controller 帳號達到 draining 門檻時提示換帳號重開", async () => {
+    const draining = accountWith("prof_1", 0.95, 0.4, 0, {
+      quota_gate: {
+        profile_id: "prof_1",
+        state: "draining",
+        reason: "drain_threshold",
+        used: 0.95,
+        reset_at: null,
+        since: CHECKED_AT,
+        version: 2,
+      },
+    });
+    renderPage(fakeClient(controllerCliRun(), [profile(), spare], schedulingOverview({ accounts: [draining] })));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Controller 帳號的額度已接近上限，建議換帳號重開");
+  });
+
+  it("換帳號重開只能選其他可用的帳號，按下呼叫 switch 並顯示換帳號中", async () => {
+    const user = userEvent.setup();
+    const client = fakeClient(controllerCliRun(), [notLoggedIn, profile(), spare]);
+    renderPage(client);
+
+    const target = await screen.findByLabelText("換成帳號");
+    expect(within(target).getAllByRole("option").map((option) => option.textContent)).toEqual(["第二帳號"]);
+    expect(target).toHaveValue("prof_2");
+    await user.click(screen.getByRole("button", { name: "換帳號重開" }));
+
+    expect(client.switchControllerCli).toHaveBeenCalledWith("ws_1", "prof_2");
+    expect(screen.getByText("換帳號重開中：改用 第二帳號")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "換帳號重開" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "結束中…" })).toBeDisabled();
+  });
+
+  it("沒有其他可用的帳號時不能換帳號重開", async () => {
+    renderPage(fakeClient(controllerCliRun(), [notLoggedIn, profile()]));
+
+    expect(await screen.findByText("沒有其他可用的帳號可換")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "換帳號重開" })).toBeDisabled();
+  });
+
+  it("換帳號重開被拒時以警示顯示原因", async () => {
+    const user = userEvent.setup();
+    const client = fakeClient(controllerCliRun(), [profile(), spare]);
+    client.switchControllerCli.mockRejectedValue(
+      Object.assign(new Error("這個帳號目前不可用"), { code: "profile_unavailable" }),
+    );
+    renderPage(client);
+
+    await user.click(await screen.findByRole("button", { name: "換帳號重開" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("這個帳號目前不可用");
+  });
+
+  it("顯示這次開啟是接續上次的 Session、由換帳號重開開啟或新的 Session", async () => {
+    const resumed = renderPage(fakeClient(controllerCliRun({ continue_session: true })));
+    expect(await screen.findByText("接續上次的 Session")).toBeInTheDocument();
+    resumed.unmount();
+
+    const switched = renderPage(
+      fakeClient(controllerCliRun({ id: "ctl_2", profile_id: "prof_2", switched_from_run_id: "ctl_1" }), [profile(), spare]),
+    );
+    expect(await screen.findByText("由換帳號重開開啟的新 Session")).toBeInTheDocument();
+    expect(fact("Controller 帳號")).toHaveTextContent("第二帳號");
+    switched.unmount();
+
+    renderPage(fakeClient(controllerCliRun()));
+    expect(await screen.findByText("新的 Session")).toBeInTheDocument();
+  });
+
+  it("換帳號重開而結束的 Run 顯示結束原因，不當成開啟失敗", async () => {
+    const ended = controllerCliRun({
+      status: "ended",
+      end_requested_at: CHECKED_AT + 60_000,
+      ended_at: CHECKED_AT + 61_000,
+      end_code: "switched",
+      end_reason: "已換帳號重開",
+      switch_to_profile_id: "prof_2",
+    });
+    renderPage(fakeClient(ended, [profile(), spare]));
+
+    expect(await screen.findByText("結束原因：已換帳號重開")).toBeInTheDocument();
+    expect(screen.queryByText(/換帳號重開中/)).not.toBeInTheDocument();
   });
 });

@@ -15,6 +15,7 @@ use baton_domain::scheduler::{
     self, Capacity, CapacityMode, Evaluation, SchedulerSettings, SlotKind, WaitCategory, WaitReason,
 };
 
+use super::controller_cli::load_controller_accounts;
 use super::guards::{load_active_guards, record_prevented};
 use super::handoffs::load_gate_states;
 use super::lifecycle::halt_for;
@@ -92,6 +93,8 @@ impl Store {
                 let settings = load_settings(tx)?;
                 // 額度門檻（遲滯、draining，票 28）在同一個交易中讀取
                 let gates = load_gate_states(tx)?;
+                // 開著的 Controller CLI 的 Controller 帳號不接新的 Worker（desktop-controller-cli 票 05）
+                let controllers = load_controller_accounts(tx)?;
                 if let Some(request) = &request {
                     // 先用目前狀態判定一次：不可能派的要求不進佇列
                     let mut loaded = load(tx, &request.workspace_id)?;
@@ -101,7 +104,7 @@ impl Store {
                     loaded.guards = load_active_guards(tx, &request.workspace_id, now)?;
                     let active = load_active_runs(tx)?;
                     let halt = halt_for(tx, loaded.workspace.as_ref(), &request.workspace_id)?;
-                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt };
+                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt, controller_accounts: &controllers };
                     let task_ctx = loaded.ctx(&request.workspace_id);
                     let ctx = RunContext {
                         task: &task_ctx,
@@ -133,7 +136,7 @@ impl Store {
                     let active = load_active_runs(tx)?;
                     // 停止意圖或 Workspace 暫停：佇列重試與額度恢復都不派（票 25）
                     let halt = halt_for(tx, loaded.workspace.as_ref(), &entry.workspace_id)?;
-                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt };
+                    let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt, controller_accounts: &controllers };
                     let task_ctx = loaded.ctx(&entry.workspace_id);
                     let ctx = RunContext {
                         task: &task_ctx,
@@ -219,6 +222,7 @@ impl Store {
             let settings = load_settings(conn)?;
             let gates = load_gate_states(conn)?;
             let active = load_active_runs(conn)?;
+            let controllers = load_controller_accounts(conn)?;
             let mut active_runs = Vec::with_capacity(active.len());
             for run in &active {
                 let title: String = conn
@@ -232,7 +236,7 @@ impl Store {
                 let mut loaded = load(conn, &entry.workspace_id)?;
                 loaded.guards = load_active_guards(conn, &entry.workspace_id, now)?;
                 let halt = halt_for(conn, loaded.workspace.as_ref(), &entry.workspace_id)?;
-                let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt };
+                let capacity = Capacity { profiles: &profiles, settings: &settings, active_runs: &active, quota_used: &quota_used, quota_gates: &gates, halt, controller_accounts: &controllers };
                 let task_ctx = loaded.ctx(&entry.workspace_id);
                 let ctx = RunContext {
                     task: &task_ctx,

@@ -654,6 +654,19 @@ async fn controller_cli_end(link: State<'_, RuntimeLink>, workspace_id: String) 
     link.client.end_controller_cli(&workspace_id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 要求換帳號重開：結束目前的 Controller CLI，再以指定 Profile 開新的（desktop-controller-cli 票 05）。
+#[tauri::command]
+async fn controller_cli_switch(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    profile_id: String,
+) -> Result<ControllerCliView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.switch_controller_cli(&workspace_id, &profile_id).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 讀取裁定中心：Workspace 內的裁定請求與待處理數。
 #[tauri::command]
 async fn decision_list(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<DecisionList, String> {
@@ -1409,6 +1422,7 @@ fn main() {
             controller_cli_view,
             controller_cli_open,
             controller_cli_end,
+            controller_cli_switch,
             scheduling_overview,
             scheduling_set_mode,
             backup_status,

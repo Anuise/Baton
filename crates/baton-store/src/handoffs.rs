@@ -609,6 +609,8 @@ fn successor_placement(
     active.retain(|r| Some(r.id.as_str()) != ending);
     let workspace = load_workspaces(conn)?.into_iter().find(|w| w.id == workspace_id);
     let halt = halt_for(conn, workspace.as_ref(), workspace_id)?;
+    // 承接者是 Worker：開著的 Controller CLI 的 Controller 帳號不接手（desktop-controller-cli 票 05）
+    let controllers = super::controller_cli::load_controller_accounts(conn)?;
     let capacity = Capacity {
         profiles: &profiles,
         settings: &settings,
@@ -616,6 +618,7 @@ fn successor_placement(
         quota_used,
         quota_gates: &gates,
         halt,
+        controller_accounts: &controllers,
     };
     Ok(scheduler::place_preferring(&capacity, SlotKind::Handoff, preferred))
 }

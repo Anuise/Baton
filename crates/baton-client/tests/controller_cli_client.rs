@@ -69,3 +69,29 @@ async fn app_ends_the_open_controller_cli_and_ending_without_one_is_rejected() {
     assert!(run.end_requested_at.is_some());
     assert_eq!(client.controller_cli(&workspace_id).await.unwrap().run.unwrap().end_requested_at, run.end_requested_at);
 }
+
+#[tokio::test]
+async fn app_switches_the_controller_cli_to_another_profile_and_bad_switches_are_rejected() {
+    let harness = Harness::start().await;
+    let client = app_client(&harness);
+    let workspace_id = new_workspace(&harness, &client).await;
+    let first = harness.add_account("Controller 帳號", "ctl@example.com").await;
+    let second = harness.add_account("備用帳號", "spare@example.com").await;
+
+    let not_open = client.switch_controller_cli(&workspace_id, &second).await.unwrap_err();
+    assert_eq!(rejected_code(not_open), "controller_cli_not_open");
+
+    client.open_controller_cli(&workspace_id, &first).await.unwrap();
+    let same = client.switch_controller_cli(&workspace_id, &first).await.unwrap_err();
+    assert_eq!(rejected_code(same), "controller_cli_same_profile");
+
+    let switched = client.switch_controller_cli(&workspace_id, &second).await.unwrap();
+    let run = switched.run.clone().expect("換帳號後應該仍回傳目前的 Run");
+    assert_eq!(run.profile_id, first);
+    assert_eq!(run.switch_to_profile_id.as_deref(), Some(second.as_str()));
+    assert!(run.end_requested_at.is_some());
+    assert_eq!(client.controller_cli(&workspace_id).await.unwrap(), switched);
+
+    let again = client.switch_controller_cli(&workspace_id, &second).await.unwrap_err();
+    assert_eq!(rejected_code(again), "controller_cli_ending");
+}

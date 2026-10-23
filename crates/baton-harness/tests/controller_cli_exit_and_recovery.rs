@@ -86,6 +86,21 @@ fn continues(launch: &TerminalLaunch) -> bool {
     launch.spawn.args.iter().any(|a| a == "--continue")
 }
 
+/// 模擬 claude 在這個帳號下為工作目錄留下原生 Session 檔（`projects\{目錄名}\*.jsonl`，目錄名是非英數字換成 `-`）：
+/// 開窗前查驗 Session 確定不存在時不帶 `--continue`（票 05），真的對話過才會有這個檔案。
+async fn write_native_session(harness: &Harness, profile: &str, launch: &TerminalLaunch) {
+    let profiles = harness.send_json(Method::GET, "/api/v1/profiles", None).await.1;
+    let config_dir = profiles["profiles"].as_array().unwrap().iter().find(|p| p["id"] == profile).unwrap()["config_dir"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let working_dir = launch.spawn.working_dir.as_deref().unwrap();
+    let project: String = working_dir.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let dir = std::path::Path::new(&config_dir).join("projects").join(project);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("326f0edb-57c5-40e9-8560-99ae95e9027e.jsonl"), "{}\n").unwrap();
+}
+
 async fn host(harness: &Harness, token: &str, path: &str, body: Value) -> StatusCode {
     harness
         .request(Method::POST, path)
@@ -254,6 +269,7 @@ async fn reopening_with_the_same_account_after_recovery_continues_the_native_ses
     let ws = new_workspace(&harness, "main").await;
     let (_, first, _) = open_and_launch(&harness, &ws, &profile).await;
     assert!(!continues(&first), "第一次開啟沒有可接續的原生 Session：{:?}", first.spawn.args);
+    write_native_session(&harness, &profile, &first).await;
     let identity = harness.process_control.identity_of(&first.spawn.command_id).unwrap();
 
     harness.crash_restart().await;
@@ -278,6 +294,7 @@ async fn reopening_after_an_interruption_continues_only_with_the_same_account() 
     let other_profile = harness.add_account("帳號 2", "account2@example.com").await;
     let ws = new_workspace(&harness, "main").await;
     let (_, first, _) = open_and_launch(&harness, &ws, &first_profile).await;
+    write_native_session(&harness, &first_profile, &first).await;
     let identity = harness.process_control.identity_of(&first.spawn.command_id).unwrap();
     harness.process_control.script_liveness(&identity, Liveness::Dead);
     harness.crash_restart().await;

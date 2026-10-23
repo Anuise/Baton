@@ -387,6 +387,47 @@
 - 影響：harness 測試多一個 Controller 帳號；若有測試斷言帳號分配，日後要注意這個帳號。
 - 審閱：未審
 
+### AI-41：Controller 帳號排除放在 Scheduler 的候選條件，交接承接者一併排除
+- 重要度：中
+- 時間／階段：2026-10-23，票 05 實作
+- 決策：`scheduler::Capacity` 新增 `controller_accounts`（有 `starting`／`running` Controller CLI 的 Profile，跨 Workspace），這些帳號不被選為新 Worker 的帳號，等待原因是 `account` 類別、代碼 `controller_account`。一般派工、佇列重試與交接承接者（`successor_placement`）都套用；已在執行的 Worker 照常佔名額、不被停止。交接保留槽的「可用帳號數」仍把 Controller 帳號算進去（與額度受限的帳號相同）。舊的 Controller 一輪不套用（合併時票 08 已把它移除）。同一 Task 續跑時偏好上一個 Run 的帳號，但那個帳號是 Controller 帳號時改派其他帳號。
+- 理由：spec「帳號排除」只寫 Scheduler 候選條件；交接的承接者也是 Worker，若不排除，Controller 帳號會在交接時接到工作。沿用 `account` 類別，前端不必新增類別標籤。
+- 替代方案：新增 `controller` 等待類別——前端任務看板要多一個標籤；把 Controller 帳號從可用帳號數扣掉——帳號少時會讓交接保留槽忽有忽無。
+- 影響：只有一個帳號時，開著 Controller CLI 期間所有新 Task 都會排隊（原因寫明是 Controller 帳號）。
+- 審閱：未審
+
+### AI-42：同帳號重開沿用 AI-25 的接續規則，開窗前再確認原生 Session 存在
+- 重要度：中
+- 時間／階段：2026-10-23，票 05 實作（R019 修正 run 合併票 07 後改寫）
+- 決策：要不要帶 `--continue` 沿用 AI-25（這個 Workspace 最近一次真的執行過的 Controller Run 用同一個 Profile；換帳號重開開的新 Run 一律不帶），欄位也沿用 AI-25 的 `continue_session`。本票只多一步：Supervisor 寫 launch intent 前以新的 Port 方法 `AgentAdapter::continue_capability` 查驗，帳號目錄下 `projects\<工作目錄名>\*.jsonl` 確定一個都沒有時，把這個 Run 的 `continue_session` 改為 false，改開新的 Session；讀不到或判斷不了時照原決定接續。結果隨 launch intent 持久化（事件 `controller_cli_launch_started` 的 `continue_session`），Runtime 重建後組出相同的啟動指令。
+- 理由：`claude --continue` 找不到 Session 會直接結束（AI-25 的「影響」所說的情形）；上次開啟後沒有任何對話就關掉時，若只看「同帳號」，之後同帳號每次重開都會立刻失敗。
+- 替代方案：不查驗——上述情況會卡住；在宿主偵測 `--continue` 失敗後重試——宿主要多一段判斷，違反 shim「只轉送」的定位。
+- 影響：查驗依賴 Claude Code 存放 Session 的目錄名規則（與票 15 的 `resume_capability` 相同，2.1.307 實測）；規則變了時會判為「沒有 Session」而開新的，不會卡住。以正式 Adapter 測試同帳號接續的情境要先放一個原生 Session 檔（票 07 的兩個恢復情境測試已補上）。
+- 審閱：未審
+
+### AI-43：換帳號重開先記下新 Profile，舊 Run 結束的同一個交易中開新 Run
+- 重要度：中
+- 時間／階段：2026-10-23，票 05 實作
+- 決策：新增 `POST /api/v1/workspaces/{id}/controller-cli/switch`（`{ profile_id }`，202）：在目前的 Run 記下 `end_requested_at` 與 `switch_to_profile_id`（事件 `controller_cli_switch_requested`，含 from／to Profile）；Supervisor 結束宿主後以結束代碼 `switched` 結束舊 Run，同一個交易中開新的 `starting` Run（`switched_from_run_id` 指向舊 Run，存在既有的 `handoff_from_run_id` 欄位），下一次處理開窗。宿主先回報結束（使用者自己關掉）時也照樣開新的。拒絕：沒有開著的（`controller_cli_not_open`）、與目前相同的帳號（`controller_cli_same_profile`）、已在結束或換帳號中（`controller_cli_ending`）、Profile 不可用或不存在。新 Profile 在要求之後才失效時照樣建立新 Run，由開窗前的檢查以 `profile_unavailable` 結束並顯示原因。新增 migration `controller_cli_switch`（只有 `switch_to_profile_id` 一個欄位，排在票 06、07 的 migration 之後；`continue_session` 沿用票 07 的 `controller_cli_recovery`）。換帳號開出的新 Run 第一次等待時依 AI-29 接續上一個 Run 確認到的事件位置；Runtime 重啟後被重新綁定（AI-23）的 Run 也可以換帳號重開，新 Run 取得新的憑證。
+- 理由：結束宿主是非同步的（Supervisor 處理）；在同一個交易中開新 Run，頁簽不會看到「舊的已結束、新的還沒開」的空檔，Scheduler 也不會在空檔把帳號派給 Worker；時間線依序是換帳號要求、舊的結束、新的開啟（指回舊的），可追查。
+- 替代方案：前端先結束、輪詢到結束再開新的——兩次操作之間 App 關掉就只剩結束；API 同步結束舊 Run——宿主還活著時憑證已失效，`claude` 繼續開著卻不能用工具。
+- 影響：`handoff_from_run_id` 對 `kind = 'cli'` 的意思是「換帳號重開的前一個 Run」。
+- 審閱：未審
+
+### AI-44：額度與執行中 Worker 數直接取自排程總覽，只在 Controller 開著時輪詢
+- 重要度：低
+- 時間／階段：2026-10-23，票 05 實作
+- 決策：Controller 頁簽不新增 API，以既有的 `GET /api/v1/scheduling`（`accounts[].quota.windows`、`running`、`quota_gate`）顯示「5h 剩 N%｜7d 剩 N%｜執行中 Worker N」（剩餘＝1−較保守的已用比例，最低 0%，未觀測顯示「未知」）；帳號下拉選單與換帳號選單的可用帳號都附上這段，不可用的帳號照舊只顯示狀態。Controller 帳號的 `quota_gate.state` 是 `draining` 時顯示「Controller 帳號的額度已接近上限，建議換帳號重開」。進入頁簽讀一次，Controller 開著時每 2 秒與 Controller 狀態一起重讀；讀不到額度只顯示「無法取得額度」，不擋其他操作。狀態區多一欄「Session」：接續上次的 Session／由換帳號重開開啟的新 Session／新的 Session（合併票 07 時取代它的「原生 Session：接續上次」一欄，見 AI-45）。換帳號選單只列與目前不同、可用的帳號，結束中（含已要求換帳號）時停用。
+- 理由：排程總覽已有每個帳號的兩個視窗、門檻與進行中 Run 數，重複做一個端點沒有新資訊；票面的提示門檻寫的是 draining。
+- 替代方案：新增 Controller 專用的額度端點——資料與排程總覽重複；`paused` 也提示——paused 是停止派工門檻，對 Controller 自己的互動還有餘裕。
+- 影響：Controller 沒開著時，選單上的額度只在進入頁簽時更新（同 AI-22 的帳號清單）。
+### AI-45：合併票 06、07 時，`--continue` 只由 Controller CLI 的啟動組裝加一次，狀態區只留一欄 Session
+- 重要度：低
+- 時間／階段：2026-10-23，票 05 修正（R019，合併 `cli/v1`）
+- 決策：兩票都在 Adapter 加了 `--continue`，合併後只保留票 07 在 `controller_spawn_spec` 加的那一處（Worker 不受影響），並把票 07 的 Adapter 測試改為斷言 `--continue` 恰好出現一次；刪除本票在共用組裝中加的那一處與重複的測試。Controller 頁簽狀態區票 07 的「原生 Session：接續上次」與本票的「Session」重複，只留本票那一欄（含換帳號重開的說明），刪除票 07 對應的元件測試（本票的「顯示這次開啟是接續上次的 Session…」測試涵蓋）。
+- 理由：同一條規則只能有一份實作（主控在 R015 結果的補充中指定）；兩欄顯示同一件事會讓使用者困惑。
+- 替代方案：保留兩欄——資訊重複；保留票 07 的一欄——看不出這次是不是換帳號重開開的新 Session。
+- 影響：無行為改變；`--continue` 的判斷與欄位都沿用票 07。
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）

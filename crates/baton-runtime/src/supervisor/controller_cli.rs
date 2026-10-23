@@ -12,6 +12,7 @@
 //!
 //! Run 結束時，以它簽發的 Controller 憑證隨之失效（憑證的有效性取決於 Run 是否尚未結束、是否被重新綁定）。
 //! 完全退出時，Supervisor 在停止流程中結束所有開著的 Controller CLI，並列入停止進度（`stop_controller_clis_for_exit`）。
+//! 使用者要求換帳號重開時（票 05），結束宿主的同一個交易中以新 Profile 開新的 Run，下一次處理就開窗。
 
 use std::path::Path;
 use std::time::Duration;
@@ -20,15 +21,15 @@ use baton_api::RUN_SETTINGS_DIR;
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::ControllerScope;
 use baton_domain::controller_cli::{
-    ControllerCliRun, ControllerCliStatus, END_CLAUDE_NOT_FOUND, END_FULL_EXIT, END_HOST_GONE, END_LAUNCH_FAILED,
-    END_LAUNCH_OUTCOME_UNKNOWN, END_TERMINAL_FAILED, END_USER_ENDED, WINDOW_TITLE_PREFIX,
+    ControllerCliRun, ControllerCliStatus, OpenIds, END_CLAUDE_NOT_FOUND, END_FULL_EXIT, END_HOST_GONE, END_LAUNCH_FAILED,
+    END_LAUNCH_OUTCOME_UNKNOWN, END_SWITCHED, END_TERMINAL_FAILED, END_USER_ENDED, WINDOW_TITLE_PREFIX,
 };
 use baton_domain::playbook::{self, AI_DECISIONS_TEMPLATE, CONTROLLER_PLAYBOOK, SYSTEM_PROMPT_FILE};
 use baton_domain::lifecycle::{RunStopOutcome, RunStopRecord, StopAnomaly};
 use baton_domain::shared_settings::{self, MANIFEST_FILE};
-use baton_ports::{Liveness, ProcessIdentity, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
+use baton_ports::{Capability, Liveness, ProcessIdentity, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
 
-use super::{identity_of, process_record, Supervisor};
+use super::{identity_of, new_prefixed_id, process_record, Supervisor};
 
 /// 使用者按「結束」時，給宿主自行結束的時間；之後終止整棵程序樹。
 const CONTROLLER_CLI_STOP_GRACE: Duration = Duration::from_secs(2);
@@ -54,10 +55,16 @@ impl Supervisor {
 
     async fn launch_controller_cli(&self, run: &ControllerCliRun) {
         if run.end_requested_at.is_some() {
-            return self.end_controller_cli(run, END_USER_ENDED, "開窗之前已從 App 結束").await;
+            let (code, reason) = match run.switch_to_profile_id {
+                Some(_) => (END_SWITCHED, "開窗之前已換帳號重開"),
+                None => (END_USER_ENDED, "開窗之前已從 App 結束"),
+            };
+            return self.end_controller_cli(run, code, reason).await;
         }
-        // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗（Profile 已失效時改為結束，不開窗）
-        let run = match self.store.begin_controller_cli_launch(&run.id, self.ports.clock.now()).await {
+        // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗（Profile 已失效時改為結束，不開窗）。
+        //    同帳號重開要接續時，一併決定原生 Session 還在不在
+        let continuable = !run.continue_session || self.native_session_continuable(run).await;
+        let run = match self.store.begin_controller_cli_launch(&run.id, continuable, self.ports.clock.now()).await {
             Ok(run) if run.status == ControllerCliStatus::Ended => return,
             Ok(run) => run,
             Err(error) => return self.note(&format!("Controller CLI {} 無法寫入 launch intent，不開窗：{error}", run.id)),
@@ -221,7 +228,7 @@ impl Supervisor {
             };
             let mut record = RunStopRecord { outcome, ..record };
             let now = self.ports.clock.now();
-            if let Err(error) = self.store.end_controller_cli(&run.id, END_FULL_EXIT, "完全退出時由 Runtime 結束", None, now).await {
+            if let Err(error) = self.store.end_controller_cli(&run.id, END_FULL_EXIT, "完全退出時由 Runtime 結束", None, None, now).await {
                 record.message = Some(format!("Controller CLI 已停止，但無法寫入 Run 的結束：{error}"));
             }
             record
@@ -254,9 +261,10 @@ impl Supervisor {
                 let _ = self.ports.process_control.find(&spawn).await;
             }
             match self.ports.process_control.stop(&identity, CONTROLLER_CLI_STOP_GRACE).await {
-                Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
-                    self.end_controller_cli(run, END_USER_ENDED, "已從 App 結束 Controller CLI").await;
-                }
+                Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => match run.switch_to_profile_id {
+                    Some(_) => self.end_controller_cli(run, END_SWITCHED, "已換帳號重開：結束這個 Controller CLI，改用新的帳號開啟").await,
+                    None => self.end_controller_cli(run, END_USER_ENDED, "已從 App 結束 Controller CLI").await,
+                },
                 Ok(StopResult::StillAlive) => self.note(&format!("Controller CLI {} 的宿主仍未結束，稍後重試", run.id)),
                 Err(error) => self.note(&format!("Controller CLI {} 無法結束宿主，稍後重試：{error}", run.id)),
             }
@@ -267,8 +275,19 @@ impl Supervisor {
         }
     }
 
+    /// 結束 Run；已要求換帳號重開時，同一個交易中以新 Profile 開新的 Run（取不到亂數時只結束，並記下原因）。
     async fn end_controller_cli(&self, run: &ControllerCliRun, code: &str, reason: &str) {
-        if let Err(error) = self.store.end_controller_cli(&run.id, code, reason, None, self.ports.clock.now()).await {
+        let next = match run.switch_to_profile_id {
+            Some(_) => {
+                let ids = new_controller_cli_ids();
+                if ids.is_none() {
+                    self.note(&format!("Controller CLI {} 換帳號重開：無法取得系統亂數，只結束、不開新的", run.id));
+                }
+                ids
+            }
+            None => None,
+        };
+        if let Err(error) = self.store.end_controller_cli(&run.id, code, reason, None, next, self.ports.clock.now()).await {
             self.note(&format!("Controller CLI {} 的結束沒有寫入：{error}", run.id));
         }
     }
@@ -338,6 +357,19 @@ impl Supervisor {
             .map_err(|error| format!("無法寫入設定快照目錄 {directory}：{error}"))
     }
 
+    /// 同帳號重開時，要接續的原生 Session 是否可能還在：只有 Adapter 確定沒有（`NotResumable`）才改開新的 Session；
+    /// 判斷不了時照原本的決定接續。
+    async fn native_session_continuable(&self, run: &ControllerCliRun) -> bool {
+        let Ok(config_dir) = self.config_dir_of(&run.profile_id).await else { return true };
+        match self.ports.agent_adapter.continue_capability(&config_dir, &run.working_dir).await {
+            Ok(Capability::NotResumable) => {
+                self.note(&format!("Controller CLI {} 找不到要接續的原生 Session，改開新的 Session", run.id));
+                false
+            }
+            _ => true,
+        }
+    }
+
     /// Workspace 沒有 `.baton/ai-decisions.md` 時以標頭範本建立；已存在（含同時被建立）時不動它。
     async fn ensure_ai_decisions(&self, run: &ControllerCliRun) -> Result<(), String> {
         let path = playbook::ai_decisions_path(Path::new(&run.working_dir));
@@ -357,4 +389,9 @@ impl Supervisor {
         };
         format!("{WINDOW_TITLE_PREFIX} - {}", name.unwrap_or_else(|| run.working_dir.clone()))
     }
+}
+
+/// 換帳號重開時新 Run 的識別（與 API 開啟使用相同格式）。
+fn new_controller_cli_ids() -> Option<OpenIds> {
+    Some(OpenIds { run_id: new_prefixed_id("ctl")?, command_id: new_prefixed_id("cmd")? })
 }
