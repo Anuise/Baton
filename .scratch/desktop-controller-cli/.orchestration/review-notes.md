@@ -16,3 +16,4 @@
 - 第 4 項已由票 04 完成（操作手冊已寫 `"$BATON_MCP_SHIM" wait` 與結束碼，R020 驗證），不必再處理。
 - **final-ab**（Rust 後端：Domain、Store、Runtime、API、Ports、MCP shim、Client）：第 3 項（`baton-store` lifecycle 並行寫入測試，含第 5 項中的同一支）、第 6、7、9、10 項。
 - **final-c**（Web、Tauri、scripts、docs、GLOSSARY、harness）：第 1、2、5 項（harness 的當掉模擬測試；R028 第 1 項已找出成因）、第 8 項。
+12. `crates/baton-harness/tests/verification_handoff.rs:5` 與 `verification_takeover_blocked.rs:8` 檔頭說明仍寫「以 `timeout` 丟棄那次處理」，與 final-c 改寫後的 `supervise_until` 不一致（R031 觀察，低）。

@@ -32,4 +32,4 @@
 | R028-review-c | — | review | Work-9 | 2026-10-23 19:02 | 2026-10-23 19:08 | DONE（中 2、低 4） |
 | R029-fix-ab | final-ab | final-fix | Work-8 | 2026-10-23 19:10 | | |
 | R030-fix-c | final-c | final-fix | Work-9 | 2026-10-23 19:10 | 2026-10-23 20:00 | DONE（5d1402b..6df628d，修 6 項＋待修 #1、#2、#5、#8） |
-| R031-final-verify-c | final-c | final-verify | Work-3 | 2026-10-23 20:00 | | |
+| R031-final-verify-c | final-c | final-verify | Work-3 | 2026-10-23 20:00 | 2026-10-23 20:14 | PASS |
