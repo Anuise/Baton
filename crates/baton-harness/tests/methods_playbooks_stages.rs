@@ -1,9 +1,8 @@
 //! 情境測試：方法登錄、Playbook 路由與 Stage／Gate（票 43），經由 Runtime harness 的真實 HTTP API 驗證。
 //!
-//! Controller 是腳本化的（同票 17、42）：測試在 Controller 的一輪進行中，以那一輪啟動時收到的 Controller 憑證呼叫工具。
+//! Controller 是腳本化的（同票 17、42）：測試在 Controller CLI 開著時，以開窗時交給它的 Controller 憑證呼叫工具。
 //! 證據是真的：成果由 Worker 以 `register_artifact` 登記，裁定由 Worker 以 `request_decision` 提出、使用者以桌面 API 回答。
-//! 帳號額度由 fake QuotaObserver 的樣本產生（同票 30）。只斷言外部行為：工具與桌面 API 的回應、交給 Adapter 的 Prompt、
-//! context receipt。
+//! 只斷言外部行為：工具與桌面 API 的回應、交給 Adapter 的 Worker Prompt、context receipt。
 //!
 //! 每個測試名稱對應票 43 的驗收條件：
 //! - 功能、缺陷、調查分別走對應 Playbook；非開發工作不套用開發流程：
@@ -12,30 +11,26 @@
 //!   `a_stage_without_evidence_is_recorded_as_incomplete_or_blocked_and_words_alone_never_advance_it`、
 //!   `skipping_a_stage_keeps_the_reason_and_decision_or_safety_gates_cannot_be_skipped`
 //! - Playbook 升級不改變進行中的 Workflow：`a_playbook_upgrade_does_not_change_a_workflow_already_in_progress`
-//! - 換帳號不會讓 Workflow 從頭跑：`switching_accounts_continues_the_workflow_from_its_current_stage_instead_of_starting_over`
+//! - 換帳號（以另一個帳號開啟 Controller CLI）不會讓 Workflow 從頭跑：
+//!   `switching_accounts_continues_the_workflow_from_its_current_stage_instead_of_starting_over`
 
 use baton_domain::agent::TOOL_REQUEST_DECISION;
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::Timestamp;
 use baton_harness::Harness;
-use baton_ports::{AdapterEvent, Clock, Confidence, QuotaSample, QuotaSource};
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
 const WORKSPACES: &str = "/api/v1/workspaces";
 const PLAYBOOKS: &str = "/api/v1/playbooks";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
-/// 額度觀測器的輪詢間隔（spec D-31）。
-const QUOTA_POLL_MS: i64 = 5 * 60 * 1000;
 
 // --- 共用輔助 ---
 
 struct World {
     harness: Harness,
-    /// 依建立順序：帳號 A、B
-    accounts: Vec<String>,
+    /// Controller CLI 專用帳號的 Profile 識別（不拿來派 Worker）。
+    controller_profile: String,
     ws: String,
     goal: String,
 }
@@ -56,12 +51,10 @@ fn contract() -> Value {
     })
 }
 
-async fn world(accounts: usize) -> World {
+async fn world() -> World {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
-    let mut ids = Vec::new();
-    for (index, name) in ["A", "B"].into_iter().take(accounts).enumerate() {
-        ids.push(harness.add_account(&format!("帳號 {name}"), &format!("account{index}@example.com")).await);
-    }
+    harness.add_account("帳號 A", "account0@example.com").await;
+    let controller_profile = harness.add_account("Controller 帳號", "controller@example.com").await;
     let dir = harness.data_dir().join("projects").join("ledger");
     std::fs::create_dir_all(&dir).unwrap();
     let (status, body) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": dir.to_string_lossy() }))).await;
@@ -71,7 +64,7 @@ async fn world(accounts: usize) -> World {
         harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/goals"), Some(json!({ "title": "記帳工具" }))).await;
     assert_eq!(status, StatusCode::CREATED, "{goal}");
     let goal = goal["id"].as_str().unwrap().to_string();
-    World { harness, accounts: ids, ws, goal }
+    World { harness, controller_profile, ws, goal }
 }
 
 fn error_code(body: &Value) -> &str {
@@ -130,41 +123,9 @@ impl World {
         body["artifact_id"].as_str().unwrap().to_string()
     }
 
-    /// 使用者送一則訊息、合併視窗過後喚起 Controller，回傳這一輪的 (Controller Run, Controller 憑證)。
-    async fn controller_turn(&self, text: &str) -> (Value, String) {
-        let path = format!("{WORKSPACES}/{}/conversation/messages", self.ws);
-        let (status, body) = self.h().send_json(Method::POST, &path, Some(json!({ "text": text }))).await;
-        assert_eq!(status, StatusCode::CREATED, "{body}");
-        self.h().clock.advance_millis(WINDOW_MS);
-        self.h().supervise().await;
-        let (status, view) = self.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/conversation", self.ws), None).await;
-        assert_eq!(status, StatusCode::OK, "{view}");
-        let run = view["runs"].as_array().unwrap().last().cloned().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}"));
-        let token = self.h().agent_credential(run["id"].as_str().unwrap()).expect("Controller 程序啟動時應該收到 Controller 憑證");
-        (run, token)
-    }
-
-    async fn finish_turn(&self, run: &Value) {
-        let run_id = run["id"].as_str().unwrap();
-        let adapter = &self.h().agent_adapter;
-        adapter.emit(run_id, AdapterEvent::Started { native_session_id: Some(format!("native-{run_id}")) });
-        adapter.emit(run_id, AdapterEvent::Message { text: "好的".into() });
-        adapter.emit(run_id, AdapterEvent::Exited { success: true });
-        self.h().supervise().await;
-    }
-
-    /// fake QuotaObserver 回報某個帳號的用量；等輪詢到期後 Supervisor 處理一次。
-    async fn observe(&self, profile: &str, used: f64) {
-        let sample = QuotaSample {
-            source: QuotaSource::Observed,
-            observed_at: self.h().clock.now(),
-            used: Some(used),
-            reset_at: None,
-            confidence: Confidence::Observed,
-        };
-        self.h().quota_observer.set_sample(profile, sample);
-        self.h().clock.advance_millis(QUOTA_POLL_MS);
-        self.h().supervise().await;
+    /// 以給定帳號開啟這個 Workspace 的 Controller CLI，回傳 Controller 憑證。
+    async fn open_controller(&self, profile: &str) -> String {
+        self.h().open_controller_cli(&self.ws, profile).await.1
     }
 
     async fn start(&self, token: &str, body: Value) -> (StatusCode, Value) {
@@ -227,9 +188,9 @@ impl World {
 
 #[tokio::test]
 async fn features_defects_and_investigations_each_follow_their_own_playbook_and_non_development_work_gets_no_development_flow() {
-    let w = world(1).await;
+    let w = world().await;
     let worker = w.evidence_worker().await;
-    let (_, token) = w.controller_turn("加上匯出功能、修正匯出錯誤，並調查競品").await;
+    let token = w.open_controller(&w.controller_profile).await;
     let feature = w.task("新增 CSV 匯出", "development").await;
     let defect = w.task("修正匯出的金額錯誤", "development").await;
     let research = w.task("調查競品的匯出格式", "research").await;
@@ -299,9 +260,9 @@ async fn features_defects_and_investigations_each_follow_their_own_playbook_and_
 
 #[tokio::test]
 async fn a_stage_without_evidence_is_recorded_as_incomplete_or_blocked_and_words_alone_never_advance_it() {
-    let w = world(1).await;
+    let w = world().await;
     let worker = w.evidence_worker().await;
-    let (_, token) = w.controller_turn("需求還很模糊，先釐清").await;
+    let token = w.open_controller(&w.controller_profile).await;
     let mut workflow = w.started(&token, json!({ "situation": "ambiguous", "goal_id": w.goal, "rationale": "成功條件不清楚" })).await;
 
     // 只有文字宣告：incomplete，不推進
@@ -388,9 +349,9 @@ async fn a_stage_without_evidence_is_recorded_as_incomplete_or_blocked_and_words
 
 #[tokio::test]
 async fn skipping_a_stage_keeps_the_reason_and_decision_or_safety_gates_cannot_be_skipped() {
-    let w = world(1).await;
+    let w = world().await;
     let worker = w.evidence_worker().await;
-    let (_, token) = w.controller_turn("新增匯出功能").await;
+    let token = w.open_controller(&w.controller_profile).await;
     let task = w.task("新增 CSV 匯出", "development").await;
     let mut workflow = w.started(&token, json!({ "situation": "feature", "task_id": task, "rationale": "新功能" })).await;
 
@@ -452,9 +413,9 @@ async fn skipping_a_stage_keeps_the_reason_and_decision_or_safety_gates_cannot_b
 
 #[tokio::test]
 async fn a_playbook_upgrade_does_not_change_a_workflow_already_in_progress() {
-    let mut w = world(1).await;
+    let mut w = world().await;
     let worker = w.evidence_worker().await;
-    let (_, token) = w.controller_turn("修正匯出錯誤").await;
+    let token = w.open_controller(&w.controller_profile).await;
     let first = w.task("修正金額錯誤", "development").await;
     let mut running = w.started(&token, json!({ "situation": "defect", "task_id": first, "rationale": "使用者回報" })).await;
     running = w.pass_with_artifact(&token, &worker, &running).await;
@@ -517,29 +478,23 @@ async fn a_playbook_upgrade_does_not_change_a_workflow_already_in_progress() {
 
 #[tokio::test]
 async fn switching_accounts_continues_the_workflow_from_its_current_stage_instead_of_starting_over() {
-    let mut w = world(2).await;
-    let (a, b) = (w.accounts[0].clone(), w.accounts[1].clone());
+    let mut w = world().await;
+    // 兩個 Controller 帳號：第一次的 Controller CLI 用 a，之後使用者換成 b
+    let a = w.controller_profile.clone();
+    let b = w.h().add_account("Controller 帳號 2", "controller2@example.com").await;
     let worker = w.evidence_worker().await;
     let research = w.task("調查競品的匯出格式", "research").await;
 
-    // 第一輪在帳號 A：開始調查流程並通過前兩個 Stage
-    let (first, token) = w.controller_turn("調查競品的匯出格式").await;
-    assert_eq!(first["profile_id"], a.as_str());
+    // 以帳號 a 開啟的 Controller CLI：開始調查流程並通過前兩個 Stage
+    let token = w.open_controller(&a).await;
     let mut workflow = w.started(&token, json!({ "situation": "investigation", "task_id": research, "rationale": "要先了解" })).await;
     workflow = w.pass_with_artifact(&token, &worker, &workflow).await;
     workflow = w.pass_with_artifact(&token, &worker, &workflow).await;
     assert_eq!(workflow["current_stage"], "evidence_uncertainty");
-    w.finish_turn(&first).await;
+    w.h().end_controller_cli(&w.ws).await;
 
-    // A 接近上限：下一輪換到 B，新的 Session 從持久化的目前 Stage 接續
-    w.observe(&a, 0.9).await;
-    let (second, token) = w.controller_turn("繼續").await;
-    assert_eq!(second["profile_id"], b.as_str());
-    assert!(second["handoff"]["from_profile_id"] == a.as_str(), "{second}");
-    let prompt = second["prompt"].as_str().unwrap();
-    assert!(prompt.contains("## 進行中的 Workflow"), "{prompt}");
-    assert!(prompt.contains("目前 Stage「證據與不確定性」（evidence_uncertainty）"), "{prompt}");
-    assert!(prompt.contains("已完成：明確問題、一手來源／實驗"), "{prompt}");
+    // 使用者改以帳號 b 開啟 Controller CLI：從持久化的目前 Stage 接續
+    let token = w.open_controller(&b).await;
 
     let (status, listed) = w.h().call_tool(&token, "get_workflows", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{listed}");
@@ -554,7 +509,7 @@ async fn switching_accounts_continues_the_workflow_from_its_current_stage_instea
     assert_eq!(workflow["current_stage"], "conclusion");
     let profile = |key: &str| stage(&workflow, key)["attempts"][0]["profile_id"].clone();
     assert_eq!((profile("question"), profile("evidence_uncertainty")), (json!(a), json!(b)), "attempt 記下各自的帳號");
-    w.finish_turn(&second).await;
+    w.h().end_controller_cli(&w.ws).await;
 
     // Worker 的 Prompt 也從目前 Stage 開始（不是第一個 Stage），並記在 context receipt
     let (run, _) = w.dispatch(&research).await;
@@ -573,9 +528,9 @@ async fn switching_accounts_continues_the_workflow_from_its_current_stage_instea
 
 #[tokio::test]
 async fn a_stage_whose_budget_is_used_up_only_continues_after_the_user_decides() {
-    let w = world(1).await;
+    let w = world().await;
     let worker = w.evidence_worker().await;
-    let (_, token) = w.controller_turn("新增匯出功能").await;
+    let token = w.open_controller(&w.controller_profile).await;
     let task = w.task("新增 CSV 匯出", "development").await;
     let mut workflow = w.started(&token, json!({ "situation": "feature", "task_id": task, "rationale": "新功能" })).await;
     let max = stage(&workflow, "requirements_contract")["budget"]["max_attempts"].as_i64().unwrap();

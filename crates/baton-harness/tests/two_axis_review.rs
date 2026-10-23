@@ -1,6 +1,6 @@
 //! 情境測試：雙軸 Review、獨立 reviewer 與設計偏離（票 44），經由 Runtime harness 的真實 HTTP API 驗證。
 //!
-//! Controller 是腳本化的（同票 17、42、43）：測試在 Controller 的一輪進行中，以那一輪的 Controller 憑證呼叫工具。
+//! Controller 是腳本化的（同票 17、42、43）：測試在 Controller CLI 開著時，以開窗時交給它的 Controller 憑證呼叫工具。
 //! reviewer 是另一個 Task 的 Worker，以 `submit_review` 提交；Gate 由 Controller 以 `record_stage_result` 附審查證據回報，
 //! Runtime 查驗。裁定由使用者以桌面 API 回答。兩個 candidate 之間的變更檔案由 fake Git 腳本化（正式版以 git diff 計算）。
 //! 只斷言外部行為：工具與桌面 API 的回應、交給 Adapter 的 Prompt、context receipt、成果版本。
@@ -24,8 +24,6 @@ use serde_json::{json, Value};
 const WORKSPACES: &str = "/api/v1/workspaces";
 const PLAYBOOKS: &str = "/api/v1/playbooks";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 
 // --- 共用輔助 ---
 
@@ -33,6 +31,8 @@ struct World {
     harness: Harness,
     ws: String,
     goal: String,
+    /// Controller CLI 專用帳號的 Profile 識別（不拿來派 Worker）。
+    controller_profile: String,
     dir: std::path::PathBuf,
 }
 
@@ -52,12 +52,13 @@ fn contract(objective: &str) -> Value {
     })
 }
 
-/// 四個帳號（Controller、作者、證據與 reviewer 的 Worker 同時執行也有容量），Workspace 是 Git repo。
+/// 四個 Worker 帳號（作者、證據與 reviewer 的 Worker 同時執行也有容量）加上 Controller CLI 專用的帳號，Workspace 是 Git repo。
 async fn world() -> World {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     for (index, name) in ["A", "B", "C", "D"].into_iter().enumerate() {
         harness.add_account(&format!("帳號 {name}"), &format!("account{index}@example.com")).await;
     }
+    let controller_profile = harness.add_account("Controller 帳號", "controller@example.com").await;
     let dir = harness.data_dir().join("projects").join("ledger");
     std::fs::create_dir_all(&dir).unwrap();
     let (status, body) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": dir.to_string_lossy() }))).await;
@@ -69,7 +70,7 @@ async fn world() -> World {
         harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/goals"), Some(json!({ "title": "記帳工具" }))).await;
     assert_eq!(status, StatusCode::CREATED, "{goal}");
     let goal = goal["id"].as_str().unwrap().to_string();
-    World { harness, ws, goal, dir }
+    World { harness, ws, goal, controller_profile, dir }
 }
 
 fn error_code(body: &Value) -> &str {
@@ -139,17 +140,9 @@ impl World {
         body["artifact_id"].as_str().unwrap().to_string()
     }
 
-    /// 使用者送一則訊息、合併視窗過後喚起 Controller，回傳這一輪的 Controller 憑證。
-    async fn controller_turn(&self, text: &str) -> String {
-        let path = format!("{WORKSPACES}/{}/conversation/messages", self.ws);
-        let (status, body) = self.h().send_json(Method::POST, &path, Some(json!({ "text": text }))).await;
-        assert_eq!(status, StatusCode::CREATED, "{body}");
-        self.h().clock.advance_millis(WINDOW_MS);
-        self.h().supervise().await;
-        let (status, view) = self.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/conversation", self.ws), None).await;
-        assert_eq!(status, StatusCode::OK, "{view}");
-        let run = view["runs"].as_array().unwrap().last().cloned().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}"));
-        self.h().agent_credential(run["id"].as_str().unwrap()).expect("Controller 程序啟動時應該收到 Controller 憑證")
+    /// 以 Controller 帳號開啟這個 Workspace 的 Controller CLI，回傳 Controller 憑證。
+    async fn open_controller(&self) -> String {
+        self.h().open_controller_cli(&self.ws, &self.controller_profile).await.1
     }
 
     async fn start_feature(&self, token: &str, task: &str) -> Value {
@@ -235,7 +228,7 @@ async fn requirement_met_but_standards_violated_or_standards_met_but_requirement
     let w = world().await;
     let evidence = w.worker("整理證據").await;
     let reviewer = w.worker("審查匯出功能").await;
-    let token = w.controller_turn("新增 CSV 匯出").await;
+    let token = w.open_controller().await;
     let author = w.task("新增 CSV 匯出", "development").await;
     let workflow = w.start_feature(&token, &author).await;
     let workflow = w.to_review_stage(&token, &evidence, workflow).await;
@@ -308,7 +301,7 @@ async fn a_review_of_an_older_candidate_cannot_open_the_gate_once_more_changes_a
     let w = world().await;
     let evidence = w.worker("整理證據").await;
     let reviewer = w.worker("審查匯出功能").await;
-    let token = w.controller_turn("新增 CSV 匯出").await;
+    let token = w.open_controller().await;
     let author = w.task("新增 CSV 匯出", "development").await;
     let workflow = w.start_feature(&token, &author).await;
     let workflow = w.to_review_stage(&token, &evidence, workflow).await;
@@ -338,7 +331,7 @@ async fn a_review_of_an_older_candidate_cannot_open_the_gate_once_more_changes_a
 async fn the_author_cannot_be_the_required_reviewer_and_the_gate_stays_closed_until_enough_independent_reviewers() {
     let w = world().await;
     let evidence = w.worker("整理證據").await;
-    let token = w.controller_turn("新增 CSV 匯出，需要兩位 reviewer").await;
+    let token = w.open_controller().await;
 
     // 使用者把獨立審查改為每一軸需要兩位 reviewer
     let (_, catalog) = w.h().send_json(Method::GET, PLAYBOOKS, None).await;
@@ -411,7 +404,7 @@ async fn after_a_fix_only_review_results_provably_unaffected_are_reused() {
     let evidence = w.worker("整理證據").await;
     let first_reviewer = w.worker("審查一").await;
     let second_reviewer = w.worker("審查二").await;
-    let token = w.controller_turn("新增 CSV 匯出").await;
+    let token = w.open_controller().await;
     let author = w.task("新增 CSV 匯出", "development").await;
     let workflow = w.start_feature(&token, &author).await;
     let workflow = w.to_review_stage(&token, &evidence, workflow).await;
@@ -509,7 +502,7 @@ async fn an_accepted_design_deviation_keeps_who_accepted_it_and_the_next_worker_
     w.h().supervise().await;
 
     // Controller 接受偏離：必須送裁定；Worker 不能處理偏離
-    let token = w.controller_turn("實作偏離了設計").await;
+    let token = w.open_controller().await;
     let resolve = json!({ "deviation_id": reported["id"], "resolution": "accept", "reason": "串流是唯一可行的做法" });
     let (status, body) = w.h().call_tool(&implementer, "resolve_design_deviation", resolve.clone()).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");

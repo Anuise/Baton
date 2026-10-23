@@ -1,7 +1,7 @@
 //! 情境測試：探索測試到可重現缺陷（票 47，issue #3 §10.3），經由 Runtime harness 的真實 HTTP API 驗證。
 //!
 //! 受驗的「真實介面」由 fake VerificationDriver 扮演（HTTP 端點的回應由測試腳本化；沒有腳本的端點連不上）。
-//! Controller 與 Worker 是腳本化的。只斷言外部行為：工具與桌面 API 的回應、探索概況、Evidence Bundle、
+//! Controller 與 Worker 是腳本化的（Controller 憑證由 Controller CLI 取得）。只斷言外部行為：工具與桌面 API 的回應、探索概況、Evidence Bundle、
 //! Worker 拿到的 Prompt，以及控制資料庫拒絕的直接竄改。
 //!
 //! 每個測試名稱對應票 47 的驗收條件：
@@ -22,8 +22,6 @@ use serde_json::{json, Value};
 const WORKSPACES: &str = "/api/v1/workspaces";
 const PLAYBOOKS: &str = "/api/v1/playbooks";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 const API: &str = "http://127.0.0.1:8080";
 
 // --- 共用輔助 ---
@@ -32,6 +30,8 @@ struct World {
     harness: Harness,
     ws: String,
     goal: String,
+    /// Controller CLI 專用帳號的 Profile 識別（不拿來派 Worker）。
+    controller_profile: String,
     #[allow(dead_code)]
     dir: PathBuf,
 }
@@ -128,6 +128,7 @@ fn journey_of<'a>(bundle: &'a Value, key: &str) -> Option<&'a Value> {
 async fn world() -> World {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     harness.add_account("帳號 A", "account0@example.com").await;
+    let controller_profile = harness.add_account("Controller 帳號", "controller@example.com").await;
     let dir = harness.data_dir().join("projects").join("shop");
     std::fs::create_dir_all(&dir).unwrap();
     let (status, body) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": dir.to_string_lossy() }))).await;
@@ -137,7 +138,7 @@ async fn world() -> World {
         harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/goals"), Some(json!({ "title": "商店" }))).await;
     assert_eq!(status, StatusCode::CREATED, "{goal}");
     let goal = goal["id"].as_str().unwrap().to_string();
-    let w = World { harness, ws, goal, dir };
+    let w = World { harness, ws, goal, controller_profile, dir };
     let (status, body) = w.h().send_json(Method::POST, &w.verification("/profile"), Some(profile())).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     w
@@ -147,7 +148,7 @@ async fn world() -> World {
 async fn explored() -> (World, String, String, String, Value) {
     let w = world().await;
     let task = w.task("探索結帳").await;
-    let controller = w.controller_turn("探索結帳流程").await;
+    let controller = w.open_controller().await;
     let (status, body) = w.h().call_tool(&controller, "define_exploration_charter", charter(&task)).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let (_, worker) = w.dispatch(&task).await;
@@ -195,16 +196,9 @@ impl World {
         (rid, token)
     }
 
-    async fn controller_turn(&self, text: &str) -> String {
-        let path = format!("{WORKSPACES}/{}/conversation/messages", self.ws);
-        let (status, body) = self.h().send_json(Method::POST, &path, Some(json!({ "text": text }))).await;
-        assert_eq!(status, StatusCode::CREATED, "{body}");
-        self.h().clock.advance_millis(WINDOW_MS);
-        self.h().supervise().await;
-        let (status, view) = self.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/conversation", self.ws), None).await;
-        assert_eq!(status, StatusCode::OK, "{view}");
-        let run = view["runs"].as_array().unwrap().last().cloned().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}"));
-        self.h().agent_credential(run["id"].as_str().unwrap()).expect("Controller 程序啟動時應該收到 Controller 憑證")
+    /// 以 Controller 帳號開啟這個 Workspace 的 Controller CLI，回傳 Controller 憑證。
+    async fn open_controller(&self) -> String {
+        self.h().open_controller_cli(&self.ws, &self.controller_profile).await.1
     }
 
     /// 桌面的探索概況。
@@ -590,7 +584,7 @@ async fn a_queued_reproduction_does_not_stand_in_for_the_reverification_of_an_in
 async fn exploration_starts_from_a_charter_and_unreproducible_or_expected_findings_are_kept_with_their_reason() {
     let w = world().await;
     let task = w.task("探索結帳").await;
-    let controller = w.controller_turn("探索結帳流程").await;
+    let controller = w.open_controller().await;
 
     // 章程要有區域、角色、目標、禁止的副作用與上限；Worker 不能自己定章程
     let mut incomplete = charter(&task);
