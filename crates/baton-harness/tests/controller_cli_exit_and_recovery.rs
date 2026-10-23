@@ -11,12 +11,16 @@
 //! - 恢復後同帳號重新開啟帶 `--continue`：`reopening_with_the_same_account_after_recovery_continues_the_native_session`、
 //!   `reopening_after_an_interruption_continues_only_with_the_same_account`
 //! - 沒有經過完全退出的正常重啟也同樣查驗：`an_orderly_restart_also_rebinds_a_live_controller_cli`
+//! - 最終 review 修正：一個 Controller CLI 停不下來時，其他已停止的照實列在報告中：
+//!   `full_exit_reports_each_controller_cli_as_it_stops_even_when_another_hangs`
 
 use std::sync::Arc;
 
 use baton_domain::agent::AGENT_TOKEN_ENV;
 use baton_domain::controller_cli::{HOST_ENDED_PATH, HOST_STARTED_PATH};
+use baton_domain::lifecycle::ExitTiming;
 use baton_domain::Timestamp;
+use baton_harness::fakes::FakeStop;
 use baton_harness::Harness;
 use baton_ports::{Liveness, TerminalLaunch};
 use baton_runtime::claude_adapter::ClaudeCodeAdapter;
@@ -204,6 +208,38 @@ async fn full_exit_records_a_controller_host_that_cannot_be_stopped_as_a_stop_an
     let entry = lifecycle["exit"]["runs"].as_array().unwrap().iter().find(|r| r["run_id"] == run["id"]).cloned().unwrap();
     assert_eq!((entry["outcome"].as_str(), entry["anomaly"].as_str()), (Some("anomaly"), Some("still_alive")), "{entry}");
     assert_eq!(view(&harness, &ws).await["status"], "running", "無法確認停止時不假裝已結束");
+}
+
+#[tokio::test]
+async fn full_exit_reports_each_controller_cli_as_it_stops_even_when_another_hangs() {
+    let harness = Harness::builder()
+        .clock_at(CLOCK_START)
+        .exit_timing(ExitTiming { stop_grace_ms: 150, kill_confirm_ms: 150 })
+        .agent_adapter(|data_dir| Arc::new(ClaudeCodeAdapter::new("claude".into(), SHIM.into(), data_dir, Vec::new())))
+        .start()
+        .await;
+    let profile = harness.add_account("帳號 1", "account1@example.com").await;
+    let (quick_ws, stuck_ws) = (new_workspace(&harness, "quick").await, new_workspace(&harness, "stuck").await);
+    let (quick, _, _) = open_and_launch(&harness, &quick_ws, &profile).await;
+    let (stuck, stuck_launch, _) = open_and_launch(&harness, &stuck_ws, &profile).await;
+    let stuck_host = harness.process_control.identity_of(&stuck_launch.spawn.command_id).unwrap();
+    harness.process_control.script_stop(&stuck_host, FakeStop::Hang);
+
+    let (status, body) = harness.send_json(Method::POST, LIFECYCLE_EXIT, None).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    harness.wait_for_exit().await;
+
+    let lifecycle: Value = harness.get_json(LIFECYCLE).await;
+    let entry = |run: &Value| {
+        lifecycle["exit"]["runs"].as_array().unwrap().iter().find(|r| r["run_id"] == run["id"]).cloned().unwrap()
+    };
+    // 已停止、Run 也以 full_exit 結束的那一個，照實列為已停止；停不下來的才是無法確認
+    let quick_entry = entry(&quick);
+    assert_eq!(quick_entry["outcome"], "stopped_gracefully", "{quick_entry}");
+    assert_eq!(view(&harness, &quick_ws).await["end_code"], "full_exit");
+    let stuck_entry = entry(&stuck);
+    assert_eq!((stuck_entry["outcome"].as_str(), stuck_entry["anomaly"].as_str()), (Some("anomaly"), Some("stop_unconfirmed")), "{stuck_entry}");
+    assert_eq!(view(&harness, &stuck_ws).await["status"], "running", "無法確認停止時不假裝已結束");
 }
 
 #[tokio::test]

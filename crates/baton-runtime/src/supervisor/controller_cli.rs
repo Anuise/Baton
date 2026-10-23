@@ -14,6 +14,7 @@
 //! 完全退出時，Supervisor 在停止流程中結束所有開著的 Controller CLI，並列入停止進度（`stop_controller_clis_for_exit`）。
 //! 使用者要求換帳號重開時（票 05），結束宿主的同一個交易中以新 Profile 開新的 Run，下一次處理就開窗。
 
+use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ use baton_domain::playbook::{self, AI_DECISIONS_TEMPLATE, CONTROLLER_PLAYBOOK, S
 use baton_domain::lifecycle::{RunStopOutcome, RunStopRecord, StopAnomaly};
 use baton_domain::shared_settings::{self, MANIFEST_FILE};
 use baton_ports::{Capability, Liveness, ProcessIdentity, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
+use futures::stream::FuturesUnordered;
 
 use super::{identity_of, new_prefixed_id, process_record, Supervisor};
 
@@ -199,10 +201,14 @@ impl Supervisor {
         self.controller_clis_checked.lock().await.insert(run.id.clone());
     }
 
-    /// 完全退出：結束所有開著的 Controller CLI（宿主連同它啟動的 `claude`），回傳每一項的停止結果。
+    /// 完全退出：結束所有開著的 Controller CLI（宿主連同它啟動的 `claude`），每一項停完就產生它的停止結果
+    /// （呼叫端逐筆收集，一個停不下來不影響其他已停止的呈現）。
     /// 確認停止（或從未開出宿主）的以 `full_exit` 結束 Run（憑證隨之失效）；無法確認的記為停止異常、Run 維持原狀。
-    pub(super) async fn stop_controller_clis_for_exit(&self, runs: Vec<ControllerCliRun>) -> Vec<RunStopRecord> {
-        let stops = runs.into_iter().map(|run| async move {
+    pub(super) fn stop_controller_clis_for_exit(
+        &self,
+        runs: Vec<ControllerCliRun>,
+    ) -> FuturesUnordered<impl Future<Output = RunStopRecord> + '_> {
+        runs.into_iter().map(|run| async move {
             let record = RunStopRecord::pending_controller_cli(&run.id, &run.workspace_id);
             let anomaly = |kind: StopAnomaly, message: String| RunStopRecord {
                 outcome: RunStopOutcome::Anomaly,
@@ -229,8 +235,8 @@ impl Supervisor {
                 record.message = Some(format!("Controller CLI 已停止，但無法寫入 Run 的結束：{error}"));
             }
             record
-        });
-        futures::future::join_all(stops).await
+        })
+        .collect()
     }
 
     /// 完全退出時要結束的宿主：還沒開窗的沒有宿主；開窗結果不明的以 command_id 找回。
