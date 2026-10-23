@@ -269,6 +269,17 @@ impl Store {
     }
 }
 
+/// 從備份還原時，把備份當下尚未結束的 Controller CLI 一律中斷（不開新的 Run）：還原後的 Runtime 不替使用者開窗，
+/// 也不沿用備份當下的宿主；使用者要時再自行開啟。回傳中斷的數量。
+pub(crate) fn interrupt_open_controller_clis(tx: &Transaction<'_>, reason: &str, now: Timestamp) -> rusqlite::Result<usize> {
+    let runs = load(tx, "status IN ('starting', 'running')", [])?;
+    for run in &runs {
+        let change = controller_cli::interrupt(run, reason, now).expect("尚未結束的 Controller CLI 可以中斷");
+        save(tx, &change, now)?;
+    }
+    Ok(runs.len())
+}
+
 /// 已要求換帳號重開的 Run 結束後，以新 Profile 開新的 Run；沒有要求換帳號時不做任何事。
 /// Workspace 已封存等無法開新 Run 的情況只結束舊的（頁簽顯示已結束，使用者可再手動開啟）。
 fn open_switched(tx: &Transaction<'_>, ended: &ControllerCliRun, ids: OpenIds, now: Timestamp) -> rusqlite::Result<()> {
