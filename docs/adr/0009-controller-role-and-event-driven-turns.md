@@ -1,8 +1,8 @@
 # ADR-0009：Controller 協調角色、事件觸發與依序處理
 
 - 來源識別：DR-20261022-01
-- 狀態：已確認（使用者核准，2026-10-22）；實作未查驗，CLI 與 Windows 整合為 Validation Required
-- 後續：A1（事件驅動喚醒）與 B1（對話依序處理）擬由 [ADR-0014](0014-native-cli-controller.md) 取代（AI 暫定，待使用者確認）
+- 狀態：已確認（使用者核准，2026-10-22）；**部分被 [ADR-0014](0014-native-cli-controller.md) 取代**（A1、B1）；實作未查驗，CLI 與 Windows 整合為 Validation Required
+- 後續：A1（事件驅動喚醒）與 B1（對話依序處理）由 [ADR-0014](0014-native-cli-controller.md) 取代（ADR-0014 仍為 AI 暫定，待使用者確認），並已於 desktop-controller-cli 票 08 移除：對話頁、事件合併視窗、每輪一次 `claude -p` 的 Controller 輪次與 Controller 自動交接。舊的對話資料保留在資料庫，不遷移、不再寫入。本 ADR 其餘部分（Controller 的協調角色、透過工具提交委託、事件去重與 command_id）仍有效。
 - 來源：[issue #3](https://github.com/Anuise/issue-orchestrator/issues/3) §17 DR-20261022-01；§2.4、§15.11
 - Spec 對應：[spec.md](../../.scratch/platform-rebuild-v1/spec.md) 的 D-06（Controller 執行方式）、D-31（事件合併視窗）、User Stories 18–20、24
 
