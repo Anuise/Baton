@@ -161,3 +161,63 @@ fn ending_is_terminal_and_records_the_reason_and_exit_code() {
     assert!(host_started(&ended.run, 1, NOW).is_err());
     assert!(record_receipt(&ended.run, host(), NOW).is_err());
 }
+
+/// 開啟後開窗並進入 running。
+fn running(run: ControllerCliRun) -> ControllerCliRun {
+    record_receipt(&run, host(), NOW).unwrap().run
+}
+
+#[test]
+fn reopening_with_the_account_that_last_ran_continues_its_native_session_and_another_account_does_not() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
+    let first = opened(&ws, &profiles);
+    assert!(!first.continue_session, "第一次開啟沒有可接續的原生 Session");
+    let first = end(&running(first), END_USER_ENDED, "結束", None, NOW).unwrap().run;
+
+    let same = open(&ws, "p1", &profiles, std::slice::from_ref(&first), None, ids(2), NOW).unwrap();
+    assert!(same.run.continue_session);
+    assert_eq!(same.events[0].payload["continue_session"], true);
+    let other = open(&ws, "p2", &profiles, std::slice::from_ref(&first), None, ids(2), NOW).unwrap();
+    assert!(!other.run.continue_session, "換帳號不接續");
+
+    // 開啟失敗（沒有執行過）的 Run 不算：比對的是最近一次真的執行過的 Run
+    let failed = end(&opened(&ws, &profiles), END_CLAUDE_NOT_FOUND, "找不到", None, NOW).unwrap().run;
+    let failed = ControllerCliRun { id: "ctl_2".into(), profile_id: "p2".into(), ..failed };
+    let after_failure = open(&ws, "p1", &profiles, &[first, failed], None, ids(3), NOW).unwrap();
+    assert!(after_failure.run.continue_session);
+}
+
+#[test]
+fn interrupting_is_terminal_and_records_the_restart_reason() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true)];
+    let run = running(opened(&ws, &profiles));
+
+    let change = interrupt(&run, "Runtime 重新啟動時終端機已關閉", NOW).unwrap();
+
+    assert_eq!(change.run.status, ControllerCliStatus::Interrupted);
+    assert_eq!(change.run.end_code.as_deref(), Some(END_RUNTIME_RESTARTED));
+    assert_eq!(change.run.ended_at, Some(NOW));
+    assert!(!credential_valid(&change.run));
+    assert_eq!(change.events[0].event_type, EVENT_CONTROLLER_CLI_INTERRUPTED);
+    assert_eq!(interrupt(&change.run, "再一次", NOW), Err(ControllerCliError::AlreadyEnded));
+}
+
+#[test]
+fn rebinding_keeps_the_run_open_but_invalidates_its_credential_once() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true)];
+    let run = running(opened(&ws, &profiles));
+    assert!(credential_valid(&run));
+
+    let change = rebind(&run, NOW).unwrap().unwrap();
+
+    assert_eq!(change.run.status, ControllerCliStatus::Running);
+    assert_eq!(change.run.rebound_at, Some(NOW));
+    assert!(!credential_valid(&change.run));
+    assert_eq!(change.events[0].event_type, EVENT_CONTROLLER_CLI_REBOUND);
+    assert_eq!(rebind(&change.run, NOW), Ok(None), "已重新綁定過就不再改變");
+    // 之後仍可以結束（使用者按結束或關掉終端機）
+    assert_eq!(end(&change.run, END_HOST_GONE, "關閉", None, NOW).unwrap().run.status, ControllerCliStatus::Ended);
+}

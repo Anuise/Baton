@@ -146,6 +146,9 @@ pub struct RunStopRecord {
     /// 給使用者看的說明（異常原因等）；沒有時為 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// 這一項是互動式 Controller CLI（desktop-controller-cli 票 07），不是 Worker Run；`task_id` 為空字串。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub controller_cli: bool,
 }
 
 impl RunStopRecord {
@@ -157,7 +160,13 @@ impl RunStopRecord {
             outcome: RunStopOutcome::Pending,
             anomaly: None,
             message: None,
+            controller_cli: false,
         }
+    }
+
+    /// 完全退出要結束的 Controller CLI（票 07）。
+    pub fn pending_controller_cli(run_id: &str, workspace_id: &str) -> Self {
+        Self { controller_cli: true, ..Self::pending(run_id, workspace_id, "") }
     }
 }
 
