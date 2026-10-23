@@ -799,11 +799,9 @@ mod tests {
 
         let snapshot = data.path().join("run-settings").join("run_1");
         std::fs::create_dir_all(&snapshot).unwrap();
-        std::fs::write(snapshot.join(INSTRUCTIONS_FILE), "使用者的共同指示
-").unwrap();
+        std::fs::write(snapshot.join(INSTRUCTIONS_FILE), "使用者的共同指示\n").unwrap();
         adapter.prepare(&run_spec(Some(&snapshot), None)).await.unwrap();
-        assert_eq!(system_prompt(), playbook::system_prompt(WORKER_RULES, Some("使用者的共同指示
-")));
+        assert_eq!(system_prompt(), playbook::system_prompt(WORKER_RULES, Some("使用者的共同指示\n")));
 
         let without_instructions = RunSpec { settings_files: vec![SETTINGS_FILE.to_string()], ..run_spec(Some(&snapshot), None) };
         adapter.prepare(&without_instructions).await.unwrap();

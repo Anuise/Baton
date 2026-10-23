@@ -280,8 +280,7 @@ async fn the_worker_starts_with_the_profiles_config_dir_the_runs_settings_snapsh
     assert_eq!(value_after(&spec.args, "--append-system-prompt-file"), Some(system_prompt.to_string_lossy().as_ref()));
     assert_eq!(
         std::fs::read_to_string(&system_prompt).unwrap(),
-        playbook::system_prompt(WORKER_RULES, Some("一律使用繁體中文。
-"))
+        playbook::system_prompt(WORKER_RULES, Some("一律使用繁體中文。\n"))
     );
     assert_eq!(value_after(&spec.args, "--setting-sources"), Some(""), "不載入使用者層與 Workspace 內的設定檔");
     let config_dir = profile_config_dir(&profile(&harness, &profile_id).await);
