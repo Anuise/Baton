@@ -310,6 +310,37 @@ impl Harness {
             .map(|(_, token)| token)
     }
 
+    /// 以桌面 API 為 Workspace 開啟 Controller CLI，讓 Supervisor 開窗，回傳 (Controller Run 識別, Controller 憑證)。
+    /// 憑證取自 fake Claude 環境 Port 記錄的開窗環境變數，與真實 Controller 宿主拿到的是同一個值（票 03）。
+    pub async fn open_controller_cli(&self, workspace_id: &str, profile_id: &str) -> (String, String) {
+        let path = baton_api::controller_cli_path(workspace_id);
+        let (status, body) =
+            self.send_json(reqwest::Method::POST, &path, Some(serde_json::json!({ "profile_id": profile_id }))).await;
+        assert_eq!(status, reqwest::StatusCode::ACCEPTED, "開啟 Controller CLI 失敗：{body}");
+        let run_id = body["run"]["id"].as_str().expect("回應沒有 Controller Run 識別").to_string();
+        self.supervise().await;
+        let token = self
+            .fakes
+            .claude_env
+            .controller_terminals()
+            .into_iter()
+            .rev()
+            .find_map(|launch| {
+                let mut env = launch.spawn.env.into_iter();
+                env.find(|(name, _)| name == AGENT_TOKEN_ENV).map(|(_, token)| token)
+            })
+            .expect("Controller 終端機應該收到 Controller 憑證");
+        (run_id, token)
+    }
+
+    /// 從桌面 API 結束 Workspace 的 Controller CLI，讓 Supervisor 停止宿主；之後它的 Controller 憑證失效。
+    pub async fn end_controller_cli(&self, workspace_id: &str) {
+        let path = baton_api::controller_cli_end_path(workspace_id);
+        let (status, body) = self.send_json(reqwest::Method::POST, &path, None).await;
+        assert_eq!(status, reqwest::StatusCode::ACCEPTED, "結束 Controller CLI 失敗：{body}");
+        self.supervise().await;
+    }
+
     /// Runtime 的 loopback 位址（MCP shim 的 `BATON_RUNTIME_URL`）。
     pub fn runtime_url(&self) -> String {
         format!("http://{}", self.addr())

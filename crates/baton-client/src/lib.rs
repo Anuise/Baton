@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    admission_check_path, artifact_content_path, conversation_messages_path, conversation_path, PostMessageRequest,
+    admission_check_path, artifact_content_path,
     controller_cli_end_path, controller_cli_path, ControllerCliView, OpenControllerCliRequest,
-    PostedMessage, artifact_preview_path, artifacts_path, authorization_path,
+    artifact_preview_path, artifacts_path, authorization_path,
     authorization_summary_path, decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path,
     decision_path, decisions_path, goals_path, run_cancel_path, run_context_path, RunContextView, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
     MergeResponse, UpdateAuthorityRequest, DECISIONS_BATCH_PATH,
@@ -46,7 +46,6 @@ use baton_api::{
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
 };
 use baton_domain::authority::AuthorityTable;
-use baton_domain::conversation::ConversationView;
 use baton_domain::decision::DecisionView;
 use baton_domain::authorization::{Admission, AuthorizationRevision, ConfirmationSummary};
 use baton_domain::profile::ProfileView;
@@ -343,17 +342,6 @@ impl RuntimeClient {
     /// 上限不是正整數或 Profile 已封存時回傳 `ClientError::Rejected`。
     pub async fn set_quota_limits(&self, profile_id: &str, limits: &PlanLimits) -> Result<SchedulingOverview, ClientError> {
         self.send_json(reqwest::Method::PUT, &plan_limits_path(profile_id), Some(limits)).await
-    }
-
-    /// Workspace 與 Controller 的長期對話（票 16）。
-    pub async fn conversation(&self, workspace_id: &str) -> Result<ConversationView, ClientError> {
-        self.get_json(&conversation_path(workspace_id)).await
-    }
-
-    /// 送出一則使用者訊息；Controller 忙碌時同樣保存為「已收到／待處理」。空白或過長時回傳 `ClientError::Rejected`。
-    pub async fn send_conversation_message(&self, workspace_id: &str, text: &str) -> Result<PostedMessage, ClientError> {
-        let request = PostMessageRequest { text: text.to_string() };
-        self.send_json(reqwest::Method::POST, &conversation_messages_path(workspace_id), Some(&request)).await
     }
 
     /// Controller 頁簽的狀態：這個 Workspace 最近一次的 Controller CLI Run（desktop-controller-cli 票 03）。

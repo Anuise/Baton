@@ -469,8 +469,6 @@ pub(crate) fn save(tx: &Transaction<'_>, change: &RunChange, now: Timestamp) -> 
     for event in &change.events {
         append_event(tx, event)?;
     }
-    // Worker 的成果或阻礙在同一個交易中成為 Controller 對話的工作事件（票 16）
-    super::conversations::enqueue_work_events(tx, change, now)?;
     // Run 結束（任何路徑：結束回報、核對、取消、完全退出、還原）：還沒回報結果的外部操作在同一個交易變成結果未知（票 26）
     if let Some(run) = change.run.as_ref().filter(|r| r.status.is_terminal()) {
         super::external_operations::settle_run_end(tx, run, now)?;
