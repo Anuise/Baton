@@ -169,6 +169,33 @@ describe("完全退出進度", () => {
     expect(client.quitApp).toHaveBeenCalledTimes(1);
   });
 
+  it("Controller CLI 的項目以「Workspace · Controller CLI」標示，進度與停止異常清單都是", async () => {
+    const controller = { run_id: "ctl_1", task_id: "", controller_cli: true };
+    const { client, emitFullExit } = fakeClient(
+      stopping({ runs: [exitRun(), exitRun(controller)] }),
+      stopped({
+        runs: [
+          exitRun({ outcome: "stopped_gracefully" }),
+          exitRun({ ...controller, outcome: "anomaly", anomaly: "still_alive", message: "pid 4242 在期限後仍存在" }),
+        ],
+      }),
+    );
+    render(<ExitProgress client={client} quitDelayMs={1000} />);
+    await emitFullExit();
+    await settle();
+
+    const runs = screen.getByRole("list", { name: "Run 停止結果" });
+    expect(within(runs).getByText("筆記 · run_1")).toBeInTheDocument();
+    expect(within(runs).getByText("筆記 · Controller CLI").closest("li")).toHaveTextContent("等待中");
+    expect(runs).not.toHaveTextContent("ctl_1");
+
+    await settle(500);
+
+    const anomalies = screen.getByRole("alert");
+    expect(anomalies).toHaveTextContent("筆記 · Controller CLI：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
+    expect(anomalies).not.toHaveTextContent("ctl_1");
+  });
+
   it("輪詢時連續 3 次連不上 Runtime 視為已結束，結束 App", async () => {
     const { client, emitFullExit } = fakeClient(stopping(), new Error("connection refused"));
     render(<ExitProgress client={client} quitDelayMs={1000} />);

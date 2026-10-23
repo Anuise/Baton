@@ -225,7 +225,43 @@
 - 影響：在帳號頁簽核對完 Profile 後要重新切回 Controller 頁簽才會更新選單；票 05 加額度顯示時可一併改為輪詢。
 - 審閱：未審
 
-### AI-23：等待的事件來源是追加式事件表，游標就是事件序號；寄給 Controller 的訊息另追加收件匣事件
+### AI-23：重啟後宿主仍存活時，Run 維持執行中、只讓舊憑證失效，不替使用者結束 CLI
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：spec 的「憑證世代加一」實作為 Controller Run 上的 `rebound_at`（新欄位，migration `controller_cli_recovery`）：Runtime 重啟後以 command_id 找到宿主仍存活時寫入它，並記一筆 `controller_cli_rebound` 事件；`rebound_at` 有值時，以這個 Run 簽發的 Controller 憑證一律回 401（`controller_run_active` 多檢查這一欄），宿主的開始／結束回報也被拒。Run 維持 `running`，Runtime 不停止宿主；頁簽提示「請按『結束』後以同一個帳號重新開啟」。使用者關掉終端機時由既有的存活查驗結束 Run（`host_gone`）。不另外簽發新的憑證。
+- 理由：憑證只經環境變數交給宿主，已開著的 CLI 拿不到新的憑證，所以「重新綁定」實際上就是讓舊憑證失效、等使用者重開；使用者可能正在和那個 CLI 對話，Runtime 自己把它關掉會打斷工作。憑證資料表沒有世代或撤銷欄位，以 Run 上的一個時間欄位達成相同效果，改動最小。
+- 替代方案：在憑證與 `ControllerScope` 加世代數字——要改憑證資料表與所有 Controller 工具的範圍檢查，效果相同；重啟後直接停止宿主並標為中斷——會中斷使用者正在進行的互動。
+- 影響：重新綁定後到使用者重開之前，那個 CLI 的平台工具都不能用（票 06 的 `wait` 也會以憑證失效結束）；同一個 Workspace 在使用者按「結束」或關掉終端機之前不能開新的 Controller CLI。
+- 審閱：未審
+
+### AI-24：每次 Runtime 啟動都查驗上一個實例開出的 Controller CLI，不只當掉恢復
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：Supervisor 記住「這個 Runtime 實例自己寫下 launch intent 或已查驗過」的 Controller Run；其他已寫過 launch intent 的非終態 Run 一律視為上一個實例開出的，先查驗：找到宿主→（沒有回執時補寫）重新綁定；有回執但找不到→`interrupted`（`end_code = runtime_restarted`）；沒有回執也找不到→沿用票 03 的 `ended`／`launch_outcome_unknown`。正常重啟（沒有經過完全退出）與當掉恢復一樣處理；不依賴崩潰恢復事件，也不受恢復暫停派工影響。
+- 理由：舊實例交出的 Runtime 位址與憑證在新實例下不保證可用，正常重啟與當掉的差別只在於程序有沒有記下正常結束；以「是不是這個實例開出的」判斷不需要讀恢復狀態。開窗結果不明的情形票 03 已定義並通過驗證，沒有理由改成 `interrupted`。
+- 替代方案：只在偵測到意外終止（有恢復事件）時查驗——正常重啟後 CLI 拿著舊憑證，行為取決於重啟方式，較難預期。
+- 影響：Runtime 因更新等原因正常重啟後，開著的 Controller CLI 也要重新開啟。
+- 審閱：未審
+
+### AI-25：同帳號接續的判斷：最近一次真的執行過的 Run 用同一個帳號，開啟時決定並持久化
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：使用者要求開啟時，Domain 找這個 Workspace 最近一次 `running_at` 有值（真的執行過）的 Controller Run；它的 Profile 與這次相同就把 `continue_session` 設為 true（新欄位，同一個 migration），Adapter 在 `claude` 參數加 `--continue`；換帳號、或從未執行過時不加。開啟失敗的 Run 不列入比對。`RunSpec` 多一個 `continue_session` 欄位（Worker 一律 false）。這條規則與票 05 的驗收條件重疊，本票先實作；Controller 頁簽未開啟時預設選最近一次 Run 的帳號（仍可用時），讓「同帳號重開」是預設動作。
+- 理由：票 07 的「恢復後重新開啟同帳號時帶 `--continue`」與票 05 的「同帳號重開帶 `--continue`」是同一條規則，分兩處實作會不一致；持久化在 Run 上，Runtime 重建後組出相同的啟動指令（command hash 不變），能以 command_id 找回宿主。
+- 替代方案：每次組啟動規格時才回頭查前一個 Run——規則藏在 Supervisor，API 與時間線看不到這次是否接續。
+- 影響：票 05 合併時應沿用這個欄位與規則，不要再做一份。若上次的 CLI 開了就關、沒有留下原生 Session，`claude --continue` 可能顯示找不到可接續的對話，使用者要改用其他帳號或手動開新對話；平台目前不偵測這種情形。
+- 審閱：未審
+
+### AI-26：完全退出時 Controller CLI 的停止方式與在退出進度中的呈現
+- 重要度：低
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：完全退出的停止流程讀取所有開著的 Controller CLI，先以「等待中」列入停止報告（`ExitReport.runs`，`controller_cli: true`、`task_id` 為空字串），再與 Worker 同時停止宿主（寬限 2 秒，與按「結束」相同），同樣受 40 秒總上限約束。確認停止或從未開出宿主的以 `end_code = full_exit` 結束 Run；無法確認的記為停止異常、Run 維持原狀（重新開啟後由 AI-24 的查驗處理）。退出畫面以「Workspace 名稱 · Controller CLI」標示這一項。
+- 理由：沿用既有的停止報告與停止異常呈現，不新增另一份進度；互動式 `claude` 不會因為寬限期而自行保存結束，給 Worker 的 30 秒寬限只會拖慢退出。
+- 替代方案：另開「Controller CLI 停止結果」欄位——前端要多一套呈現，且停止異常的判斷要重寫。
+- 影響：停止報告的項目不再都是 Worker Run；讀取 `runs` 的程式要以 `controller_cli` 區分（目前只有退出畫面）。只關 App 視窗不經過這個流程，Controller CLI 不受影響（Runtime 是獨立程序，沒有改動）。
+- 審閱：未審
+
+### AI-27：等待的事件來源是追加式事件表，游標就是事件序號；寄給 Controller 的訊息另追加收件匣事件
 - 重要度：中
 - 時間／階段：2026-10-23，票 06 實作
 - 決策：等待端點直接從追加式 `event` 表讀出四種事件，游標是事件表的 `seq`：Worker Run 結束＝`run_succeeded`／`run_failed`／`run_cancelled`／`run_interrupted`（交接 `run_handed_off` 不算，工作由接手的 Run 繼續）；Task 受阻＝`task_status_changed` 且 `to = blocked`；裁定被回答＝該 Workspace 任何裁定請求的 `decision_answered`（含 Worker 的與權限提示）；收到訊息＝新事件 `controller_inbox`／`controller_message_received`（`aggregate_id` 是 Workspace，Worker 寄給 Controller 的訊息存入收件匣時在同一個交易中追加）。一次最多回 20 筆。舊對話的工作事件佇列（`enqueue_work_events`）不使用。
@@ -234,7 +270,7 @@
 - 影響：時間線不顯示 `controller_inbox` 事件（不在時間線聚合清單內）。Controller 自己取消 Task 也會收到 Run 結束通知。
 - 審閱：未審
 
-### AI-24：wait 印出摘要後才由 shim 確認，確認走同一個端點
+### AI-28：wait 印出摘要後才由 shim 確認，確認走同一個端點
 - 重要度：中
 - 時間／階段：2026-10-23，票 06 實作
 - 決策：`POST /agent/v1/controller/wait`，body `{ ack?, timeout_seconds? }`。shim 的 `wait` 先送等待請求，把事件摘要寫到 stdout 並 flush 成功後，再送 `{ ack: <回應的 cursor>, timeout_seconds: 0 }` 確認；確認失敗只警告，事件下次會再回報（至少一次）。沒確認前再等一次會拿到同一批。確認只會往前；超過目前最後一筆事件或為負數回 400 `wait_cursor_invalid`。
@@ -243,7 +279,7 @@
 - 影響：每次有事件的 wait 會打兩個請求。
 - 審閱：未審
 
-### AI-25：新的 Controller Run 接續同一個 Workspace 上一個 Controller 確認到的位置
+### AI-29：新的 Controller Run 接續同一個 Workspace 上一個 Controller 確認到的位置
 - 重要度：中
 - 時間／階段：2026-10-23，票 06 實作
 - 決策：Controller Run 第一次等待時決定起點並保存：同一個 Workspace 先前的 Controller Run 確認過的最大游標；沒有的話是這個 Run 的 `controller_cli_opened` 事件；都沒有時是目前最後一筆。之後依 Controller Run 保存在新資料表 `controller_event_cursor`（只能往前）。
@@ -252,7 +288,7 @@
 - 影響：上一個 Controller 沒確認的事件會交給下一個 Controller。
 - 審閱：未審
 
-### AI-26：等待的逾時、批次與 wait 的結束碼
+### AI-30：等待的逾時、批次與 wait 的結束碼
 - 重要度：低
 - 時間／階段：2026-10-23，票 06 實作
 - 決策：逾時預設 600 秒、上限 3600 秒（超過回 400 `wait_timeout_invalid`；`--timeout` 格式錯或超過上限，shim 以 2 結束且不送請求），`0` 表示只查一次。結束碼：0 有事件、1 其他失敗（連線失敗、非 401 的錯誤回應、回應無法解析）、2 參數或環境變數錯誤、3 憑證失效（401，Controller CLI 已結束）、4 逾時。逾時說明印在 stdout，其餘錯誤走 stderr。Worker 憑證呼叫回 403 `controller_only`（shim 以 1 結束）。Runtime 停止時等待中的請求回 503 `runtime_stopping`。
@@ -261,7 +297,7 @@
 - 影響：操作手冊（票 04）需要說明這些結束碼。
 - 審閱：未審
 
-### AI-27：Controller 宿主以 BATON_MCP_SHIM 環境變數把 shim 執行檔路徑交給 claude
+### AI-31：Controller 宿主以 BATON_MCP_SHIM 環境變數把 shim 執行檔路徑交給 claude
 - 重要度：中
 - 時間／階段：2026-10-23，票 06 實作
 - 決策：`controller-host` 啟動 `claude` 時設定 `BATON_MCP_SHIM=<shim 執行檔完整路徑>`（取自 `current_exe`），Controller 以 `"$BATON_MCP_SHIM" wait` 在背景 Bash 執行等待。憑證與 Runtime 位址仍只經既有的環境變數繼承，不出現在命令列。
@@ -270,7 +306,7 @@
 - 影響：票 04 的操作手冊應以 `"$BATON_MCP_SHIM" wait` 說明背景等待。
 - 審閱：未審
 
-### AI-28：長輪詢以 Store 的提交通知叫醒、以 Clock 計時
+### AI-32：長輪詢以 Store 的提交通知叫醒、以 Clock 計時
 - 重要度：低
 - 時間／階段：2026-10-23，票 06 實作
 - 決策：Store 每次寫入交易提交就通知訂閱者，等待端點據此重新查詢（並重新檢查憑證，Controller 結束時回 401）；逾時以 Clock Port 新增的 `sleep_until` 計時。正式時鐘用 tokio 的 sleep；harness 的 fake Clock 只在測試推進時間時醒來，並提供 `wait_for_sleepers` 讓測試確認端點已經開始等待。`sleep_until` 的預設實作永遠不醒（只有 API 用的時鐘需要覆寫）。
