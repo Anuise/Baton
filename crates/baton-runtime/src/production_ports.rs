@@ -146,6 +146,10 @@ impl WorkspaceFs for LocalWorkspaceFs {
         let (dir, files) = (dir.to_path_buf(), files.to_vec());
         blocking(move || baton_ports::write_readonly_tree(&dir, &files)).await
     }
+    async fn create_file_if_absent(&self, path: &Path, bytes: &[u8]) -> PortResult<bool> {
+        let (path, bytes) = (path.to_path_buf(), bytes.to_vec());
+        blocking(move || baton_ports::create_file_if_absent(&path, &bytes)).await
+    }
     async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>> {
         let path = path.to_path_buf();
         blocking(move || read_file_if_exists(&path)).await
