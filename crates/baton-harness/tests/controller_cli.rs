@@ -257,7 +257,7 @@ async fn ending_from_the_app_stops_the_host_and_revokes_the_credential() {
     assert!(body["run"]["end_requested_at"].is_number(), "{body}");
     harness.supervise().await;
 
-    assert_eq!(harness.process_control.stop_calls(), [identity.clone()], "結束宿主（連同它啟動的 claude）");
+    assert_eq!(harness.process_control.stop_calls(), std::slice::from_ref(&identity), "結束宿主（連同它啟動的 claude）");
     assert!(!harness.process_control.alive().contains(&identity));
     let run = view(&harness, &ws).await;
     assert_eq!((run["status"].as_str(), run["end_code"].as_str()), (Some("ended"), Some("user_ended")), "{run}");
