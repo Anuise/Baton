@@ -13,6 +13,7 @@
 //! 直接以 `--ignored` 執行卻找不到 Playwright 時測試失敗。
 
 mod browser;
+mod controller_cli_open_and_end;
 mod decision_center_batch;
 mod dispatch_to_completion;
 mod server;
