@@ -925,6 +925,10 @@ impl WorkspaceFs for FakeWorkspaceFs {
     async fn write_readonly_files(&self, dir: &Path, files: &[(String, Vec<u8>)]) -> PortResult<()> {
         baton_ports::write_readonly_tree(dir, files)
     }
+
+    async fn create_file_if_absent(&self, path: &Path, bytes: &[u8]) -> PortResult<bool> {
+        baton_ports::create_file_if_absent(path, bytes)
+    }
 }
 
 /// 使用者平常使用的 Claude Code 設定：一個暫存的「家目錄」，內含 `.claude\` 與 `.claude.json`。

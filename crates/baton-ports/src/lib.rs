@@ -44,7 +44,7 @@ pub use update::UpdateSource;
 pub use user_settings::{DirUserSettingsSource, SourceFile, SourceFiles, UserSettingsSource};
 pub use verification::{HttpOutcome, HttpRequest, ServiceHandle, ServiceRequest, VerificationDriver};
 pub use workspace_fs::{
-    directory_state, list_files_recursive, partial_path, read_file_if_exists, read_file_within, write_file_atomic,
+    create_file_if_absent, directory_state, list_files_recursive, partial_path, read_file_if_exists, read_file_within, write_file_atomic,
     write_readonly_tree, AdvanceOutcome, ContainedFile, DirectoryState, FileEntry, GitState, MergeOutcome, WorkspaceFs, WorktreeState,
 };
 
