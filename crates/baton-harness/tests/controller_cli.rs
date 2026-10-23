@@ -14,6 +14,7 @@
 //! - launch intent 與開窗回執之間崩潰不重複開窗：`a_crash_between_launch_intent_and_receipt_*`
 //! - 開窗失敗、找不到 claude、Profile 失效：`open_failures_*`、`an_unusable_profile_*`
 //! - Controller 憑證可呼叫 Controller 工具：`the_controller_credential_can_propose_and_dispatch_tasks`
+//! - 最終 review 修正：Run 目錄只放 MCP 設定，不寫用不到的 Worker 檔案：`the_run_directory_gets_the_mcp_config_but_no_worker_files`
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +24,7 @@ use baton_domain::controller_cli::{HOST_ENDED_PATH, HOST_STARTED_PATH, HOST_SUBC
 use baton_domain::Timestamp;
 use baton_harness::Harness;
 use baton_ports::{Liveness, TerminalLaunch, ToolProbe};
-use baton_runtime::claude_adapter::{ClaudeCodeAdapter, RUNS_DIR, RUN_MCP_FILE};
+use baton_runtime::claude_adapter::{ClaudeCodeAdapter, PROMPT_FILE, RUNS_DIR, RUN_MCP_FILE};
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
@@ -175,6 +176,23 @@ async fn opening_launches_native_claude_in_a_terminal_with_the_shared_assembly()
     assert_eq!(event_types(&events), ["controller_cli_opened", "controller_cli_launch_started", "controller_cli_running"]);
     assert_eq!(events[0]["payload"]["profile_id"], profile.as_str());
     assert_eq!(events[0]["category"], "controller");
+}
+
+#[tokio::test]
+async fn the_run_directory_gets_the_mcp_config_but_no_worker_files() {
+    let harness = start().await;
+    let profile = harness.add_account("帳號 1", "account1@example.com").await;
+    let (ws, _) = new_workspace(&harness, "main").await;
+
+    let (run, _, _) = open_and_launch(&harness, &ws, &profile).await;
+
+    let run_dir = harness.data_dir().join(RUNS_DIR).join(run["id"].as_str().unwrap());
+    assert!(run_dir.join(RUN_MCP_FILE).is_file(), "Controller CLI 的 --mcp-config 指向這個檔案");
+    // Worker 的 Prompt 與 Worker 通則系統提示用不到（Controller CLI 的系統提示是唯讀目錄裡的操作手冊）
+    let mut names: Vec<String> =
+        std::fs::read_dir(&run_dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, [RUN_MCP_FILE], "不應寫出 {PROMPT_FILE} 或 Worker 通則：{names:?}");
 }
 
 #[tokio::test]

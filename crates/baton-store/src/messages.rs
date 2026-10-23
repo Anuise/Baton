@@ -2,7 +2,7 @@
 //!
 //! 規則都在 Domain（`baton_domain::message`）；這裡只做「在同一個交易中載入狀態 → 交給 Domain 判定 → 寫入」。
 //! 範圍（Workspace、Run、世代）一律來自憑證；收件匣以憑證所屬 Run 的 Task 為界，沒有任何查詢接受別人的 Task。
-//! Controller（票 54）以它那一輪所屬的 Workspace 為界：收件匣是寄給這個 Workspace 的 Controller 的交付
+//! Controller（票 54）以它的 Controller CLI 所屬的 Workspace 為界：收件匣是寄給這個 Workspace 的 Controller 的交付
 //! （`message_controller_delivery`），可以寄給同一個 Workspace 的任何 Task。
 
 use baton_domain::message::{
@@ -11,7 +11,6 @@ use baton_domain::message::{
 };
 use baton_domain::run;
 
-use rusqlite::OptionalExtension;
 
 use super::tasks::load;
 use super::*;
@@ -40,7 +39,7 @@ pub struct SendOutcome {
     pub duplicate: bool,
 }
 
-/// 收發訊息的一方：Worker 的 Run（Agent 憑證的範圍），或 Workspace 的 Controller 的一輪（Controller 憑證的範圍，票 54）。
+/// 收發訊息的一方：Worker 的 Run（Agent 憑證的範圍），或 Workspace 的 Controller CLI（Controller 憑證的範圍，票 54）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageActor {
     Worker(AgentScope),
@@ -67,7 +66,7 @@ pub struct Inbox {
 }
 
 /// 憑證所屬的寄件者／讀取者與它所在 Workspace 的全部 Task。Worker 記下它此刻是否還是 Task 的寫入所有者，
-/// Controller 記下這一輪是否仍在進行；Run（或這一輪）不存在時回報 `RunNotFound`。
+/// Controller 記下它的 Controller CLI 是否仍是目前的 Controller；Run（或 Controller CLI）不存在時回報 `RunNotFound`。
 fn sender_of(tx: &Connection, actor: &MessageActor) -> Result<(Sender, Vec<String>), MessageApplyError> {
     let loaded = load(tx, actor.workspace_id())?;
     let sender = match actor {
@@ -87,20 +86,14 @@ fn sender_of(tx: &Connection, actor: &MessageActor) -> Result<(Sender, Vec<Strin
             }
         }
         MessageActor::Controller(scope) => {
-            let status: Option<String> = tx
-                .query_row(
-                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2",
-                    [&scope.controller_run_id, &scope.workspace_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(status) = status else {
+            // 與 Controller 憑證同一份規則：Controller CLI 尚未結束、沒有被重新綁定
+            let Some(is_current) = super::controller_cli::controller_credential_valid(tx, scope)? else {
                 return Err(MessageApplyError::RunNotFound(scope.controller_run_id.clone()));
             };
             Sender {
                 workspace_id: scope.workspace_id.clone(),
                 identity: MessageSender::Controller { controller_run_id: scope.controller_run_id.clone() },
-                is_current: matches!(status.as_str(), "starting" | "running"),
+                is_current,
             }
         }
     };
@@ -177,7 +170,7 @@ impl Store {
 
     /// 讀取寄給讀取者的訊息，依送出順序；回傳的未讀訊息會被標為已讀。Worker 讀寄給它 Task 的，
     /// Controller 讀寄給這個 Workspace 的 Controller 的（票 54）。
-    /// Run 已結束或被接替（Controller 這一輪已結束）時拒絕（`MessageError::Revoked`），不改變任何已讀狀態。
+    /// Run 已結束或被接替（Controller CLI 已結束或已重新綁定）時拒絕（`MessageError::Revoked`），不改變任何已讀狀態。
     pub async fn read_inbox(
         &self,
         actor: &MessageActor,

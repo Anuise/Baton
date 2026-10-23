@@ -305,6 +305,34 @@ async fn backups_contain_no_credentials_or_native_login_data() {
 
 // ============================================================ 還原後不重放外部操作
 
+/// 最終 review 修正（R026 第 3 項）：備份當下 Controller CLI 剛被要求開啟（還沒開窗），還原後不替使用者開出 Controller 終端機。
+#[tokio::test]
+async fn after_restore_an_unfinished_controller_cli_is_not_opened() {
+    let harness = harness().await;
+    let ws = new_workspace(&harness).await;
+    let profile = harness.add_account("Controller 帳號", "controller@example.com").await;
+    let cli = format!("{WORKSPACES}/{ws}/controller-cli");
+    let (status, body) = harness.send_json(Method::POST, &cli, Some(json!({ "profile_id": profile }))).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+
+    harness.run_backups().await;
+    let restored = restored_from(latest_backup_dir(&harness).await, CLOCK_START.plus_millis(HOUR)).await;
+    for _ in 0..3 {
+        restored.supervise().await;
+        restored.clock.advance_millis(5 * 60 * 1000);
+    }
+
+    assert!(restored.claude_env.controller_terminals().is_empty(), "還原後不自動開出 Controller 終端機");
+    let (status, body) = restored.send_json(Method::GET, &cli, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["run"]["status"], "interrupted", "{body}");
+    assert!(body["run"]["end_reason"].as_str().unwrap().starts_with("restored_from_backup"), "{body}");
+    // 使用者可以在還原後自行重新開啟
+    let (status, body) = restored.send_json(Method::POST, &cli, Some(json!({ "profile_id": profile }))).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+}
+
+
 #[tokio::test]
 async fn after_restore_unfinished_runs_are_not_relaunched_or_resumed() {
     let harness = harness().await;

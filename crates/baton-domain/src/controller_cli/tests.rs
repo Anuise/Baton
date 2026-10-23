@@ -222,9 +222,9 @@ fn switching_requests_the_end_and_remembers_the_new_profile() {
     assert_eq!(switched.events[0].payload["to_profile_id"], "p2");
 
     // 已在結束中（含已要求換帳號）不能再換
-    assert_eq!(request_switch(&switched.run, "p2", &profiles, NOW).unwrap_err(), ControllerCliError::Ending);
+    assert_eq!(request_switch(&switched.run, "p2", &profiles, NOW).unwrap_err(), ControllerCliError::SwitchWhileEnding);
     let ending = request_end(&run, NOW).unwrap().unwrap().run;
-    assert_eq!(request_switch(&ending, "p2", &profiles, NOW).unwrap_err(), ControllerCliError::Ending);
+    assert_eq!(request_switch(&ending, "p2", &profiles, NOW).unwrap_err(), ControllerCliError::SwitchWhileEnding);
 }
 
 #[test]
@@ -345,4 +345,40 @@ fn rebinding_keeps_the_run_open_but_invalidates_its_credential_once() {
     assert_eq!(rebind(&change.run, NOW), Ok(None), "已重新綁定過就不再改變");
     // 之後仍可以結束（使用者按結束或關掉終端機）
     assert_eq!(end(&change.run, END_HOST_GONE, "關閉", None, NOW).unwrap().run.status, ControllerCliStatus::Ended);
+}
+
+#[test]
+fn a_run_whose_end_was_requested_before_the_launch_intent_ends_without_opening() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
+
+    // 使用者按「結束」之後 Supervisor 才走到開窗：不寫 launch intent，直接以 user_ended 結束
+    let ended_by_user = request_end(&opened(&ws, &profiles), NOW).unwrap().unwrap().run;
+    let change = begin_launch(&ended_by_user, &profiles, true, NOW).unwrap();
+    assert_eq!(change.run.status, ControllerCliStatus::Ended);
+    assert_eq!(change.run.end_code.as_deref(), Some(END_USER_ENDED));
+    assert_eq!(change.run.launched_at, None, "不寫 launch intent，也就不會開窗");
+    assert_eq!(change.events[0].event_type, EVENT_CONTROLLER_CLI_ENDED);
+
+    // 換帳號重開之後才走到開窗：不以舊帳號開窗，以 switched 結束（由 Store 接著以新帳號開新的 Run）
+    let switched = request_switch(&opened(&ws, &profiles), "p2", &profiles, NOW).unwrap().run;
+    let change = begin_launch(&switched, &profiles, true, NOW).unwrap();
+    assert_eq!(change.run.status, ControllerCliStatus::Ended);
+    assert_eq!(change.run.end_code.as_deref(), Some(END_SWITCHED));
+    assert_eq!(change.run.launched_at, None);
+}
+
+#[test]
+fn opening_while_the_previous_run_is_ending_says_it_is_ending_and_switching_says_it_cannot_switch() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
+    let ending = request_end(&running(opened(&ws, &profiles)), NOW).unwrap().unwrap().run;
+
+    let reopened = open(&ws, "p1", &profiles, std::slice::from_ref(&ending), None, ids(2), NOW).unwrap_err();
+    assert_eq!(reopened, ControllerCliError::Ending);
+    assert!(reopened.to_string().contains("再開啟"), "{reopened}");
+
+    let switched = request_switch(&ending, "p2", &profiles, NOW).unwrap_err();
+    assert_eq!(switched.code(), "controller_cli_ending");
+    assert!(switched.to_string().contains("換帳號") && !switched.to_string().contains("再開啟"), "{switched}");
 }

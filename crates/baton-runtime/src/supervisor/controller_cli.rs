@@ -14,6 +14,7 @@
 //! 完全退出時，Supervisor 在停止流程中結束所有開著的 Controller CLI，並列入停止進度（`stop_controller_clis_for_exit`）。
 //! 使用者要求換帳號重開時（票 05），結束宿主的同一個交易中以新 Profile 開新的 Run，下一次處理就開窗。
 
+use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ use baton_domain::playbook::{self, AI_DECISIONS_TEMPLATE, CONTROLLER_PLAYBOOK, S
 use baton_domain::lifecycle::{RunStopOutcome, RunStopRecord, StopAnomaly};
 use baton_domain::shared_settings::{self, MANIFEST_FILE};
 use baton_ports::{Capability, Liveness, ProcessIdentity, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
+use futures::stream::FuturesUnordered;
 
 use super::{identity_of, new_prefixed_id, process_record, Supervisor};
 
@@ -54,17 +56,12 @@ impl Supervisor {
     }
 
     async fn launch_controller_cli(&self, run: &ControllerCliRun) {
-        if run.end_requested_at.is_some() {
-            let (code, reason) = match run.switch_to_profile_id {
-                Some(_) => (END_SWITCHED, "開窗之前已換帳號重開"),
-                None => (END_USER_ENDED, "開窗之前已從 App 結束"),
-            };
-            return self.end_controller_cli(run, code, reason).await;
-        }
-        // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗（Profile 已失效時改為結束，不開窗）。
+        // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗。Profile 已失效、或使用者已按「結束」／「換帳號重開」
+        //    （依交易內讀到的 Run 判斷）時改為結束，不開窗；換帳號時同一個交易中開新的 Run。
         //    同帳號重開要接續時，一併決定原生 Session 還在不在
         let continuable = !run.continue_session || self.native_session_continuable(run).await;
-        let run = match self.store.begin_controller_cli_launch(&run.id, continuable, self.ports.clock.now()).await {
+        let next = self.controller_cli_next_ids(run);
+        let run = match self.store.begin_controller_cli_launch(&run.id, continuable, next, self.ports.clock.now()).await {
             Ok(run) if run.status == ControllerCliStatus::Ended => return,
             Ok(run) => run,
             Err(error) => return self.note(&format!("Controller CLI {} 無法寫入 launch intent，不開窗：{error}", run.id)),
@@ -95,7 +92,7 @@ impl Supervisor {
         if let Err(reason) = self.write_controller_cli_settings(&run).await {
             return self.end_controller_cli(&run, END_LAUNCH_FAILED, &reason).await;
         }
-        if let Err(error) = self.ports.agent_adapter.prepare(&spec).await {
+        if let Err(error) = self.ports.agent_adapter.prepare_controller(&spec).await {
             let reason = format!("無法準備 Controller CLI 的啟動檔案：{error}");
             return self.end_controller_cli(&run, END_LAUNCH_FAILED, &reason).await;
         }
@@ -194,7 +191,9 @@ impl Supervisor {
             }
             (None, true) => {
                 let reason = "Runtime 重新啟動時 Controller CLI 的終端機已關閉；請重新開啟（同一個帳號會接續原生 Session）";
-                if let Err(error) = self.store.interrupt_controller_cli(&run.id, reason, now).await {
+                // 已要求換帳號重開時，同一個交易中以新帳號開新的 Run
+                let next = self.controller_cli_next_ids(run);
+                if let Err(error) = self.store.interrupt_controller_cli(&run.id, reason, next, now).await {
                     return self.note(&format!("Controller CLI {} 的中斷沒有寫入，稍後重試：{error}", run.id));
                 }
             }
@@ -202,10 +201,14 @@ impl Supervisor {
         self.controller_clis_checked.lock().await.insert(run.id.clone());
     }
 
-    /// 完全退出：結束所有開著的 Controller CLI（宿主連同它啟動的 `claude`），回傳每一項的停止結果。
+    /// 完全退出：結束所有開著的 Controller CLI（宿主連同它啟動的 `claude`），每一項停完就產生它的停止結果
+    /// （呼叫端逐筆收集，一個停不下來不影響其他已停止的呈現）。
     /// 確認停止（或從未開出宿主）的以 `full_exit` 結束 Run（憑證隨之失效）；無法確認的記為停止異常、Run 維持原狀。
-    pub(super) async fn stop_controller_clis_for_exit(&self, runs: Vec<ControllerCliRun>) -> Vec<RunStopRecord> {
-        let stops = runs.into_iter().map(|run| async move {
+    pub(super) fn stop_controller_clis_for_exit(
+        &self,
+        runs: Vec<ControllerCliRun>,
+    ) -> FuturesUnordered<impl Future<Output = RunStopRecord> + '_> {
+        runs.into_iter().map(|run| async move {
             let record = RunStopRecord::pending_controller_cli(&run.id, &run.workspace_id);
             let anomaly = |kind: StopAnomaly, message: String| RunStopRecord {
                 outcome: RunStopOutcome::Anomaly,
@@ -232,8 +235,8 @@ impl Supervisor {
                 record.message = Some(format!("Controller CLI 已停止，但無法寫入 Run 的結束：{error}"));
             }
             record
-        });
-        futures::future::join_all(stops).await
+        })
+        .collect()
     }
 
     /// 完全退出時要結束的宿主：還沒開窗的沒有宿主；開窗結果不明的以 command_id 找回。
@@ -275,21 +278,22 @@ impl Supervisor {
         }
     }
 
-    /// 結束 Run；已要求換帳號重開時，同一個交易中以新 Profile 開新的 Run（取不到亂數時只結束，並記下原因）。
+    /// 結束 Run；已要求換帳號重開時（由 Store 依交易內讀到的 Run 判斷），同一個交易中以新 Profile 開新的 Run。
     async fn end_controller_cli(&self, run: &ControllerCliRun, code: &str, reason: &str) {
-        let next = match run.switch_to_profile_id {
-            Some(_) => {
-                let ids = new_controller_cli_ids();
-                if ids.is_none() {
-                    self.note(&format!("Controller CLI {} 換帳號重開：無法取得系統亂數，只結束、不開新的", run.id));
-                }
-                ids
-            }
-            None => None,
-        };
+        let next = self.controller_cli_next_ids(run);
         if let Err(error) = self.store.end_controller_cli(&run.id, code, reason, None, next, self.ports.clock.now()).await {
             self.note(&format!("Controller CLI {} 的結束沒有寫入：{error}", run.id));
         }
+    }
+
+    /// 可能讓 Run 結束的寫入一律備妥新 Run 的識別：使用者可能在這一輪讀到快照之後才按「換帳號重開」，
+    /// 只有 Store 在交易內讀到的 Run 才準。取不到亂數時只結束、不開新的，並記下原因。
+    fn controller_cli_next_ids(&self, run: &ControllerCliRun) -> Option<OpenIds> {
+        let ids = new_controller_cli_ids();
+        if ids.is_none() {
+            self.note(&format!("Controller CLI {}：無法取得系統亂數；若已要求換帳號重開，只結束、不開新的", run.id));
+        }
+        ids
     }
 
     /// Controller CLI 的 `RunSpec`：全部來自持久化的 Run（帳號、工作目錄、開啟時固定的共同設定版本），

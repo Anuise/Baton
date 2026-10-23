@@ -203,3 +203,34 @@ async fn a_scope_change_attempt_becomes_one_event_and_nothing_else() {
     let messages: i64 = conn.query_row("SELECT COUNT(*) FROM message", [], |r| r.get(0)).unwrap();
     assert_eq!(messages, 0);
 }
+
+/// 直接放一個 Controller Run 列（`kind`、`status`、`rebound_at` 由測試指定），回傳它的 Controller 範圍。
+fn insert_controller_run(dir: &Path, id: &str, kind: &str, status: &str, rebound_at: Option<i64>) -> ControllerScope {
+    let conn = raw(dir);
+    conn.execute_batch("PRAGMA ignore_check_constraints = ON").unwrap();
+    conn.execute(
+        "INSERT INTO controller_run (id, kind, workspace_id, profile_id, status, version, command_id, working_dir, created_at, updated_at, rebound_at)
+         VALUES (?1, ?2, 'w1', 'p1', ?3, 1, ?4, 'C:/work/app', 1000, 1000, ?5)",
+        rusqlite::params![id, kind, status, format!("cmd_{id}"), rebound_at],
+    )
+    .unwrap();
+    ControllerScope { workspace_id: "w1".into(), controller_run_id: id.into() }
+}
+
+#[tokio::test]
+async fn only_an_open_controller_cli_that_was_not_rebound_may_send_as_the_controller() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _) = store_with_running_t1(dir.path()).await;
+    let cli = insert_controller_run(dir.path(), "ctl_cli", "cli", "running", None);
+    let old_turn = insert_controller_run(dir.path(), "ctl_turn", "turn", "running", None);
+
+    let sent = store.send_message(&MessageActor::Controller(cli.clone()), message("t2", "開著的 CLI", None), "msg_a".into(), T1).await;
+    assert!(sent.is_ok(), "{sent:?}");
+
+    // 規則與 Controller 憑證相同（`controller_run_active`）：重新綁定後、或升級前留下的舊輪次，都不是目前的 Controller
+    raw(dir.path()).execute("UPDATE controller_run SET rebound_at = 2000 WHERE id = 'ctl_cli'", []).unwrap();
+    let refused = store.send_message(&MessageActor::Controller(cli), message("t2", "重新綁定", None), "msg_b".into(), T1).await;
+    assert!(matches!(refused, Err(MessageApplyError::Rejected(MessageError::StaleSender))), "{refused:?}");
+    let refused = store.send_message(&MessageActor::Controller(old_turn), message("t2", "舊輪次", None), "msg_c".into(), T1).await;
+    assert!(matches!(refused, Err(MessageApplyError::Rejected(MessageError::StaleSender)) | Err(MessageApplyError::RunNotFound(_))), "{refused:?}");
+}

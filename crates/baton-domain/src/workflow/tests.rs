@@ -409,12 +409,10 @@ fn a_task_runs_at_most_one_open_workflow() {
 }
 
 #[test]
-fn notes_for_the_controller_and_the_worker_name_the_current_stage() {
+fn the_note_for_the_worker_names_the_current_stage() {
     let (mut workflow, playbook) = started("defect");
     let mut prior = Vec::new();
     workflow = pass(&workflow, &playbook, &mut prior);
-    let note = WorkflowNote::from_parts(&workflow, &playbook, &prior, Some("修正匯出錯誤".into())).unwrap().render();
-    assert!(note.contains("目前 Stage「最小化」") && note.contains("已完成：建立重現") && note.contains("修正匯出錯誤"), "{note}");
     let worker = worker_stage_note(&workflow, &playbook).unwrap();
     assert!(worker.contains("Stage「最小化」（minimization）") && worker.contains("不要重做"), "{worker}");
 }

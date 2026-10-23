@@ -243,7 +243,7 @@ pub(crate) fn requires_decision(matter: Matter, request_id: String, existing: bo
         matter,
         message: format!(
             "依決策權限表，「{}」必須由使用者裁定：已建立裁定請求 {request_id}，{what}。\
-             使用者回答後你會在對話中收到工作事件，屆時以相同內容再呼叫一次這個工具套用結果；不要自行繞過。",
+             使用者回答後，背景執行的 wait 會回報「裁定已回答」事件通知你，屆時以相同內容再呼叫一次這個工具套用結果；不要自行繞過。",
             matter.label()
         ),
         decision_request_id: request_id,

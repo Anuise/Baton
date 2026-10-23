@@ -409,6 +409,7 @@ fn check_manifest_entry(backup_dir: &Path, entry: &ArtifactFileEntry) -> BackupR
 }
 
 /// 結束備份當下尚未結束的 Run：已啟動的標為中斷、還沒啟動的取消；兩者都釋放寫入所有權並讓 Task 回到 ready。
+/// 尚未結束的 Controller CLI 也一律中斷，還原後不會自動開出 Controller 終端機（這是還原的處理，不是遷移）。
 /// 同一個交易中把快照裡最後一次（備份當下）尚未結束的啟動記為正常結束：還原不是崩潰，還原後第一次啟動不觸發崩潰恢復。
 fn end_unfinished_runs(conn: &mut Connection, now: Timestamp) -> BackupResult<usize> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -433,6 +434,7 @@ fn end_unfinished_runs(conn: &mut Connection, now: Timestamp) -> BackupResult<us
             ended += 1;
         }
     }
+    ended += super::controller_cli::interrupt_open_controller_clis(&tx, RESTORE_INTERRUPT_REASON, now)?;
     tx.commit()?;
     Ok(ended)
 }

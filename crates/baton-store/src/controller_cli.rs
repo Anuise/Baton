@@ -1,14 +1,15 @@
 //! 互動式 Controller Run 的持久化（desktop-controller-cli 票 03）。
 //!
-//! 與 Controller 的一輪共用 `controller_run` 資料表（`kind = 'cli'`），所以 Controller 憑證、裁定請求、訊息等
+//! 與升級前的 Controller 輪次（`kind = 'turn'`）共用 `controller_run` 資料表（`kind = 'cli'`），所以 Controller 憑證、裁定請求、訊息等
 //! 既有以 `controller_run` 為範圍的機制直接適用：Run 進入 `ended` 時，以它簽發的 Controller 憑證隨之失效。
 //! 規則都在 Domain（`baton_domain::controller_cli`）；這裡只做「在同一個交易中載入目前狀態 → 交給 Domain 判定 → 寫入 Run 與事件」。
 //! 已要求換帳號重開的 Run 結束時，在同一個交易中以新 Profile 開新的 Run（票 05），不會有「舊的已結束、新的還沒開」的空檔。
+//! 要不要開新的 Run 依交易內讀到的 Run 決定，不依呼叫端的快照：可能讓 Run 結束的命令都由呼叫端備妥新 Run 的識別（`next`），
+//! 沒有要求換帳號時不使用。
 
 use baton_domain::auth::ControllerScope;
 use baton_domain::controller_cli::{self, ControllerCliChange, ControllerCliError, ControllerCliRun, ControllerCliStatus, OpenIds};
 use baton_domain::run::ProcessRecord;
-use rusqlite::OptionalExtension;
 
 use super::profiles::load_profiles;
 use super::*;
@@ -33,22 +34,12 @@ const COLUMNS: &str = "id, workspace_id, profile_id, status, version, command_id
      end_reason, exit_code, continue_session, rebound_at, switch_to_profile_id, handoff_from_run_id";
 
 impl Store {
-    /// Controller 憑證是否仍然有效（票 17）：它所屬的 Controller CLI 屬於這個 Workspace，而且還沒結束（`starting`／`running`）。
+    /// Controller 憑證是否仍然有效（票 17）：它所屬的 Controller CLI 屬於這個 Workspace，而且憑證仍有效
+    /// （Domain 的 `credential_valid`：尚未結束、沒有在 Runtime 重啟後被重新綁定，desktop-controller-cli 票 07）。
     /// 舊的 Controller 輪次（`kind = 'turn'`）已不再啟動（票 08）；升級前留下的列即使停在未結束，也不再讓憑證有效。
-    /// Runtime 重啟後被重新綁定（`rebound_at`）時，舊憑證失效（desktop-controller-cli 票 07）。
     pub async fn controller_run_active(&self, scope: &ControllerScope) -> StoreResult<bool> {
         let scope = scope.clone();
-        self.read(move |conn| {
-            let status: Option<String> = conn
-                .query_row(
-                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2 AND kind = 'cli' AND rebound_at IS NULL",
-                    [&scope.controller_run_id, &scope.workspace_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            Ok(matches!(status.as_deref(), Some("starting" | "running")))
-        })
-        .await
+        self.read(move |conn| Ok(controller_credential_valid(conn, &scope)?.unwrap_or(false))).await
     }
 
     /// 使用者要求開啟：在同一個交易中確認 Workspace、Profile 與「這個 Workspace 沒有開著的 Controller CLI」，
@@ -92,14 +83,17 @@ impl Store {
         self.read(|conn| Ok(load(conn, "status IN ('starting', 'running')", [])?)).await
     }
 
-    /// 寫下 launch intent（開窗之前）；Profile 已不可用時改為結束。`continuable` 為 false 時不接續原生 Session（見 Domain）。
+    /// 寫下 launch intent（開窗之前）；Profile 已不可用、或使用者已要求結束時改為結束（已要求換帳號時以 `next` 開新的 Run）。
+    /// `continuable` 為 false 時不接續原生 Session（見 Domain）。
     pub async fn begin_controller_cli_launch(
         &self,
         run_id: &str,
         continuable: bool,
+        next: Option<OpenIds>,
         now: Timestamp,
     ) -> Result<ControllerCliRun, ControllerCliApplyError> {
-        self.apply_cli(run_id, move |tx, run| Ok(controller_cli::begin_launch(run, &load_profiles(tx)?, continuable, now)), now).await
+        self.apply_cli(run_id, move |tx, run| Ok(controller_cli::begin_launch(run, &load_profiles(tx)?, continuable, now)), next, now)
+            .await
     }
 
     /// 開窗回執。
@@ -109,7 +103,7 @@ impl Store {
         host: ProcessRecord,
         now: Timestamp,
     ) -> Result<ControllerCliRun, ControllerCliApplyError> {
-        self.apply_cli(run_id, move |_, run| Ok(controller_cli::record_receipt(run, host, now)), now).await
+        self.apply_cli(run_id, move |_, run| Ok(controller_cli::record_receipt(run, host, now)), None, now).await
     }
 
     /// 結束（宿主消失、使用者結束、開窗失敗或結果不明）。已要求換帳號重開時，同一個交易中以 `next` 開新的 Run。
@@ -123,7 +117,7 @@ impl Store {
         now: Timestamp,
     ) -> Result<ControllerCliRun, ControllerCliApplyError> {
         let (code, reason) = (code.to_string(), reason.to_string());
-        self.end_cli(run_id, move |run| controller_cli::end(run, &code, &reason, exit_code, now), next, now).await
+        self.apply_cli(run_id, move |_, run| Ok(controller_cli::end(run, &code, &reason, exit_code, now)), next, now).await
     }
 
     /// 使用者按「換帳號重開」：記下要改用的 Profile 並要求結束，由 Supervisor 結束宿主；結束時開新的 Run。
@@ -154,15 +148,16 @@ impl Store {
         Ok(result?)
     }
 
-    /// 有開著的 Controller CLI 的 Controller 帳號（Scheduler 不派新的 Worker 給它們，票 05）。
-    pub async fn controller_cli_accounts(&self) -> StoreResult<Vec<String>> {
-        self.read(|conn| Ok(load_controller_accounts(conn)?)).await
-    }
-
-    /// Runtime 重啟後查驗宿主已不在：中斷（票 07）。
-    pub async fn interrupt_controller_cli(&self, run_id: &str, reason: &str, now: Timestamp) -> Result<ControllerCliRun, ControllerCliApplyError> {
+    /// Runtime 重啟後查驗宿主已不在：中斷（票 07）。已要求換帳號重開時，同一個交易中以 `next` 開新的 Run（換帳號的要求不因當掉而遺失）。
+    pub async fn interrupt_controller_cli(
+        &self,
+        run_id: &str,
+        reason: &str,
+        next: Option<OpenIds>,
+        now: Timestamp,
+    ) -> Result<ControllerCliRun, ControllerCliApplyError> {
         let reason = reason.to_string();
-        self.apply_cli(run_id, move |_, run| Ok(controller_cli::interrupt(run, &reason, now)), now).await
+        self.apply_cli(run_id, move |_, run| Ok(controller_cli::interrupt(run, &reason, now)), next, now).await
     }
 
     /// Runtime 重啟後查驗宿主仍存活：重新綁定，以這個 Run 簽發的 Controller 憑證從此失效（票 07）。已重新綁定過不改變。
@@ -218,7 +213,7 @@ impl Store {
         now: Timestamp,
     ) -> Result<ControllerCliRun, ControllerCliApplyError> {
         let run_id = scoped_run(self, scope).await?;
-        self.apply_cli(&run_id, move |_, run| Ok(controller_cli::host_started(run, claude_pid, now)), now).await
+        self.apply_cli(&run_id, move |_, run| Ok(controller_cli::host_started(run, claude_pid, now)), None, now).await
     }
 
     /// 宿主回報 `claude` 已結束：Run 結束，憑證隨之失效（已要求換帳號重開時以 `next` 開新的 Run）。
@@ -234,16 +229,20 @@ impl Store {
             Some(code) => format!("Controller CLI 已在終端機結束（結束碼 {code}）"),
             None => "Controller CLI 已在終端機結束".to_string(),
         };
-        self.end_cli(&run_id, move |run| controller_cli::end(run, controller_cli::END_HOST_EXITED, &reason, exit_code, now), next, now)
-            .await
+        let end = move |_: &Transaction<'_>, run: &ControllerCliRun| {
+            Ok(controller_cli::end(run, controller_cli::END_HOST_EXITED, &reason, exit_code, now))
+        };
+        self.apply_cli(&run_id, end, next, now).await
     }
 
-    /// 結束一個 Run；它已要求換帳號重開時，在同一個交易中以 `next` 開新的 Run（`next` 為 `None` 時只結束）。
-    /// 回傳結束的 Run。
-    async fn end_cli(
+    /// 在一個交易中載入 Run、交給 Domain 判定並寫入。Run 因此結束、而它（交易內讀到的最新狀態）已要求換帳號重開時，
+    /// 同一個交易中以 `next` 開新的 Run；`next` 為 `None` 時只結束（例如完全退出）。回傳這個 Run 的新狀態。
+    async fn apply_cli(
         &self,
         run_id: &str,
-        decide: impl FnOnce(&ControllerCliRun) -> Result<ControllerCliChange, ControllerCliError> + Send + 'static,
+        decide: impl FnOnce(&Transaction<'_>, &ControllerCliRun) -> rusqlite::Result<Result<ControllerCliChange, ControllerCliError>>
+            + Send
+            + 'static,
         next: Option<OpenIds>,
         now: Timestamp,
     ) -> Result<ControllerCliRun, ControllerCliApplyError> {
@@ -253,55 +252,53 @@ impl Store {
                 let Some(run) = load(tx, "id = ?1", [&run_id])?.pop() else {
                     return Ok(Err(ControllerCliError::RunNotFound(run_id)));
                 };
-                let ended = match decide(&run) {
+                let changed = match decide(tx, &run)? {
                     Err(rejected) => return Ok(Err(rejected)),
                     Ok(change) => {
                         save(tx, &change, now)?;
                         change.run
                     }
                 };
-                let workspace = load_workspaces(tx)?.into_iter().find(|w| w.id == ended.workspace_id);
-                if let (Some(workspace), Some(ids)) = (workspace, next) {
-                    let profiles = load_profiles(tx)?;
-                    // Workspace 已封存等無法開新 Run 的情況只結束舊的（頁簽顯示已結束，使用者可再手動開啟）
-                    if let Ok(Some(change)) = controller_cli::open_switched(&workspace, &ended, &profiles, latest_settings_version(tx)?, ids, now) {
-                        save(tx, &change, now)?;
-                    }
+                if let (true, Some(ids)) = (changed.status.is_terminal(), next) {
+                    open_switched(tx, &changed, ids, now)?;
                 }
-                Ok(Ok(ended))
-            })
-            .await?;
-        Ok(result?)
-    }
-
-    async fn apply_cli(
-        &self,
-        run_id: &str,
-        decide: impl FnOnce(&Transaction<'_>, &ControllerCliRun) -> rusqlite::Result<Result<ControllerCliChange, ControllerCliError>>
-            + Send
-            + 'static,
-        now: Timestamp,
-    ) -> Result<ControllerCliRun, ControllerCliApplyError> {
-        let run_id = run_id.to_string();
-        let result = self
-            .write(move |tx| {
-                let Some(run) = load(tx, "id = ?1", [&run_id])?.pop() else {
-                    return Ok(Err(ControllerCliError::RunNotFound(run_id)));
-                };
-                match decide(tx, &run)? {
-                    Err(rejected) => Ok(Err(rejected)),
-                    Ok(change) => {
-                        save(tx, &change, now)?;
-                        Ok(Ok(change.run))
-                    }
-                }
+                Ok(Ok(changed))
             })
             .await?;
         Ok(result?)
     }
 }
 
-/// 憑證範圍所指的 Controller Run 必須是這個 Workspace 的 Controller CLI（Controller 的一輪不能冒用宿主的端點）。
+/// 從備份還原時，把備份當下尚未結束的 Controller CLI 一律中斷（不開新的 Run）：還原後的 Runtime 不替使用者開窗，
+/// 也不沿用備份當下的宿主；使用者要時再自行開啟。回傳中斷的數量。
+pub(crate) fn interrupt_open_controller_clis(tx: &Transaction<'_>, reason: &str, now: Timestamp) -> rusqlite::Result<usize> {
+    let runs = load(tx, "status IN ('starting', 'running')", [])?;
+    for run in &runs {
+        let change = controller_cli::interrupt(run, reason, now).expect("尚未結束的 Controller CLI 可以中斷");
+        save(tx, &change, now)?;
+    }
+    Ok(runs.len())
+}
+
+/// 已要求換帳號重開的 Run 結束後，以新 Profile 開新的 Run；沒有要求換帳號時不做任何事。
+/// Workspace 已封存等無法開新 Run 的情況只結束舊的（頁簽顯示已結束，使用者可再手動開啟）。
+fn open_switched(tx: &Transaction<'_>, ended: &ControllerCliRun, ids: OpenIds, now: Timestamp) -> rusqlite::Result<()> {
+    let Some(workspace) = load_workspaces(tx)?.into_iter().find(|w| w.id == ended.workspace_id) else { return Ok(()) };
+    let profiles = load_profiles(tx)?;
+    if let Ok(Some(change)) = controller_cli::open_switched(&workspace, ended, &profiles, latest_settings_version(tx)?, ids, now) {
+        save(tx, &change, now)?;
+    }
+    Ok(())
+}
+
+/// 以這個範圍簽發的 Controller 憑證是否仍有效；範圍所指的不是這個 Workspace 的 Controller CLI 時為 `None`。
+/// 憑證檢查與「Controller 寄件者是否仍是目前的 Controller」（訊息）共用這一份規則。
+pub(crate) fn controller_credential_valid(conn: &Connection, scope: &ControllerScope) -> rusqlite::Result<Option<bool>> {
+    let run = load(conn, "id = ?1 AND workspace_id = ?2", [&scope.controller_run_id, &scope.workspace_id])?.pop();
+    Ok(run.as_ref().map(controller_cli::credential_valid))
+}
+
+/// 憑證範圍所指的 Controller Run 必須是這個 Workspace 的 Controller CLI（升級前的 Controller 輪次不能冒用宿主的端點）。
 async fn scoped_run(store: &Store, scope: &ControllerScope) -> Result<String, ControllerCliApplyError> {
     let scope = scope.clone();
     let found = store
@@ -315,7 +312,7 @@ async fn scoped_run(store: &Store, scope: &ControllerScope) -> Result<String, Co
     Ok(found?)
 }
 
-/// 開著的 Controller CLI（`starting`／`running`）的 Controller 帳號，不重複。
+/// 開著的 Controller CLI（`starting`／`running`）的 Controller 帳號，不重複（Scheduler 不派新的 Worker 給它們，票 05）。
 pub(crate) fn load_controller_accounts(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     conn.prepare("SELECT DISTINCT profile_id FROM controller_run WHERE kind = 'cli' AND status IN ('starting', 'running') ORDER BY profile_id")?
         .query_map([], |r| r.get(0))?

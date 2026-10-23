@@ -375,7 +375,7 @@ impl Supervisor {
 
         let total = Duration::from_millis(self.exit_timing.total_ms().max(0) as u64);
         let grace = Duration::from_millis(self.exit_timing.stop_grace_ms.max(0) as u64);
-        let mut stopping = FuturesUnordered::new();
+        let stopping = FuturesUnordered::new();
         // 到期限仍拿不到 tick 鎖（另一個處理卡住）：不在它進行中時停止程序，全部記為無法確認
         let Ok(_serial) = serial else {
             report.notes.push("到上限仍等不到 Supervisor 的其他處理結束，沒有要求任何 Run 停止".to_string());
@@ -422,12 +422,14 @@ impl Supervisor {
             }
             self.save_progress(&report).await;
         }
-        let clis = tokio::time::timeout_at(deadline, self.stop_controller_clis_for_exit(clis));
-
-        // 到總上限仍沒有結果就不再等待（逾時的那些在 `finish_exit` 記為停止異常）
-        let workers = async {
-            while let Ok(Some((item, result))) = tokio::time::timeout_at(deadline, stopping.next()).await {
-                let record = match result {
+        // Worker 與 Controller CLI 的停止結果合成一個串流，完成一筆就記一筆；
+        // 到總上限仍沒有結果就不再等待（逾時的那些維持等待中，在 `finish_exit` 記為停止異常）
+        let mut stops =
+            futures::stream::select(stopping.map(ExitStop::Worker), self.stop_controller_clis_for_exit(clis).map(ExitStop::ControllerCli));
+        while let Ok(Some(stop)) = tokio::time::timeout_at(deadline, stops.next()).await {
+            let record = match stop {
+                ExitStop::ControllerCli(record) => record,
+                ExitStop::Worker((item, result)) => match result {
                     Ok(StopResult::StoppedGracefully) => self.finish_stopped(&item, RunStopOutcome::StoppedGracefully).await,
                     Ok(StopResult::ForceKilled) => self.finish_stopped(&item, RunStopOutcome::ForceKilled).await,
                     Ok(StopResult::StillAlive) => anomaly(
@@ -436,15 +438,10 @@ impl Supervisor {
                         "終止程序樹之後仍有程序存活，無法確認停止；Run 保留寫入所有權".to_string(),
                     ),
                     Err(error) => anomaly(&item, StopAnomaly::StopFailed, format!("停止程序失敗：{error}")),
-                };
-                report.record(record);
-                self.save_progress(&report).await;
-            }
-        };
-        let ((), clis) = tokio::join!(workers, clis);
-        // 逾時的 Controller CLI 維持等待中，在 `finish_exit` 記為停止異常
-        for record in clis.unwrap_or_default() {
+                },
+            };
             report.record(record);
+            self.save_progress(&report).await;
         }
         self.finish_exit(report, total).await
     }
@@ -458,7 +455,10 @@ impl Supervisor {
             .map(|r| RunStopRecord {
                 outcome: RunStopOutcome::Anomaly,
                 anomaly: Some(StopAnomaly::StopUnconfirmed),
-                message: Some(format!("到 {} 秒上限仍無法確認程序停止；Run 保留寫入所有權", total.as_secs_f64())),
+                message: Some(match r.controller_cli {
+                    true => format!("到 {} 秒上限仍無法確認 Controller CLI 停止；Run 維持原狀", total.as_secs_f64()),
+                    false => format!("到 {} 秒上限仍無法確認程序停止；Run 保留寫入所有權", total.as_secs_f64()),
+                }),
                 ..r.clone()
             })
             .collect();
@@ -1855,6 +1855,12 @@ fn identity_of(process: &ProcessRecord) -> ProcessIdentity {
         created_at_millis: process.created_at_millis,
         command_hash: process.command_hash.clone(),
     }
+}
+
+/// 完全退出時一筆停止結果：Worker Run（還要寫回 Run 的結束）或 Controller CLI（已寫回）。
+enum ExitStop<W> {
+    Worker(W),
+    ControllerCli(RunStopRecord),
 }
 
 /// 每次啟動的識別：96 位元隨機值；取不到系統亂數時回傳 `None`。

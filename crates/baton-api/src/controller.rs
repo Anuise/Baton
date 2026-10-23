@@ -47,7 +47,7 @@ pub(crate) fn require_controller(record: &CredentialRecord) -> Result<Controller
     })
 }
 
-/// Controller 憑證的範圍；Worker 憑證、聲稱別的 Workspace 或已經結束的一輪都拒絕。
+/// Controller 憑證的範圍；Worker 憑證、聲稱別的 Workspace 或已經結束（或已重新綁定）的 Controller CLI 都拒絕。
 pub(crate) async fn controller_scope(state: &ApiState, record: &CredentialRecord, claims: &Claims) -> Result<ControllerScope, ApiError> {
     let scope = require_controller(record)?;
     let foreign = |claimed: &Option<String>, actual: &str| claimed.as_deref().is_some_and(|c| c != actual);
@@ -59,7 +59,7 @@ pub(crate) async fn controller_scope(state: &ApiState, record: &CredentialRecord
         ));
     }
     if !state.store.controller_run_active(&scope).await? {
-        return Err(api_error(StatusCode::UNAUTHORIZED, "credential_revoked", "這一輪 Controller 已經結束，憑證已失效"));
+        return Err(api_error(StatusCode::UNAUTHORIZED, "credential_revoked", "Controller CLI 已結束或已重新綁定，憑證已失效"));
     }
     Ok(scope)
 }
@@ -132,7 +132,7 @@ async fn gate(
             matter,
             message: format!(
                 "依決策權限表，「{}」必須由使用者裁定：變更沒有執行，已建立裁定請求 {request_id}。\
-                 請等待裁定結果（回答後會成為對話中的工作事件），不要自行繞過；可以先做不依賴它的其他工作。",
+                 請等待裁定結果（回答後背景執行的 wait 會回報「裁定已回答」事件），不要自行繞過；可以先做不依賴它的其他工作。",
                 matter.label()
             ),
             decision_request_id: request_id,
@@ -472,7 +472,7 @@ pub(crate) async fn propose_decision_request(
             status: "waiting_decision".to_string(),
             existing,
             message: "已建立裁定請求，等待使用者回答；列出的 Task 在回答前不會被派出，不依賴答案的工作可以照常派出。\
-                      使用者回答後，你會在對話中收到工作事件，請依答案更新契約後再派工。"
+                      使用者回答後，背景執行的 wait 會回報「裁定已回答」事件通知你，請依答案更新契約後再派工。"
                 .to_string(),
         }),
     ))
