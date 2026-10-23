@@ -1035,10 +1035,11 @@ Runtime 的環境設了 `CLAUDE_CONFIG_DIR` 時，改讀該目錄下的 `setting
 
 | 項目 | 內容 |
 | --- | --- |
-| 指令 | `claude -p --output-format stream-json --verbose --setting-sources "" --strict-mcp-config --mcp-config <Run 的 mcp.json> [<快照的 mcp.json>] --allowedTools mcp__baton --permission-prompt-tool mcp__baton__permission_prompt [--settings <快照的 settings.json>] [--append-system-prompt-file <快照的 CLAUDE.md>] [--model <模型>]` |
+| 指令 | `claude -p --output-format stream-json --verbose --setting-sources "" --strict-mcp-config --mcp-config <Run 的 mcp.json> [<快照的 mcp.json>] --allowedTools mcp__baton --permission-prompt-tool mcp__baton__permission_prompt [--settings <快照的 settings.json>] --append-system-prompt-file <Run 的 system-prompt.md> [--model <模型>]` |
 | 設定來源 | `--setting-sources ""`：使用者層、Workspace 內的 `.claude\settings.json` 與 `settings.local.json` 都不載入，Worker 無法藉由寫入這些檔案改變自己的權限（票 22 驗證 R052 的意見）；設定只來自 Run 的快照 |
 | 權限 | 預設權限模式（不使用 `bypassPermissions`）；Baton 的 MCP 工具預先允許，其餘需要核准的操作經 `permission_prompt` 交給 Runtime 判定（spec D-08） |
-| Run 檔案 | `<資料目錄>\runs\<run_id>\`：`prompt.md`（經標準輸入交付，不放進指令列）、`mcp.json`（只指向 shim，憑證以 `${BATON_AGENT_TOKEN}` 參照）、`stream.jsonl`（標準輸出）、`stderr.log` |
+| Run 檔案 | `<資料目錄>\runs\<run_id>\`：`prompt.md`（經標準輸入交付，不放進指令列）、`mcp.json`（只指向 shim，憑證以 `${BATON_AGENT_TOKEN}` 參照）、`system-prompt.md`（Worker 通則，加上快照的 `CLAUDE.md`）、`stream.jsonl`（標準輸出）、`stderr.log` |
+| 系統提示 | Claude Code 只接受一個附加系統提示檔，所以固定指示與共同指示合併成一個檔案（`baton_domain::playbook::system_prompt`）：Worker 是 `prepare` 寫在 Run 目錄的「Worker 通則＋共同指示」；Controller CLI 是 Supervisor 以 `write_readonly_files` 寫在 `<資料目錄>\run-settings\<run_id>\system-prompt.md` 的「Controller 操作手冊＋共同指示」（desktop-controller-cli 票 04）。Controller CLI 開啟前，Workspace 沒有 `.baton\ai-decisions.md` 時以標頭範本建立（`WorkspaceFs::create_file_if_absent`，已存在不覆寫） |
 | 環境 | `CLAUDE_CONFIG_DIR` = Run 帳號 Profile 的目錄；移除 Runtime 繼承到的 `ANTHROPIC*`、`CLAUDE*` 變數（`CLAUDE_CODE_GIT_BASH_PATH` 除外）；Supervisor 再加上 `BATON_AGENT_TOKEN`、`BATON_RUNTIME_URL` |
 | 憑證 | 啟動參數只有旗標、檔案路徑與模型名稱，**不含任何憑證值**（情境測試比對 Agent 憑證與 Profile 的登入資料） |
 | 事件 | 從 `stream.jsonl` 追蹤（Runtime 重建後重新接上同一個檔案）：每個非空白行先送 `Transcript`（位置 = 第幾個非空白行，從 1 起，重播時不變），再送該行的事件：`system/init` → `Started`（原生 Session）、`assistant` 文字 → `Message`、`rate_limit_event` → `RateLimited`（見「額度觀測」）、`result` → `UsageReported`，失敗時再 `Error`，最後 `Exited`；有新輸出就是 `Heartbeat` |

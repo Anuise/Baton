@@ -212,6 +212,8 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
               <dd>{sessionLabel(run)}</dd>
             </>
           )}
+          <dt>操作手冊版本</dt>
+          <dd>{view.playbook_version}</dd>
         </dl>
       )}
       {run && !open && run.end_reason !== null && (

@@ -1490,7 +1490,7 @@ describe("Runtime 用戶端", () => {
   });
 
   it("HTTP 版讀取、開啟、結束與換帳號重開 Controller CLI", async () => {
-    const view = { workspace_id: "ws_1", run: null };
+    const view = { workspace_id: "ws_1", run: null, playbook_version: "1" };
     const fetchFn = vi.fn(async () => new Response(JSON.stringify(view), { status: 202 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);
 

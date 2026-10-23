@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::{Extension, Json};
 use baton_domain::auth::CredentialRecord;
 use baton_domain::controller_cli::{ControllerCliError, ControllerCliRun};
+use baton_domain::playbook::PLAYBOOK_VERSION;
 use baton_store::ControllerCliApplyError;
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +53,14 @@ pub struct OpenControllerCliRequest {
 pub struct ControllerCliView {
     pub workspace_id: String,
     pub run: Option<ControllerCliRun>,
+    /// 這個 App 內建的 Controller 操作手冊版本（票 04）；開啟 Controller CLI 時載入的就是這一版。
+    pub playbook_version: String,
+}
+
+impl ControllerCliView {
+    fn new(workspace_id: String, run: Option<ControllerCliRun>) -> Self {
+        Self { workspace_id, run, playbook_version: PLAYBOOK_VERSION.to_string() }
+    }
 }
 
 /// 宿主回報 `claude` 已啟動。
@@ -95,7 +104,7 @@ pub(crate) async fn view(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<ControllerCliView>, ApiError> {
     let run = state.store.latest_controller_cli_run(&id).await?;
-    Ok(Json(ControllerCliView { workspace_id: id, run }))
+    Ok(Json(ControllerCliView::new(id, run)))
 }
 
 pub(crate) async fn open(
@@ -111,7 +120,7 @@ pub(crate) async fn open(
     let run = state.store.open_controller_cli(&id, &request.profile_id, ids, state.clock.now()).await?;
     // 開窗由 Supervisor 進行；這裡只提早叫醒它
     state.supervisor_wake.notify_one();
-    Ok((StatusCode::ACCEPTED, Json(ControllerCliView { workspace_id: id, run: Some(run) })))
+    Ok((StatusCode::ACCEPTED, Json(ControllerCliView::new(id, Some(run)))))
 }
 
 /// 換帳號重開：結束開著的 Controller CLI，再以指定 Profile 開新的（不接續原生 Session）。
@@ -124,7 +133,7 @@ pub(crate) async fn switch(
     let Json(request) = body.map_err(crate::authorization::bad_json)?;
     let run = state.store.request_controller_cli_switch(&id, &request.profile_id, state.clock.now()).await?;
     state.supervisor_wake.notify_one();
-    Ok((StatusCode::ACCEPTED, Json(ControllerCliView { workspace_id: id, run: Some(run) })))
+    Ok((StatusCode::ACCEPTED, Json(ControllerCliView::new(id, Some(run)))))
 }
 
 pub(crate) async fn end(
@@ -133,7 +142,7 @@ pub(crate) async fn end(
 ) -> Result<(StatusCode, Json<ControllerCliView>), ApiError> {
     let run = state.store.request_controller_cli_end(&id, state.clock.now()).await?;
     state.supervisor_wake.notify_one();
-    Ok((StatusCode::ACCEPTED, Json(ControllerCliView { workspace_id: id, run: Some(run) })))
+    Ok((StatusCode::ACCEPTED, Json(ControllerCliView::new(id, Some(run)))))
 }
 
 /// 宿主回報 `claude` 已啟動：只接受仍開著的 Controller CLI 的 Controller 憑證。

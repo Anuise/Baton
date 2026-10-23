@@ -1978,6 +1978,8 @@ export interface ControllerCliRun {
 export interface ControllerCliView {
   workspace_id: string;
   run: ControllerCliRun | null;
+  /** 目前 App 內建 Controller 操作手冊的版本號；永遠存在（即使從未開啟過）。 */
+  playbook_version: string;
 }
 
 /** Controller 頁簽：開啟／結束外部終端機中的互動式 Controller CLI（只有桌面憑證能用）。 */

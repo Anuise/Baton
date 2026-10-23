@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use baton_domain::playbook::{self, SYSTEM_PROMPT_FILE, WORKER_RULES};
 use baton_harness::Harness;
 use baton_ports::{
     AdapterEvent, AgentAdapter, AgentHandle, Capability, PortResult, RunSpec, SessionRef, SpawnSpec, ToolProbe,
@@ -274,7 +275,13 @@ async fn the_worker_starts_with_the_profiles_config_dir_the_runs_settings_snapsh
     let snapshot = harness.data_dir().join("run-settings").join(&run);
     let in_snapshot = |name: &str| snapshot.join(name).to_string_lossy().into_owned();
     assert_eq!(value_after(&spec.args, "--settings"), Some(in_snapshot("settings.json").as_str()));
-    assert_eq!(value_after(&spec.args, "--append-system-prompt-file"), Some(in_snapshot("CLAUDE.md").as_str()));
+    // 票 04：共同指示接在 Worker 通則之後，合併成 Run 目錄裡的系統提示檔
+    let system_prompt = run_dir(&harness, &run).join(SYSTEM_PROMPT_FILE);
+    assert_eq!(value_after(&spec.args, "--append-system-prompt-file"), Some(system_prompt.to_string_lossy().as_ref()));
+    assert_eq!(
+        std::fs::read_to_string(&system_prompt).unwrap(),
+        playbook::system_prompt(WORKER_RULES, Some("一律使用繁體中文。\n"))
+    );
     assert_eq!(value_after(&spec.args, "--setting-sources"), Some(""), "不載入使用者層與 Workspace 內的設定檔");
     let config_dir = profile_config_dir(&profile(&harness, &profile_id).await);
     assert!(spec.env.contains(&("CLAUDE_CONFIG_DIR".to_string(), config_dir)), "{:?}", spec.env);
@@ -286,6 +293,23 @@ async fn the_worker_starts_with_the_profiles_config_dir_the_runs_settings_snapsh
     let (status, pinned) =
         harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/runs/{run}/settings-snapshot"), Some(json!({}))).await;
     assert_eq!((status, pinned["directory"].as_str()), (StatusCode::OK, Some(snapshot.to_string_lossy().as_ref())));
+}
+
+/// 票 04：沒有採用共同設定時，Worker 的系統提示仍包含固定的 Worker 通則。
+#[tokio::test]
+async fn the_worker_gets_the_worker_rules_as_its_system_prompt_even_without_shared_settings() {
+    let harness = harness().await;
+    harness.add_account("主要帳號", "main@example.com").await;
+    let (ws, goal) = workspace(&harness).await;
+    let run = dispatch_ok(&harness, &ws, &goal, "工作").await;
+
+    harness.supervise().await;
+
+    let spec = spawned_for(&harness, &run);
+    let system_prompt = run_dir(&harness, &run).join(SYSTEM_PROMPT_FILE);
+    assert_eq!(value_after(&spec.args, "--append-system-prompt-file"), Some(system_prompt.to_string_lossy().as_ref()));
+    assert_eq!(std::fs::read_to_string(&system_prompt).unwrap(), WORKER_RULES);
+    assert!(!spec.args.contains(&"--settings".to_string()), "沒有共同設定就沒有設定快照：{:?}", spec.args);
 }
 
 #[tokio::test]
@@ -306,7 +330,7 @@ async fn no_credential_value_appears_in_the_launch_arguments_or_the_runs_files()
     let secrets = [token.as_str(), login_secret.as_str()];
 
     let mut exposed = vec![format!("{} {}", spec.program, spec.args.join(" "))];
-    for name in [PROMPT_FILE, RUN_MCP_FILE] {
+    for name in [PROMPT_FILE, RUN_MCP_FILE, SYSTEM_PROMPT_FILE] {
         exposed.push(std::fs::read_to_string(run_dir(&harness, &run).join(name)).unwrap());
     }
     for text in &exposed {

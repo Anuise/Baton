@@ -110,6 +110,9 @@ pub trait WorkspaceFs: Send + Sync {
     /// 把一組檔案寫成唯讀目錄（Run 專屬的設定快照，spec D-09）：目錄已存在時整個取代；
     /// 先寫到同層的暫存目錄、檔案設為唯讀後才改名，讀取端不會看到寫到一半的目錄。
     async fn write_readonly_files(&self, dir: &Path, files: &[(String, Vec<u8>)]) -> PortResult<()>;
+    /// 檔案不存在時才建立並寫入內容（需要時一併建立上層目錄），已存在時不動它；回傳是否建立了新檔案。
+    /// 以「只建立新檔」開啟，檢查與建立之間才出現的檔案也不會被覆寫（Workspace 的 AI 決策紀錄，desktop-controller-cli 票 04）。
+    async fn create_file_if_absent(&self, path: &Path, bytes: &[u8]) -> PortResult<bool>;
     /// 讀取成果檔案；檔案不存在回 `None`。
     async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>>;
     /// 讀取工作目錄內的檔案（驗證的檔案檢查用，票 13）；不存在回 `None`，不是檔案（例如目錄）是錯誤。
@@ -139,6 +142,22 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> PortResult<()> {
     file.sync_all().map_err(|e| fail("無法 fsync 暫存檔", e))?;
     drop(file);
     std::fs::rename(&temp, path).map_err(|e| fail("無法改名為成果檔", e))
+}
+
+/// [`WorkspaceFs::create_file_if_absent`] 的正式實作（fake 也使用）。
+pub fn create_file_if_absent(path: &Path, bytes: &[u8]) -> PortResult<bool> {
+    let fail = |what: &str, e: std::io::Error| PortError::Failed(format!("{what} {}：{e}", path.display()));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| fail("無法建立目錄", e))?;
+    }
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(fail("無法建立", e)),
+    };
+    file.write_all(bytes).map_err(|e| fail("無法寫入", e))?;
+    file.sync_all().map_err(|e| fail("無法 fsync", e))?;
+    Ok(true)
 }
 
 /// 讀取檔案；不存在回 `None`。
@@ -282,6 +301,20 @@ mod tests {
         assert!(!partial_path(&target).exists());
         let listed = list_files_recursive(dir.path()).unwrap();
         assert_eq!(listed, vec![FileEntry { path: target, size_bytes: 5 }]);
+    }
+
+    #[test]
+    fn create_file_if_absent_creates_missing_directories_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ws").join(".baton").join("ai-decisions.md");
+
+        assert!(create_file_if_absent(&target, b"template").unwrap());
+        assert!(!create_file_if_absent(&target, b"other").unwrap(), "已存在時回 false");
+        assert_eq!(read_file_if_exists(&target).unwrap().as_deref(), Some(&b"template"[..]));
+
+        let blocked = dir.path().join("file").join("child.md");
+        std::fs::write(dir.path().join("file"), b"x").unwrap();
+        assert!(create_file_if_absent(&blocked, b"x").is_err(), "上層是檔案時是錯誤");
     }
 
     #[test]

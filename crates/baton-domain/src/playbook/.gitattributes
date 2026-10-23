@@ -1,0 +1,2 @@
+# include_str! 的內容不可隨 checkout 的換行設定改變（寫進 Workspace 的範本與系統提示要固定為 LF）
+*.md text eol=lf
