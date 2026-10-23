@@ -1,6 +1,6 @@
 # 05: Controller 帳號排除、額度顯示與換帳號重開
 
-Status: ready-for-agent
+Status: in_progress（Work-9，run R009-05-impl，2026-10-23 16:09）
 Blocked by: 03
 
 **What to build:** Controller CLI 開著時，該 Profile 不被 Scheduler 分派給 Worker（既有 Worker 不受影響），結束後自動恢復。Controller 頁簽持續顯示 Controller 帳號的 5h／7d 額度，接近上限時提示；Profile 選單顯示每個 Profile 的額度與執行中 Worker 數。同帳號重新開啟時以 `--continue` 接回原生 Session；「換帳號重開」結束目前 CLI 並以新 Profile 開新 Session（不接續）。User stories 19、33～35、38～40。
