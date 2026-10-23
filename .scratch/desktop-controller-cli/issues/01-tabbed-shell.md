@@ -1,6 +1,6 @@
 # 01: 桌面 App 頁簽外殼
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R001-01-impl，2026-10-23 14:29）
 Blocked by: None（可立即開始）
 
 **What to build:** 把桌面 App 改成頁簽式：頂層 `Workspace`｜`帳號`｜`設定`；選中 Workspace 後主區以九個頁簽（Controller、工作、裁定、成果、審查與驗證、知識、流程、時間線、授權）一次只顯示一個功能。左側 Workspace 清單只負責選擇 Workspace。現有各功能元件原樣放進對應頁簽，只調整外層容器、標題層級與間距。Controller 頁簽本票先放佔位內容（票 03 填入）；舊的「對話」暫時保留為第十個頁簽，由票 08 移除。User stories 1～17。
