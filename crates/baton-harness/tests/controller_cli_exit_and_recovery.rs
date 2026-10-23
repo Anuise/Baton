@@ -214,7 +214,8 @@ async fn full_exit_records_a_controller_host_that_cannot_be_stopped_as_a_stop_an
 async fn full_exit_reports_each_controller_cli_as_it_stops_even_when_another_hangs() {
     let harness = Harness::builder()
         .clock_at(CLOCK_START)
-        .exit_timing(ExitTiming { stop_grace_ms: 150, kill_confirm_ms: 150 })
+        // 總上限只要讓卡住的那個到期；留足時間給另一個在高負載下也能停完並寫回（太短時它也會被記為無法確認）
+        .exit_timing(ExitTiming { stop_grace_ms: 1_500, kill_confirm_ms: 1_500 })
         .agent_adapter(|data_dir| Arc::new(ClaudeCodeAdapter::new("claude".into(), SHIM.into(), data_dir, Vec::new())))
         .start()
         .await;
