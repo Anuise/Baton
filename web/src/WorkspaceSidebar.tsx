@@ -10,32 +10,14 @@ interface Props {
     Pick<LifecycleClient, "lifecycleStatus" | "updateWorkspaceLifecycle" | "updateWorkspaceLoginResume" | "resumeWorkspace">;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
-  /** 使用者要設定某個 Workspace 的授權：點「授權設定」，或剛建立完成（建立後直接進入授權設定）。 */
+  /** 使用者選取某個 Workspace：點清單中的名稱，或剛建立完成（建立後直接選中）。 */
   onSelect?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 與 Controller 的對話。 */
-  onOpenConversation?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的工作面板。 */
-  onOpenTasks?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的裁定中心。 */
-  onOpenDecisions?: (workspace: Workspace) => void;
+  /** 目前選中的 Workspace id；以 aria-current 標示。 */
+  selectedId?: string | null;
   /** 各 Workspace 的待裁定數（workspace id → 數量）；沒有的視為 0。 */
   pendingDecisions?: Record<string, number>;
-  /** 使用者要開啟某個 Workspace 的成果與驗證。 */
-  onOpenArtifacts?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的知識。 */
-  onOpenKnowledge?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的時間線與觀測指標。 */
-  onOpenTimeline?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的專案理解。 */
-  onOpenUnderstanding?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的流程（Workflow、Playbook、Stage 與 Gate）。 */
-  onOpenWorkflows?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的審查與設計偏離。 */
-  onOpenReviews?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的驗證（Verification Profile、Feature Map 與 Evidence Bundle）。 */
-  onOpenVerification?: (workspace: Workspace) => void;
-  /** 使用者要開啟某個 Workspace 的探索（章程、疑點、已確認缺陷與未驗風險）。 */
-  onOpenExploration?: (workspace: Workspace) => void;
+  /** 每次讀到清單後告知上層目前使用中的 Workspace（例如封存後選中的 Workspace 已不在清單）。 */
+  onWorkspaces?: (workspaces: Workspace[]) => void;
 }
 
 function reasonOf(error: unknown): string {
@@ -50,23 +32,7 @@ const PAUSE_LABELS: Record<PauseCause, string> = {
 };
 
 /** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace，並提供各自的完全退出後與跨登入自動續跑設定。 */
-export function WorkspaceSidebar({
-  client,
-  timeZone,
-  onSelect,
-  onOpenConversation,
-  onOpenTasks,
-  onOpenDecisions,
-  pendingDecisions,
-  onOpenArtifacts,
-  onOpenKnowledge,
-  onOpenTimeline,
-  onOpenUnderstanding,
-  onOpenWorkflows,
-  onOpenReviews,
-  onOpenVerification,
-  onOpenExploration,
-}: Props) {
+export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendingDecisions, onWorkspaces }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
@@ -83,11 +49,12 @@ export function WorkspaceSidebar({
     try {
       const { workspaces } = await client.listWorkspaces();
       setList({ state: "ready", workspaces });
+      onWorkspaces?.(workspaces.filter((w) => w.status === "active"));
     } catch (error) {
       setList({ state: "failed", reason: reasonOf(error) });
     }
     setLifecycles(await lifecycle);
-  }, [client]);
+  }, [client, onWorkspaces]);
 
   useEffect(() => {
     void refresh();
@@ -205,53 +172,23 @@ export function WorkspaceSidebar({
         <ul className="workspace-list">
           {active.map((workspace) => (
             <li key={workspace.id}>
-              <span className="workspace-name">{workspace.name}</span>
-              <span className="workspace-path">{workspace.path}</span>
-              <span className="workspace-created">建立於 {formatTimestamp(workspace.created_at, timeZone)}</span>
-              <div className="workspace-actions">
-                <button type="button" aria-label={`授權設定 ${workspace.name}`} onClick={() => onSelect?.(workspace)}>
-                  授權設定
-                </button>
-                <button type="button" aria-label={`對話 ${workspace.name}`} onClick={() => onOpenConversation?.(workspace)}>
-                  對話
-                </button>
-                <button type="button" aria-label={`工作面板 ${workspace.name}`} onClick={() => onOpenTasks?.(workspace)}>
-                  工作面板
-                </button>
-                <button type="button" aria-label={`裁定 ${workspace.name}`} onClick={() => onOpenDecisions?.(workspace)}>
-                  裁定
+              <div className="workspace-heading">
+                <button
+                  type="button"
+                  className="workspace-select"
+                  aria-label={`選擇 ${workspace.name}`}
+                  aria-current={workspace.id === selectedId ? true : undefined}
+                  onClick={() => onSelect?.(workspace)}
+                >
+                  <span className="workspace-name">{workspace.name}</span>
                 </button>
                 {(pendingDecisions?.[workspace.id] ?? 0) > 0 && (
                   <span className="decision-badge">待裁定 {pendingDecisions?.[workspace.id]}</span>
                 )}
-                <button type="button" aria-label={`成果與驗證 ${workspace.name}`} onClick={() => onOpenArtifacts?.(workspace)}>
-                  成果與驗證
-                </button>
-                <button type="button" aria-label={`知識 ${workspace.name}`} onClick={() => onOpenKnowledge?.(workspace)}>
-                  知識
-                </button>
-                <button type="button" aria-label={`時間線 ${workspace.name}`} onClick={() => onOpenTimeline?.(workspace)}>
-                  時間線
-                </button>
-                <button
-                  type="button"
-                  aria-label={`專案理解 ${workspace.name}`}
-                  onClick={() => onOpenUnderstanding?.(workspace)}
-                >
-                  專案理解
-                </button>
-                <button type="button" aria-label={`流程 ${workspace.name}`} onClick={() => onOpenWorkflows?.(workspace)}>
-                  流程
-                </button>
-                <button type="button" aria-label={`審查 ${workspace.name}`} onClick={() => onOpenReviews?.(workspace)}>
-                  審查
-                </button>
-                <button type="button" aria-label={`驗證 ${workspace.name}`} onClick={() => onOpenVerification?.(workspace)}>
-                  驗證
-                </button>
-                <button type="button" aria-label={`探索 ${workspace.name}`} onClick={() => onOpenExploration?.(workspace)}>
-                  探索
-                </button>
+              </div>
+              <span className="workspace-path">{workspace.path}</span>
+              <span className="workspace-created">建立於 {formatTimestamp(workspace.created_at, timeZone)}</span>
+              <div className="workspace-actions">
                 <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
                   封存
                 </button>
