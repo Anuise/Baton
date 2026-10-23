@@ -14,7 +14,7 @@
 3. 檢查修正有沒有引入新缺陷、有沒有刪除或弱化既有測試。
 4. 實際執行 `pnpm test`、`pnpm --filter web typecheck`、`cargo check -p baton-desktop`。
 
-唯讀：不要修改、新增或 commit 任何追蹤中的檔案。若驗證途中整合分支前進，前置條件不成立時請標註但不要因此判 FAIL。
+唯讀：不要 commit，也不要留下對追蹤中檔案的修改。為了延遲注入可以暫時修改測試檔，但跑完一定要以 `git checkout -- <檔案>` 還原，結束時 `git status --short` 必須是空的。若驗證途中整合分支前進，前置條件不成立時請標註但不要因此判 FAIL。
 
 **執行方式限制：** 這是 `claude -p` 非互動 run，你一結束回合，run 就結束。不要使用 Monitor、`run_in_background` 或任何「等通知再繼續」的方式；建置與測試一律在前景執行到結束。
 
