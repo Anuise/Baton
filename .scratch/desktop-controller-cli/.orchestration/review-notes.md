@@ -7,3 +7,6 @@
 5. 不穩定測試（承第 1～3 項）：R008（票 04 實作）高負載下另見 `worktree_cleanup.rs` 的當掉清理測試、`worktrees.rs` 的當掉合併測試各偶發失敗；R020、R016 都再遇到第 3 項的 lifecycle 並行寫入測試（「存取被拒 os error 5」）。最終修正應找出原因並讓它們穩定，而不是放寬斷言。
 6. 開啟 Controller CLI 時 `supervisor/controller_cli.rs` 仍呼叫 `agent_adapter.prepare`，在 `runs\<controller_run_id>\` 寫出一份用不到的 Worker 通則 `system-prompt.md`（R020 觀察，低）。
 7. 票 08 刻意暫留的對話殘留（R021 觀察）：`crates/baton-domain/src/decision.rs` 的 `DecisionChange.notices`／`ConversationNotice` 仍會產生但沒有讀者，`SessionOwner::Conversation`、`WorkflowNote` 在正式程式碼已無使用者，`decision.rs` 多處註解仍寫「喚醒 Controller」。票 06 已合併且沒有沿用，最終修正可清掉（AI 決策：票 08 的「通知型別暫留」條目）。
+8. 前端不穩定測試：R019 加壓（3 套同時跑 ×4 輪）時，`ExplorationPage` 與 `ControllerPage`（票 03 的既有測試）的 `findBy` 在高負載下逾時或時序太早，各失敗一次。
+9. `Store::controller_cli_accounts`（`crates/baton-store/src/controller_cli.rs`，票 05）目前沒有呼叫端（R019 觀察）。
+10. 已要求換帳號、宿主尚未結束時 Runtime 當掉，重啟後宿主已不在 → Run 走 interrupted，換帳號要求不會開出新 Run（R023 觀察，極端時序，spec 未規定）。
