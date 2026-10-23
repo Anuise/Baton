@@ -225,6 +225,42 @@
 - 影響：在帳號頁簽核對完 Profile 後要重新切回 Controller 頁簽才會更新選單；票 05 加額度顯示時可一併改為輪詢。
 - 審閱：未審
 
+### AI-23：重啟後宿主仍存活時，Run 維持執行中、只讓舊憑證失效，不替使用者結束 CLI
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：spec 的「憑證世代加一」實作為 Controller Run 上的 `rebound_at`（新欄位，migration `controller_cli_recovery`）：Runtime 重啟後以 command_id 找到宿主仍存活時寫入它，並記一筆 `controller_cli_rebound` 事件；`rebound_at` 有值時，以這個 Run 簽發的 Controller 憑證一律回 401（`controller_run_active` 多檢查這一欄），宿主的開始／結束回報也被拒。Run 維持 `running`，Runtime 不停止宿主；頁簽提示「請按『結束』後以同一個帳號重新開啟」。使用者關掉終端機時由既有的存活查驗結束 Run（`host_gone`）。不另外簽發新的憑證。
+- 理由：憑證只經環境變數交給宿主，已開著的 CLI 拿不到新的憑證，所以「重新綁定」實際上就是讓舊憑證失效、等使用者重開；使用者可能正在和那個 CLI 對話，Runtime 自己把它關掉會打斷工作。憑證資料表沒有世代或撤銷欄位，以 Run 上的一個時間欄位達成相同效果，改動最小。
+- 替代方案：在憑證與 `ControllerScope` 加世代數字——要改憑證資料表與所有 Controller 工具的範圍檢查，效果相同；重啟後直接停止宿主並標為中斷——會中斷使用者正在進行的互動。
+- 影響：重新綁定後到使用者重開之前，那個 CLI 的平台工具都不能用（票 06 的 `wait` 也會以憑證失效結束）；同一個 Workspace 在使用者按「結束」或關掉終端機之前不能開新的 Controller CLI。
+- 審閱：未審
+
+### AI-24：每次 Runtime 啟動都查驗上一個實例開出的 Controller CLI，不只當掉恢復
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：Supervisor 記住「這個 Runtime 實例自己寫下 launch intent 或已查驗過」的 Controller Run；其他已寫過 launch intent 的非終態 Run 一律視為上一個實例開出的，先查驗：找到宿主→（沒有回執時補寫）重新綁定；有回執但找不到→`interrupted`（`end_code = runtime_restarted`）；沒有回執也找不到→沿用票 03 的 `ended`／`launch_outcome_unknown`。正常重啟（沒有經過完全退出）與當掉恢復一樣處理；不依賴崩潰恢復事件，也不受恢復暫停派工影響。
+- 理由：舊實例交出的 Runtime 位址與憑證在新實例下不保證可用，正常重啟與當掉的差別只在於程序有沒有記下正常結束；以「是不是這個實例開出的」判斷不需要讀恢復狀態。開窗結果不明的情形票 03 已定義並通過驗證，沒有理由改成 `interrupted`。
+- 替代方案：只在偵測到意外終止（有恢復事件）時查驗——正常重啟後 CLI 拿著舊憑證，行為取決於重啟方式，較難預期。
+- 影響：Runtime 因更新等原因正常重啟後，開著的 Controller CLI 也要重新開啟。
+- 審閱：未審
+
+### AI-25：同帳號接續的判斷：最近一次真的執行過的 Run 用同一個帳號，開啟時決定並持久化
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：使用者要求開啟時，Domain 找這個 Workspace 最近一次 `running_at` 有值（真的執行過）的 Controller Run；它的 Profile 與這次相同就把 `continue_session` 設為 true（新欄位，同一個 migration），Adapter 在 `claude` 參數加 `--continue`；換帳號、或從未執行過時不加。開啟失敗的 Run 不列入比對。`RunSpec` 多一個 `continue_session` 欄位（Worker 一律 false）。這條規則與票 05 的驗收條件重疊，本票先實作；Controller 頁簽未開啟時預設選最近一次 Run 的帳號（仍可用時），讓「同帳號重開」是預設動作。
+- 理由：票 07 的「恢復後重新開啟同帳號時帶 `--continue`」與票 05 的「同帳號重開帶 `--continue`」是同一條規則，分兩處實作會不一致；持久化在 Run 上，Runtime 重建後組出相同的啟動指令（command hash 不變），能以 command_id 找回宿主。
+- 替代方案：每次組啟動規格時才回頭查前一個 Run——規則藏在 Supervisor，API 與時間線看不到這次是否接續。
+- 影響：票 05 合併時應沿用這個欄位與規則，不要再做一份。若上次的 CLI 開了就關、沒有留下原生 Session，`claude --continue` 可能顯示找不到可接續的對話，使用者要改用其他帳號或手動開新對話；平台目前不偵測這種情形。
+- 審閱：未審
+
+### AI-26：完全退出時 Controller CLI 的停止方式與在退出進度中的呈現
+- 重要度：低
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：完全退出的停止流程讀取所有開著的 Controller CLI，先以「等待中」列入停止報告（`ExitReport.runs`，`controller_cli: true`、`task_id` 為空字串），再與 Worker 同時停止宿主（寬限 2 秒，與按「結束」相同），同樣受 40 秒總上限約束。確認停止或從未開出宿主的以 `end_code = full_exit` 結束 Run；無法確認的記為停止異常、Run 維持原狀（重新開啟後由 AI-24 的查驗處理）。退出畫面以「Workspace 名稱 · Controller CLI」標示這一項。
+- 理由：沿用既有的停止報告與停止異常呈現，不新增另一份進度；互動式 `claude` 不會因為寬限期而自行保存結束，給 Worker 的 30 秒寬限只會拖慢退出。
+- 替代方案：另開「Controller CLI 停止結果」欄位——前端要多一套呈現，且停止異常的判斷要重寫。
+- 影響：停止報告的項目不再都是 Worker Run；讀取 `runs` 的程式要以 `controller_cli` 區分（目前只有退出畫面）。只關 App 視窗不經過這個流程，Controller CLI 不受影響（Runtime 是獨立程序，沒有改動）。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）
