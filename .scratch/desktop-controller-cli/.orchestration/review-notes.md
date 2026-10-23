@@ -21,3 +21,4 @@
 
 11. 前端不穩定測試：R030 加壓（3 套完整 `pnpm --filter web test` 同時跑 ×2 輪）第 1 輪有 2 套失敗，都在 `web/src/VerificationPage.test.tsx`：「發布：JSON 格式錯誤時不送出…」2 次超過 vitest 每個測試 5 秒的上限（`user.type` 逐字輸入一長串 JSON），「要求執行…」1 次送出時少了 `task_id`（疑似時序）。第 2 輪全過；不在 final-c 分派的項目內，未處理。
 12. `crates/baton-harness/tests/verification_handoff.rs:5` 與 `verification_takeover_blocked.rs:8` 檔頭說明仍寫「以 `timeout` 丟棄那次處理」，與 final-c 改寫後的 `supervise_until` 不一致（R031 觀察，低）。
+13. `crates/baton-client/tests/shared_settings_client.rs` 的 `app_gets_a_run_settings_snapshot_*` 在 R029 期間（機器同時加壓）失敗一次（第 129 行 unwrap），之後單獨 6 次、整包 2 次都通過，成因未查（R029 觀察）。
