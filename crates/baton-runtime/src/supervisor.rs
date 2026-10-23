@@ -91,6 +91,8 @@ use tokio::task::JoinHandle;
 
 use crate::CredentialIssuer;
 
+mod controller_cli;
+
 /// 對話紀錄在成果儲存中的子目錄（票 15）；檔名是內容的 SHA-256。
 pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
@@ -239,6 +241,7 @@ impl Supervisor {
         }
         let exited_into_handoff = self.pump_events().await;
         self.drive_controllers().await;
+        self.drive_controller_clis().await;
         self.process_cancellations().await;
         self.check_leases().await;
         self.poll_quota().await;

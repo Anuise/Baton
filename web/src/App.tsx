@@ -4,6 +4,7 @@ import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { BackupSettings } from "./BackupSettings";
+import { ControllerPage } from "./ControllerPage";
 import { ConversationPage } from "./ConversationPage";
 import { ModelOverridesPanel } from "./ModelOverridesPanel";
 import { DecisionCenter } from "./DecisionCenter";
@@ -165,16 +166,6 @@ function TabPanel<T extends string>({ idPrefix, selected, children }: { idPrefix
     <div role="tabpanel" id={`${idPrefix}-panel`} aria-labelledby={`${idPrefix}-tab-${selected}`} className="tab-panel">
       {children}
     </div>
-  );
-}
-
-/** Controller 頁簽的佔位內容；開啟 Controller CLI 的功能由票 03 提供。 */
-function ControllerPlaceholder({ workspace }: { workspace: Workspace }) {
-  return (
-    <section className="controller-page" aria-label="Controller">
-      <h2>Controller：{workspace.name}</h2>
-      <p>選擇 Controller 帳號並開啟 Controller CLI 的功能即將提供。</p>
-    </section>
   );
 }
 
@@ -348,7 +339,7 @@ function WorkspaceView({
   // 換 Workspace 時以 key 重新掛載，上一個 Workspace 較晚回來的讀取結果不會蓋掉目前畫面與草稿
   switch (tab) {
     case "controller":
-      return <ControllerPlaceholder workspace={workspace} />;
+      return <ControllerPage key={workspace.id} client={client} workspace={workspace} />;
     case "tasks":
       return <TaskBoard key={workspace.id} client={client} workspace={workspace} />;
     case "decisions":

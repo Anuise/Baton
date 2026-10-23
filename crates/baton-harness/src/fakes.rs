@@ -207,6 +207,17 @@ impl FakeProcessControl {
         lock(&self.state).inspect_count
     }
 
+    /// 登記一個不是由 `spawn` 啟動、但放在 `spec.command_id` 程序群組裡的程序（例如在終端機中開出的 Controller 宿主），
+    /// 之後可以 `find`、`inspect`、`stop` 它；不計入 `spawned`。
+    pub fn register_external(&self, spec: &SpawnSpec) -> ProcessIdentity {
+        let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
+        let identity = ProcessIdentity { pid, created_at_millis: i64::from(pid), command_hash: command_hash(spec) };
+        let mut state = lock(&self.state);
+        state.by_command.insert(spec.command_id.clone(), identity.clone());
+        state.liveness.insert(identity.clone(), Liveness::Alive);
+        identity
+    }
+
     /// 某個 command_id 啟動出來的程序身分。
     pub fn identity_of(&self, command_id: &str) -> Option<ProcessIdentity> {
         lock(&self.state).by_command.get(command_id).cloned()
@@ -431,6 +442,19 @@ impl FakeAgentAdapter {
 
 #[async_trait]
 impl AgentAdapter for FakeAgentAdapter {
+    /// Controller 宿主：`args` 是宿主子命令、假的 `claude` 與 Run 識別；帳號目錄以 `CLAUDE_CONFIG_DIR` 交付。
+    fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        let args = [baton_domain::controller_cli::HOST_SUBCOMMAND, "fake-claude", spec.run_id.as_str()].map(String::from).to_vec();
+        SpawnSpec {
+            program: "fake-controller-host".into(),
+            args,
+            working_dir: spec.working_dir.clone(),
+            command_id: spec.command_id.clone(),
+            env: spec.config_dir.iter().map(|dir| ("CLAUDE_CONFIG_DIR".to_string(), dir.clone())).collect(),
+            ..Default::default()
+        }
+    }
+
     fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
         let mut args = vec![spec.run_id.clone()];
         if let Some(native_session_id) = &spec.resume_native_session_id {
@@ -1075,6 +1099,10 @@ impl PlatformInfo for FakePlatformInfo {
 /// （`.credentials.json`），核對結果只回報認證來源與帳號，不含 token；環境變數覆蓋時沒有帳號。
 pub struct FakeClaudeEnvironment {
     state: Mutex<ClaudeEnvState>,
+    /// 開出的 Controller 宿主登記在這裡，Runtime 才能以 ProcessControl 找回、查驗與停止它（與正式版相同的契約）。
+    processes: Option<Arc<FakeProcessControl>>,
+    /// 開 Controller 終端機走到停住點時喚醒等待中的測試。
+    activity: tokio::sync::Notify,
 }
 
 struct ClaudeEnvState {
@@ -1090,6 +1118,12 @@ struct ClaudeEnvState {
     terminals: Vec<PathBuf>,
     auth_checks: usize,
     secrets_issued: u32,
+    /// 已開啟的 Controller 終端機（依序記錄完整的啟動規格）。
+    controller_terminals: Vec<TerminalLaunch>,
+    /// 下一次開 Controller 終端機失敗（沒有開出任何視窗），只生效一次。
+    fail_terminal: Option<String>,
+    /// 下一次開 Controller 終端機：視窗與宿主已開出，但呼叫永遠不回來（模擬在開窗與回執之間當掉）。
+    hang_terminal: bool,
 }
 
 impl Default for FakeClaudeEnvironment {
@@ -1106,7 +1140,12 @@ impl Default for FakeClaudeEnvironment {
                 terminals: Vec::new(),
                 auth_checks: 0,
                 secrets_issued: 0,
+                controller_terminals: Vec::new(),
+                fail_terminal: None,
+                hang_terminal: false,
             }),
+            processes: None,
+            activity: tokio::sync::Notify::new(),
         }
     }
 }
@@ -1116,6 +1155,38 @@ fn dir_key(dir: &Path) -> String {
 }
 
 impl FakeClaudeEnvironment {
+    /// 開出的 Controller 宿主登記到 `processes`（harness 的組態：與 Runtime 共用同一個 fake ProcessControl）。
+    pub fn with_processes(processes: Arc<FakeProcessControl>) -> Self {
+        Self { processes: Some(processes), ..Self::default() }
+    }
+
+    /// 已開啟的 Controller 終端機的啟動規格，依開啟順序。
+    pub fn controller_terminals(&self) -> Vec<TerminalLaunch> {
+        lock(&self.state).controller_terminals.clone()
+    }
+
+    /// 下一次開 Controller 終端機失敗（例如終端機開不起來），只生效一次。
+    pub fn fail_next_controller_terminal(&self, reason: &str) {
+        lock(&self.state).fail_terminal = Some(reason.to_string());
+    }
+
+    /// 下一次開 Controller 終端機時，視窗與宿主都開出了，但呼叫永遠不回來，只生效一次。
+    pub fn hang_next_controller_terminal(&self) {
+        lock(&self.state).hang_terminal = true;
+    }
+
+    /// 等到 `hang_next_controller_terminal` 設定的停住點已被走到。
+    pub async fn wait_for_terminal_hang(&self) {
+        loop {
+            let mut changed = std::pin::pin!(self.activity.notified());
+            changed.as_mut().enable();
+            if !lock(&self.state).hang_terminal {
+                return;
+            }
+            changed.await;
+        }
+    }
+
     pub fn set_claude(&self, probe: ToolProbe) {
         lock(&self.state).claude = probe;
     }
@@ -1224,6 +1295,32 @@ impl ClaudeEnvironment for FakeClaudeEnvironment {
                 config_dir: config_dir_reported,
             },
         })
+    }
+
+    /// 與正式版相同的契約：同一個 command_id 已有程序時拒絕；開出的宿主放進以 command_id 識別的程序群組。
+    async fn open_controller_terminal(&self, launch: &TerminalLaunch) -> PortResult<ProcessIdentity> {
+        let hang = {
+            let mut state = lock(&self.state);
+            state.controller_terminals.push(launch.clone());
+            if let Some(reason) = state.fail_terminal.take() {
+                return Err(PortError::Failed(reason));
+            }
+            std::mem::take(&mut state.hang_terminal)
+        };
+        let identity = match &self.processes {
+            Some(processes) => {
+                if processes.find(&launch.spawn).await?.is_some() {
+                    return Err(PortError::Failed(format!("command_id {} 已有對應的程序，拒絕重複開窗", launch.spawn.command_id)));
+                }
+                processes.register_external(&launch.spawn)
+            }
+            None => ProcessIdentity { pid: 1, created_at_millis: 1, command_hash: command_hash(&launch.spawn) },
+        };
+        if hang {
+            self.activity.notify_waiters();
+            std::future::pending::<()>().await;
+        }
+        Ok(identity)
     }
 
     async fn open_login_terminal(&self, config_dir: &Path) -> PortResult<()> {
@@ -1471,16 +1568,17 @@ pub struct FakePorts {
 impl FakePorts {
     pub fn new(clock_start: Timestamp) -> Self {
         let clock = Arc::new(FakeClock::new(clock_start));
+        let process_control: Arc<FakeProcessControl> = Arc::default();
         Self {
             verification_driver: Arc::new(FakeVerificationDriver::new(clock.clone())),
             clock,
-            process_control: Arc::default(),
+            claude_env: Arc::new(FakeClaudeEnvironment::with_processes(process_control.clone())),
+            process_control,
             agent_adapter: Arc::default(),
             quota_observer: Arc::default(),
             workspace_fs: Arc::default(),
             platform_info: Arc::default(),
             secret_protector: Arc::default(),
-            claude_env: Arc::default(),
             command_runner: Arc::default(),
             user_settings: Arc::default(),
             guardian_probe: Arc::default(),

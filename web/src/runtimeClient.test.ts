@@ -1488,4 +1488,50 @@ describe("Runtime 用戶端", () => {
       ["conversation_send_message", { workspaceId: "ws_1", text: "整理一下進度" }],
     ]);
   });
+
+  it("HTTP 版讀取、開啟與結束 Controller CLI", async () => {
+    const view = { workspace_id: "ws_1", run: null };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(view), { status: 202 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    expect(await client.getControllerCli("ws_1")).toEqual(view);
+    await client.openControllerCli("ws_1", "prof_1");
+    await client.endControllerCli("ws_1");
+
+    expect(fetchFn).toHaveBeenNthCalledWith(1, "/api/v1/workspaces/ws_1/controller-cli");
+    expect(fetchFn).toHaveBeenNthCalledWith(2, "/api/v1/workspaces/ws_1/controller-cli", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ profile_id: "prof_1" }),
+    });
+    expect(fetchFn).toHaveBeenNthCalledWith(3, "/api/v1/workspaces/ws_1/controller-cli/end", { method: "POST" });
+  });
+
+  it("HTTP 版開啟 Controller CLI 被拒時保留 Runtime 的說明與錯誤代碼", async () => {
+    const body = { error: "controller_cli_already_open", message: "這個 Workspace 已有開啟中的 Controller CLI" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .openControllerCli("ws_1", "prof_1")
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("這個 Workspace 已有開啟中的 Controller CLI");
+    expect(errorCode(error)).toBe("controller_cli_already_open");
+  });
+
+  it("Tauri 版以指令與參數讀取、開啟與結束 Controller CLI", async () => {
+    const invoke = vi.fn(async () => ({}));
+    const client = createTauriClient(invoke as never);
+
+    await client.getControllerCli("ws_1");
+    await client.openControllerCli("ws_1", "prof_1");
+    await client.endControllerCli("ws_1");
+
+    expect(invoke.mock.calls).toEqual([
+      ["controller_cli_view", { workspaceId: "ws_1" }],
+      ["controller_cli_open", { workspaceId: "ws_1", profileId: "prof_1" }],
+      ["controller_cli_end", { workspaceId: "ws_1" }],
+    ]);
+  });
 });

@@ -6,6 +6,7 @@ import type {
   BackupStatus,
   BackupSummary,
   BudgetView,
+  ControllerCliRun,
   ControllerRun,
   ConversationTurn,
   ConversationView,
@@ -752,6 +753,31 @@ export function controllerRun(overrides: Partial<ControllerRun> = {}): Controlle
     updated_at: CHECKED_AT,
     started_at: CHECKED_AT,
     ended_at: null,
+    ...overrides,
+  };
+}
+
+/** 測試用的 Controller CLI Run：ws_1 以 prof_1 開啟，預設 running。 */
+export function controllerCliRun(overrides: Partial<ControllerCliRun> = {}): ControllerCliRun {
+  return {
+    id: "ctl_1",
+    workspace_id: "ws_1",
+    profile_id: "prof_1",
+    status: "running",
+    version: 3,
+    command_id: "cmd_1",
+    working_dir: "C:\\work\\notes",
+    settings_version: null,
+    opened_at: CHECKED_AT,
+    launched_at: CHECKED_AT + 1_000,
+    host: { pid: 4242, created_at_millis: CHECKED_AT + 1_000, command_hash: "hash" },
+    claude_pid: 4343,
+    running_at: CHECKED_AT + 2_000,
+    end_requested_at: null,
+    ended_at: null,
+    end_code: null,
+    end_reason: null,
+    exit_code: null,
     ...overrides,
   };
 }

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use baton_domain::agent::{mcp_config_json, MCP_SERVER_NAME, TOOL_PERMISSION_PROMPT};
+use baton_domain::controller_cli::HOST_SUBCOMMAND;
 use baton_domain::quota::{LimitStatus, QuotaWindow};
 use baton_domain::shared_settings::{INSTRUCTIONS_FILE, MCP_FILE, SETTINGS_FILE};
 use baton_ports::{
@@ -45,6 +46,12 @@ const DEFAULT_POLL: Duration = Duration::from_millis(250);
 pub fn affects_auth(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     (upper.starts_with("ANTHROPIC") || upper.starts_with("CLAUDE")) && !KEPT_ENV.contains(&upper.as_str())
+}
+
+/// 啟動 Claude Code 前要從繼承環境移除的變數（不分大小寫）：會改變認證來源的變數，加上外層 Claude Code
+/// 或代理工具留下的 `AI_AGENT`、`BAGGAGE`（desktop-controller-cli spec：Worker 與 Controller CLI 共用的環境清理）。
+pub fn inherited_to_clear(name: &str) -> bool {
+    affects_auth(name) || ["AI_AGENT", "BAGGAGE"].contains(&name.to_ascii_uppercase().as_str())
 }
 
 pub struct ClaudeCodeAdapter {
@@ -90,16 +97,12 @@ impl ClaudeCodeAdapter {
     fn file(&self, run_id: &str, name: &str) -> String {
         self.run_dir(run_id).join(name).to_string_lossy().into_owned()
     }
-}
 
-#[async_trait]
-impl AgentAdapter for ClaudeCodeAdapter {
-    fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
-        let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"].map(String::from).to_vec();
-        // 不載入任何設定檔來源（使用者層、Workspace 的 .claude\settings*.json）：設定只來自 Run 的快照
-        args.extend(["--setting-sources", ""].map(String::from));
+    /// Worker 與 Controller CLI 共用的 `claude` 引數：strict MCP 設定（shim 加上快照中的共同 MCP 伺服器）、
+    /// Baton 工具免逐次核准、設定快照、模型與原生接續。`permission_prompt` 為 true 時（只有 `-p`）把需要核准的操作轉給 Runtime。
+    fn shared_args(&self, spec: &RunSpec, permission_prompt: bool) -> Vec<String> {
         // 只使用這個 Run 的 MCP 設定：Baton 的 shim，加上快照中的共同 MCP 伺服器
-        args.extend(["--strict-mcp-config", "--mcp-config"].map(String::from));
+        let mut args: Vec<String> = ["--strict-mcp-config", "--mcp-config"].map(String::from).to_vec();
         args.push(self.file(&spec.run_id, RUN_MCP_FILE));
         // 只依綁定的版本決定要傳哪些快照檔，不讀檔案系統（啟動指令與它的雜湊在重建後必須相同）
         let snapshot = |name: &str| {
@@ -111,7 +114,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
         }
         // Baton 的工具不需要逐次核准；其他需要核准的操作經 permission_prompt 工具轉給 Runtime 判定（spec D-08）
         args.extend(["--allowedTools".to_string(), format!("mcp__{MCP_SERVER_NAME}")]);
-        args.extend(["--permission-prompt-tool".to_string(), format!("mcp__{MCP_SERVER_NAME}__{TOOL_PERMISSION_PROMPT}")]);
+        if permission_prompt {
+            args.extend(["--permission-prompt-tool".to_string(), format!("mcp__{MCP_SERVER_NAME}__{TOOL_PERMISSION_PROMPT}")]);
+        }
         if let Some(settings) = snapshot(SETTINGS_FILE) {
             args.extend(["--settings".to_string(), settings]);
         }
@@ -125,12 +130,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
         if let Some(native_session_id) = &spec.resume_native_session_id {
             args.extend(["--resume".to_string(), native_session_id.clone()]);
         }
+        args
+    }
 
-        let mut env_remove: Vec<String> = self.inherited_env.iter().filter(|name| affects_auth(name)).cloned().collect();
-        env_remove.sort();
-        env_remove.dedup();
-        let env = spec.config_dir.iter().map(|dir| ("CLAUDE_CONFIG_DIR".to_string(), dir.clone())).collect();
-        let (program, args) = if is_batch_file(&self.program) {
+    /// `claude` 是批次檔時改經 cmd.exe 執行，回傳實際的程式與引數。
+    fn wrap_batch(&self, args: Vec<String>) -> (String, Vec<String>) {
+        if is_batch_file(&self.program) {
             // CreateProcessW 不能直接執行批次檔：經 cmd.exe 執行。`/d` 不跑 AutoRun（不會有額外輸出混進 stream），
             // `/v:off` 關閉延遲展開；以 `call` 開頭，路徑含空白而加的引號不會被 `/c` 的引號規則剝掉。
             // 引數只有旗標、路徑與模型名稱（Prompt 經標準輸入），`prepare` 會拒絕 cmd 會另作解讀的字元。
@@ -140,18 +145,54 @@ impl AgentAdapter for ClaudeCodeAdapter {
             (cmd_exe(), wrapped)
         } else {
             (self.program.clone(), args)
-        };
+        }
+    }
+
+    /// 兩種啟動共用的環境與工作目錄：移除繼承的、會改變認證來源的變數，`CLAUDE_CONFIG_DIR` 指向 Run 的帳號。
+    fn base_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        let mut env_remove: Vec<String> = self.inherited_env.iter().filter(|name| inherited_to_clear(name)).cloned().collect();
+        env_remove.sort();
+        env_remove.dedup();
+        let env = spec.config_dir.iter().map(|dir| ("CLAUDE_CONFIG_DIR".to_string(), dir.clone())).collect();
         SpawnSpec {
-            program,
-            args,
             working_dir: spec.working_dir.clone(),
             command_id: spec.command_id.clone(),
             env,
             env_remove,
+            ..Default::default()
+        }
+    }
+}
+
+#[async_trait]
+impl AgentAdapter for ClaudeCodeAdapter {
+    fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"].map(String::from).to_vec();
+        // 不載入任何設定檔來源（使用者層、Workspace 的 .claude\settings*.json）：設定只來自 Run 的快照
+        args.extend(["--setting-sources", ""].map(String::from));
+        args.extend(self.shared_args(spec, true));
+        let (program, args) = self.wrap_batch(args);
+        SpawnSpec {
+            program,
+            args,
             stdin_file: Some(self.file(&spec.run_id, PROMPT_FILE)),
             stdout_file: Some(self.file(&spec.run_id, STREAM_FILE)),
             stderr_file: Some(self.file(&spec.run_id, STDERR_FILE)),
+            ..self.base_spec(spec)
         }
+    }
+
+    /// 互動式 Controller CLI（票 03）：與 Worker 共用同一套組裝（環境清理、`CLAUDE_CONFIG_DIR`、strict MCP 設定、設定快照、
+    /// 工作目錄），差別只在不加 `-p`、不指定輸出格式與權限模式（`--permission-prompt-tool` 只在 `-p` 有效）。
+    /// 設定檔來源只載入 Workspace 的專案層與本機層，Workspace 的 `CLAUDE.md` 與設定以原生方式生效（使用者層由快照提供）。
+    /// 終端機裡執行的是 MCP shim 的「Controller 宿主」子命令，由它以繼承主控台的方式啟動 `claude`；標準輸入輸出不導向檔案。
+    fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        let mut args: Vec<String> = ["--setting-sources", "project,local"].map(String::from).to_vec();
+        args.extend(self.shared_args(spec, false));
+        let (claude, claude_args) = self.wrap_batch(args);
+        let mut args = vec![HOST_SUBCOMMAND.to_string(), claude];
+        args.extend(claude_args);
+        SpawnSpec { program: self.shim_program.clone(), args, ..self.base_spec(spec) }
     }
 
     async fn prepare(&self, spec: &RunSpec) -> PortResult<()> {
@@ -575,6 +616,55 @@ mod tests {
         assert_eq!(spec.stdin_file, Some(run_dir.join(PROMPT_FILE).to_string_lossy().into_owned()));
         assert_eq!(spec.stdout_file, Some(run_dir.join(STREAM_FILE).to_string_lossy().into_owned()));
         assert_eq!(spec.stderr_file, Some(run_dir.join(STDERR_FILE).to_string_lossy().into_owned()));
+    }
+
+    /// 票 03：Controller CLI 與 Worker 共用組裝，但不以 `-p` 執行、不指定輸出格式與權限模式，由 Controller 宿主啟動 `claude`。
+    #[test]
+    fn the_controller_cli_shares_the_worker_assembly_but_runs_interactively_through_the_host() {
+        let data = tempfile::tempdir().unwrap();
+        let snapshot = data.path().join("run-settings").join("run_1");
+        let inherited = ["ANTHROPIC_API_KEY", "CLAUDECODE", "AI_AGENT", "baggage", "CLAUDE_CODE_GIT_BASH_PATH", "PATH"];
+        let adapter = adapter(data.path(), &inherited);
+        let spec = adapter.controller_spawn_spec(&run_spec(Some(&snapshot), None));
+
+        assert_eq!(spec.program, r"C:\Baton\bin\baton-mcp-shim.exe");
+        assert_eq!(&spec.args[..2], [HOST_SUBCOMMAND, "claude"]);
+        let claude_args = &spec.args[2..];
+        for absent in ["-p", "--output-format", "--verbose", "--permission-prompt-tool", "--permission-mode", "--dangerously-skip-permissions"] {
+            assert!(!claude_args.contains(&absent.to_string()), "{absent}：{claude_args:?}");
+        }
+        assert_eq!(value_after(claude_args, "--setting-sources"), Some("project,local"), "Workspace 的 CLAUDE.md 與設定原生載入");
+        assert!(claude_args.contains(&"--strict-mcp-config".to_string()));
+        let mcp = data.path().join(RUNS_DIR).join("run_1").join(RUN_MCP_FILE);
+        assert_eq!(value_after(claude_args, "--mcp-config"), Some(mcp.to_string_lossy().as_ref()));
+        let mcp_at = claude_args.iter().position(|a| a == "--mcp-config").unwrap();
+        assert_eq!(claude_args[mcp_at + 2], snapshot.join(MCP_FILE).to_string_lossy(), "共同設定的 MCP 伺服器");
+        assert_eq!(value_after(claude_args, "--settings"), Some(snapshot.join(SETTINGS_FILE).to_string_lossy().as_ref()));
+        assert_eq!(value_after(claude_args, "--allowedTools"), Some("mcp__baton"));
+
+        // 環境清理與帳號目錄與 Worker 相同
+        let worker = adapter.spawn_spec(&run_spec(Some(&snapshot), None));
+        assert_eq!(spec.env_remove, worker.env_remove);
+        assert_eq!(spec.env_remove, ["AI_AGENT", "ANTHROPIC_API_KEY", "CLAUDECODE", "baggage"]);
+        assert_eq!(spec.env, [("CLAUDE_CONFIG_DIR".to_string(), r"C:\Baton\profiles\prof_1".to_string())]);
+        assert_eq!((spec.working_dir.as_deref(), spec.command_id.as_str()), (Some(r"C:\work\app"), "cmd_1"));
+        assert_eq!((&spec.stdin_file, &spec.stdout_file, &spec.stderr_file), (&None, &None, &None), "使用終端機自己的主控台");
+        assert_eq!(adapter.controller_spawn_spec(&run_spec(Some(&snapshot), None)), spec, "純函式：重建後組出相同的指令");
+    }
+
+    #[test]
+    fn a_batch_claude_is_started_by_the_host_through_cmd() {
+        let data = tempfile::tempdir().unwrap();
+        let adapter = ClaudeCodeAdapter::new(
+            r"C:\npm\claude.cmd".into(),
+            r"C:\Baton\bin\baton-mcp-shim.exe".into(),
+            data.path(),
+            Vec::new(),
+        );
+        let spec = adapter.controller_spawn_spec(&run_spec(None, None));
+        assert_eq!(spec.args[0], HOST_SUBCOMMAND);
+        assert!(spec.args[1].to_ascii_lowercase().ends_with("cmd.exe"), "{:?}", spec.args);
+        assert_eq!(&spec.args[2..7], ["/d", "/v:off", "/c", "call", r"C:\npm\claude.cmd"]);
     }
 
     #[test]

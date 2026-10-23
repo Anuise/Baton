@@ -1529,6 +1529,56 @@ body {
   color: #cf222e;
 }
 
+.controller-page {
+  display: grid;
+  gap: 12px;
+}
+
+.controller-page h2,
+.controller-page p {
+  margin: 0;
+}
+
+.controller-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0;
+}
+
+.controller-facts dd {
+  margin: 0;
+}
+
+.controller-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.controller-hint,
+.controller-unavailable {
+  color: #656d76;
+  font-size: 12px;
+}
+
+.controller-unavailable {
+  margin: 0;
+  padding-left: 16px;
+}
+
+/* 開啟失敗或結束的原因 */
+.controller-end-reason {
+  padding: 8px 12px;
+  background: #fff1e5;
+  border: 1px solid #bc4c00;
+  border-radius: 6px;
+}
+
+.controller-page [role="alert"] {
+  color: #cf222e;
+}
+
 .conversation-page {
   display: grid;
   gap: 12px;

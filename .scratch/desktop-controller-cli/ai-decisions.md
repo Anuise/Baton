@@ -144,6 +144,87 @@
 - 影響：commit 93b1324 的訊息仍寫 AI-06～AI-08，以本檔為準。
 - 審閱：未審
 
+### AI-14：互動式 Controller Run 與 Controller 的一輪共用 controller_run 資料表
+- 重要度：中
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：互動式 Controller Run 存在既有的 `controller_run` 資料表，以新欄位 `kind`（`turn`／`cli`）區分；migration `controller_cli_run` 重建資料表，讓 CLI 的列可以沒有 conversation、Prompt、輸入與 Agent Session，狀態多一個 `ended`，並加上「每個 Workspace 最多一個未結束的 CLI」唯一索引。重建時以 `PRAGMA legacy_alter_table` 改名，其他資料表以名稱參照 `controller_run` 的觸發器與外鍵維持不變。對話相關的查詢都只讀 `kind = 'turn'`。
+- 理由：Controller 憑證（`credential.controller_run_id` 外鍵）、Controller 提出的裁定請求（觸發器檢查 `controller_run`）、Controller 寄出的訊息（外鍵）都以 `controller_run` 為範圍；共用資料表，Controller CLI 的憑證不必改任何既有機制就能使用 Controller 工具，Run 結束（`ended`）時憑證自然失效。
+- 替代方案：另開 `controller_cli_run` 資料表——憑證、裁定請求與訊息的外鍵與觸發器都要重建或改成兩表擇一，改動面更大。
+- 影響：票 08 移除舊對話時保留 `kind = 'turn'` 的資料即可；之後查詢 `controller_run` 的新程式要記得依 `kind` 區分。
+- 審閱：未審
+
+### AI-15：以新主控台開窗，交給 Windows 的預設終端機設定，不直接呼叫 wt.exe
+- 重要度：中
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：正式的「開啟 Controller 終端機」以 `CREATE_NEW_CONSOLE` 建立宿主程序（與 Worker 相同的具名 Job），視窗由 Windows「預設終端機應用程式」設定決定：Windows 11 預設是 Windows Terminal，沒有時是系統主控台。不直接執行 `wt.exe`。視窗標題是「Baton Controller - <Workspace 名稱>」。
+- 理由：spec 寫「有 Windows Terminal 就用它」。但 `wt.exe` 會把命令交給已在執行的 Windows Terminal 實例，不保證帶上呼叫端的環境變數；Controller 憑證與 `CLAUDE_CONFIG_DIR` 只經環境變數交付，帶不過去就會開出錯的帳號或沒有工具的 CLI。直接建立程序也才拿得到宿主的程序身分並放進可找回的 Job（不重複開窗、查驗存活、結束整棵程序樹都靠它）。
+- 替代方案：呼叫 `wt.exe -w new`，憑證改寫進暫存檔交給宿主——憑證落地成檔案，且仍拿不到宿主身分。
+- 影響：使用者把預設終端機設成系統主控台時不會用 Windows Terminal；Windows 10 上要使用者自行把 Windows Terminal 設為預設終端機。實機行為列在 `docs/validation.md` 的手動驗收。
+- 審閱：未審
+
+### AI-16：Controller CLI 載入 Workspace 的專案層設定、保留 Baton 工具免逐次確認、不套用模型覆寫
+- 重要度：中
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：Controller CLI 與 Worker 共用組裝（環境清理、`CLAUDE_CONFIG_DIR`、`--strict-mcp-config` 指向 shim 與共同設定的 MCP、設定快照的 `--settings`／`--append-system-prompt-file`），差別：不加 `-p`、`--output-format`、`--verbose`、`--permission-prompt-tool`；`--setting-sources` 用 `project,local`（Worker 是空字串）；保留 `--allowedTools mcp__baton`；不帶 Workspace 的模型覆寫。
+- 理由：使用者故事 23、58 要求 Workspace 的 `CLAUDE.md` 被原生載入，空的設定來源會把它關掉；使用者層的設定由共同設定快照提供，不再讀帳號目錄裡的 settings.json，避免兩份重複。`--allowedTools` 不是權限模式，只讓 Baton 自己的工具不必每次確認，其他操作仍照 Claude Code 預設互動詢問。模型覆寫不在票 03 範圍。
+- 替代方案：照 Worker 用空的設定來源——Workspace 的 `CLAUDE.md` 不會載入；連 `--allowedTools` 也拿掉——每次派工、查詢都要使用者確認。
+- 影響：Workspace 內的 `.claude\settings*.json` 會影響 Controller CLI 的權限（使用者在場，可接受）；若要套用 Controller 角色的模型覆寫，另開票。
+- 審閱：未審
+
+### AI-17：環境清理加入 AI_AGENT 與 BAGGAGE，Worker 一併適用
+- 重要度：低
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：啟動 Claude Code 前移除的繼承環境變數，除了原有的 `ANTHROPIC*`、`CLAUDE*`（保留 `CLAUDE_CODE_GIT_BASH_PATH`）之外，加入 `AI_AGENT`、`BAGGAGE`；Worker 與 Controller CLI 用同一份清單（`inherited_to_clear`）。語意 judge 的呼叫維持原本只清認證相關變數。
+- 理由：spec 的共用組裝明列這兩個變數；在外層 Claude Code 裡啟動 Runtime 時它們會被帶進子程序，影響 CLI 的行為與遙測歸屬。
+- 替代方案：只對 Controller CLI 清除——兩種啟動的組裝不再相同。
+- 影響：Worker 的 `env_remove` 多了這兩個名稱（只在 Runtime 繼承到時）。
+- 審閱：未審
+
+### AI-18：開啟分兩步（要求→launch intent），running 以開窗回執或宿主回報先到者為準，失敗以結束代碼區分
+- 重要度：中
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：`POST .../controller-cli` 在交易中檢查 Workspace、Profile 與「沒有未結束的 CLI」後建立 `starting` 的 Run（202）；Supervisor 開窗前另外寫下 launch intent（`launched_at`），寫完才開窗。重啟後看到「有 launch intent、沒有回執」就以 command_id 找回宿主，找到補寫回執、找不到以 `launch_outcome_unknown` 結束，不重新開窗。開窗回執或宿主回報 `claude` 已啟動，先到的那個讓 Run 進入 `running`。「結束」也只記下要求，由 Supervisor 停止宿主（寬限 2 秒後終止整棵程序樹）。開啟失敗一律結束 Run，以 `end_code`（`claude_not_found`、`profile_unavailable`、`terminal_failed`、`launch_failed`、`launch_outcome_unknown`）與繁中 `end_reason` 呈現；Profile 在要求之後、開窗之前失效也以 `profile_unavailable` 結束。開窗前先以既有的 `probe_claude` 確認找得到 `claude`。
+- 理由：API 沒有程序控制與憑證簽發，由 Supervisor 統一開窗與核對才能沿用 Worker 的「先持久化再啟動、以 command_id 找回」模式；分出 launch intent 才分得出「還沒開」與「開了但結果不明」。
+- 替代方案：API 同步開窗——API 與 Supervisor 會同時處理同一個 starting 的 Run，崩潰核對可能誤判。
+- 影響：頁簽需要輪詢才看得到 `running`／失敗原因（最慢約一秒，背景迴圈每秒處理一次）。
+- 審閱：未審
+
+### AI-19：Controller 宿主的行為細節
+- 重要度：中
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：`baton-mcp-shim controller-host <program> [args]`：宿主先把自己放進「宿主結束時一併終止」的 Job 再啟動 `claude`（宿主被結束或視窗被關時 `claude` 一起結束）；以處理函式忽略 Ctrl+C／Ctrl+Break（不被子程序繼承，`claude` 照常收到）；啟動後回報 `POST /agent/v1/controller-host/started {claude_pid}`，回 401（平台已結束這個 Run）就結束 `claude` 並以結束碼 3 結束；`claude` 結束後回報 `ended {exit_code}` 並以同一個結束碼結束；啟動失敗時回報 ended、提示「按 Enter 關閉視窗」並以 1 結束；設定缺漏以 2 結束。回報的網路失敗只警告，存活另由 Runtime 查驗。
+- 理由：讓 Runtime 不是終端機程序的父程序也能追蹤生命週期；`claude.cmd` 經 cmd.exe 啟動時只結束 cmd 會留下真正的 `claude`。
+- 替代方案：宿主不建 Job——從 App 結束時只靠外層 Job，宿主被工作管理員單獨結束時會留下 `claude`。
+- 影響：從 App 按「結束」時 `claude` 是被終止的（不是 `/exit`），Windows Terminal 可能依 `closeOnExit` 設定保留分頁並顯示結束碼。
+- 審閱：未審
+
+### AI-20：時間線新增「controller」類別
+- 重要度：低
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：時間線新增類別 `controller`，收錄聚合 `controller_cli` 的事件：`controller_cli_opened`（含 `profile_id`、`profile_name`）、`controller_cli_launch_started`、`controller_cli_running`、`controller_cli_end_requested`、`controller_cli_ended`（含 `end_code`、`end_reason`、`exit_code`、`profile_id`）。事件不屬於任何 Task，以 `controller_run` 的 Workspace 歸屬。
+- 理由：使用者故事 41 要求時間線記錄 Controller CLI 的開啟、結束與帳號。
+- 替代方案：併入既有的「派工」類別——會混進派工的觀測指標計算。
+- 影響：前端時間線的類別標籤多一個「Controller」。
+- 審閱：未審
+
+### AI-21：Controller CLI 開窗的手動驗收先放在 docs/validation.md
+- 重要度：低
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：真實開窗以 `crates/baton-runtime/tests/controller_terminal.rs` 的 `#[ignore]` 測試（開出真實視窗、以 Job 找回並停止）與 `docs/validation.md` 檔尾新增的「Windows 平台手動驗收：Controller CLI 開窗（票 03）」表格驗收；一般 `cargo test` 只跑不開視窗的拒絕路徑。
+- 理由：repo 內沒有 Windows 平台驗收清單（原清單在 GitHub issue #3 §15），票面允許「明確標為手動驗收」。
+- 替代方案：把開窗測試納入一般測試——每次 `cargo test` 都會跳出視窗。
+- 影響：票 09 整理 Windows 驗收清單時，把這一節搬過去。
+- 審閱：未審
+
+### AI-22：Controller 頁簽的呈現細節
+- 重要度：低
+- 時間／階段：2026-10-23，票 03 實作
+- 決策：頁簽顯示最近一次 Controller Run：狀態（未開啟／開啟中／執行中／已結束／中斷）、Controller 帳號、開啟時間；開著時以「Controller CLI 已開啟，請切到它的終端機視窗」取代「開啟」（不做「切到視窗」），「結束」按下後顯示「結束中…」。帳號下拉只列使用中的 Profile，不可派工的停用並在下方「不可用的帳號」列出完整原因，預設選第一個可用的。開啟失敗的結束代碼顯示「開啟失敗：原因」，其餘顯示「結束原因：原因」。開著時每 2 秒重新讀取；帳號清單只在進入頁簽時讀一次。錯誤訊息沿用其他頁簽的顯示方式（Tauri 下帶「Runtime 拒絕連線（代碼）」前綴）。
+- 理由：使用者故事 29 允許「提示已開啟」；切到既有視窗需要視窗管理的 API，超出本票。
+- 替代方案：實作「切到已開啟的視窗」——要以宿主程序找出所屬的終端機視窗，Windows Terminal 下拿不到可靠的視窗代碼。
+- 影響：在帳號頁簽核對完 Profile 後要重新切回 Controller 頁簽才會更新選單；票 05 加額度顯示時可一併改為輪詢。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）

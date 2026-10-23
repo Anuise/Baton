@@ -104,7 +104,7 @@ fn read_timeline(conn: &Connection, workspace_id: &str, task_id: Option<&str>) -
          LEFT JOIN decision_request d ON e.aggregate_type = 'decision_request' AND d.id = e.aggregate_id
          LEFT JOIN external_operation x ON e.aggregate_type = 'external_operation' AND x.id = e.aggregate_id
          LEFT JOIN lesson_recurrence lr ON e.aggregate_type = 'lesson_recurrence' AND lr.id = e.aggregate_id
-         LEFT JOIN controller_run cr ON e.aggregate_type = 'run_usage' AND cr.id = e.aggregate_id
+         LEFT JOIN controller_run cr ON e.aggregate_type IN ('run_usage', 'controller_cli') AND cr.id = e.aggregate_id
          LEFT JOIN run pr ON pr.id = json_extract(e.payload, '$.run_id')
          WHERE e.aggregate_type IN ({aggregates}))
          WHERE aggregate_type = '{RECOVERY_AGGREGATE}'

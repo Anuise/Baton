@@ -1933,6 +1933,52 @@ export interface ConversationClient {
   sendConversationMessage(workspaceId: string, text: string): Promise<SendMessageResponse>;
 }
 
+/** 互動式 Controller CLI Run 的狀態：開啟中、執行中、已結束、中斷。 */
+export type ControllerCliStatus = "starting" | "running" | "ended" | "interrupted";
+
+/** 互動式 Controller CLI 的一次 Run（對應 Rust 的 ControllerCliRun）；時間是 UTC 毫秒。 */
+export interface ControllerCliRun {
+  id: string;
+  workspace_id: string;
+  /** Controller 帳號。 */
+  profile_id: string;
+  status: ControllerCliStatus;
+  version: number;
+  command_id: string;
+  working_dir: string;
+  settings_version: number | null;
+  /** 使用者要求開啟的時間。 */
+  opened_at: number;
+  launched_at: number | null;
+  /** 宿主程序身分（開窗回執）。 */
+  host: ProcessRecord | null;
+  claude_pid: number | null;
+  running_at: number | null;
+  /** 使用者按「結束」的時間；Runtime 結束宿主後才進入 ended。 */
+  end_requested_at: number | null;
+  ended_at: number | null;
+  /** 例如 "host_exited"、"user_ended"、"claude_not_found"、"terminal_failed"。 */
+  end_code: string | null;
+  /** 給使用者看的結束原因。 */
+  end_reason: string | null;
+  exit_code: number | null;
+}
+
+/** Controller 頁簽的狀態（對應 GET /controller-cli）：最近一次的 Run（含已結束），從未開啟過為 null。 */
+export interface ControllerCliView {
+  workspace_id: string;
+  run: ControllerCliRun | null;
+}
+
+/** Controller 頁簽：開啟／結束外部終端機中的互動式 Controller CLI（只有桌面憑證能用）。 */
+export interface ControllerCliClient {
+  getControllerCli(workspaceId: string): Promise<ControllerCliView>;
+  /** 已有開著的（controller_cli_already_open）、Profile 不可用（profile_unavailable）或 Workspace 已封存會被拒。 */
+  openControllerCli(workspaceId: string, profileId: string): Promise<ControllerCliView>;
+  /** 沒有開著的 Controller CLI 時被拒（controller_cli_not_open）。 */
+  endControllerCli(workspaceId: string): Promise<ControllerCliView>;
+}
+
 /** 恢復事件的狀態：等待（第一次立即、之後為退避）、嘗試中、穩定觀察中、已恢復、恢復額度用盡。 */
 export type RecoveryStatus = "waiting" | "attempting" | "observing" | "succeeded" | "exhausted";
 
@@ -2010,7 +2056,8 @@ export type TimelineCategory =
   | "task"
   | "external_operation"
   | "lesson"
-  | "usage";
+  | "usage"
+  | "controller";
 
 /** 時間線上的一個事件（對應 Rust 的 TimelineEntry）；時間是 UTC 毫秒。 */
 export interface TimelineEvent {
@@ -3010,6 +3057,7 @@ export type AppClient = RuntimeClient &
   VerificationProfileClient &
   ExplorationClient &
   ConversationClient &
+  ControllerCliClient &
   UpdateClient;
 
 /** 取出 Runtime 回報的穩定錯誤代碼：HTTP 版掛在 `code`，Tauri 版在訊息開頭的「（代碼）」。 */
@@ -3273,6 +3321,10 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     getConversation: (workspaceId) => send(`${workspacePath(workspaceId)}/conversation`),
     sendConversationMessage: (workspaceId, text) =>
       send(`${workspacePath(workspaceId)}/conversation/messages`, { method: "POST", body: { text } }),
+    getControllerCli: (workspaceId) => send(`${workspacePath(workspaceId)}/controller-cli`),
+    openControllerCli: (workspaceId, profileId) =>
+      send(`${workspacePath(workspaceId)}/controller-cli`, { method: "POST", body: { profile_id: profileId } }),
+    endControllerCli: (workspaceId) => send(`${workspacePath(workspaceId)}/controller-cli/end`, { method: "POST" }),
   };
 }
 
@@ -3429,6 +3481,10 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     getConversation: (workspaceId) => call<ConversationView>("conversation_view", { workspaceId }),
     sendConversationMessage: (workspaceId, text) =>
       call<SendMessageResponse>("conversation_send_message", { workspaceId, text }),
+    getControllerCli: (workspaceId) => call<ControllerCliView>("controller_cli_view", { workspaceId }),
+    openControllerCli: (workspaceId, profileId) =>
+      call<ControllerCliView>("controller_cli_open", { workspaceId, profileId }),
+    endControllerCli: (workspaceId) => call<ControllerCliView>("controller_cli_end", { workspaceId }),
   };
 }
 

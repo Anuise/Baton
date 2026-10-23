@@ -9,6 +9,7 @@ mod artifacts;
 mod authorization;
 mod backups;
 mod controller;
+mod controller_cli;
 mod conversations;
 mod decisions;
 mod external_operations;
@@ -89,6 +90,10 @@ pub use artifacts::{
     ArtifactView, ArtifactVersionView, SHA256_HEADER,
 };
 pub use backups::{BackupStatus, BackupSummary, BACKUPS_PATH};
+pub use controller_cli::{
+    controller_cli_end_path, controller_cli_path, ControllerCliView, HostAck, HostEndedRequest, HostStartedRequest,
+    OpenControllerCliRequest,
+};
 pub use conversations::{conversation_messages_path, conversation_path, PostMessageRequest, PostedMessage};
 pub use external_operations::{external_operations_path, BeginResponse, ExternalOperationList, RecordResponse};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
@@ -309,6 +314,8 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::CONTEXT_ROUTE, get(runs::context))
         .route(conversations::CONVERSATION_ROUTE, get(conversations::view))
         .route(conversations::MESSAGES_ROUTE, post(conversations::post_message))
+        .route(controller_cli::CONTROLLER_CLI_ROUTE, get(controller_cli::view).post(controller_cli::open))
+        .route(controller_cli::CONTROLLER_CLI_END_ROUTE, post(controller_cli::end))
         .route(sessions::SESSIONS_ROUTE, get(sessions::list))
         .route(sessions::SESSION_ROUTE, get(sessions::detail))
         .route(external_operations::EXTERNAL_OPERATIONS_ROUTE, get(external_operations::list))
@@ -376,6 +383,9 @@ pub fn router(state: ApiState) -> Router {
         .route(&tool_path(TOOL_SEARCH_KNOWLEDGE), post(knowledge::search_knowledge))
         .route(&tool_path(TOOL_BEGIN_EXTERNAL_OPERATION), post(external_operations::begin))
         .route(&tool_path(TOOL_RECORD_EXTERNAL_OPERATION_RESULT), post(external_operations::record_result))
+        // Controller 宿主回報 claude 的開始與結束（desktop-controller-cli 票 03）：只接受 Controller 憑證
+        .route(baton_domain::controller_cli::HOST_STARTED_PATH, post(controller_cli::host_started))
+        .route(baton_domain::controller_cli::HOST_ENDED_PATH, post(controller_cli::host_ended))
         // Controller 專屬的拆工與派工工具（票 17）：只接受 Controller 憑證
         .route(&tool_path(TOOL_PROPOSE_TASK), post(controller::propose_task))
         .route(&tool_path(TOOL_UPDATE_TASK), post(controller::update_task))

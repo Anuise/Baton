@@ -50,6 +50,10 @@ impl AgentAdapter for Observed {
         self.inner.spawn_spec(spec)
     }
 
+    fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        self.inner.controller_spawn_spec(spec)
+    }
+
     async fn prepare(&self, spec: &RunSpec) -> PortResult<()> {
         self.inner.prepare(spec).await
     }
