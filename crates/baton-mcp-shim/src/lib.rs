@@ -324,7 +324,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_READ_INBOX,
-            "description": "讀取寄給自己的訊息；回傳的未讀訊息會被標為已讀。Worker 讀寄給這個 Task 的訊息，建議在 save_checkpoint 與開始新階段前呼叫；Controller 讀寄給這個 Workspace 的 Controller 的訊息（收件匣屬於 Workspace，上一輪沒讀的訊息這一輪讀得到），建議每一輪開始時呼叫。寄件者是 Controller 的訊息 from_task_id 為 controller。",
+            "description": "讀取寄給自己的訊息；回傳的未讀訊息會被標為已讀。Worker 讀寄給這個 Task 的訊息，建議在 save_checkpoint 與開始新階段前呼叫；Controller 讀寄給這個 Workspace 的 Controller 的訊息（收件匣屬於 Workspace，之前開啟的 Controller CLI 沒讀的訊息也讀得到），建議每次收到事件時呼叫。寄件者是 Controller 的訊息 from_task_id 為 controller。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -556,7 +556,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_PROPOSE_DECISION_REQUEST,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：向使用者提出裁定請求，提供 2 到 8 個選項與取捨。只問會阻擋下一步的關鍵問題。列在 blocking 的 Task 在使用者回答前不會被派出；不依賴這個答案的工作可以照常派出。使用者回答後你會在對話中收到工作事件，不要自行假設答案。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：向使用者提出裁定請求，提供 2 到 8 個選項與取捨。只問會阻擋下一步的關鍵問題。列在 blocking 的 Task 在使用者回答前不會被派出；不依賴這個答案的工作可以照常派出。使用者回答後，背景執行的 wait 會回報「裁定已回答」事件通知你，不要自行假設答案。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

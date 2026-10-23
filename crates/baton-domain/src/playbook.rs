@@ -21,9 +21,9 @@ pub const AI_DECISIONS_RELATIVE_PATH: &str = ".baton/ai-decisions.md";
 /// 附加系統提示檔的檔名：Controller CLI 放在 Run 專屬的唯讀目錄，Worker 放在 Run 目錄。
 pub const SYSTEM_PROMPT_FILE: &str = "system-prompt.md";
 
-/// Workspace 的 AI 決策紀錄檔。
+/// Workspace 的 AI 決策紀錄檔：由 `AI_DECISIONS_RELATIVE_PATH` 逐段組成，維持平台原生的路徑分隔符。
 pub fn ai_decisions_path(workspace_dir: &Path) -> PathBuf {
-    workspace_dir.join(".baton").join("ai-decisions.md")
+    AI_DECISIONS_RELATIVE_PATH.split('/').fold(workspace_dir.to_path_buf(), |path, part| path.join(part))
 }
 
 /// 附加系統提示的內容：固定指示（操作手冊或 Worker 通則）在前，共同設定的指示（`CLAUDE.md`）在後。

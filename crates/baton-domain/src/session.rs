@@ -211,18 +211,17 @@ pub fn session_id_for_run(run_id: &str) -> String {
     format!("ses_{}", run_id.strip_prefix("run_").unwrap_or(run_id))
 }
 
-/// Session 的歸屬：Worker Session 綁 Task，Controller Session 綁 conversation（票 16）。
+/// Session 的歸屬：Worker Session 綁 Task。升級前 Controller 輪次的 Session 綁 conversation（票 16），
+/// 對話退役後只保留在資料庫（`AgentRole::Controller`、`conversation_id`），不再建立或接續。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionOwner<'a> {
     Task(&'a str),
-    Conversation(&'a str),
 }
 
 impl SessionOwner<'_> {
     fn owns(&self, session: &AgentSession) -> bool {
         match self {
             SessionOwner::Task(task_id) => session.task_id.as_deref() == Some(*task_id),
-            SessionOwner::Conversation(conversation_id) => session.conversation_id.as_deref() == Some(*conversation_id),
         }
     }
 }
@@ -232,7 +231,7 @@ pub fn latest_for_task<'a>(sessions: &'a [AgentSession], task_id: &str) -> Optio
     latest_for(sessions, SessionOwner::Task(task_id))
 }
 
-/// 某個 Task 或 conversation 最近建立的 Session（`sessions` 依建立順序）。
+/// 某個 Task 最近建立的 Session（`sessions` 依建立順序）。
 pub fn latest_for<'a>(sessions: &'a [AgentSession], owner: SessionOwner<'_>) -> Option<&'a AgentSession> {
     sessions.iter().rev().find(|s| owner.owns(s))
 }
@@ -266,7 +265,7 @@ pub fn resume_candidate<'a>(
     resume_candidate_for(sessions, SessionOwner::Task(task_id), profile_id, working_dir)
 }
 
-/// 同 `resume_candidate`，但歸屬可以是 Task 或 conversation。
+/// 同 `resume_candidate`，但以 `SessionOwner` 指定歸屬。
 pub fn resume_candidate_for<'a>(
     sessions: &'a [AgentSession],
     owner: SessionOwner<'_>,
@@ -309,7 +308,7 @@ pub fn plan_launch(
     plan_launch_for(sessions, run_id, SessionOwner::Task(task_id), profile_id, working_dir, check)
 }
 
-/// 同 `plan_launch`，但歸屬可以是 Task 或 conversation。
+/// 同 `plan_launch`，但以 `SessionOwner` 指定歸屬。
 pub fn plan_launch_for(
     sessions: &[AgentSession],
     run_id: &str,
@@ -426,19 +425,14 @@ pub fn apply_plan(
                     edits.push(old, event, payload, now);
                 }
             }
-            let (role, task_id, conversation_id) = match facts.owner {
-                SessionOwner::Task(task_id) => (AgentRole::Worker, Some(task_id.to_string()), None),
-                SessionOwner::Conversation(conversation_id) => {
-                    (AgentRole::Controller, None, Some(conversation_id.to_string()))
-                }
-            };
+            let SessionOwner::Task(task_id) = facts.owner;
             let session = AgentSession {
                 id: id.clone(),
                 runtime_type: RUNTIME_CLAUDE_CODE.to_string(),
                 workspace_id: facts.workspace_id.to_string(),
-                role,
-                task_id,
-                conversation_id,
+                role: AgentRole::Worker,
+                task_id: Some(task_id.to_string()),
+                conversation_id: None,
                 profile_id: facts.profile_id.to_string(),
                 working_directory: facts.working_dir.to_string(),
                 native_session_id: None,

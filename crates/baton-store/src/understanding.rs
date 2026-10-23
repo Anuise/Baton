@@ -2,7 +2,7 @@
 //!
 //! - 項目的每次變更在單一交易中完成：載入既有項目 → Domain 判定 → 寫回並追加事件。
 //! - 投影的比對與寫檔在 API 層（需要 WorkspaceFs）；這裡只以「預期的 revision」寫回投影狀態，
-//!   別人先改過就不寫（回 `false`），並在同一個交易中把新開的協調送進 Controller 對話成為工作事件。
+//!   別人先改過就不寫（回 `false`）；新開的協調由使用者在知識頁簽處理。
 
 use baton_domain::knowledge::{KnowledgeEntry, KnowledgeKind, KnowledgeStatus, ScopeKind};
 use baton_domain::understanding::{
