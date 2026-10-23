@@ -225,6 +225,60 @@
 - 影響：在帳號頁簽核對完 Profile 後要重新切回 Controller 頁簽才會更新選單；票 05 加額度顯示時可一併改為輪詢。
 - 審閱：未審
 
+### AI-23：等待的事件來源是追加式事件表，游標就是事件序號；寄給 Controller 的訊息另追加收件匣事件
+- 重要度：中
+- 時間／階段：2026-10-23，票 06 實作
+- 決策：等待端點直接從追加式 `event` 表讀出四種事件，游標是事件表的 `seq`：Worker Run 結束＝`run_succeeded`／`run_failed`／`run_cancelled`／`run_interrupted`（交接 `run_handed_off` 不算，工作由接手的 Run 繼續）；Task 受阻＝`task_status_changed` 且 `to = blocked`；裁定被回答＝該 Workspace 任何裁定請求的 `decision_answered`（含 Worker 的與權限提示）；收到訊息＝新事件 `controller_inbox`／`controller_message_received`（`aggregate_id` 是 Workspace，Worker 寄給 Controller 的訊息存入收件匣時在同一個交易中追加）。一次最多回 20 筆。舊對話的工作事件佇列（`enqueue_work_events`）不使用。
+- 理由：事件表已在每個狀態變更的交易中寫入、只追加且有全域順序，作為游標最可靠；不用再在四條寫入路徑各加一份佇列。舊對話的佇列會在票 08 移除。訊息原本不產生事件，只能補一個。
+- 替代方案：另建 `controller_event` 佇列表，四條寫入路徑各自寫入——改動面大，且與事件表重複。
+- 影響：時間線不顯示 `controller_inbox` 事件（不在時間線聚合清單內）。Controller 自己取消 Task 也會收到 Run 結束通知。
+- 審閱：未審
+
+### AI-24：wait 印出摘要後才由 shim 確認，確認走同一個端點
+- 重要度：中
+- 時間／階段：2026-10-23，票 06 實作
+- 決策：`POST /agent/v1/controller/wait`，body `{ ack?, timeout_seconds? }`。shim 的 `wait` 先送等待請求，把事件摘要寫到 stdout 並 flush 成功後，再送 `{ ack: <回應的 cursor>, timeout_seconds: 0 }` 確認；確認失敗只警告，事件下次會再回報（至少一次）。沒確認前再等一次會拿到同一批。確認只會往前；超過目前最後一筆事件或為負數回 400 `wait_cursor_invalid`。
+- 理由：spec 要求 shim 不保存狀態，又要求「確認後同一事件不再回傳」；由 shim 在同一次執行內確認，Controller 不必自己記游標，也不會因為 wait 程序在印出前被結束而漏掉事件。
+- 替代方案：伺服器回傳即視為確認——印出前程序被結束就漏事件；要 Controller 帶 `--ack <游標>`——Controller 忘了帶就會反覆收到同一批，背景 wait 一直立即結束。
+- 影響：每次有事件的 wait 會打兩個請求。
+- 審閱：未審
+
+### AI-25：新的 Controller Run 接續同一個 Workspace 上一個 Controller 確認到的位置
+- 重要度：中
+- 時間／階段：2026-10-23，票 06 實作
+- 決策：Controller Run 第一次等待時決定起點並保存：同一個 Workspace 先前的 Controller Run 確認過的最大游標；沒有的話是這個 Run 的 `controller_cli_opened` 事件；都沒有時是目前最後一筆。之後依 Controller Run 保存在新資料表 `controller_event_cursor`（只能往前）。
+- 理由：換帳號重開、Controller 關著時 Worker 結束，新的 Controller 一掛上 wait 就該收到（spec「沒掛時事件只會累積，下次掛上時立即回傳」）；第一次使用時不回報開啟前的整段歷史，避免一開就被大量舊事件淹沒。
+- 替代方案：每個 Run 都從自己開啟時開始——關著期間發生的事會被跳過；從 0 開始——舊 Workspace 一開就收到全部歷史。
+- 影響：上一個 Controller 沒確認的事件會交給下一個 Controller。
+- 審閱：未審
+
+### AI-26：等待的逾時、批次與 wait 的結束碼
+- 重要度：低
+- 時間／階段：2026-10-23，票 06 實作
+- 決策：逾時預設 600 秒、上限 3600 秒（超過回 400 `wait_timeout_invalid`；`--timeout` 格式錯或超過上限，shim 以 2 結束且不送請求），`0` 表示只查一次。結束碼：0 有事件、1 其他失敗（連線失敗、非 401 的錯誤回應、回應無法解析）、2 參數或環境變數錯誤、3 憑證失效（401，Controller CLI 已結束）、4 逾時。逾時說明印在 stdout，其餘錯誤走 stderr。Worker 憑證呼叫回 403 `controller_only`（shim 以 1 結束）。Runtime 停止時等待中的請求回 503 `runtime_stopping`。
+- 理由：2、3 與 Controller 宿主子命令的結束碼意義一致；逾時要讓 Controller 能辨識並決定是否重掛。
+- 替代方案：逾時用 124（GNU timeout 慣例）——與宿主的結束碼不成一組。
+- 影響：操作手冊（票 04）需要說明這些結束碼。
+- 審閱：未審
+
+### AI-27：Controller 宿主以 BATON_MCP_SHIM 環境變數把 shim 執行檔路徑交給 claude
+- 重要度：中
+- 時間／階段：2026-10-23，票 06 實作
+- 決策：`controller-host` 啟動 `claude` 時設定 `BATON_MCP_SHIM=<shim 執行檔完整路徑>`（取自 `current_exe`），Controller 以 `"$BATON_MCP_SHIM" wait` 在背景 Bash 執行等待。憑證與 Runtime 位址仍只經既有的環境變數繼承，不出現在命令列。
+- 理由：shim 不在 PATH 上，Controller 沒有其他可靠方式找到它；由宿主自己設定，不必改 Runtime 的啟動組裝。
+- 替代方案：把 shim 目錄加進 PATH——會改變使用者在 Controller CLI 裡執行其他指令的解析順序；由 Runtime 在啟動規格加變數——要改票 03 的共用組裝。
+- 影響：票 04 的操作手冊應以 `"$BATON_MCP_SHIM" wait` 說明背景等待。
+- 審閱：未審
+
+### AI-28：長輪詢以 Store 的提交通知叫醒、以 Clock 計時
+- 重要度：低
+- 時間／階段：2026-10-23，票 06 實作
+- 決策：Store 每次寫入交易提交就通知訂閱者，等待端點據此重新查詢（並重新檢查憑證，Controller 結束時回 401）；逾時以 Clock Port 新增的 `sleep_until` 計時。正式時鐘用 tokio 的 sleep；harness 的 fake Clock 只在測試推進時間時醒來，並提供 `wait_for_sleepers` 讓測試確認端點已經開始等待。`sleep_until` 的預設實作永遠不醒（只有 API 用的時鐘需要覆寫）。
+- 理由：票面要求以 fake Clock 驗證、不用真實 sleep；提交通知讓事件一發生就回應，不必定時輪詢資料庫。
+- 替代方案：每秒輪詢一次資料庫與時間——測試要等真實時間，事件也最多延遲一秒。
+- 影響：每次寫入都會讓等待中的端點多查一次（只查游標之後的事件，本機負擔很小）。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）
