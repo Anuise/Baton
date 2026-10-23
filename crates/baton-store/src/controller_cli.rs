@@ -8,7 +8,6 @@
 use baton_domain::auth::ControllerScope;
 use baton_domain::controller_cli::{self, ControllerCliChange, ControllerCliError, ControllerCliRun, ControllerCliStatus, OpenIds};
 use baton_domain::run::ProcessRecord;
-use rusqlite::OptionalExtension;
 
 use super::profiles::load_profiles;
 use super::*;
@@ -33,22 +32,12 @@ const COLUMNS: &str = "id, workspace_id, profile_id, status, version, command_id
      end_reason, exit_code, continue_session, rebound_at, switch_to_profile_id, handoff_from_run_id";
 
 impl Store {
-    /// Controller 憑證是否仍然有效（票 17）：它所屬的 Controller CLI 屬於這個 Workspace，而且還沒結束（`starting`／`running`）。
+    /// Controller 憑證是否仍然有效（票 17）：它所屬的 Controller CLI 屬於這個 Workspace，而且憑證仍有效
+    /// （Domain 的 `credential_valid`：尚未結束、沒有在 Runtime 重啟後被重新綁定，desktop-controller-cli 票 07）。
     /// 舊的 Controller 輪次（`kind = 'turn'`）已不再啟動（票 08）；升級前留下的列即使停在未結束，也不再讓憑證有效。
-    /// Runtime 重啟後被重新綁定（`rebound_at`）時，舊憑證失效（desktop-controller-cli 票 07）。
     pub async fn controller_run_active(&self, scope: &ControllerScope) -> StoreResult<bool> {
         let scope = scope.clone();
-        self.read(move |conn| {
-            let status: Option<String> = conn
-                .query_row(
-                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2 AND kind = 'cli' AND rebound_at IS NULL",
-                    [&scope.controller_run_id, &scope.workspace_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            Ok(matches!(status.as_deref(), Some("starting" | "running")))
-        })
-        .await
+        self.read(move |conn| Ok(controller_credential_valid(conn, &scope)?.unwrap_or(false))).await
     }
 
     /// 使用者要求開啟：在同一個交易中確認 Workspace、Profile 與「這個 Workspace 沒有開著的 Controller CLI」，
@@ -152,11 +141,6 @@ impl Store {
             })
             .await?;
         Ok(result?)
-    }
-
-    /// 有開著的 Controller CLI 的 Controller 帳號（Scheduler 不派新的 Worker 給它們，票 05）。
-    pub async fn controller_cli_accounts(&self) -> StoreResult<Vec<String>> {
-        self.read(|conn| Ok(load_controller_accounts(conn)?)).await
     }
 
     /// Runtime 重啟後查驗宿主已不在：中斷（票 07）。
@@ -301,6 +285,13 @@ impl Store {
     }
 }
 
+/// 以這個範圍簽發的 Controller 憑證是否仍有效；範圍所指的不是這個 Workspace 的 Controller CLI 時為 `None`。
+/// 憑證檢查與「Controller 寄件者是否仍是目前的 Controller」（訊息）共用這一份規則。
+pub(crate) fn controller_credential_valid(conn: &Connection, scope: &ControllerScope) -> rusqlite::Result<Option<bool>> {
+    let run = load(conn, "id = ?1 AND workspace_id = ?2", [&scope.controller_run_id, &scope.workspace_id])?.pop();
+    Ok(run.as_ref().map(controller_cli::credential_valid))
+}
+
 /// 憑證範圍所指的 Controller Run 必須是這個 Workspace 的 Controller CLI（Controller 的一輪不能冒用宿主的端點）。
 async fn scoped_run(store: &Store, scope: &ControllerScope) -> Result<String, ControllerCliApplyError> {
     let scope = scope.clone();
@@ -315,7 +306,7 @@ async fn scoped_run(store: &Store, scope: &ControllerScope) -> Result<String, Co
     Ok(found?)
 }
 
-/// 開著的 Controller CLI（`starting`／`running`）的 Controller 帳號，不重複。
+/// 開著的 Controller CLI（`starting`／`running`）的 Controller 帳號，不重複（Scheduler 不派新的 Worker 給它們，票 05）。
 pub(crate) fn load_controller_accounts(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     conn.prepare("SELECT DISTINCT profile_id FROM controller_run WHERE kind = 'cli' AND status IN ('starting', 'running') ORDER BY profile_id")?
         .query_map([], |r| r.get(0))?

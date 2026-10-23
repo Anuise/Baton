@@ -11,7 +11,6 @@ use baton_domain::message::{
 };
 use baton_domain::run;
 
-use rusqlite::OptionalExtension;
 
 use super::tasks::load;
 use super::*;
@@ -67,7 +66,7 @@ pub struct Inbox {
 }
 
 /// 憑證所屬的寄件者／讀取者與它所在 Workspace 的全部 Task。Worker 記下它此刻是否還是 Task 的寫入所有者，
-/// Controller 記下這一輪是否仍在進行；Run（或這一輪）不存在時回報 `RunNotFound`。
+/// Controller 記下它的 Controller CLI 是否仍是目前的 Controller；Run（或 Controller CLI）不存在時回報 `RunNotFound`。
 fn sender_of(tx: &Connection, actor: &MessageActor) -> Result<(Sender, Vec<String>), MessageApplyError> {
     let loaded = load(tx, actor.workspace_id())?;
     let sender = match actor {
@@ -87,20 +86,14 @@ fn sender_of(tx: &Connection, actor: &MessageActor) -> Result<(Sender, Vec<Strin
             }
         }
         MessageActor::Controller(scope) => {
-            let status: Option<String> = tx
-                .query_row(
-                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2",
-                    [&scope.controller_run_id, &scope.workspace_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(status) = status else {
+            // 與 Controller 憑證同一份規則：Controller CLI 尚未結束、沒有被重新綁定
+            let Some(is_current) = super::controller_cli::controller_credential_valid(tx, scope)? else {
                 return Err(MessageApplyError::RunNotFound(scope.controller_run_id.clone()));
             };
             Sender {
                 workspace_id: scope.workspace_id.clone(),
                 identity: MessageSender::Controller { controller_run_id: scope.controller_run_id.clone() },
-                is_current: matches!(status.as_str(), "starting" | "running"),
+                is_current,
             }
         }
     };
