@@ -1,6 +1,6 @@
 # 08: 移除舊的對話頁與 Controller 自動喚醒
 
-Status: ready-for-agent
+Status: in_progress（Work-3，run R012-08-impl，2026-10-23 16:09）
 Blocked by: 03
 
 **What to build:** Controller 改由 Controller CLI 操作後，移除「對話」頁簽、前端對話 client 方法，以及 Runtime 的 Controller 自動喚醒（事件合併、`claude -p` 輪次、Controller 自動交接）。對話資料表保留、不遷移、不再寫入。Controller 工具與 MCP shim 不變。User stories 72～74。
