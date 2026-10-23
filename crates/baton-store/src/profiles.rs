@@ -3,7 +3,7 @@
 //! 規則都在 Domain（`baton_domain::profile`、`baton_domain::setup`）；這裡只做「在同一個交易中載入目前狀態 →
 //! 交給 Domain 判定 → 寫入新狀態與事件」。只保存核對結果，不保存任何登入資料。
 
-use baton_domain::profile::{self, AccountProfile, ProfileCommand, ProfileError, ProfileStatus, Verification};
+use baton_domain::profile::{self, AccountProfile, ConfigDirOrigin, ProfileCommand, ProfileError, ProfileStatus, Verification};
 use baton_domain::setup;
 
 use super::*;
@@ -89,16 +89,21 @@ fn load_notice_acknowledgement(conn: &Connection) -> rusqlite::Result<Option<Tim
 
 pub(crate) fn load_profiles(conn: &Connection) -> rusqlite::Result<Vec<AccountProfile>> {
     let mut statement = conn.prepare(
-        "SELECT id, name, config_dir, expected_account, status, verification, version, created_at, archived_at
+        "SELECT id, name, config_dir, expected_account, status, verification, version, created_at, archived_at,
+                config_dir_origin
          FROM account_profile ORDER BY rowid",
     )?;
     let rows = statement.query_map([], |r| {
         let status: String = r.get(4)?;
         let verification: Option<String> = r.get(5)?;
+        let origin: String = r.get(9)?;
         Ok(AccountProfile {
             id: r.get(0)?,
             name: r.get(1)?,
             config_dir: r.get(2)?,
+            config_dir_origin: ConfigDirOrigin::parse(&origin).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, "未知的設定目錄來源".into())
+            })?,
             expected_account: r.get(3)?,
             status: ProfileStatus::parse(&status).ok_or_else(|| {
                 rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, "未知的 Profile 狀態".into())
@@ -116,8 +121,9 @@ fn save_profile(tx: &Transaction<'_>, profile: &AccountProfile) -> rusqlite::Res
     let verification = profile.verification.as_ref().map(|v| serde_json::to_string(v).expect("Verification 可序列化"));
     tx.execute(
         "INSERT INTO account_profile
-         (id, name, config_dir, expected_account, status, verification, version, created_at, archived_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         (id, name, config_dir, expected_account, status, verification, version, created_at, archived_at,
+          config_dir_origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(id) DO UPDATE SET
            expected_account = excluded.expected_account, status = excluded.status,
            verification = excluded.verification, version = excluded.version, archived_at = excluded.archived_at",
@@ -131,6 +137,7 @@ fn save_profile(tx: &Transaction<'_>, profile: &AccountProfile) -> rusqlite::Res
             profile.version,
             profile.created_at.as_millis(),
             profile.archived_at.map(|t| t.as_millis()),
+            profile.config_dir_origin.as_str(),
         ],
     )?;
     Ok(())

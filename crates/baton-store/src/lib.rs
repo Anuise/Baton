@@ -1836,6 +1836,13 @@ const MIGRATIONS: &[Migration] = &[
         CREATE TRIGGER message_controller_delivery_no_delete BEFORE DELETE ON message_controller_delivery
         BEGIN SELECT RAISE(ABORT, 'message_controller_delivery 不可刪除'); END;",
     },
+    // desktop-controller-cli 票 02：設定目錄的來源。既有的 Profile 都是平台建立的（managed）；
+    // 以既有目錄建立的是 external，封存時平台不刪除、不修改該目錄
+    Migration {
+        name: "account_profile_config_dir_origin",
+        sql: "ALTER TABLE account_profile ADD COLUMN config_dir_origin TEXT NOT NULL DEFAULT 'managed'
+            CHECK (config_dir_origin IN ('managed', 'external'));",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
