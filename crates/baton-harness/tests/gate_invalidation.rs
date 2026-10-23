@@ -1,8 +1,8 @@
 //! 情境測試：Gate 失效與重驗（票 50，spec 使用者故事 23、73），經由 Runtime harness 的真實 HTTP API 驗證。
 //!
 //! 受驗的「真實介面」由 fake VerificationDriver 扮演（同票 45）：build 是受驗目錄的 revision，由測試以 `set_revision`
-//! 模擬「程式碼改了」。Controller 與 Worker 是腳本化的。只斷言外部行為：工具與桌面 API 的回應、流程視圖、
-//! 驗證要求與 Evidence Bundle、裁定中心、Controller 收到的工作事件。
+//! 模擬「程式碼改了」。Controller 與 Worker 是腳本化的（Controller 憑證由 Controller CLI 取得）。只斷言外部行為：
+//! 工具與桌面 API 的回應、流程視圖、驗證要求與 Evidence Bundle、裁定中心。
 //!
 //! 每個測試名稱對應票 50 的驗收條件：
 //! - build 改變後受影響 Gate 失效、獨立 Gate 不受影響（含票 45 驗證 R132 的觀察：驗證通過後再改程式碼，舊 Bundle 不能再用）：
@@ -22,8 +22,6 @@ use serde_json::{json, Value};
 const WORKSPACES: &str = "/api/v1/workspaces";
 const PLAYBOOKS: &str = "/api/v1/playbooks";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 const API: &str = "http://127.0.0.1:8080";
 
 // --- 共用輔助 ---
@@ -32,6 +30,8 @@ struct World {
     harness: Harness,
     ws: String,
     goal: String,
+    /// Controller CLI 專用帳號的 Profile 識別（不拿來派 Worker）。
+    controller_profile: String,
     dir: PathBuf,
 }
 
@@ -81,6 +81,7 @@ fn last_attempt(stage: &Value) -> &Value {
 async fn world() -> World {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     harness.add_account("帳號 A", "account0@example.com").await;
+    let controller_profile = harness.add_account("Controller 帳號", "controller@example.com").await;
     let dir = harness.data_dir().join("projects").join("ledger");
     std::fs::create_dir_all(&dir).unwrap();
     let (status, body) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": dir.to_string_lossy() }))).await;
@@ -90,7 +91,7 @@ async fn world() -> World {
         harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/goals"), Some(json!({ "title": "記帳工具" }))).await;
     assert_eq!(status, StatusCode::CREATED, "{goal}");
     let goal = goal["id"].as_str().unwrap().to_string();
-    let w = World { harness, ws, goal, dir };
+    let w = World { harness, ws, goal, controller_profile, dir };
     // 受驗的 API 讀得回「午餐」
     w.h().verification_driver.script_response("GET", &format!("{API}/expenses"), 200, r#"[{"memo":"午餐"}]"#);
     w.publish_profile("午餐").await;
@@ -165,15 +166,9 @@ impl World {
         self.dir.join(".baton").join("outputs").join(tid)
     }
 
-    async fn controller_turn(&self, text: &str) -> String {
-        let (status, body) = self.h().send_json(Method::POST, &self.ws_path("/conversation/messages"), Some(json!({ "text": text }))).await;
-        assert_eq!(status, StatusCode::CREATED, "{body}");
-        self.h().clock.advance_millis(WINDOW_MS);
-        self.h().supervise().await;
-        let (status, view) = self.h().send_json(Method::GET, &self.ws_path("/conversation"), None).await;
-        assert_eq!(status, StatusCode::OK, "{view}");
-        let run = view["runs"].as_array().unwrap().last().cloned().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}"));
-        self.h().agent_credential(run["id"].as_str().unwrap()).expect("Controller 程序啟動時應該收到 Controller 憑證")
+    /// 以 Controller 帳號開啟這個 Workspace 的 Controller CLI，回傳 Controller 憑證。
+    async fn open_controller(&self) -> String {
+        self.h().open_controller_cli(&self.ws, &self.controller_profile).await.1
     }
 
     /// Controller 向使用者提問（阻擋 `blocking`），回傳裁定請求識別。
@@ -288,19 +283,6 @@ impl World {
         workflow
     }
 
-    /// Controller 收到、尚未處理的工作事件內容。
-    async fn work_events(&self) -> Vec<String> {
-        let (status, view) = self.h().send_json(Method::GET, &self.ws_path("/conversation"), None).await;
-        assert_eq!(status, StatusCode::OK, "{view}");
-        view["turns"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|t| t["kind"] == "work_event")
-            .map(|t| t["content"].as_str().unwrap_or_default().to_string())
-            .collect()
-    }
-
     async fn missing_codes(&self, controller: &str, tid: &str) -> (StatusCode, Vec<String>, Value) {
         let (status, body) = self.h().call_tool(controller, "dispatch_task", json!({ "task_id": tid })).await;
         let codes = body["missing"].as_array().map(|m| m.iter().map(|i| i["code"].as_str().unwrap().to_string()).collect()).unwrap_or_default();
@@ -319,7 +301,7 @@ async fn a_build_change_invalidates_the_affected_gate_queues_reverification_and_
     let dir_b = w.dispatch(&b).await;
     w.h().verification_driver.set_revision(&dir_a, "a1");
     w.h().verification_driver.set_revision(&dir_b, "b1");
-    let controller = w.controller_turn("驗證兩個 API").await;
+    let controller = w.open_controller().await;
     let approval = w.answered_decision(&controller, "第一版用 REST 嗎？").await;
     let flow_a = w.to_sign_off(&controller, &a, &approval).await;
     let flow_b = w.to_sign_off(&controller, &b, &approval).await;
@@ -342,7 +324,7 @@ async fn a_build_change_invalidates_the_affected_gate_queues_reverification_and_
     let now_b = w.workflow(&flow_b["id"]).await;
     assert_eq!((now_b["current_stage"].as_str(), now_b["revision"].as_i64()), (Some("sign_off"), flow_b["revision"].as_i64()));
 
-    // 重驗工作：Runtime 自動排入同一個 Task 的驗證要求，在新的 build 上執行；Controller 收到工作事件
+    // 重驗工作：Runtime 自動排入同一個 Task 的驗證要求，在新的 build 上執行
     let overview = w.overview().await;
     let reverify = overview["requests"]
         .as_array()
@@ -354,9 +336,6 @@ async fn a_build_change_invalidates_the_affected_gate_queues_reverification_and_
     assert_eq!((reverify["task_id"].as_str(), reverify["status"].as_str()), (Some(a.as_str()), Some("completed")));
     let new_bundle = reverify["bundle_id"].clone();
     assert_eq!(w.bundle(new_bundle.as_str().unwrap()).await["candidate_revision"], "a2");
-    let events = w.work_events().await;
-    assert!(events.iter().any(|e| e.contains("Gate 失效") && e.contains("真實介面驗證") && e.contains(&flow_a["id"].as_str().unwrap().to_string())), "{events:?}");
-    assert!(!events.iter().any(|e| e.contains("Gate 失效") && e.contains(flow_b["id"].as_str().unwrap())), "{events:?}");
 
     // 舊的 Bundle 驗的是舊 build，不能再開啟 Gate（票 45 驗證 R132 的觀察）
     let (status, body) = w.record(&controller, &now_a, json!({ "evidence_bundle_id": old_bundle })).await;
@@ -378,7 +357,7 @@ async fn a_build_change_invalidates_the_affected_gate_queues_reverification_and_
 #[tokio::test]
 async fn an_answer_that_overturns_an_assumption_revokes_stale_requests_and_blocks_or_reverifies_only_dependent_work() {
     let w = world().await;
-    let controller = w.controller_turn("規劃 API").await;
+    let controller = w.open_controller().await;
     let approval = w.answered_decision(&controller, "要開始做嗎？").await;
     // 協定還沒定：Controller 建議 REST，最後的整合等答案；依賴它的 API 實作先照建議（假設）進行
     let integration = w.task("最終整合").await;
@@ -395,7 +374,6 @@ async fn an_answer_that_overturns_an_assumption_revokes_stale_requests_and_block
     let about_report = w.ask(&controller, "月報要含稅嗎？", "rest", &[&report]).await;
     // API 實作的成果已經通過驗證 Gate
     let flow = w.to_sign_off(&controller, &api, &approval).await;
-    let events_before = w.work_events().await.len();
 
     // 使用者回答 gRPC：推翻了 REST 的假設
     w.answer(&protocol, "grpc").await;
@@ -421,10 +399,6 @@ async fn an_answer_that_overturns_an_assumption_revokes_stale_requests_and_block
     assert_eq!(list["pending_count"], json!(pending), "{list}");
     assert_eq!(pending, 1, "只剩獨立的提問在等待：{list}");
     assert_eq!(w.decision(&protocol).await["status"], "answered");
-    // Controller 收到「假設被推翻」的工作事件，點名受影響的 Task、不提獨立的 Task
-    let events = w.work_events().await;
-    let notice = events.iter().skip(events_before).find(|e| e.contains("推翻")).unwrap_or_else(|| panic!("{events:?}"));
-    assert!(notice.contains(&api) && !notice.contains(&report), "{notice}");
 
     // 受影響的 Task 被阻擋：契約依據失效，不能派工；獨立的 Task 只等它自己的提問
     let (status, codes, body) = w.missing_codes(&controller, &api).await;
@@ -458,7 +432,7 @@ async fn an_answer_that_overturns_an_assumption_revokes_stale_requests_and_block
 #[tokio::test]
 async fn an_overturned_assumption_does_not_strand_the_workflow_of_a_task_that_already_ended() {
     let w = world().await;
-    let controller = w.controller_turn("規劃 API").await;
+    let controller = w.open_controller().await;
     let approval = w.answered_decision(&controller, "要開始做嗎？").await;
     let integration = w.task("最終整合").await;
     let protocol = w.ask(&controller, "API 用哪種協定？", "rest", &[&integration]).await;
@@ -502,7 +476,7 @@ async fn verification_and_acceptance_evidence_must_belong_to_the_task_the_workfl
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let a = w.task("新增支出的 API").await;
     let b = w.task("月報的 API").await;
-    let controller = w.controller_turn("驗證新增支出").await;
+    let controller = w.open_controller().await;
     let flow = w.start_workflow(&controller, &a).await;
 
     // B 的驗證通過了，但 Workflow 綁定的是 A：不能拿來開 A 的 Gate（review-notes #21）
@@ -532,7 +506,7 @@ async fn completion_criteria_cannot_be_rewritten_by_an_agent_to_let_old_results_
     let a = w.task("新增支出的 API").await;
     let dir = w.dispatch(&a).await;
     w.h().verification_driver.set_revision(&dir, "a1");
-    let controller = w.controller_turn("驗證新增支出").await;
+    let controller = w.open_controller().await;
     let approval = w.answered_decision(&controller, "要開始做嗎？").await;
     let flow = w.to_sign_off(&controller, &a, &approval).await;
     let old_bundle = last_attempt(stage_of(&w.workflow(&flow["id"]).await, "real_interface"))["evidence"][0]["evidence_bundle_id"].clone();
@@ -574,7 +548,7 @@ async fn completion_criteria_cannot_be_rewritten_by_an_agent_to_let_old_results_
 async fn a_new_verification_profile_invalidates_gates_that_relied_on_the_old_one() {
     let w = world().await;
     let a = w.task("新增支出的 API").await;
-    let controller = w.controller_turn("驗證新增支出").await;
+    let controller = w.open_controller().await;
     let approval = w.answered_decision(&controller, "要開始做嗎？").await;
     let flow = w.to_sign_off(&controller, &a, &approval).await;
 

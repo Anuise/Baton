@@ -360,16 +360,43 @@
 - 影響：手冊還沒發佈過，所以這次修改仍是版本 1。之後若改 `wait` 的介面或新增「標記受阻」的 Controller 工具，要改手冊並升版。
 - 審閱：未審
 
-### AI-38：Controller 帳號排除放在 Scheduler 的候選條件，交接承接者一併排除
+### AI-38：升級前的對話資料原樣保留，Controller 憑證只認 Controller CLI
+- 重要度：中
+- 時間／階段：2026-10-23，票 08 實作
+- 決策：`conversation`、`conversation_turn`、`kind = 'turn'` 的 `controller_run` 與 Controller Session 不加 migration、不改狀態、不刪除；Runtime 不再讀寫它們（含升級時停在 `pending` 的輸入與停在 `starting`／`running` 的舊輪次）。Controller 憑證的有效性檢查（`controller_run_active`）改為只認 `kind = 'cli'`，所以舊輪次的憑證一律被拒。完全退出不再停止舊輪次的程序。桌面 API 的兩個對話端點、`baton-client` 的對應方法與 Tauri 指令直接移除（回 404），不保留唯讀檢視。
+- 理由：票面要求「保留、不遷移、不再寫入」；把殘留的舊輪次標成 interrupted 本身就是寫入。舊輪次的憑證若仍因狀態停在 running 而有效，會留下一個沒人管理卻能用 Controller 工具的憑證。
+- 替代方案：加 migration 把未結束的舊輪次標為 interrupted——違反「不遷移」；保留唯讀的對話檢視——UI 已無入口，只是多一個要維護的端點。
+- 影響：升級前若有舊輪次的 `claude -p` 程序仍在執行（Runtime 意外終止且程序沒被 Job 一併結束），平台不再追蹤它，它的工具呼叫會被拒；歷史對話只能直接查資料庫。
+- 審閱：未審
+
+### AI-39：所有寫入 conversation 的工作事件一併停止，Domain 中只為對話產生的輸出暫不刪除
+- 重要度：中
+- 時間／階段：2026-10-23，票 08 實作
+- 決策：Store 不再把下列事項寫成 conversation 的工作事件：Worker Run 成功／失敗／回報受阻、Controller 提出的裁定被回答或過期、專案理解投影衝突、Gate 失效需要重驗（後兩者連同組字串的程式一起移除，`save_projection` 不再收 `notice`）。本票不另外補送這些通知；Controller CLI 的事件通知由票 06 的事件等待負責（票 06 涵蓋 Run 結束、受阻、裁定被回答、訊息；投影衝突與 Gate 失效不在其範圍）。`baton_domain::conversation` 整個刪除；但 `DecisionChange.notices`／`ConversationNotice`（Domain 仍會算出、Store 不再寫入）、`workflow::WorkflowNote` 與 `session::SessionOwner::Conversation` 先保留。
+- 理由：「不再寫入」適用於所有寫入路徑，否則 conversation_turn 仍會成長。保留的三個 Domain 型別是純邏輯、各有自己的單元測試，票 06 與本票平行實作，可能沿用裁定通知的文字；現在刪掉會擴大與票 06 的衝突面。
+- 替代方案：把 Domain 的 `notices` 一併刪除——之後若票 06 要同樣的通知文字得重寫；把投影衝突、Gate 失效改送到事件等待——超出本票，也超出票 06 列的四種事件。
+- 影響：投影衝突與 Gate 失效目前只在 UI（知識頁簽、流程頁簽、裁定中心）可見，Controller 不會被通知。票 06 合併後若確定不用 `notices`，應另行刪除這三個型別。
+- 審閱：未審
+
+### AI-40：Controller 工具的情境測試改以 Controller CLI 取得憑證，只刪除測舊行為的斷言
+- 重要度：低
+- 時間／階段：2026-10-23，票 08 實作
+- 決策：刪除只測舊功能的測試檔（`conversation.rs`、`controller_handoff.rs`、`controller_handoff_single_account.rs`、`conversation_client.rs`）。其餘以對話喚起 Controller 取得憑證的 harness 測試（Controller 工具、驗收、知識候選、訊息、共用工具、探索、Gate 失效、Workflow、雙軸審查、專案理解、預算、時間線、驗證設定）改用新增的 `Harness::open_controller_cli`／`end_controller_cli`，並為 Controller CLI 建立專用帳號；「這一輪結束後憑證失效」改為「Controller CLI 結束後憑證失效」。只刪除斷言舊行為的部分（對話的工作事件與內容、下一輪 Prompt 帶入的背景、Controller 自動交接）。`methods_playbooks_stages` 的「換帳號後 Workflow 接續」改為使用者以另一個帳號重開 Controller CLI。`timeline_and_metrics` 的「Controller 用量計入 Workspace、不屬於任何 Task」整個刪除：它靠 Controller 輪次的 Adapter 用量回報，Controller CLI 沒有對應的回報。新增 `retired_conversation.rs` 以 harness 驗證端點已移除、工作事件不產生 Controller 輪次、升級前資料在重啟後原樣保留。
+- 理由：Controller 工具不變，它們的驗收測試應繼續保護；專用帳號讓票 05（開著 CLI 的帳號不派 Worker）合併後這些測試不必再改。
+- 替代方案：直接刪除所有依賴對話的測試——Controller 工具會失去大部分情境覆蓋。
+- 影響：harness 測試多一個 Controller 帳號；若有測試斷言帳號分配，日後要注意這個帳號。
+- 審閱：未審
+
+### AI-41：Controller 帳號排除放在 Scheduler 的候選條件，交接承接者一併排除
 - 重要度：中
 - 時間／階段：2026-10-23，票 05 實作
-- 決策：`scheduler::Capacity` 新增 `controller_accounts`（有 `starting`／`running` Controller CLI 的 Profile，跨 Workspace），這些帳號不被選為新 Worker 的帳號，等待原因是 `account` 類別、代碼 `controller_account`。一般派工、佇列重試與交接承接者（`successor_placement`）都套用；已在執行的 Worker 照常佔名額、不被停止。交接保留槽的「可用帳號數」仍把 Controller 帳號算進去（與額度受限的帳號相同）。舊的 Controller 一輪（票 08 會移除）不套用。同一 Task 續跑時偏好上一個 Run 的帳號，但那個帳號是 Controller 帳號時改派其他帳號。
+- 決策：`scheduler::Capacity` 新增 `controller_accounts`（有 `starting`／`running` Controller CLI 的 Profile，跨 Workspace），這些帳號不被選為新 Worker 的帳號，等待原因是 `account` 類別、代碼 `controller_account`。一般派工、佇列重試與交接承接者（`successor_placement`）都套用；已在執行的 Worker 照常佔名額、不被停止。交接保留槽的「可用帳號數」仍把 Controller 帳號算進去（與額度受限的帳號相同）。舊的 Controller 一輪不套用（合併時票 08 已把它移除）。同一 Task 續跑時偏好上一個 Run 的帳號，但那個帳號是 Controller 帳號時改派其他帳號。
 - 理由：spec「帳號排除」只寫 Scheduler 候選條件；交接的承接者也是 Worker，若不排除，Controller 帳號會在交接時接到工作。沿用 `account` 類別，前端不必新增類別標籤。
 - 替代方案：新增 `controller` 等待類別——前端任務看板要多一個標籤；把 Controller 帳號從可用帳號數扣掉——帳號少時會讓交接保留槽忽有忽無。
 - 影響：只有一個帳號時，開著 Controller CLI 期間所有新 Task 都會排隊（原因寫明是 Controller 帳號）。
 - 審閱：未審
 
-### AI-39：同帳號重開沿用 AI-25 的接續規則，開窗前再確認原生 Session 存在
+### AI-42：同帳號重開沿用 AI-25 的接續規則，開窗前再確認原生 Session 存在
 - 重要度：中
 - 時間／階段：2026-10-23，票 05 實作（R019 修正 run 合併票 07 後改寫）
 - 決策：要不要帶 `--continue` 沿用 AI-25（這個 Workspace 最近一次真的執行過的 Controller Run 用同一個 Profile；換帳號重開開的新 Run 一律不帶），欄位也沿用 AI-25 的 `continue_session`。本票只多一步：Supervisor 寫 launch intent 前以新的 Port 方法 `AgentAdapter::continue_capability` 查驗，帳號目錄下 `projects\<工作目錄名>\*.jsonl` 確定一個都沒有時，把這個 Run 的 `continue_session` 改為 false，改開新的 Session；讀不到或判斷不了時照原決定接續。結果隨 launch intent 持久化（事件 `controller_cli_launch_started` 的 `continue_session`），Runtime 重建後組出相同的啟動指令。
@@ -378,7 +405,7 @@
 - 影響：查驗依賴 Claude Code 存放 Session 的目錄名規則（與票 15 的 `resume_capability` 相同，2.1.307 實測）；規則變了時會判為「沒有 Session」而開新的，不會卡住。以正式 Adapter 測試同帳號接續的情境要先放一個原生 Session 檔（票 07 的兩個恢復情境測試已補上）。
 - 審閱：未審
 
-### AI-40：換帳號重開先記下新 Profile，舊 Run 結束的同一個交易中開新 Run
+### AI-43：換帳號重開先記下新 Profile，舊 Run 結束的同一個交易中開新 Run
 - 重要度：中
 - 時間／階段：2026-10-23，票 05 實作
 - 決策：新增 `POST /api/v1/workspaces/{id}/controller-cli/switch`（`{ profile_id }`，202）：在目前的 Run 記下 `end_requested_at` 與 `switch_to_profile_id`（事件 `controller_cli_switch_requested`，含 from／to Profile）；Supervisor 結束宿主後以結束代碼 `switched` 結束舊 Run，同一個交易中開新的 `starting` Run（`switched_from_run_id` 指向舊 Run，存在既有的 `handoff_from_run_id` 欄位），下一次處理開窗。宿主先回報結束（使用者自己關掉）時也照樣開新的。拒絕：沒有開著的（`controller_cli_not_open`）、與目前相同的帳號（`controller_cli_same_profile`）、已在結束或換帳號中（`controller_cli_ending`）、Profile 不可用或不存在。新 Profile 在要求之後才失效時照樣建立新 Run，由開窗前的檢查以 `profile_unavailable` 結束並顯示原因。新增 migration `controller_cli_switch`（只有 `switch_to_profile_id` 一個欄位，排在票 06、07 的 migration 之後；`continue_session` 沿用票 07 的 `controller_cli_recovery`）。換帳號開出的新 Run 第一次等待時依 AI-29 接續上一個 Run 確認到的事件位置；Runtime 重啟後被重新綁定（AI-23）的 Run 也可以換帳號重開，新 Run 取得新的憑證。
@@ -387,14 +414,14 @@
 - 影響：`handoff_from_run_id` 對 `kind = 'cli'` 的意思是「換帳號重開的前一個 Run」。
 - 審閱：未審
 
-### AI-41：額度與執行中 Worker 數直接取自排程總覽，只在 Controller 開著時輪詢
+### AI-44：額度與執行中 Worker 數直接取自排程總覽，只在 Controller 開著時輪詢
 - 重要度：低
 - 時間／階段：2026-10-23，票 05 實作
-- 決策：Controller 頁簽不新增 API，以既有的 `GET /api/v1/scheduling`（`accounts[].quota.windows`、`running`、`quota_gate`）顯示「5h 剩 N%｜7d 剩 N%｜執行中 Worker N」（剩餘＝1−較保守的已用比例，最低 0%，未觀測顯示「未知」）；帳號下拉選單與換帳號選單的可用帳號都附上這段，不可用的帳號照舊只顯示狀態。Controller 帳號的 `quota_gate.state` 是 `draining` 時顯示「Controller 帳號的額度已接近上限，建議換帳號重開」。進入頁簽讀一次，Controller 開著時每 2 秒與 Controller 狀態一起重讀；讀不到額度只顯示「無法取得額度」，不擋其他操作。狀態區多一欄「Session」：接續上次的 Session／由換帳號重開開啟的新 Session／新的 Session（合併票 07 時取代它的「原生 Session：接續上次」一欄，見 AI-42）。換帳號選單只列與目前不同、可用的帳號，結束中（含已要求換帳號）時停用。
+- 決策：Controller 頁簽不新增 API，以既有的 `GET /api/v1/scheduling`（`accounts[].quota.windows`、`running`、`quota_gate`）顯示「5h 剩 N%｜7d 剩 N%｜執行中 Worker N」（剩餘＝1−較保守的已用比例，最低 0%，未觀測顯示「未知」）；帳號下拉選單與換帳號選單的可用帳號都附上這段，不可用的帳號照舊只顯示狀態。Controller 帳號的 `quota_gate.state` 是 `draining` 時顯示「Controller 帳號的額度已接近上限，建議換帳號重開」。進入頁簽讀一次，Controller 開著時每 2 秒與 Controller 狀態一起重讀；讀不到額度只顯示「無法取得額度」，不擋其他操作。狀態區多一欄「Session」：接續上次的 Session／由換帳號重開開啟的新 Session／新的 Session（合併票 07 時取代它的「原生 Session：接續上次」一欄，見 AI-45）。換帳號選單只列與目前不同、可用的帳號，結束中（含已要求換帳號）時停用。
 - 理由：排程總覽已有每個帳號的兩個視窗、門檻與進行中 Run 數，重複做一個端點沒有新資訊；票面的提示門檻寫的是 draining。
 - 替代方案：新增 Controller 專用的額度端點——資料與排程總覽重複；`paused` 也提示——paused 是停止派工門檻，對 Controller 自己的互動還有餘裕。
 - 影響：Controller 沒開著時，選單上的額度只在進入頁簽時更新（同 AI-22 的帳號清單）。
-### AI-42：合併票 06、07 時，`--continue` 只由 Controller CLI 的啟動組裝加一次，狀態區只留一欄 Session
+### AI-45：合併票 06、07 時，`--continue` 只由 Controller CLI 的啟動組裝加一次，狀態區只留一欄 Session
 - 重要度：低
 - 時間／階段：2026-10-23，票 05 修正（R019，合併 `cli/v1`）
 - 決策：兩票都在 Adapter 加了 `--continue`，合併後只保留票 07 在 `controller_spawn_spec` 加的那一處（Worker 不受影響），並把票 07 的 Adapter 測試改為斷言 `--continue` 恰好出現一次；刪除本票在共用組裝中加的那一處與重複的測試。Controller 頁簽狀態區票 07 的「原生 Session：接續上次」與本票的「Session」重複，只留本票那一欄（含換帳號重開的說明），刪除票 07 對應的元件測試（本票的「顯示這次開啟是接續上次的 Session…」測試涵蓋）。

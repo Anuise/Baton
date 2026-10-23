@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baton_api::{
-    PostedMessage, AcceptTaskRequest, AdmissionReport, AnswerRequest, ArtifactList, ArtifactPreview, AuthorizationView, BackupStatus,
+    AcceptTaskRequest, AdmissionReport, AnswerRequest, ArtifactList, ArtifactPreview, AuthorizationView, BackupStatus,
     BatchRequest, BatchResponse, ConfirmAuthorizationRequest, CreateProfileFromDirRequest, CreateProfileRequest, CreateTaskRequest,
     CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus, LoginStartupView, LoginTerminalResponse, MergeRequest,
     MergeResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus,
@@ -36,7 +36,6 @@ use baton_credential::DpapiProtector;
 use baton_store::{AnswerResult, DecisionList};
 use baton_domain::config::{RuntimeConfig, ENV_DATA_DIR, ENV_PORT};
 use baton_domain::authority::AuthorityTable;
-use baton_domain::conversation::ConversationView;
 use baton_domain::decision::DecisionView;
 use baton_domain::guard::Recurrence;
 use baton_domain::profile::ProfileView;
@@ -622,28 +621,6 @@ async fn run_context(
         return Err(reason.clone());
     }
     link.client.run_context(&workspace_id, &run_id).await.map_err(|e| e.to_string())
-}
-
-/// Web UI 讀取「對話」分頁：Workspace 與 Controller 的長期對話（票 16）。
-#[tauri::command]
-async fn conversation_view(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<ConversationView, String> {
-    if let Err(reason) = link.ensure_started().await {
-        return Err(reason.clone());
-    }
-    link.client.conversation(&workspace_id).await.map_err(|e| e.to_string())
-}
-
-/// Web UI 送出一則使用者訊息；Controller 忙碌時保存為「已收到／待處理」。
-#[tauri::command]
-async fn conversation_send_message(
-    link: State<'_, RuntimeLink>,
-    workspace_id: String,
-    text: String,
-) -> Result<PostedMessage, String> {
-    if let Err(reason) = link.ensure_started().await {
-        return Err(reason.clone());
-    }
-    link.client.send_conversation_message(&workspace_id, &text).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 讀取 Controller 頁簽：這個 Workspace 最近一次的 Controller CLI Run（desktop-controller-cli 票 03）。
@@ -1442,8 +1419,6 @@ fn main() {
             task_accept,
             run_cancel,
             run_context,
-            conversation_view,
-            conversation_send_message,
             controller_cli_view,
             controller_cli_open,
             controller_cli_end,

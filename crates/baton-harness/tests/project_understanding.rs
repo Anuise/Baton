@@ -1,8 +1,8 @@
 //! 情境測試：Project Brief、Glossary 與 Project Map（票 42），經由 Runtime harness 的真實 HTTP API 驗證。
 //!
-//! Controller 是腳本化的（同票 17）：測試在 Controller 的一輪進行中，以那一輪啟動時收到的 Controller 憑證呼叫工具。
+//! Controller 是腳本化的（同票 17）：測試以專用帳號開啟 Controller CLI，以 CLI 啟動時收到的 Controller 憑證呼叫工具。
 //! Workspace 目錄是暫存目錄中的真實檔案；Git 狀態由 fake WorkspaceFs 腳本化（`init_repo`）。
-//! 只斷言外部行為：工具與桌面 API 的回應、Workspace 內的檔案內容、Controller 對話收到的工作事件與 Prompt。
+//! 只斷言外部行為：工具與桌面 API 的回應、Workspace 內的檔案內容。
 //!
 //! 每個測試名稱對應票 42 的驗收條件：
 //! - 未知資訊不被寫成已確認事實：`unknown_information_is_never_recorded_or_projected_as_a_confirmed_fact`、
@@ -22,14 +22,11 @@ use std::path::{Path, PathBuf};
 use baton_domain::artifact::sha256_hex;
 use baton_domain::Timestamp;
 use baton_harness::Harness;
-use baton_ports::AdapterEvent;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
 const WORKSPACES: &str = "/api/v1/workspaces";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 const README: &str = "# 範例專案\n\n這是給小型團隊用的記帳工具。\n";
 
 // --- 共用輔助 ---
@@ -38,12 +35,15 @@ struct Project {
     harness: Harness,
     ws: String,
     dir: PathBuf,
+    /// 只用來開 Controller CLI 的帳號（Worker 派工用另一個帳號）。
+    controller: String,
 }
 
-/// 啟動 Harness、建立一個帳號與一個 Workspace（`git` 為 true 時目錄是 Git repo），目錄內有 README.md 與 src/store.rs。
+/// 啟動 Harness、建立 Worker 與 Controller CLI 各用的帳號與一個 Workspace（`git` 為 true 時目錄是 Git repo），目錄內有 README.md 與 src/store.rs。
 async fn project(git: bool) -> Project {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     harness.add_account("帳號 1", "account1@example.com").await;
+    let controller = harness.add_account("Controller 帳號", "controller@example.com").await;
     let dir = harness.data_dir().join("projects").join("ledger");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("README.md"), README).unwrap();
@@ -54,37 +54,11 @@ async fn project(git: bool) -> Project {
     let (status, body) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": dir.to_string_lossy() }))).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let ws = body["id"].as_str().unwrap().to_string();
-    Project { harness, ws, dir }
+    Project { harness, ws, dir, controller }
 }
 
 fn read(dir: &Path, relative: &str) -> Option<String> {
     std::fs::read_to_string(dir.join(relative)).ok()
-}
-
-async fn conversation(harness: &Harness, ws: &str) -> Value {
-    let (status, body) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/conversation"), None).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    body
-}
-
-/// 使用者送一則訊息、合併視窗過後喚起 Controller，回傳這一輪的 (Controller Run 識別, Controller 憑證)。
-async fn controller_turn(harness: &Harness, ws: &str, text: &str) -> (String, String) {
-    let path = format!("{WORKSPACES}/{ws}/conversation/messages");
-    let (status, body) = harness.send_json(Method::POST, &path, Some(json!({ "text": text }))).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    harness.clock.advance_millis(WINDOW_MS);
-    harness.supervise().await;
-    let view = conversation(harness, ws).await;
-    let run_id = view["active_run"]["id"].as_str().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}")).to_string();
-    let token = harness.agent_credential(&run_id).expect("Controller 程序啟動時應該收到 Controller 憑證");
-    (run_id, token)
-}
-
-async fn finish_turn(harness: &Harness, run_id: &str) {
-    harness.agent_adapter.emit(run_id, AdapterEvent::Started { native_session_id: Some(format!("native-{run_id}")) });
-    harness.agent_adapter.emit(run_id, AdapterEvent::Message { text: "好的".into() });
-    harness.agent_adapter.emit(run_id, AdapterEvent::Exited { success: true });
-    harness.supervise().await;
 }
 
 async fn record(harness: &Harness, token: &str, body: Value) -> (StatusCode, Value) {
@@ -132,17 +106,6 @@ fn projection<'a>(view: &'a Value, path: &str) -> &'a Value {
     view["projections"].as_array().unwrap().iter().find(|p| p["path"] == path).unwrap_or_else(|| panic!("沒有投影 {path}：{view}"))
 }
 
-/// Controller 對話中尚待處理的工作事件內容。
-async fn pending_work_events(harness: &Harness, ws: &str) -> Vec<String> {
-    conversation(harness, ws).await["turns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|t| t["kind"] == "work_event" && t["status"] == "pending")
-        .map(|t| t["content"].as_str().unwrap().to_string())
-        .collect()
-}
-
 fn error_code(body: &Value) -> &str {
     body["error"].as_str().unwrap_or_default()
 }
@@ -151,13 +114,10 @@ fn error_code(body: &Value) -> &str {
 
 #[tokio::test]
 async fn the_controller_builds_a_sourced_brief_glossary_and_map_when_the_workspace_is_first_connected() {
-    let Project { harness, ws, dir } = project(true).await;
-    let (run_id, token) = controller_turn(&harness, &ws, "幫我看看這個專案").await;
+    let Project { harness, ws, dir, controller } = project(true).await;
+    let (run_id, token) = harness.open_controller_cli(&ws, &controller).await;
 
-    // 首次接入：Prompt 要求建立專案理解，讀到的專案理解是空的
-    let prompt = conversation(&harness, &ws).await["runs"][0]["prompt"].as_str().unwrap().to_string();
-    assert!(prompt.contains("record_understanding") && prompt.contains("get_project_understanding"), "{prompt}");
-    assert!(prompt.contains("hypothesis"), "{prompt}");
+    // 首次接入：讀到的專案理解是空的
     let (status, empty) = harness.call_tool(&token, "get_project_understanding", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{empty}");
     assert_eq!(empty["items"], json!([]));
@@ -194,7 +154,7 @@ async fn the_controller_builds_a_sourced_brief_glossary_and_map_when_the_workspa
     assert_eq!(source["path"], "README.md");
     assert_eq!(source["line"], 3);
     assert_eq!(source["version"], sha256_hex(README.as_bytes()));
-    assert_eq!(source["checked_at"], CLOCK_START.as_millis() + WINDOW_MS);
+    assert_eq!(source["checked_at"], CLOCK_START.as_millis());
     assert_eq!(source["changed"], false);
     let store = item(&view, "map", "Store");
     assert_eq!(store["sources"][1]["kind"], "external");
@@ -214,8 +174,8 @@ async fn the_controller_builds_a_sourced_brief_glossary_and_map_when_the_workspa
     let glossary = read(&dir, "GLOSSARY.md").unwrap();
     assert!(glossary.contains("Glossary 第 3 版") && !glossary.contains("## 帳目"), "{glossary}");
 
-    // 這一輪結束後，它的憑證不能再記錄
-    finish_turn(&harness, &run_id).await;
+    // Controller CLI 結束後，它的憑證不能再記錄
+    harness.end_controller_cli(&ws).await;
     let (status, body) = record(&harness, &token, term("新詞", "說明", "hypothesis", json!([]))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 }
@@ -254,8 +214,8 @@ async fn only_the_controller_can_record_project_understanding() {
 
 #[tokio::test]
 async fn unknown_information_is_never_recorded_or_projected_as_a_confirmed_fact() {
-    let Project { harness, ws, dir } = project(true).await;
-    let (_, token) = controller_turn(&harness, &ws, "建立專案理解").await;
+    let Project { harness, ws, dir, controller } = project(true).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
 
     // 沒有來源的「已確認」被拒絕
     let (status, body) = record(&harness, &token, term("帳本", "所有帳目的集合", "confirmed", json!([]))).await;
@@ -293,8 +253,8 @@ async fn unknown_information_is_never_recorded_or_projected_as_a_confirmed_fact(
 
 #[tokio::test]
 async fn a_confirmed_item_whose_source_file_changes_is_flagged_for_recheck() {
-    let Project { harness, ws, dir } = project(true).await;
-    let (_, token) = controller_turn(&harness, &ws, "建立專案理解").await;
+    let Project { harness, ws, dir, controller } = project(true).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     recorded(&harness, &token, term("帳目", "一筆收入或支出", "confirmed", json!([{ "path": "README.md" }]))).await;
     let before = view(&harness, &ws).await;
     assert_eq!(item(&before, "glossary", "帳目")["stale"], false);
@@ -310,15 +270,15 @@ async fn a_confirmed_item_whose_source_file_changes_is_flagged_for_recheck() {
     let rechecked = recorded(&harness, &token, term("帳目", "一筆收入或支出", "confirmed", json!([{ "path": "README.md" }]))).await;
     assert_eq!(rechecked["item"]["stale"], false);
     assert_eq!(rechecked["item"]["sources"][0]["version"], sha256_hex(read(&dir, "README.md").unwrap().as_bytes()));
-    assert_eq!(rechecked["item"]["sources"][0]["checked_at"], CLOCK_START.as_millis() + WINDOW_MS + 60_000);
+    assert_eq!(rechecked["item"]["sources"][0]["checked_at"], CLOCK_START.as_millis() + 60_000);
 }
 
 // --- 投影檔被外部修改時產生協調事件而非靜默覆寫 ---
 
 #[tokio::test]
 async fn an_externally_edited_glossary_raises_a_reconciliation_event_instead_of_being_overwritten() {
-    let Project { mut harness, ws, dir } = project(true).await;
-    let (run_id, token) = controller_turn(&harness, &ws, "建立專案理解").await;
+    let Project { mut harness, ws, dir, controller } = project(true).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     recorded(&harness, &token, term("帳目", "一筆收入或支出", "confirmed", json!([{ "path": "README.md" }]))).await;
     assert!(read(&dir, "GLOSSARY.md").unwrap().contains("第 1 版"));
 
@@ -334,24 +294,13 @@ async fn an_externally_edited_glossary_raises_a_reconciliation_event_instead_of_
     let conflict = projection(&view, "GLOSSARY.md");
     assert_eq!(conflict["status"], "conflict");
     assert_eq!(conflict["external_hash"], sha256_hex(edited.as_bytes()));
-    // 協調事件：Controller 在對話中收到工作事件（下一輪處理）
-    let events = pending_work_events(&harness, &ws).await;
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert!(events[0].contains("GLOSSARY.md") && events[0].contains("被外部修改"), "{events:?}");
-    finish_turn(&harness, &run_id).await;
+    harness.end_controller_cli(&ws).await;
 
-    // 協調中：之後的變更與重新比對都不寫入，也不重複通知
-    let (_, token) = controller_turn(&harness, &ws, "繼續").await;
+    // 協調中：之後（另一次開啟的 Controller CLI）的變更與重新比對都不寫入
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     recorded(&harness, &token, term("結算", "每月結算", "hypothesis", json!([]))).await;
     sync(&harness, &ws).await;
     assert_eq!(read(&dir, "GLOSSARY.md").as_deref(), Some(edited));
-    let notices = conversation(&harness, &ws).await["turns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|t| t["kind"] == "work_event" && t["content"].as_str().unwrap().contains("GLOSSARY.md"))
-        .count();
-    assert_eq!(notices, 1, "同一個協調只通知一次");
 
     // 重啟後協調仍在
     harness.restart().await;
@@ -386,8 +335,8 @@ async fn an_externally_edited_glossary_raises_a_reconciliation_event_instead_of_
 
 #[tokio::test]
 async fn a_kept_external_glossary_edited_again_can_still_be_overwritten_with_the_hash_from_the_view() {
-    let Project { harness, ws, dir } = project(true).await;
-    let (_, token) = controller_turn(&harness, &ws, "建立專案理解").await;
+    let Project { harness, ws, dir, controller } = project(true).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     recorded(&harness, &token, term("帳目", "一筆收入或支出", "confirmed", json!([{ "path": "README.md" }]))).await;
     let edited = "# Glossary
 
@@ -401,7 +350,7 @@ async fn a_kept_external_glossary_edited_again_can_still_be_overwritten_with_the
     assert_eq!(projection(&kept, "GLOSSARY.md")["status"], "detached");
     assert_eq!(projection(&kept, "GLOSSARY.md")["external_hash"], seen.as_str());
 
-    // 保留外部版本之後使用者繼續編輯：重新比對不寫入、不通知，但視圖帶著檔案目前的雜湊
+    // 保留外部版本之後使用者繼續編輯：重新比對不寫入，但視圖帶著檔案目前的雜湊
     let edited_again = format!("{edited}
 又補了一段
 ");
@@ -411,8 +360,6 @@ async fn a_kept_external_glossary_edited_again_can_still_be_overwritten_with_the
     assert_eq!(detached["status"], "detached");
     assert_eq!(detached["external_hash"], sha256_hex(edited_again.as_bytes()));
     assert_eq!(read(&dir, "GLOSSARY.md").as_deref(), Some(edited_again.as_str()));
-    let notices = pending_work_events(&harness, &ws).await;
-    assert_eq!(notices.iter().filter(|e| e.contains("GLOSSARY.md")).count(), 1, "只有最初的協調通知過 Controller：{notices:?}");
 
     // 用過時的雜湊（保留時看到的版本）覆寫：拒絕
     let (status, body) = reconcile(&harness, &ws, "GLOSSARY.md", "overwrite", Some(&seen)).await;
@@ -431,22 +378,20 @@ async fn a_kept_external_glossary_edited_again_can_still_be_overwritten_with_the
 
 #[tokio::test]
 async fn a_glossary_that_already_exists_in_the_repo_is_not_overwritten_on_first_projection() {
-    let Project { harness, ws, dir } = project(true).await;
+    let Project { harness, ws, dir, controller } = project(true).await;
     let ours = "# 我們自己的 Glossary\n";
     std::fs::write(dir.join("GLOSSARY.md"), ours).unwrap();
-    let (_, token) = controller_turn(&harness, &ws, "建立專案理解").await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     recorded(&harness, &token, term("帳目", "一筆收入或支出", "confirmed", json!([{ "path": "README.md" }]))).await;
 
     assert_eq!(read(&dir, "GLOSSARY.md").as_deref(), Some(ours));
     let view = view(&harness, &ws).await;
     assert_eq!(projection(&view, "GLOSSARY.md")["status"], "conflict");
-    let events = pending_work_events(&harness, &ws).await;
-    assert!(events.iter().any(|e| e.contains("GLOSSARY.md") && e.contains("之前就已存在")), "{events:?}");
 }
 
 #[tokio::test]
 async fn workspace_decisions_are_projected_as_adrs_and_an_external_deletion_is_reconciled() {
-    let Project { harness, ws, dir } = project(true).await;
+    let Project { harness, ws, dir, .. } = project(true).await;
     let decision = json!({
         "kind": "decision", "scope": { "kind": "workspace", "workspace_id": ws },
         "title": "帳目一律以分為單位存整數", "body": "避免浮點誤差", "evidence": ["README.md"],
@@ -486,8 +431,8 @@ async fn workspace_decisions_are_projected_as_adrs_and_an_external_deletion_is_r
 
 #[tokio::test]
 async fn a_workspace_that_is_not_a_git_repo_gets_no_projection_files() {
-    let Project { harness, ws, dir } = project(false).await;
-    let (_, token) = controller_turn(&harness, &ws, "建立專案理解").await;
+    let Project { harness, ws, dir, controller } = project(false).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     recorded(&harness, &token, term("帳目", "一筆收入或支出", "confirmed", json!([{ "path": "README.md" }]))).await;
 
     let view = sync(&harness, &ws).await;

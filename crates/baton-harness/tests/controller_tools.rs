@@ -1,8 +1,8 @@
 //! 情境測試：Controller 拆工與派工工具、漸進拆工（票 17），經由 Runtime harness 的真實 HTTP API 驗證。
 //!
-//! Controller 是腳本化的：fake AgentAdapter 不會自己呼叫工具，測試在 Controller 的一輪進行中，以那一輪啟動時
-//! 收到的 Controller 憑證（與真實 MCP shim 拿到的同一個值）呼叫 Agent API，等同 Controller 在這一輪中使用工具。
-//! 只斷言外部行為：工具與桌面 API 的回應、工作面板、裁定中心、對話、交給 Adapter 的 Prompt 與 spawn 次數。
+//! Controller 是腳本化的：測試開啟 Controller CLI，以 Controller 終端機收到的 Controller 憑證（與真實 MCP shim 拿到的
+//! 同一個值）呼叫 Agent API，等同 Controller 在 CLI 中使用工具。
+//! 只斷言外部行為：工具與桌面 API 的回應、工作面板、裁定中心、交給 ProcessControl 的 Worker spawn。
 //!
 //! 每個測試名稱對應票 17 的驗收條件：
 //! - Controller 透過工具建立的 Task 與使用者手動建立的 Task 受相同准入檢查：
@@ -18,7 +18,6 @@
 
 use baton_domain::Timestamp;
 use baton_harness::Harness;
-use baton_ports::AdapterEvent;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
@@ -26,8 +25,6 @@ const WORKSPACES: &str = "/api/v1/workspaces";
 
 /// 2023-11-14 22:13:20.123 UTC
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 
 // --- 共用輔助 ---
 
@@ -55,13 +52,15 @@ async fn confirm_research_template(harness: &Harness, ws: &str) {
     assert_eq!(status, StatusCode::CREATED, "{revision}");
 }
 
-/// 啟動 Harness、建立一個帳號與一個已確認「研究／文件」授權的 Workspace。
-async fn start() -> (Harness, String) {
+/// 啟動 Harness、建立 Worker 用的帳號 1、只拿來開 Controller CLI 的 Controller 帳號，與一個已確認「研究／文件」授權的
+/// Workspace。回傳 (Harness, Workspace, Controller 帳號)。
+async fn start() -> (Harness, String, String) {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     harness.add_account("帳號 1", "account1@example.com").await;
+    let controller = harness.add_account("Controller 帳號", "controller@example.com").await;
     let ws = new_workspace(&harness, "main").await;
     confirm_research_template(&harness, &ws).await;
-    (harness, ws)
+    (harness, ws, controller)
 }
 
 fn filled(text: &str) -> Value {
@@ -88,45 +87,6 @@ fn codes(missing: &Value) -> Vec<String> {
     missing.as_array().unwrap().iter().map(|m| m["code"].as_str().unwrap().to_string()).collect()
 }
 
-async fn send(harness: &Harness, ws: &str, text: &str) {
-    let path = format!("{WORKSPACES}/{ws}/conversation/messages");
-    let (status, body) = harness.send_json(Method::POST, &path, Some(json!({ "text": text }))).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-}
-
-async fn conversation(harness: &Harness, ws: &str) -> Value {
-    let (status, body) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/conversation"), None).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    body
-}
-
-/// 合併視窗過後讓 Supervisor 喚起 Controller，回傳這一輪的 (Controller Run 識別, Controller 憑證)。
-async fn wake_controller(harness: &Harness, ws: &str) -> (String, String) {
-    harness.clock.advance_millis(WINDOW_MS);
-    harness.supervise().await;
-    let view = conversation(harness, ws).await;
-    let run = view["active_run"].clone();
-    assert!(run.is_object(), "Controller 沒有被喚起：{view}");
-    let run_id = run["id"].as_str().unwrap().to_string();
-    let token = harness.agent_credential(&run_id).expect("Controller 程序啟動時應該收到 Controller 憑證");
-    (run_id, token)
-}
-
-/// 某個 Controller Run 的 Prompt（與 launch intent 一起持久化，Adapter 收到的就是它）。
-async fn prompt_of(harness: &Harness, ws: &str, run_id: &str) -> String {
-    let view = conversation(harness, ws).await;
-    let run = view["runs"].as_array().unwrap().iter().find(|r| r["id"] == run_id).cloned();
-    run.unwrap_or_else(|| panic!("找不到 Controller Run {run_id}"))["prompt"].as_str().unwrap().to_string()
-}
-
-/// 讓一輪 Controller 回覆並成功結束。
-async fn finish_turn(harness: &Harness, run_id: &str, reply: &str) {
-    harness.agent_adapter.emit(run_id, AdapterEvent::Started { native_session_id: Some(format!("native-{run_id}")) });
-    harness.agent_adapter.emit(run_id, AdapterEvent::Message { text: reply.into() });
-    harness.agent_adapter.emit(run_id, AdapterEvent::Exited { success: true });
-    harness.supervise().await;
-}
-
 async fn board(harness: &Harness, ws: &str) -> Value {
     let (status, body) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/tasks"), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -142,15 +102,9 @@ fn runs_of(board: &Value, tid: &str) -> usize {
     board["runs"].as_array().unwrap().iter().filter(|r| r["task_id"] == tid).count()
 }
 
-/// 被啟動過的 Worker 程序（不含 Controller 的 `ctl_` 程序）。
+/// 被啟動過的 Worker 程序（Controller CLI 的宿主由終端機開出，不在其中）。
 fn worker_spawns(harness: &Harness) -> Vec<String> {
-    harness
-        .process_control
-        .spawned()
-        .iter()
-        .filter_map(|s| s.args.first().cloned())
-        .filter(|id| !id.starts_with("ctl_"))
-        .collect()
+    harness.process_control.spawned().iter().filter_map(|s| s.args.first().cloned()).collect()
 }
 
 async fn decisions(harness: &Harness, ws: &str) -> Value {
@@ -182,9 +136,8 @@ async fn propose(harness: &Harness, token: &str, body: Value) -> String {
 
 #[tokio::test]
 async fn tasks_proposed_by_the_controller_pass_the_same_admission_check_as_tasks_created_by_the_user() {
-    let (harness, ws) = start().await;
-    send(&harness, &ws, "幫我比較競品").await;
-    let (_, token) = wake_controller(&harness, &ws).await;
+    let (harness, ws, controller) = start().await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
 
     // 相同的不完整契約：一個由 Controller 提出，一個由使用者在工作面板建立
     let mut incomplete = contract(&[]);
@@ -250,7 +203,7 @@ async fn tasks_proposed_by_the_controller_pass_the_same_admission_check_as_tasks
 
 #[tokio::test]
 async fn the_controller_cannot_create_a_dependency_cycle_or_change_tasks_of_another_workspace() {
-    let (harness, ws) = start().await;
+    let (harness, ws, controller) = start().await;
     let other = new_workspace(&harness, "other").await;
     let (status, goal) =
         harness.send_json(Method::POST, &format!("{WORKSPACES}/{other}/goals"), Some(json!({ "title": "別的" }))).await;
@@ -259,8 +212,7 @@ async fn the_controller_cannot_create_a_dependency_cycle_or_change_tasks_of_anot
     let (_, foreign) = harness.send_json(Method::POST, &format!("{WORKSPACES}/{other}/tasks"), Some(body)).await;
     let foreign = foreign["id"].as_str().unwrap().to_string();
 
-    send(&harness, &ws, "拆工").await;
-    let (_, token) = wake_controller(&harness, &ws).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     let a = propose(&harness, &token, json!({ "goal_title": "目標", "title": "A", "contract": contract(&[]) })).await;
     let goal_id = board(&harness, &ws).await["goals"][0]["id"].as_str().unwrap().to_string();
     let b = propose(&harness, &token, json!({ "goal_id": goal_id, "title": "B", "contract": contract(&[]) })).await;
@@ -293,9 +245,8 @@ async fn the_controller_cannot_create_a_dependency_cycle_or_change_tasks_of_anot
 
 #[tokio::test]
 async fn a_task_beyond_the_workspace_authorization_is_refused_and_sent_to_the_decision_center() {
-    let (harness, ws) = start().await;
-    send(&harness, &ws, "幫我把網站部署上線").await;
-    let (controller_run, token) = wake_controller(&harness, &ws).await;
+    let (harness, ws, controller) = start().await;
+    let (controller_run, token) = harness.open_controller_cli(&ws, &controller).await;
 
     // 「研究／文件」授權不含部署：提出可以（pending，准入顯示缺少能力），派工被拒絕並轉成裁定請求
     let (status, proposed) = harness
@@ -332,16 +283,11 @@ async fn a_task_beyond_the_workspace_authorization_is_refused_and_sent_to_the_de
     let (status, user_ready) = harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/tasks/{tid}/ready"), None).await;
     assert_eq!((status, error_code(&user_ready)), (StatusCode::CONFLICT, "task_admission_denied"));
     assert_eq!(codes(&user_ready["missing"]), vec!["capability_not_granted"]);
-    finish_turn(&harness, &controller_run, "部署需要你的裁定，已送到裁定中心").await;
+    harness.end_controller_cli(&ws).await;
 
-    // 使用者核准：Controller 被喚醒（工作事件），但核准不會擴大授權，授權仍不涵蓋時照樣不能派出
+    // 使用者核准後再開 Controller CLI：核准不會擴大授權，授權仍不涵蓋時照樣不能派出
     answer(&harness, &ws, &rid, "approve", None).await;
-    let view = conversation(&harness, &ws).await;
-    let event = view["turns"].as_array().unwrap().iter().rev().find(|t| t["kind"] == "work_event").cloned().unwrap();
-    assert_eq!(event["status"], "pending");
-    assert!(event["content"].as_str().unwrap().contains(&rid), "{event}");
-    let (next_run, next_token) = wake_controller(&harness, &ws).await;
-    assert!(prompt_of(&harness, &ws, &next_run).await.contains(&rid));
+    let (_, next_token) = harness.open_controller_cli(&ws, &controller).await;
     let (status, not_expanded) = harness.call_tool(&next_token, "dispatch_task", json!({ "task_id": tid })).await;
     assert_eq!((status, error_code(&not_expanded)), (StatusCode::CONFLICT, "authorization_not_expanded"), "{not_expanded}");
     assert_eq!(runs_of(&board(&harness, &ws).await, &tid), 0);
@@ -350,9 +296,8 @@ async fn a_task_beyond_the_workspace_authorization_is_refused_and_sent_to_the_de
 
 #[tokio::test]
 async fn a_task_that_depends_on_an_unanswered_question_waits_while_independent_research_is_dispatched() {
-    let (harness, ws) = start().await;
-    send(&harness, &ws, "我想做一個記帳 App，但還沒想好要支援哪些平台").await;
-    let (turn1, token) = wake_controller(&harness, &ws).await;
+    let (harness, ws, controller) = start().await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
 
     // 腳本化的 Controller：先派不依賴答案的研究，把依賴答案的實作掛在問題上
     let research = propose(
@@ -401,7 +346,7 @@ async fn a_task_that_depends_on_an_unanswered_question_waits_while_independent_r
     let (status, user_ready) =
         harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/tasks/{implementation}/ready"), None).await;
     assert_eq!((status, codes(&user_ready["missing"])), (StatusCode::CONFLICT, vec!["decision_pending".to_string()]));
-    finish_turn(&harness, &turn1, "已先派出競品調查；平台的問題送到裁定中心，回答後再開始實作").await;
+    harness.end_controller_cli(&ws).await;
 
     harness.supervise().await;
     let snapshot = board(&harness, &ws).await;
@@ -410,36 +355,32 @@ async fn a_task_that_depends_on_an_unanswered_question_waits_while_independent_r
     assert_eq!(worker_spawns(&harness), vec![research_run["id"].as_str().unwrap().to_string()]);
     assert_eq!(board_task(&snapshot, &implementation)["status"], "pending");
     assert!(board_task(&snapshot, &implementation)["missing"][0]["message"].as_str().unwrap().contains("第一版要支援哪些平台？"));
-    // 幾個小時過去、沒有新事件：不會自己派出，也不會喚醒 Controller
+    // 幾個小時過去、沒有新事件：不會自己派出
     harness.clock.advance_millis(3 * 3_600_000);
     harness.supervise().await;
     assert_eq!(runs_of(&board(&harness, &ws).await, &implementation), 0);
-    assert!(conversation(&harness, &ws).await["active_run"].is_null());
 
-    // 使用者回答：Controller 被喚醒，Prompt 帶著答案；依答案更新契約後派出實作
+    // 使用者回答後再開 Controller CLI：依答案更新契約後派出實作
     let list = decisions(&harness, &ws).await;
     let request = list["decisions"].as_array().unwrap().iter().find(|d| d["id"] == rid.as_str()).unwrap();
     assert_eq!((request["origin"].as_str(), request["kind"].as_str()), (Some("controller"), Some("agent")));
     answer(&harness, &ws, &rid, "web", None).await;
-    let (turn2, token2) = wake_controller(&harness, &ws).await;
-    let prompt = prompt_of(&harness, &ws, &turn2).await;
-    assert!(prompt.contains("第一版要支援哪些平台？") && prompt.contains("只做網頁版"), "{prompt}");
+    let (_, token2) = harness.open_controller_cli(&ws, &controller).await;
     let mut web = decided_scope.clone();
     web["scope"] = filled("只做網頁版");
     let (status, _) = harness.call_tool(&token2, "update_task", json!({ "task_id": implementation, "contract": web })).await;
     assert_eq!(status, StatusCode::OK);
     let (status, dispatched) = harness.call_tool(&token2, "dispatch_task", json!({ "task_id": implementation })).await;
     assert_eq!((status, dispatched["status"].as_str()), (StatusCode::CREATED, Some("started")), "{dispatched}");
-    // 上一輪的憑證已經失效
+    // 已結束的 Controller CLI 的憑證失效
     let (status, revoked) = harness.call_tool(&token, "cancel_task", json!({ "task_id": implementation })).await;
     assert_eq!((status, error_code(&revoked)), (StatusCode::UNAUTHORIZED, "credential_revoked"));
 }
 
 #[tokio::test]
 async fn only_the_controller_credential_can_use_controller_tools_and_it_cannot_act_as_a_worker() {
-    let (mut harness, ws) = start().await;
-    send(&harness, &ws, "開始").await;
-    let (controller_run, token) = wake_controller(&harness, &ws).await;
+    let (mut harness, ws, controller) = start().await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     assert_ne!(token, "controller-credential-not-issued", "票 17 起 Controller 有真正的憑證");
     let tid = propose(&harness, &token, json!({ "goal_title": "目標", "title": "研究", "contract": contract(&[]) })).await;
     let (_, started) = harness.call_tool(&token, "dispatch_task", json!({ "task_id": tid })).await;
@@ -469,20 +410,19 @@ async fn only_the_controller_credential_can_use_controller_tools_and_it_cannot_a
     }
     assert_eq!(decisions(&harness, &ws).await["pending_count"], 0, "Controller 的權限提示不會變成裁定請求");
 
-    // Runtime 重啟後，進行中的這一輪仍能使用自己的憑證；這一輪結束後就失效
+    // Runtime 重啟後，開著的 Controller CLI 仍能使用自己的憑證；Controller CLI 結束後就失效
     harness.restart().await;
     let (status, _) = harness.call_tool(&token, "cancel_task", json!({ "task_id": "task_nope" })).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    finish_turn(&harness, &controller_run, "好了").await;
+    harness.end_controller_cli(&ws).await;
     let (status, revoked) = harness.call_tool(&token, "propose_task", json!({ "goal_title": "g", "title": "t" })).await;
     assert_eq!((status, error_code(&revoked)), (StatusCode::UNAUTHORIZED, "credential_revoked"));
 }
 
 #[tokio::test]
 async fn changing_the_done_criteria_of_a_dispatched_task_requires_a_decision() {
-    let (harness, ws) = start().await;
-    send(&harness, &ws, "開始").await;
-    let (turn1, token) = wake_controller(&harness, &ws).await;
+    let (harness, ws, controller) = start().await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
 
     // 還沒派工的 Task：補上或修改完成條件都是拆工的一部分，可以自主處理
     let mut draft = contract(&[]);
@@ -506,11 +446,11 @@ async fn changing_the_done_criteria_of_a_dispatched_task_requires_a_decision() {
     let rid = refused["decision_request_id"].as_str().unwrap().to_string();
     let (_, detail) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/tasks/{tid}"), None).await;
     assert_eq!(detail["task"]["contract"]["done_criteria"]["text"], "至少五個產品");
-    finish_turn(&harness, &turn1, "完成條件的修改送到裁定中心").await;
+    harness.end_controller_cli(&ws).await;
 
-    // 使用者核准這一次：下一輪的同樣變更消耗它；再改一次又要裁定
+    // 使用者核准這一次：再開 Controller CLI 時同樣的變更消耗它；再改一次又要裁定
     answer(&harness, &ws, &rid, "approve", None).await;
-    let (_, token2) = wake_controller(&harness, &ws).await;
+    let (_, token2) = harness.open_controller_cli(&ws, &controller).await;
     let mut approved = wording.clone();
     approved["done_criteria"] = filled("至少三個產品");
     let (status, applied) = harness.call_tool(&token2, "update_task", json!({ "task_id": tid, "contract": approved })).await;

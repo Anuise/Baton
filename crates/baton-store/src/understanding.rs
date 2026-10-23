@@ -203,13 +203,8 @@ impl Store {
     }
 
     /// 寫回一次投影比對或協調的結果。投影狀態必須仍是比對時讀到的那一版（`expected_revision`，沒有紀錄時為 0），
-    /// 否則什麼都不寫並回 `false`。`notice` 有值時（新開的協調）在同一個交易中成為 Controller 對話的工作事件。
-    pub async fn save_projection(
-        &self,
-        plan: ProjectionPlan,
-        expected_revision: i64,
-        notice: Option<(String, String)>,
-    ) -> StoreResult<bool> {
+    /// 否則什麼都不寫並回 `false`。
+    pub async fn save_projection(&self, plan: ProjectionPlan, expected_revision: i64) -> StoreResult<bool> {
         let Some(projection) = plan.projection else { return Ok(true) };
         self.write(move |tx| {
             let current = load_projection(tx, &projection.workspace_id, &projection.path)?;
@@ -240,9 +235,6 @@ impl Store {
             )?;
             for event in &plan.events {
                 append_event(tx, event)?;
-            }
-            if let Some((source, content)) = notice {
-                super::conversations::enqueue_notice(tx, &projection.workspace_id, &source, &content, projection.updated_at)?;
             }
             Ok(true)
         })

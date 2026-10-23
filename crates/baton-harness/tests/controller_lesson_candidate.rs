@@ -1,6 +1,6 @@
 //! 情境測試：Controller 提交候選教訓（票 54，spec D-05、D-28），經由 Runtime harness 的真實 HTTP API 驗證。
 //!
-//! Controller 是腳本化的：測試在 Controller 的一輪進行中，以那一輪收到的 Controller 憑證呼叫 `record_lesson_candidate`。
+//! Controller 是腳本化的：測試開啟 Controller CLI，以 Controller 終端機收到的 Controller 憑證呼叫 `record_lesson_candidate`。
 //! - Controller 沒有自己的 Task，必須以 `task_id` 指定教訓來源的 Task（必須在它的 Workspace 內），範圍以這個 Task 解析；
 //!   來源記為 `controller`（帶 Controller Run 與 Task），狀態一律是候選，使用者確認前不是有效知識。
 //! - 依決策權限表判定「把候選教訓提交給使用者」：內建可自主處理；Workspace 收窄為必須送裁定時先建立裁定請求，
@@ -10,15 +10,12 @@
 use baton_domain::knowledge::{TOOL_RECORD_LESSON_CANDIDATE, TOOL_SEARCH_KNOWLEDGE};
 use baton_domain::Timestamp;
 use baton_harness::Harness;
-use baton_ports::AdapterEvent;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
 const WORKSPACES: &str = "/api/v1/workspaces";
 const KNOWLEDGE: &str = "/api/v1/knowledge";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 
 fn filled(text: &str) -> Value {
     json!({ "status": "filled", "text": text })
@@ -28,10 +25,12 @@ fn error_code(body: &Value) -> &str {
     body["error"].as_str().unwrap_or_default()
 }
 
-async fn harness() -> Harness {
+/// 啟動 Harness 與兩個帳號：Worker 用的帳號 1，以及只拿來開 Controller CLI 的 Controller 帳號。回傳 (Harness, Controller 帳號)。
+async fn harness() -> (Harness, String) {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     harness.add_account("帳號 1", "account1@example.com").await;
-    harness
+    let controller = harness.add_account("Controller 帳號", "controller@example.com").await;
+    (harness, controller)
 }
 
 async fn new_workspace(harness: &Harness, name: &str) -> String {
@@ -60,28 +59,6 @@ async fn task(harness: &Harness, ws: &str) -> (String, String) {
     let (status, task) = harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/tasks"), Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "{task}");
     (goal["id"].as_str().unwrap().to_string(), task["id"].as_str().unwrap().to_string())
-}
-
-/// 使用者送出一則對話訊息，合併視窗過後喚起 Controller，回傳這一輪的 (Controller Run 識別, Controller 憑證)。
-async fn wake_controller(harness: &Harness, ws: &str) -> (String, String) {
-    let path = format!("{WORKSPACES}/{ws}/conversation/messages");
-    let (status, body) = harness.send_json(Method::POST, &path, Some(json!({ "text": "開始" }))).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    harness.clock.advance_millis(WINDOW_MS);
-    harness.supervise().await;
-    let (status, view) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/conversation"), None).await;
-    assert_eq!(status, StatusCode::OK, "{view}");
-    let run_id = view["active_run"]["id"].as_str().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}")).to_string();
-    let token = harness.agent_credential(&run_id).expect("Controller 程序啟動時應該收到 Controller 憑證");
-    (run_id, token)
-}
-
-/// 讓這一輪 Controller 回覆並成功結束。
-async fn finish_turn(harness: &Harness, run_id: &str) {
-    harness.agent_adapter.emit(run_id, AdapterEvent::Started { native_session_id: Some("native-1".into()) });
-    harness.agent_adapter.emit(run_id, AdapterEvent::Message { text: "好了".into() });
-    harness.agent_adapter.emit(run_id, AdapterEvent::Exited { success: true });
-    harness.supervise().await;
 }
 
 fn lesson(task_id: &str, title: &str) -> Value {
@@ -133,10 +110,10 @@ async fn answer(harness: &Harness, ws: &str, request_id: &str, option: &str) {
 
 #[tokio::test]
 async fn the_controller_records_a_candidate_lesson_for_a_task_of_its_workspace() {
-    let harness = harness().await;
+    let (harness, controller) = harness().await;
     let ws = new_workspace(&harness, "main").await;
     let (goal, tid) = task(&harness, &ws).await;
-    let (controller_run, token) = wake_controller(&harness, &ws).await;
+    let (controller_run, token) = harness.open_controller_cli(&ws, &controller).await;
 
     // 預設 Task 範圍；請求指定的狀態與種類不被採信
     let mut body = lesson(&tid, "測試前先清除快取");
@@ -176,12 +153,12 @@ async fn the_controller_records_a_candidate_lesson_for_a_task_of_its_workspace()
 
 #[tokio::test]
 async fn the_controller_cannot_record_lessons_outside_its_workspace_or_without_a_source_task() {
-    let harness = harness().await;
+    let (harness, controller) = harness().await;
     let ws = new_workspace(&harness, "main").await;
     let other = new_workspace(&harness, "other").await;
     let (_, tid) = task(&harness, &ws).await;
     let (_, foreign_task) = task(&harness, &other).await;
-    let (controller_run, token) = wake_controller(&harness, &ws).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     let before = knowledge_rows(&harness);
 
     // 別的 Workspace 的 Task：找不到，什麼都不寫
@@ -208,8 +185,8 @@ async fn the_controller_cannot_record_lessons_outside_its_workspace_or_without_a
 
     assert_eq!(knowledge_rows(&harness), before, "被拒絕的請求沒有寫入任何條目");
 
-    // 這一輪結束後憑證失效
-    finish_turn(&harness, &controller_run).await;
+    // Controller CLI 結束後憑證失效
+    harness.end_controller_cli(&ws).await;
     let (status, body) = harness.call_tool(&token, TOOL_RECORD_LESSON_CANDIDATE, lesson(&tid, "結束後")).await;
     assert_eq!((status, error_code(&body)), (StatusCode::UNAUTHORIZED, "credential_revoked"), "{body}");
     assert_eq!(knowledge_rows(&harness), before);
@@ -217,10 +194,10 @@ async fn the_controller_cannot_record_lessons_outside_its_workspace_or_without_a
 
 #[tokio::test]
 async fn a_workspace_can_require_a_decision_before_the_controller_submits_a_lesson() {
-    let harness = harness().await;
+    let (harness, controller) = harness().await;
     let ws = new_workspace(&harness, "main").await;
     let (_, tid) = task(&harness, &ws).await;
-    let (_, token) = wake_controller(&harness, &ws).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
 
     // 收窄：把候選教訓提交給使用者必須送裁定
     let narrow = json!({ "expected_revision": 0, "entries": [{ "matter": "submit_lesson_candidate", "effective": "requires_decision" }] });
@@ -256,7 +233,7 @@ async fn a_workspace_can_require_a_decision_before_the_controller_submits_a_less
 
 #[tokio::test]
 async fn a_worker_cannot_attach_its_lesson_to_another_task_by_naming_it() {
-    let harness = harness().await;
+    let (harness, _) = harness().await;
     let ws = new_workspace(&harness, "main").await;
     let (goal, own) = task(&harness, &ws).await;
     let (_, other) = task(&harness, &ws).await;

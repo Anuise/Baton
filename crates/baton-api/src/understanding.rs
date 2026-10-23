@@ -272,28 +272,6 @@ async fn targets(state: &ApiState, workspace: &Workspace) -> Result<Vec<Projecti
     Ok(targets)
 }
 
-/// Controller 在對話中收到的工作事件：投影檔被外部改動，Baton 沒有覆寫。
-fn conflict_notice(projection: &Projection, existed_before: bool) -> (String, String) {
-    let what = match (&projection.external_hash, existed_before) {
-        (None, _) => "被外部刪除",
-        (Some(_), false) => "在 Baton 投影之前就已存在",
-        (Some(_), true) => "被外部修改",
-    };
-    let source = format!(
-        "{}:{}:{}:{}",
-        understanding::EVENT_PROJECTION_CONFLICT_DETECTED,
-        projection.workspace_id,
-        projection.path,
-        projection.revision
-    );
-    let content = format!(
-        "投影檔 {} {what}：Baton 沒有覆寫，已送交使用者協調。請讀取該檔，把其中與專案理解不一致或新增的內容以 record_understanding 更新\
-         （無法確認的標為 hypothesis，不要寫成已確認）；決策類內容請建議使用者在知識分頁更新。",
-        projection.path
-    );
-    (source, content)
-}
-
 /// 比對並寫入這個 Workspace 的全部投影檔；不是 Git repo 時什麼都不做。
 async fn sync_projections(state: &ApiState, workspace: &Workspace) -> Result<(), ApiError> {
     let _guard = state.projection_lock.lock().await;
@@ -307,11 +285,7 @@ async fn sync_projections(state: &ApiState, workspace: &Workspace) -> Result<(),
         if let Some(content) = &plan.write {
             state.workspace_fs.write_artifact_atomic(&file_path(workspace, &target.path), content.as_bytes()).await.map_err(io_error)?;
         }
-        let notice = match (&plan.projection, plan.conflict_opened) {
-            (Some(projection), true) => Some(conflict_notice(projection, record.is_some())),
-            _ => None,
-        };
-        state.store.save_projection(plan, record.map_or(0, |r| r.revision), notice).await?;
+        state.store.save_projection(plan, record.map_or(0, |r| r.revision)).await?;
     }
     Ok(())
 }
@@ -385,7 +359,7 @@ pub(crate) async fn reconcile(
         if let Some(content) = &plan.write {
             state.workspace_fs.write_artifact_atomic(&file_path(&workspace, &record.path), content.as_bytes()).await.map_err(io_error)?;
         }
-        state.store.save_projection(plan, record.revision, None).await?;
+        state.store.save_projection(plan, record.revision).await?;
     }
     Ok(Json(build_view(&state, &workspace).await?))
 }

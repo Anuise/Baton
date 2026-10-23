@@ -25,8 +25,6 @@ use serde_json::{json, Value};
 const WORKSPACES: &str = "/api/v1/workspaces";
 const PLAYBOOKS: &str = "/api/v1/playbooks";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 const API: &str = "http://127.0.0.1:8080";
 const TOKEN: &str = "test-token-123";
 
@@ -37,6 +35,8 @@ struct World {
     ws: String,
     goal: String,
     dir: PathBuf,
+    /// 只用來開 Controller CLI 的帳號（Worker 派工用帳號 A）。
+    controller_account: String,
 }
 
 fn filled(text: &str) -> Value {
@@ -132,6 +132,7 @@ fn journey_of<'a>(bundle: &'a Value, key: &str) -> &'a Value {
 async fn world() -> World {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     harness.add_account("帳號 A", "account0@example.com").await;
+    let controller_account = harness.add_account("Controller 帳號", "controller@example.com").await;
     let dir = harness.data_dir().join("projects").join("ledger");
     std::fs::create_dir_all(&dir).unwrap();
     let (status, body) = harness.send_json(Method::POST, WORKSPACES, Some(json!({ "path": dir.to_string_lossy() }))).await;
@@ -141,7 +142,7 @@ async fn world() -> World {
         harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/goals"), Some(json!({ "title": "記帳工具" }))).await;
     assert_eq!(status, StatusCode::CREATED, "{goal}");
     let goal = goal["id"].as_str().unwrap().to_string();
-    World { harness, ws, goal, dir }
+    World { harness, ws, goal, dir, controller_account }
 }
 
 impl World {
@@ -225,16 +226,9 @@ impl World {
         (rid, token)
     }
 
-    async fn controller_turn(&self, text: &str) -> String {
-        let path = format!("{WORKSPACES}/{}/conversation/messages", self.ws);
-        let (status, body) = self.h().send_json(Method::POST, &path, Some(json!({ "text": text }))).await;
-        assert_eq!(status, StatusCode::CREATED, "{body}");
-        self.h().clock.advance_millis(WINDOW_MS);
-        self.h().supervise().await;
-        let (status, view) = self.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/conversation", self.ws), None).await;
-        assert_eq!(status, StatusCode::OK, "{view}");
-        let run = view["runs"].as_array().unwrap().last().cloned().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}"));
-        self.h().agent_credential(run["id"].as_str().unwrap()).expect("Controller 程序啟動時應該收到 Controller 憑證")
+    /// 以專用帳號開啟 Controller CLI，回傳 Controller 憑證。
+    async fn controller_cli(&self) -> String {
+        self.h().open_controller_cli(&self.ws, &self.controller_account).await.1
     }
 
     /// 發布「調查與研究」Playbook 的新版本：只有一個安全 Gate，離開條件是通過的 Evidence Bundle。
@@ -306,7 +300,7 @@ async fn a_worker_claiming_success_fails_verification_when_the_real_side_effect_
     w.healthy();
     w.h().verification_driver.script_response("GET", &format!("{API}/expenses"), 200, "[]");
 
-    let controller = w.controller_turn("驗證新增支出").await;
+    let controller = w.controller_cli().await;
     // 只有 Controller 能要求驗證；Worker 不能替自己的工作做驗證
     let (status, body) = w.h().call_tool(&worker, "run_verification", json!({ "task_id": tid })).await;
     assert_eq!((status, error_code(&body)), (StatusCode::FORBIDDEN, "controller_only"), "{body}");
@@ -318,7 +312,7 @@ async fn a_worker_claiming_success_fails_verification_when_the_real_side_effect_
     let (status, request) =
         w.h().call_tool(&controller, "run_verification", json!({ "task_id": tid, "journeys": ["record-expense"] })).await;
     assert_eq!(status, StatusCode::CREATED, "{request}");
-    assert_eq!(request["requested_by"].as_str(), workflow["created_by"].as_str(), "要求者是這一輪 Controller");
+    assert_eq!(request["requested_by"].as_str(), workflow["created_by"].as_str(), "要求者是 Controller CLI 的 Controller");
     let failed = w.bundle_of(&request).await;
     assert_eq!((failed["verdict"].as_str(), failed["reason_code"].as_str()), (Some("product_failure"), Some("assertion_failed")));
     let create = step_of(&failed, "create");

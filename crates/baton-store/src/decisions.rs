@@ -752,10 +752,6 @@ fn save(tx: &Transaction<'_>, change: &DecisionChange, now: Timestamp) -> rusqli
             rusqlite::params![item.kind, item.run_id, item.payload.to_string(), item.created_at.as_millis()],
         )?;
     }
-    // Controller 提出的請求結束：成為 conversation 的工作事件，喚醒 Controller（票 17）
-    for notice in &change.notices {
-        super::conversations::enqueue_notice(tx, &notice.workspace_id, &notice.source, &notice.content, now)?;
-    }
     for event in &change.events {
         append_event(tx, event)?;
     }
