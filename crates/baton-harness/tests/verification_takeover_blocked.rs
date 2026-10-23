@@ -5,7 +5,8 @@
 //! `environment_blocked`（`previous_session_unconfirmed`）。
 //!
 //! 受驗服務由 fake VerificationDriver 扮演（它記下每一個操作，含準備與移除狀態目錄）；「Runtime 中途崩潰」與
-//! `verification_handoff.rs` 相同：讓請求永遠不回來、以 `timeout` 丟棄那次處理，再 `crash_restart`。
+//! `verification_handoff.rs` 相同：讓請求永遠不回來、等 fake 回報那個請求已送出就以 `supervise_until` 丟棄那次處理，
+//! 再 `crash_restart`。
 
 use baton_domain::Timestamp;
 use baton_harness::fakes::FakePage;
