@@ -468,6 +468,15 @@
 - 影響：兩個修正 run 可能都動到 `crates/baton-harness`（後端修正補的情境測試）與 `docs/`，後合併的需要整合 run。
 - 審閱：未審
 
+### AI-50：harness 的當掉模擬一律等 fake 回報「已走到停住點」，不以固定時間估計
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R030-fix-c）
+- 決策：`Harness::supervise_until(reached)` 以 `select!` 同時推進 `supervise` 與 `reached`，`reached` 完成就丟棄這一次處理（另有 20 秒保險，逾時就 panic）。fake 的停住點各補一個等待方法：`FakeWorkspaceFs::wait_for_held_removal`、`wait_for_artifact_hang`，`FakeCommandRunner::wait_for_held`，`FakeVerificationDriver::wait_for_http_hang`（與既有的 `wait_for_held_merge` 相同，用 `Notify::notify_one` 保留一次通知，先到先等都不會漏）；ProcessControl 沿用既有的 `wait_for_spawn_hang`、`wait_for_stop_call`。改寫的 12 個測試檔（`acceptance`、`artifacts`、`handoff`、`outbox_and_external_ops`、`retry_budgets`、`run_process_release`、`runs`、`sessions`、`verification_handoff`、`verification_takeover_blocked`、`worktree_cleanup`、`worktrees`）大多來自 platform-rebuild-v1，一併改；斷言都不變。`run_process_release` 的「慢的停止不擋住其他取消」沒有單一停住點，改成在 supervise 進行中輪詢「快的 Run 已是 cancelled」（若停止變成一個接一個，就會撞到保險逾時而失敗）。`crash_recovery.rs` 原本就以條件輪詢（`supervise_until_stuck`），不改。
+- 理由：舊寫法 `timeout(300/500ms, supervise())` 假設 Supervisor 在這段真實時間內一定走到停住點；高負載下 timeout 先到期，當掉位置提早，後面的斷言（`removing`、`merging`、驗證的 verdict）就失敗。以同時跑 6 份 × 16 執行緒重現：舊寫法 `worktree_cleanup` 6 次中失敗 2 次（崩潰時還沒改名到暫放目錄）；新寫法 12 個測試檔各 10 份同時跑全部通過，單跑也從每支至少 300ms 降到不必等待。
+- 替代方案：加長 timeout——只是降低機率，也讓每支測試更慢；只改 review-notes 點名的三支——其餘同樣寫法的測試遲早一樣不穩。
+- 影響：之後寫「在某一點當掉」的情境測試要用 `supervise_until` 配合對應 fake 的等待方法；`docs/development.md` 的 harness 說明已同步。review-notes 第 1 項 R005 那次未保存輸出的結束碼 101 無法確認是哪一支，依時序與第 2、5 項同一成因推定一併解決。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）
