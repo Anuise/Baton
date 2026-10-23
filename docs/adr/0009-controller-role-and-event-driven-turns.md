@@ -2,6 +2,7 @@
 
 - 來源識別：DR-20261022-01
 - 狀態：已確認（使用者核准，2026-10-22）；實作未查驗，CLI 與 Windows 整合為 Validation Required
+- 後續：A1（事件驅動喚醒）與 B1（對話依序處理）擬由 [ADR-0014](0014-native-cli-controller.md) 取代（AI 暫定，待使用者確認）
 - 來源：[issue #3](https://github.com/Anuise/issue-orchestrator/issues/3) §17 DR-20261022-01；§2.4、§15.11
 - Spec 對應：[spec.md](../../.scratch/platform-rebuild-v1/spec.md) 的 D-06（Controller 執行方式）、D-31（事件合併視窗）、User Stories 18–20、24
 

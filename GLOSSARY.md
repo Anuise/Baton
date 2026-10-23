@@ -77,6 +77,11 @@
 - **關係**：每個 Run 綁定一個 Account Profile；額度觀測、並行上限與 draining 都以 Account Profile 為單位；各 Profile 之間不共用登入資料；共同設定以版本化快照提供，不直接共用。
 - **避免使用**：account（單說 account 容易與應用程式測試帳號混淆）、user、seat、token。
 
+### Controller 帳號
+- **定義**：使用者為某個 Workspace 開啟 Controller CLI 時選定的 Account Profile。
+- **關係**：Controller CLI 開啟期間不被派去執行 Worker，結束後恢復；同一個 Profile 可以同時是多個 Workspace 的 Controller 帳號；換 Controller 帳號會開新的 Session，不接續原帳號的原生 Session。
+- **避免使用**：主帳號、Work-0（那是 `.scratch` 流程的本機慣例，不是平台概念）、work（使用者口語中的 work 指的是 Account Profile）。
+
 ### 共同設定（Shared Settings）
 - **定義**：所有 Account Profile 的 Agent 共用的行為基準，從使用者平常使用的 Claude Code 設定匯入，分偏好、指示、hooks、MCP 伺服器、plugins 與市集五類。不含任何登入資料；登入與 Session 狀態只留在各 Account Profile 自己的設定目錄。
 - **關係**：只讀白名單來源（`settings.json`、`CLAUDE.md`、`.claude.json` 的 `mcpServers`），絕不改寫使用者的原始設定；經匯入候選預覽、使用者採用後才成為設定版本；各 Account Profile 不直接共用它，Run 只使用自己准入的設定快照。
@@ -102,9 +107,14 @@
 ## 二、角色
 
 ### Controller
-- **定義**：長期存在的協調角色，本身也是 Agent。負責與使用者對話、釐清目標、拆 Task、派工、協調訊息、評估成果與提出 Decision Request。不是常駐程序，每次需要判斷時才啟動一輪。
-- **關係**：透過工具介面向 Runtime 提交動作，不直接寫資料；同一 conversation 同時最多一輪進行中，忙碌時新訊息先保存；可像 Worker 一樣因額度而交接。Controller 評估不取代必要的獨立審查。
+- **定義**：長期存在的協調角色，本身也是 Agent。負責與使用者對話、釐清目標、拆 Task、派工、協調訊息、評估成果與提出 Decision Request。由使用者在 Controller CLI 中直接操作（AI 暫定，見 ADR-0014；先前的「每次需要判斷時才啟動一輪」擬被取代）。
+- **關係**：透過工具介面向 Runtime 提交動作，不直接寫資料；以一個 Controller 帳號執行；每個 Workspace 同時最多一個 Controller CLI。Controller 評估不取代必要的獨立審查。
 - **避免使用**：orchestrator、manager、coordinator、主控（`.scratch` 流程中的「主控 session」是另一回事）。
+
+### Controller CLI
+- **定義**：使用者從桌面 App 開啟、在終端機視窗中操作的原生互動式 Claude Code，扮演某個 Workspace 的 Controller。開啟期間在平台上是一個互動式的 Controller Run；視窗中的程序結束，這個 Run 就結束。
+- **關係**：屬於一個 Workspace，以一個 Controller 帳號執行；透過 MCP shim 使用 Controller 工具；Worker 的結果以背景等待的方式通知它，平台不替它轉述對話，也不自動喚醒它。
+- **避免使用**：對話頁、chat、conversation（舊的對話頁已擬移除）、終端機頁簽（它開在外部視窗，不在 App 裡）、主控 session。
 
 ### Worker
 - **定義**：接受明確委託並執行的 Agent，負責實作、研究、文件、審查、測試等大量工作；回報進度、checkpoint、成果與阻礙。角色與帳號分開管理，帳號不固定綁定角色。
@@ -138,7 +148,7 @@
 
 ### 桌面 App
 - **定義**：使用者唯一的人工操作入口，內嵌 Web UI，並提供系統匣與「完全退出」。
-- **關係**：連回既有 Runtime，不自行成為控制平面；只有經桌面 App 提交的裁定才算人工正式裁定。
+- **關係**：連回既有 Runtime，不自行成為控制平面；只有經桌面 App 提交的裁定才算人工正式裁定；負責開啟與結束 Controller CLI，但不承載與 Controller 的對話。
 - **避免使用**：client、frontend、瀏覽器入口（第一版不提供一般瀏覽器入口）。
 
 ---
