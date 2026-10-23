@@ -72,6 +72,42 @@
 - 影響：本次刷新後 Work-1 顯示 7d 已用 100%（不可用），Work-3／8／9 可用。之後若再遇到全數 401 token expired，照同樣方式處理。
 - 審閱：未審
 
+### AI-06：封存後的外部目錄不能再登記成新的 Profile
+- 重要度：中
+- 時間／階段：2026-10-23，票 02 實作
+- 決策：以既有目錄建立 Profile 時，與任何 Profile（含已封存）的設定目錄相同或互相包含都拒絕（`profile_config_dir_shared`）；外部目錄的 Profile 封存後，同一個目錄也不能再登記。
+- 理由：沿用平台既有規則「已封存的 Profile 目錄不重用，因為登入資料還在那裡」，資料庫也有 `config_dir` 不分大小寫唯一的索引；放寬要改 migration 與既有 Domain 規則，超出本票範圍。
+- 替代方案：只和使用中的 Profile 比對，允許封存後重新登記同一目錄——要移除唯一索引，並決定封存紀錄與新 Profile 共用目錄時的身分與額度歸屬。
+- 影響：使用者封存 `~/.claude-Work-n` 的 Profile 後想再加回來，目前做不到（也沒有「取消封存」）；若需要，另開票做「取消封存」或放寬規則。
+- 審閱：未審
+
+### AI-07：外部目錄與平台 profiles 目錄「重疊」就拒絕，含其上層目錄
+- 重要度：低
+- 時間／階段：2026-10-23，票 02 實作
+- 決策：外部目錄位於 `<資料目錄>\profiles` 之內、等於它、或是它的上層（例如資料目錄本身）都拒絕（`profile_config_dir_managed`，400）；比對方式與 Profile 間的重疊相同（不分大小寫、忽略斜線方向、結尾分隔線與 `\\?\` 前綴）。路徑必須是絕對路徑（`profile_config_dir_invalid`），不展開 `~`。目錄不存在或不是目錄分別回 `profile_config_dir_not_found`、`profile_config_dir_not_directory`，平台不替使用者建立目錄。另外把既有的 `profile_config_dir_shared` 訊息改為「相同或互相包含」，平台建立的 Profile 也用同一句。
+- 理由：spec 只寫「不在 profiles 底下」，但包含 profiles 的上層目錄一樣會讓之後平台建立的 Profile 落在它裡面，兩邊共用登入狀態。
+- 替代方案：只擋「在 profiles 之內」——之後新增平台 Profile 時才被 `profile_config_dir_shared` 擋下，原因難懂。
+- 影響：無。
+- 審閱：未審
+
+### AI-08：立即核對失敗時仍建立 Profile，顯示為尚未核對
+- 重要度：低
+- 時間／階段：2026-10-23，票 02 實作
+- 決策：以既有目錄建立 Profile 的端點在登記成功後立即核對；核對本身失敗（例如 `claude` 沒有回應）時仍回 201，Profile 顯示「尚未核對」，使用者可按「重新核對」。只有目錄或名稱等驗證不通過才拒絕且不建立任何東西。
+- 理由：核對失敗多半是暫時性的（CLI 沒回應），與目錄是否合格無關；回錯誤卻已建立 Profile 會讓使用者以為沒建立而重送，撞上目錄重疊。
+- 替代方案：核對失敗就整筆回滾——要在 Store 增加刪除 Profile 的路徑，違反事件只追加。
+- 影響：回應不帶核對失敗的原因；使用者按「重新核對」時才會看到。
+- 審閱：未審
+
+### AI-09：以獨立端點與文字輸入實作，不做原生資料夾選擇器
+- 重要度：低
+- 時間／階段：2026-10-23，票 02 實作
+- 決策：新增 `POST /api/v1/profiles/from-existing-dir`（`{ name, config_dir }`）、Tauri 指令 `profile_create_from_dir`；Profile 多一個 `config_dir_origin`（`managed`／`external`）欄位。帳號畫面以獨立表單、文字輸入完整路徑；外部目錄的 Profile 在清單標示「外部目錄：路徑」。不接受 `expected_account`，身分以第一次核對到的原生登入固定（與平台建立的 Profile 相同）。封存的行為兩種來源都相同（平台本來就不刪設定目錄），差別只記在 `config_dir_origin` 上。
+- 理由：spec 只要求「輸入目錄路徑與名稱」；原生資料夾對話框需要額外的 Tauri plugin 與權限設定，超出本票。
+- 替代方案：沿用 `POST /api/v1/profiles` 加選填 `config_dir`——同一端點兩種語意（建立目錄與否），錯誤碼也難區分。
+- 影響：之後若要加資料夾選擇器，只動前端表單與 Tauri 設定。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）

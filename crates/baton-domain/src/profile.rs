@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::claude_code::{self, VersionCheck};
 use crate::event::DomainEvent;
-use crate::Timestamp;
+use crate::{workspace, Timestamp};
 
 pub const AGGREGATE_TYPE: &str = "account_profile";
 pub const EVENT_CREATED: &str = "account_profile_created";
@@ -41,6 +41,32 @@ impl ProfileStatus {
         match raw {
             "active" => Some(ProfileStatus::Active),
             "archived" => Some(ProfileStatus::Archived),
+            _ => None,
+        }
+    }
+}
+
+/// 設定目錄的來源：平台在資料目錄下建立，或使用者登記的既有（外部）目錄。
+/// 平台不刪除任何設定目錄；外部目錄尤其不可修改，因為使用者在平台外也在用它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigDirOrigin {
+    Managed,
+    External,
+}
+
+impl ConfigDirOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConfigDirOrigin::Managed => "managed",
+            ConfigDirOrigin::External => "external",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "managed" => Some(ConfigDirOrigin::Managed),
+            "external" => Some(ConfigDirOrigin::External),
             _ => None,
         }
     }
@@ -98,6 +124,7 @@ pub struct AccountProfile {
     pub name: String,
     /// 這個 Profile 專屬的 `CLAUDE_CONFIG_DIR`；任兩個 Profile 不共用、也不互相包含。
     pub config_dir: String,
+    pub config_dir_origin: ConfigDirOrigin,
     /// 預期的帳號身分：建立時指定，或第一次核對到原生登入時固定下來。
     pub expected_account: Option<String>,
     pub status: ProfileStatus,
@@ -288,6 +315,9 @@ pub fn views(profiles: &[AccountProfile]) -> Vec<ProfileView> {
 pub enum ProfileCommand {
     /// `id` 與 `config_dir` 由呼叫端產生（Domain 不產生亂數，也不決定資料目錄位置）。
     Create { id: String, name: String, config_dir: String, expected_account: Option<String> },
+    /// 把使用者既有的設定目錄（例如 `~/.claude-Work-3`）登記成 Profile；`managed_root` 是平台建立設定目錄的位置，
+    /// 外部目錄不能在它之內或包含它。
+    CreateFromExistingDir { id: String, name: String, config_dir: String, managed_root: String },
     /// `cli_version` 是核對當下 `claude --version` 的輸出（取不到為 `None`）。
     RecordVerification { id: String, report: AuthReport, cli_version: Option<String> },
     Archive { id: String },
@@ -312,8 +342,12 @@ pub enum ProfileError {
     ExpectedAccountInvalid(String),
     #[error("最多只能有 {MAX_PROFILES} 個帳號 Profile（目前已有 {MAX_PROFILES} 個）。請先封存用不到的 Profile，再新增")]
     LimitReached,
-    #[error("設定目錄 {0} 已被其他 Profile 使用；每個 Profile 必須有獨立的設定目錄")]
+    #[error("設定目錄 {0} 與其他 Profile 的設定目錄相同或互相包含；每個 Profile 必須有獨立的設定目錄")]
     ConfigDirShared(String),
+    #[error(r"設定目錄必須是完整的絕對路徑（例如 C:\Users\me\.claude-Work-3）：{0}")]
+    ConfigDirInvalid(String),
+    #[error("設定目錄 {0} 與平台資料目錄的 profiles 重疊；平台建立的設定目錄請用「新增 Profile」")]
+    ConfigDirManaged(String),
     #[error("找不到 Profile {0}")]
     NotFound(String),
     #[error("Profile {0} 已經封存")]
@@ -329,6 +363,8 @@ impl ProfileError {
             ProfileError::ExpectedAccountInvalid(_) => "profile_account_invalid",
             ProfileError::LimitReached => "profile_limit_reached",
             ProfileError::ConfigDirShared(_) => "profile_config_dir_shared",
+            ProfileError::ConfigDirInvalid(_) => "profile_config_dir_invalid",
+            ProfileError::ConfigDirManaged(_) => "profile_config_dir_managed",
             ProfileError::NotFound(_) => "profile_not_found",
             ProfileError::AlreadyArchived(_) => "profile_already_archived",
         }
@@ -368,48 +404,14 @@ fn normalize_expected_account(raw: Option<String>) -> Result<Option<String>, Pro
 pub fn decide(existing: &[AccountProfile], command: ProfileCommand, now: Timestamp) -> Result<Decision, ProfileError> {
     match command {
         ProfileCommand::Create { id, name, config_dir, expected_account } => {
-            let name = name.trim().to_string();
-            if name.is_empty() {
-                return Err(ProfileError::NameEmpty);
+            create(existing, id, name, config_dir, ConfigDirOrigin::Managed, expected_account, now)
+        }
+        ProfileCommand::CreateFromExistingDir { id, name, config_dir, managed_root } => {
+            let config_dir = workspace::normalize_path(&config_dir).map_err(|_| ProfileError::ConfigDirInvalid(config_dir))?;
+            if dirs_overlap(&config_dir, &managed_root) {
+                return Err(ProfileError::ConfigDirManaged(config_dir));
             }
-            if name.chars().count() > MAX_NAME_CHARS {
-                return Err(ProfileError::NameTooLong);
-            }
-            let expected_account = normalize_expected_account(expected_account)?;
-            let active = existing.iter().filter(|p| p.status == ProfileStatus::Active);
-            if active.clone().any(|p| p.name.to_lowercase() == name.to_lowercase()) {
-                return Err(ProfileError::NameTaken(name));
-            }
-            if active.count() >= MAX_PROFILES {
-                return Err(ProfileError::LimitReached);
-            }
-            // 已封存的 Profile 目錄也不能重用：它的登入資料仍在那裡
-            if existing.iter().any(|p| dirs_overlap(&p.config_dir, &config_dir)) {
-                return Err(ProfileError::ConfigDirShared(config_dir));
-            }
-            let profile = AccountProfile {
-                id,
-                name,
-                config_dir,
-                expected_account,
-                status: ProfileStatus::Active,
-                verification: None,
-                version: 1,
-                created_at: now,
-                archived_at: None,
-            };
-            let created = event(
-                &profile,
-                profile.version,
-                EVENT_CREATED,
-                now,
-                serde_json::json!({
-                    "name": profile.name,
-                    "config_dir": profile.config_dir,
-                    "expected_account": profile.expected_account,
-                }),
-            );
-            Ok(Decision { profile, events: vec![created] })
+            create(existing, id, name, config_dir, ConfigDirOrigin::External, None, now)
         }
         ProfileCommand::RecordVerification { id, report, cli_version } => {
             let current = find_active(existing, &id)?;
@@ -470,6 +472,62 @@ pub fn decide(existing: &[AccountProfile], command: ProfileCommand, now: Timesta
             Ok(Decision { profile, events: vec![archived] })
         }
     }
+}
+
+/// 建立 Profile 的共同規則：名稱、預期帳號、數量上限、設定目錄不共用。
+fn create(
+    existing: &[AccountProfile],
+    id: String,
+    name: String,
+    config_dir: String,
+    config_dir_origin: ConfigDirOrigin,
+    expected_account: Option<String>,
+    now: Timestamp,
+) -> Result<Decision, ProfileError> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(ProfileError::NameEmpty);
+    }
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(ProfileError::NameTooLong);
+    }
+    let expected_account = normalize_expected_account(expected_account)?;
+    let active = existing.iter().filter(|p| p.status == ProfileStatus::Active);
+    if active.clone().any(|p| p.name.to_lowercase() == name.to_lowercase()) {
+        return Err(ProfileError::NameTaken(name));
+    }
+    if active.count() >= MAX_PROFILES {
+        return Err(ProfileError::LimitReached);
+    }
+    // 已封存的 Profile 目錄也不能重用：它的登入資料仍在那裡
+    if existing.iter().any(|p| dirs_overlap(&p.config_dir, &config_dir)) {
+        return Err(ProfileError::ConfigDirShared(config_dir));
+    }
+    let profile = AccountProfile {
+        id,
+        name,
+        config_dir,
+        config_dir_origin,
+        expected_account,
+        status: ProfileStatus::Active,
+        verification: None,
+        version: 1,
+        created_at: now,
+        archived_at: None,
+    };
+    let created = event(
+        &profile,
+        profile.version,
+        EVENT_CREATED,
+        now,
+        serde_json::json!({
+            "name": profile.name,
+            "config_dir": profile.config_dir,
+            "config_dir_origin": profile.config_dir_origin,
+            "expected_account": profile.expected_account,
+        }),
+    );
+    Ok(Decision { profile, events: vec![created] })
 }
 
 fn find_active<'a>(existing: &'a [AccountProfile], id: &str) -> Result<&'a AccountProfile, ProfileError> {
@@ -825,10 +883,110 @@ mod tests {
         );
     }
 
+    const MANAGED_ROOT: &str = "C:\\Baton\\profiles";
+
+    fn from_dir(id: &str, name: &str, dir: &str) -> ProfileCommand {
+        ProfileCommand::CreateFromExistingDir {
+            id: id.into(),
+            name: name.into(),
+            config_dir: dir.into(),
+            managed_root: MANAGED_ROOT.into(),
+        }
+    }
+
+    #[test]
+    fn platform_created_profiles_are_marked_managed() {
+        assert_eq!(created("p1", "a").config_dir_origin, ConfigDirOrigin::Managed);
+    }
+
+    #[test]
+    fn an_existing_dir_becomes_an_external_unverified_profile_with_a_normalized_path() {
+        let decision = decide(&[], from_dir("p1", " Work 3 ", "  \"c:/Users/me/.claude-Work-3/\" "), T1).unwrap();
+
+        let profile = &decision.profile;
+        assert_eq!(profile.name, "Work 3");
+        assert_eq!(profile.config_dir, "c:\\Users\\me\\.claude-Work-3");
+        assert_eq!(profile.config_dir_origin, ConfigDirOrigin::External);
+        assert_eq!((profile.status, profile.version, profile.expected_account.as_deref()), (ProfileStatus::Active, 1, None));
+        assert_eq!(codes(profile, std::slice::from_ref(profile)), ["profile_unverified"]);
+        assert_eq!(decision.events.len(), 1);
+        assert_eq!(decision.events[0].event_type, EVENT_CREATED);
+        assert_eq!(decision.events[0].payload["config_dir_origin"], "external");
+    }
+
+    #[test]
+    fn an_existing_dir_must_be_an_absolute_path() {
+        for bad in ["", "   ", ".claude-Work-3", "Users\\me\\.claude", "C:\\Users\\..\\me"] {
+            let error = decide(&[], from_dir("p1", "a", bad), T1).unwrap_err();
+            assert!(matches!(error, ProfileError::ConfigDirInvalid(_)), "{bad:?}: {error:?}");
+            assert_eq!(error.code(), "profile_config_dir_invalid");
+        }
+    }
+
+    #[test]
+    fn an_existing_dir_under_or_containing_the_platform_profiles_dir_is_rejected() {
+        for inside in ["C:\\Baton\\profiles\\mine", "c:/baton/PROFILES", "C:\\Baton", "\\\\?\\C:\\Baton\\profiles\\x"] {
+            let error = decide(&[], from_dir("p1", "a", inside), T1).unwrap_err();
+            assert!(matches!(error, ProfileError::ConfigDirManaged(_)), "{inside}: {error:?}");
+            assert_eq!(error.code(), "profile_config_dir_managed");
+            assert!(error.to_string().contains("profiles"), "{error}");
+        }
+        // 只是名稱前綴相同的同層目錄不受影響
+        assert!(decide(&[], from_dir("p1", "a", "C:\\Baton\\profiles-old"), T1).is_ok());
+    }
+
+    #[test]
+    fn an_existing_dir_shared_with_or_nested_in_another_profile_is_rejected_with_the_reason() {
+        let mut archived = decide(&[], from_dir("p1", "a", "C:\\Users\\me\\.claude-Work-3"), T1).unwrap().profile;
+        archived.status = ProfileStatus::Archived;
+        let existing = [created("p0", "managed"), archived];
+
+        for overlapping in [
+            "C:\\Users\\me\\.claude-Work-3",
+            "c:/users/ME/.claude-Work-3/",
+            "C:\\Users\\me\\.claude-Work-3\\nested",
+            "C:\\Users\\me",
+            "C:\\Baton\\profiles\\p0\\inner",
+        ] {
+            let error = decide(&existing, from_dir("p2", "b", overlapping), T2).unwrap_err();
+            // 位於平台 profiles 底下的目錄由另一個原因擋下；其餘都是與其他 Profile 重疊
+            if overlapping.starts_with("C:\\Baton") {
+                assert!(matches!(error, ProfileError::ConfigDirManaged(_)), "{overlapping}: {error:?}");
+            } else {
+                assert!(matches!(error, ProfileError::ConfigDirShared(_)), "{overlapping}: {error:?}");
+                assert!(error.to_string().contains("相同或互相包含"), "{error}");
+            }
+        }
+        assert!(decide(&existing, from_dir("p2", "b", "C:\\Users\\me\\.claude-Work-4"), T2).is_ok());
+    }
+
+    #[test]
+    fn an_existing_dir_profile_obeys_the_name_and_limit_rules() {
+        let mut all: Vec<AccountProfile> = Vec::new();
+        for n in 1..=MAX_PROFILES {
+            all.push(decide(&all, create_cmd(&format!("p{n}"), &format!("帳號 {n}"), None), T1).unwrap().profile);
+        }
+
+        assert_eq!(decide(&all, from_dir("x", "帳號 1", "D:\\a"), T2), Err(ProfileError::NameTaken("帳號 1".into())));
+        assert_eq!(decide(&all, from_dir("x", "新的", "D:\\a"), T2), Err(ProfileError::LimitReached));
+        assert_eq!(decide(&[], from_dir("x", " ", "D:\\a"), T2), Err(ProfileError::NameEmpty));
+    }
+
+    #[test]
+    fn archiving_an_external_profile_keeps_its_origin() {
+        let profile = decide(&[], from_dir("p1", "a", "D:\\claude"), T1).unwrap().profile;
+
+        let archived = decide(std::slice::from_ref(&profile), ProfileCommand::Archive { id: "p1".into() }, T2).unwrap().profile;
+
+        assert_eq!((archived.status, archived.config_dir_origin), (ProfileStatus::Archived, ConfigDirOrigin::External));
+    }
+
     #[test]
     fn error_codes_are_stable() {
         assert_eq!(ProfileError::LimitReached.code(), "profile_limit_reached");
         assert_eq!(ProfileError::NameTaken("x".into()).code(), "profile_name_taken");
         assert_eq!(ProfileError::NotFound("x".into()).code(), "profile_not_found");
+        assert_eq!(ConfigDirOrigin::parse(ConfigDirOrigin::External.as_str()), Some(ConfigDirOrigin::External));
+        assert_eq!(ConfigDirOrigin::parse(ConfigDirOrigin::Managed.as_str()), Some(ConfigDirOrigin::Managed));
     }
 }

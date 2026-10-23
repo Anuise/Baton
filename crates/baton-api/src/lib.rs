@@ -121,7 +121,10 @@ pub use updates::{
     ApplyUpdateRequest, AvailableUpdateView, MaintenanceRequestBody, UpdateControl, UpdatePrepareError, UpdateStatusView,
     MAINTENANCE_PATH, UPDATES_PATH, UPDATE_APPLY_PATH,
 };
-pub use profiles::{CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_PATH};
+pub use profiles::{
+    CreateProfileFromDirRequest, CreateProfileRequest, LoginTerminalResponse, ProfileList, PROFILES_FROM_EXISTING_DIR_PATH,
+    PROFILES_PATH,
+};
 pub use setup::{BackgroundNotice, SetupStatus, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH};
 pub use sessions::{session_path, sessions_path, SessionList};
 pub use runs::{
@@ -291,6 +294,7 @@ pub fn router(state: ApiState) -> Router {
         .route(PENDING_DECISIONS_PATH, get(decisions::pending))
         .route(DECISIONS_BATCH_PATH, post(decisions::batch))
         .route(PROFILES_PATH, get(profiles::list).post(profiles::create))
+        .route(PROFILES_FROM_EXISTING_DIR_PATH, post(profiles::create_from_existing_dir))
         .route(profiles::VERIFY_ROUTE, post(profiles::verify))
         .route(profiles::LOGIN_TERMINAL_ROUTE, post(profiles::login_terminal))
         .route(profiles::ARCHIVE_ROUTE, post(profiles::archive))

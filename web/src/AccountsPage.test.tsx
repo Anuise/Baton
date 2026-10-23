@@ -16,7 +16,12 @@ import type { AccountClient, AccountProfile, AccountScheduling, PlanLimits } fro
 
 type PageClient = Pick<
   AccountClient,
-  "listProfiles" | "createProfile" | "verifyProfile" | "openLoginTerminal" | "archiveProfile"
+  | "listProfiles"
+  | "createProfile"
+  | "createProfileFromExistingDir"
+  | "verifyProfile"
+  | "openLoginTerminal"
+  | "archiveProfile"
 >;
 
 /** 以記憶體模擬 Runtime 的 Profile 清單，讓測試只看使用者可見的行為。 */
@@ -36,6 +41,19 @@ function fakeClient(initial: AccountProfile[] = []) {
       items = [...items, created];
       return created;
     }),
+    // 以既有目錄建立時 Runtime 會立即核對，回傳的 Profile 已帶核對結果
+    createProfileFromExistingDir: vi.fn(async ({ name, configDir }) => {
+      const created = profile({
+        id: `prof_${items.length + 1}`,
+        name,
+        config_dir: configDir,
+        config_dir_origin: "external",
+        expected_account: null,
+        verification: { ...profile().verification!, account: "work3@example.com" },
+      });
+      items = [...items, created];
+      return created;
+    }),
     verifyProfile: vi.fn(async (id) => items.find((p) => p.id === id)!),
     openLoginTerminal: vi.fn(async () => ({ opened: true })),
     archiveProfile: vi.fn(async (id) => {
@@ -46,6 +64,10 @@ function fakeClient(initial: AccountProfile[] = []) {
   };
   return client;
 }
+
+/** 兩個表單都有「名稱」欄位，以表單的名稱區分。 */
+const createForm = () => screen.getByRole("form", { name: "新增 Profile" });
+const fromDirForm = () => screen.getByRole("form", { name: "以既有目錄建立 Profile" });
 
 const overridden = profile({
   id: "prof_2",
@@ -164,13 +186,13 @@ describe("帳號頁", () => {
     render(<AccountsPage client={client} onChange={onChange} />);
     await screen.findByText("還沒有帳號 Profile");
 
-    await user.type(screen.getByLabelText("名稱"), "工作帳號");
+    await user.type(within(createForm()).getByLabelText("名稱"), "工作帳號");
     await user.type(screen.getByLabelText("預期帳號（選填）"), "work@example.com");
     await user.click(screen.getByRole("button", { name: "新增 Profile" }));
 
     expect(await screen.findByText("工作帳號")).toBeInTheDocument();
     expect(client.createProfile).toHaveBeenCalledWith({ name: "工作帳號", expectedAccount: "work@example.com" });
-    expect(screen.getByLabelText("名稱")).toHaveValue("");
+    expect(within(createForm()).getByLabelText("名稱")).toHaveValue("");
     expect(screen.getByText("1 / 8")).toBeInTheDocument();
     expect(onChange).toHaveBeenCalled();
   });
@@ -196,12 +218,12 @@ describe("帳號頁", () => {
     render(<AccountsPage client={client} />);
     await screen.findByText("還沒有帳號 Profile");
 
-    await user.type(screen.getByLabelText("名稱"), "工作帳號");
+    await user.type(within(createForm()).getByLabelText("名稱"), "工作帳號");
     await user.type(screen.getByLabelText("預期帳號（選填）"), "nope");
     await user.click(screen.getByRole("button", { name: "新增 Profile" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("預期帳號必須是電子郵件");
-    expect(screen.getByLabelText("名稱")).toHaveValue("工作帳號");
+    expect(within(createForm()).getByLabelText("名稱")).toHaveValue("工作帳號");
   });
 
   it("已有 8 個 Profile 時不能再新增，並說明上限；封存後恢復", async () => {
@@ -218,6 +240,84 @@ describe("帳號頁", () => {
 
     await waitFor(() => expect(screen.getByRole("button", { name: "新增 Profile" })).toBeEnabled());
     expect(screen.getByText("7 / 8")).toBeInTheDocument();
+  });
+
+  describe("以既有目錄建立 Profile", () => {
+    const WORK3_DIR = "C:\\Users\\me\\.claude-Work-3";
+
+    it("以名稱與設定目錄送出；成功後新 Profile 帶核對結果與「外部目錄」標示出現在清單，表單清空並通知上層", async () => {
+      const client = fakeClient([profile()]);
+      const onChange = vi.fn();
+      const user = userEvent.setup();
+      render(<AccountsPage client={client} onChange={onChange} timeZone="Asia/Taipei" />);
+      await screen.findByText("主要帳號");
+
+      const form = fromDirForm();
+      await user.type(within(form).getByLabelText("名稱"), "工作三");
+      await user.type(within(form).getByLabelText("設定目錄"), WORK3_DIR);
+      await user.click(within(form).getByRole("button", { name: "以既有目錄建立" }));
+
+      const item = (await screen.findByText("工作三")).closest("li")!;
+      expect(client.createProfileFromExistingDir).toHaveBeenCalledWith({ name: "工作三", configDir: WORK3_DIR });
+      expect(client.createProfile).not.toHaveBeenCalled();
+      expect(within(item).getByText("可派工")).toBeInTheDocument();
+      expect(within(item).getByText(/work3@example\.com/, { selector: ".profile-source" })).toBeInTheDocument();
+      expect(within(item).getByText(`外部目錄：${WORK3_DIR}`)).toBeInTheDocument();
+      // 平台建立的 Profile 不標示外部目錄
+      expect(within(screen.getByText("主要帳號").closest("li")!).queryByText(/外部目錄/)).not.toBeInTheDocument();
+      expect(within(form).getByLabelText("名稱")).toHaveValue("");
+      expect(within(form).getByLabelText("設定目錄")).toHaveValue("");
+      expect(screen.getByText("2 / 8")).toBeInTheDocument();
+      expect(onChange).toHaveBeenCalled();
+    });
+
+    it("Runtime 拒絕時在表單上顯示它的說明並保留輸入", async () => {
+      const client = fakeClient();
+      vi.mocked(client.createProfileFromExistingDir).mockRejectedValueOnce(
+        new Error("Runtime 拒絕連線（profile_dir_overlaps）：設定目錄與 Profile「主要帳號」的目錄重疊"),
+      );
+      const user = userEvent.setup();
+      render(<AccountsPage client={client} />);
+      await screen.findByText("還沒有帳號 Profile");
+
+      const form = fromDirForm();
+      await user.type(within(form).getByLabelText("名稱"), "工作三");
+      await user.type(within(form).getByLabelText("設定目錄"), WORK3_DIR);
+      await user.click(within(form).getByRole("button", { name: "以既有目錄建立" }));
+
+      expect(await within(form).findByRole("alert")).toHaveTextContent("設定目錄與 Profile「主要帳號」的目錄重疊");
+      expect(within(form).getByLabelText("名稱")).toHaveValue("工作三");
+      expect(within(form).getByLabelText("設定目錄")).toHaveValue(WORK3_DIR);
+      expect(within(createForm()).queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("名稱或設定目錄是空的時不送出，並提示缺少哪一項", async () => {
+      const client = fakeClient();
+      const user = userEvent.setup();
+      render(<AccountsPage client={client} />);
+      await screen.findByText("還沒有帳號 Profile");
+
+      const form = fromDirForm();
+      await user.type(within(form).getByLabelText("設定目錄"), WORK3_DIR);
+      await user.click(within(form).getByRole("button", { name: "以既有目錄建立" }));
+      expect(within(form).getByRole("alert")).toHaveTextContent("請輸入名稱");
+
+      await user.clear(within(form).getByLabelText("設定目錄"));
+      await user.type(within(form).getByLabelText("名稱"), "工作三");
+      await user.click(within(form).getByRole("button", { name: "以既有目錄建立" }));
+      expect(within(form).getByRole("alert")).toHaveTextContent("請輸入設定目錄");
+
+      expect(client.createProfileFromExistingDir).not.toHaveBeenCalled();
+    });
+
+    it("已有 8 個 Profile 時不能以既有目錄建立", async () => {
+      const eight = Array.from({ length: 8 }, (_, n) => profile({ id: `prof_${n + 1}`, name: `帳號 ${n + 1}` }));
+      render(<AccountsPage client={fakeClient(eight)} />);
+
+      expect(await screen.findByText("8 / 8")).toBeInTheDocument();
+      expect(within(fromDirForm()).getByRole("button", { name: "以既有目錄建立" })).toBeDisabled();
+      expect(screen.getByText(/最多 8 個/)).toBeInTheDocument();
+    });
   });
 
   it("「在終端機登入」要求 Runtime 為該 Profile 開啟登入終端機，並說明完成後按重新核對", async () => {

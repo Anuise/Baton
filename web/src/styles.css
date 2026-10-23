@@ -538,7 +538,8 @@ body {
 }
 
 .profile-source,
-.profile-expected {
+.profile-expected,
+.profile-origin {
   color: #656d76;
   font-size: 13px;
 }
