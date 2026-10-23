@@ -196,6 +196,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let system_prompt =
             spec.settings_dir.as_deref().map(|dir| Path::new(dir).join(SYSTEM_PROMPT_FILE).to_string_lossy().into_owned());
         args.extend(self.shared_args(spec, false, system_prompt));
+        // 同帳號重新開啟：接續這個工作目錄在這個帳號下最近的原生 Session（票 07）
+        if spec.continue_session {
+            args.push("--continue".to_string());
+        }
         let (claude, claude_args) = self.wrap_batch(args);
         let mut args = vec![HOST_SUBCOMMAND.to_string(), claude];
         args.extend(claude_args);
@@ -610,6 +614,7 @@ mod tests {
             },
             model: model.map(Into::into),
             resume_native_session_id: None,
+            continue_session: false,
         }
     }
 
@@ -696,6 +701,20 @@ mod tests {
         assert_eq!(spec.args[0], HOST_SUBCOMMAND);
         assert!(spec.args[1].to_ascii_lowercase().ends_with("cmd.exe"), "{:?}", spec.args);
         assert_eq!(&spec.args[2..7], ["/d", "/v:off", "/c", "call", r"C:\npm\claude.cmd"]);
+    }
+
+    #[test]
+    fn the_controller_cli_continues_the_native_session_only_when_asked() {
+        let data = tempfile::tempdir().unwrap();
+        let adapter = adapter(data.path(), &[]);
+        let fresh = adapter.controller_spawn_spec(&run_spec(None, None));
+        assert!(!fresh.args.contains(&"--continue".to_string()), "{:?}", fresh.args);
+
+        let continued = adapter.controller_spawn_spec(&RunSpec { continue_session: true, ..run_spec(None, None) });
+        assert!(continued.args.contains(&"--continue".to_string()), "{:?}", continued.args);
+        // Worker 不受影響
+        let worker = adapter.spawn_spec(&RunSpec { continue_session: true, ..run_spec(None, None) });
+        assert!(!worker.args.contains(&"--continue".to_string()), "{:?}", worker.args);
     }
 
     #[test]

@@ -225,7 +225,43 @@
 - 影響：在帳號頁簽核對完 Profile 後要重新切回 Controller 頁簽才會更新選單；票 05 加額度顯示時可一併改為輪詢。
 - 審閱：未審
 
-### AI-23：固定指示與共同指示合併成一個系統提示檔，Worker 的 `--append-system-prompt-file` 改指向 Run 目錄
+### AI-23：重啟後宿主仍存活時，Run 維持執行中、只讓舊憑證失效，不替使用者結束 CLI
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：spec 的「憑證世代加一」實作為 Controller Run 上的 `rebound_at`（新欄位，migration `controller_cli_recovery`）：Runtime 重啟後以 command_id 找到宿主仍存活時寫入它，並記一筆 `controller_cli_rebound` 事件；`rebound_at` 有值時，以這個 Run 簽發的 Controller 憑證一律回 401（`controller_run_active` 多檢查這一欄），宿主的開始／結束回報也被拒。Run 維持 `running`，Runtime 不停止宿主；頁簽提示「請按『結束』後以同一個帳號重新開啟」。使用者關掉終端機時由既有的存活查驗結束 Run（`host_gone`）。不另外簽發新的憑證。
+- 理由：憑證只經環境變數交給宿主，已開著的 CLI 拿不到新的憑證，所以「重新綁定」實際上就是讓舊憑證失效、等使用者重開；使用者可能正在和那個 CLI 對話，Runtime 自己把它關掉會打斷工作。憑證資料表沒有世代或撤銷欄位，以 Run 上的一個時間欄位達成相同效果，改動最小。
+- 替代方案：在憑證與 `ControllerScope` 加世代數字——要改憑證資料表與所有 Controller 工具的範圍檢查，效果相同；重啟後直接停止宿主並標為中斷——會中斷使用者正在進行的互動。
+- 影響：重新綁定後到使用者重開之前，那個 CLI 的平台工具都不能用（票 06 的 `wait` 也會以憑證失效結束）；同一個 Workspace 在使用者按「結束」或關掉終端機之前不能開新的 Controller CLI。
+- 審閱：未審
+
+### AI-24：每次 Runtime 啟動都查驗上一個實例開出的 Controller CLI，不只當掉恢復
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：Supervisor 記住「這個 Runtime 實例自己寫下 launch intent 或已查驗過」的 Controller Run；其他已寫過 launch intent 的非終態 Run 一律視為上一個實例開出的，先查驗：找到宿主→（沒有回執時補寫）重新綁定；有回執但找不到→`interrupted`（`end_code = runtime_restarted`）；沒有回執也找不到→沿用票 03 的 `ended`／`launch_outcome_unknown`。正常重啟（沒有經過完全退出）與當掉恢復一樣處理；不依賴崩潰恢復事件，也不受恢復暫停派工影響。
+- 理由：舊實例交出的 Runtime 位址與憑證在新實例下不保證可用，正常重啟與當掉的差別只在於程序有沒有記下正常結束；以「是不是這個實例開出的」判斷不需要讀恢復狀態。開窗結果不明的情形票 03 已定義並通過驗證，沒有理由改成 `interrupted`。
+- 替代方案：只在偵測到意外終止（有恢復事件）時查驗——正常重啟後 CLI 拿著舊憑證，行為取決於重啟方式，較難預期。
+- 影響：Runtime 因更新等原因正常重啟後，開著的 Controller CLI 也要重新開啟。
+- 審閱：未審
+
+### AI-25：同帳號接續的判斷：最近一次真的執行過的 Run 用同一個帳號，開啟時決定並持久化
+- 重要度：中
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：使用者要求開啟時，Domain 找這個 Workspace 最近一次 `running_at` 有值（真的執行過）的 Controller Run；它的 Profile 與這次相同就把 `continue_session` 設為 true（新欄位，同一個 migration），Adapter 在 `claude` 參數加 `--continue`；換帳號、或從未執行過時不加。開啟失敗的 Run 不列入比對。`RunSpec` 多一個 `continue_session` 欄位（Worker 一律 false）。這條規則與票 05 的驗收條件重疊，本票先實作；Controller 頁簽未開啟時預設選最近一次 Run 的帳號（仍可用時），讓「同帳號重開」是預設動作。
+- 理由：票 07 的「恢復後重新開啟同帳號時帶 `--continue`」與票 05 的「同帳號重開帶 `--continue`」是同一條規則，分兩處實作會不一致；持久化在 Run 上，Runtime 重建後組出相同的啟動指令（command hash 不變），能以 command_id 找回宿主。
+- 替代方案：每次組啟動規格時才回頭查前一個 Run——規則藏在 Supervisor，API 與時間線看不到這次是否接續。
+- 影響：票 05 合併時應沿用這個欄位與規則，不要再做一份。若上次的 CLI 開了就關、沒有留下原生 Session，`claude --continue` 可能顯示找不到可接續的對話，使用者要改用其他帳號或手動開新對話；平台目前不偵測這種情形。
+- 審閱：未審
+
+### AI-26：完全退出時 Controller CLI 的停止方式與在退出進度中的呈現
+- 重要度：低
+- 時間／階段：2026-10-23，票 07 實作
+- 決策：完全退出的停止流程讀取所有開著的 Controller CLI，先以「等待中」列入停止報告（`ExitReport.runs`，`controller_cli: true`、`task_id` 為空字串），再與 Worker 同時停止宿主（寬限 2 秒，與按「結束」相同），同樣受 40 秒總上限約束。確認停止或從未開出宿主的以 `end_code = full_exit` 結束 Run；無法確認的記為停止異常、Run 維持原狀（重新開啟後由 AI-24 的查驗處理）。退出畫面以「Workspace 名稱 · Controller CLI」標示這一項。
+- 理由：沿用既有的停止報告與停止異常呈現，不新增另一份進度；互動式 `claude` 不會因為寬限期而自行保存結束，給 Worker 的 30 秒寬限只會拖慢退出。
+- 替代方案：另開「Controller CLI 停止結果」欄位——前端要多一套呈現，且停止異常的判斷要重寫。
+- 影響：停止報告的項目不再都是 Worker Run；讀取 `runs` 的程式要以 `controller_cli` 區分（目前只有退出畫面）。只關 App 視窗不經過這個流程，Controller CLI 不受影響（Runtime 是獨立程序，沒有改動）。
+- 審閱：未審
+
+### AI-27：固定指示與共同指示合併成一個系統提示檔，Worker 的 `--append-system-prompt-file` 改指向 Run 目錄
 - 重要度：中
 - 時間／階段：2026-10-23，票 04 實作
 - 決策：Claude Code 只帶一個 `--append-system-prompt-file`，內容是「固定指示＋（有的話）`---` 分隔＋共同設定的 `CLAUDE.md`」（`baton_domain::playbook::system_prompt`）。Worker：Adapter 的 `prepare` 寫 `runs\<run_id>\system-prompt.md`（Worker 通則＋快照的共同指示），`spawn_spec` 一律帶這個檔案，即使沒有共同設定。Controller CLI：Supervisor 以 `write_readonly_files` 把操作手冊（＋共同指示）寫成 `run-settings\<run_id>\system-prompt.md`，與設定快照同一個唯讀目錄；這個目錄現在一定存在，沒有共同設定版本時只放操作手冊。原本斷言 Worker 的 `--append-system-prompt-file` 指向快照 `CLAUDE.md`（或沒有共同設定時不帶這個旗標）的 4 處既有測試，改為斷言指向合併檔並檢查檔案內容含共同指示；其餘 Worker 啟動測試沒有改。
@@ -234,7 +270,7 @@
 - 影響：舊的 Controller 輪次（`claude -p`，票 08 會移除）也走 `spawn_spec`，在移除前同樣會帶 Worker 通則。升級前已在執行的 Worker 組出的啟動指令與現在不同（多一個旗標），只有在不完全退出就換版本時才會影響以 command_id 找回程序。
 - 審閱：未審
 
-### AI-24：操作手冊內建在 domain、版本號為 "1"，頁簽顯示 App 內建的版本
+### AI-28：操作手冊內建在 domain、版本號為 "1"，頁簽顯示 App 內建的版本
 - 重要度：低
 - 時間／階段：2026-10-23，票 04 實作
 - 決策：操作手冊、Worker 通則與 AI 決策紀錄範本是 `crates/baton-domain/src/playbook/*.md`，以 `include_str!` 編進程式，並用該目錄的 `.gitattributes` 固定為 LF（repo 的 `core.autocrlf=true` 會讓不同 checkout 編進不同的換行）。`PLAYBOOK_VERSION = "1"`，手冊標題行是「# Baton Controller 操作手冊（版本 1）」，以測試確保兩者一致。`ControllerCliView` 新增 `playbook_version`（從未開啟過也有），Controller 頁簽的狀態欄列出「操作手冊版本」。版本號不記在每個 Run 上。「不含帳號名稱、額度數字、並行上限、worktree 路徑」以測試檢查：禁用字串（`Work-`、`.claude-`、`%`、`5h`、`7d`、`≥`、`-wt`、`../`、磁碟路徑等），並規定內文除了編號清單的序號，唯一的數字只能是「最多修正 3 次」。
@@ -243,7 +279,7 @@
 - 影響：修改手冊內容時要記得調整 `PLAYBOOK_VERSION` 和標題（標題那一半有測試會擋）。
 - 審閱：未審
 
-### AI-25：Worker 通則不寫死 AI 決策紀錄的路徑，由 Controller 寫進 Task 契約
+### AI-29：Worker 通則不寫死 AI 決策紀錄的路徑，由 Controller 寫進 Task 契約
 - 重要度：中
 - 時間／階段：2026-10-23，票 04 實作
 - 決策：Worker 的工作目錄是 Task 的 worktree，不是 Workspace 目錄，而 Worker 通則是固定文字，不知道 Workspace 在哪裡。所以通則寫「路徑寫在 Task 契約中；沒寫時在最後的回報中列出你的決定，由 Controller 代為追加」；操作手冊要求 Controller 派工時在契約的輸入寫明 `<Workspace>\.baton\ai-decisions.md` 的完整路徑，並代為追加 Worker 只在回報中列出的決定。
@@ -252,7 +288,7 @@
 - 影響：Worker 寫 Workspace 目錄要經過權限判定（Workspace 授權不允許時會被擋）；被擋時就照通則改在回報中列出。
 - 審閱：未審
 
-### AI-26：AI 決策紀錄的建立方式、範本與失敗處理
+### AI-30：AI 決策紀錄的建立方式、範本與失敗處理
 - 重要度：低
 - 時間／階段：2026-10-23，票 04 實作
 - 決策：Supervisor 寫下 launch intent、確認找得到 `claude` 之後、準備唯讀目錄之前，以新的 `WorkspaceFs::create_file_if_absent`（`create_new` 開檔，需要時建立 `.baton` 目錄）建立 `<Workspace>\.baton\ai-decisions.md`：已存在（包括檢查之後才被建立的）一律不動。建立失敗（例如 `.baton` 是一個檔案）時以 `launch_failed`、原因「無法建立 AI 決策紀錄 …」結束這次開啟，不開窗。範本照 `.scratch/platform-rebuild-v1/ai-decisions.md` 的檔頭：標題改為「# AI 決策紀錄」，說明改成 Workspace 適用的文字，拿掉「spec 決策記在 spec.md 的 D-01～D-33」那一行；重要度、審閱行規則、條目格式區塊與 `---` 逐字相同（有測試）。
@@ -261,7 +297,7 @@
 - 影響：寫到一半時當掉，可能留下內容不完整的範本檔，之後也不會被覆寫（檔案很小，機率極低）。
 - 審閱：未審
 
-### AI-27：操作手冊裡等待指令、受阻與決策權限表的寫法
+### AI-31：操作手冊裡等待指令、受阻與決策權限表的寫法
 - 重要度：中
 - 時間／階段：2026-10-23，票 04 實作
 - 決策：等待指令寫成「MCP shim 的 `wait` 子命令，以 Bash 工具的背景方式執行」，不寫執行檔路徑與參數（票 06 才會定下來）。Controller 工具沒有「把 Task 標為受阻」的專用工具，所以修正 3 次仍不通過時，手冊寫成「以 `update_task` 在契約的阻礙處理記下原因，不再派工」。決策權限表列出 D-15 中必須送裁定的事項，但不列「三次恢復失敗後的重試」（只能由使用者從恢復介面發起，Controller 不能提出）；不確定時先呼叫 `controller_action` 讓 Runtime 判定。驗證要「由新的 Worker Run 執行、不沿用實作的 Session」，因為帳號由 Runtime 選，Controller 無法指定不同的帳號。
