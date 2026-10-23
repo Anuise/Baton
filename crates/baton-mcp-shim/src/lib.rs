@@ -59,7 +59,9 @@ use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 mod controller_host;
+mod wait;
 pub use controller_host::run_controller_host;
+pub use wait::run_wait;
 
 /// 每個請求都必須帶的固定標頭（與 Runtime 的入口防護一致）。
 const CLIENT_HEADER: &str = "x-baton-client";
