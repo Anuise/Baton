@@ -54,17 +54,12 @@ impl Supervisor {
     }
 
     async fn launch_controller_cli(&self, run: &ControllerCliRun) {
-        if run.end_requested_at.is_some() {
-            let (code, reason) = match run.switch_to_profile_id {
-                Some(_) => (END_SWITCHED, "開窗之前已換帳號重開"),
-                None => (END_USER_ENDED, "開窗之前已從 App 結束"),
-            };
-            return self.end_controller_cli(run, code, reason).await;
-        }
-        // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗（Profile 已失效時改為結束，不開窗）。
+        // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗。Profile 已失效、或使用者已按「結束」／「換帳號重開」
+        //    （依交易內讀到的 Run 判斷）時改為結束，不開窗；換帳號時同一個交易中開新的 Run。
         //    同帳號重開要接續時，一併決定原生 Session 還在不在
         let continuable = !run.continue_session || self.native_session_continuable(run).await;
-        let run = match self.store.begin_controller_cli_launch(&run.id, continuable, self.ports.clock.now()).await {
+        let next = self.controller_cli_next_ids(run);
+        let run = match self.store.begin_controller_cli_launch(&run.id, continuable, next, self.ports.clock.now()).await {
             Ok(run) if run.status == ControllerCliStatus::Ended => return,
             Ok(run) => run,
             Err(error) => return self.note(&format!("Controller CLI {} 無法寫入 launch intent，不開窗：{error}", run.id)),
@@ -194,7 +189,9 @@ impl Supervisor {
             }
             (None, true) => {
                 let reason = "Runtime 重新啟動時 Controller CLI 的終端機已關閉；請重新開啟（同一個帳號會接續原生 Session）";
-                if let Err(error) = self.store.interrupt_controller_cli(&run.id, reason, now).await {
+                // 已要求換帳號重開時，同一個交易中以新帳號開新的 Run
+                let next = self.controller_cli_next_ids(run);
+                if let Err(error) = self.store.interrupt_controller_cli(&run.id, reason, next, now).await {
                     return self.note(&format!("Controller CLI {} 的中斷沒有寫入，稍後重試：{error}", run.id));
                 }
             }
@@ -275,21 +272,22 @@ impl Supervisor {
         }
     }
 
-    /// 結束 Run；已要求換帳號重開時，同一個交易中以新 Profile 開新的 Run（取不到亂數時只結束，並記下原因）。
+    /// 結束 Run；已要求換帳號重開時（由 Store 依交易內讀到的 Run 判斷），同一個交易中以新 Profile 開新的 Run。
     async fn end_controller_cli(&self, run: &ControllerCliRun, code: &str, reason: &str) {
-        let next = match run.switch_to_profile_id {
-            Some(_) => {
-                let ids = new_controller_cli_ids();
-                if ids.is_none() {
-                    self.note(&format!("Controller CLI {} 換帳號重開：無法取得系統亂數，只結束、不開新的", run.id));
-                }
-                ids
-            }
-            None => None,
-        };
+        let next = self.controller_cli_next_ids(run);
         if let Err(error) = self.store.end_controller_cli(&run.id, code, reason, None, next, self.ports.clock.now()).await {
             self.note(&format!("Controller CLI {} 的結束沒有寫入：{error}", run.id));
         }
+    }
+
+    /// 可能讓 Run 結束的寫入一律備妥新 Run 的識別：使用者可能在這一輪讀到快照之後才按「換帳號重開」，
+    /// 只有 Store 在交易內讀到的 Run 才準。取不到亂數時只結束、不開新的，並記下原因。
+    fn controller_cli_next_ids(&self, run: &ControllerCliRun) -> Option<OpenIds> {
+        let ids = new_controller_cli_ids();
+        if ids.is_none() {
+            self.note(&format!("Controller CLI {}：無法取得系統亂數；若已要求換帳號重開，只結束、不開新的", run.id));
+        }
+        ids
     }
 
     /// Controller CLI 的 `RunSpec`：全部來自持久化的 Run（帳號、工作目錄、開啟時固定的共同設定版本），

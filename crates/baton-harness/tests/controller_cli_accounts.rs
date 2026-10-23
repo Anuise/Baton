@@ -14,6 +14,9 @@
 //!   `a_switch_still_opens_the_new_cli_when_the_terminal_was_closed_first`、`switching_is_refused_for_the_same_or_an_unusable_profile`
 //! - 換帳號開出的新 Run 接續上一個 Controller 確認到的事件位置（票 06）：`the_switched_controller_continues_the_event_cursor`
 //! - Runtime 重啟後被重新綁定（票 07）的 Controller CLI 也能換帳號重開：`a_rebound_controller_cli_can_switch_accounts`
+//! - 最終 review 修正：換帳號後宿主結束前 Runtime 當掉、重啟時宿主已不在，仍以新帳號開新的 Run：
+//!   `a_switch_requested_before_a_crash_still_opens_the_new_account_when_the_host_is_gone`；
+//!   開窗之前就換帳號，不以舊帳號開窗：`a_switch_requested_before_the_window_opened_never_opens_the_old_account`
 
 use std::sync::Arc;
 
@@ -22,7 +25,7 @@ use baton_domain::controller_cli::HOST_ENDED_PATH;
 use baton_domain::controller_wait::WAIT_PATH;
 use baton_domain::Timestamp;
 use baton_harness::Harness;
-use baton_ports::{AdapterEvent, TerminalLaunch};
+use baton_ports::{AdapterEvent, Liveness, TerminalLaunch};
 use baton_runtime::claude_adapter::ClaudeCodeAdapter;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
@@ -477,4 +480,54 @@ async fn a_rebound_controller_cli_can_switch_accounts() {
     assert_eq!((new["status"].as_str(), new["rebound_at"].clone()), (Some("running"), Value::Null), "{new}");
     let token = env_of(&last_terminal(&harness), AGENT_TOKEN_ENV).unwrap();
     assert_eq!(harness.call_tool(&token, "get_workflows", json!({})).await.0, StatusCode::OK, "新的 Run 取得新的憑證");
+}
+
+#[tokio::test]
+async fn a_switch_requested_before_a_crash_still_opens_the_new_account_when_the_host_is_gone() {
+    let mut harness = Harness::builder().clock_at(CLOCK_START).start().await;
+    let first = harness.add_account("帳號 1", "account1@example.com").await;
+    let second = harness.add_account("帳號 2", "account2@example.com").await;
+    let ws = new_workspace(&harness, "main").await;
+    let (old, launch) = open_and_launch(&harness, &ws, &first).await;
+    let old_host = harness.process_control.identity_of(&launch.spawn.command_id).unwrap();
+
+    // 已要求換帳號、Supervisor 還沒結束宿主時 Runtime 當掉；重啟時宿主已不在
+    assert_eq!(switch(&harness, &ws, &second).await.0, StatusCode::ACCEPTED);
+    harness.process_control.script_liveness(&old_host, Liveness::Dead);
+    harness.crash_restart().await;
+    harness.supervise().await;
+    harness.supervise().await;
+
+    // 換帳號的要求不會遺失：以新帳號開出新的 Run 與視窗
+    let new = view(&harness, &ws).await;
+    assert_ne!(new["id"], old["id"]);
+    assert_eq!((new["profile_id"].as_str(), new["switched_from_run_id"].as_str()), (Some(second.as_str()), old["id"].as_str()), "{new}");
+    assert_eq!(new["status"], "running", "{new}");
+    let launches = harness.claude_env.controller_terminals();
+    assert_eq!(launches.len(), 2);
+    assert_eq!(env_of(launches.last().unwrap(), "CLAUDE_CONFIG_DIR"), Some(config_dir_of(&harness, &second).await));
+}
+
+#[tokio::test]
+async fn a_switch_requested_before_the_window_opened_never_opens_the_old_account() {
+    let harness = Harness::builder().clock_at(CLOCK_START).start().await;
+    let first = harness.add_account("帳號 1", "account1@example.com").await;
+    let second = harness.add_account("帳號 2", "account2@example.com").await;
+    let ws = new_workspace(&harness, "main").await;
+    let (status, opened) = open(&harness, &ws, &first).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{opened}");
+
+    // Supervisor 開窗之前就換帳號：舊的以 switched 結束、不開窗，新的接著以帳號 2 開窗
+    assert_eq!(switch(&harness, &ws, &second).await.0, StatusCode::ACCEPTED);
+    harness.supervise().await;
+    harness.supervise().await;
+
+    let launches = harness.claude_env.controller_terminals();
+    assert_eq!(launches.len(), 1, "只開了新帳號的視窗");
+    assert_eq!(env_of(&launches[0], "CLAUDE_CONFIG_DIR"), Some(config_dir_of(&harness, &second).await));
+    let new = view(&harness, &ws).await;
+    assert_eq!((new["status"].as_str(), new["switched_from_run_id"].as_str()), (Some("running"), opened["run"]["id"].as_str()), "{new}");
+    let events = timeline_events(&harness, &ws).await;
+    let ended = events.iter().find(|e| e["event_type"] == "controller_cli_ended").unwrap();
+    assert_eq!(ended["payload"]["end_code"], "switched", "{ended}");
 }
