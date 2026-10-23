@@ -8,7 +8,8 @@
 //! - Controller Run 非終態期間不分給新 Worker、既有 Worker 繼續、結束後恢復：
 //!   `while_the_controller_cli_is_open_its_account_gets_no_new_workers_until_it_ends`、
 //!   `another_account_takes_the_work_while_the_controller_account_is_excluded`
-//! - 同一 Workspace 同一 Profile 重開帶 `--continue`，換 Profile 不帶：`reopening_with_the_same_profile_continues_the_native_session`
+//! - 同一 Workspace 同一 Profile 重開帶 `--continue`（原生 Session 確定不存在時不帶），換 Profile 不帶：
+//!   `reopening_with_the_same_profile_continues_the_native_session`
 //! - 換帳號重開先結束再開新的，時間線可追查：`switching_accounts_ends_the_current_cli_then_opens_a_new_session_with_the_new_profile`、
 //!   `a_switch_still_opens_the_new_cli_when_the_terminal_was_closed_first`、`switching_is_refused_for_the_same_or_an_unusable_profile`
 
@@ -102,6 +103,14 @@ async fn config_dir_of(harness: &Harness, profile: &str) -> String {
         .as_str()
         .unwrap()
         .to_string()
+}
+
+/// 模擬 claude 在這個帳號下為工作目錄留下原生 Session 檔（`projects\{目錄名}\*.jsonl`，目錄名是非英數字換成 `-`）。
+async fn write_native_session(harness: &Harness, profile: &str, working_dir: &str) {
+    let project: String = working_dir.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let dir = std::path::Path::new(&config_dir_of(harness, profile).await).join("projects").join(project);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("326f0edb-57c5-40e9-8560-99ae95e9027e.jsonl"), "{}\n").unwrap();
 }
 
 async fn timeline_events(harness: &Harness, ws: &str) -> Vec<Value> {
@@ -234,6 +243,13 @@ async fn reopening_with_the_same_profile_continues_the_native_session() {
     let (run, launch) = open_and_launch(&harness, &ws, &first).await;
     assert!(!has_continue(&launch), "第一次開啟沒有可接續的 Session：{:?}", launch.spawn.args);
     assert_eq!(run["continue_session"], false);
+    end(&harness, &ws).await;
+
+    // 上次開啟後沒有任何對話（沒有留下原生 Session 檔）：同帳號重開也開新的 Session，否則 claude --continue 會直接結束
+    let (run, launch) = open_and_launch(&harness, &ws, &first).await;
+    assert!(!has_continue(&launch), "{:?}", launch.spawn.args);
+    assert_eq!(run["continue_session"], false);
+    write_native_session(&harness, &first, run["working_dir"].as_str().unwrap()).await;
     end(&harness, &ws).await;
 
     // 同一 Workspace、同一 Profile 重開：接回原生 Session

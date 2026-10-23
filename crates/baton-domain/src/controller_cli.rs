@@ -333,9 +333,12 @@ fn blank_run(
 
 /// Supervisor 開窗前寫下 launch intent；Profile 在要求開啟之後失效時改為結束（不開窗）。
 /// 已寫過 launch intent 或已不是 `starting` 時拒絕（呼叫端改走核對）。
+/// `continuable` 為 false 代表要接續的原生 Session 確定不存在（例如上次開啟後沒有任何對話就關掉）：改開新的 Session，
+/// 否則 `claude --continue` 找不到 Session 會直接結束。這個決定隨 launch intent 持久化，重建後組出相同的啟動指令。
 pub fn begin_launch(
     run: &ControllerCliRun,
     profiles: &[AccountProfile],
+    continuable: bool,
     now: Timestamp,
 ) -> Result<ControllerCliChange, ControllerCliError> {
     ensure_open(run)?;
@@ -351,7 +354,8 @@ pub fn begin_launch(
     }
     let mut next = run.clone();
     next.launched_at = Some(now);
-    let payload = serde_json::json!({ "command_id": run.command_id });
+    next.continue_session = run.continue_session && continuable;
+    let payload = serde_json::json!({ "command_id": run.command_id, "continue_session": next.continue_session });
     Ok(apply(next, EVENT_CONTROLLER_CLI_LAUNCH_STARTED, payload, now))
 }
 

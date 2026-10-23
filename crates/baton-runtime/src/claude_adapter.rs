@@ -303,6 +303,33 @@ impl AgentAdapter for ClaudeCodeAdapter {
         .await
         .map_err(|e| PortError::Failed(format!("查驗原生 Session 的工作被中斷：{e}")))
     }
+
+    /// 工作目錄在這個帳號下有沒有任何原生 Session 檔（`projects\{目錄名}\*.jsonl`）：有才能 `--continue`。
+    /// 帳號目錄存在而找不到 Session 檔是 `NotResumable`（例如上次開啟後沒有任何對話就關掉）；讀不到時是 `Unknown`。
+    async fn continue_capability(&self, config_dir: &str, working_dir: &str) -> PortResult<Capability> {
+        let project = native_project_dir(working_dir);
+        if project.chars().count() > NATIVE_PROJECT_DIR_MAX_CHARS {
+            return Ok(Capability::Unknown);
+        }
+        let config_dir = PathBuf::from(config_dir);
+        let dir = config_dir.join("projects").join(project);
+        tokio::task::spawn_blocking(move || match std::fs::read_dir(&dir) {
+            Ok(entries) => {
+                let session = |entry: &std::fs::DirEntry| {
+                    entry.path().extension().is_some_and(|ext| ext == "jsonl") && entry.file_type().is_ok_and(|t| t.is_file())
+                };
+                if entries.flatten().any(|entry| session(&entry)) {
+                    Capability::Resumable
+                } else {
+                    Capability::NotResumable
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && config_dir.is_dir() => Capability::NotResumable,
+            Err(_) => Capability::Unknown,
+        })
+        .await
+        .map_err(|e| PortError::Failed(format!("查驗原生 Session 的工作被中斷：{e}")))
+    }
 }
 
 /// 經 cmd.exe 啟動批次檔時，引數中不允許的字元：引號會改變 cmd 的引號狀態，`%`、`!` 會被展開，
@@ -669,6 +696,29 @@ mod tests {
         let continued = adapter.controller_spawn_spec(&spec);
         assert!(continued.args[2..].contains(&"--continue".to_string()), "{:?}", continued.args);
         assert_eq!(adapter.controller_spawn_spec(&spec), continued, "純函式：重建後組出相同的指令");
+    }
+
+    /// 票 05：`--continue` 只在工作目錄於這個帳號下有原生 Session 檔時可用。
+    #[tokio::test]
+    async fn continuing_needs_a_native_session_file_for_the_working_directory() {
+        let data = tempfile::tempdir().unwrap();
+        let adapter = adapter(data.path(), &[]);
+        let config_dir = data.path().join("profile");
+        let config = config_dir.to_string_lossy().into_owned();
+        let working_dir = r"C:\work\app";
+
+        let missing = data.path().join("no-such-profile").to_string_lossy().into_owned();
+        assert_eq!(adapter.continue_capability(&missing, working_dir).await.unwrap(), Capability::Unknown, "帳號目錄讀不到");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        assert_eq!(adapter.continue_capability(&config, working_dir).await.unwrap(), Capability::NotResumable, "從未在這裡執行過");
+
+        let project = config_dir.join("projects").join(native_project_dir(working_dir));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("notes.txt"), "x").unwrap();
+        assert_eq!(adapter.continue_capability(&config, working_dir).await.unwrap(), Capability::NotResumable, "沒有 Session 檔");
+        std::fs::write(project.join("326f0edb-57c5-40e9-8560-99ae95e9027e.jsonl"), "{}").unwrap();
+        assert_eq!(adapter.continue_capability(&config, working_dir).await.unwrap(), Capability::Resumable);
+        assert_eq!(adapter.continue_capability(&config, r"C:\work\other").await.unwrap(), Capability::NotResumable, "其他工作目錄不算");
     }
 
     #[test]

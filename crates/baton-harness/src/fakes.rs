@@ -371,6 +371,8 @@ struct AdapterState {
     session_capabilities: HashMap<String, Capability>,
     /// 每次 `resume_capability` 收到的參照。
     capability_queries: Vec<SessionRef>,
+    /// `continue_capability` 的回答（票 05）：預設 `Resumable`（同帳號重開照常接續）。
+    continue_capability: Capability,
 }
 
 impl Default for FakeAgentAdapter {
@@ -383,6 +385,7 @@ impl Default for FakeAgentAdapter {
                 capability: Capability::Resumable,
                 session_capabilities: HashMap::new(),
                 capability_queries: Vec::new(),
+                continue_capability: Capability::Resumable,
             }),
         }
     }
@@ -418,6 +421,11 @@ impl FakeAgentAdapter {
         if let Some(waker) = channel.waker.take() {
             waker.wake();
         }
+    }
+
+    /// `continue_capability` 的回答（例如 `NotResumable` 模擬「上次開啟後沒有任何對話」）。
+    pub fn set_continue_capability(&self, capability: Capability) {
+        lock(&self.state).continue_capability = capability;
     }
 
     pub fn set_capability(&self, capability: Capability) {
@@ -505,6 +513,10 @@ impl AgentAdapter for FakeAgentAdapter {
         let mut state = lock(&self.state);
         state.capability_queries.push(session.clone());
         Ok(state.session_capabilities.get(&session.native_session_id).copied().unwrap_or(state.capability))
+    }
+
+    async fn continue_capability(&self, _config_dir: &str, _working_dir: &str) -> PortResult<Capability> {
+        Ok(lock(&self.state).continue_capability)
     }
 }
 

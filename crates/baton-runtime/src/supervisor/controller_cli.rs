@@ -21,7 +21,7 @@ use baton_domain::controller_cli::{
     END_LAUNCH_OUTCOME_UNKNOWN, END_SWITCHED, END_TERMINAL_FAILED, END_USER_ENDED, WINDOW_TITLE_PREFIX,
 };
 use baton_domain::shared_settings::{self, MANIFEST_FILE};
-use baton_ports::{Liveness, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
+use baton_ports::{Capability, Liveness, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
 
 use super::{identity_of, new_prefixed_id, process_record, Supervisor};
 
@@ -53,8 +53,10 @@ impl Supervisor {
             };
             return self.end_controller_cli(run, code, reason).await;
         }
-        // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗（Profile 已失效時改為結束，不開窗）
-        let run = match self.store.begin_controller_cli_launch(&run.id, self.ports.clock.now()).await {
+        // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗（Profile 已失效時改為結束，不開窗）。
+        //    同帳號重開要接續時，一併決定原生 Session 還在不在
+        let continuable = !run.continue_session || self.native_session_continuable(run).await;
+        let run = match self.store.begin_controller_cli_launch(&run.id, continuable, self.ports.clock.now()).await {
             Ok(run) if run.status == ControllerCliStatus::Ended => return,
             Ok(run) => run,
             Err(error) => return self.note(&format!("Controller CLI {} 無法寫入 launch intent，不開窗：{error}", run.id)),
@@ -238,6 +240,19 @@ impl Supervisor {
             .write_readonly_files(Path::new(&directory), &files)
             .await
             .map_err(|error| format!("無法寫入設定快照目錄 {directory}：{error}"))
+    }
+
+    /// 同帳號重開時，要接續的原生 Session 是否可能還在：只有 Adapter 確定沒有（`NotResumable`）才改開新的 Session；
+    /// 判斷不了時照原本的決定接續。
+    async fn native_session_continuable(&self, run: &ControllerCliRun) -> bool {
+        let Ok(config_dir) = self.config_dir_of(&run.profile_id).await else { return true };
+        match self.ports.agent_adapter.continue_capability(&config_dir, &run.working_dir).await {
+            Ok(Capability::NotResumable) => {
+                self.note(&format!("Controller CLI {} 找不到要接續的原生 Session，改開新的 Session", run.id));
+                false
+            }
+            _ => true,
+        }
     }
 
     /// 視窗標題：前綴加 Workspace 名稱（讀不到時用工作目錄）。

@@ -73,9 +73,14 @@ impl Store {
         self.read(|conn| Ok(load(conn, "status IN ('starting', 'running')", [])?)).await
     }
 
-    /// 寫下 launch intent（開窗之前）；Profile 已不可用時改為結束。
-    pub async fn begin_controller_cli_launch(&self, run_id: &str, now: Timestamp) -> Result<ControllerCliRun, ControllerCliApplyError> {
-        self.apply_cli(run_id, move |tx, run| Ok(controller_cli::begin_launch(run, &load_profiles(tx)?, now)), now).await
+    /// 寫下 launch intent（開窗之前）；Profile 已不可用時改為結束。`continuable` 為 false 時不接續原生 Session（見 Domain）。
+    pub async fn begin_controller_cli_launch(
+        &self,
+        run_id: &str,
+        continuable: bool,
+        now: Timestamp,
+    ) -> Result<ControllerCliRun, ControllerCliApplyError> {
+        self.apply_cli(run_id, move |tx, run| Ok(controller_cli::begin_launch(run, &load_profiles(tx)?, continuable, now)), now).await
     }
 
     /// 開窗回執。
@@ -334,7 +339,7 @@ fn save(tx: &Transaction<'_>, change: &ControllerCliChange, now: Timestamp) -> r
            command_hash = excluded.command_hash, claude_pid = excluded.claude_pid, started_at = excluded.started_at,
            end_requested_at = excluded.end_requested_at, ended_at = excluded.ended_at, end_code = excluded.end_code,
            end_reason = excluded.end_reason, exit_code = excluded.exit_code,
-           switch_to_profile_id = excluded.switch_to_profile_id",
+           continue_session = excluded.continue_session, switch_to_profile_id = excluded.switch_to_profile_id",
         rusqlite::params![
             run.id,
             run.workspace_id,

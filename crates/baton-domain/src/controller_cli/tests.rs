@@ -108,13 +108,13 @@ fn launch_intent_is_written_once_and_a_profile_that_became_unusable_ends_the_run
     let profiles = [profile("p1", "a@example.com", true)];
     let run = opened(&ws, &profiles);
 
-    let launched = begin_launch(&run, &profiles, NOW).unwrap();
+    let launched = begin_launch(&run, &profiles, true, NOW).unwrap();
     assert_eq!(launched.run.launched_at, Some(NOW));
     assert_eq!(launched.events[0].event_type, EVENT_CONTROLLER_CLI_LAUNCH_STARTED);
-    assert!(begin_launch(&launched.run, &profiles, NOW).is_err(), "launch intent 不能寫兩次");
+    assert!(begin_launch(&launched.run, &profiles, true, NOW).is_err(), "launch intent 不能寫兩次");
 
     let logged_out = [profile("p1", "a@example.com", false)];
-    let ended = begin_launch(&run, &logged_out, NOW).unwrap().run;
+    let ended = begin_launch(&run, &logged_out, true, NOW).unwrap().run;
     assert_eq!(ended.status, ControllerCliStatus::Ended);
     assert_eq!(ended.end_code.as_deref(), Some(END_PROFILE_UNAVAILABLE));
     assert_eq!(ended.launched_at, None);
@@ -124,7 +124,7 @@ fn launch_intent_is_written_once_and_a_profile_that_became_unusable_ends_the_run
 fn the_receipt_and_the_host_report_both_lead_to_running_in_either_order() {
     let ws = workspace("w1", WorkspaceStatus::Active);
     let profiles = [profile("p1", "a@example.com", true)];
-    let run = begin_launch(&opened(&ws, &profiles), &profiles, NOW).unwrap().run;
+    let run = begin_launch(&opened(&ws, &profiles), &profiles, true, NOW).unwrap().run;
 
     let receipt_first = record_receipt(&run, host(), NOW).unwrap();
     assert_eq!(receipt_first.run.status, ControllerCliStatus::Running);
@@ -144,7 +144,7 @@ fn the_receipt_and_the_host_report_both_lead_to_running_in_either_order() {
 fn ending_is_terminal_and_records_the_reason_and_exit_code() {
     let ws = workspace("w1", WorkspaceStatus::Active);
     let profiles = [profile("p1", "a@example.com", true)];
-    let run = record_receipt(&begin_launch(&opened(&ws, &profiles), &profiles, NOW).unwrap().run, host(), NOW).unwrap().run;
+    let run = record_receipt(&begin_launch(&opened(&ws, &profiles), &profiles, true, NOW).unwrap().run, host(), NOW).unwrap().run;
 
     let requested = request_end(&run, NOW).unwrap().unwrap();
     assert_eq!(requested.run.end_requested_at, Some(NOW));
@@ -167,7 +167,7 @@ fn ending_is_terminal_and_records_the_reason_and_exit_code() {
 /// 開啟、開窗並進入執行中，再以指定原因結束。
 fn ran_and_ended(ws: &Workspace, profile_id: &str, n: u32, profiles: &[AccountProfile]) -> ControllerCliRun {
     let run = open(ws, profile_id, profiles, &[], None, ids(n), NOW).unwrap().run;
-    let run = record_receipt(&begin_launch(&run, profiles, NOW).unwrap().run, host(), NOW).unwrap().run;
+    let run = record_receipt(&begin_launch(&run, profiles, true, NOW).unwrap().run, host(), NOW).unwrap().run;
     end(&run, END_HOST_EXITED, "claude 已結束", Some(0), NOW).unwrap().run
 }
 
@@ -211,7 +211,7 @@ fn only_the_latest_run_that_actually_ran_decides_whether_to_continue() {
 fn switching_requests_the_end_and_remembers_the_new_profile() {
     let ws = workspace("w1", WorkspaceStatus::Active);
     let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
-    let run = record_receipt(&begin_launch(&opened(&ws, &profiles), &profiles, NOW).unwrap().run, host(), NOW).unwrap().run;
+    let run = record_receipt(&begin_launch(&opened(&ws, &profiles), &profiles, true, NOW).unwrap().run, host(), NOW).unwrap().run;
 
     let switched = request_switch(&run, "p2", &profiles, NOW).unwrap();
     assert_eq!(switched.run.end_requested_at, Some(NOW));
@@ -244,7 +244,7 @@ fn switching_to_the_same_or_an_unusable_profile_is_refused() {
 fn after_the_switched_run_ends_a_new_run_opens_with_the_new_profile_without_continuing() {
     let ws = workspace("w1", WorkspaceStatus::Active);
     let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
-    let run = record_receipt(&begin_launch(&opened(&ws, &profiles), &profiles, NOW).unwrap().run, host(), NOW).unwrap().run;
+    let run = record_receipt(&begin_launch(&opened(&ws, &profiles), &profiles, true, NOW).unwrap().run, host(), NOW).unwrap().run;
     let switching = request_switch(&run, "p2", &profiles, NOW).unwrap().run;
     assert_eq!(open_switched(&ws, &switching, &profiles, Some(4), ids(2), NOW).unwrap_err(), ControllerCliError::AlreadyOpen("ctl_1".into()));
 
@@ -264,4 +264,25 @@ fn after_the_switched_run_ends_a_new_run_opens_with_the_new_profile_without_cont
     // 沒有要求換帳號的 Run 結束時不開新的
     let plain = end(&opened(&ws, &profiles), END_HOST_EXITED, "x", None, NOW).unwrap().run;
     assert_eq!(open_switched(&ws, &plain, &profiles, None, ids(3), NOW).unwrap(), None);
+}
+
+#[test]
+fn a_continue_whose_native_session_is_gone_opens_a_new_session_instead() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true)];
+    let previous = [ran_and_ended(&ws, "p1", 1, &profiles)];
+    let reopened = open(&ws, "p1", &profiles, &previous, None, ids(2), NOW).unwrap().run;
+    assert!(reopened.continue_session);
+
+    let kept = begin_launch(&reopened, &profiles, true, NOW).unwrap();
+    assert!(kept.run.continue_session);
+    assert_eq!(kept.events[0].payload["continue_session"], true);
+
+    let fresh = begin_launch(&reopened, &profiles, false, NOW).unwrap();
+    assert!(!fresh.run.continue_session, "原生 Session 不存在時改開新的");
+    assert_eq!(fresh.events[0].payload["continue_session"], false);
+
+    // 沒有要接續時不受影響
+    let first = opened(&ws, &profiles);
+    assert!(!begin_launch(&first, &profiles, true, NOW).unwrap().run.continue_session);
 }
