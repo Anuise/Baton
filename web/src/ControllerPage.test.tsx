@@ -266,6 +266,8 @@ describe("ControllerPage", () => {
     const client = fakeClient(controllerCliRun({ status: "starting", host: null, claude_pid: null, running_at: null }));
     const { unmount } = renderPage(client);
     expect(await screen.findByText("開啟中")).toBeInTheDocument();
+    // 畫面先出現、輪詢的 effect 可能還沒執行（負載高時）：先讓它註冊計時器，再推進時間
+    await act(async () => {});
     expect(client.getControllerCli).toHaveBeenCalledTimes(1);
     expect(CONTROLLER_REFRESH_INTERVAL_MS).toBe(2000);
 
