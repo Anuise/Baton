@@ -26,6 +26,7 @@ use baton_api::{
     ReviewList,
     EvidenceArtifactContent, PublishProfileResponse, RunVerificationRequest, VerificationOverviewView,
     ExplorationOverview,
+    ControllerCliView,
 };
 use baton_client::{
     ensure_guardian, ensure_runtime, spawn_guardian_process, spawn_runtime_process, ClientError, Connection,
@@ -643,6 +644,37 @@ async fn conversation_send_message(
         return Err(reason.clone());
     }
     link.client.send_conversation_message(&workspace_id, &text).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 讀取 Controller 頁簽：這個 Workspace 最近一次的 Controller CLI Run（desktop-controller-cli 票 03）。
+#[tauri::command]
+async fn controller_cli_view(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<ControllerCliView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.controller_cli(&workspace_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 以指定 Profile 當 Controller 帳號開啟 Controller CLI（由 Runtime 在外部終端機開窗）。
+#[tauri::command]
+async fn controller_cli_open(
+    link: State<'_, RuntimeLink>,
+    workspace_id: String,
+    profile_id: String,
+) -> Result<ControllerCliView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.open_controller_cli(&workspace_id, &profile_id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 要求結束開著的 Controller CLI。
+#[tauri::command]
+async fn controller_cli_end(link: State<'_, RuntimeLink>, workspace_id: String) -> Result<ControllerCliView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.end_controller_cli(&workspace_id).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 讀取裁定中心：Workspace 內的裁定請求與待處理數。
@@ -1399,6 +1431,9 @@ fn main() {
             run_context,
             conversation_view,
             conversation_send_message,
+            controller_cli_view,
+            controller_cli_open,
+            controller_cli_end,
             scheduling_overview,
             scheduling_set_mode,
             backup_status,

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use baton_api::{
     admission_check_path, artifact_content_path, conversation_messages_path, conversation_path, PostMessageRequest,
+    controller_cli_end_path, controller_cli_path, ControllerCliView, OpenControllerCliRequest,
     PostedMessage, artifact_preview_path, artifacts_path, authorization_path,
     authorization_summary_path, decision_answer_path, decision_authority_path, decision_links_path, decision_merge_path,
     decision_path, decisions_path, goals_path, run_cancel_path, run_context_path, RunContextView, BatchRequest, BatchResponse, LinkRequest, MergeRequest,
@@ -353,6 +354,23 @@ impl RuntimeClient {
     pub async fn send_conversation_message(&self, workspace_id: &str, text: &str) -> Result<PostedMessage, ClientError> {
         let request = PostMessageRequest { text: text.to_string() };
         self.send_json(reqwest::Method::POST, &conversation_messages_path(workspace_id), Some(&request)).await
+    }
+
+    /// Controller 頁簽的狀態：這個 Workspace 最近一次的 Controller CLI Run（desktop-controller-cli 票 03）。
+    pub async fn controller_cli(&self, workspace_id: &str) -> Result<ControllerCliView, ClientError> {
+        self.get_json(&controller_cli_path(workspace_id)).await
+    }
+
+    /// 以指定 Profile 當 Controller 帳號開啟 Controller CLI；Run 從 `starting` 開始，由 Runtime 開窗。
+    /// 已有開著的 Controller CLI、Profile 不可用或 Workspace 已封存時回傳 `ClientError::Rejected`。
+    pub async fn open_controller_cli(&self, workspace_id: &str, profile_id: &str) -> Result<ControllerCliView, ClientError> {
+        let request = OpenControllerCliRequest { profile_id: profile_id.to_string() };
+        self.send_json(reqwest::Method::POST, &controller_cli_path(workspace_id), Some(&request)).await
+    }
+
+    /// 要求結束開著的 Controller CLI；沒有開著的時回傳 `ClientError::Rejected`。
+    pub async fn end_controller_cli(&self, workspace_id: &str) -> Result<ControllerCliView, ClientError> {
+        self.send_json::<(), _>(reqwest::Method::POST, &controller_cli_end_path(workspace_id), None).await
     }
 
     /// 要求取消 Run；已結束或重複取消是冪等的，回傳目前的 Run。
