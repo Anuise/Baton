@@ -27,7 +27,7 @@ pub use browser::{
     ActionPlan, ActionRequest, BrowserCommand, BrowserDriver, BrowserFile, BrowserOutcome, BrowserSession, BrowserSessionRequest,
     BrowserStep, JudgeAccount, JudgeOutcome, JudgeRequest, PageSnapshot, SecretResolver, SemanticJudge,
 };
-pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, ToolProbe};
+pub use claude_env::{AuthReport, AuthSource, ClaudeEnvironment, TerminalLaunch, ToolProbe};
 pub use clock::Clock;
 pub use command::{CommandOutput, CommandRequest, CommandRunner};
 pub use git::{

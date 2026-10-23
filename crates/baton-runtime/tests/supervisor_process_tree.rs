@@ -93,6 +93,10 @@ impl AgentAdapter for TreeAdapter {
         }
     }
 
+    fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        self.spawn_spec(spec)
+    }
+
     async fn launch(&self, spec: RunSpec) -> PortResult<AgentHandle> {
         Ok(AgentHandle(spec.run_id))
     }
@@ -120,6 +124,10 @@ impl AgentAdapter for OrphanAdapter {
             env: Vec::new(),
             ..Default::default()
         }
+    }
+
+    fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        self.spawn_spec(spec)
     }
 
     async fn launch(&self, spec: RunSpec) -> PortResult<AgentHandle> {

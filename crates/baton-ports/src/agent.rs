@@ -82,6 +82,10 @@ pub enum AdapterEvent {
 pub trait AgentAdapter: Send + Sync {
     /// 這個 Run 的啟動指令。純函式：同一個 `RunSpec` 永遠得到同一個結果，Runtime 重建後據此 `find` 原程序。
     fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec;
+    /// 互動式 Controller CLI 的啟動指令（desktop-controller-cli 票 03）：與 `spawn_spec` 共用環境與設定的組裝，
+    /// 但不以 `-p` 執行；程式是 MCP shim 的「Controller 宿主」子命令（`args[0]`），其後是它要啟動的 `claude` 與引數。
+    /// 同樣是純函式，Runtime 重建後據此找回宿主。
+    fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec;
     /// 啟動程序之前準備這個 Run 需要的檔案（例如 Prompt、MCP 設定）；重複呼叫安全。
     async fn prepare(&self, _spec: &RunSpec) -> PortResult<()> {
         Ok(())

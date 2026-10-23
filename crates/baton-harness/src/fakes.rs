@@ -431,6 +431,19 @@ impl FakeAgentAdapter {
 
 #[async_trait]
 impl AgentAdapter for FakeAgentAdapter {
+    /// Controller 宿主：`args` 是宿主子命令、假的 `claude` 與 Run 識別；帳號目錄以 `CLAUDE_CONFIG_DIR` 交付。
+    fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
+        let args = [baton_domain::controller_cli::HOST_SUBCOMMAND, "fake-claude", spec.run_id.as_str()].map(String::from).to_vec();
+        SpawnSpec {
+            program: "fake-controller-host".into(),
+            args,
+            working_dir: spec.working_dir.clone(),
+            command_id: spec.command_id.clone(),
+            env: spec.config_dir.iter().map(|dir| ("CLAUDE_CONFIG_DIR".to_string(), dir.clone())).collect(),
+            ..Default::default()
+        }
+    }
+
     fn spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
         let mut args = vec![spec.run_id.clone()];
         if let Some(native_session_id) = &spec.resume_native_session_id {
