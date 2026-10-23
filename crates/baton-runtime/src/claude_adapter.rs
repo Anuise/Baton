@@ -2,6 +2,7 @@
 //!
 //! 每個 Run 在資料目錄下有一個專屬目錄 `runs\{run_id}\`：
 //! - `prompt.md`：Prompt，經標準輸入交給 `claude -p`（不放進指令列，避免長度上限與留在程序清單中）。
+//! - `system-prompt.md`：附加的系統提示：固定的 Worker 通則，加上共同設定的指示（desktop-controller-cli 票 04）。
 //! - `mcp.json`：只指向 MCP shim 的 MCP 設定（spec D-05）；憑證只以 `${BATON_AGENT_TOKEN}` 參照，值經環境變數交付。
 //! - `stream.jsonl`：CLI 的標準輸出（stream-json）。事件串流從檔案讀取，所以 Runtime 重建後重新接上同一個檔案即可。
 //! - `stderr.log`：CLI 的標準錯誤，留給人查看。
@@ -17,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use baton_domain::agent::{mcp_config_json, MCP_SERVER_NAME, TOOL_PERMISSION_PROMPT};
 use baton_domain::controller_cli::HOST_SUBCOMMAND;
+use baton_domain::playbook::{self, SYSTEM_PROMPT_FILE, WORKER_RULES};
 use baton_domain::quota::{LimitStatus, QuotaWindow};
 use baton_domain::shared_settings::{INSTRUCTIONS_FILE, MCP_FILE, SETTINGS_FILE};
 use baton_ports::{
@@ -99,8 +101,9 @@ impl ClaudeCodeAdapter {
     }
 
     /// Worker 與 Controller CLI 共用的 `claude` 引數：strict MCP 設定（shim 加上快照中的共同 MCP 伺服器）、
-    /// Baton 工具免逐次核准、設定快照、模型與原生接續。`permission_prompt` 為 true 時（只有 `-p`）把需要核准的操作轉給 Runtime。
-    fn shared_args(&self, spec: &RunSpec, permission_prompt: bool) -> Vec<String> {
+    /// Baton 工具免逐次核准、設定快照、附加系統提示檔、模型與原生接續。`permission_prompt` 為 true 時（只有 `-p`）把需要核准的操作轉給 Runtime。
+    /// `system_prompt` 是合併了固定指示與共同指示的系統提示檔（Claude Code 只接受一個附加系統提示檔）。
+    fn shared_args(&self, spec: &RunSpec, permission_prompt: bool, system_prompt: Option<String>) -> Vec<String> {
         // 只使用這個 Run 的 MCP 設定：Baton 的 shim，加上快照中的共同 MCP 伺服器
         let mut args: Vec<String> = ["--strict-mcp-config", "--mcp-config"].map(String::from).to_vec();
         args.push(self.file(&spec.run_id, RUN_MCP_FILE));
@@ -120,8 +123,8 @@ impl ClaudeCodeAdapter {
         if let Some(settings) = snapshot(SETTINGS_FILE) {
             args.extend(["--settings".to_string(), settings]);
         }
-        if let Some(instructions) = snapshot(INSTRUCTIONS_FILE) {
-            args.extend(["--append-system-prompt-file".to_string(), instructions]);
+        if let Some(system_prompt) = system_prompt {
+            args.extend(["--append-system-prompt-file".to_string(), system_prompt]);
         }
         if let Some(model) = &spec.model {
             args.extend(["--model".to_string(), model.clone()]);
@@ -170,7 +173,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose"].map(String::from).to_vec();
         // 不載入任何設定檔來源（使用者層、Workspace 的 .claude\settings*.json）：設定只來自 Run 的快照
         args.extend(["--setting-sources", ""].map(String::from));
-        args.extend(self.shared_args(spec, true));
+        // Worker 通則與共同指示合併成 Run 目錄裡的系統提示檔（`prepare` 寫入，票 04）
+        args.extend(self.shared_args(spec, true, Some(self.file(&spec.run_id, SYSTEM_PROMPT_FILE))));
         let (program, args) = self.wrap_batch(args);
         SpawnSpec {
             program,
@@ -186,9 +190,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
     /// 工作目錄），差別只在不加 `-p`、不指定輸出格式與權限模式（`--permission-prompt-tool` 只在 `-p` 有效）。
     /// 設定檔來源只載入 Workspace 的專案層與本機層，Workspace 的 `CLAUDE.md` 與設定以原生方式生效（使用者層由快照提供）。
     /// 終端機裡執行的是 MCP shim 的「Controller 宿主」子命令，由它以繼承主控台的方式啟動 `claude`；標準輸入輸出不導向檔案。
+    /// 附加的系統提示是 Runtime 寫在 Run 專屬唯讀目錄（`settings_dir`）的操作手冊檔（票 04）。
     fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
         let mut args: Vec<String> = ["--setting-sources", "project,local"].map(String::from).to_vec();
-        args.extend(self.shared_args(spec, false));
+        let system_prompt =
+            spec.settings_dir.as_deref().map(|dir| Path::new(dir).join(SYSTEM_PROMPT_FILE).to_string_lossy().into_owned());
+        args.extend(self.shared_args(spec, false, system_prompt));
         let (claude, claude_args) = self.wrap_batch(args);
         let mut args = vec![HOST_SUBCOMMAND.to_string(), claude];
         args.extend(claude_args);
@@ -209,10 +216,25 @@ impl AgentAdapter for ClaudeCodeAdapter {
             }
         }
         let dir = self.run_dir(&spec.run_id);
-        let files = [(PROMPT_FILE, spec.prompt.clone()), (RUN_MCP_FILE, mcp_config_json(&self.shim_program))];
+        let prompt = spec.prompt.clone();
+        let mcp = mcp_config_json(&self.shim_program);
+        // 共同指示只看綁定的版本有沒有這一類（快照已由 Runtime 依 manifest 核對過）
+        let instructions = match spec.settings_dir.as_deref() {
+            Some(settings_dir) if spec.settings_files.iter().any(|file| file == INSTRUCTIONS_FILE) => {
+                Some(Path::new(settings_dir).join(INSTRUCTIONS_FILE))
+            }
+            _ => None,
+        };
         tokio::task::spawn_blocking(move || {
+            let instructions = match instructions {
+                Some(path) => Some(
+                    std::fs::read_to_string(&path).map_err(|e| PortError::Failed(format!("無法讀取共同指示 {}：{e}", path.display())))?,
+                ),
+                None => None,
+            };
+            let system_prompt = playbook::system_prompt(WORKER_RULES, instructions.as_deref());
             std::fs::create_dir_all(&dir).map_err(|e| PortError::Failed(format!("無法建立 {}：{e}", dir.display())))?;
-            for (name, content) in files {
+            for (name, content) in [(PROMPT_FILE, prompt), (RUN_MCP_FILE, mcp), (SYSTEM_PROMPT_FILE, system_prompt)] {
                 write_file_atomic(&dir.join(name), content.as_bytes())?;
             }
             Ok(())
@@ -608,11 +630,14 @@ mod tests {
         assert_eq!(value_after(&spec.args, "--mcp-config"), Some(mcp.to_string_lossy().as_ref()));
         assert_eq!(value_after(&spec.args, "--allowedTools"), Some("mcp__baton"));
         assert_eq!(value_after(&spec.args, "--permission-prompt-tool"), Some("mcp__baton__permission_prompt"));
-        for absent in ["--settings", "--append-system-prompt-file", "--model", "--dangerously-skip-permissions"] {
+        for absent in ["--settings", "--model", "--dangerously-skip-permissions"] {
             assert!(!spec.args.contains(&absent.to_string()), "{absent}：{:?}", spec.args);
         }
         assert_eq!((spec.working_dir.as_deref(), spec.command_id.as_str()), (Some("C:\\work\\app"), "cmd_1"));
         let run_dir = data.path().join(RUNS_DIR).join("run_1");
+        // 票 04：沒有共同設定時也附加 Worker 通則（Run 目錄裡的系統提示檔）
+        let system_prompt = run_dir.join(SYSTEM_PROMPT_FILE);
+        assert_eq!(value_after(&spec.args, "--append-system-prompt-file"), Some(system_prompt.to_string_lossy().as_ref()));
         assert_eq!(spec.stdin_file, Some(run_dir.join(PROMPT_FILE).to_string_lossy().into_owned()));
         assert_eq!(spec.stdout_file, Some(run_dir.join(STREAM_FILE).to_string_lossy().into_owned()));
         assert_eq!(spec.stderr_file, Some(run_dir.join(STDERR_FILE).to_string_lossy().into_owned()));
@@ -641,6 +666,12 @@ mod tests {
         assert_eq!(claude_args[mcp_at + 2], snapshot.join(MCP_FILE).to_string_lossy(), "共同設定的 MCP 伺服器");
         assert_eq!(value_after(claude_args, "--settings"), Some(snapshot.join(SETTINGS_FILE).to_string_lossy().as_ref()));
         assert_eq!(value_after(claude_args, "--allowedTools"), Some("mcp__baton"));
+        // 票 04：附加的系統提示是 Run 專屬唯讀目錄裡的操作手冊檔（Runtime 寫入），不是 Worker 通則
+        assert_eq!(
+            value_after(claude_args, "--append-system-prompt-file"),
+            Some(snapshot.join(SYSTEM_PROMPT_FILE).to_string_lossy().as_ref())
+        );
+        assert_eq!(claude_args.iter().filter(|a| *a == "--append-system-prompt-file").count(), 1);
 
         // 環境清理與帳號目錄與 Worker 相同
         let worker = adapter.spawn_spec(&run_spec(Some(&snapshot), None));
@@ -680,7 +711,9 @@ mod tests {
 
         let path = |name: &str| snapshot.join(name).to_string_lossy().into_owned();
         assert_eq!(value_after(&spec.args, "--settings"), Some(path(SETTINGS_FILE).as_str()));
-        assert_eq!(value_after(&spec.args, "--append-system-prompt-file"), Some(path(INSTRUCTIONS_FILE).as_str()));
+        // 共同指示與 Worker 通則合併在 Run 目錄的系統提示檔（Claude Code 只接受一個附加系統提示檔）
+        let system_prompt = data.path().join(RUNS_DIR).join("run_1").join(SYSTEM_PROMPT_FILE);
+        assert_eq!(value_after(&spec.args, "--append-system-prompt-file"), Some(system_prompt.to_string_lossy().as_ref()));
         let mcp_at = spec.args.iter().position(|a| a == "--mcp-config").unwrap();
         assert_eq!(spec.args[mcp_at + 2], path(MCP_FILE), "共同 MCP 伺服器接在 Baton 的設定之後：{:?}", spec.args);
         assert_eq!(value_after(&spec.args, "--model"), Some("claude-opus-5-5"));
@@ -707,7 +740,6 @@ mod tests {
 
         let path = |name: &str| snapshot.join(name).to_string_lossy().into_owned();
         assert_eq!(value_after(&before.args, "--settings"), Some(path(SETTINGS_FILE).as_str()), "快照目錄不存在也照綁定的版本傳");
-        assert_eq!(value_after(&before.args, "--append-system-prompt-file"), Some(path(INSTRUCTIONS_FILE).as_str()));
         assert!(!before.args.contains(&path(MCP_FILE)), "版本沒有共同 MCP 伺服器就不傳：{:?}", before.args);
         assert_eq!(after, before, "檔案系統的狀態不影響啟動指令");
         assert_eq!(baton_ports::command_hash(&after), baton_ports::command_hash(&before));
@@ -753,6 +785,29 @@ mod tests {
         let mcp: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(RUN_MCP_FILE)).unwrap()).unwrap();
         assert_eq!(mcp["mcpServers"]["baton"]["command"], "C:\\Baton\\bin\\baton-mcp-shim.exe");
         assert_eq!(mcp["mcpServers"]["baton"]["env"]["BATON_AGENT_TOKEN"], "${BATON_AGENT_TOKEN}");
+    }
+
+    /// 票 04：Worker 的系統提示是固定的 Worker 通則，加上快照中的共同指示（`CLAUDE.md`，只看綁定的版本有沒有這一類）。
+    #[tokio::test]
+    async fn prepare_writes_the_worker_rules_followed_by_the_shared_instructions_as_the_system_prompt() {
+        let data = tempfile::tempdir().unwrap();
+        let adapter = adapter(data.path(), &[]);
+        let system_prompt = || std::fs::read_to_string(adapter.run_dir("run_1").join(SYSTEM_PROMPT_FILE)).unwrap();
+
+        adapter.prepare(&run_spec(None, None)).await.unwrap();
+        assert_eq!(system_prompt(), WORKER_RULES, "沒有共同設定時只有 Worker 通則");
+
+        let snapshot = data.path().join("run-settings").join("run_1");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join(INSTRUCTIONS_FILE), "使用者的共同指示
+").unwrap();
+        adapter.prepare(&run_spec(Some(&snapshot), None)).await.unwrap();
+        assert_eq!(system_prompt(), playbook::system_prompt(WORKER_RULES, Some("使用者的共同指示
+")));
+
+        let without_instructions = RunSpec { settings_files: vec![SETTINGS_FILE.to_string()], ..run_spec(Some(&snapshot), None) };
+        adapter.prepare(&without_instructions).await.unwrap();
+        assert_eq!(system_prompt(), WORKER_RULES, "綁定的版本沒有共同指示就不讀快照裡的 CLAUDE.md");
     }
 
     #[tokio::test]
