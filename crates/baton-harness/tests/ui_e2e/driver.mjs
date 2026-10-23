@@ -38,6 +38,7 @@ function locate(target) {
     if (step.role) current = current.getByRole(step.role, { name: step.name, exact: true });
     else if (step.label) current = current.getByLabel(step.label, { exact: true });
     else if (step.text) current = current.getByText(step.text);
+    else if (step.exactText) current = current.getByText(step.exactText, { exact: true });
     else if (step.hasText) current = current.filter({ hasText: step.hasText });
     else if (step.nth !== undefined) current = current.nth(step.nth);
     else throw new Error(`不認識的定位：${JSON.stringify(step)}`);

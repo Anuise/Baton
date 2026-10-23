@@ -1383,7 +1383,7 @@ node scripts/smoke-desktop.mjs
 
 ### UI E2E
 
-spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」以 Playwright 操作真實的 Web UI，連到以 fake Port 啟動的真實 Runtime：
+spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」與 desktop-controller-cli 票 09 的「開啟與結束 Controller CLI」（選 Workspace → Controller 頁簽 → 選 Profile → 開啟 → 執行中 → 結束，開窗由 fake Claude 環境 Port 記錄）以 Playwright 操作真實的 Web UI，連到以 fake Port 啟動的真實 Runtime：
 
 ```powershell
 $env:BATON_PLAYWRIGHT_DIR = "$env:LOCALAPPDATA\Temp\baton-pw"   # 已安裝 playwright 與其瀏覽器的目錄
@@ -1394,7 +1394,7 @@ pnpm test:e2e                                                       # 即 node s
 - **不進入正式建置**：組態只是 `baton-harness`（測試專用 crate）的測試目標。`crates/baton-harness/tests/test_only_config.rs` 以 `cargo metadata` 與 Tauri 設定檔檢查：安裝程式打包的 `baton-runtime`、`baton-guardian` 與 `baton-desktop` 的一般與建置相依都到不了 `baton-harness`；`baton-harness` 沒有可執行檔、`ui_e2e` 只是測試目標；安裝程式只打包這兩個 sidecar 與 `web/dist`，Web UI 原始碼不引用測試組態。
 - **略過**：測試都標為 `#[ignore]`，一般的 `cargo test` 顯示為 ignored。`scripts/test-e2e.mjs` 依序從 `BATON_PLAYWRIGHT_DIR`、repo 根目錄、`web/` 尋找 Playwright：找不到時印出「UI E2E 略過」並以結束碼 0 結束（`pnpm test` 的結果列為「略過」）；設定了 `BATON_PLAYWRIGHT_DIR` 卻找不到時失敗。直接以 `cargo test -p baton-harness --test ui_e2e -- --ignored` 執行而找不到 Playwright 時，測試失敗而不是通過。
 - **清理**：腳本先建置 `web/dist`，再以專用的 TEMP／TMP 執行測試，結束後確認裡面除了 harness 共用的空 `baton-harness` 目錄之外沒有任何遺留（harness 資料目錄、Playwright 的暫存設定檔等），再刪除這個目錄；每個測試結尾關閉瀏覽器，斷言 Chromium 的程序與 driver 都已結束。測試 panic 時 driver 讀到 stdin 結束也會自行關閉瀏覽器。
-- **新增旅程**：在 `tests/ui_e2e/` 新增模組並於 `main.rs` 宣告，以 `UiE2e::start()` 開始、`e2e.finish()` 結束，測試加上同樣的 `#[ignore]` 說明。工作面板沒有輪詢，要看到 Supervisor 推進後的狀態時切到其他頁簽再切回「工作」頁簽。功能頁簽以 `role("tablist", "Workspace 功能")` 下的 `role("tab", …)` 點選；側欄的 Workspace 以 `選擇 {名稱}` 按鈕選擇。
+- **新增旅程**：在 `tests/ui_e2e/` 新增模組並於 `main.rs` 宣告，以 `UiE2e::start()` 開始、`e2e.finish()` 結束，測試加上同樣的 `#[ignore]` 說明。工作面板沒有輪詢，要看到 Supervisor 推進後的狀態時切到其他頁簽再切回「工作」頁簽。功能頁簽以 `role("tablist", "Workspace 功能")` 下的 `role("tab", …)` 點選；側欄的 Workspace 以 `選擇 {名稱}` 按鈕選擇。Controller 頁簽開著時每 2 秒自行重新讀取，`supervise` 之後直接等畫面即可；狀態欄位這類可能是其他文字一部分的短字串以 `exact_text` 完全比對（例如「執行中」與「執行中 Worker 0」）。
 
 ### 安裝程式冒煙測試
 

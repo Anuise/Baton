@@ -37,6 +37,11 @@ pub fn text(text: &str) -> Value {
     json!({ "text": text })
 }
 
+/// 以文字找元素，元素的全部文字要與 `text` 完全相同（例如狀態欄位的「執行中」，不會比對到「執行中 Worker 0」）。
+pub fn exact_text(text: &str) -> Value {
+    json!({ "exactText": text })
+}
+
 /// 前一節找到多個元素時取第 `index` 個（從 0 開始）。
 pub fn nth(index: usize) -> Value {
     json!({ "nth": index })
