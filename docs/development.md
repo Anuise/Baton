@@ -76,6 +76,17 @@ Runtime 的設定環境變數：
 | `BATON_DATA_DIR` | 資料目錄（控制資料庫放在其中） | `%LOCALAPPDATA%\Baton` |
 | `BATON_PORT` | 監聽的 loopback 埠 | `47821` |
 
+### 桌面 App 外殼
+
+Web UI（`web/src/App.tsx`）是頁簽式外殼，主區任何時候只顯示一個功能；狀態列、更新通知與完全退出進度在頁簽之外。
+
+- **頂層頁簽**「主要區塊」：`Workspace`｜`帳號`｜`設定`。
+- **Workspace**：左側清單只負責選擇（`選擇 {名稱}`）、封存與建立 Workspace，名稱旁顯示待裁定數。選中後主區的「Workspace 功能」頁簽依序是 Controller、工作、裁定（附待裁定數徽章）、成果、審查與驗證（內含審查／驗證／探索小頁簽）、知識（知識＋專案理解）、流程、時間線、授權（授權設定＋模型覆寫），以及暫時保留的「對話」。未選 Workspace 時顯示提示文字；從沒有選中到選中一個 Workspace（含建立後自動選中）時回到 Controller 頁簽，在 Workspace 之間切換時停在同一頁簽。
+- **帳號**：首次精靈（最上方，含「重新檢查」）、帳號、排程、共同設定。
+- **設定**：跨登入啟動、更新、備份、恢復、平台狀態。
+- 頂層頁簽、選中的 Workspace 與功能頁簽記在瀏覽器 localStorage，重新開啟 App 時回到上次的位置（讀不到時用預設值）。
+- 沒有可派工的 Account Profile 時，首次精靈與帳號頁以全畫面顯示，沒有頁簽與側欄；「先進入主畫面」可在這次開啟中改回頁簽外殼（例如登入暫時失效時仍要查看 Workspace）。
+
 ### 控制資料庫與 Workspace
 
 控制資料庫是 `<資料目錄>\control.sqlite`（SQLite，WAL）。
@@ -148,7 +159,7 @@ Goal 與 Task 的規則在 `baton_domain::task`（純邏輯：命令 + 目前狀
 | `POST tasks/{task_id}/ready` | pending → ready；未通過回 409 `task_admission_denied`，body 帶 `missing` |
 | `POST tasks/{task_id}/cancel` | 取消 |
 
-事件（追加式 `event` 表，`aggregate_type = 'task'`，版本連續遞增）：`task_created`、`task_contract_changed`、`task_dependency_added`、`task_status_changed`（含 `from`／`to`／`reason`）；Goal 是 `goal_created`。Web UI 的工作面板（`web/src/TaskBoard.tsx`）依狀態分欄顯示，pending 卡片列出缺項，並提供契約編輯器（`ContractEditor.tsx`）、版本歷史、新增相依與標記 ready／取消；從左側 Workspace 清單的「工作面板」進入。
+事件（追加式 `event` 表，`aggregate_type = 'task'`，版本連續遞增）：`task_created`、`task_contract_changed`、`task_dependency_added`、`task_status_changed`（含 `from`／`to`／`reason`）；Goal 是 `goal_created`。Web UI 的工作面板（`web/src/TaskBoard.tsx`）依狀態分欄顯示，pending 卡片列出缺項，並提供契約編輯器（`ContractEditor.tsx`）、版本歷史、新增相依與標記 ready／取消；在左側選擇 Workspace 後的「工作」頁簽。
 
 ### Supervisor、Run 與程序身分
 
@@ -449,7 +460,7 @@ Worker 產生的成果（Artifact）由 Runtime 保管內容與 manifest。規�
 
 預覽與下載都先**重新計算 SHA-256 與大小**，與 manifest 不符回 409 `artifact_integrity_failed`；檔案不存在回 409 `artifact_file_missing`；不存在的成果或版本回 404 `artifact_not_found`。完整的雜湊核對只發生在預覽與下載，列表的 `file_status` 為了成本只看存在與大小。
 
-Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，從左側 Workspace 清單進入）列出成果與版本、預覽文字、下載，並顯示未登記檔案。桌面殼透過 Tauri 指令 `artifact_list`、`artifact_preview`、`artifact_download` 呼叫 `RuntimeClient`（`list_artifacts`、`preview_artifact`、`download_artifact`，每次都讀憑證檔並帶標頭）；下載內容在 Tauri 指令的 JSON 回傳值中以 base64 交給 Web UI，Web UI 再核對 `X-Baton-Sha256` 與 manifest 的雜湊。測試：`crates/baton-client/tests/artifacts_client.rs`。
+Web UI 的「成果與驗證」檢視（`web/src/ArtifactsPage.tsx`，Workspace 的「成果」頁簽）列出成果與版本、預覽文字、下載，並顯示未登記檔案。桌面殼透過 Tauri 指令 `artifact_list`、`artifact_preview`、`artifact_download` 呼叫 `RuntimeClient`（`list_artifacts`、`preview_artifact`、`download_artifact`，每次都讀憑證檔並帶標頭）；下載內容在 Tauri 指令的 JSON 回傳值中以 base64 交給 Web UI，Web UI 再核對 `X-Baton-Sha256` 與 manifest 的雜湊。測試：`crates/baton-client/tests/artifacts_client.rs`。
 
 **已知限制**：
 
@@ -592,7 +603,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 
 ### 事件時間線與觀測指標
 
-「時間線」分頁（`web/src/TimelinePage.tsx`，側欄的「時間線」）呈現 Workspace 內派工、交接、裁定、恢復、驗證與清理事件，可依 Task 過濾；上方是由同一份事件計算的觀測指標（spec 使用者故事 92、93）。分類在 `baton_domain::timeline`，指標在 `baton_domain::metrics`（純函式），讀取在 `baton-store` 的 `timeline.rs`，端點在 `baton-api` 的 `timeline.rs`。沒有新的資料表：時間線直接讀追加式的 `event` 表。
+「時間線」分頁（`web/src/TimelinePage.tsx`，Workspace 的「時間線」頁簽）呈現 Workspace 內派工、交接、裁定、恢復、驗證與清理事件，可依 Task 過濾；上方是由同一份事件計算的觀測指標（spec 使用者故事 92、93）。分類在 `baton_domain::timeline`，指標在 `baton_domain::metrics`（純函式），讀取在 `baton-store` 的 `timeline.rs`，端點在 `baton-api` 的 `timeline.rs`。沒有新的資料表：時間線直接讀追加式的 `event` 表。
 
 **時間線上的事件**（`category`）：
 
@@ -815,7 +826,7 @@ Worker 宣稱成功或程序正常退出都**不會**讓 Task 完成：Run `succ
 - **降級**：FTS5 或 trigram tokenizer 不可用（開啟時建立索引失敗）時，全部關鍵字都退回 `LIKE`，結果相同但較慢。列表與 `search_knowledge` 的回應以 `search_mode` 標示（`full_text` 或 `like_fallback`），Runtime 啟動時在日誌記錄降級（「全文檢索（FTS5 + trigram）無法使用，知識搜尋已降級為逐筆 LIKE 比對」），Web UI 顯示降級提示。因為索引每次啟動都從條目重建，降級期間寫入的條目在 FTS5 恢復後一樣搜得到。
 - 開關：`StoreOptions { full_text_search }`（`Store::open_with`）與 `RuntimeOptions.full_text_search`，預設都是 `true`；設為 `false` 視同 FTS5 不可用。bundled SQLite 一定有 FTS5，所以這是重現降級的唯一方式，正式執行不會關閉它。
 
-Web UI 的「知識」分頁（`web/src/KnowledgePage.tsx`，從左側 Workspace 清單的「知識」進入）：搜尋、待確認的候選教訓、有效條目與歷史條目（撤銷、淘汰、被取代、過期）分開列出；可新增條目（範圍只提供全域或此 Workspace）、確認、修正、撤銷、淘汰，並在詳情查看全部版本與變更歷史；降級時顯示提示。桌面殼透過 Tauri 指令 `knowledge_list`、`knowledge_create`、`knowledge_detail`、`knowledge_confirm`、`knowledge_correct`、`knowledge_revoke`、`knowledge_retire` 呼叫 `RuntimeClient`。
+Web UI 的「知識」分頁（`web/src/KnowledgePage.tsx`，Workspace 的「知識」頁簽）：搜尋、待確認的候選教訓、有效條目與歷史條目（撤銷、淘汰、被取代、過期）分開列出；可新增條目（範圍只提供全域或此 Workspace）、確認、修正、撤銷、淘汰，並在詳情查看全部版本與變更歷史；降級時顯示提示。桌面殼透過 Tauri 指令 `knowledge_list`、`knowledge_create`、`knowledge_detail`、`knowledge_confirm`、`knowledge_correct`、`knowledge_revoke`、`knowledge_retire` 呼叫 `RuntimeClient`。
 
 測試：`crates/baton-harness/tests/knowledge.rs`（情境測試，降級情境見〈測試 harness〉的 `without_full_text_search`）、`crates/baton-domain/src/knowledge/tests.rs`、`crates/baton-store/src/knowledge/tests.rs`。
 
@@ -1037,7 +1048,7 @@ Runtime 的環境設了 `CLAUDE_CONFIG_DIR` 時，改讀該目錄下的 `setting
 
 ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdin_file`、`stdout_file`、`stderr_file` 處理環境與標準輸入輸出；輸出檔以 share read/write/delete 開啟，Adapter 可在程序執行中讀取。
 
-**模型（spec D-30）**：平台預設不指定模型。Workspace 可依角色覆寫：`PUT /api/v1/workspaces/{id}/model-overrides`，本文 `{ "controller"?, "worker"?, "reviewer"? }`（`null`、省略或空白 = 不覆寫；名稱只允許英數字與 `. _ - : [ ] @ /`，否則 400 `model_name_invalid`；封存的 Workspace 409 `workspace_already_archived`），回 200 與 Workspace（`model_overrides`）。派工時把 Worker 角色的模型固定進派工 Outbox（`LaunchPayload.model`），所以**只影響之後派出的 Run**。UI 在 Workspace 的「授權設定」畫面下方。
+**模型（spec D-30）**：平台預設不指定模型。Workspace 可依角色覆寫：`PUT /api/v1/workspaces/{id}/model-overrides`，本文 `{ "controller"?, "worker"?, "reviewer"? }`（`null`、省略或空白 = 不覆寫；名稱只允許英數字與 `. _ - : [ ] @ /`，否則 400 `model_name_invalid`；封存的 Workspace 409 `workspace_already_archived`），回 200 與 Workspace（`model_overrides`）。派工時把 Worker 角色的模型固定進派工 Outbox（`LaunchPayload.model`），所以**只影響之後派出的 Run**。UI 在 Workspace 的「授權」頁簽、授權設定下方。
 
 **Adapter 契約測試**：`crates/baton-harness/tests/adapter_contract.rs`，同一份契約跑在 fake、replay（真實 CLI 錄下的 stream-json）與 live（真實 CLI，手動）上；執行方式與結果記錄見 [adapter-contract.md](adapter-contract.md)。
 
@@ -1192,7 +1203,7 @@ Workspace 首次接入專案時，Controller 以工具建立並維護「專案�
 | 協調中 | 不寫入；檔案又被改成別的內容時更新 `external_hash` 並再記一次事件（不重複通知 Controller） |
 | 保留外部版本（`detached`） | 不寫入、不通知；檔案又被改動（或刪除）時只把目前的雜湊記在 `external_hash`，供之後覆寫時核對 |
 
-比對發生在 `record_understanding` 有變更之後、Workspace 範圍的決策被建立／確認／修正／撤銷／淘汰之後，以及 `POST …/understanding/sync`（「專案理解」分頁開啟與「重新檢查」）；比對與寫入以 `ApiState::projection_lock` 一次只做一個。變更之後的比對失敗只記日誌，下一次再試。
+比對發生在 `record_understanding` 有變更之後、Workspace 範圍的決策被建立／確認／修正／撤銷／淘汰之後，以及 `POST …/understanding/sync`（「知識」頁簽中的專案理解開啟與「重新檢查」）；比對與寫入以 `ApiState::projection_lock` 一次只做一個。變更之後的比對失敗只記日誌，下一次再試。
 
 | 端點（桌面） | 說明 |
 | --- | --- |
@@ -1200,7 +1211,7 @@ Workspace 首次接入專案時，Controller 以工具建立並維護「專案�
 | `POST /api/v1/workspaces/{id}/understanding/sync` | 重新比對投影檔後回傳同一個視圖 |
 | `POST /api/v1/workspaces/{id}/understanding/projections/reconcile` | `{ path, action: "overwrite" \| "keep_external", expected_external_hash }`。`expected_external_hash` 是使用者檢視時檔案的雜湊（當時不存在為 `null`），即視圖中該投影的 `external_hash`（協調中與已保留外部版本都是最後一次比對讀到的雜湊），與目前檔案不同回 409 `projection_changed`（重新比對後再試）；`keep_external` 只限協調中，`overwrite` 協調中或已保留外部版本時都可以，否則 409 `projection_transition_invalid`；沒有這個投影 404 `projection_not_found` |
 
-Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`）：`record_understanding` `{ section, key, text?, status?, sources? }` 回 `{ item, changed, projections }`；`get_project_understanding` `{}` 回與桌面相同的視圖。桌面殼指令：`workspace_understanding`、`workspace_understanding_sync`、`workspace_projection_reconcile`。UI 在側欄的「專案理解」（`web/src/ProjectUnderstandingPage.tsx`）。
+Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`）：`record_understanding` `{ section, key, text?, status?, sources? }` 回 `{ item, changed, projections }`；`get_project_understanding` `{}` 回與桌面相同的視圖。桌面殼指令：`workspace_understanding`、`workspace_understanding_sync`、`workspace_projection_reconcile`。UI 在 Workspace 的「知識」頁簽、知識下方（`web/src/ProjectUnderstandingPage.tsx`）。
 
 測試：`crates/baton-harness/tests/project_understanding.rs`（情境測試）、`crates/baton-domain/src/understanding/tests.rs`、`crates/baton-client/tests/understanding_client.rs`、`web/src/ProjectUnderstandingPage.test.tsx`。
 
@@ -1222,7 +1233,7 @@ Controller 依工作情境選 Playbook，Runtime 依**證據**推進 Stage。規
 | `GET /api/v1/workspaces/{id}/workflows` | `{ workspace_id, workflows }`（最新的在前）；每個 Workflow 帶 `playbook_title`、`latest_playbook_version`、`task_title` 與依順序的 `stages[]`（定義 + `state` + `attempts`） |
 | `POST /api/v1/workspaces/{id}/workflows/{workflow_id}/skip` | 附原因跳過目前 Stage，回更新後的 Workflow |
 
-Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`）：`start_workflow` `{ situation, task_id?, goal_id?, rationale }`（`task_id`、`goal_id` 至少一個）回 Workflow；`record_stage_result` `{ workflow_id, stage, expected_revision, outcome, evidence: [{ check, artifact_id | decision_request_id | task_id }], note }` 回 `{ attempt, workflow }`；`get_workflows` `{}` 回 `{ playbooks, workflows }`。桌面殼指令：`workspace_workflows`、`workflow_skip_stage`。UI 在側欄的「流程」（`web/src/WorkflowPage.tsx`）。
+Controller 工具（Controller 專屬，Worker 呼叫回 403 `controller_only`）：`start_workflow` `{ situation, task_id?, goal_id?, rationale }`（`task_id`、`goal_id` 至少一個）回 Workflow；`record_stage_result` `{ workflow_id, stage, expected_revision, outcome, evidence: [{ check, artifact_id | decision_request_id | task_id }], note }` 回 `{ attempt, workflow }`；`get_workflows` `{}` 回 `{ playbooks, workflows }`。桌面殼指令：`workspace_workflows`、`workflow_skip_stage`。UI 在 Workspace 的「流程」頁簽（`web/src/WorkflowPage.tsx`）。
 
 測試：`crates/baton-harness/tests/methods_playbooks_stages.rs`（情境測試）、`crates/baton-domain/src/workflow/tests.rs`、`crates/baton-client/tests/workflows_client.rs`、`web/src/WorkflowPage.test.tsx`。
 
@@ -1241,7 +1252,7 @@ Review 分 Standards（規範）與 Spec（需求）兩軸保存，Gate 只接�
 | --- | --- |
 | `GET /api/v1/workspaces/{id}/reviews` | `{ workspace_id, reviews, deviations }`（最新的在前）；審查帶 `standards`／`spec`（各有 `passed`、`findings`）、`passed`、`stale_reason` |
 
-Worker 工具：`submit_review` 回 201 審查視圖；`report_design_deviation` 回 201 偏離視圖。Controller 工具：`classify_review_finding` `{ finding_id, classification, reason, evidence? }` 回 `{ finding, review, message }`；`resolve_design_deviation` `{ deviation_id, resolution: accept|reject, reason }` 回 `{ deviation, message }`；`get_reviews` `{ task_id? }`。桌面殼指令：`workspace_reviews`。UI 在側欄的「審查」（`web/src/ReviewPage.tsx`，唯讀）。harness 的 fake Git 以 `workspace_fs.set_changed_paths(repo, from, to, paths)` 腳本化變更檔案。
+Worker 工具：`submit_review` 回 201 審查視圖；`report_design_deviation` 回 201 偏離視圖。Controller 工具：`classify_review_finding` `{ finding_id, classification, reason, evidence? }` 回 `{ finding, review, message }`；`resolve_design_deviation` `{ deviation_id, resolution: accept|reject, reason }` 回 `{ deviation, message }`；`get_reviews` `{ task_id? }`。桌面殼指令：`workspace_reviews`。UI 在 Workspace 的「審查與驗證」頁簽中的「審查」（`web/src/ReviewPage.tsx`，唯讀）。harness 的 fake Git 以 `workspace_fs.set_changed_paths(repo, from, to, paths)` 腳本化變更檔案。
 
 測試：`crates/baton-harness/tests/two_axis_review.rs`（情境測試）、`crates/baton-domain/src/review/tests.rs`、`crates/baton-domain/src/workflow/tests.rs`、`crates/baton-client/tests/reviews_client.rs`、`web/src/ReviewPage.test.tsx`。
 
@@ -1263,7 +1274,7 @@ Worker 工具：`submit_review` 回 201 審查視圖；`report_design_deviation`
 | `POST /api/v1/workspaces/{id}/verification/runs` | `{ task_id?, journeys? }` 回 201 驗證要求；沒有 Profile 404 `verification_profile_not_found`，未知旅程 422 `verification_request_invalid`，Task 不在這個 Workspace 404 `task_not_found` |
 | `GET /api/v1/workspaces/{id}/verification/bundles/{bundle_id}` | 一份 Evidence Bundle；找不到 404 `evidence_bundle_not_found` |
 
-Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journeys? }` 回 201 驗證要求；`get_verification` `{}` 回與桌面相同的概況。桌面殼指令：`workspace_verification`、`verification_publish_profile`、`verification_run`、`verification_bundle`。UI 在側欄的「驗證」（`web/src/VerificationPage.tsx`）：Profile 狀態與是否已證明可用、Feature Map 與未覆蓋範圍、以 JSON 發布新版本、要求執行、Evidence Bundle 與每個步驟的判定。
+Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journeys? }` 回 201 驗證要求；`get_verification` `{}` 回與桌面相同的概況。桌面殼指令：`workspace_verification`、`verification_publish_profile`、`verification_run`、`verification_bundle`。UI 在 Workspace 的「審查與驗證」頁簽中的「驗證」（`web/src/VerificationPage.tsx`）：Profile 狀態與是否已證明可用、Feature Map 與未覆蓋範圍、以 JSON 發布新版本、要求執行、Evidence Bundle 與每個步驟的判定。
 
 測試：`crates/baton-harness/tests/verification_profile_cli_api.rs`（情境測試）、`crates/baton-harness/tests/verification_real_adapter.rs`（正式 Port 對真實程序與 HTTP 服務）、`crates/baton-runtime/tests/verification_driver.rs`、`crates/baton-domain/src/verification_profile/tests.rs`、`crates/baton-client/tests/verification_profiles_client.rs`、`web/src/VerificationPage.test.tsx`。
 
@@ -1302,7 +1313,7 @@ Controller 工具（Controller 專屬）：`run_verification` `{ task_id?, journ
 | --- | --- |
 | `GET /api/v1/workspaces/{id}/exploration` | `{ workspace_id, charters, findings }`：各探索 Task 目前的章程（附 `task_title`）與全部疑點（附 `task_title` 與 `attempts`，新的在前） |
 
-Controller 工具（Controller 專屬）：`define_exploration_charter`（新增回 201、相同回 200 `{ charter, created }`）、`triage_exploration_finding`（`{ finding, message }`）、`reproduce_exploration_finding`（201 `{ finding, attempt, request, message }`）、`get_exploration`。Worker 工具：`report_exploration_finding`（201 疑點）。錯誤碼：`exploration_invalid`（422）、`exploration_finding_not_found`（404）、`exploration_charter_required`、`exploration_defect_locked`、`exploration_transition_refused`、`exploration_reproduction_pending`（409）。事件：`exploration_charter_defined`、`exploration_finding_reported`、`exploration_finding_status_changed`、`exploration_reproduction_requested`、`exploration_reproduction_judged`。桌面殼指令：`workspace_exploration`（`RuntimeClient::exploration_overview`）。UI 在側欄的「探索」（`web/src/ExplorationPage.tsx`）：章程，以及分開的「已確認缺陷」「疑點（未經重現）」「未驗風險」「已修復・納入回歸」「已排除」與每個疑點的重現紀錄。
+Controller 工具（Controller 專屬）：`define_exploration_charter`（新增回 201、相同回 200 `{ charter, created }`）、`triage_exploration_finding`（`{ finding, message }`）、`reproduce_exploration_finding`（201 `{ finding, attempt, request, message }`）、`get_exploration`。Worker 工具：`report_exploration_finding`（201 疑點）。錯誤碼：`exploration_invalid`（422）、`exploration_finding_not_found`（404）、`exploration_charter_required`、`exploration_defect_locked`、`exploration_transition_refused`、`exploration_reproduction_pending`（409）。事件：`exploration_charter_defined`、`exploration_finding_reported`、`exploration_finding_status_changed`、`exploration_reproduction_requested`、`exploration_reproduction_judged`。桌面殼指令：`workspace_exploration`（`RuntimeClient::exploration_overview`）。UI 在 Workspace 的「審查與驗證」頁簽中的「探索」（`web/src/ExplorationPage.tsx`）：章程，以及分開的「已確認缺陷」「疑點（未經重現）」「未驗風險」「已修復・納入回歸」「已排除」與每個疑點的重現紀錄。
 
 測試：`crates/baton-harness/tests/exploration_to_reproduction.rs`（情境測試）、`crates/baton-domain/src/exploration/tests.rs`、`crates/baton-domain/src/context/tests.rs`、`crates/baton-mcp-shim/tests/scenario.rs`、`crates/baton-client/tests/exploration_client.rs`、`web/src/ExplorationPage.test.tsx`。
 
@@ -1412,7 +1423,7 @@ pnpm test:e2e                                                       # 即 node s
 - **不進入正式建置**：組態只是 `baton-harness`（測試專用 crate）的測試目標。`crates/baton-harness/tests/test_only_config.rs` 以 `cargo metadata` 與 Tauri 設定檔檢查：安裝程式打包的 `baton-runtime`、`baton-guardian` 與 `baton-desktop` 的一般與建置相依都到不了 `baton-harness`；`baton-harness` 沒有可執行檔、`ui_e2e` 只是測試目標；安裝程式只打包這兩個 sidecar 與 `web/dist`，Web UI 原始碼不引用測試組態。
 - **略過**：測試都標為 `#[ignore]`，一般的 `cargo test` 顯示為 ignored。`scripts/test-e2e.mjs` 依序從 `BATON_PLAYWRIGHT_DIR`、repo 根目錄、`web/` 尋找 Playwright：找不到時印出「UI E2E 略過」並以結束碼 0 結束（`pnpm test` 的結果列為「略過」）；設定了 `BATON_PLAYWRIGHT_DIR` 卻找不到時失敗。直接以 `cargo test -p baton-harness --test ui_e2e -- --ignored` 執行而找不到 Playwright 時，測試失敗而不是通過。
 - **清理**：腳本先建置 `web/dist`，再以專用的 TEMP／TMP 執行測試，結束後確認裡面除了 harness 共用的空 `baton-harness` 目錄之外沒有任何遺留（harness 資料目錄、Playwright 的暫存設定檔等），再刪除這個目錄；每個測試結尾關閉瀏覽器，斷言 Chromium 的程序與 driver 都已結束。測試 panic 時 driver 讀到 stdin 結束也會自行關閉瀏覽器。
-- **新增旅程**：在 `tests/ui_e2e/` 新增模組並於 `main.rs` 宣告，以 `UiE2e::start()` 開始、`e2e.finish()` 結束，測試加上同樣的 `#[ignore]` 說明。工作面板沒有輪詢，要看到 Supervisor 推進後的狀態時切到其他視圖再切回。
+- **新增旅程**：在 `tests/ui_e2e/` 新增模組並於 `main.rs` 宣告，以 `UiE2e::start()` 開始、`e2e.finish()` 結束，測試加上同樣的 `#[ignore]` 說明。工作面板沒有輪詢，要看到 Supervisor 推進後的狀態時切到其他頁簽再切回「工作」頁簽。功能頁簽以 `role("tablist", "Workspace 功能")` 下的 `role("tab", …)` 點選；側欄的 Workspace 以 `選擇 {名稱}` 按鈕選擇。
 
 ### 安裝程式冒煙測試
 
