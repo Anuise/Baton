@@ -36,4 +36,4 @@
 | R032-fix-d | final-d | final-fix | Work-9 | 2026-10-23 20:14 | 2026-10-23 20:32 | DONE（350a9ad..bef7005，修待修 #11、#12） |
 | R033-final-verify-ab | final-ab | final-verify | Work-3 | 2026-10-23 20:31 | 2026-10-23 20:43 | PASS |
 | R034-final-verify-d | final-d | final-verify | Work-8 | 2026-10-23 20:32 | 2026-10-23 20:40 | PASS（待 final-ab 合併後，AI-60 順延再合併） |
-| R035-final-check | 全部 | final-verify | Work-9 | 2026-10-23 20:44 | | |
+| R035-final-check | 全部 | final-verify | Work-9 | 2026-10-23 20:44 | 2026-10-23 20:58 | PASS |

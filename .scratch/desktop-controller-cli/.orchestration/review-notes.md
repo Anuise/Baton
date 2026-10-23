@@ -23,3 +23,8 @@
 12. `crates/baton-harness/tests/verification_handoff.rs:5` 與 `verification_takeover_blocked.rs:8` 檔頭說明仍寫「以 `timeout` 丟棄那次處理」，與 final-c 改寫後的 `supervise_until` 不一致（R031 觀察，低）。
 13. `crates/baton-client/tests/shared_settings_client.rs` 的 `app_gets_a_run_settings_snapshot_*` 在 R029 期間（機器同時加壓）失敗一次（第 129 行 unwrap），之後單獨 6 次、整包 2 次都通過，成因未查（R029 觀察）。
 14. R026 第 1 項的時序（快照之後才按換帳號、接著宿主消失）沒有專屬回歸測試；修正是無條件化，看程式碼可確認（R033 觀察，低）。`crates/baton-api/src/messages.rs:98` 等程式碼註解仍有零星「一輪」用語（不送進模型）。
+15. 交接承接的 Controller 帳號排除只有 domain 單元測試（`scheduler/tests.rs`），沒有 harness 情境；`crates/baton-domain/src/decision/tests.rs:569` 的註解仍寫「喚醒 Controller」（R035 觀察，低）。
+
+## 收尾（主控，2026-10-23）
+
+第 13～15 項為低嚴重度、不影響行為的殘留，依 AI-64 不再派修正 run，留給後續處理。
