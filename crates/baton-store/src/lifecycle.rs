@@ -541,7 +541,7 @@ pub fn write_lifecycle_file(data_dir: &Path, file: &LifecycleFile) -> std::io::R
         out.sync_all()?;
         drop(out);
         // 防毒、索引器等外部程式可能正短暫開著目標檔或暫存檔且不允許刪除共享，改名取代會暫時被拒
-        retry_transient(std::time::Duration::from_secs(2), is_sharing_conflict, || std::fs::rename(&temp, &target))
+        retry_transient(|error| is_sharing_conflict(error).then_some(SHARING_RETRY), || std::fs::rename(&temp, &target))
     })();
     // 暫存檔名每次不同，失敗時要自己清掉，不能等下一次寫入覆寫
     if written.is_err() {
@@ -553,10 +553,15 @@ pub fn write_lifecycle_file(data_dir: &Path, file: &LifecycleFile) -> std::io::R
 /// 讀取生命週期檔。檔案存在卻解析不了（毀損）時保守地視為停止（spec D-25）。
 pub fn read_lifecycle_file(data_dir: &Path) -> FileStopView {
     // 寫入者正在改名取代的瞬間，開檔可能短暫「存取被拒」（舊檔待刪）或「找不到檔案」，不能因此誤判成停止或沒有檔案。
-    // 這種空窗極短，上限也短：檔案確實不存在時只多花這段時間
-    let transient = |error: &std::io::Error| is_sharing_conflict(error) || error.kind() == std::io::ErrorKind::NotFound;
-    let read = retry_transient(std::time::Duration::from_millis(50), transient, || std::fs::read(lifecycle_file_path(data_dir)));
-    match read {
+    // 「找不到檔案」的上限短：檔案確實不存在時只多花這段時間
+    let budget = |error: &std::io::Error| {
+        if is_sharing_conflict(error) {
+            Some(SHARING_RETRY)
+        } else {
+            (error.kind() == std::io::ErrorKind::NotFound).then_some(std::time::Duration::from_millis(50))
+        }
+    };
+    match retry_transient(budget, || std::fs::read(lifecycle_file_path(data_dir))) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => FileStopView::Missing,
         Err(_) => FileStopView::Stop { requested_at: None },
         Ok(bytes) => match serde_json::from_slice::<LifecycleFile>(&bytes) {
@@ -567,17 +572,24 @@ pub fn read_lifecycle_file(data_dir: &Path) -> FileStopView {
     }
 }
 
-/// 在 `budget` 之內重試暫時性的失敗，間隔由 1ms 倍增、最多 50ms；超過上限回傳最後一次的結果。
+/// 開檔／改名衝突的重試上限。
+const SHARING_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 重試暫時性的失敗：`budget` 回傳這種錯誤從第一次嘗試起最多重試多久（`None` 表示不重試）。
+/// 間隔由 1ms 倍增、最多 50ms；超過上限回傳最後一次的結果。CPU 滿載時睡眠會被拉長，
+/// 只看時間可能只試一兩次，所以至少嘗試 `MIN_ATTEMPTS` 次。
 fn retry_transient<T>(
-    budget: std::time::Duration,
-    transient: impl Fn(&std::io::Error) -> bool,
+    budget: impl Fn(&std::io::Error) -> Option<std::time::Duration>,
     mut attempt: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
+    const MIN_ATTEMPTS: u32 = 5;
     let started = std::time::Instant::now();
     let mut delay = std::time::Duration::from_millis(1);
+    let mut attempts = 0;
     loop {
+        attempts += 1;
         match attempt() {
-            Err(error) if transient(&error) && started.elapsed() < budget => {
+            Err(error) if budget(&error).is_some_and(|limit| attempts < MIN_ATTEMPTS || started.elapsed() < limit) => {
                 std::thread::sleep(delay);
                 delay = (delay * 2).min(std::time::Duration::from_millis(50));
             }

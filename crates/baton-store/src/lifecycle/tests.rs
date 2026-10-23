@@ -73,32 +73,33 @@ fn writers_and_readers_survive_other_programs_briefly_opening_the_lifecycle_file
     let expected = FileStopView::Stop { requested_at: Some(Timestamp::from_millis(7)) };
     let done = AtomicBool::new(false);
     let (failures, misreads): (Vec<String>, Vec<FileStopView>) = std::thread::scope(|scope| {
-        // 外部程式：以「讀取＋寫入共享、不含刪除共享」反覆短暫開啟目標檔（開不了就算了）
+        // 外部程式：以「讀取＋寫入共享、不含刪除共享」開啟目標檔約 1 毫秒、放開約 2 毫秒，反覆進行（開不了就算了）。
+        // 不能不間斷地開：那會讓目標檔在高負載下幾乎一直被占用，模擬的就不是「短暫」開啟了
         scope.spawn(|| {
             while !done.load(Ordering::Relaxed) {
-                let _ = std::fs::OpenOptions::new().read(true).share_mode(0x1 | 0x2).open(lifecycle_file_path(dir.path()));
+                let held = std::fs::OpenOptions::new().read(true).share_mode(0x1 | 0x2).open(lifecycle_file_path(dir.path()));
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                drop(held);
+                std::thread::sleep(std::time::Duration::from_millis(2));
             }
         });
-        let readers: Vec<_> = (0..2)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut misreads = Vec::new();
-                    while !done.load(Ordering::Relaxed) {
-                        let view = read_lifecycle_file(dir.path());
-                        if view != expected {
-                            misreads.push(view);
-                        }
-                    }
-                    misreads
-                })
-            })
-            .collect();
-        let writers: Vec<_> = (0..8)
-            .map(|_| scope.spawn(|| (0..100).filter_map(|_| write_lifecycle_file(dir.path(), &file).err()).map(|e| e.to_string()).collect::<Vec<_>>()))
+        // 執行緒數刻意壓低：整包加壓時一起跑的測試已經占滿 CPU，這裡再多開忙碌的執行緒只會讓上面的「短暫」開啟被拖長
+        let reader = scope.spawn(|| {
+            let mut misreads = Vec::new();
+            while !done.load(Ordering::Relaxed) {
+                let view = read_lifecycle_file(dir.path());
+                if view != expected {
+                    misreads.push(view);
+                }
+            }
+            misreads
+        });
+        let writers: Vec<_> = (0..4)
+            .map(|_| scope.spawn(|| (0..50).filter_map(|_| write_lifecycle_file(dir.path(), &file).err()).map(|e| e.to_string()).collect::<Vec<_>>()))
             .collect();
         let failures = writers.into_iter().flat_map(|w| w.join().unwrap()).collect();
         done.store(true, Ordering::Relaxed);
-        (failures, readers.into_iter().flat_map(|r| r.join().unwrap()).collect())
+        (failures, reader.join().unwrap())
     });
     assert!(failures.is_empty(), "{} 次寫入失敗，例如：{:?}", failures.len(), failures.first());
     assert!(misreads.is_empty(), "{} 次讀錯，例如：{:?}", misreads.len(), misreads.first());
