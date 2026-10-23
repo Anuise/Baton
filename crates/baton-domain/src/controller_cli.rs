@@ -177,6 +177,8 @@ pub enum ControllerCliError {
     SameProfile,
     #[error("Controller CLI 正在結束，請等它結束後再開啟")]
     Ending,
+    #[error("Controller CLI 正在結束或換帳號重開中，不能再換帳號；請等它完成")]
+    SwitchWhileEnding,
 }
 
 impl ControllerCliError {
@@ -191,7 +193,7 @@ impl ControllerCliError {
             ControllerCliError::RunNotFound(_) => "controller_run_not_found",
             ControllerCliError::AlreadyEnded => "controller_cli_ended",
             ControllerCliError::SameProfile => "controller_cli_same_profile",
-            ControllerCliError::Ending => "controller_cli_ending",
+            ControllerCliError::Ending | ControllerCliError::SwitchWhileEnding => "controller_cli_ending",
         }
     }
 }
@@ -225,7 +227,11 @@ pub fn open(
         return Err(ControllerCliError::WorkspaceArchived);
     }
     if let Some(active) = runs.iter().find(|r| r.workspace_id == workspace.id && !r.status.is_terminal()) {
-        return Err(ControllerCliError::AlreadyOpen(active.id.clone()));
+        // 已按「結束」或「換帳號重開」、宿主還沒結束：告訴使用者等它結束，而不是要他切過去或結束它
+        return Err(match active.end_requested_at {
+            Some(_) => ControllerCliError::Ending,
+            None => ControllerCliError::AlreadyOpen(active.id.clone()),
+        });
     }
     let profile = usable_profile(profile_id, profiles)?;
     let run = ControllerCliRun {
@@ -245,7 +251,7 @@ pub fn continues_session(workspace: &Workspace, runs: &[ControllerCliRun], profi
 }
 
 /// 換帳號重開：要求結束目前的 Run，並記下要改用的 Profile（必須可用、且與目前不同）。
-/// 已要求結束或換帳號時拒絕（`Ending`）。
+/// 已要求結束或換帳號時拒絕（`SwitchWhileEnding`）。
 pub fn request_switch(
     run: &ControllerCliRun,
     profile_id: &str,
@@ -254,7 +260,7 @@ pub fn request_switch(
 ) -> Result<ControllerCliChange, ControllerCliError> {
     ensure_open(run)?;
     if run.end_requested_at.is_some() {
-        return Err(ControllerCliError::Ending);
+        return Err(ControllerCliError::SwitchWhileEnding);
     }
     if run.profile_id == profile_id {
         return Err(ControllerCliError::SameProfile);
@@ -350,6 +356,8 @@ fn blank_run(
 }
 
 /// Supervisor 開窗前寫下 launch intent；Profile 在要求開啟之後失效時改為結束（不開窗）。
+/// 使用者在這之前已按「結束」或「換帳號重開」時也改為結束（`user_ended`／`switched`），不以舊帳號開窗；
+/// 判斷依據是交易內讀到的 Run，不是 Supervisor 這一輪開始時的快照。
 /// 已寫過 launch intent 或已不是 `starting` 時拒絕（呼叫端改走核對）。
 /// `continuable` 為 false 代表要接續的原生 Session 確定不存在（例如上次開啟後沒有任何對話就關掉）：改開新的 Session，
 /// 否則 `claude --continue` 找不到 Session 會直接結束。這個決定隨 launch intent 持久化，重建後組出相同的啟動指令。
@@ -362,6 +370,12 @@ pub fn begin_launch(
     ensure_open(run)?;
     if run.status != ControllerCliStatus::Starting || run.launched_at.is_some() {
         return Err(ControllerCliError::AlreadyEnded);
+    }
+    if run.end_requested_at.is_some() {
+        return match run.switch_to_profile_id {
+            Some(_) => end(run, END_SWITCHED, "開窗之前已換帳號重開", None, now),
+            None => end(run, END_USER_ENDED, "開窗之前已從 App 結束", None, now),
+        };
     }
     let unavailable = match profiles.iter().find(|p| p.id == run.profile_id) {
         None => Some("找不到這個帳號 Profile".to_string()),
