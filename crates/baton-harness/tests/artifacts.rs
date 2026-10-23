@@ -307,8 +307,12 @@ async fn crash_during_registration(point: ArtifactWritePoint) -> (Harness, Strin
 
     harness.workspace_fs.hang_next_artifact_write_at(point);
     let body = json!({ "name": "report.md", "content": content });
-    let hung = tokio::time::timeout(Duration::from_millis(500), register(&harness, &token, body)).await;
-    assert!(hung.is_err(), "登記應該卡在崩潰點，不可能完成");
+    // 等登記真的走到崩潰點再重啟，不以固定時間估計
+    tokio::select! {
+        _ = register(&harness, &token, body) => panic!("登記應該卡在崩潰點，不可能完成"),
+        () = harness.workspace_fs.wait_for_artifact_hang() => {}
+        () = tokio::time::sleep(Duration::from_secs(20)) => panic!("等不到登記走到崩潰點"),
+    }
 
     harness.restart().await;
     (harness, ws, rid, token, content)

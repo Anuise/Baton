@@ -6,7 +6,6 @@
 //! 使用者以桌面憑證查看工作面板（Task 狀態與清理狀態分開顯示）。
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::Timestamp;
@@ -349,8 +348,7 @@ async fn a_runtime_crash_mid_cleanup_is_reconciled_after_restart_and_finishes_wi
     // worktree 已改名到暫放目錄、還沒刪除時 Runtime 當掉：處理這次 tick 的 future 被丟棄
     let _never = harness.workspace_fs.hold_next_removal();
     harness.agent_adapter.emit(&rid, AdapterEvent::Exited { success: true });
-    let crashed = tokio::time::timeout(Duration::from_millis(500), harness.supervise()).await;
-    assert!(crashed.is_err(), "清理應該卡在崩潰點");
+    harness.supervise_until(harness.workspace_fs.wait_for_held_removal()).await;
     let cleanup = cleanup_of(&harness, &ws, &tid).await;
     assert_eq!(cleanup["status"], "removing", "這一次嘗試已經持久化：{cleanup}");
     assert_eq!(task_status(&harness, &ws, &tid).await, "completed");

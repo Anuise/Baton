@@ -328,8 +328,7 @@ async fn quota_handoff_recovery_and_cancellation_never_increase_any_counter() {
     harness.process_control.hang_next_spawn_at(HangPoint::BeforeSpawn);
     let (status, _) = harness.send_json(Method::POST, &format!("{}/dispatch", task_path(&ws, &tid)), None).await;
     assert_eq!(status, StatusCode::CREATED);
-    let crashed = tokio::time::timeout(std::time::Duration::from_millis(300), harness.supervise()).await;
-    assert!(crashed.is_err(), "預期 Supervisor 卡在啟動程序之前");
+    harness.supervise_until(harness.process_control.wait_for_spawn_hang()).await;
     harness.restart().await;
     harness.supervise().await;
     harness.supervise().await;

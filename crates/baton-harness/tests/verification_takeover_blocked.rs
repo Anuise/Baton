@@ -7,8 +7,6 @@
 //! 受驗服務由 fake VerificationDriver 扮演（它記下每一個操作，含準備與移除狀態目錄）；「Runtime 中途崩潰」與
 //! `verification_handoff.rs` 相同：讓請求永遠不回來、以 `timeout` 丟棄那次處理，再 `crash_restart`。
 
-use std::time::Duration;
-
 use baton_domain::Timestamp;
 use baton_harness::fakes::FakePage;
 use baton_harness::Harness;
@@ -81,7 +79,7 @@ async fn a_blocked_successor_leaves_the_state_dir_alone_and_runs_no_teardown() {
     assert_eq!(status, StatusCode::CREATED, "{request}");
     let request = request["id"].as_str().unwrap().to_string();
     harness.verification_driver.hang_next_http("GET", &format!("{API}/stock"));
-    assert!(tokio::time::timeout(Duration::from_millis(500), harness.supervise()).await.is_err(), "驗證應該卡在查庫存");
+    harness.supervise_until(harness.verification_driver.wait_for_http_hang()).await;
     harness.crash_restart().await;
     let state = harness.data_dir().join("verification").join(&request);
     std::fs::write(state.join("orders.db"), "舊服務仍在寫入").expect("前一次嘗試準備了狀態目錄");

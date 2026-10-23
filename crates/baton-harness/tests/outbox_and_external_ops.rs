@@ -4,8 +4,6 @@
 //! Store 的寫入故障注入），只斷言外部行為：HTTP 回應、Port 被呼叫的方式（例如「沒有第二次 spawn」）、
 //! Worker 透過 Agent API 看到的結果。`harness.db()` 只用來確認必須看落地內容的事實。
 
-use std::time::Duration;
-
 use baton_domain::external_operation::{
     OPTION_VERIFIED_DONE, OPTION_VERIFIED_NOT_DONE, TOOL_BEGIN_EXTERNAL_OPERATION, TOOL_RECORD_EXTERNAL_OPERATION_RESULT,
 };
@@ -119,11 +117,6 @@ fn error_code(body: &Value) -> &str {
     body["error"].as_str().unwrap_or("")
 }
 
-async fn supervise_until_crash(harness: &Harness) {
-    let outcome = tokio::time::timeout(Duration::from_millis(300), harness.supervise()).await;
-    assert!(outcome.is_err(), "預期 Supervisor 卡在被設定的崩潰點");
-}
-
 fn deploy_request(key: &str) -> Value {
     json!({ "idempotency_key": key, "operation": "deploy", "target": "production", "request": { "version": "1.2.3" } })
 }
@@ -196,7 +189,7 @@ async fn a_launch_that_cannot_be_proven_stays_in_reconciliation_and_is_never_red
     let tid = ready_task(&harness, &ws, &goal, "部署", &[]).await;
     let rid = dispatch_ok(&harness, &ws, &tid).await;
     harness.process_control.hang_next_spawn_at(HangPoint::AfterSpawn);
-    supervise_until_crash(&harness).await;
+    harness.supervise_until(harness.process_control.wait_for_spawn_hang()).await;
 
     // 重建之後 ProcessControl 暫時無法回答「這個 command_id 的程序在不在」
     harness.restart().await;

@@ -622,6 +622,10 @@ pub struct FakeWorkspaceFs {
     git: Mutex<FakeGit>,
     /// `hold_next_merge` 設定的合併走到閘門時通知（保留一次通知，先到先等都不會漏）
     merge_held: tokio::sync::Notify,
+    /// `hold_next_removal` 設定的移除走到閘門時通知（同上）
+    removal_held: tokio::sync::Notify,
+    /// `hang_next_artifact_write_at` 設定的停住點被走到時通知（同上）
+    artifact_hung: tokio::sync::Notify,
 }
 
 /// 腳本化的 Git 狀態。
@@ -756,6 +760,11 @@ impl FakeWorkspaceFs {
         gate
     }
 
+    /// 等到 `hold_next_removal` 設定的移除走到閘門（目錄已改名、還沒刪除）、停住等待放行。
+    pub async fn wait_for_held_removal(&self) {
+        self.removal_held.notified().await;
+    }
+
     /// 至今被要求移除的 worktree 目錄（含失敗的嘗試），依順序。
     pub fn removals(&self) -> Vec<PathBuf> {
         lock(&self.git).removals.clone()
@@ -770,6 +779,11 @@ impl FakeWorkspaceFs {
         *lock(&self.artifact_hang) = Some(point);
     }
 
+    /// 等到 `hang_next_artifact_write_at` 設定的停住點已被某次成果寫入走到（之後那次寫入永遠不回來）。
+    pub async fn wait_for_artifact_hang(&self) {
+        self.artifact_hung.notified().await;
+    }
+
     /// 若下一次成果寫入被設定在這一點當掉，這裡就永遠不回來。
     async fn crash_point(&self, point: ArtifactWritePoint) {
         let hang = {
@@ -777,6 +791,7 @@ impl FakeWorkspaceFs {
             (*armed == Some(point)).then(|| armed.take())
         };
         if hang.is_some() {
+            self.artifact_hung.notify_one();
             std::future::pending::<()>().await;
         }
     }
@@ -936,6 +951,7 @@ impl WorkspaceFs for FakeWorkspaceFs {
         lock(&self.unsaved).remove(target);
         lock(&self.git).worktree_branches.remove(target);
         if let Some(gate) = hold {
+            self.removal_held.notify_one();
             gate.notified().await;
         }
         match tokio::fs::remove_dir_all(trash).await {
@@ -1068,6 +1084,8 @@ pub struct FakeCommandRunner {
     results_in: Mutex<HashMap<(String, PathBuf), PortResultOf<CommandOutput>>>,
     calls: Mutex<Vec<CommandRequest>>,
     hold: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// `hold_next` 設定的執行走到閘門時通知（保留一次通知，先到先等都不會漏）
+    held: tokio::sync::Notify,
 }
 
 /// `PortError` 不能複製，所以腳本以字串保存錯誤原因。
@@ -1102,6 +1120,11 @@ impl FakeCommandRunner {
         gate
     }
 
+    /// 等到 `hold_next` 設定的執行走到閘門、停住等待放行。
+    pub async fn wait_for_held(&self) {
+        self.held.notified().await;
+    }
+
     /// 至今的全部執行要求，依順序。
     pub fn calls(&self) -> Vec<CommandRequest> {
         lock(&self.calls).clone()
@@ -1116,6 +1139,7 @@ impl CommandRunner for FakeCommandRunner {
         lock(&self.calls).push(request);
         let gate = lock(&self.hold).take();
         if let Some(gate) = gate {
+            self.held.notify_one();
             gate.notified().await;
         }
         match in_dir.or_else(|| lock(&self.results).get(&program).cloned()) {
@@ -1700,6 +1724,8 @@ pub struct FakeVerificationDriver {
     operations: Mutex<Vec<String>>,
     http_requests: Mutex<Vec<HttpRequest>>,
     hangs: Mutex<HashSet<(String, String)>>,
+    /// `hang_next_http` 設定的請求送出、停住時通知（保留一次通知，先到先等都不會漏）
+    http_hung: tokio::sync::Notify,
     stop_failures: Mutex<HashMap<String, String>>,
 }
 
@@ -1716,6 +1742,7 @@ impl FakeVerificationDriver {
             operations: Mutex::default(),
             http_requests: Mutex::default(),
             hangs: Mutex::default(),
+            http_hung: tokio::sync::Notify::new(),
             stop_failures: Mutex::default(),
         }
     }
@@ -1725,10 +1752,15 @@ impl FakeVerificationDriver {
         lock(&self.stop_failures).insert(handle.to_string(), reason.to_string());
     }
 
-    /// 下一次送往這個端點的請求送出後永遠不回來（已記錄為送出）；測試以 `timeout` 丟棄該次處理再重啟，
+    /// 下一次送往這個端點的請求送出後永遠不回來（已記錄為送出）；測試等 `wait_for_http_hang` 後丟棄該次處理再重啟，
     /// 即等同 Runtime 在請求送出之後、拿到結果之前崩潰（票 49）。
     pub fn hang_next_http(&self, method: &str, url: &str) {
         lock(&self.hangs).insert((method.to_string(), url.to_string()));
+    }
+
+    /// 等到 `hang_next_http` 設定的請求已送出、停住。
+    pub async fn wait_for_http_hang(&self) {
+        self.http_hung.notified().await;
     }
 
     fn command_key(program: &str, args: &[&str]) -> String {
@@ -1815,6 +1847,7 @@ impl VerificationDriver for FakeVerificationDriver {
         let key = (request.method.clone(), request.url.clone());
         lock(&self.http_requests).push(request);
         if lock(&self.hangs).remove(&key) {
+            self.http_hung.notify_one();
             std::future::pending::<()>().await;
         }
         let outcome = lock(&self.http).get_mut(&key).and_then(Self::next);

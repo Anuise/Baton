@@ -23,8 +23,6 @@
 //!   `cancelling_the_old_run_during_a_handoff_abandons_it_without_a_successor`、
 //!   `only_the_successor_can_confirm_and_the_confirmation_needs_all_three_answers`
 
-use std::time::Duration;
-
 use baton_domain::agent::{TOOL_CONFIRM_HANDOFF, TOOL_REPORT_PROGRESS, TOOL_SAVE_CHECKPOINT};
 use baton_domain::quota::{LimitStatus, QuotaWindow};
 use baton_domain::Timestamp;
@@ -217,12 +215,6 @@ impl World {
     }
 }
 
-/// 讓 Supervisor 處理一次；停止或 spawn 設成「卡住」時，等一小段時間後放棄（等同 Runtime 在那一點崩潰）。
-async fn supervise_until_crash(harness: &Harness) {
-    let outcome = tokio::time::timeout(Duration::from_millis(300), harness.supervise()).await;
-    assert!(outcome.is_err(), "預期 Supervisor 卡在被設定的崩潰點");
-}
-
 // --- 模擬接近五小時與週上限，皆觸發 draining 與交接，成果延續 ---
 
 #[tokio::test]
@@ -412,7 +404,7 @@ async fn a_crash_while_stopping_the_old_writer_resumes_the_stop_after_a_restart(
 
     // Runtime 在要求舊程序停止的途中崩潰：stopping 已經持久化
     w.h().process_control.script_stop(&identity, FakeStop::Hang);
-    supervise_until_crash(w.h()).await;
+    w.h().supervise_until(w.h().process_control.wait_for_stop_call(&identity)).await;
     assert_eq!(w.only_handoff().await["phase"], "stopping");
     assert_eq!(w.h().process_control.spawn_count(), 1);
 
@@ -435,7 +427,7 @@ async fn a_restart_after_the_old_process_already_died_transfers_without_stopping
     w.limit_signal(&first, QuotaWindow::FiveHour, LimitStatus::Allowed, Some(0.9)).await;
     w.checkpoint(&first, "保存", "").await;
     w.h().process_control.script_stop(&identity, FakeStop::Hang);
-    supervise_until_crash(w.h()).await;
+    w.h().supervise_until(w.h().process_control.wait_for_stop_call(&identity)).await;
 
     // 崩潰期間舊程序自己結束了
     w.h().process_control.script_liveness(&identity, baton_ports::Liveness::Dead);
@@ -458,7 +450,7 @@ async fn a_crash_while_launching_the_successor_adopts_it_instead_of_starting_ano
 
     // 轉移已提交、successor 的程序已啟動，但回執寫回之前 Runtime 崩潰
     w.h().process_control.hang_next_spawn_at(HangPoint::AfterSpawn);
-    supervise_until_crash(w.h()).await;
+    w.h().supervise_until(w.h().process_control.wait_for_spawn_hang()).await;
     let handoff = w.only_handoff().await;
     assert_eq!(handoff["phase"], "transferred");
     assert_eq!(w.h().process_control.spawn_count(), 2);

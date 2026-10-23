@@ -184,8 +184,13 @@ async fn cancelled_runs_are_stopped_side_by_side_so_one_slow_stop_does_not_hold_
         let (status, body) = harness.send_json(Method::POST, &format!("{WORKSPACES}/{ws}/runs/{rid}/cancel"), None).await;
         assert!(status.is_success(), "{body}");
     }
-    let outcome = tokio::time::timeout(std::time::Duration::from_millis(500), harness.supervise()).await;
-    assert!(outcome.is_err(), "慢的停止還在等");
+    // 慢的停止還在等的同時，等到快的那個已確認停止；若停止是一個接一個，快的永遠等不到
+    let quick_cancelled = async {
+        while run_status(&harness, &ws_b, &quick).await != "cancelled" {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    harness.supervise_until(quick_cancelled).await;
 
     assert_eq!(harness.process_control.stop_calls().len(), 2, "兩個取消同時開始停止");
     assert_eq!(run_status(&harness, &ws_b, &quick).await, "cancelled");
