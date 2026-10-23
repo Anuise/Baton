@@ -155,6 +155,8 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
               <dd>{formatTimestamp(run.opened_at, timeZone)}</dd>
             </>
           )}
+          <dt>操作手冊版本</dt>
+          <dd>{view.playbook_version}</dd>
           {open && run?.continue_session && (
             <>
               <dt>原生 Session</dt>

@@ -1,8 +1,9 @@
 //! Supervisor 的 Controller CLI 步驟（desktop-controller-cli 票 03，ADR-0014）。
 //!
 //! 每次處理時看所有尚未結束的 Controller Run：
-//! - 剛被要求開啟（還沒有 launch intent）：先寫下 launch intent，再確認 `claude`、準備設定快照與 MCP 設定、簽發 Controller 憑證，
-//!   經 Claude 環境 Port 開出終端機並寫回回執。任何一步失敗都以原因結束這個 Run（頁簽顯示原因、不留下非終態 Run）。
+//! - 剛被要求開啟（還沒有 launch intent）：先寫下 launch intent，再確認 `claude`、Workspace 沒有 AI 決策紀錄時以範本建立、
+//!   準備 Run 專屬唯讀目錄（設定快照與操作手冊）與 MCP 設定、簽發 Controller 憑證，經 Claude 環境 Port 開出終端機並寫回回執。
+//!   任何一步失敗都以原因結束這個 Run（頁簽顯示原因、不留下非終態 Run）。
 //! - 有 launch intent 而沒有回執：上一次開窗的結果不明（Runtime 在開窗與回執之間中斷）。以 command_id 找回宿主就補寫回執，
 //!   找不到就結束這個 Run；**不重複開窗**。
 //! - 有回執：使用者要求結束就停止宿主（連同它啟動的 `claude`）；否則以既有的程序存活查驗，宿主不在就結束。
@@ -22,6 +23,7 @@ use baton_domain::controller_cli::{
     ControllerCliRun, ControllerCliStatus, END_CLAUDE_NOT_FOUND, END_FULL_EXIT, END_HOST_GONE, END_LAUNCH_FAILED,
     END_LAUNCH_OUTCOME_UNKNOWN, END_TERMINAL_FAILED, END_USER_ENDED, WINDOW_TITLE_PREFIX,
 };
+use baton_domain::playbook::{self, AI_DECISIONS_TEMPLATE, CONTROLLER_PLAYBOOK, SYSTEM_PROMPT_FILE};
 use baton_domain::lifecycle::{RunStopOutcome, RunStopRecord, StopAnomaly};
 use baton_domain::shared_settings::{self, MANIFEST_FILE};
 use baton_ports::{Liveness, ProcessIdentity, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
@@ -74,7 +76,11 @@ impl Supervisor {
                 return self.end_controller_cli(&run, END_CLAUDE_NOT_FOUND, &reason).await;
             }
         }
-        // 3. 設定快照（開啟時固定的共同設定版本）與 MCP 設定
+        // 3. Controller 與 Worker 追加決定的 AI 決策紀錄：不存在才以標頭範本建立，已存在的不覆寫（票 04）
+        if let Err(reason) = self.ensure_ai_decisions(&run).await {
+            return self.end_controller_cli(&run, END_LAUNCH_FAILED, &reason).await;
+        }
+        // 4. Run 專屬唯讀目錄（開啟時固定的共同設定版本與操作手冊）與 MCP 設定
         let spec = match self.controller_cli_spec(&run).await {
             Ok(spec) => spec,
             Err(reason) => return self.end_controller_cli(&run, END_LAUNCH_FAILED, &reason).await,
@@ -86,7 +92,7 @@ impl Supervisor {
             let reason = format!("無法準備 Controller CLI 的啟動檔案：{error}");
             return self.end_controller_cli(&run, END_LAUNCH_FAILED, &reason).await;
         }
-        // 4. Controller 憑證：綁定這個 Run，只經環境變數交給宿主（再由 claude 交給 MCP shim）；Run 結束即失效
+        // 5. Controller 憑證：綁定這個 Run，只經環境變數交給宿主（再由 claude 交給 MCP shim）；Run 結束即失效
         let scope = ControllerScope { workspace_id: run.workspace_id.clone(), controller_run_id: run.id.clone() };
         let token = match self.credentials.issue_controller(scope).await {
             Ok(token) => token,
@@ -95,7 +101,7 @@ impl Supervisor {
                 return self.end_controller_cli(&run, END_LAUNCH_FAILED, &reason).await;
             }
         };
-        // 5. 開窗
+        // 6. 開窗
         let mut spawn = self.ports.agent_adapter.controller_spawn_spec(&spec);
         let lookup = spawn.clone();
         spawn.env.push((AGENT_TOKEN_ENV.to_string(), token));
@@ -118,7 +124,7 @@ impl Supervisor {
                 }
             },
         };
-        // 6. 回執寫回；寫回之前當掉的話，下一次處理以 command_id 找回
+        // 7. 回執寫回；寫回之前當掉的話，下一次處理以 command_id 找回
         if let Err(error) = self.store.record_controller_cli_receipt(&run.id, process_record(&identity), self.ports.clock.now()).await {
             self.note(&format!("Controller CLI {} 的開窗回執沒有寫回，下次以 command_id 核對：{error}", run.id));
         }
@@ -269,6 +275,7 @@ impl Supervisor {
 
     /// Controller CLI 的 `RunSpec`：全部來自持久化的 Run（帳號、工作目錄、開啟時固定的共同設定版本），
     /// 所以 Runtime 重建後組出相同的啟動指令，能以 command_id 找回宿主。
+    /// Run 專屬目錄一定存在（至少有操作手冊），沒有共同設定版本時只是沒有快照檔。
     async fn controller_cli_spec(&self, run: &ControllerCliRun) -> Result<RunSpec, String> {
         let settings_files = match run.settings_version {
             Some(version) => shared_settings::snapshot_files(&self.settings_version_of(version).await?)
@@ -285,7 +292,7 @@ impl Supervisor {
             prompt: String::new(),
             working_dir: Some(run.working_dir.clone()),
             config_dir: Some(self.config_dir_of(&run.profile_id).await?),
-            settings_dir: run.settings_version.map(|_| self.controller_cli_settings_dir(run)),
+            settings_dir: Some(self.controller_cli_settings_dir(run)),
             settings_files,
             model: None,
             resume_native_session_id: None,
@@ -310,17 +317,36 @@ impl Supervisor {
         self.data_dir.join(RUN_SETTINGS_DIR).join(&run.id).to_string_lossy().into_owned()
     }
 
-    /// 以與 Worker 相同的機制，把開啟時固定的共同設定版本寫成這個 Run 專屬的唯讀目錄。
+    /// 以與 Worker 相同的機制，把開啟時固定的共同設定版本寫成這個 Run 專屬的唯讀目錄，並放入操作手冊：
+    /// 附加系統提示檔是內建的操作手冊，接著共同設定的指示（Claude Code 只接受一個附加系統提示檔，票 04）。
     async fn write_controller_cli_settings(&self, run: &ControllerCliRun) -> Result<(), String> {
-        let Some(version) = run.settings_version else { return Ok(()) };
-        let files: Vec<(String, Vec<u8>)> =
-            shared_settings::snapshot_files(&self.settings_version_of(version).await?).into_iter().map(|f| (f.name, f.bytes)).collect();
+        let (mut files, instructions): (Vec<(String, Vec<u8>)>, Option<String>) = match run.settings_version {
+            Some(version) => {
+                let version = self.settings_version_of(version).await?;
+                let files = shared_settings::snapshot_files(&version).into_iter().map(|f| (f.name, f.bytes)).collect();
+                (files, version.bundle.instructions)
+            }
+            None => (Vec::new(), None),
+        };
+        let system_prompt = playbook::system_prompt(CONTROLLER_PLAYBOOK, instructions.as_deref());
+        files.push((SYSTEM_PROMPT_FILE.to_string(), system_prompt.into_bytes()));
         let directory = self.controller_cli_settings_dir(run);
         self.ports
             .workspace_fs
             .write_readonly_files(Path::new(&directory), &files)
             .await
             .map_err(|error| format!("無法寫入設定快照目錄 {directory}：{error}"))
+    }
+
+    /// Workspace 沒有 `.baton/ai-decisions.md` 時以標頭範本建立；已存在（含同時被建立）時不動它。
+    async fn ensure_ai_decisions(&self, run: &ControllerCliRun) -> Result<(), String> {
+        let path = playbook::ai_decisions_path(Path::new(&run.working_dir));
+        self.ports
+            .workspace_fs
+            .create_file_if_absent(&path, AI_DECISIONS_TEMPLATE.as_bytes())
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("無法建立 AI 決策紀錄 {}：{error}", path.display()))
     }
 
     /// 視窗標題：前綴加 Workspace 名稱（讀不到時用工作目錄）。

@@ -32,6 +32,7 @@ pub mod message;
 pub mod metrics;
 pub mod permission;
 pub mod platform;
+pub mod playbook;
 pub mod product;
 pub mod profile;
 pub mod quota;

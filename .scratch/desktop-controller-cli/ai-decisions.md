@@ -315,7 +315,52 @@
 - 影響：每次寫入都會讓等待中的端點多查一次（只查游標之後的事件，本機負擔很小）。
 - 審閱：未審
 
-### AI-33：升級前的對話資料原樣保留，Controller 憑證只認 Controller CLI
+### AI-33：固定指示與共同指示合併成一個系統提示檔，Worker 的 `--append-system-prompt-file` 改指向 Run 目錄
+- 重要度：中
+- 時間／階段：2026-10-23，票 04 實作
+- 決策：Claude Code 只帶一個 `--append-system-prompt-file`，內容是「固定指示＋（有的話）`---` 分隔＋共同設定的 `CLAUDE.md`」（`baton_domain::playbook::system_prompt`）。Worker：Adapter 的 `prepare` 寫 `runs\<run_id>\system-prompt.md`（Worker 通則＋快照的共同指示），`spawn_spec` 一律帶這個檔案，即使沒有共同設定。Controller CLI：Supervisor 以 `write_readonly_files` 把操作手冊（＋共同指示）寫成 `run-settings\<run_id>\system-prompt.md`，與設定快照同一個唯讀目錄；這個目錄現在一定存在，沒有共同設定版本時只放操作手冊。原本斷言 Worker 的 `--append-system-prompt-file` 指向快照 `CLAUDE.md`（或沒有共同設定時不帶這個旗標）的 4 處既有測試，改為斷言指向合併檔並檢查檔案內容含共同指示；其餘 Worker 啟動測試沒有改。
+- 理由：`--append-system-prompt-file` 在 `claude --help` 中沒有列出，重複指定時是否都生效無從確認；同時用 `--append-system-prompt` 帶內嵌文字也可能被拒，而且經 cmd.exe 啟動 `claude.cmd` 時，換行與特殊字元會被 `prepare` 擋下。合併成一個檔案的行為最確定。
+- 替代方案：重複指定兩個 `--append-system-prompt-file`——若只有最後一個生效，共同指示或通則就會悄悄消失；把通則放進 Prompt（標準輸入）——不是票面要求的系統提示。
+- 影響：舊的 Controller 輪次（`claude -p`，票 08 會移除）也走 `spawn_spec`，在移除前同樣會帶 Worker 通則。升級前已在執行的 Worker 組出的啟動指令與現在不同（多一個旗標），只有在不完全退出就換版本時才會影響以 command_id 找回程序。
+- 審閱：未審
+
+### AI-34：操作手冊內建在 domain、版本號為 "1"，頁簽顯示 App 內建的版本
+- 重要度：低
+- 時間／階段：2026-10-23，票 04 實作
+- 決策：操作手冊、Worker 通則與 AI 決策紀錄範本是 `crates/baton-domain/src/playbook/*.md`，以 `include_str!` 編進程式，並用該目錄的 `.gitattributes` 固定為 LF（repo 的 `core.autocrlf=true` 會讓不同 checkout 編進不同的換行）。`PLAYBOOK_VERSION = "1"`，手冊標題行是「# Baton Controller 操作手冊（版本 1）」，以測試確保兩者一致。`ControllerCliView` 新增 `playbook_version`（從未開啟過也有），Controller 頁簽的狀態欄列出「操作手冊版本」。版本號不記在每個 Run 上。「不含帳號名稱、額度數字、並行上限、worktree 路徑」以測試檢查：禁用字串（`Work-`、`.claude-`、`%`、`5h`、`7d`、`≥`、`-wt`、`../`、磁碟路徑等），並規定內文除了編號清單的序號，唯一的數字只能是「最多修正 3 次」。
+- 理由：Run 的手冊檔是開啟時由同一個執行檔寫入的，版本必定等於內建版本；只有「Controller 開著時更新 App」才會不同，而更新要先完全退出，Controller CLI 也會一起結束（票 07）。
+- 替代方案：在 `controller_run` 記錄開啟時的手冊版本——要加 migration，目前沒有使用情境。
+- 影響：修改手冊內容時要記得調整 `PLAYBOOK_VERSION` 和標題（標題那一半有測試會擋）。
+- 審閱：未審
+
+### AI-35：Worker 通則不寫死 AI 決策紀錄的路徑，由 Controller 寫進 Task 契約
+- 重要度：中
+- 時間／階段：2026-10-23，票 04 實作
+- 決策：Worker 的工作目錄是 Task 的 worktree，不是 Workspace 目錄，而 Worker 通則是固定文字，不知道 Workspace 在哪裡。所以通則寫「路徑寫在 Task 契約中；沒寫時在最後的回報中列出你的決定，由 Controller 代為追加」；操作手冊要求 Controller 派工時在契約的輸入寫明 `<Workspace>\.baton\ai-decisions.md` 的完整路徑，並代為追加 Worker 只在回報中列出的決定。
+- 理由：spec 要求通則固定，又要求 Worker 把決定寫進 Workspace 的紀錄檔；由 Controller 補上路徑，兩者都能滿足。
+- 替代方案：Adapter 依 Run 的 Workspace 把路徑插進系統提示——通則就不再固定，Adapter 也要多知道 Workspace 目錄；寫相對路徑 `.baton/ai-decisions.md`——在 worktree 裡會寫到錯的檔案（或寫進分支裡）。
+- 影響：Worker 寫 Workspace 目錄要經過權限判定（Workspace 授權不允許時會被擋）；被擋時就照通則改在回報中列出。
+- 審閱：未審
+
+### AI-36：AI 決策紀錄的建立方式、範本與失敗處理
+- 重要度：低
+- 時間／階段：2026-10-23，票 04 實作
+- 決策：Supervisor 寫下 launch intent、確認找得到 `claude` 之後、準備唯讀目錄之前，以新的 `WorkspaceFs::create_file_if_absent`（`create_new` 開檔，需要時建立 `.baton` 目錄）建立 `<Workspace>\.baton\ai-decisions.md`：已存在（包括檢查之後才被建立的）一律不動。建立失敗（例如 `.baton` 是一個檔案）時以 `launch_failed`、原因「無法建立 AI 決策紀錄 …」結束這次開啟，不開窗。範本照 `.scratch/platform-rebuild-v1/ai-decisions.md` 的檔頭：標題改為「# AI 決策紀錄」，說明改成 Workspace 適用的文字，拿掉「spec 決策記在 spec.md 的 D-01～D-33」那一行；重要度、審閱行規則、條目格式區塊與 `---` 逐字相同（有測試）。
+- 理由：沒有紀錄檔時，手冊要求 Controller 追加的對象就不存在；直接以失敗呈現，使用者看得到原因。用 `create_new` 而不是「先讀再原子改名」，是因為改名會覆蓋檢查之後才出現的檔案。
+- 替代方案：建立失敗時只記錄、照常開窗——Controller 之後追加也很可能失敗，問題會被延後、更難發現。
+- 影響：寫到一半時當掉，可能留下內容不完整的範本檔，之後也不會被覆寫（檔案很小，機率極低）。
+- 審閱：未審
+
+### AI-37：操作手冊裡等待指令、受阻與決策權限表的寫法
+- 重要度：中
+- 時間／階段：2026-10-23，票 04 實作
+- 決策：等待照票 06 的 AI-30、AI-31，寫成「以 Bash 工具的背景執行跑 `"$BATON_MCP_SHIM" wait`」，並說明結束碼：0 有事件就處理、4 逾時就重新掛上、3 憑證失效就不再掛並請使用者從 App 重新開啟、其他結束碼把錯誤告訴使用者。手冊不寫 `--timeout` 與逾時秒數，用預設值。Controller 工具沒有「把 Task 標為受阻」的專用工具，所以修正 3 次仍不通過時，手冊寫成「以 `update_task` 在契約的阻礙處理記下原因，不再派工」。決策權限表列出 D-15 中必須送裁定的事項，但不列「三次恢復失敗後的重試」（只能由使用者從恢復介面發起，Controller 不能提出）；不確定時先呼叫 `controller_action` 讓 Runtime 判定。驗證要「由新的 Worker Run 執行、不沿用實作的 Session」，因為帳號由 Runtime 選，Controller 無法指定不同的帳號。檢查手冊數字的測試，除了「最多修正 3 次」之外也允許「結束碼 N」。
+- 理由：手冊不能要求 Controller 用平台沒有的工具；`wait` 的呼叫方式與結束碼已經由票 06 定案並合入 `cli/v1`。
+- 替代方案：手冊也寫逾時秒數——那是 Runtime 的預設值，寫進手冊就要跟著改。
+- 影響：手冊還沒發佈過，所以這次修改仍是版本 1。之後若改 `wait` 的介面或新增「標記受阻」的 Controller 工具，要改手冊並升版。
+- 審閱：未審
+
+### AI-38：升級前的對話資料原樣保留，Controller 憑證只認 Controller CLI
 - 重要度：中
 - 時間／階段：2026-10-23，票 08 實作
 - 決策：`conversation`、`conversation_turn`、`kind = 'turn'` 的 `controller_run` 與 Controller Session 不加 migration、不改狀態、不刪除；Runtime 不再讀寫它們（含升級時停在 `pending` 的輸入與停在 `starting`／`running` 的舊輪次）。Controller 憑證的有效性檢查（`controller_run_active`）改為只認 `kind = 'cli'`，所以舊輪次的憑證一律被拒。完全退出不再停止舊輪次的程序。桌面 API 的兩個對話端點、`baton-client` 的對應方法與 Tauri 指令直接移除（回 404），不保留唯讀檢視。
@@ -324,7 +369,7 @@
 - 影響：升級前若有舊輪次的 `claude -p` 程序仍在執行（Runtime 意外終止且程序沒被 Job 一併結束），平台不再追蹤它，它的工具呼叫會被拒；歷史對話只能直接查資料庫。
 - 審閱：未審
 
-### AI-34：所有寫入 conversation 的工作事件一併停止，Domain 中只為對話產生的輸出暫不刪除
+### AI-39：所有寫入 conversation 的工作事件一併停止，Domain 中只為對話產生的輸出暫不刪除
 - 重要度：中
 - 時間／階段：2026-10-23，票 08 實作
 - 決策：Store 不再把下列事項寫成 conversation 的工作事件：Worker Run 成功／失敗／回報受阻、Controller 提出的裁定被回答或過期、專案理解投影衝突、Gate 失效需要重驗（後兩者連同組字串的程式一起移除，`save_projection` 不再收 `notice`）。本票不另外補送這些通知；Controller CLI 的事件通知由票 06 的事件等待負責（票 06 涵蓋 Run 結束、受阻、裁定被回答、訊息；投影衝突與 Gate 失效不在其範圍）。`baton_domain::conversation` 整個刪除；但 `DecisionChange.notices`／`ConversationNotice`（Domain 仍會算出、Store 不再寫入）、`workflow::WorkflowNote` 與 `session::SessionOwner::Conversation` 先保留。
@@ -333,7 +378,7 @@
 - 影響：投影衝突與 Gate 失效目前只在 UI（知識頁簽、流程頁簽、裁定中心）可見，Controller 不會被通知。票 06 合併後若確定不用 `notices`，應另行刪除這三個型別。
 - 審閱：未審
 
-### AI-35：Controller 工具的情境測試改以 Controller CLI 取得憑證，只刪除測舊行為的斷言
+### AI-40：Controller 工具的情境測試改以 Controller CLI 取得憑證，只刪除測舊行為的斷言
 - 重要度：低
 - 時間／階段：2026-10-23，票 08 實作
 - 決策：刪除只測舊功能的測試檔（`conversation.rs`、`controller_handoff.rs`、`controller_handoff_single_account.rs`、`conversation_client.rs`）。其餘以對話喚起 Controller 取得憑證的 harness 測試（Controller 工具、驗收、知識候選、訊息、共用工具、探索、Gate 失效、Workflow、雙軸審查、專案理解、預算、時間線、驗證設定）改用新增的 `Harness::open_controller_cli`／`end_controller_cli`，並為 Controller CLI 建立專用帳號；「這一輪結束後憑證失效」改為「Controller CLI 結束後憑證失效」。只刪除斷言舊行為的部分（對話的工作事件與內容、下一輪 Prompt 帶入的背景、Controller 自動交接）。`methods_playbooks_stages` 的「換帳號後 Workflow 接續」改為使用者以另一個帳號重開 Controller CLI。`timeline_and_metrics` 的「Controller 用量計入 Workspace、不屬於任何 Task」整個刪除：它靠 Controller 輪次的 Adapter 用量回報，Controller CLI 沒有對應的回報。新增 `retired_conversation.rs` 以 harness 驗證端點已移除、工作事件不產生 Controller 輪次、升級前資料在重啟後原樣保留。

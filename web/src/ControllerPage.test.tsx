@@ -26,7 +26,7 @@ const notLoggedIn = profile({
   blockers: [{ code: "unverified", message: "尚未核對登入狀態；請完成原生登入後按「重新核對」" }],
 });
 
-const viewOf = (run: ControllerCliRun | null): ControllerCliView => ({ workspace_id: "ws_1", run });
+const viewOf = (run: ControllerCliRun | null): ControllerCliView => ({ workspace_id: "ws_1", run, playbook_version: "1" });
 
 function fakeClient(run: ControllerCliRun | null = null, profiles: AccountProfile[] = [notLoggedIn, profile()]) {
   return {
@@ -74,6 +74,32 @@ describe("ControllerPage", () => {
       "備用帳號：尚未核對登入狀態；請完成原生登入後按「重新核對」",
     );
     expect(screen.getByRole("button", { name: "開啟" })).toBeEnabled();
+  });
+
+  it("從未開啟過也顯示操作手冊版本", async () => {
+    renderPage(fakeClient(null));
+
+    expect(await screen.findByText("操作手冊版本", { selector: "dt" })).toBeInTheDocument();
+    expect(fact("狀態")).toHaveTextContent("未開啟");
+    expect(fact("操作手冊版本")).toHaveTextContent("1");
+  });
+
+  it("有 Run 時也顯示操作手冊版本", async () => {
+    const client = fakeClient(controllerCliRun());
+    client.getControllerCli.mockResolvedValue({ ...viewOf(controllerCliRun()), playbook_version: "2" });
+    renderPage(client);
+
+    expect(await screen.findByText("執行中")).toBeInTheDocument();
+    expect(fact("操作手冊版本")).toHaveTextContent("2");
+  });
+
+  it("狀態還沒載入時不顯示操作手冊版本", () => {
+    const client = fakeClient();
+    client.getControllerCli.mockReturnValue(new Promise(() => {}));
+    renderPage(client);
+
+    expect(screen.getByText("載入中…")).toBeInTheDocument();
+    expect(screen.queryByText("操作手冊版本")).not.toBeInTheDocument();
   });
 
   it("沒有可用的帳號時不能開啟，並提示到帳號頁簽處理", async () => {

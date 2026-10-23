@@ -111,7 +111,7 @@ const client = {
   reviews: vi.fn(async () => reviewList()),
   verificationOverview: vi.fn(async () => verificationOverview()),
   explorationOverview: vi.fn(async () => explorationOverview()),
-  getControllerCli: vi.fn(async () => ({ workspace_id: "ws_1", run: null })),
+  getControllerCli: vi.fn(async () => ({ workspace_id: "ws_1", run: null, playbook_version: "1" })),
   listProfiles: vi.fn(async () => ({ profiles: [profile()], limit: 8 })),
   updateStatus: vi.fn(async () => availableUpdateStatus()),
   applyUpdate: vi.fn(),
