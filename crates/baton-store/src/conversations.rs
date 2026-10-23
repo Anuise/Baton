@@ -454,7 +454,7 @@ fn load_state(conn: &Connection, conversation_id: &str) -> rusqlite::Result<Opti
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let latest_run = conn
         .query_row(
-            &format!("SELECT {RUN_COLUMNS} FROM controller_run WHERE conversation_id = ?1 ORDER BY rowid DESC LIMIT 1"),
+            &format!("SELECT {RUN_COLUMNS} FROM controller_run WHERE kind = 'turn' AND conversation_id = ?1 ORDER BY rowid DESC LIMIT 1"),
             [conversation_id],
             run_row,
         )
@@ -464,7 +464,8 @@ fn load_state(conn: &Connection, conversation_id: &str) -> rusqlite::Result<Opti
 
 /// 以條件載入 Controller Run，依建立順序。
 fn load_runs(conn: &Connection, condition: &str, params: impl rusqlite::Params) -> rusqlite::Result<Vec<ControllerRun>> {
-    conn.prepare(&format!("SELECT {RUN_COLUMNS} FROM controller_run WHERE {condition} ORDER BY rowid"))?
+    // 互動式 Controller CLI（票 03，`kind = 'cli'`）不是對話的一輪
+    conn.prepare(&format!("SELECT {RUN_COLUMNS} FROM controller_run WHERE kind = 'turn' AND ({condition}) ORDER BY rowid"))?
         .query_map(params, run_row)?
         .collect()
 }

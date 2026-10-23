@@ -29,6 +29,7 @@ mod agent;
 mod artifacts;
 mod cleanup;
 mod context;
+mod controller_cli;
 mod conversations;
 pub mod backup;
 mod budgets;
@@ -63,6 +64,7 @@ pub use agent::AgentContext;
 pub use artifacts::NewArtifactVersion;
 pub use cleanup::{CleanupApplyError, CleanupWork};
 pub use context::ContextApplyError;
+pub use controller_cli::ControllerCliApplyError;
 pub use conversations::{ConversationApplyError, ControllerWake};
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
 pub use external_operations::ExternalApplyError;
@@ -1843,11 +1845,75 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE account_profile ADD COLUMN config_dir_origin TEXT NOT NULL DEFAULT 'managed'
             CHECK (config_dir_origin IN ('managed', 'external'));",
     },
+    // desktop-controller-cli 票 03：互動式 Controller Run（Controller CLI）。與 Controller 的一輪共用 `controller_run`
+    // （`kind = 'cli'`），既有以它為範圍的 Controller 憑證、裁定請求與訊息直接適用。CLI 的 Run 不綁 conversation、
+    // 沒有 Prompt 與輸入，狀態多一個 `ended`，所以重建資料表放寬這些欄位；每個 Workspace 最多一個未結束的 CLI。
+    // 這個 migration 在 `foreign_keys=OFF` 下套用；其他資料表的觸發器以名稱參照 `controller_run`，
+    // 以 `legacy_alter_table` 改名，不讓 SQLite 在舊表刪除後、新表改名前檢查（並改寫）那些觸發器
+    Migration {
+        name: "controller_cli_run",
+        sql: "PRAGMA legacy_alter_table = ON;
+        CREATE TABLE controller_run_next (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL DEFAULT 'turn' CHECK (kind IN ('turn', 'cli')),
+            conversation_id TEXT REFERENCES conversation (id),
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            profile_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('starting', 'running', 'succeeded', 'failed', 'interrupted', 'ended')),
+            version INTEGER NOT NULL CHECK (version >= 1),
+            command_id TEXT NOT NULL UNIQUE,
+            prompt TEXT,
+            working_dir TEXT NOT NULL,
+            model TEXT,
+            input_turn_ids TEXT CHECK (input_turn_ids IS NULL OR json_valid(input_turn_ids)),
+            agent_session_id TEXT REFERENCES agent_session (id),
+            resume_native_session_id TEXT,
+            native_session_id TEXT,
+            pid INTEGER,
+            process_created_at INTEGER,
+            command_hash TEXT,
+            end_reason TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            started_at INTEGER,
+            ended_at INTEGER,
+            handoff_from_run_id TEXT REFERENCES controller_run (id),
+            handoff_from_profile_id TEXT,
+            handoff_reason TEXT,
+            settings_version INTEGER,
+            launched_at INTEGER,
+            claude_pid INTEGER,
+            end_requested_at INTEGER,
+            end_code TEXT,
+            exit_code INTEGER,
+            CHECK (kind = 'cli' OR (conversation_id IS NOT NULL AND prompt IS NOT NULL AND input_turn_ids IS NOT NULL
+                                    AND agent_session_id IS NOT NULL AND status <> 'ended')),
+            CHECK (kind = 'turn' OR (conversation_id IS NULL AND status IN ('starting', 'running', 'ended', 'interrupted')))
+        );
+        INSERT INTO controller_run_next
+            (id, kind, conversation_id, workspace_id, profile_id, status, version, command_id, prompt, working_dir, model,
+             input_turn_ids, agent_session_id, resume_native_session_id, native_session_id, pid, process_created_at,
+             command_hash, end_reason, created_at, updated_at, started_at, ended_at, handoff_from_run_id,
+             handoff_from_profile_id, handoff_reason)
+        SELECT id, 'turn', conversation_id, workspace_id, profile_id, status, version, command_id, prompt, working_dir, model,
+               input_turn_ids, agent_session_id, resume_native_session_id, native_session_id, pid, process_created_at,
+               command_hash, end_reason, created_at, updated_at, started_at, ended_at, handoff_from_run_id,
+               handoff_from_profile_id, handoff_reason
+        FROM controller_run ORDER BY rowid;
+        DROP TABLE controller_run;
+        ALTER TABLE controller_run_next RENAME TO controller_run;
+        PRAGMA legacy_alter_table = OFF;
+        CREATE INDEX controller_run_conversation ON controller_run (conversation_id);
+        CREATE UNIQUE INDEX controller_run_one_active ON controller_run (conversation_id)
+            WHERE kind = 'turn' AND status IN ('starting', 'running');
+        CREATE UNIQUE INDEX controller_run_one_cli_per_workspace ON controller_run (workspace_id)
+            WHERE kind = 'cli' AND status IN ('starting', 'running');",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
 /// 外鍵開著會讓 `DROP TABLE` 的隱含刪除失敗。套用後、提交前以 `foreign_key_check` 確認沒有任何違反。
-const FOREIGN_KEYS_OFF_MIGRATIONS: &[&str] = &["controller_tools", "controller_messages"];
+const FOREIGN_KEYS_OFF_MIGRATIONS: &[&str] = &["controller_tools", "controller_messages", "controller_cli_run"];
 
 /// 開啟 Store 的選項；預設值就是正式執行的行為。
 #[derive(Debug, Clone, Copy)]
@@ -2764,6 +2830,86 @@ mod tests {
         assert!(insert("d3", "ctl_nope", "controller").is_err());
         insert("d4", "r1", "worker").unwrap();
         assert!(conn.execute("UPDATE decision_request SET origin = 'controller', revision = 2 WHERE id = 'd4'", []).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_controller_cli_migration_keeps_controller_turns_and_their_references() {
+        // 套用到票 03 之前的版本，放一輪已結束的 Controller、它的憑證與它提出的裁定請求
+        let dir = tempfile::tempdir().unwrap();
+        let before = MIGRATIONS.iter().position(|m| m.name == "controller_cli_run").unwrap();
+        {
+            let old = raw(dir.path());
+            old.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (index, migration) in MIGRATIONS[..before].iter().enumerate() {
+                old.execute_batch(migration.sql).unwrap();
+                old.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![index + 1, migration.name],
+                )
+                .unwrap();
+            }
+            old.execute_batch(
+                "INSERT INTO workspace (id, name, path, status, version, created_at) VALUES ('w1', 'w', 'C:/w', 'active', 1, 1);
+                 INSERT INTO conversation (id, workspace_id, version, created_at) VALUES ('c1', 'w1', 1, 1);
+                 INSERT INTO agent_session (id, runtime_type, workspace_id, role, conversation_id, profile_id, working_directory,
+                   state, version, created_at, last_activity_at)
+                   VALUES ('s1', 'claude_code', 'w1', 'controller', 'c1', 'p1', 'C:/w', 'closed', 1, 1, 1);
+                 INSERT INTO controller_run (id, conversation_id, workspace_id, profile_id, status, version, command_id, prompt,
+                   working_dir, input_turn_ids, agent_session_id, created_at, updated_at)
+                   VALUES ('ctl_old', 'c1', 'w1', 'p1', 'succeeded', 2, 'cmd_old', '你好', 'C:/w', '[]', 's1', 1, 2);
+                 INSERT INTO credential (token_hash, role, issued_at, workspace_id, controller_run_id)
+                   VALUES ('h1', 'agent', 1, 'w1', 'ctl_old');",
+            )
+            .unwrap();
+        }
+
+        drop(open(dir.path()).await);
+
+        let conn = raw(dir.path());
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        let kept: (String, String, String) = conn
+            .query_row("SELECT kind, status, prompt FROM controller_run WHERE id = 'ctl_old'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(kept, ("turn".to_string(), "succeeded".to_string(), "你好".to_string()));
+        // 參照 controller_run 的觸發器與外鍵仍然指向新的資料表
+        let insert_cli = |id: &str, status: &str| {
+            conn.execute(
+                "INSERT INTO controller_run (id, kind, workspace_id, profile_id, status, version, command_id, working_dir,
+                   created_at, updated_at) VALUES (?1, 'cli', 'w1', 'p1', ?2, 1, ?1, 'C:/w', 3, 3)",
+                rusqlite::params![id, status],
+            )
+        };
+        insert_cli("ctl_cli", "running").unwrap();
+        assert!(insert_cli("ctl_cli2", "starting").is_err(), "每個 Workspace 最多一個未結束的 Controller CLI");
+        insert_cli("ctl_cli3", "ended").unwrap();
+        conn.execute(
+            "INSERT INTO credential (token_hash, role, issued_at, workspace_id, controller_run_id) VALUES ('h2', 'agent', 3, 'w1', 'ctl_cli')",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO credential (token_hash, role, issued_at, workspace_id, controller_run_id) VALUES ('h3', 'agent', 3, 'w1', 'nope')",
+                [],
+            )
+            .is_err());
+        // 對話的一輪仍必須有 Prompt 與 conversation；CLI 不能綁 conversation
+        assert!(conn
+            .execute(
+                "INSERT INTO controller_run (id, kind, workspace_id, profile_id, status, version, command_id, working_dir,
+                   created_at, updated_at) VALUES ('bad', 'turn', 'w1', 'p1', 'running', 1, 'cmd_bad', 'C:/w', 3, 3)",
+                [],
+            )
+            .is_err());
+        let triggers: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND sql LIKE '%controller_run_next%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(triggers, 0, "觸發器不能指向重建時的暫時名稱");
     }
 
     #[tokio::test]
