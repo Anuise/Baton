@@ -27,6 +27,8 @@
 | R023-05-verify | 05 | verify | Work-8 | 2026-10-23 18:31 | 2026-10-23 18:39 | PASS |
 | R024-09-impl | 09 | impl | Work-8 | 2026-10-23 18:40 | 2026-10-23 18:53 | DONE（d9e3c7b..5f90284） |
 | R025-09-verify | 09 | verify | Work-3 | 2026-10-23 18:53 | 2026-10-23 19:02 | PASS |
-| R026-review-a | — | review | Work-3 | 2026-10-23 19:02 | | |
-| R027-review-b | — | review | Work-8 | 2026-10-23 19:02 | | |
-| R028-review-c | — | review | Work-9 | 2026-10-23 19:02 | | |
+| R026-review-a | — | review | Work-3 | 2026-10-23 19:02 | 2026-10-23 19:09 | DONE（低 6） |
+| R027-review-b | — | review | Work-8 | 2026-10-23 19:02 | 2026-10-23 19:09 | DONE（中 1、低 3） |
+| R028-review-c | — | review | Work-9 | 2026-10-23 19:02 | 2026-10-23 19:08 | DONE（中 2、低 4） |
+| R029-fix-ab | final-ab | final-fix | Work-8 | 2026-10-23 19:10 | | |
+| R030-fix-c | final-c | final-fix | Work-9 | 2026-10-23 19:10 | | |

@@ -459,6 +459,15 @@
 - 影響：spec 故事 48 的「CLI 結束後等待指令自動失效」在實機上主要是「隨程序樹一起被終止」，結束碼 3 只在重新綁定後出現；若使用者希望關掉 CLI 時 wait 以 3 結束，需要改宿主的 Job 設定。
 - 審閱：未審
 
+### AI-49：最終 code-review 分三個範圍審查、兩個範圍修正
+- 重要度：中
+- 時間／階段：2026-10-23，最終 code-review
+- 決策：`cli/v1` 相對 `rebuild/v1`（不含 `.scratch`）120 個檔案、約 1.6 萬行。照 platform-rebuild-v1 的 AI-448，在唯讀 worktree 上分三個範圍各派一個審查 run（R026 Domain／Store、R027 Runtime／API／Ports／shim／Client、R028 Web／Tauri／文件／harness），共回報中 3、低 13，沒有高嚴重度；加上 `review-notes.md` 尚未處理的 9 項。修正改分兩個範圍平行處理：final-ab（R026＋R027 與後端的待修項）、final-c（R028 與 harness／前端的待修項），各自驗證後合併。
+- 理由：R026 的換帳號與 `begin_launch` 時序修正需要同時改 Store 的 `end_cli` 與 Supervisor 的呼叫端，和 R027 的範圍重疊；分三個修正 run 必然改到同一批檔案。項目數量（後端約 14 項、前端與 harness 約 10 項）兩個 run 處理得完。implement-spec skill 要求單一修正 run，但 harness 不穩定測試的重構橫跨十多個測試檔，與後端修正放在同一個 run 會讓單一 context 負擔過重。
+- 替代方案：照 skill 字面派單一修正 run（範圍跨整個系統，驗證也難在一個 context 完成）；照 AI-448 分三個修正 run（A、B 必然衝突）。
+- 影響：兩個修正 run 可能都動到 `crates/baton-harness`（後端修正補的情境測試）與 `docs/`，後合併的需要整合 run。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）

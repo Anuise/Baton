@@ -10,3 +10,9 @@
 8. 前端不穩定測試：R019 加壓（3 套同時跑 ×4 輪）時，`ExplorationPage` 與 `ControllerPage`（票 03 的既有測試）的 `findBy` 在高負載下逾時或時序太早，各失敗一次。
 9. `Store::controller_cli_accounts`（`crates/baton-store/src/controller_cli.rs`，票 05）目前沒有呼叫端（R019 觀察）。
 10. 已要求換帳號、宿主尚未結束時 Runtime 當掉，重啟後宿主已不在 → Run 走 interrupted，換帳號要求不會開出新 Run（R023 觀察，極端時序，spec 未規定）。
+
+## 最終修正的分派（主控，2026-10-23）
+
+- 第 4 項已由票 04 完成（操作手冊已寫 `"$BATON_MCP_SHIM" wait` 與結束碼，R020 驗證），不必再處理。
+- **final-ab**（Rust 後端：Domain、Store、Runtime、API、Ports、MCP shim、Client）：第 3 項（`baton-store` lifecycle 並行寫入測試，含第 5 項中的同一支）、第 6、7、9、10 項。
+- **final-c**（Web、Tauri、scripts、docs、GLOSSARY、harness）：第 1、2、5 項（harness 的當掉模擬測試；R028 第 1 項已找出成因）、第 8 項。

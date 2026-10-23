@@ -1,0 +1,11 @@
+```
+SCOPE: crates/baton-runtime、crates/baton-api、crates/baton-ports、crates/baton-mcp-shim、crates/baton-client — Runtime、API、Ports、MCP shim、Client（Controller 啟動組裝與環境清理、開窗 Port、宿主回報、憑證範圍與失效、長輪詢等待、完全退出與崩潰恢復、操作手冊與 Worker 通則的寫入）
+FINDINGS:
+- [中] Controller 看得到的工具說明與錯誤訊息仍寫著舊的對話模型，例如「使用者回答後你會在對話中收到工作事件」「建議每一輪開始時呼叫」「這一輪 Controller 已經結束」。票 08 之後不再有對話工作事件，裁定被回答改由 `wait` 通知，所以這些文字會誤導 Controller CLI 的模型，讓它以為不必掛背景 wait。review-notes 第 7 項只涵蓋 domain 的註解，沒有包含這些會送進模型的文字 — crates/baton-mcp-shim/src/lib.rs:559、crates/baton-mcp-shim/src/lib.rs:327、crates/baton-api/src/controller.rs:135、crates/baton-api/src/controller.rs:475、crates/baton-api/src/reviews.rs:246、crates/baton-api/src/controller.rs:62 — 改成「回答後會以 `wait` 的事件通知（裁定被回答）」，「每一輪」改為「每次收到事件時」，401 訊息改為「Controller CLI 已結束或已重新綁定，憑證已失效」。spec 說「MCP shim 不變」，這次只改說明文字、不改行為，建議記一條 AI 決策。
+- [低] 完全退出時，所有 Controller CLI 的停止包在同一個 `join_all`，外面再包一個總上限 `timeout_at`。只要有一個 CLI 到上限還沒停完，整批結果都會被 `unwrap_or_default()` 丟掉，已經確認停止、而且已寫入 `full_exit` 結束的 CLI 也會在報告中被標成 `stop_unconfirmed`（訊息還寫「Run 保留寫入所有權」），報告和實際 Run 狀態不一致。此外，這個 future 要到 Worker 的 `find` 迴圈跑完後才在 `join!` 裡開始執行，和 AI-26 的「與 Worker 同時停止」不完全相符 — crates/baton-runtime/src/supervisor.rs:425、crates/baton-runtime/src/supervisor.rs:448-452、crates/baton-runtime/src/supervisor/controller_cli.rs:166-197 — 改用 `FuturesUnordered` 逐筆收集，完成一筆就 `report.record`，只有真的逾時的那幾筆留在 Pending；也可以在 Worker 的 find 迴圈之前就開始執行 CLI 的停止。
+- [低] `create_file_if_absent` 以 `create_new` 建檔後，如果 `write_all` 或 `sync_all` 失敗，會留下空的或寫一半的 `.baton/ai-decisions.md`。下次開啟時會判定「已存在」而回 `Ok(false)`，此後永遠不會補寫標頭範本，Controller 和 Worker 就照著沒有格式說明的檔案追加 — crates/baton-ports/src/workspace_fs.rs:148-160 — 寫入失敗時先刪掉剛建立的檔案再回錯誤；也可以改成先寫暫存檔，再用不覆寫的方式改名。
+- [低] 票 08 移除了投影衝突的 Controller 通知（刪掉 `conflict_notice`，`save_projection` 也不再收 notice），但模組文件仍寫「讓 Controller 在對話中收到工作事件」，與現在的行為不符 — crates/baton-api/src/understanding.rs:7 — 把這半句刪掉，或改為「由使用者在知識頁簽協調」（AI-39 已說明這類通知不在 wait 的範圍內）。
+SUMMARY: 這幾個 crate 的實作與 spec、ADR-0014 和 AI-14～AI-48 大致一致：先寫 launch intent 再開窗；以 command_id 找回宿主，不會重複開窗；Worker 與 Controller CLI 共用同一套環境清理；憑證只經環境變數傳遞，並在 Run 結束或重新綁定時一律失效；長輪詢在每次 commit 後重新檢查憑證，Runtime 停止時回 503；完全退出與重啟後的查驗也都有實作，沒有發現高嚴重度的正確性或安全問題。主要缺口是跨票整合後留下的舊「對話／每一輪」用語，這些文字會實際送進 Controller 模型；另有完全退出報告與 AI 決策紀錄建檔兩處邊界情況。我在本 worktree 跑過 `cargo test -p baton-mcp-shim`，全部通過（含 controller_host 6 項、wait 10 項）；review-notes 已列的第 6、7、9、10 項不重複回報。
+```
+exit: 0
+
