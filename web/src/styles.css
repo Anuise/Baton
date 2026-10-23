@@ -148,6 +148,101 @@ body {
   padding: 24px;
 }
 
+/* App 外殼：產品名稱與更新通知在頁簽之外 */
+.app-heading {
+  padding: 12px 24px 0;
+}
+
+.app-heading h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid #d0d7de;
+}
+
+.tabs-top {
+  padding: 0 24px;
+  background: #fff;
+}
+
+.tabs [role="tab"] {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: #656d76;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: #0969da;
+  color: #1f2328;
+  font-weight: 600;
+}
+
+.tab-badge {
+  padding: 0 6px;
+  border-radius: 10px;
+  background: #fff8c5;
+  border: 1px solid #d4a72c;
+  font-size: 12px;
+}
+
+/* 各頁簽內容的標題與間距一致；同一頁簽疊放的功能以相同間距分開 */
+.tab-panel {
+  display: grid;
+  gap: 24px;
+  padding-top: 16px;
+}
+
+.tab-panel h2 {
+  margin-top: 0;
+}
+
+.workspace-hint {
+  color: #656d76;
+}
+
+.setup-screen {
+  display: grid;
+  gap: 24px;
+  align-content: start;
+}
+
+.setup-skip {
+  justify-self: start;
+}
+
+.workspace-heading {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.workspace-select {
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-select[aria-current="true"] {
+  border-color: #0969da;
+  background: #ddf4ff;
+}
+
 .workspace-actions {
   display: flex;
   gap: 8px;
