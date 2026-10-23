@@ -1,6 +1,6 @@
 # 06: Controller 事件等待（背景 wait）
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R010-06-impl，2026-10-23 16:09）
 Blocked by: 03
 
 **What to build:** Controller 派工後在 Claude Code 的背景 Bash 執行 MCP shim 的 `wait` 子命令；Worker Run 結束、Task 受阻、Decision Request 被裁定、Controller 收到訊息時，`wait` 印出事件摘要並結束，由 Claude Code 原生通知 Controller。Agent API 新增 Controller 專用的長輪詢等待端點，依 Controller Run 保存事件游標，同一事件只回報一次。憑證只從環境變數取得。User stories 42～48。
