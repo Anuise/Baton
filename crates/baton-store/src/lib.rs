@@ -1909,6 +1909,13 @@ const MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX controller_run_one_cli_per_workspace ON controller_run (workspace_id)
             WHERE kind = 'cli' AND status IN ('starting', 'running');",
     },
+    // desktop-controller-cli 票 05：同帳號重開以 `--continue` 接續原生 Session；換帳號重開記下要改用的 Profile。
+    // 換帳號產生的新 Run 以既有的 `handoff_from_run_id` 指向前一個 Run（外鍵已在）。
+    Migration {
+        name: "controller_cli_switch",
+        sql: "ALTER TABLE controller_run ADD COLUMN continue_session INTEGER NOT NULL DEFAULT 0 CHECK (continue_session IN (0, 1));
+        ALTER TABLE controller_run ADD COLUMN switch_to_profile_id TEXT;",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，

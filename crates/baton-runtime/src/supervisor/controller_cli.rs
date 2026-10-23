@@ -8,6 +8,7 @@
 //! - 有回執：使用者要求結束就停止宿主（連同它啟動的 `claude`）；否則以既有的程序存活查驗，宿主不在就結束。
 //!
 //! Run 結束時，以它簽發的 Controller 憑證隨之失效（憑證的有效性取決於 Run 是否尚未結束）。
+//! 使用者要求換帳號重開時（票 05），結束宿主的同一個交易中以新 Profile 開新的 Run，下一次處理就開窗。
 
 use std::path::Path;
 use std::time::Duration;
@@ -16,13 +17,13 @@ use baton_api::RUN_SETTINGS_DIR;
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::ControllerScope;
 use baton_domain::controller_cli::{
-    ControllerCliRun, ControllerCliStatus, END_CLAUDE_NOT_FOUND, END_HOST_GONE, END_LAUNCH_FAILED, END_LAUNCH_OUTCOME_UNKNOWN,
-    END_TERMINAL_FAILED, END_USER_ENDED, WINDOW_TITLE_PREFIX,
+    ControllerCliRun, ControllerCliStatus, OpenIds, END_CLAUDE_NOT_FOUND, END_HOST_GONE, END_LAUNCH_FAILED,
+    END_LAUNCH_OUTCOME_UNKNOWN, END_SWITCHED, END_TERMINAL_FAILED, END_USER_ENDED, WINDOW_TITLE_PREFIX,
 };
 use baton_domain::shared_settings::{self, MANIFEST_FILE};
 use baton_ports::{Liveness, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
 
-use super::{identity_of, process_record, Supervisor};
+use super::{identity_of, new_prefixed_id, process_record, Supervisor};
 
 /// 使用者按「結束」時，給宿主自行結束的時間；之後終止整棵程序樹。
 const CONTROLLER_CLI_STOP_GRACE: Duration = Duration::from_secs(2);
@@ -46,7 +47,11 @@ impl Supervisor {
 
     async fn launch_controller_cli(&self, run: &ControllerCliRun) {
         if run.end_requested_at.is_some() {
-            return self.end_controller_cli(run, END_USER_ENDED, "開窗之前已從 App 結束").await;
+            let (code, reason) = match run.switch_to_profile_id {
+                Some(_) => (END_SWITCHED, "開窗之前已換帳號重開"),
+                None => (END_USER_ENDED, "開窗之前已從 App 結束"),
+            };
+            return self.end_controller_cli(run, code, reason).await;
         }
         // 1. 先持久化 launch intent；這一步完成之前不會開任何視窗（Profile 已失效時改為結束，不開窗）
         let run = match self.store.begin_controller_cli_launch(&run.id, self.ports.clock.now()).await {
@@ -148,9 +153,10 @@ impl Supervisor {
                 let _ = self.ports.process_control.find(&spawn).await;
             }
             match self.ports.process_control.stop(&identity, CONTROLLER_CLI_STOP_GRACE).await {
-                Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => {
-                    self.end_controller_cli(run, END_USER_ENDED, "已從 App 結束 Controller CLI").await;
-                }
+                Ok(StopResult::StoppedGracefully | StopResult::ForceKilled) => match run.switch_to_profile_id {
+                    Some(_) => self.end_controller_cli(run, END_SWITCHED, "已換帳號重開：結束這個 Controller CLI，改用新的帳號開啟").await,
+                    None => self.end_controller_cli(run, END_USER_ENDED, "已從 App 結束 Controller CLI").await,
+                },
                 Ok(StopResult::StillAlive) => self.note(&format!("Controller CLI {} 的宿主仍未結束，稍後重試", run.id)),
                 Err(error) => self.note(&format!("Controller CLI {} 無法結束宿主，稍後重試：{error}", run.id)),
             }
@@ -161,8 +167,19 @@ impl Supervisor {
         }
     }
 
+    /// 結束 Run；已要求換帳號重開時，同一個交易中以新 Profile 開新的 Run（取不到亂數時只結束，並記下原因）。
     async fn end_controller_cli(&self, run: &ControllerCliRun, code: &str, reason: &str) {
-        if let Err(error) = self.store.end_controller_cli(&run.id, code, reason, None, self.ports.clock.now()).await {
+        let next = match run.switch_to_profile_id {
+            Some(_) => {
+                let ids = new_controller_cli_ids();
+                if ids.is_none() {
+                    self.note(&format!("Controller CLI {} 換帳號重開：無法取得系統亂數，只結束、不開新的", run.id));
+                }
+                ids
+            }
+            None => None,
+        };
+        if let Err(error) = self.store.end_controller_cli(&run.id, code, reason, None, next, self.ports.clock.now()).await {
             self.note(&format!("Controller CLI {} 的結束沒有寫入：{error}", run.id));
         }
     }
@@ -189,6 +206,7 @@ impl Supervisor {
             settings_files,
             model: None,
             resume_native_session_id: None,
+            continue_session: run.continue_session,
         })
     }
 
@@ -230,4 +248,9 @@ impl Supervisor {
         };
         format!("{WINDOW_TITLE_PREFIX} - {}", name.unwrap_or_else(|| run.working_dir.clone()))
     }
+}
+
+/// 換帳號重開時新 Run 的識別（與 API 開啟使用相同格式）。
+fn new_controller_cli_ids() -> Option<OpenIds> {
+    Some(OpenIds { run_id: new_prefixed_id("ctl")?, command_id: new_prefixed_id("cmd")? })
 }

@@ -1039,6 +1039,7 @@ impl Supervisor {
             settings_files,
             model: payload.model.clone(),
             resume_native_session_id: run.resume_native_session_id.clone(),
+            continue_session: false,
         })
     }
 
@@ -1451,6 +1452,7 @@ impl Supervisor {
                 quota_used: &quota_used,
                 quota_gates: &gate_states,
                 halt: None,
+                controller_accounts: &[],
             };
             if !matches!(scheduler::place_preferring(&capacity, SlotKind::Handoff, None), Placement::Place { .. }) {
                 continue;
@@ -1509,6 +1511,7 @@ impl Supervisor {
             settings_files: Vec::new(),
             model: run.model.clone(),
             resume_native_session_id: run.resume_native_session_id.clone(),
+            continue_session: false,
         })
     }
 
@@ -1542,7 +1545,7 @@ impl Supervisor {
         for wake in wakes {
             // Controller 不佔 Worker 的並行名額，但同樣只用核對無誤、額度未達門檻的帳號；可派時留在上一輪的帳號
             let capacity =
-                Capacity { profiles: &profiles, settings: &settings, active_runs: &[], quota_used: &quota_used, quota_gates: &quota_gates, halt: None };
+                Capacity { profiles: &profiles, settings: &settings, active_runs: &[], quota_used: &quota_used, quota_gates: &quota_gates, halt: None, controller_accounts: &[] };
             let profile_id =
                 match scheduler::place_preferring(&capacity, SlotKind::Handoff, wake.preferred_profile_id.as_deref()) {
                     Placement::Place { profile_id } => profile_id,

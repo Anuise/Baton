@@ -130,6 +130,10 @@ impl ClaudeCodeAdapter {
         if let Some(native_session_id) = &spec.resume_native_session_id {
             args.extend(["--resume".to_string(), native_session_id.clone()]);
         }
+        // 互動式 Controller CLI 同帳號重開（票 05）：接回工作目錄在這個帳號下最近的原生 Session
+        if spec.continue_session {
+            args.push("--continue".to_string());
+        }
         args
     }
 
@@ -588,6 +592,7 @@ mod tests {
             },
             model: model.map(Into::into),
             resume_native_session_id: None,
+            continue_session: false,
         }
     }
 
@@ -650,6 +655,20 @@ mod tests {
         assert_eq!((spec.working_dir.as_deref(), spec.command_id.as_str()), (Some(r"C:\work\app"), "cmd_1"));
         assert_eq!((&spec.stdin_file, &spec.stdout_file, &spec.stderr_file), (&None, &None, &None), "使用終端機自己的主控台");
         assert_eq!(adapter.controller_spawn_spec(&run_spec(Some(&snapshot), None)), spec, "純函式：重建後組出相同的指令");
+    }
+
+    /// 票 05：同帳號重開時以 `--continue` 接回原生 Session；沒有要求接續時不帶。
+    #[test]
+    fn the_controller_cli_continues_the_latest_native_session_only_when_asked() {
+        let data = tempfile::tempdir().unwrap();
+        let adapter = adapter(data.path(), &[]);
+        let fresh = adapter.controller_spawn_spec(&run_spec(None, None));
+        assert!(!fresh.args.contains(&"--continue".to_string()), "{:?}", fresh.args);
+
+        let spec = RunSpec { continue_session: true, ..run_spec(None, None) };
+        let continued = adapter.controller_spawn_spec(&spec);
+        assert!(continued.args[2..].contains(&"--continue".to_string()), "{:?}", continued.args);
+        assert_eq!(adapter.controller_spawn_spec(&spec), continued, "純函式：重建後組出相同的指令");
     }
 
     #[test]

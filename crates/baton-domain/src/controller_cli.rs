@@ -9,6 +9,9 @@
 //! - `interrupted`：Runtime 當掉恢復時的處理（票 07），本票不產生。
 //!
 //! 每個 Workspace 同時最多一個非終態的 Controller Run；同一個 Profile 可以同時是多個 Workspace 的 Controller 帳號。
+//!
+//! 票 05：同一個 Workspace 以同一個 Profile 重開時以 `--continue` 接回原生 Session（`continue_session`）；
+//! 「換帳號重開」先要求結束目前的 Run（記下新 Profile），Run 結束的同一個交易中以新 Profile 開新的 Run（不接續）。
 
 use serde::{Deserialize, Serialize};
 
@@ -27,6 +30,8 @@ pub const EVENT_CONTROLLER_CLI_LAUNCH_STARTED: &str = "controller_cli_launch_sta
 pub const EVENT_CONTROLLER_CLI_RUNNING: &str = "controller_cli_running";
 /// 使用者按「結束」：等 Supervisor 結束宿主。
 pub const EVENT_CONTROLLER_CLI_END_REQUESTED: &str = "controller_cli_end_requested";
+/// 使用者按「換帳號重開」：等 Supervisor 結束宿主，Run 結束時以新 Profile 開新的 Run。
+pub const EVENT_CONTROLLER_CLI_SWITCH_REQUESTED: &str = "controller_cli_switch_requested";
 pub const EVENT_CONTROLLER_CLI_ENDED: &str = "controller_cli_ended";
 
 /// 終端機內執行的 MCP shim 子命令：「Controller 宿主」，它啟動 `claude` 並回報開始與結束。
@@ -42,6 +47,8 @@ pub const WINDOW_TITLE_PREFIX: &str = "Baton Controller";
 pub const END_HOST_EXITED: &str = "host_exited";
 pub const END_HOST_GONE: &str = "host_gone";
 pub const END_USER_ENDED: &str = "user_ended";
+/// 換帳號重開：由 App 結束，接著以新 Profile 開新的 Run。
+pub const END_SWITCHED: &str = "switched";
 pub const END_CLAUDE_NOT_FOUND: &str = "claude_not_found";
 pub const END_PROFILE_UNAVAILABLE: &str = "profile_unavailable";
 pub const END_TERMINAL_FAILED: &str = "terminal_failed";
@@ -115,6 +122,12 @@ pub struct ControllerCliRun {
     pub end_reason: Option<String>,
     /// 宿主回報的 `claude` 結束碼。
     pub exit_code: Option<i32>,
+    /// 以 `--continue` 接回這個 Workspace 在這個帳號下最近的原生 Session（同帳號重開，票 05）。
+    pub continue_session: bool,
+    /// 已要求換帳號重開：這個 Run 結束後以這個 Profile 開新的 Run。
+    pub switch_to_profile_id: Option<String>,
+    /// 由換帳號重開產生時，前一個 Run。
+    pub switched_from_run_id: Option<String>,
 }
 
 /// 一次變更：新的 Run 與這次產生的事件，由 Store 在一個交易中套用。
@@ -142,6 +155,10 @@ pub enum ControllerCliError {
     RunNotFound(String),
     #[error("Controller Run 已經結束")]
     AlreadyEnded,
+    #[error("Controller CLI 已經在用這個帳號；換帳號重開請選另一個帳號")]
+    SameProfile,
+    #[error("Controller CLI 正在結束，請等它結束後再開啟")]
+    Ending,
 }
 
 impl ControllerCliError {
@@ -155,6 +172,8 @@ impl ControllerCliError {
             ControllerCliError::NotOpen => "controller_cli_not_open",
             ControllerCliError::RunNotFound(_) => "controller_run_not_found",
             ControllerCliError::AlreadyEnded => "controller_cli_ended",
+            ControllerCliError::SameProfile => "controller_cli_same_profile",
+            ControllerCliError::Ending => "controller_cli_ending",
         }
     }
 }
@@ -190,14 +209,107 @@ pub fn open(
     if let Some(active) = runs.iter().find(|r| r.workspace_id == workspace.id && !r.status.is_terminal()) {
         return Err(ControllerCliError::AlreadyOpen(active.id.clone()));
     }
+    let profile = usable_profile(profile_id, profiles)?;
+    let run = ControllerCliRun {
+        profile_id: profile.id.clone(),
+        ..blank_run(workspace, settings_version, ids, continues_session(workspace, runs, profile_id), None, now)
+    };
+    let payload = opened_payload(&run, &profile.name);
+    Ok(apply(run, EVENT_CONTROLLER_CLI_OPENED, payload, now))
+}
+
+/// 同帳號重開才接續：這個 Workspace 最近一次真的執行過（進入過 `running`）的 Controller Run 用的是同一個 Profile。
+/// 開啟失敗的 Run 沒有原生 Session，不算數；`runs` 依建立順序。
+pub fn continues_session(workspace: &Workspace, runs: &[ControllerCliRun], profile_id: &str) -> bool {
+    runs.iter()
+        .rev()
+        .find(|r| r.workspace_id == workspace.id && r.running_at.is_some())
+        .is_some_and(|r| r.profile_id == profile_id)
+}
+
+/// 換帳號重開：要求結束目前的 Run，並記下要改用的 Profile（必須可用、且與目前不同）。
+/// 已要求結束或換帳號時拒絕（`Ending`）。
+pub fn request_switch(
+    run: &ControllerCliRun,
+    profile_id: &str,
+    profiles: &[AccountProfile],
+    now: Timestamp,
+) -> Result<ControllerCliChange, ControllerCliError> {
+    ensure_open(run)?;
+    if run.end_requested_at.is_some() {
+        return Err(ControllerCliError::Ending);
+    }
+    if run.profile_id == profile_id {
+        return Err(ControllerCliError::SameProfile);
+    }
+    let profile = usable_profile(profile_id, profiles)?;
+    let mut next = run.clone();
+    next.end_requested_at = Some(now);
+    next.switch_to_profile_id = Some(profile.id.clone());
+    let payload = serde_json::json!({
+        "from_profile_id": run.profile_id,
+        "to_profile_id": profile.id,
+        "to_profile_name": profile.name,
+    });
+    Ok(apply(next, EVENT_CONTROLLER_CLI_SWITCH_REQUESTED, payload, now))
+}
+
+/// 已要求換帳號重開的 Run 結束後，以新 Profile 開新的 Run（不接續原生 Session）。沒有要求換帳號時回 `None`。
+/// `profiles` 只用來在時間線記下帳號名稱；Profile 在這之間失效時照樣建立，由 `begin_launch` 以 `profile_unavailable`
+/// 結束並顯示原因。
+pub fn open_switched(
+    workspace: &Workspace,
+    previous: &ControllerCliRun,
+    profiles: &[AccountProfile],
+    settings_version: Option<i64>,
+    ids: OpenIds,
+    now: Timestamp,
+) -> Result<Option<ControllerCliChange>, ControllerCliError> {
+    if !previous.status.is_terminal() {
+        return Err(ControllerCliError::AlreadyOpen(previous.id.clone()));
+    }
+    let Some(profile_id) = previous.switch_to_profile_id.clone() else { return Ok(None) };
+    if workspace.status == WorkspaceStatus::Archived {
+        return Err(ControllerCliError::WorkspaceArchived);
+    }
+    let name = profiles.iter().find(|p| p.id == profile_id).map_or(profile_id.as_str(), |p| p.name.as_str()).to_string();
+    let run = ControllerCliRun { profile_id, ..blank_run(workspace, settings_version, ids, false, Some(previous.id.clone()), now) };
+    let payload = opened_payload(&run, &name);
+    Ok(Some(apply(run, EVENT_CONTROLLER_CLI_OPENED, payload, now)))
+}
+
+fn usable_profile<'a>(profile_id: &str, profiles: &'a [AccountProfile]) -> Result<&'a AccountProfile, ControllerCliError> {
     let profile = profiles.iter().find(|p| p.id == profile_id).ok_or_else(|| ControllerCliError::ProfileNotFound(profile_id.into()))?;
     if let Some(reason) = profile_unavailable_reason(profile, profiles) {
         return Err(ControllerCliError::ProfileUnavailable(reason));
     }
-    let run = ControllerCliRun {
+    Ok(profile)
+}
+
+fn opened_payload(run: &ControllerCliRun, profile_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "workspace_id": run.workspace_id,
+        "profile_id": run.profile_id,
+        "profile_name": profile_name,
+        "settings_version": run.settings_version,
+        "continue_session": run.continue_session,
+        "switched_from_run_id": run.switched_from_run_id,
+    })
+}
+
+/// 剛要求開啟、尚未指定帳號的 Run（呼叫端補上 `profile_id`）。
+fn blank_run(
+    workspace: &Workspace,
+    settings_version: Option<i64>,
+    ids: OpenIds,
+    continue_session: bool,
+    switched_from_run_id: Option<String>,
+    now: Timestamp,
+) -> ControllerCliRun {
+    ControllerCliRun {
         id: ids.run_id,
         workspace_id: workspace.id.clone(),
-        profile_id: profile.id.clone(),
+        profile_id: String::new(),
         status: ControllerCliStatus::Starting,
         version: 0,
         command_id: ids.command_id,
@@ -213,14 +325,10 @@ pub fn open(
         end_code: None,
         end_reason: None,
         exit_code: None,
-    };
-    let payload = serde_json::json!({
-        "workspace_id": run.workspace_id,
-        "profile_id": run.profile_id,
-        "profile_name": profile.name,
-        "settings_version": run.settings_version,
-    });
-    Ok(apply(run, EVENT_CONTROLLER_CLI_OPENED, payload, now))
+        continue_session,
+        switch_to_profile_id: None,
+        switched_from_run_id,
+    }
 }
 
 /// Supervisor 開窗前寫下 launch intent；Profile 在要求開啟之後失效時改為結束（不開窗）。

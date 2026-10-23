@@ -91,7 +91,7 @@ pub use artifacts::{
 };
 pub use backups::{BackupStatus, BackupSummary, BACKUPS_PATH};
 pub use controller_cli::{
-    controller_cli_end_path, controller_cli_path, ControllerCliView, HostAck, HostEndedRequest, HostStartedRequest,
+    controller_cli_end_path, controller_cli_path, controller_cli_switch_path, ControllerCliView, HostAck, HostEndedRequest, HostStartedRequest,
     OpenControllerCliRequest,
 };
 pub use conversations::{conversation_messages_path, conversation_path, PostMessageRequest, PostedMessage};
@@ -316,6 +316,7 @@ pub fn router(state: ApiState) -> Router {
         .route(conversations::MESSAGES_ROUTE, post(conversations::post_message))
         .route(controller_cli::CONTROLLER_CLI_ROUTE, get(controller_cli::view).post(controller_cli::open))
         .route(controller_cli::CONTROLLER_CLI_END_ROUTE, post(controller_cli::end))
+        .route(controller_cli::CONTROLLER_CLI_SWITCH_ROUTE, post(controller_cli::switch))
         .route(sessions::SESSIONS_ROUTE, get(sessions::list))
         .route(sessions::SESSION_ROUTE, get(sessions::detail))
         .route(external_operations::EXTERNAL_OPERATIONS_ROUTE, get(external_operations::list))

@@ -28,6 +28,9 @@ pub struct RunSpec {
     /// 要以原生方式接續的原生 Session（票 15）；`None` 時建立新的原生 Session。
     /// 在寫入 launch intent 的同一個交易中決定並持久化在 Run 上，所以 Runtime 重建後組出相同的啟動指令。
     pub resume_native_session_id: Option<String>,
+    /// 以 `--continue` 接回工作目錄在這個帳號下最近的原生 Session（互動式 Controller CLI 同帳號重開，
+    /// desktop-controller-cli 票 05）。由持久化的 Controller Run 決定，所以 Runtime 重建後組出相同的啟動指令。
+    pub continue_session: bool,
 }
 
 /// 已啟動 Run 的控制代碼。

@@ -161,3 +161,107 @@ fn ending_is_terminal_and_records_the_reason_and_exit_code() {
     assert!(host_started(&ended.run, 1, NOW).is_err());
     assert!(record_receipt(&ended.run, host(), NOW).is_err());
 }
+
+// ---------------------------------------------------------------- 票 05：同帳號接續、換帳號重開
+
+/// 開啟、開窗並進入執行中，再以指定原因結束。
+fn ran_and_ended(ws: &Workspace, profile_id: &str, n: u32, profiles: &[AccountProfile]) -> ControllerCliRun {
+    let run = open(ws, profile_id, profiles, &[], None, ids(n), NOW).unwrap().run;
+    let run = record_receipt(&begin_launch(&run, profiles, NOW).unwrap().run, host(), NOW).unwrap().run;
+    end(&run, END_HOST_EXITED, "claude 已結束", Some(0), NOW).unwrap().run
+}
+
+#[test]
+fn reopening_with_the_same_profile_continues_the_native_session_and_another_profile_does_not() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
+
+    let first = open(&ws, "p1", &profiles, &[], None, ids(1), NOW).unwrap();
+    assert!(!first.run.continue_session, "第一次開啟沒有可接續的 Session");
+    assert_eq!(first.events[0].payload["continue_session"], false);
+
+    let previous = [ran_and_ended(&ws, "p1", 1, &profiles)];
+    let same = open(&ws, "p1", &profiles, &previous, None, ids(2), NOW).unwrap();
+    assert!(same.run.continue_session);
+    assert_eq!(same.events[0].payload["continue_session"], true);
+    assert!(!open(&ws, "p2", &profiles, &previous, None, ids(3), NOW).unwrap().run.continue_session);
+}
+
+#[test]
+fn only_the_latest_run_that_actually_ran_decides_whether_to_continue() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
+    let ran_p1 = ran_and_ended(&ws, "p1", 1, &profiles);
+    // p2 開啟失敗（沒開出視窗）：沒有原生 Session，不算換手
+    let failed_p2 = end(&open(&ws, "p2", &profiles, &[], None, ids(2), NOW).unwrap().run, END_CLAUDE_NOT_FOUND, "x", None, NOW)
+        .unwrap()
+        .run;
+    assert!(open(&ws, "p1", &profiles, &[ran_p1.clone(), failed_p2.clone()], None, ids(3), NOW).unwrap().run.continue_session);
+
+    // p1 之後 p2 真的跑過：再以 p1 開啟是換帳號，不接續
+    let ran_p2 = ran_and_ended(&ws, "p2", 4, &profiles);
+    assert!(!open(&ws, "p1", &profiles, &[ran_p1, ran_p2], None, ids(5), NOW).unwrap().run.continue_session);
+
+    // 其他 Workspace 的 Run 不影響
+    let other = ran_and_ended(&workspace("w2", WorkspaceStatus::Active), "p1", 6, &profiles);
+    assert!(!open(&ws, "p1", &profiles, &[other], None, ids(7), NOW).unwrap().run.continue_session);
+}
+
+#[test]
+fn switching_requests_the_end_and_remembers_the_new_profile() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
+    let run = record_receipt(&begin_launch(&opened(&ws, &profiles), &profiles, NOW).unwrap().run, host(), NOW).unwrap().run;
+
+    let switched = request_switch(&run, "p2", &profiles, NOW).unwrap();
+    assert_eq!(switched.run.end_requested_at, Some(NOW));
+    assert_eq!(switched.run.switch_to_profile_id.as_deref(), Some("p2"));
+    assert_eq!(switched.run.status, ControllerCliStatus::Running, "由 Supervisor 結束宿主之後才結束");
+    assert_eq!(switched.events[0].event_type, EVENT_CONTROLLER_CLI_SWITCH_REQUESTED);
+    assert_eq!(switched.events[0].payload["from_profile_id"], "p1");
+    assert_eq!(switched.events[0].payload["to_profile_id"], "p2");
+
+    // 已在結束中（含已要求換帳號）不能再換
+    assert_eq!(request_switch(&switched.run, "p2", &profiles, NOW).unwrap_err(), ControllerCliError::Ending);
+    let ending = request_end(&run, NOW).unwrap().unwrap().run;
+    assert_eq!(request_switch(&ending, "p2", &profiles, NOW).unwrap_err(), ControllerCliError::Ending);
+}
+
+#[test]
+fn switching_to_the_same_or_an_unusable_profile_is_refused() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", false)];
+    let run = opened(&ws, &profiles);
+
+    assert_eq!(request_switch(&run, "p1", &profiles, NOW).unwrap_err(), ControllerCliError::SameProfile);
+    assert_eq!(request_switch(&run, "p2", &profiles, NOW).unwrap_err().code(), "profile_unavailable");
+    assert_eq!(request_switch(&run, "nope", &profiles, NOW).unwrap_err().code(), "profile_not_found");
+    let ended = end(&run, END_HOST_EXITED, "x", None, NOW).unwrap().run;
+    assert_eq!(request_switch(&ended, "p2", &profiles, NOW).unwrap_err(), ControllerCliError::AlreadyEnded);
+}
+
+#[test]
+fn after_the_switched_run_ends_a_new_run_opens_with_the_new_profile_without_continuing() {
+    let ws = workspace("w1", WorkspaceStatus::Active);
+    let profiles = [profile("p1", "a@example.com", true), profile("p2", "b@example.com", true)];
+    let run = record_receipt(&begin_launch(&opened(&ws, &profiles), &profiles, NOW).unwrap().run, host(), NOW).unwrap().run;
+    let switching = request_switch(&run, "p2", &profiles, NOW).unwrap().run;
+    assert_eq!(open_switched(&ws, &switching, &profiles, Some(4), ids(2), NOW).unwrap_err(), ControllerCliError::AlreadyOpen("ctl_1".into()));
+
+    let ended = end(&switching, END_SWITCHED, "換帳號重開", None, NOW).unwrap().run;
+    let next = open_switched(&ws, &ended, &profiles, Some(4), ids(2), NOW).unwrap().unwrap();
+
+    assert_eq!(next.run.id, "ctl_2");
+    assert_eq!(next.run.profile_id, "p2");
+    assert_eq!(next.run.status, ControllerCliStatus::Starting);
+    assert_eq!(next.run.settings_version, Some(4));
+    assert_eq!(next.run.switched_from_run_id.as_deref(), Some("ctl_1"));
+    assert!(!next.run.continue_session, "換帳號不接續原生 Session");
+    assert_eq!(next.events[0].event_type, EVENT_CONTROLLER_CLI_OPENED);
+    assert_eq!(next.events[0].payload["switched_from_run_id"], "ctl_1");
+    assert_eq!(next.events[0].payload["profile_id"], "p2");
+
+    // 沒有要求換帳號的 Run 結束時不開新的
+    let plain = end(&opened(&ws, &profiles), END_HOST_EXITED, "x", None, NOW).unwrap().run;
+    assert_eq!(open_switched(&ws, &plain, &profiles, None, ids(3), NOW).unwrap(), None);
+}

@@ -2,6 +2,7 @@
 //!
 //! 開啟只持久化「使用者要求開啟」（`starting`），由 Supervisor 寫下 launch intent 後開窗；結束只記下要求，
 //! 由 Supervisor 結束宿主與 `claude`。頁簽輪詢 `GET` 取得最新一次 Controller Run 的狀態與結束原因。
+//! 換帳號重開（票 05）也只記下要求與新 Profile；目前的 Run 結束時，Store 在同一個交易中開新的 Run。
 //! 規則都在 Domain（`baton_domain::controller_cli`）。
 
 use std::sync::Arc;
@@ -21,6 +22,7 @@ use crate::ApiState;
 
 pub(crate) const CONTROLLER_CLI_ROUTE: &str = "/api/v1/workspaces/{id}/controller-cli";
 pub(crate) const CONTROLLER_CLI_END_ROUTE: &str = "/api/v1/workspaces/{id}/controller-cli/end";
+pub(crate) const CONTROLLER_CLI_SWITCH_ROUTE: &str = "/api/v1/workspaces/{id}/controller-cli/switch";
 
 /// `GET`：Controller 頁簽的狀態；`POST`（`OpenControllerCliRequest`）：開啟。
 pub fn controller_cli_path(workspace_id: &str) -> String {
@@ -32,6 +34,12 @@ pub fn controller_cli_end_path(workspace_id: &str) -> String {
     format!("{}/end", controller_cli_path(workspace_id))
 }
 
+/// `POST`（`OpenControllerCliRequest`）：換帳號重開——結束開著的 Controller CLI，再以指定 Profile 開新的（不接續原生 Session）。
+pub fn controller_cli_switch_path(workspace_id: &str) -> String {
+    format!("{}/switch", controller_cli_path(workspace_id))
+}
+
+/// 開啟與換帳號重開的請求內容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenControllerCliRequest {
     /// 當 Controller 帳號的 Account Profile。
@@ -106,6 +114,19 @@ pub(crate) async fn open(
     Ok((StatusCode::ACCEPTED, Json(ControllerCliView { workspace_id: id, run: Some(run) })))
 }
 
+/// 換帳號重開：結束開著的 Controller CLI，再以指定 Profile 開新的（不接續原生 Session）。
+/// 回傳目前（即將結束）的 Run；新的 Run 在它結束後出現在 `GET`。
+pub(crate) async fn switch(
+    State(state): State<Arc<ApiState>>,
+    UrlPath(id): UrlPath<String>,
+    body: Result<Json<OpenControllerCliRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<ControllerCliView>), ApiError> {
+    let Json(request) = body.map_err(crate::authorization::bad_json)?;
+    let run = state.store.request_controller_cli_switch(&id, &request.profile_id, state.clock.now()).await?;
+    state.supervisor_wake.notify_one();
+    Ok((StatusCode::ACCEPTED, Json(ControllerCliView { workspace_id: id, run: Some(run) })))
+}
+
 pub(crate) async fn end(
     State(state): State<Arc<ApiState>>,
     UrlPath(id): UrlPath<String>,
@@ -135,6 +156,12 @@ pub(crate) async fn host_ended(
 ) -> Result<Json<HostAck>, ApiError> {
     let scope = crate::controller::controller_scope(&state, &record, &Claims::default()).await?;
     let Json(request) = body.map_err(crate::authorization::bad_json)?;
-    state.store.controller_cli_host_ended(&scope, request.exit_code, state.clock.now()).await?;
+    // 已要求換帳號重開時，結束的同一個交易中開新的 Run
+    let next = baton_domain::controller_cli::OpenIds {
+        run_id: crate::workspaces::new_id("ctl")?,
+        command_id: crate::workspaces::new_id("cmd")?,
+    };
+    state.store.controller_cli_host_ended(&scope, request.exit_code, Some(next), state.clock.now()).await?;
+    state.supervisor_wake.notify_one();
     Ok(Json(HostAck { accepted: true }))
 }

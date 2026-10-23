@@ -138,6 +138,7 @@ struct World {
     quota: HashMap<String, f64>,
     gates: HashMap<String, GateState>,
     halt: Option<WaitReason>,
+    controllers: Vec<String>,
 }
 
 impl World {
@@ -149,7 +150,14 @@ impl World {
             quota: HashMap::new(),
             gates: HashMap::new(),
             halt: None,
+            controllers: Vec::new(),
         }
+    }
+
+    /// 這些帳號是開著的 Controller CLI 的 Controller 帳號。
+    fn with_controller(mut self, profile_id: &str) -> Self {
+        self.controllers.push(profile_id.into());
+        self
     }
 
     fn with_runs(mut self, counts: &[(&str, usize)]) -> Self {
@@ -176,6 +184,7 @@ impl World {
                 quota_used: &self.quota,
                 quota_gates: &self.gates,
                 halt: self.halt.clone(),
+                controller_accounts: &self.controllers,
             },
             kind,
         )
@@ -189,6 +198,7 @@ impl World {
             quota_used: &self.quota,
             quota_gates: &self.gates,
             halt: self.halt.clone(),
+            controller_accounts: &self.controllers,
         };
         place_preferring(&capacity, SlotKind::Normal, preferred)
     }
@@ -375,6 +385,41 @@ fn only_dispatchable_accounts_are_listed_as_usable() {
     let ids: Vec<&str> = usable_profiles(&profiles).iter().map(|p| p.id.as_str()).collect();
 
     assert_eq!(ids, ["p1", "p4"]);
+}
+
+// ============================================================ Controller 帳號（desktop-controller-cli 票 05）
+
+#[test]
+fn a_controller_account_is_not_given_new_workers_even_when_it_is_the_least_busy() {
+    let world = World::new(vec![usable("p1"), usable("p2")], CapacityMode::ReserveHandoff)
+        .with_runs(&[("p2", 1)])
+        .with_controller("p1");
+
+    assert_eq!(placed(world.place(SlotKind::Normal)), "p2");
+    assert_eq!(placed(world.place_preferring(Some("p1"))), "p2", "上一個 Run 的帳號是 Controller 帳號時改用其他帳號");
+    assert_eq!(placed(world.place(SlotKind::Handoff)), "p2", "交接的承接者也是 Worker");
+}
+
+#[test]
+fn when_the_only_account_is_the_controller_account_the_task_waits_with_an_account_reason() {
+    let world = World::new(vec![usable("p1")], CapacityMode::ReserveHandoff).with_controller("p1");
+
+    let reasons = waiting(world.place(SlotKind::Normal));
+
+    assert_eq!(summary(&reasons), [(WaitCategory::Account, "controller_account", Some("p1"))]);
+    assert!(reasons[0].message.contains("Controller"), "{}", reasons[0].message);
+}
+
+#[test]
+fn a_controller_account_does_not_change_the_other_accounts_or_running_workers() {
+    // Controller 帳號上既有的 Worker 照樣佔名額（不中斷）；其他帳號照常派
+    let world = World::new(vec![usable("p1"), usable("p2")], CapacityMode::ReserveHandoff)
+        .with_runs(&[("p1", 2), ("p2", 1)])
+        .with_controller("p1");
+    assert_eq!(placed(world.place(SlotKind::Normal)), "p2");
+
+    let without = World::new(vec![usable("p1")], CapacityMode::ReserveHandoff);
+    assert_eq!(placed(without.place(SlotKind::Normal)), "p1", "沒有 Controller CLI 時是候選");
 }
 
 // ============================================================ 每帳號上限

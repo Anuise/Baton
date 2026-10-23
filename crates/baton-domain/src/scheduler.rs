@@ -292,6 +292,9 @@ pub struct Capacity<'a> {
     /// 生命週期的阻擋（完全退出的停止意圖、Workspace 等待「繼續工作」，`lifecycle::dispatch_halt`）。
     /// 有值時任何名額（含交接）都不派，佇列重試與額度恢復也就不會啟動新的 Run。
     pub halt: Option<WaitReason>,
+    /// 有開著的 Controller CLI（非終態的互動式 Controller Run）的 Controller 帳號（desktop-controller-cli 票 05）：
+    /// 不派新的 Worker 給它們，已在執行的 Worker 照常佔用名額；Controller CLI 結束後自動回到候選。
+    pub controller_accounts: &'a [String],
 }
 
 impl Capacity<'_> {
@@ -397,6 +400,15 @@ pub fn place_preferring(capacity: &Capacity<'_>, kind: SlotKind, preferred: Opti
 
     let mut candidates = Vec::new();
     for profile in usable {
+        if capacity.controller_accounts.contains(&profile.id) {
+            reasons.push(reason(
+                WaitCategory::Account,
+                "controller_account",
+                format!("帳號「{}」是開著的 Controller CLI 的 Controller 帳號，結束後才會派新的工作給它", profile.name),
+                Some(&profile.id),
+            ));
+            continue;
+        }
         if let Some(waiting) = quota_reason(capacity, profile) {
             reasons.push(waiting);
             continue;
