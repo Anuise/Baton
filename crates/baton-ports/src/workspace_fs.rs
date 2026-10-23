@@ -112,6 +112,7 @@ pub trait WorkspaceFs: Send + Sync {
     async fn write_readonly_files(&self, dir: &Path, files: &[(String, Vec<u8>)]) -> PortResult<()>;
     /// 檔案不存在時才建立並寫入內容（需要時一併建立上層目錄），已存在時不動它；回傳是否建立了新檔案。
     /// 以「只建立新檔」開啟，檢查與建立之間才出現的檔案也不會被覆寫（Workspace 的 AI 決策紀錄，desktop-controller-cli 票 04）。
+    /// 建立後寫入失敗時移除剛建立的檔案再回錯誤，下次仍會寫入完整內容。
     async fn create_file_if_absent(&self, path: &Path, bytes: &[u8]) -> PortResult<bool>;
     /// 讀取成果檔案；檔案不存在回 `None`。
     async fn read_artifact(&self, path: &Path) -> PortResult<Option<Vec<u8>>>;
@@ -146,6 +147,14 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> PortResult<()> {
 
 /// [`WorkspaceFs::create_file_if_absent`] 的正式實作（fake 也使用）。
 pub fn create_file_if_absent(path: &Path, bytes: &[u8]) -> PortResult<bool> {
+    create_new_with(path, |file| {
+        file.write_all(bytes)?;
+        file.sync_all()
+    })
+}
+
+/// 以「只建立新檔」建立 `path` 後交給 `write` 寫入；已存在時不呼叫 `write`、回 `false`（測試可注入寫入失敗）。
+fn create_new_with(path: &Path, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> PortResult<bool> {
     let fail = |what: &str, e: std::io::Error| PortError::Failed(format!("{what} {}：{e}", path.display()));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| fail("無法建立目錄", e))?;
@@ -155,8 +164,12 @@ pub fn create_file_if_absent(path: &Path, bytes: &[u8]) -> PortResult<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
         Err(e) => return Err(fail("無法建立", e)),
     };
-    file.write_all(bytes).map_err(|e| fail("無法寫入", e))?;
-    file.sync_all().map_err(|e| fail("無法 fsync", e))?;
+    if let Err(e) = write(&mut file) {
+        // 這個檔案是自己剛建立的：留著空的或寫一半的內容，之後會永遠判定「已存在」而不再補寫
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(fail("無法寫入", e));
+    }
     Ok(true)
 }
 
@@ -315,6 +328,35 @@ mod tests {
         let blocked = dir.path().join("file").join("child.md");
         std::fs::write(dir.path().join("file"), b"x").unwrap();
         assert!(create_file_if_absent(&blocked, b"x").is_err(), "上層是檔案時是錯誤");
+    }
+
+    #[test]
+    fn a_failed_write_removes_the_new_file_so_the_next_attempt_writes_the_template() {
+        // R027 第 3 項：建立後寫入或 fsync 失敗時不能留下空的或寫一半的檔案，否則之後永遠判定「已存在」而不補寫範本
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".baton").join("ai-decisions.md");
+
+        let failed = create_new_with(&target, |file| {
+            file.write_all(b"temp")?;
+            Err(std::io::Error::other("模擬磁碟已滿"))
+        });
+        assert!(failed.is_err());
+        assert!(!target.exists(), "寫入失敗時移除剛建立的檔案");
+
+        assert!(create_file_if_absent(&target, b"template").unwrap());
+        assert_eq!(read_file_if_exists(&target).unwrap().as_deref(), Some(&b"template"[..]));
+    }
+
+    #[test]
+    fn a_failed_write_never_removes_a_file_that_already_existed() {
+        // AI-36：已存在的檔案（包括檢查之後才出現的）一律不動；寫入步驟根本不會執行
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ai-decisions.md");
+        std::fs::write(&target, b"existing").unwrap();
+
+        let outcome = create_new_with(&target, |_| Err(std::io::Error::other("不該被呼叫")));
+        assert!(!outcome.unwrap());
+        assert_eq!(read_file_if_exists(&target).unwrap().as_deref(), Some(&b"existing"[..]));
     }
 
     #[test]
