@@ -5,10 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{cleanup, decision, external_operation, guard, handoff, quota, recovery, run, task, verification, Timestamp};
+use crate::{
+    cleanup, controller_cli, decision, external_operation, guard, handoff, quota, recovery, run, task, verification, Timestamp,
+};
 
 /// 時間線的事件類別。前六類是票面要求的「派工、交接、裁定、恢復、驗證與清理」；
-/// 其餘四類是計算觀測指標需要的事件（Task 狀態、外部操作、教訓重犯、用量），同樣可在時間線上追溯。
+/// 其後四類是計算觀測指標需要的事件（Task 狀態、外部操作、教訓重犯、用量），同樣可在時間線上追溯；
+/// 最後是 Controller CLI 的開啟、結束與帳號（desktop-controller-cli 票 03）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimelineCategory {
@@ -22,10 +25,11 @@ pub enum TimelineCategory {
     ExternalOperation,
     Lesson,
     Usage,
+    Controller,
 }
 
 impl TimelineCategory {
-    pub const ALL: [TimelineCategory; 10] = [
+    pub const ALL: [TimelineCategory; 11] = [
         TimelineCategory::Dispatch,
         TimelineCategory::Handoff,
         TimelineCategory::Decision,
@@ -36,6 +40,7 @@ impl TimelineCategory {
         TimelineCategory::ExternalOperation,
         TimelineCategory::Lesson,
         TimelineCategory::Usage,
+        TimelineCategory::Controller,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -50,12 +55,13 @@ impl TimelineCategory {
             TimelineCategory::ExternalOperation => "external_operation",
             TimelineCategory::Lesson => "lesson",
             TimelineCategory::Usage => "usage",
+            TimelineCategory::Controller => "controller",
         }
     }
 }
 
 /// 可能出現在時間線上的聚合種類；Store 只讀這些聚合的事件。
-pub const TIMELINE_AGGREGATES: [&str; 10] = [
+pub const TIMELINE_AGGREGATES: [&str; 11] = [
     run::RUN_AGGREGATE,
     handoff::HANDOFF_AGGREGATE,
     decision::DECISION_AGGREGATE,
@@ -66,6 +72,7 @@ pub const TIMELINE_AGGREGATES: [&str; 10] = [
     external_operation::EXTERNAL_OPERATION_DUPLICATE_AGGREGATE,
     guard::RECURRENCE_AGGREGATE,
     quota::USAGE_AGGREGATE,
+    controller_cli::CONTROLLER_CLI_AGGREGATE,
 ];
 
 /// Run 的派工生命週期事件。進度、checkpoint、lease 續約與原生 Session 綁定量大且不是派工的轉折，不上時間線。
@@ -112,6 +119,7 @@ pub fn category_of(aggregate_type: &str, event_type: &str) -> Option<TimelineCat
         }
         guard::RECURRENCE_AGGREGATE => Some(C::Lesson),
         quota::USAGE_AGGREGATE => Some(C::Usage),
+        controller_cli::CONTROLLER_CLI_AGGREGATE => Some(C::Controller),
         _ => None,
     }
 }
