@@ -35,6 +35,7 @@ const CATEGORY_LABELS: Record<TimelineCategory, string> = {
   external_operation: "外部操作",
   lesson: "教訓重犯",
   usage: "用量",
+  controller: "Controller",
 };
 
 /** 沒有資料（null）一律顯示的文字，不當成 0。 */

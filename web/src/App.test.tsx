@@ -113,6 +113,8 @@ const client = {
   verificationOverview: vi.fn(async () => verificationOverview()),
   explorationOverview: vi.fn(async () => explorationOverview()),
   getConversation: vi.fn(async () => conversationView()),
+  getControllerCli: vi.fn(async () => ({ workspace_id: "ws_1", run: null })),
+  listProfiles: vi.fn(async () => ({ profiles: [profile()], limit: 8 })),
   updateStatus: vi.fn(async () => availableUpdateStatus()),
   applyUpdate: vi.fn(),
 } as unknown as AppClient;
@@ -226,6 +228,7 @@ describe("App 外殼", () => {
       ]);
       expect(workspaceTab("Controller")).toHaveAttribute("aria-selected", "true");
       expect(screen.getByRole("tabpanel", { name: "Controller" })).toHaveTextContent("Controller：筆記");
+      expect(client.getControllerCli).toHaveBeenCalledWith("ws_1");
       expect(screen.queryByText("請從左側選擇或建立 Workspace")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "選擇 筆記" })).toHaveAttribute("aria-current", "true");
       // 其他功能尚未開啟，不會讀取

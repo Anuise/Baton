@@ -175,6 +175,24 @@ describe("時間線", () => {
     expect(items[2]).not.toHaveTextContent("Run：");
   });
 
+  it("Controller CLI 的開啟與結束以「Controller」類別列出", async () => {
+    const opened = timelineEvent({
+      seq: 9,
+      category: "controller",
+      aggregate_type: "controller_cli",
+      aggregate_id: "ctl_1",
+      event_type: "controller_cli_opened",
+      task_ids: [],
+      run_id: null,
+    });
+    renderPage(fakeClient({ events: [opened] }));
+
+    const list = await screen.findByRole("list", { name: "事件" });
+    const [item] = within(list).getAllByRole("listitem");
+    expect(item).toHaveTextContent("Controller");
+    expect(item).toHaveTextContent("controller_cli_opened");
+  });
+
   it("選擇 Task 後以 task_id 重新查詢並只顯示 Runtime 回傳的事件；清除過濾後回到全部", async () => {
     const filteredEvent = allEvents[1];
     const client = fakeClient({ filtered: { task_2: [filteredEvent] } });
