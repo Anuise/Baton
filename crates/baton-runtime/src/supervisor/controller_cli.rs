@@ -6,8 +6,11 @@
 //! - 有 launch intent 而沒有回執：上一次開窗的結果不明（Runtime 在開窗與回執之間中斷）。以 command_id 找回宿主就補寫回執，
 //!   找不到就結束這個 Run；**不重複開窗**。
 //! - 有回執：使用者要求結束就停止宿主（連同它啟動的 `claude`）；否則以既有的程序存活查驗，宿主不在就結束。
+//! - 上一個 Runtime 實例開出的（Runtime 重啟或當掉恢復後，票 07）：先以 command_id 查驗宿主。仍存活就重新綁定
+//!   （補寫回執、舊憑證失效，頁簽提示重新開啟）；已不在就標為 `interrupted`（開窗結果不明的照上一條結束）。都不重新開窗。
 //!
-//! Run 結束時，以它簽發的 Controller 憑證隨之失效（憑證的有效性取決於 Run 是否尚未結束）。
+//! Run 結束時，以它簽發的 Controller 憑證隨之失效（憑證的有效性取決於 Run 是否尚未結束、是否被重新綁定）。
+//! 完全退出時，Supervisor 在停止流程中結束所有開著的 Controller CLI，並列入停止進度（`stop_controller_clis_for_exit`）。
 
 use std::path::Path;
 use std::time::Duration;
@@ -16,11 +19,12 @@ use baton_api::RUN_SETTINGS_DIR;
 use baton_domain::agent::{AGENT_TOKEN_ENV, RUNTIME_URL_ENV};
 use baton_domain::auth::ControllerScope;
 use baton_domain::controller_cli::{
-    ControllerCliRun, ControllerCliStatus, END_CLAUDE_NOT_FOUND, END_HOST_GONE, END_LAUNCH_FAILED, END_LAUNCH_OUTCOME_UNKNOWN,
-    END_TERMINAL_FAILED, END_USER_ENDED, WINDOW_TITLE_PREFIX,
+    ControllerCliRun, ControllerCliStatus, END_CLAUDE_NOT_FOUND, END_FULL_EXIT, END_HOST_GONE, END_LAUNCH_FAILED,
+    END_LAUNCH_OUTCOME_UNKNOWN, END_TERMINAL_FAILED, END_USER_ENDED, WINDOW_TITLE_PREFIX,
 };
+use baton_domain::lifecycle::{RunStopOutcome, RunStopRecord, StopAnomaly};
 use baton_domain::shared_settings::{self, MANIFEST_FILE};
-use baton_ports::{Liveness, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
+use baton_ports::{Liveness, ProcessIdentity, RunSpec, SpawnSpec, StopResult, TerminalLaunch, ToolProbe};
 
 use super::{identity_of, process_record, Supervisor};
 
@@ -36,6 +40,8 @@ impl Supervisor {
         for run in runs {
             if run.launched_at.is_none() {
                 self.launch_controller_cli(&run).await;
+            } else if !self.controller_clis_checked.lock().await.contains(&run.id) {
+                self.reconcile_controller_cli_after_restart(&run).await;
             } else if run.host.is_none() {
                 self.recover_controller_cli(&run).await;
             } else {
@@ -54,6 +60,8 @@ impl Supervisor {
             Ok(run) => run,
             Err(error) => return self.note(&format!("Controller CLI {} 無法寫入 launch intent，不開窗：{error}", run.id)),
         };
+        // 由這個 Runtime 實例開窗、簽發憑證：之後不需要重啟後的查驗
+        self.controller_clis_checked.lock().await.insert(run.id.clone());
         // 2. 確認找得到 claude（宿主找不到時視窗只會一閃而過）
         match self.ports.claude_env.probe_claude().await {
             Ok(ToolProbe::Found { .. }) => {}
@@ -138,6 +146,98 @@ impl Supervisor {
         }
     }
 
+    /// 上一個 Runtime 實例開出的 Controller CLI（Runtime 重啟或當掉恢復後）：以 command_id 查驗宿主（同時取得管理權），
+    /// 存活就重新綁定、已不在就中斷；無法查驗時不下結論，下次再試。都不重新開窗。
+    async fn reconcile_controller_cli_after_restart(&self, run: &ControllerCliRun) {
+        let spawn = match self.controller_cli_lookup(run).await {
+            Ok(spawn) => spawn,
+            Err(error) => return self.note(&format!("Controller CLI {} 暫時無法查驗宿主，稍後重試：{error}", run.id)),
+        };
+        let found = match self.ports.process_control.find(&spawn).await {
+            Ok(found) => found,
+            Err(error) => return self.note(&format!("Controller CLI {} 暫時無法查驗宿主，稍後重試：{error}", run.id)),
+        };
+        let now = self.ports.clock.now();
+        match (found, run.host.is_some()) {
+            (Some(receipt), had_receipt) => {
+                if !had_receipt {
+                    let host = process_record(&receipt.identity);
+                    if let Err(error) = self.store.record_controller_cli_receipt(&run.id, host, now).await {
+                        return self.note(&format!("Controller CLI {} 的回執沒有寫回，稍後重試：{error}", run.id));
+                    }
+                }
+                // 憑證只經環境變數交給宿主，已開著的 CLI 拿不到新的：舊憑證失效，由使用者重新開啟
+                if let Err(error) = self.store.rebind_controller_cli(&run.id, now).await {
+                    return self.note(&format!("Controller CLI {} 的重新綁定沒有寫入，稍後重試：{error}", run.id));
+                }
+                self.note(&format!(
+                    "Controller CLI {} 的宿主 {} 在 Runtime 重啟後仍存活：舊憑證已失效，等使用者重新開啟",
+                    run.id, receipt.identity.pid
+                ));
+            }
+            (None, false) => {
+                let reason = "上一次開啟時 Runtime 中斷，找不到 Controller CLI 的終端機；為避免重複開窗，這次開啟已結束，請重新開啟";
+                self.end_controller_cli(run, END_LAUNCH_OUTCOME_UNKNOWN, reason).await;
+            }
+            (None, true) => {
+                let reason = "Runtime 重新啟動時 Controller CLI 的終端機已關閉；請重新開啟（同一個帳號會接續原生 Session）";
+                if let Err(error) = self.store.interrupt_controller_cli(&run.id, reason, now).await {
+                    return self.note(&format!("Controller CLI {} 的中斷沒有寫入，稍後重試：{error}", run.id));
+                }
+            }
+        }
+        self.controller_clis_checked.lock().await.insert(run.id.clone());
+    }
+
+    /// 完全退出：結束所有開著的 Controller CLI（宿主連同它啟動的 `claude`），回傳每一項的停止結果。
+    /// 確認停止（或從未開出宿主）的以 `full_exit` 結束 Run（憑證隨之失效）；無法確認的記為停止異常、Run 維持原狀。
+    pub(super) async fn stop_controller_clis_for_exit(&self, runs: Vec<ControllerCliRun>) -> Vec<RunStopRecord> {
+        let stops = runs.into_iter().map(|run| async move {
+            let record = RunStopRecord::pending_controller_cli(&run.id, &run.workspace_id);
+            let anomaly = |kind: StopAnomaly, message: String| RunStopRecord {
+                outcome: RunStopOutcome::Anomaly,
+                anomaly: Some(kind),
+                message: Some(message),
+                ..record.clone()
+            };
+            let outcome = match self.controller_cli_host_for_exit(&run).await {
+                Err(message) => return anomaly(StopAnomaly::StopFailed, message),
+                Ok(None) => RunStopOutcome::NotStarted,
+                Ok(Some(identity)) => match self.ports.process_control.stop(&identity, CONTROLLER_CLI_STOP_GRACE).await {
+                    Ok(StopResult::StoppedGracefully) => RunStopOutcome::StoppedGracefully,
+                    Ok(StopResult::ForceKilled) => RunStopOutcome::ForceKilled,
+                    Ok(StopResult::StillAlive) => {
+                        let message = "終止程序樹之後仍有程序存活，無法確認 Controller CLI 已停止".to_string();
+                        return anomaly(StopAnomaly::StillAlive, message);
+                    }
+                    Err(error) => return anomaly(StopAnomaly::StopFailed, format!("無法結束 Controller CLI：{error}")),
+                },
+            };
+            let mut record = RunStopRecord { outcome, ..record };
+            let now = self.ports.clock.now();
+            if let Err(error) = self.store.end_controller_cli(&run.id, END_FULL_EXIT, "完全退出時由 Runtime 結束", None, now).await {
+                record.message = Some(format!("Controller CLI 已停止，但無法寫入 Run 的結束：{error}"));
+            }
+            record
+        });
+        futures::future::join_all(stops).await
+    }
+
+    /// 完全退出時要結束的宿主：還沒開窗的沒有宿主；開窗結果不明的以 command_id 找回。
+    /// Runtime 重建後 ProcessControl 要先找回宿主所在的程序群組才能停止它，所以有回執的也先找一次。
+    async fn controller_cli_host_for_exit(&self, run: &ControllerCliRun) -> Result<Option<ProcessIdentity>, String> {
+        if run.launched_at.is_none() {
+            return Ok(None);
+        }
+        let spawn = self.controller_cli_lookup(run).await.map_err(|error| format!("無法組出 Controller CLI 的啟動規格：{error}"))?;
+        let found = self.ports.process_control.find(&spawn).await;
+        match (run.host.as_ref(), found) {
+            (Some(host), _) => Ok(Some(identity_of(host))),
+            (None, Ok(found)) => Ok(found.map(|receipt| receipt.identity)),
+            (None, Err(error)) => Err(format!("無法以 command_id 找回 Controller CLI 的宿主：{error}")),
+        }
+    }
+
     /// 已有宿主：使用者要求結束就停止它；否則查驗存活，宿主確定不在才結束（無法判定時不下結論）。
     async fn watch_controller_cli(&self, run: &ControllerCliRun) {
         let Some(host) = run.host.as_ref() else { return };
@@ -189,6 +289,7 @@ impl Supervisor {
             settings_files,
             model: None,
             resume_native_session_id: None,
+            continue_session: run.continue_session,
         })
     }
 

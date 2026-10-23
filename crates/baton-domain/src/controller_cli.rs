@@ -6,7 +6,11 @@
 //!   所以重啟後看到「已寫 launch intent、沒有回執」就知道開窗結果不明，只以 `command_id` 找回、不重複開窗。
 //! - `running`：開窗回執（宿主程序身分）已寫回，或宿主已回報 `claude` 啟動。
 //! - `ended`：宿主回報結束、宿主消失、使用者按結束、或開啟失敗。終態；Controller 憑證隨之失效。
-//! - `interrupted`：Runtime 當掉恢復時的處理（票 07），本票不產生。
+//! - `interrupted`：Runtime 重啟（含當掉恢復）後查驗發現宿主已不在（票 07）。終態；Controller 憑證隨之失效。
+//!
+//! Runtime 重啟後查驗發現宿主仍存活時，Run 維持 `running`（不打斷使用者正在用的 CLI），但記下重新綁定（`rebound_at`）：
+//! 舊的 Controller 憑證從此失效（憑證只經環境變數交給宿主，已開著的 CLI 拿不到新的），頁簽提示使用者重新開啟。
+//! 同一個 Workspace 以同一個帳號重新開啟時，以 `--continue` 接續上一次的原生 Session（`continue_session`）。
 //!
 //! 每個 Workspace 同時最多一個非終態的 Controller Run；同一個 Profile 可以同時是多個 Workspace 的 Controller 帳號。
 
@@ -28,6 +32,10 @@ pub const EVENT_CONTROLLER_CLI_RUNNING: &str = "controller_cli_running";
 /// 使用者按「結束」：等 Supervisor 結束宿主。
 pub const EVENT_CONTROLLER_CLI_END_REQUESTED: &str = "controller_cli_end_requested";
 pub const EVENT_CONTROLLER_CLI_ENDED: &str = "controller_cli_ended";
+/// Runtime 重啟後查驗宿主已不在（票 07）。
+pub const EVENT_CONTROLLER_CLI_INTERRUPTED: &str = "controller_cli_interrupted";
+/// Runtime 重啟後查驗宿主仍存活：舊憑證失效，等使用者重新開啟（票 07）。
+pub const EVENT_CONTROLLER_CLI_REBOUND: &str = "controller_cli_rebound";
 
 /// 終端機內執行的 MCP shim 子命令：「Controller 宿主」，它啟動 `claude` 並回報開始與結束。
 pub const HOST_SUBCOMMAND: &str = "controller-host";
@@ -47,6 +55,10 @@ pub const END_PROFILE_UNAVAILABLE: &str = "profile_unavailable";
 pub const END_TERMINAL_FAILED: &str = "terminal_failed";
 pub const END_LAUNCH_FAILED: &str = "launch_failed";
 pub const END_LAUNCH_OUTCOME_UNKNOWN: &str = "launch_outcome_unknown";
+/// 完全退出時由 Runtime 結束（票 07）。
+pub const END_FULL_EXIT: &str = "full_exit";
+/// Runtime 重啟後宿主已不在（`interrupted` 的原因代碼，票 07）。
+pub const END_RUNTIME_RESTARTED: &str = "runtime_restarted";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -115,6 +127,12 @@ pub struct ControllerCliRun {
     pub end_reason: Option<String>,
     /// 宿主回報的 `claude` 結束碼。
     pub exit_code: Option<i32>,
+    /// 以 `--continue` 接續這個 Workspace 在這個帳號下最近的原生 Session（開啟時決定，票 07）。
+    #[serde(default)]
+    pub continue_session: bool,
+    /// Runtime 重啟後查驗宿主仍存活、重新綁定的時間（票 07）：有值時舊的 Controller 憑證已失效，要重新開啟。
+    #[serde(default)]
+    pub rebound_at: Option<Timestamp>,
 }
 
 /// 一次變更：新的 Run 與這次產生的事件，由 Store 在一個交易中套用。
@@ -194,6 +212,10 @@ pub fn open(
     if let Some(reason) = profile_unavailable_reason(profile, profiles) {
         return Err(ControllerCliError::ProfileUnavailable(reason));
     }
+    let continue_session = runs
+        .iter()
+        .rfind(|r| r.workspace_id == workspace.id && r.running_at.is_some())
+        .is_some_and(|previous| previous.profile_id == profile.id);
     let run = ControllerCliRun {
         id: ids.run_id,
         workspace_id: workspace.id.clone(),
@@ -213,12 +235,15 @@ pub fn open(
         end_code: None,
         end_reason: None,
         exit_code: None,
+        continue_session,
+        rebound_at: None,
     };
     let payload = serde_json::json!({
         "workspace_id": run.workspace_id,
         "profile_id": run.profile_id,
         "profile_name": profile.name,
         "settings_version": run.settings_version,
+        "continue_session": continue_session,
     });
     Ok(apply(run, EVENT_CONTROLLER_CLI_OPENED, payload, now))
 }
@@ -298,6 +323,39 @@ pub fn end(
         "exit_code": exit_code,
     });
     Ok(apply(next, EVENT_CONTROLLER_CLI_ENDED, payload, now))
+}
+
+/// Runtime 重啟後查驗宿主已不在：中斷（終態）。Controller 憑證隨之失效；之後以同一個帳號重新開啟會接續原生 Session。
+pub fn interrupt(run: &ControllerCliRun, reason: &str, now: Timestamp) -> Result<ControllerCliChange, ControllerCliError> {
+    ensure_open(run)?;
+    let mut next = run.clone();
+    next.status = ControllerCliStatus::Interrupted;
+    next.ended_at = Some(now);
+    next.end_code = Some(END_RUNTIME_RESTARTED.to_string());
+    next.end_reason = Some(reason.to_string());
+    let payload = serde_json::json!({
+        "profile_id": run.profile_id,
+        "end_code": END_RUNTIME_RESTARTED,
+        "end_reason": reason,
+    });
+    Ok(apply(next, EVENT_CONTROLLER_CLI_INTERRUPTED, payload, now))
+}
+
+/// Runtime 重啟後查驗宿主仍存活：重新綁定（舊憑證失效），Run 維持原狀態等使用者重新開啟。已重新綁定過就不再改變。
+pub fn rebind(run: &ControllerCliRun, now: Timestamp) -> Result<Option<ControllerCliChange>, ControllerCliError> {
+    ensure_open(run)?;
+    if run.rebound_at.is_some() {
+        return Ok(None);
+    }
+    let mut next = run.clone();
+    next.rebound_at = Some(now);
+    let payload = serde_json::json!({ "profile_id": run.profile_id });
+    Ok(Some(apply(next, EVENT_CONTROLLER_CLI_REBOUND, payload, now)))
+}
+
+/// 這個 Run 簽發的 Controller 憑證是否仍有效：尚未結束，而且沒有在 Runtime 重啟後被重新綁定。
+pub fn credential_valid(run: &ControllerCliRun) -> bool {
+    !run.status.is_terminal() && run.rebound_at.is_none()
 }
 
 fn ensure_open(run: &ControllerCliRun) -> Result<(), ControllerCliError> {

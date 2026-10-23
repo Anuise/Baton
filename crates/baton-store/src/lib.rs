@@ -1909,6 +1909,13 @@ const MIGRATIONS: &[Migration] = &[
         CREATE UNIQUE INDEX controller_run_one_cli_per_workspace ON controller_run (workspace_id)
             WHERE kind = 'cli' AND status IN ('starting', 'running');",
     },
+    // desktop-controller-cli 票 07：同帳號重開時以 `--continue` 接續原生 Session（開啟時決定）；
+    // Runtime 重啟後宿主仍存活時的重新綁定時間（有值時以這個 Run 簽發的 Controller 憑證失效）
+    Migration {
+        name: "controller_cli_recovery",
+        sql: "ALTER TABLE controller_run ADD COLUMN continue_session INTEGER NOT NULL DEFAULT 0 CHECK (continue_session IN (0, 1));
+        ALTER TABLE controller_run ADD COLUMN rebound_at INTEGER;",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
