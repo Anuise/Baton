@@ -18,4 +18,4 @@
 | R014-06-verify | 06 | verify | Work-8 | 2026-10-23 16:52 | 2026-10-23 17:11 | PASS（基底早於票 07，依 AI-109 整合後合併） |
 | R015-05-verify | 05 | verify | Work-9 | 2026-10-23 16:56 | | |
 | R016-08-verify | 08 | verify | Work-3 | 2026-10-23 17:01 | | |
-| R017-06-integrate | 06 | integrate | Work-8 | 2026-10-23 17:11 | | |
+| R017-06-integrate | 06 | integrate | Work-8 | 2026-10-23 17:11 | 2026-10-23 17:24 | DONE（3ea2ec9），依 AI-109 直接合併 |
