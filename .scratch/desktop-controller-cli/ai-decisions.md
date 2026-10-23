@@ -574,6 +574,31 @@
   - 先寫暫存檔，再以 `hard_link` 連到目標——FAT／exFAT 不支援硬連結，在這類磁碟上會完全開不起來，崩潰時還會留下暫存檔。
   - 使用不帶 REPLACE_EXISTING 的 `MoveFileExW`——要加 unsafe 與 windows-sys。
 - 影響：寫入期間程序被強制結束的極短空窗仍可能留下不完整的檔案（AI-36 的「影響」已記載）。
+### AI-50：harness 的當掉模擬一律等 fake 回報「已走到停住點」，不以固定時間估計
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R030-fix-c）
+- 決策：`Harness::supervise_until(reached)` 以 `select!` 同時推進 `supervise` 與 `reached`，`reached` 完成就丟棄這一次處理（另有 20 秒保險，逾時就 panic）。fake 的停住點各補一個等待方法：`FakeWorkspaceFs::wait_for_held_removal`、`wait_for_artifact_hang`，`FakeCommandRunner::wait_for_held`，`FakeVerificationDriver::wait_for_http_hang`（與既有的 `wait_for_held_merge` 相同，用 `Notify::notify_one` 保留一次通知，先到先等都不會漏）；ProcessControl 沿用既有的 `wait_for_spawn_hang`、`wait_for_stop_call`。改寫的 12 個測試檔（`acceptance`、`artifacts`、`handoff`、`outbox_and_external_ops`、`retry_budgets`、`run_process_release`、`runs`、`sessions`、`verification_handoff`、`verification_takeover_blocked`、`worktree_cleanup`、`worktrees`）大多來自 platform-rebuild-v1，一併改；斷言都不變。`run_process_release` 的「慢的停止不擋住其他取消」沒有單一停住點，改成在 supervise 進行中輪詢「快的 Run 已是 cancelled」（若停止變成一個接一個，就會撞到保險逾時而失敗）。`crash_recovery.rs` 原本就以條件輪詢（`supervise_until_stuck`），不改。
+- 理由：舊寫法 `timeout(300/500ms, supervise())` 假設 Supervisor 在這段真實時間內一定走到停住點；高負載下 timeout 先到期，當掉位置提早，後面的斷言（`removing`、`merging`、驗證的 verdict）就失敗。以同時跑 6 份 × 16 執行緒重現：舊寫法 `worktree_cleanup` 6 次中失敗 2 次（崩潰時還沒改名到暫放目錄）；新寫法 12 個測試檔各 10 份同時跑全部通過，單跑也從每支至少 300ms 降到不必等待。
+- 替代方案：加長 timeout——只是降低機率，也讓每支測試更慢；只改 review-notes 點名的三支——其餘同樣寫法的測試遲早一樣不穩。
+- 影響：之後寫「在某一點當掉」的情境測試要用 `supervise_until` 配合對應 fake 的等待方法；`docs/development.md` 的 harness 說明已同步。review-notes 第 1 項 R005 那次未保存輸出的結束碼 101 無法確認是哪一支，依時序與第 2、5 項同一成因推定一併解決。
+- 審閱：未審
+
+### AI-51：時間線的 Controller CLI 事件以帳號清單對照帳號名稱，另顯示 Controller CLI id 與原始結束代碼
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R030-fix-c）
+- 決策：時間線頁與讀 Task 標題一起讀帳號清單（`listProfiles`，含已封存的帳號）；`controller` 類別的事件在原有欄位後接「帳號：名稱」（payload 有 `profile_id` 時；`launch_started`、`end_requested` 沒有就不顯示）、「Controller CLI：`aggregate_id`」、「結束代碼：`end_code`」（`ended`、`interrupted` 才有，顯示原始代碼，不翻成中文）。帳號清單讀不到或找不到對應帳號時退回顯示 `profile_id`，不顯示錯誤。
+- 理由：R028 第 2 項：spec 故事 41 與票 03 驗收要求時間線看得出開啟、結束與帳號，原本只在 API payload 達成。只有 `controller_cli_opened` 帶 `profile_name`，其他事件只有 `profile_id`，以帳號清單對照才能每筆一致；讀不到時退回 id 與 Task 標題的作法相同。
+- 替代方案：用 opened 事件的 `profile_name`——結束、中斷、重新綁定事件看不到帳號；後端在每個事件 payload 補 `profile_name`——跨到 final-ab 的範圍，而且改名後舊事件仍是舊名；結束代碼翻成中文——要維護另一份代碼對照，Controller 頁簽已顯示結束原因。
+- 影響：時間線多一個 `listProfiles` 請求；`TimelinePage` 的 client 型別多要求 `listProfiles`（App 傳入的完整 client 原本就有）。
+- 審閱：未審
+
+### AI-52：前端輪詢測試改用完全的假計時器，Testing Library 的非同步等待上限統一為 3 秒
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R030-fix-c）
+- 決策：`ControllerPage`、`AccountsPage` 的輪詢測試從 `useFakeTimers({ shouldAdvanceTime: true })`＋一秒餘裕改成 `useFakeTimers()`＋`advanceTimersByTimeAsync`（`ExitProgress`、`RecoveryPanel` 測試已有的寫法），斷言收緊為「差 1ms 還沒呼叫、到 interval 剛好第二次」。多個請求到達順序不定的測試（ControllerPage 的狀態／帳號清單／額度、ExplorationPage 的標題先於資料）改等明確的完成狀態再斷言。`web/src/test-setup.ts` 以 `configure({ asyncUtilTimeout: 3000 })` 把 findBy／waitFor 的預設上限從 1 秒放寬到 3 秒（仍低於 vitest 每個測試 5 秒）。Controller 開著時帳號清單讀取失敗的提示移到兩個分支共用的位置，仍要有狀態資料才顯示。
+- 理由：R028 第 3 項與 review-notes 第 8 項。`shouldAdvanceTime` 讓假時間隨真實時間前進，負載高時超過一秒餘裕就提早輪詢；AccountsPage 的間隔是 5 分鐘、元件沒有 `pollMs` 參數，無法用「短 pollMs＋真實計時器」，兩邊統一一種寫法。以延遲注入（讓 fake client 的回應晚到、換到達順序）重現：帳號清單晚到時 ControllerPage 6 個測試失敗、ExplorationPage 資料晚 30ms 時 2 個失敗，修後都通過；指定加壓（3 套同時 ×4 輪）12 次全過。
+- 替代方案：只拉長等待上限——時序太早的問題仍在；逐一給 findBy 指定 timeout——容易漏。
+- 影響：只拉長等待上限、不改斷言；`App.test.tsx` 自己指定的 10 秒不受影響。更重的負載（3 套完整前端測試同時跑）下 `VerificationPage.test.tsx` 另有不穩定，不在本次範圍，已記入 review-notes 第 11 項。
 - 審閱：未審
 
 ## Spec 決策審閱紀錄

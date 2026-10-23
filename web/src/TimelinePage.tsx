@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { formatTimestamp } from "./time";
 import type {
+  AccountClient,
   DurationStats,
   MetricRatio,
   Metrics,
@@ -17,8 +18,8 @@ import type {
 type Loaded<T> = { state: "loading" } | { state: "ready"; value: T } | { state: "failed"; reason: string };
 
 interface Props {
-  /** Task 清單只用來顯示標題；讀不到時改顯示 Task id。 */
-  client: ObservabilityClient & Pick<TaskClient, "getTaskBoard">;
+  /** Task 清單只用來顯示標題、帳號清單只用來顯示帳號名稱；讀不到時改顯示 id。 */
+  client: ObservabilityClient & Pick<TaskClient, "getTaskBoard"> & Pick<AccountClient, "listProfiles">;
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
@@ -43,6 +44,13 @@ const NO_DATA = "無資料";
 
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 事件 payload 的字串欄位；不是物件或欄位不是字串時為 null。 */
+function payloadString(payload: unknown, key: string): string | null {
+  if (typeof payload !== "object" || payload === null) return null;
+  const value = (payload as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
 }
 
 /** 0–1 的比例顯示成百分比，最多一位小數。 */
@@ -88,6 +96,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
   // 過濾選項取自未過濾時間線出現過的 Task，過濾後仍保留
   const [taskOptions, setTaskOptions] = useState<string[]>([]);
   const [titles, setTitles] = useState<Record<string, string>>({});
+  const [profileNames, setProfileNames] = useState<Record<string, string>>({});
 
   useEffect(() => {
     // 卸載或換 Workspace 後遲到的回應一律忽略
@@ -99,6 +108,11 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
     );
     client.getTaskBoard(workspace.id).then(
       (board) => !cancelled && setTitles(Object.fromEntries(board.tasks.map((task) => [task.id, task.title]))),
+      () => {},
+    );
+    // Controller CLI 事件只帶 profile_id，帳號名稱由帳號清單對照（含已封存的帳號）
+    client.listProfiles().then(
+      (list) => !cancelled && setProfileNames(Object.fromEntries(list.profiles.map((profile) => [profile.id, profile.name]))),
       () => {},
     );
     return () => {
@@ -124,6 +138,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
   }, [client, workspace.id, taskId]);
 
   const taskLabel = (id: string) => titles[id] ?? id;
+  const profileLabel = (id: string) => profileNames[id] ?? id;
 
   return (
     <section className="timeline-page" aria-label="時間線">
@@ -170,12 +185,26 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
                 <span className="timeline-type">{event.event_type}</span>
                 {event.task_ids.length > 0 && <span>Task：{event.task_ids.map(taskLabel).join("、")}</span>}
                 {event.run_id !== null && <span>Run：{event.run_id}</span>}
+                {event.category === "controller" && <ControllerEventFacts event={event} profileLabel={profileLabel} />}
               </li>
             ))}
           </ol>
         )}
       </section>
     </section>
+  );
+}
+
+/** Controller CLI 事件的帳號、Controller CLI id 與結束代碼（Run id 為 null，帳號只在 payload）。 */
+function ControllerEventFacts({ event, profileLabel }: { event: TimelineEvent; profileLabel: (id: string) => string }) {
+  const profileId = payloadString(event.payload, "profile_id");
+  const endCode = payloadString(event.payload, "end_code");
+  return (
+    <>
+      {profileId !== null && <span>帳號：{profileLabel(profileId)}</span>}
+      <span>Controller CLI：{event.aggregate_id}</span>
+      {endCode !== null && <span>結束代碼：{endCode}</span>}
+    </>
   );
 }
 

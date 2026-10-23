@@ -50,8 +50,8 @@ describe("探索", () => {
   it("疑點依狀態分在各自的區塊，疑點絕不出現在已確認缺陷區，也不顯示「已確認」", async () => {
     renderPage(fakeClient());
 
-    await screen.findByRole("heading", { name: "探索：筆記" });
-    const defects = group("已確認缺陷");
+    // 標題不等資料讀回就會出現：等分區出現再斷言
+    const defects = await screen.findByRole("region", { name: "已確認缺陷" });
     const suspected = group("疑點（未經重現）");
     const risks = group("未驗風險");
     const fixed = group("已修復・納入回歸");
@@ -74,7 +74,8 @@ describe("探索", () => {
   it("只有疑點時，已確認缺陷區是空的", async () => {
     renderPage(fakeClient(explorationOverview({ findings: [explorationFinding()] })));
 
-    await screen.findByRole("heading", { name: "探索：筆記" });
+    // 標題不等資料讀回就會出現：等分區出現再斷言
+    await screen.findByRole("region", { name: "已確認缺陷" });
     expect(group("已確認缺陷")).toHaveTextContent("沒有已確認缺陷。");
     expect(within(group("已確認缺陷")).queryByRole("heading", { level: 4 })).not.toBeInTheDocument();
     const finding = within(group("疑點（未經重現）")).getByRole("region", { name: "優惠碼欄位接受負數" });

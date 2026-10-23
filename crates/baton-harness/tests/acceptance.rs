@@ -4,8 +4,6 @@
 //! 確定性檢查中的命令由 fake CommandRunner 回應，檔案與成果檢查讀取暫存目錄中的真實檔案。
 //! 使用者以桌面憑證檢視驗證狀況與手動接受。`harness.db()` 只用來確認事件這類必須看落地內容的事實。
 
-use std::time::Duration;
-
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::agent::TOOL_REPORT_PROGRESS;
 use baton_domain::auth::Role;
@@ -312,8 +310,7 @@ async fn a_runtime_crash_while_checks_run_reruns_them_after_restart_instead_of_g
 
     // Run 結束、Task 進入 verifying 之後，檢查執行到一半 Runtime 當掉（這一次處理被丟棄）
     let _gate = harness.command_runner.hold_next();
-    let crashed = tokio::time::timeout(Duration::from_millis(300), harness.supervise()).await;
-    assert!(crashed.is_err(), "預期 Supervisor 卡在檢查中");
+    harness.supervise_until(harness.command_runner.wait_for_held()).await;
     harness.restart().await;
     assert_eq!(task_status(&harness, &ws, &tid).await, "verifying", "沒有結論前不會被當成通過或失敗");
 

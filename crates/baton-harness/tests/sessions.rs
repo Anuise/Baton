@@ -15,8 +15,6 @@
 //! - 原生 ID 取得前中斷：`crash_after_spawn_before_the_native_id_...`、`a_launch_that_never_bound_...`
 //! - transcript 以事件位置去重、記錄缺口、遮蔽憑證：`transcript_import_...`
 
-use std::time::Duration;
-
 use baton_domain::artifact::sha256_hex;
 use baton_domain::Timestamp;
 use baton_harness::fakes::HangPoint;
@@ -220,12 +218,6 @@ fn launched_spec(harness: &Harness, rid: &str) -> baton_ports::RunSpec {
 async fn identity_of_run(harness: &Harness, ws: &str, rid: &str) -> baton_ports::ProcessIdentity {
     let run = run_view(harness, ws, rid).await;
     harness.process_control.identity_of(run["command_id"].as_str().unwrap()).unwrap()
-}
-
-/// 讓 Supervisor 處理一次；若 spawn 設成會「當掉」，等一小段時間後放棄那一次處理（等同 Runtime 在那一點崩潰）。
-async fn supervise_until_crash(harness: &Harness) {
-    let outcome = tokio::time::timeout(Duration::from_millis(300), harness.supervise()).await;
-    assert!(outcome.is_err(), "預期 Supervisor 卡在被設定的崩潰點");
 }
 
 /// 第一個 Run：啟動、綁定原生 Session `native`，以失敗結束讓 Task 回到 ready。回傳 (run_id, session_id)。
@@ -575,7 +567,7 @@ async fn crash_after_spawn_before_the_native_id_is_reconciled_by_command_id_with
     let tid = ready_task(&harness, &ws, &goal, "整理資料").await;
     let rid = dispatch_ok(&harness, &ws, &tid).await;
     harness.process_control.hang_next_spawn_at(HangPoint::AfterSpawn);
-    supervise_until_crash(&harness).await;
+    harness.supervise_until(harness.process_control.wait_for_spawn_hang()).await;
     assert_eq!(harness.process_control.spawn_count(), 1);
 
     harness.restart().await;
@@ -608,7 +600,7 @@ async fn a_launch_that_never_bound_a_native_session_is_replaced_without_a_capabi
     let first = dispatch_ok(&harness, &ws, &tid).await;
     assert_eq!(unfinished_runs(&harness, &ws, &tid).await, 1);
     harness.process_control.hang_next_spawn_at(HangPoint::BeforeSpawn);
-    supervise_until_crash(&harness).await;
+    harness.supervise_until(harness.process_control.wait_for_spawn_hang()).await;
     assert_eq!(unfinished_runs(&harness, &ws, &tid).await, 1);
 
     // 重建後找不到程序：啟動結果不明，Run 中斷

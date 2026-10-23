@@ -426,3 +426,19 @@ async fn the_controller_credential_can_propose_and_dispatch_tasks() {
     let on_board = board["tasks"].as_array().unwrap().iter().find(|t| t["id"] == task.as_str()).cloned().unwrap();
     assert_ne!(on_board["status"], "pending", "{on_board}");
 }
+
+// --- harness 的開啟輔助函式本身 ---
+
+#[tokio::test]
+#[should_panic(expected = "這次開啟沒有進入執行中")]
+async fn the_harness_open_helper_fails_loudly_when_this_open_did_not_launch() {
+    let harness = start().await;
+    let profile = harness.add_account("帳號 1", "account1@example.com").await;
+    let (ws, _) = new_workspace(&harness, "main").await;
+    harness.open_controller_cli(&ws, &profile).await;
+    harness.end_controller_cli(&ws).await;
+
+    // 這次開窗失敗：不可默默交回上一次（或失敗那次）開窗的憑證
+    harness.claude_env.fail_next_controller_terminal("找不到可用的主控台");
+    harness.open_controller_cli(&ws, &profile).await;
+}

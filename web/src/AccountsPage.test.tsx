@@ -65,6 +65,13 @@ function fakeClient(initial: AccountProfile[] = []) {
   return client;
 }
 
+/** 在假計時器下讓排隊中的 Promise 與 React 更新全部完成。 */
+async function settle(ms = 0) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
 /** 兩個表單都有「名稱」欄位，以表單的名稱區分。 */
 const createForm = () => screen.getByRole("form", { name: "新增 Profile" });
 const fromDirForm = () => screen.getByRole("form", { name: "以既有目錄建立 Profile" });
@@ -708,10 +715,12 @@ describe("帳號頁", () => {
     });
 
     it("每 5 分鐘重新讀取排程總覽，不到 5 分鐘不讀取", async () => {
-      vi.useFakeTimers({ shouldAdvanceTime: true });
+      // 假計時器不隨真實時間前進：輪詢只在推進時觸發，負載高低不影響呼叫次數
+      vi.useFakeTimers();
       const client = withQuota();
       render(<AccountsPage client={client} />);
-      await screen.findByText("判斷用量：未知");
+      await settle();
+      expect(screen.getByText("判斷用量：未知")).toBeInTheDocument();
       expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
 
       client.schedulingOverview.mockResolvedValue(
@@ -724,13 +733,12 @@ describe("帳號頁", () => {
           ],
         }),
       );
-      // 留一秒餘裕，抵銷 shouldAdvanceTime 隨真實時間前進的部分
-      act(() => vi.advanceTimersByTime(QUOTA_REFRESH_INTERVAL_MS - 1000));
+      await settle(QUOTA_REFRESH_INTERVAL_MS - 1);
       expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
 
-      act(() => vi.advanceTimersByTime(1000));
+      await settle(1);
       expect(client.schedulingOverview).toHaveBeenCalledTimes(2);
-      expect(await screen.findByText("判斷用量：60%")).toBeInTheDocument();
+      expect(screen.getByText("判斷用量：60%")).toBeInTheDocument();
       expect(client.listProfiles).toHaveBeenCalledTimes(1);
     });
 
