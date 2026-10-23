@@ -2,9 +2,9 @@
 //!
 //! 受驗的網站由 fake BrowserDriver 扮演、受驗服務與 API 由 fake VerificationDriver 扮演；語意 judge 是腳本化的 fake，
 //! 記錄每一次的輸入（含使用的帳號）。帳號額度由 fake QuotaObserver 的樣本決定。「Runtime 中途崩潰」= 讓某個 HTTP 請求
-//! 送出後永遠不回來、以 `timeout` 丟棄那次處理，再 `crash_restart`（資料目錄與全部 fake 都保留，所以前一個 Runtime
-//! 啟動的服務與瀏覽器 Session 仍然存在）。只斷言外部行為：桌面 API 回傳的 Evidence Bundle、受驗服務與瀏覽器實際收到的
-//! 操作、judge 實際收到的要求。
+//! 送出後永遠不回來、等 fake 回報那個請求已送出就以 `supervise_until` 丟棄那次處理，再 `crash_restart`（資料目錄與
+//! 全部 fake 都保留，所以前一個 Runtime 啟動的服務與瀏覽器 Session 仍然存在）。只斷言外部行為：桌面 API 回傳的
+//! Evidence Bundle、受驗服務與瀏覽器實際收到的操作、judge 實際收到的要求。
 //!
 //! 每個測試名稱對應票 49 的驗收條件：
 //! - 驗證中途交接後結果正確，未完成案例不會被拼成 passed：

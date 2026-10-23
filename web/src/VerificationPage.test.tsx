@@ -147,15 +147,17 @@ describe("驗證", () => {
     const user = userEvent.setup();
     renderPage(client);
 
+    // 以貼上取代逐字輸入：逐字輸入一長串 JSON 在高負載下會超過每個測試 5 秒的上限，
+    // 逾時後沒打完的按鍵還會打進下一個測試的輸入欄（review-notes 第 11 項）
     const textarea = await screen.findByLabelText("Profile 內容（JSON）");
     await user.clear(textarea);
-    await user.type(textarea, "{{不是 JSON");
+    await user.paste("{不是 JSON");
     await user.click(screen.getByRole("button", { name: "發布新版本" }));
     expect(within(region("發布新版本")).getByRole("alert")).toHaveTextContent("JSON 格式不正確");
     expect(client.publishVerificationProfile).not.toHaveBeenCalled();
 
     await user.clear(textarea);
-    await user.type(textarea, '{{"interface": "cli_api"}');
+    await user.paste('{"interface": "cli_api"}');
     await user.click(screen.getByRole("button", { name: "發布新版本" }));
     expect(await within(region("發布新版本")).findByRole("alert")).toHaveTextContent(
       "發布失敗：Verification Profile 不正確：至少要有一條代表旅程（verification_profile_invalid）",
