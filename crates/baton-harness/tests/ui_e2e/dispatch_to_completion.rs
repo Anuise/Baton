@@ -33,6 +33,7 @@ async fn a_task_dispatched_from_the_ui_completes_after_the_worker_reports_and_ch
     let e2e = UiE2e::start().await;
     let (harness, browser) = (&e2e.harness, &e2e.browser);
     let sidebar = role("complementary", "Workspace");
+    let tab = |name: &str| [role("tablist", "Workspace 功能"), role("tab", name)];
 
     // 1. 建立 Workspace：在側欄填入目錄與名稱
     let dir = harness.data_dir().join("projects").join("report");
@@ -41,7 +42,8 @@ async fn a_task_dispatched_from_the_ui_completes_after_the_worker_reports_and_ch
     browser.fill(&[sidebar.clone(), label("名稱（選填）")], WORKSPACE_NAME).await;
     browser.click(&[sidebar.clone(), role("button", "建立 Workspace")]).await;
 
-    // 2. 確認授權：建立後直接進入授權設定；套用「研究／文件」範本、檢視摘要後確認
+    // 2. 確認授權：建立後自動選中該 Workspace，切到「授權」頁簽；套用「研究／文件」範本、檢視摘要後確認
+    browser.click(&tab("授權")).await;
     let authorization = role("region", "授權設定");
     browser.wait_visible(&[authorization.clone(), role("heading", &format!("授權設定：{WORKSPACE_NAME}"))]).await;
     browser.wait_visible(&[authorization.clone(), text("尚未確認授權")]).await;
@@ -51,7 +53,7 @@ async fn a_task_dispatched_from_the_ui_completes_after_the_worker_reports_and_ch
     browser.wait_visible(&[authorization.clone(), text("已保存為 revision 1")]).await;
 
     // 3. 建立 Task：新 Goal、六項契約全部填寫、宣告確定性檢查（成果 report.md）、所需能力在授權範圍內
-    browser.click(&[sidebar.clone(), role("button", &format!("工作面板 {WORKSPACE_NAME}"))]).await;
+    browser.click(&tab("工作")).await;
     let board = role("region", "工作面板");
     browser.click(&[board.clone(), role("button", "建立 Task")]).await;
     let form = role("region", "建立 Task");
@@ -87,10 +89,10 @@ async fn a_task_dispatched_from_the_ui_completes_after_the_worker_reports_and_ch
     harness.agent_adapter.emit(&rid, AdapterEvent::Exited { success: true });
     harness.supervise().await;
 
-    // 6. 工作面板沒有輪詢：切到別的視圖再切回來讓它重新載入；Task 在「已完成」欄，並顯示經自動檢查通過驗證
-    browser.click(&[sidebar.clone(), role("button", &format!("時間線 {WORKSPACE_NAME}"))]).await;
+    // 6. 工作面板沒有輪詢：切到別的頁簽再切回「工作」讓它重新載入；Task 在「已完成」欄，並顯示經自動檢查通過驗證
+    browser.click(&tab("時間線")).await;
     browser.wait_hidden(std::slice::from_ref(&board)).await;
-    browser.click(&[sidebar.clone(), role("button", &format!("工作面板 {WORKSPACE_NAME}"))]).await;
+    browser.click(&tab("工作")).await;
     let completed = card("已完成（1）");
     browser.wait_visible(&completed).await;
     browser.wait_visible(&[&completed[..], &[role("group", "驗證紀錄"), has_text("已通過驗證（自動檢查）")]].concat()).await;

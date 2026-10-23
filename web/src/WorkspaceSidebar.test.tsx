@@ -175,7 +175,7 @@ describe("左側 Workspace 清單", () => {
     expect(await screen.findByText(/2023\/11\/14 22:13/)).toBeInTheDocument();
   });
 
-  it("建立完成後直接進入該 Workspace 的授權設定", async () => {
+  it("建立完成後選中新的 Workspace", async () => {
     const client = fakeClient();
     const onSelect = vi.fn();
     const user = userEvent.setup();
@@ -189,7 +189,7 @@ describe("左側 Workspace 清單", () => {
     expect(onSelect.mock.calls[0][0]).toMatchObject({ path: "C:\\work\\docs", name: "docs" });
   });
 
-  it("建立失敗時不進入授權設定", async () => {
+  it("建立失敗時不選取任何 Workspace", async () => {
     const client = fakeClient();
     vi.mocked(client.createWorkspace).mockRejectedValueOnce(new Error("找不到目錄"));
     const onSelect = vi.fn();
@@ -204,26 +204,44 @@ describe("左側 Workspace 清單", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it("既有的 Workspace 可以隨時重新開啟授權設定", async () => {
+  it("點 Workspace 即選取它", async () => {
     const onSelect = vi.fn();
     const user = userEvent.setup();
     render(<WorkspaceSidebar client={fakeClient([workspace()])} onSelect={onSelect} />);
 
-    await user.click(await screen.findByRole("button", { name: "授權設定 筆記" }));
+    await user.click(await screen.findByRole("button", { name: "選擇 筆記" }));
 
     expect(onSelect).toHaveBeenCalledWith(workspace());
   });
 
-  it("每個 Workspace 都有「工作面板」入口，不會觸發授權設定", async () => {
-    const onSelect = vi.fn();
-    const onOpenTasks = vi.fn();
+  it("清單只負責選擇 Workspace，不再列出各功能的按鈕", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+
+    const buttons = within(item)
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label"));
+    expect(buttons).toEqual(["選擇 筆記", "封存 筆記"]);
+  });
+
+  it("標示目前選中的 Workspace", async () => {
+    const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "專案", path: "D:\\proj" })]);
+    render(<WorkspaceSidebar client={client} selectedId="ws_2" />);
+
+    expect(await screen.findByRole("button", { name: "選擇 專案" })).toHaveAttribute("aria-current", "true");
+    expect(screen.getByRole("button", { name: "選擇 筆記" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("讀到清單後把使用中的 Workspace 告訴上層，封存後再告知一次", async () => {
+    const onWorkspaces = vi.fn();
+    const archived = workspace({ id: "ws_2", name: "舊的", status: "archived", archived_at: CREATED_AT + 1 });
     const user = userEvent.setup();
-    render(<WorkspaceSidebar client={fakeClient([workspace()])} onSelect={onSelect} onOpenTasks={onOpenTasks} />);
+    render(<WorkspaceSidebar client={fakeClient([workspace(), archived])} onWorkspaces={onWorkspaces} />);
 
-    await user.click(await screen.findByRole("button", { name: "工作面板 筆記" }));
+    await waitFor(() => expect(onWorkspaces).toHaveBeenLastCalledWith([workspace()]));
+    await user.click(screen.getByRole("button", { name: "封存 筆記" }));
 
-    expect(onOpenTasks).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
+    await waitFor(() => expect(onWorkspaces).toHaveBeenLastCalledWith([]));
   });
 
   it("每個 Workspace 有「完全退出後自動續跑」勾選，預設關閉並說明只影響下次重新開啟", async () => {
@@ -366,18 +384,6 @@ describe("左側 Workspace 清單", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("每個 Workspace 都有「裁定」入口，不會觸發授權設定", async () => {
-    const onSelect = vi.fn();
-    const onOpenDecisions = vi.fn();
-    const user = userEvent.setup();
-    render(<WorkspaceSidebar client={fakeClient([workspace()])} onSelect={onSelect} onOpenDecisions={onOpenDecisions} />);
-
-    await user.click(await screen.findByRole("button", { name: "裁定 筆記" }));
-
-    expect(onOpenDecisions).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-  });
-
   it("有待裁定時在該 Workspace 顯示數量徽章，沒有時不顯示", async () => {
     const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "專案", path: "D:\proj" })]);
     render(<WorkspaceSidebar client={client} pendingDecisions={{ ws_1: 3, ws_2: 0 }} />);
@@ -386,206 +392,5 @@ describe("左側 Workspace 清單", () => {
 
     expect(screen.getAllByText(/待裁定/)).toHaveLength(1);
     expect(screen.getByText("待裁定 3")).toBeInTheDocument();
-  });
-
-  it("每個 Workspace 都有「成果與驗證」入口，不會觸發授權設定或工作面板", async () => {
-    const onSelect = vi.fn();
-    const onOpenTasks = vi.fn();
-    const onOpenArtifacts = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenTasks={onOpenTasks}
-        onOpenArtifacts={onOpenArtifacts}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "成果與驗證 筆記" }));
-
-    expect(onOpenArtifacts).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenTasks).not.toHaveBeenCalled();
-  });
-
-  it("每個 Workspace 都有「知識」入口，不會觸發其他檢視", async () => {
-    const onSelect = vi.fn();
-    const onOpenTasks = vi.fn();
-    const onOpenArtifacts = vi.fn();
-    const onOpenKnowledge = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenTasks={onOpenTasks}
-        onOpenArtifacts={onOpenArtifacts}
-        onOpenKnowledge={onOpenKnowledge}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "知識 筆記" }));
-
-    expect(onOpenKnowledge).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenTasks).not.toHaveBeenCalled();
-    expect(onOpenArtifacts).not.toHaveBeenCalled();
-  });
-
-  it("每個 Workspace 都有「時間線」入口，不會觸發其他檢視", async () => {
-    const onSelect = vi.fn();
-    const onOpenTasks = vi.fn();
-    const onOpenKnowledge = vi.fn();
-    const onOpenTimeline = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenTasks={onOpenTasks}
-        onOpenKnowledge={onOpenKnowledge}
-        onOpenTimeline={onOpenTimeline}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "時間線 筆記" }));
-
-    expect(onOpenTimeline).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenTasks).not.toHaveBeenCalled();
-    expect(onOpenKnowledge).not.toHaveBeenCalled();
-  });
-
-  it("每個 Workspace 都有「專案理解」入口，不會觸發其他檢視", async () => {
-    const onSelect = vi.fn();
-    const onOpenTimeline = vi.fn();
-    const onOpenUnderstanding = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenTimeline={onOpenTimeline}
-        onOpenUnderstanding={onOpenUnderstanding}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "專案理解 筆記" }));
-
-    expect(onOpenUnderstanding).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenTimeline).not.toHaveBeenCalled();
-  });
-
-  it("每個 Workspace 都有「流程」入口，不會觸發其他檢視", async () => {
-    const onSelect = vi.fn();
-    const onOpenUnderstanding = vi.fn();
-    const onOpenWorkflows = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenUnderstanding={onOpenUnderstanding}
-        onOpenWorkflows={onOpenWorkflows}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "流程 筆記" }));
-
-    expect(onOpenWorkflows).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenUnderstanding).not.toHaveBeenCalled();
-  });
-
-  it("每個 Workspace 都有「審查」入口，不會觸發其他檢視", async () => {
-    const onSelect = vi.fn();
-    const onOpenWorkflows = vi.fn();
-    const onOpenReviews = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenWorkflows={onOpenWorkflows}
-        onOpenReviews={onOpenReviews}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "審查 筆記" }));
-
-    expect(onOpenReviews).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenWorkflows).not.toHaveBeenCalled();
-  });
-
-  it("每個 Workspace 都有「驗證」入口，不會觸發成果與驗證或流程", async () => {
-    const onSelect = vi.fn();
-    const onOpenArtifacts = vi.fn();
-    const onOpenWorkflows = vi.fn();
-    const onOpenVerification = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenArtifacts={onOpenArtifacts}
-        onOpenWorkflows={onOpenWorkflows}
-        onOpenVerification={onOpenVerification}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "驗證 筆記" }));
-
-    expect(onOpenVerification).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenArtifacts).not.toHaveBeenCalled();
-    expect(onOpenWorkflows).not.toHaveBeenCalled();
-  });
-
-  it("每個 Workspace 都有「探索」入口，不會觸發驗證或審查", async () => {
-    const onSelect = vi.fn();
-    const onOpenReviews = vi.fn();
-    const onOpenVerification = vi.fn();
-    const onOpenExploration = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenReviews={onOpenReviews}
-        onOpenVerification={onOpenVerification}
-        onOpenExploration={onOpenExploration}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "探索 筆記" }));
-
-    expect(onOpenExploration).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenReviews).not.toHaveBeenCalled();
-    expect(onOpenVerification).not.toHaveBeenCalled();
-  });
-
-  it("每個 Workspace 都有「對話」入口，不會觸發其他檢視", async () => {
-    const onSelect = vi.fn();
-    const onOpenTasks = vi.fn();
-    const onOpenConversation = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <WorkspaceSidebar
-        client={fakeClient([workspace()])}
-        onSelect={onSelect}
-        onOpenTasks={onOpenTasks}
-        onOpenConversation={onOpenConversation}
-      />,
-    );
-
-    await user.click(await screen.findByRole("button", { name: "對話 筆記" }));
-
-    expect(onOpenConversation).toHaveBeenCalledWith(workspace());
-    expect(onSelect).not.toHaveBeenCalled();
-    expect(onOpenTasks).not.toHaveBeenCalled();
   });
 });

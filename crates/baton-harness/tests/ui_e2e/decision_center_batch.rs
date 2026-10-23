@@ -177,9 +177,15 @@ fn center() -> Value {
     role("region", "裁定中心")
 }
 
-/// 在側欄開啟 Workspace 的裁定中心（每次開啟都會重新讀取清單）。
+/// Workspace 功能頁簽。
+fn tab(name: &str) -> [Value; 2] {
+    [role("tablist", "Workspace 功能"), role("tab", name)]
+}
+
+/// 在側欄選擇 Workspace（已選中時再點一次無害），切到「裁定」頁簽開啟裁定中心（從別的頁簽切過來時會重新讀取清單）。
 async fn open_center(browser: &Browser, workspace: &str) {
-    browser.click(&[role("button", &format!("裁定 {workspace}"))]).await;
+    browser.click(&[role("button", &format!("選擇 {workspace}"))]).await;
+    browser.click(&tab("裁定")).await;
     browser.wait_visible(&[center(), role("heading", &format!("裁定：{workspace}"))]).await;
 }
 
@@ -314,7 +320,7 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     let (_, token_a2) = running_run(harness, &ws, &a).await;
     let (_, token_b2) = running_run(harness, &ws, &b).await;
     let (_, token_c2) = running_run(harness, &ws, &c).await;
-    browser.click(&[role("button", &format!("工作面板 {ws_name}"))]).await;
+    browser.click(&tab("工作")).await;
     let running = [role("region", "工作面板"), role("region", "執行中（3）")];
     browser.wait_visible(&running).await;
     for title in titles {

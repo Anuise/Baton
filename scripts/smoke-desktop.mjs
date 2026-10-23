@@ -4,7 +4,7 @@
 //   1. App 啟動後自動啟動 Runtime，狀態列顯示「Runtime 運作中」
 //   2. App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以這裡直接結束 App 程序）
 //   3. 再次開啟 App 時連回同一個 Runtime（boot_count 不增加、pid 不變）
-//   4. 在 App 內建立 Workspace 後進入授權設定，套用 P3 範本、檢視摘要、承認風險並確認保存；
+//   4. 在 App 內建立 Workspace 後切到「授權」頁簽，套用 P3 範本、檢視摘要、承認風險並確認保存；
 //      確認之前需要「建置與測試」的 Run 被准入檢查拒絕，確認之後通過
 //   5. 不帶憑證的請求被 Runtime 拒絕（桌面憑證由 App 自動讀取 DPAPI 保護檔，不需人工複製）
 //   6. 首次設定精靈以本機真實的 claude 與 git 檢查；帳號頁新增 Profile 並以真實的 claude auth status 核對，
@@ -95,6 +95,10 @@ const ui = {
   check: (text) =>
     `(() => { const l = [...document.querySelectorAll('label')].find((l) => l.innerText.trim() === ${JSON.stringify(text)}); const i = l?.querySelector('input[type=checkbox]'); if (!i) return false; if (!i.checked) i.click(); return true; })()`,
   text: (selector) => `document.querySelector(${JSON.stringify(selector)})?.innerText ?? ''`,
+  // 點頁簽（role=tab，以文字比對）；畫面上沒有這個頁簽時回傳 false。
+  // 冒煙環境的 Profile 都未登入，App 會以全畫面顯示首次精靈：這時先按「先進入主畫面」，下一輪再點頁簽
+  tab: (text) =>
+    `(() => { const t = [...document.querySelectorAll('[role=tab]')].find((t) => t.innerText.trim() === ${JSON.stringify(text)}); if (!t) { [...document.querySelectorAll('button')].find((b) => b.innerText.trim() === '先進入主畫面')?.click(); return false; } t.click(); return true; })()`,
 };
 
 /** 系統匣「完全退出」送給主視窗的事件（src-tauri 的 FULL_EXIT_EVENT）。 */
@@ -201,16 +205,11 @@ try {
     return text.includes("Runtime 運作中") ? text : null;
   });
   console.log(`✔ 狀態列：${bar.trim()}`);
-  // 平台辨識：狀態列顯示支援狀態，平台狀態頁顯示本機實際的診斷資訊
+  // 平台辨識：狀態列顯示支援狀態（平台狀態頁在「設定」頁簽，新增 Profile 後再檢查）
   const platformBar = await waitFor("狀態列顯示平台狀態", async () => {
     const text = await evaluate(debug1, "document.querySelector('.status-bar')?.innerText ?? ''");
     return /平台：(正式支援|非正式支援)/.test(text) ? text : null;
   });
-  const platformPage = await waitFor("平台狀態頁顯示診斷資訊", async () => {
-    const text = await evaluate(debug1, "document.querySelector('.platform-page')?.innerText ?? ''");
-    return text.includes("OS build") && text.includes("原生架構") && text.includes("App 版本") ? text : null;
-  });
-  console.log(`✔ ${platformBar.match(/平台：\S+/)[0]}；${platformPage.replace(/\s+/g, " ").trim()}`);
   const first = await health(runtimePort);
   runtimePid = first.pid;
 
@@ -224,6 +223,8 @@ try {
   await waitFor("填入 Profile 名稱", () => evaluate(debug1, fillExpression("名稱", "冒煙測試帳號")));
   await waitFor("按下新增 Profile", () => evaluate(debug1, clickExpression("新增 Profile")));
   await waitFor("帳號頁列出新的 Profile", async () => {
+    // 有 Profile 後 App 離開全畫面首次精靈、改為頁簽外殼：帳號頁在「帳號」頁簽（仍是全畫面時沒有頁簽，不影響）
+    await evaluate(debug1, ui.tab("帳號"));
     const text = await evaluate(debug1, "document.querySelector('.accounts-page')?.innerText ?? ''");
     return text.includes("冒煙測試帳號") && text.includes("尚未核對") ? text : null;
   }).catch(async (error) => {
@@ -250,6 +251,13 @@ try {
     throw new Error(`第 9 個 Profile 應該被拒絕並說明上限：${JSON.stringify(ninth)}`);
   }
   console.log(`✔ 第 9 個 Profile 被拒絕：${ninth.body.message}`);
+  // 平台狀態頁（「設定」頁簽）顯示本機實際的診斷資訊
+  const platformPage = await waitFor("平台狀態頁顯示診斷資訊", async () => {
+    await evaluate(debug1, ui.tab("設定"));
+    const text = await evaluate(debug1, "document.querySelector('.platform-page')?.innerText ?? ''");
+    return text.includes("OS build") && text.includes("原生架構") && text.includes("App 版本") ? text : null;
+  });
+  console.log(`✔ ${platformBar.match(/平台：\S+/)[0]}；${platformPage.replace(/\s+/g, " ").trim()}`);
   console.log(`✔ Runtime 已由 App 啟動（pid ${first.pid}，boot_count ${first.boot_count}）`);
 
   // 2. 結束 App 程序（關窗只會隱藏到系統匣，App 不會結束）：Runtime 繼續執行
@@ -272,7 +280,7 @@ try {
   }
   console.log("✔ 再次開啟時連回同一個 Runtime（沒有重複啟動）");
 
-  // 4. 在 App 內建立 Workspace → 授權設定 → 確認 P3；確認前後的准入檢查結果不同
+  // 4. 在 App 內建立 Workspace →「授權」頁簽 → 確認 P3；確認前後的准入檢查結果不同
   const api = async (path, init = {}) =>
     fetch(`http://127.0.0.1:${runtimePort}${path}`, {
       ...init,
@@ -283,9 +291,13 @@ try {
       },
     });
   const step = (description, expression) => waitFor(description, async () => (await evaluate(debug2, expression)) === true);
+  // 同一個 WebView2 資料夾會記住上次的頂層頁簽（「設定」）：先切回「Workspace」頁簽才有側欄
+  await step("切到 Workspace 頁簽", ui.tab("Workspace"));
   await step("輸入目錄", ui.type("目錄", projectDir));
   await step("建立 Workspace", ui.click("建立 Workspace"));
-  await waitFor("建立後進入授權設定", async () => (await evaluate(debug2, ui.text(".authorization"))).includes("尚未確認授權"));
+  // 建立後自動選中該 Workspace（預設 Controller 頁簽），切到「授權」頁簽
+  await step("切到授權頁簽", ui.tab("授權"));
+  await waitFor("授權頁簽顯示授權設定", async () => (await evaluate(debug2, ui.text(".authorization"))).includes("尚未確認授權"));
   const { workspaces } = await (await api("/api/v1/workspaces")).json();
   const workspaceId = workspaces.at(-1).id;
   const needsBuild = () =>
@@ -297,7 +309,7 @@ try {
   if (before.status !== 409 || (await before.json()).error !== "authorization_unconfirmed") {
     throw new Error("確認授權之前，需要建置與測試的 Run 應被准入檢查拒絕");
   }
-  console.log("✔ 建立 Workspace 後進入授權設定；未確認前准入檢查拒絕需要能力的 Run");
+  console.log("✔ 建立 Workspace 後在「授權」頁簽顯示授權設定；未確認前准入檢查拒絕需要能力的 Run");
   await step("套用 P3 範本", ui.click("套用「可信專案開發（P3）」"));
   await step("檢視確認摘要", ui.click("檢視確認摘要"));
   await waitFor("摘要揭露可信程式風險", async () =>
@@ -338,6 +350,8 @@ try {
     `✔ 強制結束 Runtime 後由監護重新拉起（pid ${restarted.pid}，boot_count ${restarted.boot_count}），恢復事件 ${recovery.event.status}`,
   );
   const recoveryPanel = await waitFor("恢復面板顯示恢復事件", async () => {
+    // 恢復面板在「設定」頁簽
+    await evaluate(debug2, ui.tab("設定"));
     const text = await evaluate(debug2, ui.text(".recovery-panel"));
     return text.includes("偵測到崩潰") && text.includes("第 1 輪") ? text : null;
   });
