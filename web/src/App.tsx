@@ -5,7 +5,6 @@ import { ArtifactsPage } from "./ArtifactsPage";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { BackupSettings } from "./BackupSettings";
 import { ControllerPage } from "./ControllerPage";
-import { ConversationPage } from "./ConversationPage";
 import { ModelOverridesPanel } from "./ModelOverridesPanel";
 import { DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
@@ -31,7 +30,7 @@ import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
 /** 頂層頁簽。 */
 type TopTab = "workspace" | "accounts" | "settings";
-/** 選中 Workspace 後的功能頁簽；「對話」暫時保留，由票 08 移除。 */
+/** 選中 Workspace 後的功能頁簽。 */
 type WorkspaceTab =
   | "controller"
   | "tasks"
@@ -41,8 +40,7 @@ type WorkspaceTab =
   | "knowledge"
   | "workflows"
   | "timeline"
-  | "authorization"
-  | "conversation";
+  | "authorization";
 /** 「審查與驗證」頁簽內的小頁簽。 */
 type QualityTab = "reviews" | "verification" | "exploration";
 
@@ -69,7 +67,6 @@ const WORKSPACE_TABS: TabItem<WorkspaceTab>[] = [
   { id: "workflows", label: "流程" },
   { id: "timeline", label: "時間線" },
   { id: "authorization", label: "授權" },
-  { id: "conversation", label: "對話" },
 ];
 
 const QUALITY_TABS: TabItem<QualityTab>[] = [
@@ -379,7 +376,5 @@ function WorkspaceView({
           <ModelOverridesPanel key={`models-${workspace.id}`} client={client} workspace={workspace} />
         </>
       );
-    case "conversation":
-      return <ConversationPage key={workspace.id} client={client} workspace={workspace} />;
   }
 }
