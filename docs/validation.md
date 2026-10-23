@@ -150,3 +150,25 @@ The two test directories were verified as direct children of the system temporar
 ## Limits
 
 Installation layout compatibility does not prove a host has isolated delegation enabled. No live Claude Code session was exercised. The runtime must provide fresh worker contexts, observe worker termination, and establish exclusive checkout ownership. The skill is not a daemon and cannot guarantee progress through host shutdown or exhausted usage limits. It deliberately has no concurrent feature scheduling or distributed locking service.
+
+## Windows 平台手動驗收：Controller CLI 開窗（票 03）
+
+需要真實的 Windows、已安裝並登入的 Claude Code 與桌面 App，因此由人執行。每項記錄 OS build、App 與 Claude Code 版本。
+
+| # | 步驟 | 預期結果 |
+|---|---|---|
+| 1 | 在 Workspace 的 Controller 頁簽選一個已登入的 Profile，按「開啟」。 | 有 Windows Terminal（Windows 11 的預設終端機）時在其中開新視窗；沒有或預設終端機設為主控台主機時用系統主控台。頁簽狀態變成執行中。 |
+| 2 | 看視窗標題。 | 標題含「Baton Controller」。 |
+| 3 | 在終端機執行 `cd`（或看提示字元）。 | 工作目錄是該 Workspace。 |
+| 4 | 在 `claude` 中輸入 `/status`。 | `claude` 以互動模式執行（命令列沒有 `-p`），顯示的帳號是選定 Profile 的帳號。 |
+| 5 | 輸入 `/mcp`。 | 看得到 baton 伺服器，Controller 工具可用。 |
+| 6 | 在終端機輸入 `/exit`；另開一次後改為直接關閉視窗。 | 兩種方式下，頁簽都在數秒內變成「已結束」。 |
+| 7 | 再開一次，在 App 按「結束」。 | 宿主與 `claude` 整棵程序樹結束，視窗關閉；頁簽變成「已結束」。若 Windows Terminal 保留分頁並顯示程序結束碼，記錄為發現事項（取決於設定檔的 `closeOnExit`）。 |
+
+自動化部分（會開出真實的主控台視窗，不納入一般 `cargo test`）：
+
+```sh
+cargo test -p baton-runtime --test controller_terminal -- --ignored
+```
+
+這個測試以新主控台執行 `cmd.exe /c ping -n 30 127.0.0.1`，確認新的 `WindowsProcessControl` 能以 `find` 找回同一個程序身分、`inspect` 為 Alive、`stop` 後為 Dead，且同一個 `command_id` 再開一次被拒絕。不開視窗的拒絕路徑（`command_id` 已有 Job、`command_id` 不合法）由同一個檔案在一般 `cargo test` 中執行。

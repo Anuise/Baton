@@ -11,7 +11,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use baton_ports::{AuthReport, AuthSource, ClaudeEnvironment, PortError, PortResult, ToolProbe};
+use baton_ports::{
+    AuthReport, AuthSource, ClaudeEnvironment, PortError, PortResult, ProcessIdentity, TerminalLaunch, ToolProbe,
+};
 use serde::Deserialize;
 
 /// 單一命令的等待上限；超過就視為探測失敗。
@@ -123,6 +125,20 @@ impl ClaudeEnvironment for ClaudeCli {
             .spawn()
             .map(drop)
             .map_err(|e| PortError::Failed(format!("無法開啟終端機：{e}")))
+    }
+
+    /// 以 `CREATE_NEW_CONSOLE` 開新主控台執行 Controller 宿主，外觀由 Windows 的「預設終端機應用程式」設定決定：
+    /// Windows 11 預設是 Windows Terminal，沒有時是系統主控台。
+    ///
+    /// 不直接呼叫 `wt.exe`：wt.exe 把命令交給既有的 Windows Terminal 實例時，不保證帶上呼叫端的環境變數
+    /// （Agent 憑證與 `CLAUDE_CONFIG_DIR` 只經環境變數交付），也拿不到宿主的程序身分，無法放進 Job 管理。
+    #[cfg(windows)]
+    async fn open_controller_terminal(&self, launch: &TerminalLaunch) -> PortResult<ProcessIdentity> {
+        let launch = launch.clone();
+        tokio::task::spawn_blocking(move || crate::windows_process::spawn_in_new_console(&launch.spawn, &launch.title))
+            .await
+            .map_err(|e| PortError::Failed(format!("無法開啟 Controller 終端機：背景工作失敗：{e}")))?
+            .map_err(|e| PortError::Failed(format!("無法開啟 Controller 終端機：{e}")))
     }
 }
 

@@ -8,6 +8,7 @@
 //! - 不設 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`：關閉 Job handle（含 Runtime 崩潰）不會殺掉程序。
 //! - 子孫程序預設繼承 Job 成員資格（本實作不允許 breakaway），所以 `stop` 能終止整棵程序樹。
 //! - 程序的 stdin/stdout/stderr 依 `SpawnSpec` 導向檔案，未指定時導向 NUL。
+//! - `spawn_in_new_console`（Controller 終端機）沿用同一套 Job 規則，但開新主控台視窗、以它作為標準輸入輸出，只繼承 Job handle。
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -34,8 +35,8 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetProcessTimes, InitializeProcThreadAttributeList,
-    OpenProcess, ResumeThread, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
+    OpenProcess, ResumeThread, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NEW_CONSOLE,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES,
     STARTUPINFOEXW,
 };
@@ -387,8 +388,29 @@ fn root_of_job(job: HANDLE) -> PortResult<(u32, i64, OwnedHandle)> {
     oldest.ok_or_else(|| PortError::Failed("Job 內找不到可開啟的程序".to_string()))
 }
 
+/// 子程序的主控台。
+enum Console<'a> {
+    /// 不建立主控台視窗，標準輸入輸出依 `SpawnSpec` 導向檔案或 NUL（Worker 等背景程序）。
+    Hidden,
+    /// 建立新的主控台視窗並以它作為標準輸入輸出，視窗標題為 `title`（Controller 終端機）。
+    New { title: &'a str },
+}
+
 /// 同步啟動：建立具名 Job → 以暫停狀態建立程序 → 加入 Job → 恢復執行。
 fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)> {
+    spawn_in_job(spec, Console::Hidden)
+}
+
+/// 在新的主控台視窗執行 `spec`，程序放進與 `WindowsProcessControl::spawn` 相同命名規則的具名 Job。
+///
+/// 標準輸入輸出用新主控台自己的（忽略 `spec` 的 stdin/stdout/stderr 欄位）。根程序同樣繼承只能查詢的 Job handle，
+/// 所以回傳後本程序不必保留任何 handle：之後以 `WindowsProcessControl::find(spec)` 找回（Runtime 重啟後亦同）、
+/// `inspect` 查驗存活、`stop` 結束整棵程序樹。同一個 `command_id` 已有 Job 時拒絕，不開第二個視窗。
+pub fn spawn_in_new_console(spec: &SpawnSpec, title: &str) -> PortResult<ProcessIdentity> {
+    spawn_in_job(spec, Console::New { title }).map(|(identity, _entry)| identity)
+}
+
+fn spawn_in_job(spec: &SpawnSpec, console: Console<'_>) -> PortResult<(ProcessIdentity, Entry)> {
     let name = job_name(&spec.command_id)?;
     // 先建立 Job 再建立程序：同名 Job 已存在就直接拒絕，不會啟動第二個程序。
     // SAFETY：name 以 NUL 結尾；SetLastError(0) 讓後面的 ERROR_ALREADY_EXISTS 判斷不受舊值影響。
@@ -405,37 +427,52 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
         return Err(PortError::Failed(format!("command_id {} 已有對應的 Job，拒絕重複啟動", spec.command_id)));
     }
 
-    let security = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: std::ptr::null_mut(),
-        bInheritHandle: 1,
-    };
-    // 檔案在確認 Job 不重複之後才開啟：重複的 spawn 不會覆寫執行中程序的輸出檔。
-    // 失敗時直接回傳，Job 尚無程序，handle 關閉後即消失。
-    let stdin = open_std_handle(spec.stdin_file.as_deref().unwrap_or("NUL"), GENERIC_READ, OPEN_EXISTING, &security)?;
-    let open_output = |path: Option<&str>| match path {
-        Some(path) => open_std_handle(path, GENERIC_WRITE, CREATE_ALWAYS, &security),
-        None => open_std_handle("NUL", GENERIC_WRITE, OPEN_EXISTING, &security),
-    };
-    let stdout = open_output(spec.stdout_file.as_deref())?;
-    // stdout 與 stderr 指向同一個檔案時共用 handle：兩個 handle 各有檔案位置，會互相覆寫。
-    let stderr = match (&spec.stdout_file, &spec.stderr_file) {
-        (Some(out), Some(err)) if out.eq_ignore_ascii_case(err) => None,
-        _ => Some(open_output(spec.stderr_file.as_deref())?),
-    };
-
     // 根程序持有的 Job handle 只能查詢：讓具名 Job 在 Runtime 關閉 handle 之後仍找得回，但 Worker 不能藉它改 Job 的限制
     let keeper = inheritable_copy(job.0, JOB_OBJECT_QUERY)?;
-    let stderr_handle = stderr.as_ref().unwrap_or(&stdout).0;
-    let mut inherit = InheritList::new(vec![stdin.0, stdout.0, stderr_handle, keeper.0])?;
-
     // SAFETY：全零是 STARTUPINFOEXW 的有效初始值，之後設定必要欄位。
     let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = stdin.0;
-    startup.StartupInfo.hStdOutput = stdout.0;
-    startup.StartupInfo.hStdError = stderr_handle;
+    // 標準輸入輸出的 handle 與視窗標題要保存到 CreateProcessW 之後
+    let mut std_handles: Vec<OwnedHandle> = Vec::new();
+    let mut title_buffer: Option<Vec<u16>> = None;
+    let (inherited, console_flag) = match console {
+        Console::Hidden => {
+            let security = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: std::ptr::null_mut(),
+                bInheritHandle: 1,
+            };
+            // 檔案在確認 Job 不重複之後才開啟：重複的 spawn 不會覆寫執行中程序的輸出檔。
+            // 失敗時直接回傳，Job 尚無程序，handle 關閉後即消失。
+            let stdin =
+                open_std_handle(spec.stdin_file.as_deref().unwrap_or("NUL"), GENERIC_READ, OPEN_EXISTING, &security)?;
+            let open_output = |path: Option<&str>| match path {
+                Some(path) => open_std_handle(path, GENERIC_WRITE, CREATE_ALWAYS, &security),
+                None => open_std_handle("NUL", GENERIC_WRITE, OPEN_EXISTING, &security),
+            };
+            let stdout = open_output(spec.stdout_file.as_deref())?;
+            // stdout 與 stderr 指向同一個檔案時共用 handle：兩個 handle 各有檔案位置，會互相覆寫。
+            let stderr = match (&spec.stdout_file, &spec.stderr_file) {
+                (Some(out), Some(err)) if out.eq_ignore_ascii_case(err) => None,
+                _ => Some(open_output(spec.stderr_file.as_deref())?),
+            };
+            let stderr_handle = stderr.as_ref().unwrap_or(&stdout).0;
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startup.StartupInfo.hStdInput = stdin.0;
+            startup.StartupInfo.hStdOutput = stdout.0;
+            startup.StartupInfo.hStdError = stderr_handle;
+            let inherited = vec![stdin.0, stdout.0, stderr_handle, keeper.0];
+            std_handles.extend([stdin, stdout]);
+            std_handles.extend(stderr);
+            (inherited, CREATE_NO_WINDOW)
+        }
+        Console::New { title } => {
+            // 不設 STARTF_USESTDHANDLES：標準輸入輸出由新主控台提供，只繼承 Job handle
+            startup.StartupInfo.lpTitle = title_buffer.insert(wide(title)).as_mut_ptr();
+            (vec![keeper.0], CREATE_NEW_CONSOLE)
+        }
+    };
+    let mut inherit = InheritList::new(inherited)?;
     startup.lpAttributeList = inherit.as_ptr();
     // SAFETY：全零是 PROCESS_INFORMATION 的有效初始值，由 CreateProcessW 填寫。
     let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
@@ -443,7 +480,7 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
     let dir = spec.working_dir.as_deref().map(wide);
     let environment = environment_block(spec);
     // SAFETY：cmd 是可寫、NUL 結尾的緩衝區；environment 是以雙 NUL 結尾的 Unicode 環境區塊或 NULL；
-    // dir 為 NUL 結尾或 NULL；startup（含屬性清單）與 info 皆為有效結構。
+    // dir 為 NUL 結尾或 NULL；startup（含屬性清單、標題）與 info 皆為有效結構，引用的 handle 與緩衝區都仍存活。
     let ok = unsafe {
         CreateProcessW(
             std::ptr::null(),
@@ -451,7 +488,7 @@ fn spawn_blocking_impl(spec: &SpawnSpec) -> PortResult<(ProcessIdentity, Entry)>
             std::ptr::null(),
             std::ptr::null(),
             1,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_SUSPENDED | console_flag | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
             environment.as_ref().map_or(std::ptr::null(), |e| e.as_ptr() as *const c_void),
             dir.as_ref().map_or(std::ptr::null(), |d| d.as_ptr()),
             &startup.StartupInfo,
