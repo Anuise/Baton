@@ -1957,11 +1957,17 @@ export interface ControllerCliRun {
   /** 使用者按「結束」的時間；Runtime 結束宿主後才進入 ended。 */
   end_requested_at: number | null;
   ended_at: number | null;
-  /** 例如 "host_exited"、"user_ended"、"claude_not_found"、"terminal_failed"。 */
+  /** 例如 "host_exited"、"user_ended"、"switched"（換帳號重開）、"claude_not_found"、"terminal_failed"。 */
   end_code: string | null;
   /** 給使用者看的結束原因。 */
   end_reason: string | null;
   exit_code: number | null;
+  /** 這次開啟以 `--continue` 接續同帳號在此 Workspace 的原生 Session。 */
+  continue_session: boolean;
+  /** 已要求換帳號重開：這個 Run 結束後以此 Profile 開新的 Run；沒有要求為 null。 */
+  switch_to_profile_id: string | null;
+  /** 由換帳號重開產生時，前一個 Run 的 id。 */
+  switched_from_run_id: string | null;
 }
 
 /** Controller 頁簽的狀態（對應 GET /controller-cli）：最近一次的 Run（含已結束），從未開啟過為 null。 */
@@ -1977,6 +1983,12 @@ export interface ControllerCliClient {
   openControllerCli(workspaceId: string, profileId: string): Promise<ControllerCliView>;
   /** 沒有開著的 Controller CLI 時被拒（controller_cli_not_open）。 */
   endControllerCli(workspaceId: string): Promise<ControllerCliView>;
+  /**
+   * 換帳號重開：結束目前的 Controller CLI，Runtime 結束後以 `profileId` 開新的 Run；回傳目前的 Run（已帶結束要求與換帳號目標）。
+   * 沒有開著的（controller_cli_not_open）、與目前帳號相同（controller_cli_same_profile）、已在結束中（controller_cli_ending）、
+   * Profile 不可用（profile_unavailable）或不存在（profile_not_found）會被拒。
+   */
+  switchControllerCli(workspaceId: string, profileId: string): Promise<ControllerCliView>;
 }
 
 /** 恢復事件的狀態：等待（第一次立即、之後為退避）、嘗試中、穩定觀察中、已恢復、恢復額度用盡。 */
@@ -3325,6 +3337,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     openControllerCli: (workspaceId, profileId) =>
       send(`${workspacePath(workspaceId)}/controller-cli`, { method: "POST", body: { profile_id: profileId } }),
     endControllerCli: (workspaceId) => send(`${workspacePath(workspaceId)}/controller-cli/end`, { method: "POST" }),
+    switchControllerCli: (workspaceId, profileId) =>
+      send(`${workspacePath(workspaceId)}/controller-cli/switch`, { method: "POST", body: { profile_id: profileId } }),
   };
 }
 
@@ -3485,6 +3499,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     openControllerCli: (workspaceId, profileId) =>
       call<ControllerCliView>("controller_cli_open", { workspaceId, profileId }),
     endControllerCli: (workspaceId) => call<ControllerCliView>("controller_cli_end", { workspaceId }),
+    switchControllerCli: (workspaceId, profileId) =>
+      call<ControllerCliView>("controller_cli_switch", { workspaceId, profileId }),
   };
 }
 

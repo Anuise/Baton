@@ -5,17 +5,23 @@ import { formatTimestamp } from "./time";
 import type {
   AccountClient,
   AccountProfile,
+  AccountScheduling,
   ControllerCliClient,
   ControllerCliRun,
   ControllerCliStatus,
   ControllerCliView,
+  QuotaWindow,
+  SchedulingClient,
+  SchedulingOverview,
   Workspace,
 } from "./runtimeClient";
 
 /** Controller CLI 開著（starting／running）時重新讀取狀態的間隔：開窗與結束由 Runtime 推進。 */
 export const CONTROLLER_REFRESH_INTERVAL_MS = 2000;
 
-export type ControllerPageClient = ControllerCliClient & Pick<AccountClient, "listProfiles">;
+export type ControllerPageClient = ControllerCliClient &
+  Pick<AccountClient, "listProfiles"> &
+  Pick<SchedulingClient, "schedulingOverview">;
 
 interface Props {
   client: ControllerPageClient;
@@ -50,6 +56,24 @@ function isOpen(run: ControllerCliRun | null): boolean {
   return run !== null && (run.status === "starting" || run.status === "running");
 }
 
+/** 一個視窗的剩餘額度：1 − 已用比例，以百分比顯示；未知（null）顯示「未知」。 */
+function remainingLabel(account: AccountScheduling, window: QuotaWindow, short: string): string {
+  const used = account.quota.windows.find((w) => w.window === window)?.effective?.used ?? null;
+  // 推估可能超過 1，剩餘不顯示負數
+  return used === null ? `${short} 未知` : `${short} 剩 ${Math.round(Math.max(0, 1 - used) * 100)}%`;
+}
+
+/** 帳號的 5h／7d 剩餘額度與執行中 Worker 數，例如「5h 剩 60%｜7d 剩 85%｜執行中 Worker 1」。 */
+function quotaSummary(account: AccountScheduling): string {
+  return `${remainingLabel(account, "five_hour", "5h")}｜${remainingLabel(account, "seven_day", "7d")}｜執行中 Worker ${account.running}`;
+}
+
+/** Session 說明：接續同帳號的原生 Session、換帳號重開開的新 Session，或一般的新 Session。 */
+function sessionLabel(run: ControllerCliRun): string {
+  if (run.continue_session) return "接續上次的 Session";
+  return run.switched_from_run_id !== null ? "由換帳號重開開啟的新 Session" : "新的 Session";
+}
+
 /**
  * Workspace 的「Controller」頁簽（desktop-controller-cli 票 03）：選一個 Account Profile 當 Controller 帳號，
  * 由平台在外部終端機開啟互動式 Claude Code（Controller CLI），並可從 App 結束它。
@@ -62,6 +86,9 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const [profileId, setProfileId] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [overview, setOverview] = useState<SchedulingOverview | null>(null);
+  const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [switchTo, setSwitchTo] = useState("");
   // 只採用最後發出的讀取結果，避免較早的輪詢回應蓋掉剛開啟／結束的狀態
   const latest = useRef(0);
 
@@ -77,9 +104,23 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
     }
   }, [client, workspace.id]);
 
+  // 額度與執行中 Worker 數取自排程總覽；讀取失敗不擋住頁面，只提示無法取得額度
+  const loadOverview = useCallback(async () => {
+    try {
+      setOverview(await client.schedulingOverview());
+      setOverviewError(null);
+    } catch (e) {
+      setOverviewError(reasonOf(e));
+    }
+  }, [client]);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void loadOverview();
+  }, [loadOverview]);
 
   useEffect(() => {
     let current = true;
@@ -103,12 +144,16 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const run = view?.run ?? null;
   const open = isOpen(run);
 
-  // 開著時定期重新讀取，看到 running 或 ended（含開啟失敗）
+  // 開著時定期重新讀取，看到 running 或 ended（含開啟失敗）；額度與執行中 Worker 數一起更新。
+  // 換帳號重開後 view 回傳的是最新的 Run（新 Run 為 starting），所以會繼續輪詢到新 Run 開好。
   useEffect(() => {
     if (!open) return;
-    const timer = setInterval(() => void load(), pollMs);
+    const timer = setInterval(() => {
+      void load();
+      void loadOverview();
+    }, pollMs);
     return () => clearInterval(timer);
-  }, [open, load, pollMs]);
+  }, [open, load, loadOverview, pollMs]);
 
   const act = async (action: () => Promise<ControllerCliView>) => {
     setBusy(true);
@@ -132,6 +177,16 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const profileName = (id: string) => profiles?.find((profile) => profile.id === id)?.name ?? id;
   const selectable = available.some((profile) => profile.id === profileId);
   const ending = open && run !== null && run.end_requested_at !== null;
+  const accountOf = (id: string) => overview?.accounts.find((account) => account.profile_id === id) ?? null;
+  const optionLabel = (profile: AccountProfile) => {
+    if (!profile.dispatchable) return `${profile.name}（${profileStateLabel(profile)}）`;
+    const account = accountOf(profile.id);
+    return account === null ? profile.name : `${profile.name}（${quotaSummary(account)}）`;
+  };
+  const controllerAccount = run === null ? null : accountOf(run.profile_id);
+  // 換帳號的目標：與目前帳號不同、可用的 Profile；預設第一個
+  const switchTargets = available.filter((profile) => profile.id !== run?.profile_id);
+  const switchTarget = switchTargets.some((profile) => profile.id === switchTo) ? switchTo : (switchTargets[0]?.id ?? "");
 
   return (
     <section className="controller-page" aria-label="Controller">
@@ -148,6 +203,8 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
               <dd>{profileName(run.profile_id)}</dd>
               <dt>開啟時間</dt>
               <dd>{formatTimestamp(run.opened_at, timeZone)}</dd>
+              <dt>Session</dt>
+              <dd>{sessionLabel(run)}</dd>
             </>
           )}
         </dl>
@@ -161,9 +218,44 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
       {view && open && (
         <div className="controller-actions">
           <p className="controller-hint">Controller CLI 已開啟，請切到它的終端機視窗</p>
+          {controllerAccount && (
+            <div className="controller-quota" role="group" aria-label="Controller 帳號額度">
+              {quotaSummary(controllerAccount)}
+            </div>
+          )}
+          {controllerAccount?.quota_gate?.state === "draining" && (
+            <p role="status" className="controller-quota-warning">
+              Controller 帳號的額度已接近上限，建議換帳號重開
+            </p>
+          )}
           <button type="button" disabled={busy || ending} onClick={() => void act(() => client.endControllerCli(workspace.id))}>
             {ending ? "結束中…" : "結束"}
           </button>
+          {run !== null && run.switch_to_profile_id !== null && (
+            <p className="controller-switching">換帳號重開中：改用 {profileName(run.switch_to_profile_id)}</p>
+          )}
+          {profiles !== null && (
+            <div className="controller-switch">
+              <label>
+                換成帳號
+                <select value={switchTarget} disabled={ending} onChange={(e) => setSwitchTo(e.target.value)}>
+                  {switchTargets.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {optionLabel(profile)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {switchTargets.length === 0 && <p className="controller-hint">沒有其他可用的帳號可換</p>}
+              <button
+                type="button"
+                disabled={busy || ending || switchTarget === ""}
+                onClick={() => void act(() => client.switchControllerCli(workspace.id, switchTarget))}
+              >
+                換帳號重開
+              </button>
+            </div>
+          )}
         </div>
       )}
       {view && !open && (
@@ -177,7 +269,7 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
                 {available.length === 0 && <option value="">（沒有可用的帳號）</option>}
                 {profiles.map((profile) => (
                   <option key={profile.id} value={profile.id} disabled={!profile.dispatchable}>
-                    {profile.dispatchable ? profile.name : `${profile.name}（${profileStateLabel(profile)}）`}
+                    {optionLabel(profile)}
                   </option>
                 ))}
               </select>
@@ -207,6 +299,7 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
           </button>
         </div>
       )}
+      {overviewError && <p className="controller-quota-error">無法取得額度：{overviewError}</p>}
       {actionError && <p role="alert">{actionError}</p>}
     </section>
   );

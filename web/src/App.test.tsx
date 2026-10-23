@@ -13,6 +13,7 @@ import {
   metricsResponse,
   profile,
   reviewList,
+  schedulingOverview,
   setupStatus,
   verificationOverview,
   understandingView,
@@ -115,6 +116,7 @@ const client = {
   getConversation: vi.fn(async () => conversationView()),
   getControllerCli: vi.fn(async () => ({ workspace_id: "ws_1", run: null })),
   listProfiles: vi.fn(async () => ({ profiles: [profile()], limit: 8 })),
+  schedulingOverview: vi.fn(async () => schedulingOverview()),
   updateStatus: vi.fn(async () => availableUpdateStatus()),
   applyUpdate: vi.fn(),
 } as unknown as AppClient;

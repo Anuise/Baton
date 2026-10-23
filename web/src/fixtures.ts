@@ -778,6 +778,9 @@ export function controllerCliRun(overrides: Partial<ControllerCliRun> = {}): Con
     end_code: null,
     end_reason: null,
     exit_code: null,
+    continue_session: false,
+    switch_to_profile_id: null,
+    switched_from_run_id: null,
     ...overrides,
   };
 }
