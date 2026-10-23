@@ -22,25 +22,74 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// 由測試手動推進的時鐘。
 pub struct FakeClock {
     now: AtomicI64,
+    /// 時間被推進時叫醒停在 `sleep_until` 的等待者。
+    advanced: tokio::sync::Notify,
+    /// 目前停在 `sleep_until` 的等待者數：測試以 `wait_for_sleepers` 確認長輪詢已經開始等待，再推進時間。
+    sleepers: tokio::sync::watch::Sender<usize>,
 }
 
 impl FakeClock {
     pub fn new(start: Timestamp) -> Self {
-        Self { now: AtomicI64::new(start.as_millis()) }
+        Self {
+            now: AtomicI64::new(start.as_millis()),
+            advanced: tokio::sync::Notify::new(),
+            sleepers: tokio::sync::watch::Sender::new(0),
+        }
     }
 
     pub fn set(&self, to: Timestamp) {
         self.now.store(to.as_millis(), Ordering::SeqCst);
+        self.advanced.notify_waiters();
     }
 
     pub fn advance_millis(&self, millis: i64) {
         self.now.fetch_add(millis, Ordering::SeqCst);
+        self.advanced.notify_waiters();
+    }
+
+    /// 等到至少 `count` 個等待者停在 `sleep_until`（不推進時間、不使用真實 sleep）。
+    pub async fn wait_for_sleepers(&self, count: usize) {
+        let mut sleepers = self.sleepers.subscribe();
+        let _ = sleepers.wait_for(|n| *n >= count).await;
+    }
+}
+
+/// 在 `sleep_until` 期間計入等待者數，結束（含被丟棄）時扣回。
+struct Sleeper<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+impl<'a> Sleeper<'a> {
+    fn enter(sleepers: &'a tokio::sync::watch::Sender<usize>) -> Self {
+        sleepers.send_modify(|n| *n += 1);
+        Self(sleepers)
+    }
+}
+
+impl Drop for Sleeper<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n -= 1);
     }
 }
 
 impl Clock for FakeClock {
     fn now(&self) -> Timestamp {
         Timestamp::from_millis(self.now.load(Ordering::SeqCst))
+    }
+
+    /// 只在測試推進時間（`set`、`advance_millis`）時醒來比對。
+    fn sleep_until(&self, deadline: Timestamp) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let _sleeper = Sleeper::enter(&self.sleepers);
+            loop {
+                let advanced = self.advanced.notified();
+                tokio::pin!(advanced);
+                // 先登記再比對時間，比對之後的推進一定叫得醒
+                advanced.as_mut().enable();
+                if self.now() >= deadline {
+                    return;
+                }
+                advanced.await;
+            }
+        })
     }
 }
 

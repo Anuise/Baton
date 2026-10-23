@@ -130,10 +130,6 @@ impl ClaudeCodeAdapter {
         if let Some(native_session_id) = &spec.resume_native_session_id {
             args.extend(["--resume".to_string(), native_session_id.clone()]);
         }
-        // 互動式 Controller CLI 同帳號重開（票 05）：接回工作目錄在這個帳號下最近的原生 Session
-        if spec.continue_session {
-            args.push("--continue".to_string());
-        }
         args
     }
 
@@ -193,6 +189,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn controller_spawn_spec(&self, spec: &RunSpec) -> SpawnSpec {
         let mut args: Vec<String> = ["--setting-sources", "project,local"].map(String::from).to_vec();
         args.extend(self.shared_args(spec, false));
+        // 同帳號重新開啟：接續這個工作目錄在這個帳號下最近的原生 Session（票 07）
+        if spec.continue_session {
+            args.push("--continue".to_string());
+        }
         let (claude, claude_args) = self.wrap_batch(args);
         let mut args = vec![HOST_SUBCOMMAND.to_string(), claude];
         args.extend(claude_args);
@@ -684,20 +684,6 @@ mod tests {
         assert_eq!(adapter.controller_spawn_spec(&run_spec(Some(&snapshot), None)), spec, "純函式：重建後組出相同的指令");
     }
 
-    /// 票 05：同帳號重開時以 `--continue` 接回原生 Session；沒有要求接續時不帶。
-    #[test]
-    fn the_controller_cli_continues_the_latest_native_session_only_when_asked() {
-        let data = tempfile::tempdir().unwrap();
-        let adapter = adapter(data.path(), &[]);
-        let fresh = adapter.controller_spawn_spec(&run_spec(None, None));
-        assert!(!fresh.args.contains(&"--continue".to_string()), "{:?}", fresh.args);
-
-        let spec = RunSpec { continue_session: true, ..run_spec(None, None) };
-        let continued = adapter.controller_spawn_spec(&spec);
-        assert!(continued.args[2..].contains(&"--continue".to_string()), "{:?}", continued.args);
-        assert_eq!(adapter.controller_spawn_spec(&spec), continued, "純函式：重建後組出相同的指令");
-    }
-
     /// 票 05：`--continue` 只在工作目錄於這個帳號下有原生 Session 檔時可用。
     #[tokio::test]
     async fn continuing_needs_a_native_session_file_for_the_working_directory() {
@@ -734,6 +720,20 @@ mod tests {
         assert_eq!(spec.args[0], HOST_SUBCOMMAND);
         assert!(spec.args[1].to_ascii_lowercase().ends_with("cmd.exe"), "{:?}", spec.args);
         assert_eq!(&spec.args[2..7], ["/d", "/v:off", "/c", "call", r"C:\npm\claude.cmd"]);
+    }
+
+    #[test]
+    fn the_controller_cli_continues_the_native_session_only_when_asked() {
+        let data = tempfile::tempdir().unwrap();
+        let adapter = adapter(data.path(), &[]);
+        let fresh = adapter.controller_spawn_spec(&run_spec(None, None));
+        assert!(!fresh.args.contains(&"--continue".to_string()), "{:?}", fresh.args);
+
+        let continued = adapter.controller_spawn_spec(&RunSpec { continue_session: true, ..run_spec(None, None) });
+        assert_eq!(continued.args.iter().filter(|arg| *arg == "--continue").count(), 1, "{:?}", continued.args);
+        // Worker 不受影響
+        let worker = adapter.spawn_spec(&RunSpec { continue_session: true, ..run_spec(None, None) });
+        assert!(!worker.args.contains(&"--continue".to_string()), "{:?}", worker.args);
     }
 
     #[test]

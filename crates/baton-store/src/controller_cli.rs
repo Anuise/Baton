@@ -29,7 +29,7 @@ impl From<rusqlite::Error> for ControllerCliApplyError {
 
 const COLUMNS: &str = "id, workspace_id, profile_id, status, version, command_id, working_dir, settings_version, created_at, \
      launched_at, pid, process_created_at, command_hash, claude_pid, started_at, end_requested_at, ended_at, end_code, \
-     end_reason, exit_code, continue_session, switch_to_profile_id, handoff_from_run_id";
+     end_reason, exit_code, continue_session, rebound_at, switch_to_profile_id, handoff_from_run_id";
 
 impl Store {
     /// 使用者要求開啟：在同一個交易中確認 Workspace、Profile 與「這個 Workspace 沒有開著的 Controller CLI」，
@@ -138,6 +138,33 @@ impl Store {
     /// 有開著的 Controller CLI 的 Controller 帳號（Scheduler 不派新的 Worker 給它們，票 05）。
     pub async fn controller_cli_accounts(&self) -> StoreResult<Vec<String>> {
         self.read(|conn| Ok(load_controller_accounts(conn)?)).await
+    }
+
+    /// Runtime 重啟後查驗宿主已不在：中斷（票 07）。
+    pub async fn interrupt_controller_cli(&self, run_id: &str, reason: &str, now: Timestamp) -> Result<ControllerCliRun, ControllerCliApplyError> {
+        let reason = reason.to_string();
+        self.apply_cli(run_id, move |_, run| Ok(controller_cli::interrupt(run, &reason, now)), now).await
+    }
+
+    /// Runtime 重啟後查驗宿主仍存活：重新綁定，以這個 Run 簽發的 Controller 憑證從此失效（票 07）。已重新綁定過不改變。
+    pub async fn rebind_controller_cli(&self, run_id: &str, now: Timestamp) -> Result<ControllerCliRun, ControllerCliApplyError> {
+        let run_id = run_id.to_string();
+        let result = self
+            .write(move |tx| {
+                let Some(run) = load(tx, "id = ?1", [&run_id])?.pop() else {
+                    return Ok(Err(ControllerCliError::RunNotFound(run_id)));
+                };
+                match controller_cli::rebind(&run, now) {
+                    Err(rejected) => Ok(Err(rejected)),
+                    Ok(None) => Ok(Ok(run)),
+                    Ok(Some(change)) => {
+                        save(tx, &change, now)?;
+                        Ok(Ok(change.run))
+                    }
+                }
+            })
+            .await?;
+        Ok(result?)
     }
 
     /// 使用者按「結束」：記下要求，由 Supervisor 結束宿主。
@@ -318,8 +345,9 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ControllerCliRun> {
         end_reason: r.get(18)?,
         exit_code: r.get(19)?,
         continue_session: r.get(20)?,
-        switch_to_profile_id: r.get(21)?,
-        switched_from_run_id: r.get(22)?,
+        rebound_at: millis(21)?,
+        switch_to_profile_id: r.get(22)?,
+        switched_from_run_id: r.get(23)?,
     })
 }
 
@@ -331,14 +359,14 @@ fn save(tx: &Transaction<'_>, change: &ControllerCliChange, now: Timestamp) -> r
         "INSERT INTO controller_run
             (id, kind, workspace_id, profile_id, status, version, command_id, working_dir, settings_version, created_at,
              updated_at, launched_at, pid, process_created_at, command_hash, claude_pid, started_at, end_requested_at,
-             ended_at, end_code, end_reason, exit_code, continue_session, switch_to_profile_id, handoff_from_run_id)
-         VALUES (?1, 'cli', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+             ended_at, end_code, end_reason, exit_code, continue_session, rebound_at, switch_to_profile_id, handoff_from_run_id)
+         VALUES (?1, 'cli', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status, version = excluded.version, updated_at = excluded.updated_at,
            launched_at = excluded.launched_at, pid = excluded.pid, process_created_at = excluded.process_created_at,
            command_hash = excluded.command_hash, claude_pid = excluded.claude_pid, started_at = excluded.started_at,
            end_requested_at = excluded.end_requested_at, ended_at = excluded.ended_at, end_code = excluded.end_code,
-           end_reason = excluded.end_reason, exit_code = excluded.exit_code,
+           end_reason = excluded.end_reason, exit_code = excluded.exit_code, rebound_at = excluded.rebound_at,
            continue_session = excluded.continue_session, switch_to_profile_id = excluded.switch_to_profile_id",
         rusqlite::params![
             run.id,
@@ -363,6 +391,7 @@ fn save(tx: &Transaction<'_>, change: &ControllerCliChange, now: Timestamp) -> r
             run.end_reason,
             run.exit_code,
             run.continue_session,
+            millis(run.rebound_at),
             run.switch_to_profile_id,
             run.switched_from_run_id,
         ],

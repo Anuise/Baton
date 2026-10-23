@@ -10,6 +10,7 @@ mod authorization;
 mod backups;
 mod controller;
 mod controller_cli;
+mod controller_wait;
 mod conversations;
 mod decisions;
 mod external_operations;
@@ -387,6 +388,8 @@ pub fn router(state: ApiState) -> Router {
         // Controller 宿主回報 claude 的開始與結束（desktop-controller-cli 票 03）：只接受 Controller 憑證
         .route(baton_domain::controller_cli::HOST_STARTED_PATH, post(controller_cli::host_started))
         .route(baton_domain::controller_cli::HOST_ENDED_PATH, post(controller_cli::host_ended))
+        // Controller 事件等待（desktop-controller-cli 票 06）：只接受仍開著的 Controller 憑證
+        .route(baton_domain::controller_wait::WAIT_PATH, post(controller_wait::wait))
         // Controller 專屬的拆工與派工工具（票 17）：只接受 Controller 憑證
         .route(&tool_path(TOOL_PROPOSE_TASK), post(controller::propose_task))
         .route(&tool_path(TOOL_UPDATE_TASK), post(controller::update_task))

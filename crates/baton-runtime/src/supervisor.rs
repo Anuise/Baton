@@ -142,6 +142,9 @@ pub struct Supervisor {
     exiting: watch::Sender<bool>,
     /// 最近一次寫給監護的恢復事件（識別與版本，票 32）；事件有變動才重寫鏡像。
     mirrored: Mutex<Option<(String, i64)>>,
+    /// 這個 Runtime 實例自己開窗（簽發憑證）或重啟後已核對過的 Controller CLI（desktop-controller-cli 票 07）；
+    /// 不在其中、又已寫過 launch intent 的，是上一個實例開出的，要先查驗宿主。
+    controller_clis_checked: Mutex<HashSet<String>>,
 }
 
 /// Supervisor 的生命週期參數（票 25）。
@@ -187,6 +190,7 @@ impl Supervisor {
             reopen_from: Mutex::new(lifecycle.reopen_from),
             exiting: watch::Sender::new(false),
             mirrored: Mutex::new(None),
+            controller_clis_checked: Mutex::new(HashSet::new()),
         })
     }
 
@@ -414,6 +418,22 @@ impl Supervisor {
             }
         }
 
+        // Controller CLI 也列入停止進度（desktop-controller-cli 票 07），與 Worker 同時結束
+        let clis = match self.store.open_controller_cli_runs().await {
+            Ok(clis) => clis,
+            Err(error) => {
+                report.notes.push(format!("無法讀取開著的 Controller CLI：{error}"));
+                Vec::new()
+            }
+        };
+        if !clis.is_empty() {
+            for run in &clis {
+                report.record(RunStopRecord::pending_controller_cli(&run.id, &run.workspace_id));
+            }
+            self.save_progress(&report).await;
+        }
+        let clis = tokio::time::timeout_at(deadline, self.stop_controller_clis_for_exit(clis));
+
         // Controller 的輪次與 Worker 同時停止，同樣受總上限約束（票 16）
         let controllers = tokio::time::timeout_at(deadline, self.stop_controllers_for_exit(grace));
         // 到總上限仍沒有結果就不再等待（逾時的那些在 `finish_exit` 記為停止異常）
@@ -433,9 +453,13 @@ impl Supervisor {
                 self.save_progress(&report).await;
             }
         };
-        let (controllers, ()) = tokio::join!(controllers, workers);
+        let (controllers, (), clis) = tokio::join!(controllers, workers, clis);
         if controllers.is_err() {
             report.notes.push("到上限仍無法確認 Controller 的程序已停止".to_string());
+        }
+        // 逾時的 Controller CLI 維持等待中，在 `finish_exit` 記為停止異常
+        for record in clis.unwrap_or_default() {
+            report.record(record);
         }
         self.finish_exit(report, total).await
     }

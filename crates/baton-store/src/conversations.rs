@@ -221,14 +221,15 @@ impl Store {
     pub async fn controller_run_active(&self, scope: &ControllerScope) -> StoreResult<bool> {
         let scope = scope.clone();
         self.read(move |conn| {
-            let status: Option<String> = conn
+            // Controller CLI 在 Runtime 重啟後被重新綁定（`rebound_at`）時，舊憑證失效（desktop-controller-cli 票 07）
+            let row: Option<(String, Option<i64>)> = conn
                 .query_row(
-                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2",
+                    "SELECT status, rebound_at FROM controller_run WHERE id = ?1 AND workspace_id = ?2",
                     [&scope.controller_run_id, &scope.workspace_id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            Ok(matches!(status.as_deref(), Some("starting" | "running")))
+            Ok(matches!(row, Some((status, None)) if matches!(status.as_str(), "starting" | "running")))
         })
         .await
     }

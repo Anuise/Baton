@@ -12,11 +12,14 @@
 //!   `reopening_with_the_same_profile_continues_the_native_session`
 //! - 換帳號重開先結束再開新的，時間線可追查：`switching_accounts_ends_the_current_cli_then_opens_a_new_session_with_the_new_profile`、
 //!   `a_switch_still_opens_the_new_cli_when_the_terminal_was_closed_first`、`switching_is_refused_for_the_same_or_an_unusable_profile`
+//! - 換帳號開出的新 Run 接續上一個 Controller 確認到的事件位置（票 06）：`the_switched_controller_continues_the_event_cursor`
+//! - Runtime 重啟後被重新綁定（票 07）的 Controller CLI 也能換帳號重開：`a_rebound_controller_cli_can_switch_accounts`
 
 use std::sync::Arc;
 
 use baton_domain::agent::AGENT_TOKEN_ENV;
 use baton_domain::controller_cli::HOST_ENDED_PATH;
+use baton_domain::controller_wait::WAIT_PATH;
 use baton_domain::Timestamp;
 use baton_harness::Harness;
 use baton_ports::{AdapterEvent, TerminalLaunch};
@@ -388,4 +391,90 @@ async fn switching_is_refused_for_the_same_or_an_unusable_profile() {
     harness.supervise().await;
     let run = view(&harness, &ws).await;
     assert_eq!((run["id"].clone(), run["status"].as_str(), run["end_requested_at"].clone()), (old["id"].clone(), Some("running"), Value::Null));
+}
+
+// --- 換帳號與事件等待 ---
+
+/// 以 Controller 憑證查一次事件（不等待）；有事件就確認，回傳各事件的 `run_id`。
+async fn take_events(harness: &Harness, token: &str) -> Vec<Value> {
+    let wait = |body: Value| async move {
+        let response = harness
+            .request(Method::POST, WAIT_PATH)
+            .bearer_auth(token)
+            .header(baton_api::CLIENT_HEADER, baton_api::CLIENT_HEADER_VALUE)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.json::<Value>().await.unwrap()
+    };
+    let response = wait(json!({ "timeout_seconds": 0 })).await;
+    let events = response["events"].as_array().unwrap().clone();
+    if !events.is_empty() {
+        wait(json!({ "ack": response["cursor"], "timeout_seconds": 0 })).await;
+    }
+    events.iter().map(|e| e["run_id"].clone()).collect()
+}
+
+/// 派工並讓 Worker 結束（成功），回傳 Run 的識別。
+async fn worker_runs_to_the_end(harness: &Harness, ws: &str, title: &str) -> String {
+    let tid = ready_task(harness, ws, title).await;
+    let (status, run) = dispatch(harness, ws, &tid).await;
+    assert_eq!(status, StatusCode::CREATED, "{run}");
+    let rid = run["id"].as_str().unwrap().to_string();
+    harness.supervise().await;
+    harness.agent_adapter.emit(&rid, AdapterEvent::Exited { success: true });
+    harness.supervise().await;
+    rid
+}
+
+#[tokio::test]
+async fn the_switched_controller_continues_the_event_cursor() {
+    let harness = Harness::builder().clock_at(CLOCK_START).start().await;
+    let first = harness.add_account("帳號 1", "account1@example.com").await;
+    let second = harness.add_account("帳號 2", "account2@example.com").await;
+    harness.add_account("Worker 帳號", "worker@example.com").await;
+    let ws = new_workspace(&harness, "main").await;
+    let (_, launch) = open_and_launch(&harness, &ws, &first).await;
+    let old_token = env_of(&launch, AGENT_TOKEN_ENV).unwrap();
+
+    // 舊的 Controller 確認了第一個 Worker 的結束；第二個 Worker 結束時還沒確認就換帳號
+    let confirmed = worker_runs_to_the_end(&harness, &ws, "一").await;
+    assert_eq!(take_events(&harness, &old_token).await, [json!(confirmed)]);
+    let pending = worker_runs_to_the_end(&harness, &ws, "二").await;
+    assert_eq!(switch(&harness, &ws, &second).await.0, StatusCode::ACCEPTED);
+    harness.supervise().await;
+    harness.supervise().await;
+    let new = view(&harness, &ws).await;
+    assert_eq!((new["profile_id"].as_str(), new["status"].as_str()), (Some(second.as_str()), Some("running")), "{new}");
+
+    // 新的 Controller 從舊的確認到的位置接續：收到沒確認的，已確認的不重複
+    let new_token = env_of(&last_terminal(&harness), AGENT_TOKEN_ENV).unwrap();
+    assert_eq!(take_events(&harness, &new_token).await, [json!(pending)]);
+}
+
+#[tokio::test]
+async fn a_rebound_controller_cli_can_switch_accounts() {
+    let mut harness = Harness::builder().clock_at(CLOCK_START).start().await;
+    let first = harness.add_account("帳號 1", "account1@example.com").await;
+    let second = harness.add_account("帳號 2", "account2@example.com").await;
+    let ws = new_workspace(&harness, "main").await;
+    let (old, launch) = open_and_launch(&harness, &ws, &first).await;
+    let old_host = harness.process_control.identity_of(&launch.spawn.command_id).unwrap();
+
+    // 當掉重啟後宿主仍存活：重新綁定（舊憑證失效），使用者改以換帳號重開
+    harness.crash_restart().await;
+    harness.supervise().await;
+    assert!(view(&harness, &ws).await["rebound_at"].is_number());
+    assert_eq!(switch(&harness, &ws, &second).await.0, StatusCode::ACCEPTED);
+    harness.supervise().await;
+    harness.supervise().await;
+
+    assert!(harness.process_control.stop_calls().contains(&old_host), "Runtime 重建後仍能結束舊宿主");
+    let new = view(&harness, &ws).await;
+    assert_eq!(new["switched_from_run_id"], old["id"]);
+    assert_eq!((new["status"].as_str(), new["rebound_at"].clone()), (Some("running"), Value::Null), "{new}");
+    let token = env_of(&last_terminal(&harness), AGENT_TOKEN_ENV).unwrap();
+    assert_eq!(harness.call_tool(&token, "get_workflows", json!({})).await.0, StatusCode::OK, "新的 Run 取得新的憑證");
 }

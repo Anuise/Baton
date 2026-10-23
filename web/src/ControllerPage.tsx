@@ -83,7 +83,8 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const [loadError, setLoadError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<AccountProfile[] | null>(null);
   const [profilesError, setProfilesError] = useState<string | null>(null);
-  const [profileId, setProfileId] = useState("");
+  // 使用者手動選的帳號；沒選過時用預設（見下方 profileId）
+  const [pickedProfileId, setPickedProfileId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [overview, setOverview] = useState<SchedulingOverview | null>(null);
@@ -129,8 +130,6 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
         if (!current) return;
         const active = list.profiles.filter((profile) => profile.status === "active");
         setProfiles(active);
-        // 預設選第一個可用的 Profile
-        setProfileId(active.find((profile) => profile.dispatchable)?.id ?? "");
       },
       (e: unknown) => {
         if (current) setProfilesError(reasonOf(e));
@@ -175,6 +174,12 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const available = profiles?.filter((profile) => profile.dispatchable) ?? [];
   const unavailable = profiles?.filter((profile) => !profile.dispatchable) ?? [];
   const profileName = (id: string) => profiles?.find((profile) => profile.id === id)?.name ?? id;
+  // 預設選最近一次 Run 的帳號（同帳號重開才會接續原生 Session）；不可用時選第一個可用的。
+  // 由目前的 view 與 profiles 推導，兩者的到達順序不影響結果
+  const profileId =
+    pickedProfileId ??
+    (available.find((profile) => profile.id === run?.profile_id) ?? available[0])?.id ??
+    "";
   const selectable = available.some((profile) => profile.id === profileId);
   const ending = open && run !== null && run.end_requested_at !== null;
   const accountOf = (id: string) => overview?.accounts.find((account) => account.profile_id === id) ?? null;
@@ -211,13 +216,24 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
       )}
       {run && !open && run.end_reason !== null && (
         <p className="controller-end-reason">
-          {run.end_code !== null && LAUNCH_FAILURE_CODES.has(run.end_code) ? "開啟失敗：" : "結束原因："}
+          {run.end_code !== null && LAUNCH_FAILURE_CODES.has(run.end_code)
+            ? "開啟失敗："
+            : run.status === "interrupted"
+              ? "中斷原因："
+              : "結束原因："}
           {run.end_reason}
         </p>
       )}
       {view && open && (
         <div className="controller-actions">
-          <p className="controller-hint">Controller CLI 已開啟，請切到它的終端機視窗</p>
+          {run?.rebound_at != null ? (
+            <p role="alert">
+              Runtime 重新啟動過，這個 Controller CLI 的平台工具已失效。請按「結束」後以同一個帳號重新開啟（會接續原生
+              Session）。
+            </p>
+          ) : (
+            <p className="controller-hint">Controller CLI 已開啟，請切到它的終端機視窗</p>
+          )}
           {controllerAccount && (
             <div className="controller-quota" role="group" aria-label="Controller 帳號額度">
               {quotaSummary(controllerAccount)}
@@ -265,7 +281,7 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
           {profiles !== null && (
             <label>
               Controller 帳號
-              <select value={profileId} onChange={(e) => setProfileId(e.target.value)}>
+              <select value={profileId} onChange={(e) => setPickedProfileId(e.target.value)}>
                 {available.length === 0 && <option value="">（沒有可用的帳號）</option>}
                 {profiles.map((profile) => (
                   <option key={profile.id} value={profile.id} disabled={!profile.dispatchable}>

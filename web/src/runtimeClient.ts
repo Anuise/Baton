@@ -1567,6 +1567,8 @@ export interface ExitRunResult {
   /** 只有 outcome 為 anomaly 時才有。 */
   anomaly?: StopAnomaly;
   message?: string;
+  /** 這一項是 Controller CLI，不是 Worker Run。 */
+  controller_cli?: boolean;
 }
 
 /** 最近一次完全退出的經過；時間是 UTC 毫秒。 */
@@ -1962,8 +1964,10 @@ export interface ControllerCliRun {
   /** 給使用者看的結束原因。 */
   end_reason: string | null;
   exit_code: number | null;
-  /** 這次開啟以 `--continue` 接續同帳號在此 Workspace 的原生 Session。 */
+  /** 同帳號重新開啟、以 `--continue` 接續上次的原生 Session。 */
   continue_session: boolean;
+  /** Runtime 重啟後查驗宿主仍存活、重新綁定的時間；有值時這個 Controller CLI 的平台工具已失效，要重新開啟。 */
+  rebound_at: number | null;
   /** 已要求換帳號重開：這個 Run 結束後以此 Profile 開新的 Run；沒有要求為 null。 */
   switch_to_profile_id: string | null;
   /** 由換帳號重開產生時，前一個 Run 的 id。 */
