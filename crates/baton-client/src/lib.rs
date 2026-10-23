@@ -32,7 +32,7 @@ use baton_api::{
     VerificationOverviewView,
     workspace_exploration_path, ExplorationOverview,
     AddDependencyRequest, AdmissionCheckRequest, AdmissionReport, AdoptRequest, AnswerRequest, AuthorizationView,
-    ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
+    ConfirmAuthorizationRequest, CreateGoalRequest, CreateProfileFromDirRequest, CreateProfileRequest, CreateTaskRequest, CreateWorkspaceRequest,
     ErrorBody, HealthResponse, ImportPreview, LoginTerminalResponse, PendingDecisions, PlatformResponse, ProfileList,
     RunSettingsSnapshot, SetupStatus, SharedSettingsStatus, SnapshotRequest, SummaryRequest, TaskBoard, TaskDetail,
     knowledge_action_path, knowledge_entry_path, ConfirmKnowledgeRequest, CorrectKnowledgeRequest,
@@ -41,7 +41,7 @@ use baton_api::{
     guard_action_path, recurrences_path, CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList,
     ReportRecurrenceRequest, GUARDS_PATH,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
-    PLATFORM_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
+    PLATFORM_PATH, PROFILES_FROM_EXISTING_DIR_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
     SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
 };
 use baton_domain::authority::AuthorityTable;
@@ -175,6 +175,11 @@ impl RuntimeClient {
     /// 新增帳號 Profile；Runtime 為它建立獨立的設定目錄。
     pub async fn create_profile(&self, request: &CreateProfileRequest) -> Result<ProfileView, ClientError> {
         self.send_json(reqwest::Method::POST, PROFILES_PATH, Some(request)).await
+    }
+
+    /// 以既有的 Claude Code 設定目錄建立 Profile；Runtime 建立後立即核對登入身分。
+    pub async fn create_profile_from_dir(&self, request: &CreateProfileFromDirRequest) -> Result<ProfileView, ClientError> {
+        self.send_json_within(reqwest::Method::POST, PROFILES_FROM_EXISTING_DIR_PATH, Some(request), PROBE_TIMEOUT).await
     }
 
     /// 重新核對 Profile 的登入狀態、認證來源與帳號身分。

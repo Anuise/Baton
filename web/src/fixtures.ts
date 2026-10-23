@@ -111,6 +111,7 @@ export function profile(overrides: Partial<AccountProfile> = {}): AccountProfile
     id: "prof_1",
     name: "主要帳號",
     config_dir: "C:\\Baton\\profiles\\prof_1",
+    config_dir_origin: "managed",
     expected_account: "me@example.com",
     status: "active",
     verification: {

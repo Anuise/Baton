@@ -232,6 +232,8 @@ export interface AccountProfile {
   id: string;
   name: string;
   config_dir: string;
+  /** 設定目錄的來源：`managed` 是平台在資料目錄下建立的；`external` 是以既有目錄建立，封存時不刪除。 */
+  config_dir_origin: "managed" | "external";
   expected_account: string | null;
   status: "active" | "archived";
   verification: ProfileVerification | null;
@@ -250,6 +252,11 @@ export interface ProfileList {
 export interface CreateProfileRequest {
   name: string;
   expectedAccount?: string;
+}
+
+export interface CreateProfileFromDirRequest {
+  name: string;
+  configDir: string;
 }
 
 export interface GuidanceCommand {
@@ -1533,6 +1540,8 @@ export interface SchedulingClient {
 export interface AccountClient {
   listProfiles(): Promise<ProfileList>;
   createProfile(request: CreateProfileRequest): Promise<AccountProfile>;
+  /** 以已登入的既有 Claude Code 設定目錄建立 Profile；Runtime 會立即核對，回傳的 Profile 已帶核對結果。 */
+  createProfileFromExistingDir(request: CreateProfileFromDirRequest): Promise<AccountProfile>;
   verifyProfile(id: string): Promise<AccountProfile>;
   /** 開啟終端機，以該 Profile 自己的設定目錄執行原生登入。 */
   openLoginTerminal(id: string): Promise<{ opened: boolean }>;
@@ -3148,6 +3157,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     listProfiles: () => send(PROFILES_PATH),
     createProfile: ({ name, expectedAccount }) =>
       send(PROFILES_PATH, { method: "POST", body: { name, expected_account: expectedAccount } }),
+    createProfileFromExistingDir: ({ name, configDir }) =>
+      send(`${PROFILES_PATH}/from-existing-dir`, { method: "POST", body: { name, config_dir: configDir } }),
     verifyProfile: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/verify`, { method: "POST" }),
     openLoginTerminal: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/login-terminal`, { method: "POST" }),
     archiveProfile: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/archive`, { method: "POST" }),
@@ -3313,6 +3324,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     listProfiles: () => call<ProfileList>("profile_list"),
     // Tauri 會把 JS 的 camelCase 參數對應到 Rust 的 snake_case
     createProfile: ({ name, expectedAccount }) => call<AccountProfile>("profile_create", { name, expectedAccount }),
+    createProfileFromExistingDir: ({ name, configDir }) =>
+      call<AccountProfile>("profile_create_from_dir", { name, configDir }),
     verifyProfile: (id) => call<AccountProfile>("profile_verify", { id }),
     openLoginTerminal: (id) => call<{ opened: boolean }>("profile_login_terminal", { id }),
     archiveProfile: (id) => call<AccountProfile>("profile_archive", { id }),
