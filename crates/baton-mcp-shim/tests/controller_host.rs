@@ -191,3 +191,18 @@ fn unreachable_runtime_does_not_stop_the_child() {
     let output = run(host(Some(&closed_url()), &["cmd.exe", "/c", "exit", "0"]));
     assert_eq!(output.status.code(), Some(0), "stderr：{}", output.stderr);
 }
+
+#[test]
+fn passes_the_shim_path_to_the_child() {
+    let (url, _) = spawn_runtime(200);
+
+    let output = run(host(Some(&url), &["cmd.exe", "/c", "echo", "%BATON_MCP_SHIM%"]));
+
+    assert_eq!(output.status.code(), Some(0), "stderr：{}", output.stderr);
+    let shim = std::path::Path::new(env!("CARGO_BIN_EXE_baton-mcp-shim"));
+    let file_name = shim.file_name().unwrap().to_string_lossy().to_lowercase();
+    let stdout = output.stdout.to_lowercase();
+    // 變數沒設定時 cmd.exe 會原樣印出 %BATON_MCP_SHIM%
+    assert!(!stdout.contains("%baton_mcp_shim%"), "{}", output.stdout);
+    assert!(stdout.contains(&file_name), "stdout 應含 shim 路徑 {}：{}", shim.display(), output.stdout);
+}

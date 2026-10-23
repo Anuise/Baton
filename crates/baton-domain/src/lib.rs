@@ -15,6 +15,7 @@ pub mod budget;
 pub mod config;
 pub mod context;
 pub mod controller_cli;
+pub mod controller_wait;
 pub mod conversation;
 pub mod decision;
 pub mod event;

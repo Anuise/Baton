@@ -30,6 +30,7 @@ mod artifacts;
 mod cleanup;
 mod context;
 mod controller_cli;
+mod controller_wait;
 mod conversations;
 pub mod backup;
 mod budgets;
@@ -65,6 +66,7 @@ pub use artifacts::NewArtifactVersion;
 pub use cleanup::{CleanupApplyError, CleanupWork};
 pub use context::ContextApplyError;
 pub use controller_cli::ControllerCliApplyError;
+pub use controller_wait::ControllerWaitApplyError;
 pub use conversations::{ConversationApplyError, ControllerWake};
 pub use decisions::{AnswerResult, DecisionApplyError, DecisionList, DecisionOverview, PendingByWorkspace};
 pub use external_operations::ExternalApplyError;
@@ -1916,6 +1918,21 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE controller_run ADD COLUMN continue_session INTEGER NOT NULL DEFAULT 0 CHECK (continue_session IN (0, 1));
         ALTER TABLE controller_run ADD COLUMN rebound_at INTEGER;",
     },
+    // desktop-controller-cli 票 06：Controller 事件等待的游標（事件表的 seq），依 Controller Run 保存；只會往前
+    Migration {
+        name: "controller_event_cursor",
+        sql: "CREATE TABLE controller_event_cursor (
+            controller_run_id TEXT PRIMARY KEY REFERENCES controller_run (id),
+            workspace_id TEXT NOT NULL REFERENCES workspace (id),
+            acked_seq INTEGER NOT NULL CHECK (acked_seq >= 0),
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX controller_event_cursor_workspace ON controller_event_cursor (workspace_id);
+        CREATE TRIGGER controller_event_cursor_forward_only BEFORE UPDATE ON controller_event_cursor
+        WHEN NEW.acked_seq < OLD.acked_seq OR NEW.controller_run_id <> OLD.controller_run_id
+            OR NEW.workspace_id <> OLD.workspace_id
+        BEGIN SELECT RAISE(ABORT, 'controller_event_cursor 只能往前'); END;",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
@@ -1968,6 +1985,8 @@ struct Inner {
     health: Arc<Mutex<Option<StorageFault>>>,
     /// 測試注入的寫入故障。
     injected: Arc<Mutex<Option<StorageFaultKind>>>,
+    /// 每次寫入交易提交成功就加一：長輪詢（Controller 事件等待，desktop-controller-cli 票 06）據此重新查詢。
+    commits: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl Drop for Inner {
@@ -2040,6 +2059,7 @@ impl Store {
                 full_text,
                 health: Arc::new(Mutex::new(None)),
                 injected: Arc::new(Mutex::new(None)),
+                commits: Arc::new(tokio::sync::watch::Sender::new(0)),
             }),
         })
     }
@@ -2061,6 +2081,7 @@ impl Store {
     ) -> StoreResult<T> {
         let (reply, result) = oneshot::channel();
         let (health, injected) = (self.inner.health.clone(), self.inner.injected.clone());
+        let commits = self.inner.commits.clone();
         let job: Job = Box::new(move |conn| {
             let injected = *injected.lock().unwrap_or_else(|e| e.into_inner());
             let outcome = match injected {
@@ -2073,10 +2094,18 @@ impl Store {
             } else if clears_fault && outcome.is_ok() {
                 *health.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
+            if outcome.is_ok() {
+                commits.send_modify(|n| *n = n.wrapping_add(1));
+            }
             let _ = reply.send(outcome);
         });
         self.inner.writer.as_ref().ok_or(StoreError::Join)?.send(job).map_err(|_| StoreError::Join)?;
         result.await.map_err(|_| StoreError::Join)?
+    }
+
+    /// 訂閱寫入提交：訂閱之後每次有寫入交易提交，`changed()` 就會醒來。先訂閱再查詢，查詢之後的提交一定叫得醒。
+    pub fn subscribe_commits(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.commits.subscribe()
     }
 
     /// 唯讀查詢：使用獨立的唯讀連線，不經過寫入佇列。
