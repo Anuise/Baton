@@ -1,6 +1,6 @@
 # 07: Controller CLI 的完全退出與當掉恢復
 
-Status: ready-for-agent
+Status: in_progress（Work-9，run R011-07-impl，2026-10-23 16:09）
 Blocked by: 03
 
 **What to build:** 只關 App 視窗時 Controller CLI 不受影響；完全退出時 Runtime 結束 Controller 宿主與 `claude`，退出進度列出這一項；Runtime 當掉恢復後，非終態 Controller Run 先查驗程序：不存活標為 interrupted，存活者舊憑證失效並提示使用者重開。之後可用同帳號接續原生 Session。User stories 68～71。
