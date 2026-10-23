@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use baton_api::{
     PostedMessage, AcceptTaskRequest, AdmissionReport, AnswerRequest, ArtifactList, ArtifactPreview, AuthorizationView, BackupStatus,
-    BatchRequest, BatchResponse, ConfirmAuthorizationRequest, CreateProfileRequest, CreateTaskRequest,
+    BatchRequest, BatchResponse, ConfirmAuthorizationRequest, CreateProfileFromDirRequest, CreateProfileRequest, CreateTaskRequest,
     CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus, LoginStartupView, LoginTerminalResponse, MergeRequest,
     MergeResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus,
     SummaryRequest, TaskBoard, TaskDetail, UpdateAuthorityRequest, WorkspaceLifecycleView, WorkspaceList,
@@ -240,6 +240,19 @@ async fn profile_create(
         return Err(reason.clone());
     }
     link.client.create_profile(&CreateProfileRequest { name, expected_account }).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 以既有的 Claude Code 設定目錄建立 Profile（建立後立即核對登入身分）。
+#[tauri::command]
+async fn profile_create_from_dir(
+    link: State<'_, RuntimeLink>,
+    name: String,
+    config_dir: String,
+) -> Result<ProfileView, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.create_profile_from_dir(&CreateProfileFromDirRequest { name, config_dir }).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 重新核對 Profile 的登入狀態、認證來源與帳號身分。
@@ -1356,6 +1369,7 @@ fn main() {
             workspace_set_model_overrides,
             profile_list,
             profile_create,
+            profile_create_from_dir,
             profile_verify,
             profile_login_terminal,
             profile_archive,

@@ -1,4 +1,4 @@
-//! account_profile 管理端點：建立、列出、核對登入狀態、開啟原生登入終端機、封存（桌面角色專用）。
+//! account_profile 管理端點：建立、以既有目錄建立、列出、核對登入狀態、開啟原生登入終端機、封存（桌面角色專用）。
 //!
 //! 端點只做「解析請求 → 經 Port 取得事實 → 交給 Store 套用 Domain 命令」；
 //! 數量上限、設定目錄不共用、可不可以派工都是 Domain 的規則。
@@ -12,7 +12,7 @@ use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::Json;
 use baton_domain::profile::{self, AccountProfile, ProfileCommand, ProfileError, ProfileStatus, ProfileView};
-use baton_ports::ToolProbe;
+use baton_ports::{DirectoryState, ToolProbe};
 use baton_store::{ProfileApplyError, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,8 @@ use crate::ApiState;
 
 /// Profile 集合路徑：GET 列出、POST 建立。
 pub const PROFILES_PATH: &str = "/api/v1/profiles";
+/// 以既有目錄建立 Profile 的路徑（POST）。
+pub const PROFILES_FROM_EXISTING_DIR_PATH: &str = "/api/v1/profiles/from-existing-dir";
 /// 核對登入狀態路徑樣板（`{id}` 是 Profile 識別）。
 pub(crate) const VERIFY_ROUTE: &str = "/api/v1/profiles/{id}/verify";
 pub(crate) const LOGIN_TERMINAL_ROUTE: &str = "/api/v1/profiles/{id}/login-terminal";
@@ -32,6 +34,13 @@ pub struct CreateProfileRequest {
     /// 預期的帳號（電子郵件）；省略時以第一次核對到的原生登入帳號為準。
     #[serde(default)]
     pub expected_account: Option<String>,
+}
+
+/// 以使用者既有的 Claude Code 設定目錄（例如 `~/.claude-Work-3`）建立 Profile；平台不建立、不刪除、不修改這個目錄。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateProfileFromDirRequest {
+    pub name: String,
+    pub config_dir: String,
 }
 
 /// 列出端點的回應：全部 Profile（含已封存）與可派工判定，依建立順序。
@@ -50,9 +59,11 @@ pub struct LoginTerminalResponse {
 impl From<ProfileError> for ApiError {
     fn from(error: ProfileError) -> Self {
         let status = match &error {
-            ProfileError::NameEmpty | ProfileError::NameTooLong | ProfileError::ExpectedAccountInvalid(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            ProfileError::NameEmpty
+            | ProfileError::NameTooLong
+            | ProfileError::ExpectedAccountInvalid(_)
+            | ProfileError::ConfigDirInvalid(_)
+            | ProfileError::ConfigDirManaged(_) => StatusCode::BAD_REQUEST,
             ProfileError::NotFound(_) => StatusCode::NOT_FOUND,
             ProfileError::NameTaken(_)
             | ProfileError::LimitReached
@@ -106,6 +117,59 @@ pub(crate) async fn create(
         message: format!("無法建立設定目錄 {}：{error}", config_dir.display()),
     })?;
     state.store.apply_profile_command(command, now).await?;
+    Ok((StatusCode::CREATED, Json(view_of(&state, &id).await?)))
+}
+
+pub(crate) async fn create_from_existing_dir(
+    State(state): State<Arc<ApiState>>,
+    body: Result<Json<CreateProfileFromDirRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<ProfileView>), ApiError> {
+    let Json(request) = body.map_err(|rejection| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "bad_request",
+        message: format!("請求內容不是有效的 JSON，或缺少必要欄位 name、config_dir：{}", rejection.body_text()),
+    })?;
+
+    let id = new_id("prof")?;
+    let command = ProfileCommand::CreateFromExistingDir {
+        id: id.clone(),
+        name: request.name,
+        config_dir: request.config_dir,
+        managed_root: state.data_dir.join("profiles").to_string_lossy().into_owned(),
+    };
+    let now = state.clock.now();
+
+    // 先由 Domain 檢查名稱、上限、路徑形式與重疊，才去問檔案系統；目錄由使用者準備，平台不建立
+    let checked = profile::decide(&state.store.list_profiles().await?, command.clone(), now)?.profile;
+    let config_dir = checked.config_dir;
+    match state.workspace_fs.inspect_directory(Path::new(&config_dir)).await {
+        Ok(DirectoryState::Directory) => {}
+        Ok(DirectoryState::NotFound) => {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "profile_config_dir_not_found",
+                message: format!("找不到設定目錄：{config_dir}"),
+            })
+        }
+        Ok(DirectoryState::NotADirectory) => {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "profile_config_dir_not_directory",
+                message: format!("這個路徑不是目錄：{config_dir}"),
+            })
+        }
+        Err(error) => {
+            return Err(ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "internal_error",
+                message: format!("無法檢查設定目錄 {config_dir}：{error}"),
+            })
+        }
+    }
+    let created = state.store.apply_profile_command(command, now).await?;
+
+    // 立即核對登入身分；核對本身失敗時 Profile 仍已建立，顯示為尚未核對，使用者可再按「重新核對」
+    let _ = verify_profile(&state, &created).await;
     Ok((StatusCode::CREATED, Json(view_of(&state, &id).await?)))
 }
 
