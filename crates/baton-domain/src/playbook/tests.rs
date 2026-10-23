@@ -28,7 +28,7 @@ fn the_playbook_has_no_account_names_quota_numbers_concurrency_limits_or_worktre
     ] {
         assert!(!text.contains(forbidden), "操作手冊不應含有 {forbidden:?}");
     }
-    // 內文除了編號清單的序號之外，唯一允許的數字是「最多修正 3 次」
+    // 內文除了編號清單的序號與等待指令的結束碼之外，唯一允許的數字是「最多修正 3 次」
     for line in body(text).lines() {
         let line = line.trim_start();
         let numbered = line.split_once(". ").filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
@@ -36,7 +36,8 @@ fn the_playbook_has_no_account_names_quota_numbers_concurrency_limits_or_worktre
         while let Some(at) = rest.find(|c: char| c.is_ascii_digit()) {
             let digits: String = rest[at..].chars().take_while(char::is_ascii_digit).collect();
             let after = rest[at + digits.len()..].trim_start();
-            assert!(digits == "3" && after.starts_with('次'), "操作手冊內文出現數字 {digits:?}：{line}");
+            let exit_code = rest[..at].ends_with("結束碼 ") && digits.len() == 1;
+            assert!(exit_code || (digits == "3" && after.starts_with('次')), "操作手冊內文出現數字 {digits:?}：{line}");
             rest = &rest[at + digits.len()..];
         }
     }
@@ -47,8 +48,11 @@ fn the_playbook_covers_the_platform_way_of_working() {
     for topic in [
         "frontier",
         "dispatch_task",
-        "wait",
+        "\"$BATON_MCP_SHIM\" wait",
         "背景",
+        "結束碼 0",
+        "結束碼 3",
+        "結束碼 4",
         "唯讀驗證",
         "最多修正 3 次",
         "受阻",
