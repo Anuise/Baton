@@ -5,7 +5,7 @@
 //! - 沒有宣告檢查的 Task 原本只能由使用者手動接受，Controller 的接受等同略過驗證 Gate，一定要送裁定，
 //!   使用者核准後才以與手動接受相同的接受交易（校驗 Run 世代、契約版本與成果 manifest）完成。
 //!
-//! Controller 是腳本化的：測試在 Controller 的一輪進行中，以那一輪收到的 Controller 憑證呼叫 Agent API。
+//! Controller 是腳本化的：測試開啟 Controller CLI，以 Controller 終端機收到的 Controller 憑證呼叫 Agent API。
 
 use baton_domain::artifact::TOOL_REGISTER_ARTIFACT;
 use baton_domain::verification::TOOL_ACCEPT_ARTIFACT;
@@ -17,17 +17,17 @@ use serde_json::{json, Value};
 
 const WORKSPACES: &str = "/api/v1/workspaces";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 /// SHA-256("abc")，獨立於程式碼之外的已知答案。
 const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
 // --- 共用輔助 ---
 
-async fn harness() -> Harness {
+/// 啟動 Harness 與兩個帳號：Worker 用的帳號 1，以及只拿來開 Controller CLI 的 Controller 帳號。回傳 (Harness, Controller 帳號)。
+async fn harness() -> (Harness, String) {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     harness.add_account("帳號 1", "account1@example.com").await;
-    harness
+    let controller = harness.add_account("Controller 帳號", "controller@example.com").await;
+    (harness, controller)
 }
 
 /// 建立 Workspace 與 Goal，回傳 (workspace_id, goal_id)。
@@ -90,28 +90,6 @@ async fn run_to_verifying(harness: &Harness, ws: &str, tid: &str) -> (String, St
     (rid, token)
 }
 
-/// 使用者送出一則對話訊息，合併視窗過後喚起 Controller，回傳這一輪的 (Controller Run 識別, Controller 憑證)。
-async fn wake_controller(harness: &Harness, ws: &str) -> (String, String) {
-    let path = format!("{WORKSPACES}/{ws}/conversation/messages");
-    let (status, body) = harness.send_json(Method::POST, &path, Some(json!({ "text": "開始" }))).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    harness.clock.advance_millis(WINDOW_MS);
-    harness.supervise().await;
-    let (status, view) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/conversation"), None).await;
-    assert_eq!(status, StatusCode::OK, "{view}");
-    let run_id = view["active_run"]["id"].as_str().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}")).to_string();
-    let token = harness.agent_credential(&run_id).expect("Controller 程序啟動時應該收到 Controller 憑證");
-    (run_id, token)
-}
-
-/// 讓一輪 Controller 回覆並成功結束。
-async fn finish_turn(harness: &Harness, run_id: &str) {
-    harness.agent_adapter.emit(run_id, AdapterEvent::Started { native_session_id: Some(format!("native-{run_id}")) });
-    harness.agent_adapter.emit(run_id, AdapterEvent::Message { text: "好了".into() });
-    harness.agent_adapter.emit(run_id, AdapterEvent::Exited { success: true });
-    harness.supervise().await;
-}
-
 async fn task_status(harness: &Harness, ws: &str, tid: &str) -> String {
     let (status, detail) = harness.send_json(Method::GET, &task_path(ws, tid), None).await;
     assert_eq!(status, StatusCode::OK, "{detail}");
@@ -151,11 +129,11 @@ fn error_code(body: &Value) -> &str {
 
 #[tokio::test]
 async fn accepting_a_task_without_checks_requires_the_users_decision_and_then_completes_it() {
-    let harness = harness().await;
+    let (harness, controller) = harness().await;
     let (ws, goal) = setup(&harness, "main").await;
     let tid = ready_task(&harness, &ws, &goal, json!([])).await;
     let (rid, _) = run_to_verifying(&harness, &ws, &tid).await;
-    let (controller_run, token) = wake_controller(&harness, &ws).await;
+    let (controller_run, token) = harness.open_controller_cli(&ws, &controller).await;
     let request = json!({ "task_id": tid, "reason": "報告內容符合完成條件" });
 
     // 第一次呼叫：略過驗證 Gate 必須由使用者裁定；Task 不動
@@ -198,11 +176,11 @@ async fn accepting_a_task_without_checks_requires_the_users_decision_and_then_co
 
 #[tokio::test]
 async fn when_the_user_does_not_approve_the_controller_cannot_accept_the_artifact() {
-    let harness = harness().await;
+    let (harness, controller) = harness().await;
     let (ws, goal) = setup(&harness, "main").await;
     let tid = ready_task(&harness, &ws, &goal, json!([])).await;
     run_to_verifying(&harness, &ws, &tid).await;
-    let (_, token) = wake_controller(&harness, &ws).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     let request = json!({ "task_id": tid, "reason": "看起來完成了", "note": "Controller 檢視過" });
 
     let (status, body) = accept_artifact(&harness, &token, request.clone()).await;
@@ -218,11 +196,11 @@ async fn when_the_user_does_not_approve_the_controller_cannot_accept_the_artifac
 
 #[tokio::test]
 async fn an_approval_only_covers_the_artifacts_the_user_saw() {
-    let harness = harness().await;
+    let (harness, controller) = harness().await;
     let (ws, goal) = setup(&harness, "main").await;
     let tid = ready_task(&harness, &ws, &goal, json!([])).await;
     run_to_verifying(&harness, &ws, &tid).await;
-    let (_, token) = wake_controller(&harness, &ws).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     let request = json!({ "task_id": tid, "reason": "報告內容符合完成條件" });
     let (_, body) = accept_artifact(&harness, &token, request.clone()).await;
     let approved = body["decision_request_id"].as_str().unwrap().to_string();
@@ -260,9 +238,9 @@ async fn an_approval_only_covers_the_artifacts_the_user_saw() {
 
 #[tokio::test]
 async fn a_task_whose_contract_declares_checks_cannot_be_accepted_by_the_controller() {
-    let harness = harness().await;
+    let (harness, controller) = harness().await;
     let (ws, goal) = setup(&harness, "main").await;
-    let (_, token) = wake_controller(&harness, &ws).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
     let checks = json!([{ "kind": "command", "program": "cargo", "args": ["test"], "expected_exit_code": 0 }]);
     let tid = ready_task(&harness, &ws, &goal, checks).await;
     // 檢查命令取不到證據（無法啟動）：驗證不完整，Task 留在 verifying 等 Runtime 重驗
@@ -289,13 +267,13 @@ async fn a_task_whose_contract_declares_checks_cannot_be_accepted_by_the_control
 // ============================================================ 範圍與憑證
 
 #[tokio::test]
-async fn the_controller_cannot_accept_artifacts_outside_its_workspace_or_after_its_turn() {
-    let harness = harness().await;
+async fn the_controller_cannot_accept_artifacts_outside_its_workspace_or_after_its_cli_ends() {
+    let (harness, controller) = harness().await;
     let (ws, _) = setup(&harness, "main").await;
     let (other_ws, other_goal) = setup(&harness, "other").await;
     let foreign = ready_task(&harness, &other_ws, &other_goal, json!([])).await;
     let (_, worker_token) = run_to_verifying(&harness, &other_ws, &foreign).await;
-    let (controller_run, token) = wake_controller(&harness, &ws).await;
+    let (_, token) = harness.open_controller_cli(&ws, &controller).await;
 
     // 別的 Workspace 的 Task：找不到，也動不到
     let (status, body) = accept_artifact(&harness, &token, json!({ "task_id": foreign, "reason": "接受" })).await;
@@ -312,8 +290,8 @@ async fn the_controller_cannot_accept_artifacts_outside_its_workspace_or_after_i
     let (status, body) = accept_artifact(&harness, &worker_token, json!({ "task_id": foreign, "reason": "接受" })).await;
     assert_eq!((status, error_code(&body)), (StatusCode::FORBIDDEN, "controller_only"), "{body}");
 
-    // 這一輪結束後憑證失效
-    finish_turn(&harness, &controller_run).await;
+    // Controller CLI 結束後憑證失效
+    harness.end_controller_cli(&ws).await;
     let (status, body) = accept_artifact(&harness, &token, json!({ "task_id": foreign, "reason": "接受" })).await;
     assert_eq!((status, error_code(&body)), (StatusCode::UNAUTHORIZED, "credential_revoked"), "{body}");
     assert_eq!(task_status(&harness, &other_ws, &foreign).await, "verifying");
