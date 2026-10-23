@@ -468,6 +468,88 @@
 - 影響：兩個修正 run 可能都動到 `crates/baton-harness`（後端修正補的情境測試）與 `docs/`，後合併的需要整合 run。
 - 審閱：未審
 
+### AI-50：換帳號後要不要開新 Run 由 Store 依交易內的 Run 決定，重啟後中斷也會開
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R029-fix-ab）
+- 決策：Store 的 Controller CLI 寫入統一走 `apply_cli(run_id, decide, next, now)`：Domain 判定後 Run 進入終態，而交易內讀到的 Run 有 `switch_to_profile_id` 時，同一個交易中以 `next` 開新的 Run。Supervisor 的結束、`begin_launch`、重啟後的中斷一律備妥新 Run 的識別（取不到亂數才傳 `None`），不再依這一輪開始時的快照判斷；完全退出仍傳 `None`，不開新 Run。開窗前「已按結束／換帳號重開」改由 Domain 的 `begin_launch` 判斷，以 `user_ended`／`switched` 結束、不寫 launch intent，Supervisor 依快照的檢查移除。Runtime 在換帳號要求之後當掉、重啟時宿主已不在：舊 Run 照 AI-24 標為 `interrupted`（`runtime_restarted`），同一個交易中以新帳號開新的 Run。
+- 理由：R026 第 1、2 項與 review-notes 第 10 項都是「依舊快照決定」造成的缺口。規則放在交易內，就不必顧慮呼叫端讀快照的時間點。AI-43 已規定宿主先結束時照樣開新的，中斷也是同一種情況。
+- 替代方案：Supervisor 寫入前重讀一次 Run——兩次讀取之間仍有空檔；當掉後改以 `switched` 結束舊 Run——要多一條 Domain 規則，而且宿主並不是被 Runtime 結束的。
+- 影響：換帳號後經過當掉，時間線依序是換帳號要求、`controller_cli_interrupted`、新 Run 的 `controller_cli_opened`。測試：`controller_cli_accounts.rs` 的 `a_switch_requested_before_a_crash_*`、`a_switch_requested_before_the_window_opened_*`，以及 Domain 的 `a_run_whose_end_was_requested_before_the_launch_intent_*`。
+- 審閱：未審
+
+### AI-51：從備份還原時，尚未結束的 Controller CLI 一律中斷
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R029-fix-ab）
+- 決策：`end_unfinished_runs` 在同一個交易中把非終態的 `kind = 'cli'` Run 以 Domain 的 `interrupt` 中斷，原因與 Worker 相同，都是 `RESTORE_INTERRUPT_REASON`（`restored_from_backup：…`），結束代碼沿用 `runtime_restarted`。不開新 Run，也不處理換帳號要求。數量計入還原報告的 `interrupted_runs`。
+- 理由：R026 第 3 項：備份當下剛要求開啟的 CLI，還原後會被自動開窗。這是還原的處理，不是 migration，不違反 AI-38。沿用 `interrupt` 就不用新增結束代碼，頁簽顯示的是結束原因。
+- 替代方案：新增 `restored_from_backup` 結束代碼——前端要多一個對照，資訊和原因文字重複；只處理 `starting`——`running` 的列要等 AI-24 查驗才收尾，而備份裡的宿主身分在還原後的機器上沒有意義。
+- 影響：還原演練的 `interrupted_runs` 現在也包含 Controller CLI。
+- 審閱：未審
+
+### AI-52：Controller 憑證與 Controller 寄件者共用 Domain 的 credential_valid
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R029-fix-ab）
+- 決策：Store 新增 `controller_credential_valid(conn, scope)`：以 `kind = 'cli'` 載入 Run，再交給 Domain 的 `credential_valid` 判斷（尚未結束、沒有重新綁定）。`controller_run_active` 與 `messages.rs` 的 Controller 寄件者 `is_current` 都改用它，SQL 版本的規則刪除。升級前的舊輪次（`kind = 'turn'`）當寄件者時回 `RunNotFound`，不再依狀態判斷。沒有呼叫端的 `Store::controller_cli_accounts` 一併刪除（review-notes 第 9 項），Scheduler 與交接直接用 `load_controller_accounts`。
+- 理由：R026 第 4 項：規則原本有三份，而且不一致。保留 Domain 那一份，它有單元測試。
+- 替代方案：刪除 Domain 的 `credential_valid`，在 `messages.rs` 複製 SQL 條件——規則仍是兩份。
+- 影響：API 本來就先以 `controller_run_active` 擋掉舊輪次與重新綁定的憑證，所以對外行為不變。
+- 審閱：未審
+
+### AI-53：結束中重新開啟回 Ending，換帳號遇到結束中改用 SwitchWhileEnding（同一個錯誤代碼）
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R029-fix-ab）
+- 決策：`open` 遇到 `end_requested_at` 有值的非終態 Run 時，回 `Ending`（「正在結束，請等它結束後再開啟」），不回 `AlreadyOpen`。`request_switch` 遇到結束中改回新的 `SwitchWhileEnding`（「正在結束或換帳號重開中，不能再換帳號；請等它完成」）。兩者的錯誤代碼都是 `controller_cli_ending`。
+- 理由：R026 第 5 項。錯誤代碼不變，前端與 `baton-client` 的既有判斷都不用改。
+- 替代方案：只改 `Ending` 的訊息，讓兩種情境共用——一句話很難同時說清「再開啟」與「不能再換」。
+- 影響：只有訊息文字改變。
+- 審閱：未審
+
+### AI-54：AgentAdapter 新增 prepare_controller，開啟 Controller CLI 只寫 MCP 設定
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R029-fix-ab）
+- 決策：Port 新增 `AgentAdapter::prepare_controller`，預設不做任何事，fake 不必改。`ClaudeCodeAdapter` 的實作只在 `runs\<id>\` 寫 `mcp.json`，並以 Controller 宿主的引數（跳過 `controller-host <cmd.exe> /d /v:off /c call`）做批次檔安全檢查。Supervisor 開啟 Controller CLI 時改呼叫它。
+- 理由：review-notes 第 6 項：沿用 Worker 的 `prepare` 會多寫出用不到的 `prompt.md` 與 Worker 通則 `system-prompt.md`。Controller CLI 的系統提示是唯讀目錄裡的操作手冊，`--mcp-config` 仍指向 Run 目錄的 `mcp.json`。
+- 替代方案：在 `RunSpec` 加一個旗標，讓 `prepare` 分辨兩種 Run——同一個方法有兩套語意，而且 Worker 的呼叫端也要跟著改。
+- 影響：日後其他 Adapter 若要支援 Controller CLI，要自己實作 `prepare_controller`。
+- 審閱：未審
+
+### AI-55：完全退出時逐筆收集 Controller CLI 的停止結果，但不提前到 Worker 找回程序之前開始
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R029-fix-ab）
+- 決策：`stop_controller_clis_for_exit` 改為每個 CLI 一個 future（`FuturesUnordered`），與 Worker 的停止合成同一個串流，完成一筆就記一筆。總上限到了仍沒有結果的，才在 `finish_exit` 記為 `stop_unconfirmed`；Controller CLI 的訊息改為「Run 維持原狀」，不再寫「保留寫入所有權」。CLI 的停止仍在 Worker 的 find 迴圈之後才開始執行。
+- 理由：R027 第 2 項的主要缺陷是一個 CLI 停不下來，整批結果就被丟掉，報告與 Run 狀態不一致，這部分已修正。提前開始則要讓 CLI 的停止與 find 迴圈並行，兩邊都要寫入停止報告，必須重排整段停止流程。find 迴圈一般很快，而且受同一個總上限約束，AI-26 的「同時停止」實際上只差找回程序的時間。
+- 替代方案：把 CLI 的停止 spawn 成獨立的 task 並提前開始——`Supervisor` 以參照借用，要改成 `Arc` 或重排停止流程，風險比收益大。
+- 影響：Worker 很多、find 很慢時，Controller CLI 的停止會晚一點開始，仍在總上限內。
+- 審閱：未審
+
+### AI-56：Controller 工具的說明與錯誤訊息改寫成 Controller CLI 的模型，不改行為
+- 重要度：中
+- 時間／階段：2026-10-23，最終 review 修正（R029-fix-ab）
+- 決策：MCP shim 的工具說明（`propose_decision_request`、`read_inbox`）與 Agent API 回給 Controller 的訊息要改寫：
+  - 範圍：必須送裁定、已建立裁定請求、雙軸審查與設計偏離的必須送裁定、Controller 憑證失效的 401。
+  - 「使用者回答後你會在對話中收到工作事件」改為「使用者回答後，背景執行的 wait 會回報「裁定已回答」事件」。
+  - `read_inbox` 的「建議每一輪開始時呼叫」改為「建議每次收到事件時呼叫」。
+  - 401 訊息改為「Controller CLI 已結束或已重新綁定，憑證已失效」。
+  - 工具名稱、參數、結構、錯誤碼與行為都不變。
+- 理由：R027 第 1 項：票 08 之後已經沒有對話的工作事件，舊文字會讓 Controller CLI 的模型以為不必掛背景 wait。spec 的「MCP shim 不變」指的是介面與行為，說明文字跟著實際的通知機制修正，並不違反。
+- 替代方案：完全不動 shim，只在操作手冊補說明——工具說明與手冊互相矛盾。
+- 影響：只影響送進模型的文字；「裁定已回答」與 `wait` 印出的事件標籤一致。其他 crate 的註解（不送進模型）仍有零星的「一輪」用語，未全面改寫。
+- 審閱：未審
+
+### AI-57：刪除對話退役後沒有讀者的 Domain 型別，SessionOwner 只刪對話變體
+- 重要度：低
+- 時間／階段：2026-10-23，最終 review 修正（R029-fix-ab）
+- 決策：依 AI-39 的後續清理（review-notes 第 7 項）：
+  - 刪除 `DecisionChange.notices`／`ConversationNotice`，連同組字串的程式與「答案推翻假設」的通知。
+  - 刪除 `workflow::WorkflowNote` 與 `SessionOwner::Conversation`。
+  - 單元測試只刪掉斷言這些輸出的部分。
+  - `decision.rs` 的「喚醒 Controller」註解改寫。
+  - 保留 `AgentRole::Controller` 與 `AgentSession.conversation_id`；`SessionOwner` 只剩 `Task`，但 enum 與 `*_for` 函式先保留。
+- 理由：票 06 已合併且沒有沿用這些輸出，整個 workspace 都沒有讀者。`SessionOwner` 不會序列化；資料庫存的 `role` 與 `conversation_id` 仍保留，讀取升級前的資料不受影響，符合 AI-38。
+- 替代方案：把 `SessionOwner` 整個收掉——會多動 run.rs 與測試，不屬於這次清理。
+- 影響：與 AI-39 之後的實際行為相同，只是把產生了卻沒人讀的資料移除。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）
