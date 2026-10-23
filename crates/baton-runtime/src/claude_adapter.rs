@@ -136,6 +136,23 @@ impl ClaudeCodeAdapter {
         args
     }
 
+    /// `claude` 是批次檔、要經 cmd.exe 啟動時，引數（含批次檔路徑）不能有 cmd 會另作解讀的字元，否則可能被拆成別的命令。
+    fn ensure_batch_safe<'a>(&self, args: impl Iterator<Item = &'a String>) -> PortResult<()> {
+        if !is_batch_file(&self.program) {
+            return Ok(());
+        }
+        for arg in args {
+            if let Some(ch) = arg.chars().find(|c| CMD_UNSAFE.contains(*c) || c.is_control()) {
+                return Err(PortError::Failed(format!(
+                    "Claude Code 是批次檔（{}），要經 cmd.exe 啟動，但引數 {arg:?} 含有 cmd.exe 會另作解讀的字元 {ch:?}；\
+                     請安裝原生的 claude.exe，或調整資料目錄、模型名稱",
+                    self.program
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// `claude` 是批次檔時改經 cmd.exe 執行，回傳實際的程式與引數。
     fn wrap_batch(&self, args: Vec<String>) -> (String, Vec<String>) {
         if is_batch_file(&self.program) {
@@ -207,18 +224,8 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     async fn prepare(&self, spec: &RunSpec) -> PortResult<()> {
-        if is_batch_file(&self.program) {
-            // 經 cmd.exe 啟動時，引數（含批次檔路徑）不能有 cmd 會另作解讀的字元，否則可能被拆成別的命令
-            for arg in self.spawn_spec(spec).args.iter().skip(4) {
-                if let Some(ch) = arg.chars().find(|c| CMD_UNSAFE.contains(*c) || c.is_control()) {
-                    return Err(PortError::Failed(format!(
-                        "Claude Code 是批次檔（{}），要經 cmd.exe 啟動，但引數 {arg:?} 含有 cmd.exe 會另作解讀的字元 {ch:?}；\
-                         請安裝原生的 claude.exe，或調整資料目錄、模型名稱",
-                        self.program
-                    )));
-                }
-            }
-        }
+        // 經 cmd.exe 啟動時，`/d /v:off /c call` 之後的引數（含批次檔路徑）要檢查
+        self.ensure_batch_safe(self.spawn_spec(spec).args.iter().skip(4))?;
         let dir = self.run_dir(&spec.run_id);
         let prompt = spec.prompt.clone();
         let mcp = mcp_config_json(&self.shim_program);
@@ -242,6 +249,20 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 write_file_atomic(&dir.join(name), content.as_bytes())?;
             }
             Ok(())
+        })
+        .await
+        .map_err(|e| PortError::Failed(format!("準備啟動檔案的工作被中斷：{e}")))?
+    }
+
+    /// Controller CLI 只需要 MCP 設定（`--mcp-config` 指向它）；系統提示是 Runtime 寫在唯讀目錄的操作手冊，不寫 Worker 的檔案。
+    async fn prepare_controller(&self, spec: &RunSpec) -> PortResult<()> {
+        // 宿主的引數是 `controller-host <cmd.exe> /d /v:off /c call <claude> ...`
+        self.ensure_batch_safe(self.controller_spawn_spec(spec).args.iter().skip(6))?;
+        let dir = self.run_dir(&spec.run_id);
+        let mcp = mcp_config_json(&self.shim_program);
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dir).map_err(|e| PortError::Failed(format!("無法建立 {}：{e}", dir.display())))?;
+            write_file_atomic(&dir.join(RUN_MCP_FILE), mcp.as_bytes())
         })
         .await
         .map_err(|e| PortError::Failed(format!("準備啟動檔案的工作被中斷：{e}")))?
@@ -1108,6 +1129,22 @@ mod tests {
         assert!(odd_path.prepare(&run_spec(None, None)).await.is_err(), "批次檔路徑本身也要檢查");
         batch.prepare(&run_spec(None, Some("claude-opus-5-5"))).await.unwrap();
         adapter(data.path(), &[]).prepare(&run_spec(None, Some("sonnet&calc"))).await.unwrap();
+    }
+
+    /// Controller CLI 只準備 MCP 設定（最終 review 修正）；經 cmd.exe 啟動時同樣檢查批次檔路徑等引數。
+    #[tokio::test]
+    async fn preparing_a_controller_cli_writes_only_the_mcp_config_and_checks_batch_arguments() {
+        let data = tempfile::tempdir().unwrap();
+        let spec = RunSpec { prompt: String::new(), ..run_spec(None, None) };
+
+        adapter(data.path(), &[]).prepare_controller(&spec).await.unwrap();
+
+        let run_dir = data.path().join(RUNS_DIR).join("run_1");
+        let names: Vec<String> = std::fs::read_dir(&run_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, [RUN_MCP_FILE]);
+        let odd_path = batch_adapter(data.path(), r"C:\Users\Tom&Jerry\npm\claude.cmd");
+        assert!(odd_path.prepare_controller(&spec).await.unwrap_err().to_string().contains("cmd.exe"));
+        batch_adapter(data.path(), NPM_SHIM).prepare_controller(&spec).await.unwrap();
     }
 
     /// 真的經 cmd.exe 啟動一個模擬 npm 的 `claude.cmd`（路徑含空白）：它收到的引數與標準輸入都和預期相同。

@@ -93,6 +93,11 @@ pub trait AgentAdapter: Send + Sync {
     async fn prepare(&self, _spec: &RunSpec) -> PortResult<()> {
         Ok(())
     }
+    /// 開出 Controller CLI 之前準備它需要的檔案（例如 MCP 設定，desktop-controller-cli 票 03）；重複呼叫安全。
+    /// 不寫只有 Worker 用得到的 Prompt 與 Worker 通則。
+    async fn prepare_controller(&self, _spec: &RunSpec) -> PortResult<()> {
+        Ok(())
+    }
     /// 程序已啟動後，建立事件來源（控制代碼只由 `run_id` 決定，重複呼叫安全）。
     async fn launch(&self, spec: RunSpec) -> PortResult<AgentHandle>;
     fn events(&self, handle: &AgentHandle) -> BoxStream<'static, AdapterEvent>;

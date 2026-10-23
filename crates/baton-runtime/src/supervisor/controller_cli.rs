@@ -92,7 +92,7 @@ impl Supervisor {
         if let Err(reason) = self.write_controller_cli_settings(&run).await {
             return self.end_controller_cli(&run, END_LAUNCH_FAILED, &reason).await;
         }
-        if let Err(error) = self.ports.agent_adapter.prepare(&spec).await {
+        if let Err(error) = self.ports.agent_adapter.prepare_controller(&spec).await {
             let reason = format!("無法準備 Controller CLI 的啟動檔案：{error}");
             return self.end_controller_cli(&run, END_LAUNCH_FAILED, &reason).await;
         }
