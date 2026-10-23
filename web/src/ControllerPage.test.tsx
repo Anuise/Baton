@@ -101,8 +101,22 @@ function fakeClient(
 const renderPage = (client: ReturnType<typeof fakeClient>, pollMs?: number) =>
   render(<ControllerPage client={client} workspace={workspace} timeZone="Asia/Taipei" pollMs={pollMs} />);
 
+/** 在假計時器下讓排隊中的 Promise 與 React 更新全部完成。 */
+async function settle(ms = 0) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
 /** 狀態欄位的值。 */
 const fact = (term: string) => screen.getByText(term, { selector: "dt" }).nextElementSibling;
+
+/** 「開啟」按鈕：狀態與帳號清單的到達順序不定，等兩者都讀回、按鈕可以按了再回傳。 */
+async function enabledOpenButton() {
+  const button = await screen.findByRole("button", { name: "開啟" });
+  await waitFor(() => expect(button).toBeEnabled());
+  return button;
+}
 
 afterEach(() => {
   vi.useRealTimers();
@@ -165,7 +179,7 @@ describe("ControllerPage", () => {
     const client = fakeClient();
     renderPage(client);
 
-    await user.click(await screen.findByRole("button", { name: "開啟" }));
+    await user.click(await enabledOpenButton());
 
     expect(client.openControllerCli).toHaveBeenCalledWith("ws_1", "prof_1");
     expect(fact("狀態")).toHaveTextContent("開啟中");
@@ -183,7 +197,7 @@ describe("ControllerPage", () => {
     );
     renderPage(client);
 
-    await user.click(await screen.findByRole("button", { name: "開啟" }));
+    await user.click(await enabledOpenButton());
 
     expect(await screen.findByRole("alert")).toHaveTextContent("這個 Workspace 已有開啟中的 Controller CLI");
   });
@@ -194,7 +208,8 @@ describe("ControllerPage", () => {
     renderPage(client);
 
     expect(await screen.findByText("執行中")).toBeInTheDocument();
-    expect(fact("Controller 帳號")).toHaveTextContent("主要帳號");
+    // 帳號名稱要等帳號清單讀回（可能比狀態晚到）
+    await waitFor(() => expect(fact("Controller 帳號")).toHaveTextContent("主要帳號"));
     expect(fact("開啟時間")).toHaveTextContent("2023/11/15 06:13");
     await user.click(screen.getByRole("button", { name: "結束" }));
 
@@ -216,7 +231,7 @@ describe("ControllerPage", () => {
 
     expect(await screen.findByText("開啟失敗：找不到 claude 指令，請確認 Claude Code 已安裝")).toBeInTheDocument();
     expect(fact("狀態")).toHaveTextContent("已結束");
-    expect(await screen.findByRole("button", { name: "開啟" })).toBeEnabled();
+    expect(await enabledOpenButton()).toBeEnabled();
   });
 
   it("使用者結束後顯示結束原因", async () => {
@@ -328,25 +343,24 @@ describe("ControllerPage", () => {
   });
 
   it("開啟中每 2 秒重新讀取，變成執行中，卸載後停止", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // 假計時器不隨真實時間前進：輪詢只在推進時觸發，負載高低不影響呼叫次數
+    vi.useFakeTimers();
     const client = fakeClient(controllerCliRun({ status: "starting", host: null, claude_pid: null, running_at: null }));
     const { unmount } = renderPage(client);
-    expect(await screen.findByText("開啟中")).toBeInTheDocument();
-    // 畫面先出現、輪詢的 effect 可能還沒執行（負載高時）：先讓它註冊計時器，再推進時間
-    await act(async () => {});
+    await settle();
+    expect(screen.getByText("開啟中")).toBeInTheDocument();
     expect(client.getControllerCli).toHaveBeenCalledTimes(1);
     expect(CONTROLLER_REFRESH_INTERVAL_MS).toBe(2000);
 
     client.getControllerCli.mockResolvedValue(viewOf(controllerCliRun()));
-    // 留一秒餘裕，抵銷 shouldAdvanceTime 隨真實時間前進的部分
-    act(() => vi.advanceTimersByTime(CONTROLLER_REFRESH_INTERVAL_MS - 1000));
+    await settle(CONTROLLER_REFRESH_INTERVAL_MS - 1);
     expect(client.getControllerCli).toHaveBeenCalledTimes(1);
-    act(() => vi.advanceTimersByTime(1000));
+    await settle(1);
     expect(client.getControllerCli).toHaveBeenCalledTimes(2);
-    expect(await screen.findByText("執行中")).toBeInTheDocument();
+    expect(screen.getByText("執行中")).toBeInTheDocument();
 
     unmount();
-    act(() => vi.advanceTimersByTime(CONTROLLER_REFRESH_INTERVAL_MS * 3));
+    await settle(CONTROLLER_REFRESH_INTERVAL_MS * 3);
     expect(client.getControllerCli).toHaveBeenCalledTimes(2);
   });
 
@@ -378,7 +392,8 @@ describe("ControllerPage", () => {
     renderPage(client);
 
     expect(await screen.findByText("無法取得額度：Runtime 離線")).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "主要帳號" })).toBeEnabled();
+    // 額度的錯誤可能比狀態與帳號清單先到
+    expect(await screen.findByRole("option", { name: "主要帳號" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "開啟" })).toBeEnabled();
   });
 
@@ -444,6 +459,17 @@ describe("ControllerPage", () => {
     expect(screen.getByRole("button", { name: "換帳號重開" })).toBeDisabled();
   });
 
+  it("開著時帳號清單讀取失敗也提示無法取得帳號清單，仍可結束", async () => {
+    const client = fakeClient(controllerCliRun());
+    client.listProfiles.mockRejectedValue(new Error("Runtime 離線"));
+    renderPage(client);
+
+    expect(await screen.findByText("執行中")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得帳號清單：Runtime 離線");
+    expect(screen.queryByLabelText("換成帳號")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "結束" })).toBeEnabled();
+  });
+
   it("換帳號重開被拒時以警示顯示原因", async () => {
     const user = userEvent.setup();
     const client = fakeClient(controllerCliRun(), [profile(), spare]);
@@ -466,7 +492,7 @@ describe("ControllerPage", () => {
       fakeClient(controllerCliRun({ id: "ctl_2", profile_id: "prof_2", switched_from_run_id: "ctl_1" }), [profile(), spare]),
     );
     expect(await screen.findByText("由換帳號重開開啟的新 Session")).toBeInTheDocument();
-    expect(fact("Controller 帳號")).toHaveTextContent("第二帳號");
+    await waitFor(() => expect(fact("Controller 帳號")).toHaveTextContent("第二帳號"));
     switched.unmount();
 
     renderPage(fakeClient(controllerCliRun()));

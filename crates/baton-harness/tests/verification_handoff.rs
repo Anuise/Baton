@@ -19,7 +19,6 @@
 //!   `the_judge_only_uses_accounts_below_the_quota_gate_and_without_any_only_model_free_assertions_run`
 
 use std::path::Path;
-use std::time::Duration;
 
 use baton_domain::Timestamp;
 use baton_harness::fakes::FakePage;
@@ -223,8 +222,7 @@ impl World {
     async fn crash_during(&mut self, method: &str, path: &str) -> String {
         let request = self.request().await;
         self.h().verification_driver.hang_next_http(method, &format!("{API}{path}"));
-        let outcome = tokio::time::timeout(Duration::from_millis(500), self.h().supervise()).await;
-        assert!(outcome.is_err(), "驗證應該卡在 {method} {path}");
+        self.h().supervise_until(self.h().verification_driver.wait_for_http_hang()).await;
         assert_eq!(self.request_of(&request).await["status"], "queued", "當掉時沒有 Bundle");
         self.harness.crash_restart().await;
         request

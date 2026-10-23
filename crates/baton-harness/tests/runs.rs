@@ -5,8 +5,6 @@
 //! 只斷言外部行為：HTTP 回應、重啟後仍在、Port 被呼叫的方式（例如「沒有第二次 spawn」）；
 //! `harness.db()` 只用來確認事件與 Outbox 這類必須看落地內容的事實。
 
-use std::time::Duration;
-
 use baton_api::{CLIENT_HEADER, CLIENT_HEADER_VALUE};
 use baton_domain::auth::Role;
 use baton_domain::run::{HEARTBEAT_INTERVAL_MS, LEASE_DURATION_MS};
@@ -155,12 +153,6 @@ async fn only_profile_id(harness: &Harness) -> String {
     let (status, list) = harness.send_json(Method::GET, "/api/v1/profiles", None).await;
     assert_eq!(status, StatusCode::OK, "{list}");
     list["profiles"][0]["id"].as_str().unwrap().to_string()
-}
-
-/// 讓 Supervisor 處理一次；若 spawn 設成會「當掉」，等一小段時間後放棄那一次處理（等同 Runtime 在那一點崩潰）。
-async fn supervise_until_crash(harness: &Harness) {
-    let outcome = tokio::time::timeout(Duration::from_millis(300), harness.supervise()).await;
-    assert!(outcome.is_err(), "預期 Supervisor 卡在被設定的崩潰點");
 }
 
 // ============================================================ 派工
@@ -374,7 +366,7 @@ async fn crash_after_spawn_before_the_receipt_is_found_again_by_command_id_witho
     let rid = dispatch_ok(&harness, &ws, &tid).await;
     harness.process_control.hang_next_spawn_at(HangPoint::AfterSpawn);
 
-    supervise_until_crash(&harness).await;
+    harness.supervise_until(harness.process_control.wait_for_spawn_hang()).await;
     let before = run_view(&harness, &ws, &rid).await;
     assert_eq!(status_of(&before), "starting", "launch intent 已持久化，回執還沒寫回：{before}");
     assert!(before["process"].is_null());
@@ -400,7 +392,7 @@ async fn crash_before_spawn_never_respawns_and_the_run_is_interrupted_for_the_us
     let rid = dispatch_ok(&harness, &ws, &tid).await;
     harness.process_control.hang_next_spawn_at(HangPoint::BeforeSpawn);
 
-    supervise_until_crash(&harness).await;
+    harness.supervise_until(harness.process_control.wait_for_spawn_hang()).await;
     assert_eq!(status_of(&run_view(&harness, &ws, &rid).await), "starting");
     harness.restart().await;
     harness.supervise().await;

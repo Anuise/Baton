@@ -427,8 +427,7 @@ async fn a_runtime_crash_mid_merge_resumes_after_restart_and_integrates_once() {
     // 合併途中 Runtime 當掉：處理這次 tick 的 future 被丟棄
     let _never = harness.workspace_fs.hold_next_merge();
     harness.agent_adapter.emit(&rid, AdapterEvent::Exited { success: true });
-    let crashed = tokio::time::timeout(Duration::from_millis(500), harness.supervise()).await;
-    assert!(crashed.is_err(), "合併應該卡在崩潰點");
+    harness.supervise_until(harness.workspace_fs.wait_for_held_merge()).await;
     assert_eq!(entry_of(&queue(&harness).await, &tid)["status"], "merging", "開始合併的意圖已經持久化");
 
     harness.restart().await;

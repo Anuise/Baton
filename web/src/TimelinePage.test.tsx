@@ -2,9 +2,9 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { metrics, metricsResponse, timelineEvent } from "./fixtures";
+import { metrics, metricsResponse, profile, timelineEvent } from "./fixtures";
 import { TimelinePage } from "./TimelinePage";
-import type { MetricsResponse, TaskBoard, TimelineEvent, Workspace } from "./runtimeClient";
+import type { AccountProfile, MetricsResponse, TaskBoard, TimelineEvent, Workspace } from "./runtimeClient";
 
 const workspace: Workspace = {
   id: "ws_1",
@@ -58,10 +58,12 @@ function fakeClient({
   events = allEvents,
   filtered = {},
   metricsValue = metricsResponse(),
+  profiles = [profile({ id: "prof_1", name: "Work-1" })],
 }: {
   events?: TimelineEvent[] | Error;
   filtered?: Record<string, TimelineEvent[] | Error>;
   metricsValue?: MetricsResponse | Error;
+  profiles?: AccountProfile[] | Error;
 } = {}) {
   return {
     timeline: vi.fn(async (workspaceId: string, taskId?: string) => {
@@ -74,6 +76,10 @@ function fakeClient({
       return metricsValue;
     }),
     getTaskBoard: vi.fn(async () => board),
+    listProfiles: vi.fn(async () => {
+      if (profiles instanceof Error) throw profiles;
+      return { profiles, limit: 10 };
+    }),
   };
 }
 
@@ -191,6 +197,60 @@ describe("時間線", () => {
     const [item] = within(list).getAllByRole("listitem");
     expect(item).toHaveTextContent("Controller");
     expect(item).toHaveTextContent("controller_cli_opened");
+  });
+
+  it("Controller CLI 事件顯示帳號名稱、Controller CLI id 與結束代碼", async () => {
+    const opened = timelineEvent({
+      seq: 9,
+      category: "controller",
+      aggregate_type: "controller_cli",
+      aggregate_id: "ctl_1",
+      event_type: "controller_cli_opened",
+      task_ids: [],
+      run_id: null,
+      payload: { workspace_id: "ws_1", profile_id: "prof_1", profile_name: "Work-1", continue_session: false },
+    });
+    const ended = timelineEvent({
+      seq: 10,
+      category: "controller",
+      aggregate_type: "controller_cli",
+      aggregate_id: "ctl_1",
+      event_type: "controller_cli_ended",
+      task_ids: [],
+      run_id: null,
+      payload: { profile_id: "prof_1", end_code: "host_exited", end_reason: "Claude Code 已結束", exit_code: 0 },
+    });
+    renderPage(fakeClient({ events: [opened, ended] }));
+
+    const list = await screen.findByRole("list", { name: "事件" });
+    // 帳號清單與時間線各自載入，等到帳號名稱出現
+    await waitFor(() => expect(within(list).getAllByRole("listitem")[0]).toHaveTextContent("帳號：Work-1"));
+    const [openedItem, endedItem] = within(list).getAllByRole("listitem");
+    expect(openedItem).toHaveTextContent("Controller CLI：ctl_1");
+    expect(openedItem).not.toHaveTextContent("結束代碼");
+    expect(endedItem).toHaveTextContent("帳號：Work-1");
+    expect(endedItem).toHaveTextContent("Controller CLI：ctl_1");
+    expect(endedItem).toHaveTextContent("結束代碼：host_exited");
+  });
+
+  it("找不到對應帳號或讀不到帳號清單時，Controller CLI 事件改顯示 profile_id", async () => {
+    const opened = timelineEvent({
+      seq: 9,
+      category: "controller",
+      aggregate_type: "controller_cli",
+      aggregate_id: "ctl_1",
+      event_type: "controller_cli_opened",
+      task_ids: [],
+      run_id: null,
+      payload: { profile_id: "prof_gone" },
+    });
+    const client = fakeClient({ events: [opened], profiles: new Error("離線") });
+    renderPage(client);
+
+    const list = await screen.findByRole("list", { name: "事件" });
+    await waitFor(() => expect(client.listProfiles).toHaveBeenCalled());
+    expect(within(list).getByRole("listitem")).toHaveTextContent("帳號：prof_gone");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("選擇 Task 後以 task_id 重新查詢並只顯示 Runtime 回傳的事件；清除過濾後回到全部", async () => {

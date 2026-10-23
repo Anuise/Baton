@@ -16,4 +16,8 @@
 - 第 4 項已由票 04 完成（操作手冊已寫 `"$BATON_MCP_SHIM" wait` 與結束碼，R020 驗證），不必再處理。
 - **final-ab**（Rust 後端：Domain、Store、Runtime、API、Ports、MCP shim、Client）：第 3 項（`baton-store` lifecycle 並行寫入測試，含第 5 項中的同一支）、第 6、7、9、10 項。
 - **final-c**（Web、Tauri、scripts、docs、GLOSSARY、harness）：第 1、2、5 項（harness 的當掉模擬測試；R028 第 1 項已找出成因）、第 8 項。
+
+## 最終修正中的新觀察（R030-fix-c）
+
+11. 前端不穩定測試：R030 加壓（3 套完整 `pnpm --filter web test` 同時跑 ×2 輪）第 1 輪有 2 套失敗，都在 `web/src/VerificationPage.test.tsx`：「發布：JSON 格式錯誤時不送出…」2 次超過 vitest 每個測試 5 秒的上限（`user.type` 逐字輸入一長串 JSON），「要求執行…」1 次送出時少了 `task_id`（疑似時序）。第 2 輪全過；不在 final-c 分派的項目內，未處理。
 12. `crates/baton-harness/tests/verification_handoff.rs:5` 與 `verification_takeover_blocked.rs:8` 檔頭說明仍寫「以 `timeout` 丟棄那次處理」，與 final-c 改寫後的 `supervise_until` 不一致（R031 觀察，低）。

@@ -319,13 +319,22 @@ impl Harness {
         assert_eq!(status, reqwest::StatusCode::ACCEPTED, "開啟 Controller CLI 失敗：{body}");
         let run_id = body["run"]["id"].as_str().expect("回應沒有 Controller Run 識別").to_string();
         self.supervise().await;
+        // 確認是這次開啟真的開窗並進入執行中，再取這個 Run 的開窗紀錄；不可拿到之前開窗留下的舊憑證
+        let (status, view) = self.send_json(reqwest::Method::GET, &path, None).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{view}");
+        let run = &view["run"];
+        assert_eq!(
+            (run["id"].as_str(), run["status"].as_str()),
+            (Some(run_id.as_str()), Some("running")),
+            "這次開啟沒有進入執行中：{run}"
+        );
         let token = self
             .fakes
             .claude_env
             .controller_terminals()
             .into_iter()
-            .rev()
-            .find_map(|launch| {
+            .rfind(|launch| launch.spawn.command_id == run["command_id"].as_str().unwrap_or_default())
+            .and_then(|launch| {
                 let mut env = launch.spawn.env.into_iter();
                 env.find(|(name, _)| name == AGENT_TOKEN_ENV).map(|(_, token)| token)
             })
@@ -441,6 +450,16 @@ impl Harness {
     /// Harness 不啟動 Supervisor 的背景迴圈，所以每一步都由測試決定何時發生（搭配 fake Clock 就完全決定性）。
     pub async fn supervise(&self) {
         self.runtime.as_ref().expect("Runtime 尚未啟動").supervisor().tick().await;
+    }
+
+    /// 讓 Supervisor 處理一次，等 `reached`（某個 fake 回報它的停住點已被走到）完成就丟棄這一次處理，
+    /// 等同 Runtime 在那一點當掉。不以固定時間估計 Supervisor 會走多遠，高負載下也一定停在同一點。
+    pub async fn supervise_until(&self, reached: impl std::future::Future<Output = ()>) {
+        tokio::select! {
+            () = self.supervise() => panic!("Supervisor 應該卡在設定的停住點"),
+            () = reached => {}
+            () = tokio::time::sleep(Duration::from_secs(20)) => panic!("等不到 Supervisor 走到設定的停住點"),
+        }
     }
 
     /// 讓備份排程處理一次：該備份就備份（並套用保留規則）、該演練就做還原演練。時間由 fake Clock 決定。

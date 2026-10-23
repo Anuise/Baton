@@ -226,6 +226,8 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
           {run.end_reason}
         </p>
       )}
+      {/* 開著與未開啟都要提示：開著時「換帳號重開」需要帳號清單 */}
+      {view && profilesError && <p role="alert">無法取得帳號清單：{profilesError}</p>}
       {view && open && (
         <div className="controller-actions">
           {run?.rebound_at != null ? (
@@ -278,7 +280,6 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
       )}
       {view && !open && (
         <div className="controller-actions">
-          {profilesError && <p role="alert">無法取得帳號清單：{profilesError}</p>}
           {profiles === null && profilesError === null && <p>載入帳號中…</p>}
           {profiles !== null && (
             <label>

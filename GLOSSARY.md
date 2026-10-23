@@ -78,8 +78,8 @@
 - **避免使用**：notification、chat、broadcast、command（訊息不是指令，也不是 Controller 與使用者的對話；那在 Controller CLI 中進行）。
 
 ### Account Profile
-- **定義**：一個 Claude Code 帳號及其獨立的原生登入與 Session 狀態，是額度管理的單位。
-- **關係**：每個 Run 綁定一個 Account Profile；額度觀測、並行上限與 draining 都以 Account Profile 為單位；各 Profile 之間不共用登入資料；共同設定以版本化快照提供，不直接共用。
+- **定義**：一個 Claude Code 帳號及其獨立的原生登入與 Session 狀態，是額度管理的單位。設定目錄有兩種來源（`config_dir_origin`）：平台在資料目錄下建立的（`managed`），或使用者登記的既有目錄（`external`，例如平台外也在用的 `~/.claude-Work-n`）。
+- **關係**：每個 Run 綁定一個 Account Profile；平台不刪除任何設定目錄，封存 Profile 也不刪，外部目錄尤其不修改；額度觀測、並行上限與 draining 都以 Account Profile 為單位；各 Profile 之間不共用登入資料；共同設定以版本化快照提供，不直接共用。
 - **避免使用**：account（單說 account 容易與應用程式測試帳號混淆）、user、seat、token。
 
 ### Controller 帳號
@@ -138,12 +138,12 @@
 
 ### Agent 憑證
 - **定義**：Runtime 在 Run 准入時為該 Run 簽發的範圍憑證，綁定一個 Workspace、一個 Run 與一個權限世代（generation），只能使用 Agent 的工具介面，不能操作使用者的管理功能。只交給該 Run 的程序，不寫進 Prompt、設定檔或日誌。
-- **關係**：身分與範圍一律取自憑證，不採信請求自稱的 Workspace 或 Run；有效與否取決於該 Run 是否仍是 Task 的寫入所有者（見 execution lease）：Run 結束或被接替後，它不能再改變任何狀態，過期世代的回報只保留為稽核紀錄；由 MCP shim 代 Worker 出示給 Runtime；與桌面 App 的憑證分開，兩者不能互相取代。
+- **關係**：身分與範圍一律取自憑證，不採信請求自稱的 Workspace 或 Run；Worker Run 的憑證有效與否取決於該 Run 是否仍是 Task 的寫入所有者（見 execution lease）：Run 結束或被接替後，它不能再改變任何狀態，過期世代的回報只保留為稽核紀錄；Controller Run 的憑證（Controller 憑證）在該 Controller Run 結束，或 Runtime 重啟後重新綁定（`rebound_at`）時失效；由 MCP shim 代 Worker 或 Controller 出示給 Runtime；與桌面 App 的憑證分開，兩者不能互相取代。
 - **避免使用**：token、API key、密鑰（泛稱）、session（Session 是對話脈絡，不是憑證）。
 
 ### MCP shim
-- **定義**：Worker 程序用來呼叫 Runtime 工具介面的轉接元件，把 Worker 的工具呼叫（讀取任務契約、回報進度、保存 checkpoint、回報受阻）轉送給 Runtime。本身不保存狀態、不做判斷。
-- **關係**：隨 Worker Run 啟動，帶著該 Run 的 Agent 憑證；Runtime 才是驗證與寫入的一方；執行工具的整合（Adapter）負責把它設定給 Worker。
+- **定義**：Worker 與 Controller CLI 用來呼叫 Runtime 工具介面的轉接元件，把工具呼叫（讀取任務契約、回報進度、保存 checkpoint、回報受阻、Controller 工具）轉送給 Runtime。本身不保存狀態、不做判斷。同一個執行檔另有兩個子命令：`controller-host`（Controller 宿主：在終端機中啟動 `claude`，向 Runtime 回報它的開始與結束）與 `wait`（Controller 在背景執行，長輪詢等待事件，有事件就印出摘要並結束）。
+- **關係**：隨 Worker Run 或 Controller CLI 啟動，帶著該 Run 的 Agent 憑證；Controller CLI 中以環境變數 `BATON_MCP_SHIM` 取得它的路徑；Runtime 才是驗證與寫入的一方；執行工具的整合（Adapter）負責把它設定給 Worker。
 - **避免使用**：proxy、bridge、plugin、MCP server（泛稱，shim 只是其中一個提供平台工具的實作）。
 
 ### Guardian（監護程序）
@@ -255,7 +255,7 @@
 - **避免使用**：queued（Run 的 `queued` 是已建立、等 Supervisor 啟動）、backlog、pending（Task 的 `pending` 是契約尚未通過准入）。
 
 ### 等待原因（wait reason）
-- **定義**：Task 還沒有開始的原因，分六類：名額已滿（capacity）、額度（quota）、授權（authorization）、相依（dependency）、狀態不明（state_unknown）、帳號（account：未登入、認證被覆蓋、身分不符、沒有任何帳號）。每個原因有穩定代碼與說明。
+- **定義**：Task 還沒有開始的原因，分六類：名額已滿（capacity）、額度（quota）、授權（authorization）、相依（dependency）、狀態不明（state_unknown）、帳號（account：未登入、認證被覆蓋、身分不符、沒有任何帳號、帳號是開著的 Controller CLI 的 Controller 帳號 `controller_account`）。每個原因有穩定代碼與說明。
 - **關係**：讓使用者知道該處理哪一類問題：名額已滿會自動恢復，額度要等重置，授權與相依要使用者或 Controller 處理，狀態不明與帳號要先核對帳號。
 - **避免使用**：blocked（Task 的 `blocked` 是預算用盡後的狀態）、reason code（泛稱）。
 
