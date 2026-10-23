@@ -7,6 +7,7 @@ import type {
   AccountProfile,
   AccountScheduling,
   AuthSource,
+  CreateProfileFromDirRequest,
   GateState,
   PlanLimits,
   QuotaConfidence,
@@ -20,7 +21,12 @@ import type {
 /** 排程總覽是選用的：沒有提供時帳號頁只是不顯示進行中的 Run 與用量；沒有 `setQuotaLimits` 時不顯示方案上限表單。 */
 export type AccountsClient = Pick<
   AccountClient,
-  "listProfiles" | "createProfile" | "verifyProfile" | "openLoginTerminal" | "archiveProfile"
+  | "listProfiles"
+  | "createProfile"
+  | "createProfileFromExistingDir"
+  | "verifyProfile"
+  | "openLoginTerminal"
+  | "archiveProfile"
 > &
   Partial<Pick<SchedulingClient, "schedulingOverview" | "setQuotaLimits">>;
 
@@ -153,6 +159,13 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
     }
   };
 
+  /** 以既有目錄建立；失敗時把錯誤交給表單顯示。 */
+  const createFromDir = async (request: CreateProfileFromDirRequest) => {
+    await client.createProfileFromExistingDir(request);
+    await refresh();
+    onChange?.();
+  };
+
   /** 執行一個針對單一 Profile 的動作；失敗時顯示 Runtime 的說明，清單維持原樣。 */
   const act = async (work: () => Promise<unknown>, notice: string | null = null) => {
     setActionError(null);
@@ -183,6 +196,9 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
             <li key={profile.id} className={profile.dispatchable ? "profile-ok" : "profile-blocked"}>
               <span className="profile-name">{profile.name}</span>
               <span className="profile-state">{profileStateLabel(profile)}</span>
+              {profile.config_dir_origin === "external" && (
+                <span className="profile-origin">外部目錄：{profile.config_dir}</span>
+              )}
               <ProfileFacts profile={profile} timeZone={timeZone} />
               {scheduling.state === "ready" && (
                 <AccountLoad
@@ -230,7 +246,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       )}
       {terminalNotice && <p role="status">{terminalNotice}</p>}
       {actionError && <p role="alert">{actionError}</p>}
-      <form className="profile-form" onSubmit={(event) => void create(event)}>
+      <form className="profile-form" aria-label="新增 Profile" onSubmit={(event) => void create(event)}>
         <label>
           名稱
           <input value={name} onChange={(e) => setName(e.target.value)} />
@@ -246,10 +262,70 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
         <button type="submit" disabled={busy || full}>
           新增 Profile
         </button>
-        {full && <p>已達上限：最多 {limit} 個帳號 Profile。請先封存用不到的 Profile，再新增。</p>}
         {formError && <p role="alert">{formError}</p>}
       </form>
+      <ProfileFromDirForm disabled={full} onCreate={createFromDir} />
+      {full && <p>已達上限：最多 {limit} 個帳號 Profile。請先封存用不到的 Profile，再新增。</p>}
     </section>
+  );
+}
+
+/** 以已登入的既有設定目錄建立 Profile（不必重新登入）；失敗時顯示 Runtime 的說明並保留輸入。 */
+function ProfileFromDirForm({
+  disabled,
+  onCreate,
+}: {
+  disabled: boolean;
+  onCreate: (request: CreateProfileFromDirRequest) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [configDir, setConfigDir] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (name.trim() === "") {
+      setError("請輸入名稱");
+      return;
+    }
+    if (configDir.trim() === "") {
+      setError("請輸入設定目錄");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await onCreate({ name, configDir });
+      setName("");
+      setConfigDir("");
+    } catch (failure) {
+      // 保留輸入，讓使用者修正後重送
+      setError(reasonOf(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form className="profile-form" aria-label="以既有目錄建立 Profile" onSubmit={(event) => void submit(event)}>
+      <label>
+        名稱
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label>
+        設定目錄
+        <input
+          value={configDir}
+          onChange={(e) => setConfigDir(e.target.value)}
+          placeholder="C:\Users\me\.claude-Work-3"
+        />
+      </label>
+      <button type="submit" disabled={busy || disabled}>
+        以既有目錄建立
+      </button>
+      {error && <p role="alert">{error}</p>}
+    </form>
   );
 }
 

@@ -481,6 +481,25 @@ describe("Runtime 用戶端", () => {
     expect(fetchFn).toHaveBeenNthCalledWith(5, "/api/v1/profiles/prof_1/archive", { method: "POST" });
   });
 
+  it("HTTP 版以既有目錄建立 Profile：POST 名稱與 config_dir，被拒時錯誤訊息是 Runtime 的說明", async () => {
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 201 }));
+    const client = createHttpClient(fetchFn as unknown as typeof fetch);
+
+    await client.createProfileFromExistingDir({ name: "工作三", configDir: "C:\\Users\\me\\.claude-Work-3" });
+
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/profiles/from-existing-dir", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "工作三", config_dir: "C:\\Users\\me\\.claude-Work-3" }),
+    });
+
+    const body = { error: "profile_dir_missing", message: "設定目錄不存在" };
+    const rejecting = vi.fn(async () => new Response(JSON.stringify(body), { status: 422 }));
+    await expect(
+      createHttpClient(rejecting as unknown as typeof fetch).createProfileFromExistingDir({ name: "x", configDir: "C:\\nope" }),
+    ).rejects.toThrow("設定目錄不存在");
+  });
+
   it("HTTP 版新增第 9 個 Profile 被拒絕時，錯誤訊息是 Runtime 說明的上限", async () => {
     const body = { error: "profile_limit_reached", message: "最多只能有 8 個帳號 Profile" };
     const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 409 }));
@@ -509,6 +528,7 @@ describe("Runtime 用戶端", () => {
 
     await client.listProfiles();
     await client.createProfile({ name: "主要帳號", expectedAccount: "me@example.com" });
+    await client.createProfileFromExistingDir({ name: "工作三", configDir: "C:\\Users\\me\\.claude-Work-3" });
     await client.verifyProfile("prof_1");
     await client.openLoginTerminal("prof_1");
     await client.archiveProfile("prof_1");
@@ -519,6 +539,7 @@ describe("Runtime 用戶端", () => {
     expect(invoke.mock.calls).toEqual([
       ["profile_list"],
       ["profile_create", { name: "主要帳號", expectedAccount: "me@example.com" }],
+      ["profile_create_from_dir", { name: "工作三", configDir: "C:\\Users\\me\\.claude-Work-3" }],
       ["profile_verify", { id: "prof_1" }],
       ["profile_login_terminal", { id: "prof_1" }],
       ["profile_archive", { id: "prof_1" }],
