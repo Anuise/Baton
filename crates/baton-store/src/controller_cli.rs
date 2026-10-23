@@ -29,17 +29,18 @@ impl From<rusqlite::Error> for ControllerCliApplyError {
 
 const COLUMNS: &str = "id, workspace_id, profile_id, status, version, command_id, working_dir, settings_version, created_at, \
      launched_at, pid, process_created_at, command_hash, claude_pid, started_at, end_requested_at, ended_at, end_code, \
-     end_reason, exit_code";
+     end_reason, exit_code, continue_session, rebound_at";
 
 impl Store {
     /// Controller 憑證是否仍然有效（票 17）：它所屬的 Controller CLI 屬於這個 Workspace，而且還沒結束（`starting`／`running`）。
     /// 舊的 Controller 輪次（`kind = 'turn'`）已不再啟動（票 08）；升級前留下的列即使停在未結束，也不再讓憑證有效。
+    /// Runtime 重啟後被重新綁定（`rebound_at`）時，舊憑證失效（desktop-controller-cli 票 07）。
     pub async fn controller_run_active(&self, scope: &ControllerScope) -> StoreResult<bool> {
         let scope = scope.clone();
         self.read(move |conn| {
             let status: Option<String> = conn
                 .query_row(
-                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2 AND kind = 'cli'",
+                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2 AND kind = 'cli' AND rebound_at IS NULL",
                     [&scope.controller_run_id, &scope.workspace_id],
                     |r| r.get(0),
                 )
@@ -117,6 +118,33 @@ impl Store {
     ) -> Result<ControllerCliRun, ControllerCliApplyError> {
         let (code, reason) = (code.to_string(), reason.to_string());
         self.apply_cli(run_id, move |_, run| Ok(controller_cli::end(run, &code, &reason, exit_code, now)), now).await
+    }
+
+    /// Runtime 重啟後查驗宿主已不在：中斷（票 07）。
+    pub async fn interrupt_controller_cli(&self, run_id: &str, reason: &str, now: Timestamp) -> Result<ControllerCliRun, ControllerCliApplyError> {
+        let reason = reason.to_string();
+        self.apply_cli(run_id, move |_, run| Ok(controller_cli::interrupt(run, &reason, now)), now).await
+    }
+
+    /// Runtime 重啟後查驗宿主仍存活：重新綁定，以這個 Run 簽發的 Controller 憑證從此失效（票 07）。已重新綁定過不改變。
+    pub async fn rebind_controller_cli(&self, run_id: &str, now: Timestamp) -> Result<ControllerCliRun, ControllerCliApplyError> {
+        let run_id = run_id.to_string();
+        let result = self
+            .write(move |tx| {
+                let Some(run) = load(tx, "id = ?1", [&run_id])?.pop() else {
+                    return Ok(Err(ControllerCliError::RunNotFound(run_id)));
+                };
+                match controller_cli::rebind(&run, now) {
+                    Err(rejected) => Ok(Err(rejected)),
+                    Ok(None) => Ok(Ok(run)),
+                    Ok(Some(change)) => {
+                        save(tx, &change, now)?;
+                        Ok(Ok(change.run))
+                    }
+                }
+            })
+            .await?;
+        Ok(result?)
     }
 
     /// 使用者按「結束」：記下要求，由 Supervisor 結束宿主。
@@ -251,6 +279,8 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ControllerCliRun> {
         end_code: r.get(17)?,
         end_reason: r.get(18)?,
         exit_code: r.get(19)?,
+        continue_session: r.get(20)?,
+        rebound_at: millis(21)?,
     })
 }
 
@@ -262,14 +292,14 @@ fn save(tx: &Transaction<'_>, change: &ControllerCliChange, now: Timestamp) -> r
         "INSERT INTO controller_run
             (id, kind, workspace_id, profile_id, status, version, command_id, working_dir, settings_version, created_at,
              updated_at, launched_at, pid, process_created_at, command_hash, claude_pid, started_at, end_requested_at,
-             ended_at, end_code, end_reason, exit_code)
-         VALUES (?1, 'cli', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+             ended_at, end_code, end_reason, exit_code, continue_session, rebound_at)
+         VALUES (?1, 'cli', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status, version = excluded.version, updated_at = excluded.updated_at,
            launched_at = excluded.launched_at, pid = excluded.pid, process_created_at = excluded.process_created_at,
            command_hash = excluded.command_hash, claude_pid = excluded.claude_pid, started_at = excluded.started_at,
            end_requested_at = excluded.end_requested_at, ended_at = excluded.ended_at, end_code = excluded.end_code,
-           end_reason = excluded.end_reason, exit_code = excluded.exit_code",
+           end_reason = excluded.end_reason, exit_code = excluded.exit_code, rebound_at = excluded.rebound_at",
         rusqlite::params![
             run.id,
             run.workspace_id,
@@ -292,6 +322,8 @@ fn save(tx: &Transaction<'_>, change: &ControllerCliChange, now: Timestamp) -> r
             run.end_code,
             run.end_reason,
             run.exit_code,
+            run.continue_session,
+            millis(run.rebound_at),
         ],
     )?;
     for event in &change.events {

@@ -24,6 +24,11 @@ impl Clock for SystemClock {
         let millis = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         Timestamp::from_millis(millis as i64)
     }
+
+    fn sleep_until(&self, deadline: Timestamp) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let remaining = (deadline.as_millis() - self.now().as_millis()).max(0) as u64;
+        Box::pin(tokio::time::sleep(Duration::from_millis(remaining)))
+    }
 }
 
 struct Unavailable;

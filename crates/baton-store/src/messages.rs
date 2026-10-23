@@ -397,6 +397,7 @@ fn save_message(tx: &Transaction<'_>, stored: &StoredMessage) -> rusqlite::Resul
                 "INSERT INTO message_controller_delivery (workspace_id, message_id) VALUES (?1, ?2)",
                 rusqlite::params![m.workspace_id, delivery.message_id],
             )?;
+            super::controller_wait::record_message_received(tx, m)?;
         } else {
             tx.execute(
                 "INSERT INTO message_delivery (workspace_id, message_id, recipient_task_id) VALUES (?1, ?2, ?3)",

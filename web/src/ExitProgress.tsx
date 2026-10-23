@@ -135,6 +135,9 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
 
   const workspaceName = (id: string) =>
     (exit.state === "progress" && exit.status.workspaces.find((w) => w.workspace_id === id)?.name) || id;
+  // Controller CLI 沒有 Task，以「Controller CLI」取代 Run ID
+  const runLabel = (run: ExitRunResult) =>
+    `${workspaceName(run.workspace_id)} · ${run.controller_cli ? "Controller CLI" : run.run_id}`;
 
   return (
     <div className="exit-overlay">
@@ -177,9 +180,7 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
               <ul className="exit-runs" aria-label="Run 停止結果">
                 {report.runs.map((run) => (
                   <li key={run.run_id} className={`exit-run exit-run-${run.outcome}`}>
-                    <span>
-                      {workspaceName(run.workspace_id)} · {run.run_id}
-                    </span>
+                    <span>{runLabel(run)}</span>
                     <strong>{outcomeText(run)}</strong>
                   </li>
                 ))}
@@ -201,7 +202,7 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
                 <ul>
                   {anomalies.map((run) => (
                     <li key={run.run_id}>
-                      {workspaceName(run.workspace_id)} · {run.run_id}：{outcomeText(run)}
+                      {runLabel(run)}：{outcomeText(run)}
                     </li>
                   ))}
                 </ul>

@@ -6,6 +6,7 @@
 use std::ffi::OsString;
 
 use baton_domain::controller_cli::{HOST_ENDED_PATH, HOST_STARTED_PATH};
+use baton_domain::controller_wait::SHIM_PATH_ENV;
 use serde_json::{json, Value};
 use tokio::process::Command;
 
@@ -56,7 +57,16 @@ pub async fn run_controller_host(args: &[OsString], lookup: impl Fn(&str) -> Opt
     }
 
     // 繼承標準輸入輸出錯誤、環境變數與目前目錄（tokio 的預設）
-    let mut child = match Command::new(program).args(program_args).spawn() {
+    let mut command = Command::new(program);
+    command.args(program_args);
+    // 讓 Controller 能以 "$BATON_MCP_SHIM" wait 找到 shim
+    match std::env::current_exe() {
+        Ok(path) => {
+            command.env(SHIM_PATH_ENV, path);
+        }
+        Err(error) => eprintln!("{PREFIX}：警告：無法取得 shim 執行檔路徑（{error}），Controller 將無法執行 wait"),
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             eprintln!("{PREFIX}：無法啟動 {}：{error}", program.to_string_lossy());

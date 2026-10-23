@@ -134,6 +134,9 @@ pub struct Supervisor {
     exiting: watch::Sender<bool>,
     /// 最近一次寫給監護的恢復事件（識別與版本，票 32）；事件有變動才重寫鏡像。
     mirrored: Mutex<Option<(String, i64)>>,
+    /// 這個 Runtime 實例自己開窗（簽發憑證）或重啟後已核對過的 Controller CLI（desktop-controller-cli 票 07）；
+    /// 不在其中、又已寫過 launch intent 的，是上一個實例開出的，要先查驗宿主。
+    controller_clis_checked: Mutex<HashSet<String>>,
 }
 
 /// Supervisor 的生命週期參數（票 25）。
@@ -178,6 +181,7 @@ impl Supervisor {
             reopen_from: Mutex::new(lifecycle.reopen_from),
             exiting: watch::Sender::new(false),
             mirrored: Mutex::new(None),
+            controller_clis_checked: Mutex::new(HashSet::new()),
         })
     }
 
@@ -404,20 +408,43 @@ impl Supervisor {
             }
         }
 
-        // 到總上限仍沒有結果就不再等待（逾時的那些在 `finish_exit` 記為停止異常）
-        while let Ok(Some((item, result))) = tokio::time::timeout_at(deadline, stopping.next()).await {
-            let record = match result {
-                Ok(StopResult::StoppedGracefully) => self.finish_stopped(&item, RunStopOutcome::StoppedGracefully).await,
-                Ok(StopResult::ForceKilled) => self.finish_stopped(&item, RunStopOutcome::ForceKilled).await,
-                Ok(StopResult::StillAlive) => anomaly(
-                    &item,
-                    StopAnomaly::StillAlive,
-                    "終止程序樹之後仍有程序存活，無法確認停止；Run 保留寫入所有權".to_string(),
-                ),
-                Err(error) => anomaly(&item, StopAnomaly::StopFailed, format!("停止程序失敗：{error}")),
-            };
-            report.record(record);
+        // Controller CLI 也列入停止進度（desktop-controller-cli 票 07），與 Worker 同時結束
+        let clis = match self.store.open_controller_cli_runs().await {
+            Ok(clis) => clis,
+            Err(error) => {
+                report.notes.push(format!("無法讀取開著的 Controller CLI：{error}"));
+                Vec::new()
+            }
+        };
+        if !clis.is_empty() {
+            for run in &clis {
+                report.record(RunStopRecord::pending_controller_cli(&run.id, &run.workspace_id));
+            }
             self.save_progress(&report).await;
+        }
+        let clis = tokio::time::timeout_at(deadline, self.stop_controller_clis_for_exit(clis));
+
+        // 到總上限仍沒有結果就不再等待（逾時的那些在 `finish_exit` 記為停止異常）
+        let workers = async {
+            while let Ok(Some((item, result))) = tokio::time::timeout_at(deadline, stopping.next()).await {
+                let record = match result {
+                    Ok(StopResult::StoppedGracefully) => self.finish_stopped(&item, RunStopOutcome::StoppedGracefully).await,
+                    Ok(StopResult::ForceKilled) => self.finish_stopped(&item, RunStopOutcome::ForceKilled).await,
+                    Ok(StopResult::StillAlive) => anomaly(
+                        &item,
+                        StopAnomaly::StillAlive,
+                        "終止程序樹之後仍有程序存活，無法確認停止；Run 保留寫入所有權".to_string(),
+                    ),
+                    Err(error) => anomaly(&item, StopAnomaly::StopFailed, format!("停止程序失敗：{error}")),
+                };
+                report.record(record);
+                self.save_progress(&report).await;
+            }
+        };
+        let ((), clis) = tokio::join!(workers, clis);
+        // 逾時的 Controller CLI 維持等待中，在 `finish_exit` 記為停止異常
+        for record in clis.unwrap_or_default() {
+            report.record(record);
         }
         self.finish_exit(report, total).await
     }
@@ -1021,6 +1048,7 @@ impl Supervisor {
             settings_files,
             model: payload.model.clone(),
             resume_native_session_id: run.resume_native_session_id.clone(),
+            continue_session: false,
         })
     }
 
