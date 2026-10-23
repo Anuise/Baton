@@ -438,17 +438,13 @@ fn asking_the_same_question_again_returns_the_pending_request_and_adds_new_tasks
 }
 
 #[test]
-fn answering_a_controller_question_notifies_the_conversation_instead_of_the_outbox() {
+fn answering_a_controller_question_does_not_write_the_outbox() {
     let world = World::new(vec![task("t1", TaskStatus::Pending, 3)], vec![controller_pending("d1", &["t1"])]);
 
     let change = world.run(answer("d1", 1, DecisionAction::Accept, Some("b"), Some("先做 B"))).unwrap();
 
     assert_eq!(change.outcome, DecisionOutcome::Answered { resumed_task_ids: vec![] });
     assert!(change.outbox.is_empty(), "Controller 沒有 Worker 的 Run，不寫喚醒 Outbox");
-    assert_eq!(change.notices.len(), 1);
-    let notice = &change.notices[0];
-    assert_eq!((notice.workspace_id.as_str(), notice.source.as_str()), ("ws", "decision_wake:d1:2"));
-    assert!(notice.content.contains("要用哪個方案？") && notice.content.contains("選項 b") && notice.content.contains("先做 B"), "{}", notice.content);
     assert!(change.tasks.is_empty(), "pending 的 Task 不會被改成 ready，由 Controller 補契約後再派工");
 }
 
@@ -460,7 +456,6 @@ fn a_controller_question_is_not_superseded_by_contract_changes_only_when_its_tas
     );
     let change = world.run(DecisionCommand::Refresh).unwrap();
     assert_eq!(change.outcome, DecisionOutcome::Refreshed { superseded: vec!["d2".into()] });
-    assert!(change.notices[0].content.contains("已過期"), "{}", change.notices[0].content);
 }
 
 #[test]
@@ -663,8 +658,6 @@ fn an_answer_that_overturns_the_recommendation_supersedes_pending_requests_of_ta
     let mut resumed = change.resumed.clone();
     resumed.sort();
     assert_eq!(resumed, vec!["t0".to_string(), "t1".to_string()], "等它們的 Task 不會一直卡在 waiting_decision");
-    let notice = change.notices.iter().find(|n| n.content.contains("推翻")).expect("通知 Controller 重新整理");
-    assert!(notice.content.contains("t1") && !notice.content.contains("t2"), "{}", notice.content);
 }
 
 #[test]
@@ -672,7 +665,6 @@ fn accepting_the_recommendation_confirms_the_assumption_and_changes_nothing_else
     let world = assumption_world();
     let change = world.run(answer("d_api", 1, DecisionAction::Accept, Some("a"), None)).unwrap();
     assert_eq!(change.updated.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["d_api"]);
-    assert!(change.notices.iter().all(|n| !n.content.contains("推翻")));
 }
 
 #[test]

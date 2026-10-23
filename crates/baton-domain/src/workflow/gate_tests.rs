@@ -239,12 +239,7 @@ fn a_failure_route_back_redoes_later_stages_instead_of_reusing_them() {
 }
 
 #[test]
-fn a_pass_records_the_build_it_was_made_on_and_the_controller_note_names_gates_to_reverify() {
-    let (workflow, playbook, mut prior) = at_integrate();
+fn a_pass_records_the_build_it_was_made_on() {
+    let (_, _, prior) = at_integrate();
     assert!(prior.iter().all(|a| a.build.as_deref() == Some("c1")));
-    let invalidation =
-        revalidate(&workflow, &playbook, &prior, &facts(&workflow, &playbook, &prior, Some("c2"), &[]), T1).unwrap();
-    prior.extend(invalidation.attempts);
-    let note = WorkflowNote::from_parts(&invalidation.workflow, &playbook, &prior, None).unwrap().render();
-    assert!(note.contains("需要重驗") && note.contains("Stage review"), "{note}");
 }

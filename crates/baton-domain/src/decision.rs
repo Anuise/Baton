@@ -20,8 +20,8 @@
 //!   修改授權與回答請求是兩回事，單次批准在執行時逐項核對綁定（票 23）。使用者提交時必須帶 `expected_revision`，請求在檢視後有任何變動就拒絕。
 //! - **每一項各自保存（票 35）**：一筆裁定只對應一個請求；批次處理也是逐項套用，不形成概括授權。
 //! - **答案推翻假設（票 50）**：Task 可以在契約中以 `decision` 引用一個請求，照它的建議先做。使用者的裁定與建議不同時，
-//!   假設被推翻：依據它的 Task 尚未結束的裁定請求在同一個交易中標為 `superseded`（之後重新整理時也會），並通知 Controller
-//!   重新整理受影響的 Task；與它無關的請求與 Task 不受影響。
+//!   假設被推翻：依據它的 Task 尚未結束的裁定請求在同一個交易中標為 `superseded`（之後重新整理時也會）；
+//!   與它無關的請求與 Task 不受影響。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -283,8 +283,8 @@ pub struct AuthorityDetail {
     pub fingerprint: String,
 }
 
-/// 裁定請求的提出者（票 17）。Controller 提出的請求沒有 Worker 的 Run：回答或過期時不寫喚醒 Outbox，
-/// 而是成為該 Workspace conversation 的工作事件，喚醒 Controller。
+/// 裁定請求的提出者（票 17）。Controller 提出的請求沒有 Worker 的 Run：回答或過期時不寫喚醒 Outbox；
+/// 被回答時由 Controller CLI 的事件等待（`wait`）回報「裁定已回答」。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DecisionOrigin {
@@ -323,7 +323,7 @@ pub struct DecisionTarget {
 pub struct DecisionRequest {
     pub id: String,
     pub workspace_id: String,
-    /// 提出請求的 Run 與 Task。Controller 提出的請求（票 17）`run_id` 是 Controller 的一輪（`controller_run`），
+    /// 提出請求的 Run 與 Task。Controller 提出的請求（票 17）`run_id` 是 Controller CLI 的 Run（`controller_run`），
     /// `task_id` 是目標 Task。
     pub run_id: String,
     pub task_id: String,
@@ -454,15 +454,6 @@ pub struct WakeItem {
     pub run_id: String,
     pub payload: Value,
     pub created_at: Timestamp,
-}
-
-/// Controller 提出的請求被回答或過期時，交給該 Workspace conversation 的工作事件（票 17）。
-/// Store 在同一個交易中寫入；`source` 讓同一個結果只成為一個輸入。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConversationNotice {
-    pub workspace_id: String,
-    pub source: String,
-    pub content: String,
 }
 
 // ---------------------------------------------------------------- Agent 提出請求的內容
@@ -612,11 +603,11 @@ pub enum DecisionCommand {
     },
     /// Controller 嘗試一個動作（`controller_action`），依決策權限表判定。`request_id`、`audit_id` 由呼叫端產生。
     ControllerAction { request_id: String, audit_id: String, run_id: String, generation: i64, content: ActionContent },
-    /// Controller 的一輪（票 17）向使用者提問，`blocking` 是依賴這個答案的 Task（只能是 pending 或 ready）。
-    /// 呼叫端已確認那一輪還沒結束。
+    /// Controller（票 17）向使用者提問，`blocking` 是依賴這個答案的 Task（只能是 pending 或 ready）。
+    /// 呼叫端已確認那個 Controller CLI 的 Run 還沒結束。
     ControllerQuestion { request_id: String, controller_run_id: String, content: RequestContent, blocking: Vec<String> },
     /// Controller 的工具在執行變更前由 Runtime 依實際變更推導出事項（票 17），依決策權限表判定；規則同 `ControllerAction`，
-    /// 但提出者是 Controller 的一輪、目標 Task 必填。呼叫端已確認那一輪還沒結束。
+    /// 但提出者是 Controller CLI 的 Run、目標 Task 必填。呼叫端已確認那個 Run 還沒結束。
     ControllerGate { request_id: String, audit_id: String, controller_run_id: String, content: ActionContent },
     /// 使用者（桌面憑證）處理一個請求。
     Answer {
@@ -726,8 +717,6 @@ pub struct DecisionChange {
     /// 因核准「預算用盡後的下一步」而重設的預算（票 36）。
     pub budgets: Vec<TaskBudget>,
     pub outbox: Vec<WakeItem>,
-    /// Controller 提出的請求結束時要交給 conversation 的工作事件（票 17）。
-    pub notices: Vec<ConversationNotice>,
     pub events: Vec<DomainEvent>,
     pub outcome: DecisionOutcome,
 }
@@ -745,7 +734,6 @@ impl DecisionChange {
             resumed: Vec::new(),
             budgets: Vec::new(),
             outbox: Vec::new(),
-            notices: Vec::new(),
             events: Vec::new(),
             outcome,
         }
@@ -760,7 +748,6 @@ impl DecisionChange {
             || self.approval_use.is_some()
             || !self.tasks.is_empty()
             || !self.outbox.is_empty()
-            || !self.notices.is_empty()
             || !self.events.is_empty()
     }
 }
@@ -960,7 +947,7 @@ pub fn decide(ctx: &DecisionContext<'_>, command: DecisionCommand, now: Timestam
     }
 }
 
-/// 請求的提出者：Worker 的 Run，或 Controller 的一輪（票 17）。
+/// 請求的提出者：Worker 的 Run，或 Controller CLI 的 Run（票 17）。
 #[derive(Clone, Copy)]
 enum Requester<'a> {
     Worker(&'a Run),
@@ -1695,20 +1682,12 @@ fn resume_tasks(
 }
 
 /// 喚醒提出者：請求本身與被合併進來的請求都要叫醒。Worker 提出的寫喚醒 Outbox（各自的 Run）；
-/// Controller 提出的（票 17）成為 conversation 的工作事件，由 Controller 的事件迴圈喚起下一輪。
+/// Controller 提出的（票 17）不寫 Outbox，被回答時由 Controller CLI 的事件等待（`wait`）回報。
 fn wake(ctx: &DecisionContext<'_>, request: &DecisionRequest, payload: &Value, change: &mut DecisionChange, now: Timestamp) {
-    let mut wake_one = |target: &DecisionRequest, payload: Value| match target.origin {
-        DecisionOrigin::Worker => change.outbox.push(WakeItem {
-            kind: wake_kind(&target.id),
-            run_id: target.run_id.clone(),
-            payload,
-            created_at: now,
-        }),
-        DecisionOrigin::Controller => change.notices.push(ConversationNotice {
-            workspace_id: target.workspace_id.clone(),
-            source: format!("{}{}:{}", OUTBOX_WAKE_PREFIX, target.id, target.revision + 1),
-            content: notice_content(target, &payload),
-        }),
+    let mut wake_one = |target: &DecisionRequest, payload: Value| {
+        if target.origin == DecisionOrigin::Worker {
+            change.outbox.push(WakeItem { kind: wake_kind(&target.id), run_id: target.run_id.clone(), payload, created_at: now });
+        }
     };
     wake_one(request, payload.clone());
     for source in ctx.requests.iter().filter(|r| r.merged_into.as_deref() == Some(request.id.as_str())) {
@@ -1717,27 +1696,6 @@ fn wake(ctx: &DecisionContext<'_>, request: &DecisionRequest, payload: &Value, c
         payload["merged_into"] = Value::String(request.id.clone());
         wake_one(source, payload);
     }
-}
-
-/// Controller 提出的請求結束時給 Controller 看的工作事件內容（票 17）。
-fn notice_content(request: &DecisionRequest, payload: &Value) -> String {
-    let head = format!("你提出的裁定請求「{}」（{}）", request.question, request.id);
-    let tasks = request.blocking.join("、");
-    if payload["superseded"].as_bool() == Some(true) {
-        let reason = payload["reason"].as_str().unwrap_or_default();
-        return format!("{head}已過期，不能再套用：{reason}。受影響的 Task：{tasks}");
-    }
-    let action = payload["action"].as_str().and_then(DecisionAction::parse);
-    let mut text = format!("{head}已由使用者處理：{}", action.map_or("（未知的處理方式）", |a| a.label()));
-    if let Some(option) = payload["option_id"].as_str() {
-        let label = request.option(option).map_or(option, |o| o.label.as_str());
-        text.push_str(&format!("，選項「{label}」（{option}）"));
-    }
-    if let Some(note) = payload["note"].as_str() {
-        text.push_str(&format!("；說明：{note}"));
-    }
-    text.push_str(&format!("。依賴這個答案的 Task：{tasks}；請依答案更新契約後再派工"));
-    text
 }
 
 /// 把一批待處理請求標為 `superseded`，恢復只被它們阻擋的 Task，並叫醒提出者。
@@ -1958,18 +1916,6 @@ fn answer(
     closing.extend(dependents.iter().map(|(r, _)| *r));
     let mut resumed = resume_tasks(ctx, &closing, &mut change, EVENT_DECISION_ANSWERED, now)?;
     mark_superseded(ctx, dependents, &resumed, &mut change, now);
-    if let (Some(why), false) = (&overturned, built_on.is_empty()) {
-        change.notices.push(ConversationNotice {
-            workspace_id: request.workspace_id.clone(),
-            source: format!("assumption_overturned:{}", request.id),
-            content: format!(
-                "使用者的答案推翻了假設：{why}（裁定請求 {}）。依據這個假設的 Task：{}；它們的契約引用已失效、不能派工，\
-                 相關的 Gate 會失效並需要重驗，等待中的裁定請求已過期。請依答案更新這些 Task 的契約（或取消），再重新提問與派工",
-                request.id,
-                built_on.join("、")
-            ),
-        });
-    }
     if action.needs_option() && option_id.as_deref() == Some(OPTION_APPROVE) {
         resumed.extend(continue_after_budget(ctx, request, &mut change, now)?);
     }
