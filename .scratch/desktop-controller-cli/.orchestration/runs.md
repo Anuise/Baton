@@ -33,5 +33,6 @@
 | R029-fix-ab | final-ab | final-fix | Work-8 | 2026-10-23 19:10 | 2026-10-23 20:31 | DONE（e7697ad..933bd0e，修 10 項＋待修 #3、#5～#7、#9、#10，未修 1 項附 AI-58） |
 | R030-fix-c | final-c | final-fix | Work-9 | 2026-10-23 19:10 | 2026-10-23 20:00 | DONE（5d1402b..6df628d，修 6 項＋待修 #1、#2、#5、#8） |
 | R031-final-verify-c | final-c | final-verify | Work-3 | 2026-10-23 20:00 | 2026-10-23 20:14 | PASS |
-| R032-fix-d | final-d | final-fix | Work-9 | 2026-10-23 20:14 | | |
+| R032-fix-d | final-d | final-fix | Work-9 | 2026-10-23 20:14 | 2026-10-23 20:32 | DONE（350a9ad..bef7005，修待修 #11、#12） |
 | R033-final-verify-ab | final-ab | final-verify | Work-3 | 2026-10-23 20:31 | | |
+| R034-final-verify-d | final-d | final-verify | Work-8 | 2026-10-23 20:32 | | |
