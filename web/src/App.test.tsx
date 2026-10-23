@@ -6,7 +6,6 @@ import { App, SHELL_STORAGE_KEY } from "./App";
 import {
   authorityTable,
   availableUpdateStatus,
-  conversationView,
   decisionView,
   explorationOverview,
   lifecycleStatus,
@@ -112,7 +111,6 @@ const client = {
   reviews: vi.fn(async () => reviewList()),
   verificationOverview: vi.fn(async () => verificationOverview()),
   explorationOverview: vi.fn(async () => explorationOverview()),
-  getConversation: vi.fn(async () => conversationView()),
   getControllerCli: vi.fn(async () => ({ workspace_id: "ws_1", run: null, playbook_version: "1" })),
   listProfiles: vi.fn(async () => ({ profiles: [profile()], limit: 8 })),
   updateStatus: vi.fn(async () => availableUpdateStatus()),
@@ -224,7 +222,6 @@ describe("App 外殼", () => {
         "流程",
         "時間線",
         "授權",
-        "對話",
       ]);
       expect(workspaceTab("Controller")).toHaveAttribute("aria-selected", "true");
       expect(screen.getByRole("tabpanel", { name: "Controller" })).toHaveTextContent("Controller：筆記");
@@ -241,7 +238,6 @@ describe("App 外殼", () => {
       ["成果", "成果與驗證：筆記", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
       ["流程", "流程：筆記", () => expect(client.workflows).toHaveBeenCalledWith("ws_1")],
       ["時間線", "時間線：筆記", () => expect(client.metrics).toHaveBeenCalledWith("ws_1")],
-      ["對話", "對話：筆記", () => expect(client.getConversation).toHaveBeenCalledWith("ws_1")],
     ])("「%s」頁簽開啟「%s」，且只顯示這個功能", async (tab, heading, called) => {
       const user = userEvent.setup();
       render(<App />);
@@ -428,6 +424,14 @@ describe("App 外殼", () => {
 
       expect(await screen.findByRole("tabpanel", { name: "Controller" })).toHaveTextContent("Controller：筆記");
       expect(topTab("Workspace")).toHaveAttribute("aria-selected", "true");
+    });
+
+    it("記住的是已移除的「對話」頁簽時開在 Controller 頁簽", async () => {
+      localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify({ top: "workspace", workspaceId: "ws_1", workspaceTab: "conversation" }));
+      render(<App />);
+
+      expect(await screen.findByRole("tabpanel", { name: "Controller" })).toHaveTextContent("Controller：筆記");
+      expect(workspaceTab("Controller")).toHaveAttribute("aria-selected", "true");
     });
 
     it("本機儲存無法使用時使用預設值，不報錯", async () => {

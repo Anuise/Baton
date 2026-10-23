@@ -1,6 +1,6 @@
 //! Agent Session：平台 Session、原生 Session 與程序身分分開保存；沿用、替換與對話紀錄匯入（票 15，issue §3.1～3.3）。
 //!
-//! 純邏輯、無 I/O。Session 的狀態只隨 Run 的命令改變（`crate::run::decide` 與 Controller Run 的 `crate::conversation` 呼叫這裡的函式），
+//! 純邏輯、無 I/O。Session 的狀態只隨 Run 的命令改變（`crate::run::decide` 呼叫這裡的函式），
 //! 由 Store 在同一個交易中套用。
 //!
 //! 幾條貫穿全檔的規則：

@@ -2,31 +2,32 @@
 //!
 //! Controller 沒有 Task：它在訊息中的地址是 Workspace 層級的保留地址 `controller`。
 //! - Controller 可以寄給自己 Workspace 內的任何 Task；Worker 以 `to: ["controller"]` 寄給自己 Workspace 的 Controller。
-//! - Controller 的收件匣屬於 Workspace（不屬於某一輪），所以下一輪接得到上一輪沒讀的訊息；別的 Workspace 的訊息一律看不到、寄不到。
+//! - Controller 的收件匣屬於 Workspace（不屬於某一次 Controller CLI），所以下一次開啟的 Controller CLI 接得到上一次沒讀的訊息；
+//!   別的 Workspace 的訊息一律看不到、寄不到。
 //! - Worker 的既有範圍不放寬：仍只讀得到寄給自己 Task 的訊息，只能回覆自己寄過或收到的訊息。
 //!
-//! `harness.db()` 只用來確認落地內容（訊息有沒有被儲存）。
+//! Controller 憑證由 Controller CLI 取得（以專用的 Controller 帳號開啟）。`harness.db()` 只用來確認落地內容（訊息有沒有被儲存）。
 
 use baton_domain::agent::{TOOL_READ_INBOX, TOOL_SEND_MESSAGE};
 use baton_domain::Timestamp;
 use baton_harness::Harness;
-use baton_ports::AdapterEvent;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
 const WORKSPACES: &str = "/api/v1/workspaces";
 const CLOCK_START: Timestamp = Timestamp::from_millis(1_700_000_000_123);
-/// 合併視窗（spec D-31）。
-const WINDOW_MS: i64 = 5_000;
 
 // --- 共用輔助 ---
 
-async fn harness() -> Harness {
+/// 回傳 (harness, Controller 帳號的 Profile 識別)。
+async fn harness() -> (Harness, String) {
     let harness = Harness::builder().clock_at(CLOCK_START).start().await;
     // 每個帳號並行上限 2；兩個 Workspace 各有 Worker，建立兩個帳號
     harness.add_account("帳號 1", "account1@example.com").await;
     harness.add_account("帳號 2", "account2@example.com").await;
-    harness
+    // Controller CLI 專用的帳號，不拿來派 Worker
+    let controller = harness.add_account("Controller 帳號", "controller@example.com").await;
+    (harness, controller)
 }
 
 fn filled(text: &str) -> Value {
@@ -83,26 +84,9 @@ async fn start_run(harness: &Harness, ws: &str, tid: &str) -> (String, String) {
     (rid, token)
 }
 
-/// 使用者送出一則對話訊息，合併視窗過後喚起 Controller，回傳這一輪的 (Controller Run 識別, Controller 憑證)。
-async fn wake_controller(harness: &Harness, ws: &str) -> (String, String) {
-    let path = format!("{WORKSPACES}/{ws}/conversation/messages");
-    let (status, body) = harness.send_json(Method::POST, &path, Some(json!({ "text": "開始" }))).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    harness.clock.advance_millis(WINDOW_MS);
-    harness.supervise().await;
-    let (status, view) = harness.send_json(Method::GET, &format!("{WORKSPACES}/{ws}/conversation"), None).await;
-    assert_eq!(status, StatusCode::OK, "{view}");
-    let run_id = view["active_run"]["id"].as_str().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}")).to_string();
-    let token = harness.agent_credential(&run_id).expect("Controller 程序啟動時應該收到 Controller 憑證");
-    (run_id, token)
-}
-
-/// Controller 這一輪正常結束。
-async fn finish_controller(harness: &Harness, controller_run: &str) {
-    harness.agent_adapter.emit(controller_run, AdapterEvent::Started { native_session_id: Some("native-1".into()) });
-    harness.agent_adapter.emit(controller_run, AdapterEvent::Message { text: "好了".into() });
-    harness.agent_adapter.emit(controller_run, AdapterEvent::Exited { success: true });
-    harness.supervise().await;
+/// 以 Controller 帳號開啟 Workspace 的 Controller CLI，回傳 Controller 憑證。
+async fn open_controller(harness: &Harness, ws: &str, profile: &str) -> String {
+    harness.open_controller_cli(ws, profile).await.1
 }
 
 async fn send_ok(harness: &Harness, token: &str, body: Value) -> Value {
@@ -141,11 +125,11 @@ fn prompt_of(harness: &Harness, run_id: &str) -> String {
 
 #[tokio::test]
 async fn the_controller_and_the_workers_of_its_workspace_exchange_messages() {
-    let harness = harness().await;
+    let (harness, controller_profile) = harness().await;
     let (ws, tasks) = workspace_with_tasks(&harness, "main", &["任務甲", "任務乙"]).await;
     let (a, b) = (&tasks[0], &tasks[1]);
     let (_, worker_a) = start_run(&harness, &ws, a).await;
-    let (_, controller) = wake_controller(&harness, &ws).await;
+    let controller = open_controller(&harness, &ws, &controller_profile).await;
 
     // Controller 寄給 Task：收件人是 Task，寄件地址是 controller
     let sent = send_ok(
@@ -192,13 +176,13 @@ async fn the_controller_and_the_workers_of_its_workspace_exchange_messages() {
 
 #[tokio::test]
 async fn the_controller_cannot_reach_other_workspaces_and_workers_keep_their_limits() {
-    let harness = harness().await;
+    let (harness, controller_profile) = harness().await;
     let (ws, tasks) = workspace_with_tasks(&harness, "main", &["任務甲", "任務乙"]).await;
     let (other, other_tasks) = workspace_with_tasks(&harness, "other", &["別的任務"]).await;
     let (a, b, x) = (&tasks[0], &tasks[1], &other_tasks[0]);
     let (_, worker_a) = start_run(&harness, &ws, a).await;
     let (_, worker_x) = start_run(&harness, &other, x).await;
-    let (_, controller) = wake_controller(&harness, &ws).await;
+    let controller = open_controller(&harness, &ws, &controller_profile).await;
 
     // 別的 Workspace 的 Task 寄不到；聲稱別的 Workspace 被拒絕；寄給自己不行；都沒有儲存任何訊息
     let (status, body) = harness.call_tool(&controller, TOOL_SEND_MESSAGE, json!({ "to": [x], "subject": "越界" })).await;
@@ -238,21 +222,21 @@ async fn the_controller_cannot_reach_other_workspaces_and_workers_keep_their_lim
 }
 
 #[tokio::test]
-async fn the_controller_inbox_belongs_to_the_workspace_and_a_finished_round_loses_access() {
-    let harness = harness().await;
+async fn the_controller_inbox_belongs_to_the_workspace_and_an_ended_cli_loses_access() {
+    let (harness, controller_profile) = harness().await;
     let (ws, tasks) = workspace_with_tasks(&harness, "main", &["任務甲"]).await;
     let (_, worker) = start_run(&harness, &ws, &tasks[0]).await;
-    let (first_round, first) = wake_controller(&harness, &ws).await;
-    send_ok(&harness, &worker, json!({ "to": ["controller"], "subject": "第一輪沒讀的回報" })).await;
-    finish_controller(&harness, &first_round).await;
+    let first = open_controller(&harness, &ws, &controller_profile).await;
+    send_ok(&harness, &worker, json!({ "to": ["controller"], "subject": "第一次沒讀的回報" })).await;
+    harness.end_controller_cli(&ws).await;
 
-    // 結束的一輪：憑證失效，不能再收發
+    // 結束的 Controller CLI：憑證失效，不能再收發
     for (tool, body) in [(TOOL_READ_INBOX, json!({})), (TOOL_SEND_MESSAGE, json!({ "to": [tasks[0]], "subject": "晚了" }))] {
         let (status, response) = harness.call_tool(&first, tool, body).await;
         assert_eq!((status, error_code(&response)), (StatusCode::UNAUTHORIZED, "credential_revoked"), "{tool}：{response}");
     }
 
-    // 下一輪接得到上一輪沒讀的訊息
-    let (_, second) = wake_controller(&harness, &ws).await;
-    assert_eq!(subjects(&read_inbox(&harness, &second).await), ["第一輪沒讀的回報"]);
+    // 下一次開啟的 Controller CLI 接得到上一次沒讀的訊息
+    let second = open_controller(&harness, &ws, &controller_profile).await;
+    assert_eq!(subjects(&read_inbox(&harness, &second).await), ["第一次沒讀的回報"]);
 }

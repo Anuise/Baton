@@ -13,8 +13,8 @@
 ## 一、工作環境與工作單位
 
 ### Workspace
-- **定義**：一個工作環境，包含資料來源、長期對話、成員範圍、資源政策與共用授權。對應使用者指定的一個目錄，該目錄可以不是 Git repo。
-- **關係**：擁有多個 Goal、Task、conversation 與一份共用授權；授權由使用者確認範本後才生效。每個 Workspace 各自有「完全退出後自動續跑」與「跨登入自動續跑」設定。所有範圍查詢都以 Workspace 為界。
+- **定義**：一個工作環境，包含資料來源、成員範圍、資源政策與共用授權。對應使用者指定的一個目錄，該目錄可以不是 Git repo。
+- **關係**：擁有多個 Goal、Task 與一份共用授權，同時最多一個 Controller CLI；授權由使用者確認範本後才生效。每個 Workspace 各自有「完全退出後自動續跑」與「跨登入自動續跑」設定。所有範圍查詢都以 Workspace 為界。
 - **避免使用**：project、repo、folder、專案（「專案」只用於 Project Brief、Project Map 這類被研究的對象）。
 
 ### Goal
@@ -28,8 +28,8 @@
 - **避免使用**：issue、ticket、job、card、work item（`.scratch/` 下的「票」是拆這個專案本身用的工具，不是領域詞彙）。
 
 ### Run
-- **定義**：一次 Agent 執行。綁定一個 Session、一個帳號、環境、程序識別、權限世代（generation）、檢查點與結束原因。Worker Run 必須綁 Task；Controller Run 可只綁 conversation 與 Workspace。
-- **關係**：屬於 Task（Worker）或 conversation（Controller）；交接會結束舊 Run 並建立 successor Run，兩者屬於同一個 Task；Run 結束只產生「Run 結束」事件，不等於 Task 完成。
+- **定義**：一次 Agent 執行。綁定一個 Session、一個帳號、環境、程序識別、權限世代（generation）、檢查點與結束原因。Worker Run 必須綁 Task；Controller Run 不綁 Task，只綁 Workspace（一次 Controller CLI 的開啟）。
+- **關係**：屬於 Task（Worker）或 Workspace（Controller）；交接會結束舊 Run 並建立 successor Run，兩者屬於同一個 Task；Run 結束只產生「Run 結束」事件，不等於 Task 完成。
 - **避免使用**：job、attempt（Stage 的 step_attempt 另有專義）、execution、process（程序只是 Run 的一個屬性）、session。
 
 ### execution lease
@@ -43,9 +43,14 @@
 - **避免使用**：spawn request、launch ticket。
 
 ### Session
-- **定義**：Agent 的對話脈絡，分三種識別，不可混用：`conversation_id`（使用者與 Controller 的長期對話）、`agent_session_id`（平台產生的穩定 Session 主鍵）、`native_session_id`（執行工具回報的原生識別，取得前為空）。另有 `process_identity`（程序身分）用來查驗存活，不是 Session。
-- **關係**：一個 conversation 對應多個 Controller Session；一個 Session 對應多個循序 Run；跨帳號交接會建立新的 Session 並保存 predecessor 關係。同一原生 Session 任何時刻只能有一個有效執行者。Session 存在不代表程序存活、對話完整或可 resume。
+- **定義**：Agent 的對話脈絡，分三種識別，不可混用：`conversation_id`（已退役的 conversation，只出現在歷史資料）、`agent_session_id`（平台產生的穩定 Session 主鍵）、`native_session_id`（執行工具回報的原生識別，取得前為空）。另有 `process_identity`（程序身分）用來查驗存活，不是 Session。
+- **關係**：一個 Session 對應多個循序 Run；跨帳號交接會建立新的 Session 並保存 predecessor 關係。同一原生 Session 任何時刻只能有一個有效執行者。Session 存在不代表程序存活、對話完整或可 resume。
 - **避免使用**：thread、chat、context（context 指載入的資訊，見 context receipt）、把 Session ID 當 Run ID 或 PID。
+
+### conversation（已退役，票 08）
+- **定義**：舊的使用者與 Controller 長期對話：使用者在「對話」頁打字，Runtime 合併使用者訊息與工作事件後，以每輪一次 `claude -p` 喚醒 Controller。已被 Controller CLI 取代（見 ADR-0014）。
+- **關係**：歷史資料（`conversation`、`conversation_turn`，以及 `controller_run` 中 `kind = 'turn'` 的列）保留在資料庫，不遷移、不刪除、不再寫入；一個舊 conversation 曾對應多個 Controller Session。
+- **避免使用**：用來指 Controller CLI 中的互動、「對話頁」（已移除）。
 
 ### Artifact
 - **定義**：Task 產生的成果，含位置、版本、雜湊、產生者、Task 關聯與驗證紀錄。大型內容放檔案儲存，只登記位置與雜湊。同一個 Task 內同名者是同一個 Artifact，再次登記只會追加新版本。
@@ -70,7 +75,7 @@
 ### Message（訊息）
 - **定義**：Worker 之間交換研究結果或協商介面的一則通知，含 `message_id`、`thread_id`、`correlation_id`、類型（`note`、`question`、`answer`、`result`）、寄件 Run 與收件 Task。每個收件 Task 各有一筆交付，狀態由 `pending`（已存入）→ `delivered`（出現在 Run 啟動的未讀摘要）→ `read`（用 `read_inbox` 取走全文）。
 - **關係**：屬於 Workspace；收件匣跟著 Task，交接後的新 Run 接得到前一個 Run 沒讀完的訊息；同一個 `message_id` 對同一個收件人只交付一次；Worker 自己拉取，Runtime 不在執行中途插話。訊息不能改變 Task 的歸屬或範圍，想這麼做的嘗試會被忽略並轉成給 Controller 的事件。
-- **避免使用**：notification、chat、broadcast、command（訊息不是指令，也不是 Controller 與使用者的對話；那是 conversation）。
+- **避免使用**：notification、chat、broadcast、command（訊息不是指令，也不是 Controller 與使用者的對話；那在 Controller CLI 中進行）。
 
 ### Account Profile
 - **定義**：一個 Claude Code 帳號及其獨立的原生登入與 Session 狀態，是額度管理的單位。
@@ -107,14 +112,14 @@
 ## 二、角色
 
 ### Controller
-- **定義**：長期存在的協調角色，本身也是 Agent。負責與使用者對話、釐清目標、拆 Task、派工、協調訊息、評估成果與提出 Decision Request。由使用者在 Controller CLI 中直接操作（AI 暫定，見 ADR-0014；先前的「每次需要判斷時才啟動一輪」擬被取代）。
+- **定義**：長期存在的協調角色，本身也是 Agent。負責與使用者對話、釐清目標、拆 Task、派工、協調訊息、評估成果與提出 Decision Request。由使用者在 Controller CLI 中直接操作（AI 暫定，見 ADR-0014；先前「每次需要判斷時才自動啟動一輪」的做法已於票 08 移除）。
 - **關係**：透過工具介面向 Runtime 提交動作，不直接寫資料；以一個 Controller 帳號執行；每個 Workspace 同時最多一個 Controller CLI。Controller 評估不取代必要的獨立審查。
 - **避免使用**：orchestrator、manager、coordinator、主控（`.scratch` 流程中的「主控 session」是另一回事）。
 
 ### Controller CLI
 - **定義**：使用者從桌面 App 開啟、在終端機視窗中操作的原生互動式 Claude Code，扮演某個 Workspace 的 Controller。開啟期間在平台上是一個互動式的 Controller Run；視窗中的程序結束，這個 Run 就結束。
 - **關係**：屬於一個 Workspace，以一個 Controller 帳號執行；透過 MCP shim 使用 Controller 工具；Worker 的結果以背景等待的方式通知它，平台不替它轉述對話，也不自動喚醒它。
-- **避免使用**：對話頁、chat、conversation（舊的對話頁已擬移除）、終端機頁簽（它開在外部視窗，不在 App 裡）、主控 session。
+- **避免使用**：對話頁、chat、conversation（舊的對話頁已於票 08 移除，conversation 已退役）、終端機頁簽（它開在外部視窗，不在 App 裡）、主控 session。
 
 ### Worker
 - **定義**：接受明確委託並執行的 Agent，負責實作、研究、文件、審查、測試等大量工作；回報進度、checkpoint、成果與阻礙。角色與帳號分開管理，帳號不固定綁定角色。

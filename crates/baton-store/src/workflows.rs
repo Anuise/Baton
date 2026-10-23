@@ -15,7 +15,7 @@ use baton_domain::workdir::TaskKind;
 use baton_domain::workflow::{
     self, AttemptOutcome, BudgetDecision, CheckedEvidence, ClaimedOutcome, Evidence, EvidenceRef, EvidenceStatus, MethodDefinition,
     MethodVersion, Origin, PlaybookDefinition, PlaybookVersion, Recorder, Situation, StageAttempt, StageResultInput,
-    StartInput, WorkflowChange, WorkflowError, WorkflowInstance, WorkflowNote, WorkflowStatus,
+    StartInput, WorkflowChange, WorkflowError, WorkflowInstance, WorkflowStatus,
 };
 use rusqlite::OptionalExtension;
 
@@ -572,12 +572,9 @@ fn revalidate_one(
     let change = WorkflowChange { workflow: invalidation.workflow.clone(), attempt: None, events: vec![invalidation.event.clone()] };
     save_change(tx, &change, Some(workflow.revision))?;
     let mut requests = Vec::new();
-    let mut lines = Vec::new();
     for attempt in &invalidation.attempts {
         insert_attempt(tx, attempt)?;
         let stage = playbook.definition.stage(&attempt.stage_key);
-        let title = stage.map_or(attempt.stage_key.clone(), |s| s.title.clone());
-        lines.push(format!("Stage「{title}」：{}", attempt.note));
         let verifies = stage.is_some_and(|s| s.exit_checks.iter().any(|c| c.requires == workflow::EvidenceKind::Verification));
         let previous = passed.iter().find(|p| p.stage_key == attempt.stage_key);
         if let (true, Some(previous)) = (verifies, previous) {
@@ -586,27 +583,6 @@ fn revalidate_one(
             }
         }
     }
-    let target = task_title(tx, task)?.map(|t| format!("Task「{t}」")).unwrap_or_else(|| "Goal".to_string());
-    let back = invalidation
-        .workflow
-        .current_stage
-        .as_deref()
-        .and_then(|key| playbook.definition.stage(key))
-        .map(|s| format!("Workflow 目前在 Stage「{}」（revision {}）", s.title, invalidation.workflow.revision))
-        .unwrap_or_default();
-    let queued = if requests.is_empty() {
-        String::new()
-    } else {
-        format!("已自動排入重驗的驗證要求：{}，完成後以新的 Evidence Bundle 回報。", requests.join("、"))
-    };
-    let content = format!(
-        "Gate 失效，需要重驗（Workflow {}，{target}）：{}。{back}；請重新取得證據後以 record_stage_result 回報，\
-         其他仍有效的 Gate 會被沿用。{queued}",
-        workflow.id,
-        lines.join("；"),
-    );
-    let source = format!("{}:{}:{}", workflow::EVENT_GATE_INVALIDATED, workflow.id, invalidation.workflow.revision);
-    super::conversations::enqueue_notice(tx, &workflow.workspace_id, &source, &content, now)?;
     Ok(Some(RevalidatedWorkflow {
         workspace_id: workflow.workspace_id.clone(),
         workflow_id: workflow.id.clone(),
@@ -629,27 +605,16 @@ fn detail(conn: &Connection, workflow: WorkflowInstance, latest: &[PlaybookVersi
     Ok(WorkflowDetail { workflow, playbook, attempts, task_title, latest_playbook_version })
 }
 
-fn load_details(conn: &Connection, workspace_id: &str, open_only: bool) -> rusqlite::Result<Vec<WorkflowDetail>> {
-    let filter = if open_only { "AND w.status <> 'completed'" } else { "" };
+fn load_details(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkflowDetail>> {
     let workflows = conn
         .prepare(&format!(
             "SELECT {WORKFLOW_COLUMNS} FROM workflow_instance w JOIN playbook_version p ON p.id = w.playbook_version_id
-             WHERE w.workspace_id = ?1 {filter} ORDER BY w.created_at DESC, w.rowid DESC"
+             WHERE w.workspace_id = ?1 ORDER BY w.created_at DESC, w.rowid DESC"
         ))?
         .query_map([workspace_id], workflow_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let latest = latest_of(&load_playbook_versions(conn)?, |p| p.key.as_str());
     workflows.into_iter().map(|w| detail(conn, w, &latest)).collect()
-}
-
-/// 給 Controller 的背景：這個 Workspace 未完成的 Workflow 與目前 Stage（依建立時間）。
-pub(crate) fn workflow_notes(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkflowNote>> {
-    let mut notes: Vec<WorkflowNote> = load_details(conn, workspace_id, true)?
-        .into_iter()
-        .filter_map(|d| WorkflowNote::from_parts(&d.workflow, &d.playbook, &d.attempts, d.task_title))
-        .collect();
-    notes.reverse();
-    Ok(notes)
 }
 
 /// 給 Worker 的 Stage 說明（Context Builder 的必要項目）：這個 Task 未完成的 Workflow 的目前 Stage。
@@ -967,7 +932,7 @@ impl Store {
     /// 某個 Workspace 的全部 Workflow（最新的在前）。
     pub async fn workflows(&self, workspace_id: &str) -> StoreResult<Vec<WorkflowDetail>> {
         let workspace_id = workspace_id.to_string();
-        self.read(move |conn| Ok(load_details(conn, &workspace_id, false)?)).await
+        self.read(move |conn| Ok(load_details(conn, &workspace_id)?)).await
     }
 }
 

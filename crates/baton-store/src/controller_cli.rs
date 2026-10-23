@@ -7,6 +7,7 @@
 use baton_domain::auth::ControllerScope;
 use baton_domain::controller_cli::{self, ControllerCliChange, ControllerCliError, ControllerCliRun, ControllerCliStatus, OpenIds};
 use baton_domain::run::ProcessRecord;
+use rusqlite::OptionalExtension;
 
 use super::profiles::load_profiles;
 use super::*;
@@ -31,6 +32,24 @@ const COLUMNS: &str = "id, workspace_id, profile_id, status, version, command_id
      end_reason, exit_code, continue_session, rebound_at";
 
 impl Store {
+    /// Controller 憑證是否仍然有效（票 17）：它所屬的 Controller CLI 屬於這個 Workspace，而且還沒結束（`starting`／`running`）。
+    /// 舊的 Controller 輪次（`kind = 'turn'`）已不再啟動（票 08）；升級前留下的列即使停在未結束，也不再讓憑證有效。
+    /// Runtime 重啟後被重新綁定（`rebound_at`）時，舊憑證失效（desktop-controller-cli 票 07）。
+    pub async fn controller_run_active(&self, scope: &ControllerScope) -> StoreResult<bool> {
+        let scope = scope.clone();
+        self.read(move |conn| {
+            let status: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM controller_run WHERE id = ?1 AND workspace_id = ?2 AND kind = 'cli' AND rebound_at IS NULL",
+                    [&scope.controller_run_id, &scope.workspace_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(matches!(status.as_deref(), Some("starting" | "running")))
+        })
+        .await
+    }
+
     /// 使用者要求開啟：在同一個交易中確認 Workspace、Profile 與「這個 Workspace 沒有開著的 Controller CLI」，
     /// 並固定這一刻採用的共同設定版本。
     pub async fn open_controller_cli(

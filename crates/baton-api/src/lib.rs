@@ -11,7 +11,6 @@ mod backups;
 mod controller;
 mod controller_cli;
 mod controller_wait;
-mod conversations;
 mod decisions;
 mod external_operations;
 mod guard;
@@ -95,7 +94,6 @@ pub use controller_cli::{
     controller_cli_end_path, controller_cli_path, ControllerCliView, HostAck, HostEndedRequest, HostStartedRequest,
     OpenControllerCliRequest,
 };
-pub use conversations::{conversation_messages_path, conversation_path, PostMessageRequest, PostedMessage};
 pub use external_operations::{external_operations_path, BeginResponse, ExternalOperationList, RecordResponse};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
 pub use authorization::{
@@ -313,8 +311,6 @@ pub fn router(state: ApiState) -> Router {
         .route(runs::RUN_ROUTE, get(runs::detail))
         .route(runs::CANCEL_ROUTE, post(runs::cancel))
         .route(runs::CONTEXT_ROUTE, get(runs::context))
-        .route(conversations::CONVERSATION_ROUTE, get(conversations::view))
-        .route(conversations::MESSAGES_ROUTE, post(conversations::post_message))
         .route(controller_cli::CONTROLLER_CLI_ROUTE, get(controller_cli::view).post(controller_cli::open))
         .route(controller_cli::CONTROLLER_CLI_END_ROUTE, post(controller_cli::end))
         .route(sessions::SESSIONS_ROUTE, get(sessions::list))

@@ -397,22 +397,11 @@ async fn rejecting_the_budget_decision_keeps_the_task_blocked() {
     assert!(pending_decisions(&harness, &ws).await.is_empty());
 }
 
-/// 喚起一輪 Controller，回傳它的憑證。
-async fn controller_turn(harness: &Harness, ws: &str) -> String {
-    let path = format!("{WORKSPACES}/{ws}/conversation");
-    let (status, body) = harness.send_json(Method::POST, &format!("{path}/messages"), Some(json!({ "text": "處理阻擋的 Task" }))).await;
-    assert_eq!(status, StatusCode::CREATED, "{body}");
-    harness.clock.advance_millis(5_000);
-    harness.supervise().await;
-    let (status, view) = harness.send_json(Method::GET, &path, None).await;
-    assert_eq!(status, StatusCode::OK, "{view}");
-    let run = view["runs"].as_array().unwrap().last().cloned().unwrap_or_else(|| panic!("Controller 沒有被喚起：{view}"));
-    harness.agent_credential(run["id"].as_str().unwrap()).expect("Controller 程序啟動時應該收到 Controller 憑證")
-}
-
 #[tokio::test]
 async fn the_controller_cannot_cancel_a_task_whose_budget_is_exhausted_without_a_decision() {
     let harness = harness().await;
+    // 只用來開 Controller CLI 的帳號（Worker 派工用主要帳號）
+    let controller_account = harness.add_account("Controller 帳號", "controller@example.com").await;
     let (ws, goal) = setup(&harness).await;
     let tid = ready_task(&harness, &ws, &goal).await;
     for _ in 0..4 {
@@ -420,7 +409,8 @@ async fn the_controller_cannot_cancel_a_task_whose_budget_is_exhausted_without_a
         exits(&harness, &rid, false).await;
     }
     let budget_request = assert_blocked_by_budget(&harness, &ws, &tid, "implementation").await;
-    let controller = controller_turn(&harness, &ws).await;
+    // 以 Controller CLI 取得 Controller 憑證
+    let (_, controller) = harness.open_controller_cli(&ws, &controller_account).await;
 
     // 取消再另建相同的 Task 會拿到全新的預算：取消預算已用盡的 Task 也是「預算用盡後的下一步」，必須送裁定（R151 第 9 項）
     let (status, refused) = harness.call_tool(&controller, "cancel_task", json!({ "task_id": tid })).await;

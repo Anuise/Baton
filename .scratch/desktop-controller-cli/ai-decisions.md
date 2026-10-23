@@ -360,6 +360,33 @@
 - 影響：手冊還沒發佈過，所以這次修改仍是版本 1。之後若改 `wait` 的介面或新增「標記受阻」的 Controller 工具，要改手冊並升版。
 - 審閱：未審
 
+### AI-38：升級前的對話資料原樣保留，Controller 憑證只認 Controller CLI
+- 重要度：中
+- 時間／階段：2026-10-23，票 08 實作
+- 決策：`conversation`、`conversation_turn`、`kind = 'turn'` 的 `controller_run` 與 Controller Session 不加 migration、不改狀態、不刪除；Runtime 不再讀寫它們（含升級時停在 `pending` 的輸入與停在 `starting`／`running` 的舊輪次）。Controller 憑證的有效性檢查（`controller_run_active`）改為只認 `kind = 'cli'`，所以舊輪次的憑證一律被拒。完全退出不再停止舊輪次的程序。桌面 API 的兩個對話端點、`baton-client` 的對應方法與 Tauri 指令直接移除（回 404），不保留唯讀檢視。
+- 理由：票面要求「保留、不遷移、不再寫入」；把殘留的舊輪次標成 interrupted 本身就是寫入。舊輪次的憑證若仍因狀態停在 running 而有效，會留下一個沒人管理卻能用 Controller 工具的憑證。
+- 替代方案：加 migration 把未結束的舊輪次標為 interrupted——違反「不遷移」；保留唯讀的對話檢視——UI 已無入口，只是多一個要維護的端點。
+- 影響：升級前若有舊輪次的 `claude -p` 程序仍在執行（Runtime 意外終止且程序沒被 Job 一併結束），平台不再追蹤它，它的工具呼叫會被拒；歷史對話只能直接查資料庫。
+- 審閱：未審
+
+### AI-39：所有寫入 conversation 的工作事件一併停止，Domain 中只為對話產生的輸出暫不刪除
+- 重要度：中
+- 時間／階段：2026-10-23，票 08 實作
+- 決策：Store 不再把下列事項寫成 conversation 的工作事件：Worker Run 成功／失敗／回報受阻、Controller 提出的裁定被回答或過期、專案理解投影衝突、Gate 失效需要重驗（後兩者連同組字串的程式一起移除，`save_projection` 不再收 `notice`）。本票不另外補送這些通知；Controller CLI 的事件通知由票 06 的事件等待負責（票 06 涵蓋 Run 結束、受阻、裁定被回答、訊息；投影衝突與 Gate 失效不在其範圍）。`baton_domain::conversation` 整個刪除；但 `DecisionChange.notices`／`ConversationNotice`（Domain 仍會算出、Store 不再寫入）、`workflow::WorkflowNote` 與 `session::SessionOwner::Conversation` 先保留。
+- 理由：「不再寫入」適用於所有寫入路徑，否則 conversation_turn 仍會成長。保留的三個 Domain 型別是純邏輯、各有自己的單元測試，票 06 與本票平行實作，可能沿用裁定通知的文字；現在刪掉會擴大與票 06 的衝突面。
+- 替代方案：把 Domain 的 `notices` 一併刪除——之後若票 06 要同樣的通知文字得重寫；把投影衝突、Gate 失效改送到事件等待——超出本票，也超出票 06 列的四種事件。
+- 影響：投影衝突與 Gate 失效目前只在 UI（知識頁簽、流程頁簽、裁定中心）可見，Controller 不會被通知。票 06 合併後若確定不用 `notices`，應另行刪除這三個型別。
+- 審閱：未審
+
+### AI-40：Controller 工具的情境測試改以 Controller CLI 取得憑證，只刪除測舊行為的斷言
+- 重要度：低
+- 時間／階段：2026-10-23，票 08 實作
+- 決策：刪除只測舊功能的測試檔（`conversation.rs`、`controller_handoff.rs`、`controller_handoff_single_account.rs`、`conversation_client.rs`）。其餘以對話喚起 Controller 取得憑證的 harness 測試（Controller 工具、驗收、知識候選、訊息、共用工具、探索、Gate 失效、Workflow、雙軸審查、專案理解、預算、時間線、驗證設定）改用新增的 `Harness::open_controller_cli`／`end_controller_cli`，並為 Controller CLI 建立專用帳號；「這一輪結束後憑證失效」改為「Controller CLI 結束後憑證失效」。只刪除斷言舊行為的部分（對話的工作事件與內容、下一輪 Prompt 帶入的背景、Controller 自動交接）。`methods_playbooks_stages` 的「換帳號後 Workflow 接續」改為使用者以另一個帳號重開 Controller CLI。`timeline_and_metrics` 的「Controller 用量計入 Workspace、不屬於任何 Task」整個刪除：它靠 Controller 輪次的 Adapter 用量回報，Controller CLI 沒有對應的回報。新增 `retired_conversation.rs` 以 harness 驗證端點已移除、工作事件不產生 Controller 輪次、升級前資料在重啟後原樣保留。
+- 理由：Controller 工具不變，它們的驗收測試應繼續保護；專用帳號讓票 05（開著 CLI 的帳號不派 Worker）合併後這些測試不必再改。
+- 替代方案：直接刪除所有依賴對話的測試——Controller 工具會失去大部分情境覆蓋。
+- 影響：harness 測試多一個 Controller 帳號；若有測試斷言帳號分配，日後要注意這個帳號。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）
