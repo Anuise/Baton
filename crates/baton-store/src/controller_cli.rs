@@ -1,6 +1,6 @@
 //! 互動式 Controller Run 的持久化（desktop-controller-cli 票 03）。
 //!
-//! 與 Controller 的一輪共用 `controller_run` 資料表（`kind = 'cli'`），所以 Controller 憑證、裁定請求、訊息等
+//! 與升級前的 Controller 輪次（`kind = 'turn'`）共用 `controller_run` 資料表（`kind = 'cli'`），所以 Controller 憑證、裁定請求、訊息等
 //! 既有以 `controller_run` 為範圍的機制直接適用：Run 進入 `ended` 時，以它簽發的 Controller 憑證隨之失效。
 //! 規則都在 Domain（`baton_domain::controller_cli`）；這裡只做「在同一個交易中載入目前狀態 → 交給 Domain 判定 → 寫入 Run 與事件」。
 //! 已要求換帳號重開的 Run 結束時，在同一個交易中以新 Profile 開新的 Run（票 05），不會有「舊的已結束、新的還沒開」的空檔。
@@ -298,7 +298,7 @@ pub(crate) fn controller_credential_valid(conn: &Connection, scope: &ControllerS
     Ok(run.as_ref().map(controller_cli::credential_valid))
 }
 
-/// 憑證範圍所指的 Controller Run 必須是這個 Workspace 的 Controller CLI（Controller 的一輪不能冒用宿主的端點）。
+/// 憑證範圍所指的 Controller Run 必須是這個 Workspace 的 Controller CLI（升級前的 Controller 輪次不能冒用宿主的端點）。
 async fn scoped_run(store: &Store, scope: &ControllerScope) -> Result<String, ControllerCliApplyError> {
     let scope = scope.clone();
     let found = store

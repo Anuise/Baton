@@ -2,7 +2,7 @@
 //!
 //! 規則都在 Domain（`baton_domain::message`）；這裡只做「在同一個交易中載入狀態 → 交給 Domain 判定 → 寫入」。
 //! 範圍（Workspace、Run、世代）一律來自憑證；收件匣以憑證所屬 Run 的 Task 為界，沒有任何查詢接受別人的 Task。
-//! Controller（票 54）以它那一輪所屬的 Workspace 為界：收件匣是寄給這個 Workspace 的 Controller 的交付
+//! Controller（票 54）以它的 Controller CLI 所屬的 Workspace 為界：收件匣是寄給這個 Workspace 的 Controller 的交付
 //! （`message_controller_delivery`），可以寄給同一個 Workspace 的任何 Task。
 
 use baton_domain::message::{
@@ -39,7 +39,7 @@ pub struct SendOutcome {
     pub duplicate: bool,
 }
 
-/// 收發訊息的一方：Worker 的 Run（Agent 憑證的範圍），或 Workspace 的 Controller 的一輪（Controller 憑證的範圍，票 54）。
+/// 收發訊息的一方：Worker 的 Run（Agent 憑證的範圍），或 Workspace 的 Controller CLI（Controller 憑證的範圍，票 54）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageActor {
     Worker(AgentScope),
@@ -170,7 +170,7 @@ impl Store {
 
     /// 讀取寄給讀取者的訊息，依送出順序；回傳的未讀訊息會被標為已讀。Worker 讀寄給它 Task 的，
     /// Controller 讀寄給這個 Workspace 的 Controller 的（票 54）。
-    /// Run 已結束或被接替（Controller 這一輪已結束）時拒絕（`MessageError::Revoked`），不改變任何已讀狀態。
+    /// Run 已結束或被接替（Controller CLI 已結束或已重新綁定）時拒絕（`MessageError::Revoked`），不改變任何已讀狀態。
     pub async fn read_inbox(
         &self,
         actor: &MessageActor,
