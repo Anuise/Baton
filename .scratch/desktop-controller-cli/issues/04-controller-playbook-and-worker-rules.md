@@ -1,6 +1,6 @@
 # 04: Controller 操作手冊、Worker 通則與 AI 決策紀錄
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R008-04-impl，2026-10-23 16:09）
 Blocked by: 03
 
 **What to build:** Controller CLI 一開就載入隨 App 發佈、有版本號的「Controller 操作手冊」（`execution.md` 的平台化版本：frontier、`dispatch_task`、背景 `wait`、獨立驗證、最多 3 次修正、先決定再記錄、只有決策權限表規定的才提 Decision Request、AI 決策紀錄的位置與格式；不含帳號名稱、額度門檻、並行上限、worktree 路徑）。Worker 啟動時附加固定的 Worker 通則（TDD、commit 到 Task 的 worktree 分支、最多 3 個 subagent、AI 決策只能追加）。開啟 Controller 前若 Workspace 沒有 `.baton/ai-decisions.md`，以標頭範本建立。User stories 26、49～63。
