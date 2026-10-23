@@ -63,6 +63,15 @@
 - 影響：03 是最大的一張；如果實作 run 撐不住，主控可把「宿主回報」切成新票。
 - 審閱：未審
 
+### AI-05：access token 全部過期時，以極小的 claude -p 請求刷新後再查額度
+- 重要度：中
+- 時間／階段：2026-10-23，第一次派工前
+- 決策：`usage.py` 對所有帳號都回 `err HTTPError 401 token expired`（access token 過期，不是額度用盡；`claude auth status` 不會刷新）。主控對 Work-0 以外的每個帳號各送一次 `claude -p --model claude-haiku-5-5 --max-turns 1`（清理環境、`CLAUDE_CONFIG_DIR` 指向該帳號、工作目錄在 repo 外），讓 CLI 自行以 refresh token 換新，再重跑 `usage.py` 依門檻判斷。Work-0 不刷新、不派工。
+- 理由：照 platform-rebuild-v1 的 AI-05，`err` 視為不可用；但全部帳號都 `err` 時永遠派不出去，而原因只是 token 久未使用而過期。極小請求的額度消耗可忽略，且由 CLI 自己寫回憑證，不必由主控改寫 `.credentials.json`。
+- 替代方案：主控直接呼叫 OAuth refresh 端點並改寫憑證檔——寫壞會讓帳號需要重新登入；停下來等使用者手動處理——整個 feature 卡住。
+- 影響：本次刷新後 Work-1 顯示 7d 已用 100%（不可用），Work-3／8／9 可用。之後若再遇到全數 401 token expired，照同樣方式處理。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）
