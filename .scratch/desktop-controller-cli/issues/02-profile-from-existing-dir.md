@@ -1,6 +1,6 @@
 # 02: 以既有目錄建立 Account Profile
 
-Status: ready-for-agent
+Status: in_progress（Work-9，run R002-02-impl，2026-10-23 14:29）
 Blocked by: None（可立即開始）
 
 **What to build:** 在帳號畫面新增「以既有目錄建立 Profile」：使用者選擇一個已登入的 Claude Code 設定目錄（例如 `~/.claude-Work-3`），平台把它登記為 Account Profile 並立即核對登入身分，不必重新登入。平台記錄目錄是「平台建立」還是「外部目錄」，封存外部目錄的 Profile 不刪除目錄。User stories 64～67。
