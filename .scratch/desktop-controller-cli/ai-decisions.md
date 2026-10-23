@@ -432,6 +432,33 @@
 - 影響：無行為改變；`--continue` 的判斷與欄位都沿用票 07。
 - 審閱：未審
 
+### AI-46：Windows 平台手動驗收清單獨立成 docs/windows-acceptance.md
+- 重要度：低
+- 時間／階段：2026-10-23，票 09 實作
+- 決策：新建 `docs/windows-acceptance.md` 當作 repo 內的 Windows 平台手動驗收清單，把票 03 放在 `docs/validation.md` 檔尾的「Windows 平台手動驗收：Controller CLI 開窗（票 03）」整節搬過去（原 7 項成為 A1～A7，`controller_terminal` 的自動化說明成為 F 節），再依票面補上 A8～A14（主控台主機對照、原生互動、操作手冊、Controller 工具）、B 事件等待、C 帳號排除、D 完全退出、E 以既有目錄建立 Profile；每項一列「步驟／預期結果」，開頭附執行紀錄範本。`docs/development.md` 的 UI E2E 一節加上連結。
+- 理由：AI-21 指定票 09 把這一節搬到 Windows 驗收清單；原清單在 GitHub issue #3 §15，Worker 不能 push 也不改外部 issue。`docs/validation.md` 其餘內容是 issue-orchestrator skill 的英文驗證紀錄，與桌面 App 的實機驗收不同性質。
+- 替代方案：留在 `docs/validation.md` 擴充——兩種性質的紀錄混在同一檔；寫回 GitHub issue #3——超出 Worker 權限。
+- 影響：AI-15 的「影響」仍寫實機行為列在 `docs/validation.md`，現在應讀作 `docs/windows-acceptance.md` 的 A1、A8。platform-rebuild-v1 票 51 的實機驗收可一併使用這份清單。
+- 審閱：未審
+
+### AI-47：Controller CLI 的 UI E2E 以 API 備妥前置，driver 新增完全比對的文字定位
+- 重要度：低
+- 時間／階段：2026-10-23，票 09 實作
+- 決策：新旅程 `crates/baton-harness/tests/ui_e2e/controller_cli_open_and_end.rs`：第二個帳號（「協調帳號」）與兩個 Workspace 以 API 建立後重新載入頁面，之後全部經畫面——側欄「選擇 beta」→「Controller」頁簽→在「Controller 帳號」選單選「協調帳號（5h 未知｜7d 未知｜執行中 Worker 0）」→「開啟」（開啟中）→`supervise` 後等頁簽自行重讀到「執行中」→「結束」（結束中…）→`supervise` 後「已結束」。佐證只讀：fake Claude 環境 Port 只開了一個視窗、`CLAUDE_CONFIG_DIR` 是選的帳號、工作目錄是該 Workspace；宿主在 fake ProcessControl 被停止且不再存活；API 的 Run 是 `ended`。driver 新增 `exactText`（`browser::exact_text`），因為「執行中」會以子字串比對到「執行中 Worker 0」。不遺留暫存目錄與程序沿用票 53 的機制（`scripts/test-e2e.mjs` 的專用 TEMP 檢查、`finish` 斷言 Chromium 與 driver 已結束），Controller 宿主是 fake 程序，以上述「不再存活」斷言。
+- 理由：票面的旅程從「選 Workspace」開始，Workspace 與帳號的建立已由其他旅程與 smoke 涵蓋；兩個帳號才能驗證「選 Profile」確實改變了開窗的帳號（預設會選第一個）。
+- 替代方案：在畫面建立 Workspace 與帳號——帳號登入要靠 fake 終端機登入，與本旅程無關且拉長測試；以 `has_text` 過濾——仍無法排除「執行中 Worker 0」。
+- 影響：選項文字含額度摘要，Controller 頁簽的選項格式（AI-44）改變時要一起改這個測試。
+- 審閱：未審
+
+### AI-48：「CLI 結束後 wait 失效（結束碼 3）」的實機驗收改以 Runtime 重啟觸發；設定目錄要用完整路徑
+- 重要度：中
+- 時間／階段：2026-10-23，票 09 實作
+- 決策：Windows 驗收清單 B5／B6 以「在工作管理員結束 `baton-runtime.exe`、等監護重新啟動」驗證憑證失效：掛著的 wait 以結束碼 1 結束，Runtime 重新綁定（AI-23）後再執行 wait 以結束碼 3 結束並印出「Controller 憑證已失效…」。不寫成「關掉 Controller CLI 後 wait 以 3 結束」。E 節的範例路徑用 `C:\Users\<使用者>\.claude-Work-1`，另列一項驗證 `%USERPROFILE%`／`~` 被拒。
+- 理由：宿主把 `claude` 與它的子程序放進「宿主結束時一併終止」的 Job（AI-19），關掉 CLI 時背景 wait 會跟著被終止，實機上看不到結束碼 3；只有 `claude` 還開著而憑證失效（重新綁定）時才看得到。平台不展開 `~` 與環境變數（AI-07），照票面字面輸入 `~/.claude-Work-n` 會被拒。
+- 替代方案：照 spec 故事 48 的字面寫「CLI 結束後 wait 以 3 結束」——驗收者在實機上無法重現，會誤判為失敗。
+- 影響：spec 故事 48 的「CLI 結束後等待指令自動失效」在實機上主要是「隨程序樹一起被終止」，結束碼 3 只在重新綁定後出現；若使用者希望關掉 CLI 時 wait 以 3 結束，需要改宿主的 Job 設定。
+- 審閱：未審
+
 ## Spec 決策審閱紀錄
 
 （使用者審閱 grilling.md 的 Q1～Q20 時記在這裡。）
