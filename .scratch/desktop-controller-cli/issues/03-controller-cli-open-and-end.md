@@ -1,6 +1,6 @@
 # 03: Controller CLI 開啟與結束（tracer bullet）
 
-Status: ready-for-agent
+Status: in_progress（Work-8，run R006-03-impl，2026-10-23 15:21）
 Blocked by: 01
 
 **What to build:** 在 Workspace 的 Controller 頁簽選一個 Account Profile、按「開啟」，平台就在外部終端機視窗（優先 Windows Terminal，否則系統預設主控台）啟動原生互動式 Claude Code，作為該 Workspace 的 Controller CLI；按「結束」或在終端機關掉它，頁簽狀態隨之更新。平台把它記成一個互動式 Controller Run：先持久化 launch intent 再開窗；終端機裡執行 MCP shim 的「Controller 宿主」子命令，由它啟動 `claude` 並回報開始與結束；Run 結束即撤銷 Agent 憑證。啟動內容與 Worker 的 Claude Code Adapter 共用組裝（清除繼承環境變數、`CLAUDE_CONFIG_DIR`、strict MCP 設定指向 shim 與共同設定的 MCP、設定快照、工作目錄＝Workspace），但不加 `-p`、不指定輸出格式與權限模式、憑證範圍是 Controller。操作手冊、帳號排除、事件等待、退出恢復由後續票處理。User stories 18～32、36、37、41。

@@ -7,3 +7,4 @@
 | R003-02-verify | 02 | verify | Work-9 | 2026-10-23 14:44 | 2026-10-23 14:56 | PASS |
 | R004-01-verify | 01 | verify | Work-8 | 2026-10-23 14:49 | 2026-10-23 15:01 | PASS（基底早於票 02，依 platform-rebuild-v1 的 AI-109 整合後合併） |
 | R005-01-integrate | 01 | integrate | Work-9 | 2026-10-23 15:01 | 2026-10-23 15:20 | DONE（e2ea25c），依 AI-109 直接合併 |
+| R006-03-impl | 03 | impl | Work-8 | 2026-10-23 15:21 | | |
