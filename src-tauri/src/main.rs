@@ -16,7 +16,7 @@ use baton_api::{
     BatchRequest, BatchResponse, ConfirmAuthorizationRequest, CreateProfileFromDirRequest, CreateProfileRequest, CreateTaskRequest,
     CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus, LoginStartupView, LoginTerminalResponse, MergeRequest,
     MergeResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus,
-    SummaryRequest, TaskBoard, TaskDetail, UpdateAuthorityRequest, WorkspaceLifecycleView, WorkspaceList,
+    SummaryRequest, TaskBoard, TaskDetail, UpdateAuthorityRequest, WorkspaceLifecycleView, WorkspaceList, ModelCatalog,
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
@@ -218,6 +218,15 @@ async fn workspace_set_model_overrides(
         return Err(reason.clone());
     }
     link.client.set_model_overrides(&id, &overrides).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 取得模型設定可選的模型清單。
+#[tauri::command]
+async fn model_list(link: State<'_, RuntimeLink>) -> Result<ModelCatalog, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.available_models().await.map_err(|e| e.to_string())
 }
 
 /// Web UI 列出帳號 Profile 與可派工判定。
@@ -1390,6 +1399,7 @@ fn main() {
             workspace_create,
             workspace_archive,
             workspace_set_model_overrides,
+            model_list,
             profile_list,
             profile_create,
             profile_create_from_dir,

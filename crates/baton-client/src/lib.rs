@@ -43,7 +43,7 @@ use baton_api::{
     ReportRecurrenceRequest, GUARDS_PATH,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
     PLATFORM_PATH, PROFILES_FROM_EXISTING_DIR_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
-    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
+    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH, ModelCatalog, MODELS_PATH,
 };
 use baton_domain::authority::AuthorityTable;
 use baton_domain::decision::DecisionView;
@@ -165,6 +165,11 @@ impl RuntimeClient {
     /// 整組取代 Workspace 依角色的模型覆寫（`None` 表示沿用帳號的 Claude Code 預設）；只影響之後派出的 Run。
     pub async fn set_model_overrides(&self, workspace_id: &str, overrides: &ModelOverrides) -> Result<Workspace, ClientError> {
         self.send_json(reqwest::Method::PUT, &format!("{WORKSPACES_PATH}/{workspace_id}/model-overrides"), Some(overrides)).await
+    }
+
+    /// 模型設定可選的模型清單。
+    pub async fn available_models(&self) -> Result<ModelCatalog, ClientError> {
+        self.get_json(MODELS_PATH).await
     }
 
     /// 列出全部帳號 Profile（含已封存）與可派工判定。

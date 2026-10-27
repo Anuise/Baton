@@ -118,6 +118,18 @@ describe("Runtime 用戶端", () => {
     expect(invoke).toHaveBeenCalledWith("workspace_set_model_overrides", { id: "ws_1", overrides });
   });
 
+  it("HTTP 版與 Tauri 版取得模型設定可選的模型清單", async () => {
+    const catalog = { models: [{ id: "opus", label: "Opus（最新版）" }] };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(catalog), { status: 200 }));
+    const invoke = vi.fn(async () => catalog);
+
+    expect(await createHttpClient(fetchFn as unknown as typeof fetch).listModels()).toEqual(catalog);
+    expect(await createTauriClient(invoke as never).listModels()).toEqual(catalog);
+
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/models");
+    expect(invoke).toHaveBeenCalledWith("model_list");
+  });
+
   it("HTTP 版讀取、預覽與確認 Workspace 授權", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);

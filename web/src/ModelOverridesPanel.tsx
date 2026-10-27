@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
-import type { ModelOverrides, Workspace, WorkspaceClient } from "./runtimeClient";
+import type { ModelCatalogClient, ModelOption, ModelOverrides, Workspace, WorkspaceClient } from "./runtimeClient";
 
 type Role = keyof ModelOverrides;
 type Draft = Record<Role, string>;
 type LoadState = { state: "loading" } | { state: "ready"; workspace: Workspace } | { state: "failed"; reason: string };
+/** 可選模型清單；取不到時只剩「預設（不指定）」與目前的值，頁面照常運作。 */
+type Catalog = { models: ModelOption[]; failure: string | null };
 
 interface Props {
-  client: Pick<WorkspaceClient, "listWorkspaces" | "setModelOverrides">;
+  client: Pick<WorkspaceClient, "listWorkspaces" | "setModelOverrides"> & ModelCatalogClient;
   workspace: Workspace;
 }
 
@@ -17,7 +19,8 @@ const ROLES: { role: Role; label: string }[] = [
   { role: "reviewer", label: "Reviewer" },
 ];
 
-const DEFAULT_HINT = "留空＝沿用帳號的 Claude Code 預設模型";
+const DEFAULT_LABEL = "預設（不指定）";
+const DEFAULT_HINT = `${DEFAULT_LABEL}＝沿用帳號的 Claude Code 預設模型`;
 
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -39,9 +42,19 @@ const valueOf = (text: string): string | null => (text.trim() === "" ? null : te
 export function ModelOverridesPanel({ client, workspace }: Props) {
   const [loaded, setLoaded] = useState<LoadState>({ state: "loading" });
   const [draft, setDraft] = useState<Draft>(draftFrom(workspace.model_overrides));
+  const [catalog, setCatalog] = useState<Catalog>({ models: [], failure: null });
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const loadCatalog = useCallback(async () => {
+    try {
+      const { models } = await client.listModels();
+      setCatalog({ models, failure: null });
+    } catch (e) {
+      setCatalog({ models: [], failure: reasonOf(e) });
+    }
+  }, [client]);
 
   const load = useCallback(async () => {
     try {
@@ -63,7 +76,8 @@ export function ModelOverridesPanel({ client, workspace }: Props) {
     setNotice(null);
     setError(null);
     void load();
-  }, [load]);
+    void loadCatalog();
+  }, [load, loadCatalog]);
 
   if (loaded.state === "loading") return <section aria-label="模型設定">載入中…</section>;
   if (loaded.state === "failed") {
@@ -74,6 +88,7 @@ export function ModelOverridesPanel({ client, workspace }: Props) {
     );
   }
   const current = loaded.workspace;
+  const saved = draftFrom(current.model_overrides);
   const archived = current.status === "archived";
 
   const save = async (event: FormEvent) => {
@@ -102,17 +117,27 @@ export function ModelOverridesPanel({ client, workspace }: Props) {
     <section className="model-overrides" aria-label="模型設定">
       <h2>模型設定：{current.name}</h2>
       <p className="model-overrides-hint">{DEFAULT_HINT}。變更只影響之後派出的 Run，已派出的 Run 維持派工時的模型。</p>
+      {catalog.failure && (
+        <p className="model-overrides-hint">無法取得可用模型清單：{catalog.failure}。仍可選擇預設或保留目前的設定。</p>
+      )}
       {archived && <p>這個 Workspace 已封存，不能變更模型設定。</p>}
       <form onSubmit={(event) => void save(event)}>
         <fieldset disabled={archived || busy}>
           {ROLES.map(({ role, label }) => (
             <label key={role}>
               {label} 模型
-              <input
-                value={draft[role]}
-                placeholder={DEFAULT_HINT}
-                onChange={(e) => setDraft({ ...draft, [role]: e.target.value })}
-              />
+              <select value={draft[role]} onChange={(e) => setDraft({ ...draft, [role]: e.target.value })}>
+                <option value="">{DEFAULT_LABEL}</option>
+                {/* 已存的值不在清單裡時也列為選項，避免下拉選單把它靜默清掉 */}
+                {saved[role] !== "" && !catalog.models.some((m) => m.id === saved[role]) && (
+                  <option value={saved[role]}>{saved[role]}（目前的設定，不在可用清單中）</option>
+                )}
+                {catalog.models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.label}（{model.id}）
+                  </option>
+                ))}
+              </select>
             </label>
           ))}
           <button type="submit">儲存模型設定</button>
