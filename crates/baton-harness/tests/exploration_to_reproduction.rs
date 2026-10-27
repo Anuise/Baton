@@ -253,6 +253,18 @@ impl World {
         self.h().call_tool(controller, "triage_exploration_finding", body).await
     }
 
+    /// 使用者在桌面以整張表取代決策權限表（沒列出的事項回到內建值）。
+    async fn authority(&self, expected_revision: i64, entries: Value) {
+        let body = json!({ "expected_revision": expected_revision, "entries": entries });
+        let (status, table) =
+            self.h().send_json(Method::PUT, &format!("{WORKSPACES}/{}/decision-authority", self.ws), Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{table}");
+    }
+
+    fn decision_rows(&self) -> i64 {
+        self.h().db().query_row("SELECT COUNT(*) FROM decision", [], |r| r.get(0)).unwrap()
+    }
+
     /// 使用者在桌面回答裁定請求。
     async fn answer(&self, request: &str, option: &str) {
         let path = format!("{WORKSPACES}/{}/decisions/{request}", self.ws);
@@ -660,4 +672,29 @@ async fn exploration_starts_from_a_charter_and_unreproducible_or_expected_findin
     let (status, from_tool) = w.h().call_tool(&controller, "get_exploration", json!({})).await;
     assert_eq!(status, StatusCode::OK, "{from_tool}");
     assert_eq!(from_tool["findings"], overview["findings"]);
+}
+
+// --- 決策權限表放寬或改為只能人工發起：排除為預期設計依生效等級處理 ---
+
+#[tokio::test]
+async fn excluding_as_expected_design_follows_the_effective_authority_when_the_table_is_relaxed_or_reserved_for_the_user() {
+    let (w, controller, _, _, finding) = explored().await;
+    let expected = json!({ "action": "exclude", "reason": "expected_design", "rationale": "產品規則是一次只能用一個折扣碼" });
+    let decisions = w.decision_rows();
+
+    // 只能人工發起：Controller 排除被拒絕，疑點維持原狀，也不建立裁定請求
+    w.authority(0, json!([{ "matter": "product_direction", "effective": "human_only" }])).await;
+    let (status, body) = w.triage(&controller, &finding, expected.clone()).await;
+    assert_eq!((status, error_code(&body)), (StatusCode::FORBIDDEN, "human_only"), "{body}");
+    assert_eq!(w.finding(&finding["id"]).await["status"], "suspected");
+    assert_eq!(w.decision_rows(), decisions);
+
+    // 放寬為可自主處理：直接排除（等同使用者已核准），記下由 Controller 自主處理
+    w.authority(1, json!([{ "matter": "product_direction", "effective": "autonomous" }])).await;
+    let (status, body) = w.triage(&controller, &finding, expected).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["finding"]["status"], "excluded", "{body}");
+    let marker = body["finding"]["exclusion"]["decision_request_id"].as_str().unwrap_or_default();
+    assert!(marker.starts_with("controller:ctl_"), "{body}");
+    assert_eq!(w.decision_rows(), decisions, "可自主處理的事項不建立裁定請求");
 }
