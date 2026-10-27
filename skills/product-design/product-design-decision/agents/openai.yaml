@@ -1,0 +1,4 @@
+interface:
+  display_name: "產品決策逐輪審查"
+  short_description: "比較已選決策的合理方案，檢查跨模組一致性與可測試驗收條件"
+  default_prompt: "使用 $product-design-decision 繼續目前已選定決策的方案審查。"

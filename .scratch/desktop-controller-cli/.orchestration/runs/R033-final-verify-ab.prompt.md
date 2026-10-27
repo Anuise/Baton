@@ -1,0 +1,28 @@
+你是 desktop-controller-cli 最終修正的驗證者（run R033-final-verify-ab），以唯讀方式驗證分支 `cli/final-ab` 的修正。
+
+工作目錄是該分支的 worktree。實作者的自述不是證據，請自行核對。
+
+先讀：
+- 審查報告：`C:/Users/User/Documents/au-program/issue-orchestrator/.scratch/desktop-controller-cli/.orchestration/runs/R026-review-a.result.md` 與 `C:/Users/User/Documents/au-program/issue-orchestrator/.scratch/desktop-controller-cli/.orchestration/runs/R027-review-b.result.md`
+- 修正 run 的回報：`C:/Users/User/Documents/au-program/issue-orchestrator/.scratch/desktop-controller-cli/.orchestration/runs/R029-fix-ab.result.md`
+- `.scratch/desktop-controller-cli/.orchestration/review-notes.md`（本範圍負責末尾「最終修正的分派」中分給 final-ab 的項目）
+- `git diff cli/v1...HEAD`
+
+要做的事：
+1. 逐項核對審查報告的 FINDINGS 與修正回報的 FIXED：每項是否真的修好、是否有會在修正前失敗的測試。抽查至少全部「高」與「中」項目。
+2. 核對 NOT_FIXED 的理由是否合理、是否都有對應的 AI 決策；不合理的列為需修正。
+3. 檢查修正有沒有引入新缺陷、有沒有刪除或弱化既有測試。
+4. 實際執行 `pnpm test`、`pnpm --filter web typecheck`、`cargo check -p baton-desktop`。
+
+唯讀：不要修改、新增或 commit 任何追蹤中的檔案。若驗證途中整合分支前進，前置條件不成立時請標註但不要因此判 FAIL。
+
+**執行方式限制：** 這是 `claude -p` 非互動 run，你一結束回合，run 就結束。不要使用 Monitor、`run_in_background` 或任何「等通知再繼續」的方式；建置與測試一律在前景執行到結束。
+
+最後一則回覆請用以下格式：
+```
+VERDICT: PASS | FAIL
+CHECKED:
+- [PASS|FAIL] <項目> — <證據>
+TESTS: <指令與結果>
+FIXES_NEEDED: <FAIL 時，給修正 run 的具體清單；PASS 時寫 none>
+```

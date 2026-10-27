@@ -1,0 +1,26 @@
+[package]
+name = "baton-mcp-shim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Claude Code 以 stdio 啟動的 MCP 工具 shim：把工具呼叫轉送到 Runtime 的 Agent API
+[[bin]]
+name = "baton-mcp-shim"
+path = "src/main.rs"
+
+[dependencies]
+baton-domain = { path = "../baton-domain" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "process", "signal"] }
+
+# Controller 宿主把自己放進 kill-on-close Job，宿主結束時整棵子程序樹（含 cmd.exe 再開的 claude）一併結束
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt", "macros", "io-util", "io-std", "net", "time"] }

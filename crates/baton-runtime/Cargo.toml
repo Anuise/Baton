@@ -1,0 +1,39 @@
+[package]
+name = "baton-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "baton-runtime"
+path = "src/main.rs"
+
+[dependencies]
+baton-api = { path = "../baton-api" }
+# 安裝程式的準備步驟（票 34）以桌面用戶端要求執行中的 Runtime 進入維護
+baton-client = { path = "../baton-client" }
+baton-credential = { path = "../baton-credential" }
+baton-domain = { path = "../baton-domain" }
+baton-guardian = { path = "../baton-guardian" }
+baton-ports = { path = "../baton-ports" }
+baton-store = { path = "../baton-store" }
+async-trait = "0.1"
+base64 = "0.22"
+futures = "0.3"
+minisign-verify = "0.2"
+# 更新檢查與下載（票 34）；Windows 上用系統的 TLS（schannel）
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+getrandom = "0.3"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "process", "time", "fs", "io-util"] }
+axum = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Storage_FileSystem", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Diagnostics_ToolHelp"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

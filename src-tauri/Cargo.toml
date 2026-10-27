@@ -1,0 +1,25 @@
+[package]
+name = "baton-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+baton-api = { path = "../crates/baton-api" }
+baton-client = { path = "../crates/baton-client" }
+baton-credential = { path = "../crates/baton-credential" }
+baton-domain = { path = "../crates/baton-domain" }
+baton-store = { path = "../crates/baton-store" }
+serde = { version = "1", features = ["derive"] }
+# 建置時帶入 plugins.updater 設定（產生更新簽章檔）時，generate_context! 展開的程式碼會用到 serde_json
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tokio = { version = "1", features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "test-util"] }

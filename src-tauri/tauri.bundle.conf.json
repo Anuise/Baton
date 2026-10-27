@@ -1,0 +1,5 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/baton-runtime", "binaries/baton-guardian", "binaries/baton-mcp-shim"]
+  }
+}

@@ -1,0 +1,25 @@
+[package]
+name = "baton-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 桌面 App 用來連回或啟動 Runtime 的用戶端邏輯（不含 Tauri，方便獨立測試）
+[dependencies]
+baton-api = { path = "../baton-api" }
+baton-credential = { path = "../baton-credential" }
+baton-domain = { path = "../baton-domain" }
+baton-ports = { path = "../baton-ports" }
+baton-store = { path = "../baton-store" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+baton-harness = { path = "../baton-harness" }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde_json = "1"
+tempfile = "3"
