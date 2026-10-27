@@ -1478,9 +1478,51 @@ body {
   overflow: auto;
 }
 
-.decision-scope-note {
+/* 需要使用者行動的提示（例如批次還不能送出的原因） */
+.decision-hint {
   color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
+}
+
+.decision-saved {
+  color: var(--color-success);
+  font-size: var(--font-size-sm);
+}
+
+/* 欄位與它的「?」說明排在同一列 */
+.decision-inline {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+/* 次要與技術資訊收合在 details 裡 */
+.decision-more {
+  margin-top: var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.decision-more summary {
+  cursor: pointer;
+}
+
+.decision-more dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-6);
+  margin: var(--space-3) 0 0;
+}
+
+.decision-more dd {
+  margin: 0;
+}
+
+/* 標題旁的「?」說明垂直置中 */
+.decision-center :is(h3, h4):has(.help-tip) {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
 }
 
 .decision-form fieldset {
@@ -1529,16 +1571,18 @@ body {
 .decision-overview dl {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-4);
+  gap: var(--space-4) 0;
   margin: var(--space-4) 0;
 }
 
 .decision-overview-item {
-  min-width: 72px;
   padding: var(--space-3) var(--space-5);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-left: 1px solid var(--color-border);
+}
+
+.decision-overview-item:first-child {
+  padding-left: 0;
+  border-left: 0;
 }
 
 .decision-overview-item dt {
@@ -1630,11 +1674,6 @@ body {
   gap: var(--space-4);
   align-items: center;
   margin: var(--space-3) 0;
-}
-
-.decision-related-action .decision-scope-note {
-  flex-basis: 100%;
-  margin: 0;
 }
 
 .decision-link-button {
@@ -2022,7 +2061,6 @@ body {
 .controller-page {
   display: grid;
   gap: var(--space-6);
-  max-width: 720px;
 }
 
 .controller-page h2,
@@ -2054,8 +2092,8 @@ body {
 }
 
 .controller-status::before {
-  width: 8px;
-  height: 8px;
+  width: var(--space-4);
+  height: var(--space-4);
   border-radius: var(--radius-full);
   background: var(--color-text-subtle);
   content: "";
