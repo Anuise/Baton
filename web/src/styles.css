@@ -735,6 +735,28 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* 以 API 金鑰更新可用模型清單（AI-33） */
+.model-catalog-refresh {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--color-border);
+}
+
+.model-catalog-refresh h3 {
+  margin: 0;
+}
+
+.model-catalog-refresh form {
+  display: grid;
+  gap: var(--space-3);
+  justify-items: start;
+}
+
+.model-catalog-refresh input {
+  width: 100%;
+}
+
 .task-board {
   display: grid;
   gap: var(--space-6);

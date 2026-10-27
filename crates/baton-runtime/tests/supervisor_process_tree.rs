@@ -275,6 +275,7 @@ fn ports(agent_adapter: Arc<dyn AgentAdapter>, protector: Arc<dyn SecretProtecto
         browser_driver: Arc::new(baton_runtime::browser_driver::LocalBrowserDriver::default()),
         semantic_judge: Arc::new(baton_runtime::semantic_judge::ClaudeSemanticJudge::default()),
         secret_resolver: Arc::new(baton_runtime::secret_resolver::EnvSecretResolver),
+        model_directory: Arc::new(baton_runtime::model_directory::AnthropicModelDirectory::default()),
     }
 }
 

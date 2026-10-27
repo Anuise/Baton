@@ -130,6 +130,35 @@ describe("Runtime 用戶端", () => {
     expect(invoke).toHaveBeenCalledWith("model_list");
   });
 
+  it("HTTP 版與 Tauri 版以 API 金鑰更新可用模型清單，金鑰只放在這一次請求中", async () => {
+    const catalog = { models: [{ id: "claude-opus-5-5", label: "Claude Opus 5.5" }], updated_at: 1_700_000_000_000 };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(catalog), { status: 200 }));
+    const invoke = vi.fn(async () => catalog);
+
+    expect(await createHttpClient(fetchFn as unknown as typeof fetch).refreshModels("sk-ant-test")).toEqual(catalog);
+    expect(await createTauriClient(invoke as never).refreshModels("sk-ant-test")).toEqual(catalog);
+
+    expect(fetchFn).toHaveBeenCalledWith("/api/v1/models/refresh", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ api_key: "sk-ant-test" }),
+    });
+    expect(invoke).toHaveBeenCalledWith("model_refresh", { apiKey: "sk-ant-test" });
+  });
+
+  it("HTTP 版更新清單被拒絕時帶出 Runtime 的說明與代碼", async () => {
+    const body = { error: "model_api_key_rejected", message: "無法更新可用模型清單：Anthropic 拒絕了這把 API 金鑰（HTTP 401）" };
+    const fetchFn = vi.fn(async () => new Response(JSON.stringify(body), { status: 400 }));
+
+    const error = await createHttpClient(fetchFn as unknown as typeof fetch)
+      .refreshModels("sk-ant-test")
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(body.message);
+    expect(errorCode(error)).toBe("model_api_key_rejected");
+  });
+
   it("HTTP 版讀取、預覽與確認 Workspace 授權", async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
     const client = createHttpClient(fetchFn as unknown as typeof fetch);

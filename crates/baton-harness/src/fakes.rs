@@ -1633,6 +1633,47 @@ impl UpdateSource for FakeUpdateSource {
     }
 }
 
+/// Anthropic models API（AI-33）。回應依序取用（`respond` 排入）；沒有排入的回應時視同連不上。
+/// 記下每次查詢收到的金鑰與 `after_id`，讓測試確認分頁與金鑰只用在這裡。
+#[derive(Default)]
+pub struct FakeModelDirectory {
+    responses: Mutex<VecDeque<Result<ModelPage, ModelDirectoryError>>>,
+    calls: Mutex<Vec<(String, Option<String>)>>,
+}
+
+impl FakeModelDirectory {
+    /// 排入下一次查詢的回應。
+    pub fn respond(&self, response: Result<ModelPage, ModelDirectoryError>) {
+        self.responses.lock().unwrap().push_back(response);
+    }
+
+    /// 排入一頁成功的回應：`models` 是（id, display_name），`next` 是下一頁的 `last_id`（`None` 表示最後一頁）。
+    pub fn respond_page(&self, models: &[(&str, &str)], next: Option<&str>) {
+        let data = models
+            .iter()
+            .map(|(id, name)| RemoteModel { id: (*id).to_string(), display_name: (*name).to_string() })
+            .collect();
+        self.respond(Ok(ModelPage { data, has_more: next.is_some(), last_id: next.map(str::to_string) }));
+    }
+
+    /// 至今收到的查詢：（金鑰, after_id）。
+    pub fn calls(&self) -> Vec<(String, Option<String>)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ModelDirectory for FakeModelDirectory {
+    async fn page(&self, api_key: &str, after_id: Option<&str>) -> Result<ModelPage, ModelDirectoryError> {
+        self.calls.lock().unwrap().push((api_key.to_string(), after_id.map(str::to_string)));
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err(ModelDirectoryError::Unreachable("沒有預設的回應".into())))
+    }
+}
+
 pub struct FakePorts {
     pub clock: Arc<FakeClock>,
     pub process_control: Arc<FakeProcessControl>,
@@ -1652,6 +1693,7 @@ pub struct FakePorts {
     pub browser_driver: Arc<FakeBrowserDriver>,
     pub semantic_judge: Arc<FakeSemanticJudge>,
     pub secret_resolver: Arc<FakeSecretResolver>,
+    pub model_directory: Arc<FakeModelDirectory>,
 }
 
 impl FakePorts {
@@ -1677,6 +1719,7 @@ impl FakePorts {
             browser_driver: Arc::default(),
             semantic_judge: Arc::default(),
             secret_resolver: Arc::default(),
+            model_directory: Arc::default(),
         }
     }
 
@@ -1701,6 +1744,7 @@ impl FakePorts {
             browser_driver: self.browser_driver.clone(),
             semantic_judge: self.semantic_judge.clone(),
             secret_resolver: self.secret_resolver.clone(),
+            model_directory: self.model_directory.clone(),
         }
     }
 }
