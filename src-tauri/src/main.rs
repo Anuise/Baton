@@ -282,6 +282,15 @@ async fn profile_login_terminal(link: State<'_, RuntimeLink>, id: String) -> Res
     link.client.open_login_terminal(&id).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 調整帳號的顯示順序（只影響顯示，不影響派工）。
+#[tauri::command]
+async fn profile_reorder(link: State<'_, RuntimeLink>, profile_ids: Vec<String>) -> Result<ProfileList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.reorder_profiles(&profile_ids).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 封存 Profile（釋出名額，不刪除它的登入資料目錄）。
 #[tauri::command]
 async fn profile_archive(link: State<'_, RuntimeLink>, id: String) -> Result<ProfileView, String> {
@@ -1406,6 +1415,7 @@ fn main() {
             profile_verify,
             profile_login_terminal,
             profile_archive,
+            profile_reorder,
             shared_settings_status,
             shared_settings_preview,
             shared_settings_adopt,

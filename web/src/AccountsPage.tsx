@@ -27,6 +27,7 @@ export type AccountsClient = Pick<
   | "verifyProfile"
   | "openLoginTerminal"
   | "archiveProfile"
+  | "reorderProfiles"
 > &
   Partial<Pick<SchedulingClient, "schedulingOverview" | "setQuotaLimits">>;
 
@@ -92,6 +93,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   const [actionError, setActionError] = useState<string | null>(null);
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reordering, setReordering] = useState(false);
 
   const loadOverview = useCallback(async () => {
     if (!client.schedulingOverview) return;
@@ -166,6 +168,30 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
     onChange?.();
   };
 
+  /**
+   * 把第 `index` 個帳號往上（-1）或往下（+1）移一格：先以新順序顯示，再把全部帳號的新順序存到 Runtime。
+   * 被拒（例如清單已變動）時顯示 Runtime 的說明，並重新讀取它目前的順序。只影響顯示，不影響派工。
+   */
+  const move = async (index: number, offset: -1 | 1) => {
+    if (list.state !== "ready") return;
+    const order = [...active];
+    [order[index], order[index + offset]] = [order[index + offset], order[index]];
+    const archived = list.profiles.filter((p) => p.status !== "active");
+    setList({ ...list, profiles: [...order, ...archived] });
+    setActionError(null);
+    setTerminalNotice(null);
+    setReordering(true);
+    try {
+      const { profiles, limit } = await client.reorderProfiles(order.map((p) => p.id));
+      setList({ state: "ready", profiles, limit });
+    } catch (error) {
+      setActionError(reasonOf(error));
+      await refresh();
+    } finally {
+      setReordering(false);
+    }
+  };
+
   /** 執行一個針對單一 Profile 的動作；失敗時顯示 Runtime 的說明，清單維持原樣。 */
   const act = async (work: () => Promise<unknown>, notice: string | null = null) => {
     setActionError(null);
@@ -192,7 +218,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       {scheduling.state === "failed" && <p role="alert">無法取得排程總覽：{scheduling.reason}</p>}
       {active.length > 0 && (
         <ul className="profile-list">
-          {active.map((profile) => (
+          {active.map((profile, index) => (
             <li key={profile.id} className={profile.dispatchable ? "profile-ok" : "profile-blocked"}>
               <span className="profile-name">{profile.name}</span>
               <span className="profile-state">{profileStateLabel(profile)}</span>
@@ -213,6 +239,22 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                 </p>
               ))}
               <div className="profile-actions">
+                <button
+                  type="button"
+                  aria-label={`上移 ${profile.name}`}
+                  disabled={reordering || index === 0}
+                  onClick={() => void move(index, -1)}
+                >
+                  上移
+                </button>
+                <button
+                  type="button"
+                  aria-label={`下移 ${profile.name}`}
+                  disabled={reordering || index === active.length - 1}
+                  onClick={() => void move(index, 1)}
+                >
+                  下移
+                </button>
                 <button
                   type="button"
                   aria-label={`在終端機登入 ${profile.name}`}

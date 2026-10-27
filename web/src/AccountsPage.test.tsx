@@ -22,6 +22,7 @@ type PageClient = Pick<
   | "verifyProfile"
   | "openLoginTerminal"
   | "archiveProfile"
+  | "reorderProfiles"
 >;
 
 /** 以記憶體模擬 Runtime 的 Profile 清單，讓測試只看使用者可見的行為。 */
@@ -60,6 +61,14 @@ function fakeClient(initial: AccountProfile[] = []) {
       const archived = { ...items.find((p) => p.id === id)!, status: "archived" as const };
       items = items.filter((p) => p.id !== id);
       return archived;
+    }),
+    // 依送出的順序重排；與 Runtime 一樣只接受恰好列出每個使用中的 Profile 一次
+    reorderProfiles: vi.fn(async (ids: string[]) => {
+      if (ids.length !== items.length || !items.every((p) => ids.includes(p.id))) {
+        throw new Error("帳號清單已經變動（有新增或封存），無法套用這個順序；請重新整理後再調整");
+      }
+      items = ids.map((id) => items.find((p) => p.id === id)!);
+      return { profiles: [...items], limit: 8 };
     }),
   };
   return client;
@@ -382,6 +391,74 @@ describe("帳號頁", () => {
     await screen.findByText("主要帳號");
 
     expect(screen.queryByLabelText(/密碼|token|金鑰|API key/i)).not.toBeInTheDocument();
+  });
+
+  describe("調整顯示順序", () => {
+    const three = () => [
+      profile({ id: "prof_a", name: "甲" }),
+      profile({ id: "prof_b", name: "乙" }),
+      profile({ id: "prof_c", name: "丙" }),
+    ];
+
+    /** 畫面上帳號的排列順序。 */
+    const shownOrder = () => Array.from(document.querySelectorAll(".profile-name"), (node) => node.textContent);
+
+    it("每個帳號有上移／下移；第一個不能上移，最後一個不能下移", async () => {
+      render(<AccountsPage client={fakeClient(three())} />);
+      await screen.findByText("甲");
+
+      expect(screen.getByRole("button", { name: "上移 甲" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "下移 甲" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "上移 乙" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "下移 乙" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "上移 丙" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "下移 丙" })).toBeDisabled();
+    });
+
+    it("下移後在 Runtime 回應前就以新順序顯示，並送出全部帳號的新順序", async () => {
+      const client = fakeClient(three());
+      let respond!: () => void;
+      const original = vi.mocked(client.reorderProfiles).getMockImplementation()!;
+      vi.mocked(client.reorderProfiles).mockImplementationOnce(
+        (ids) => new Promise((resolve) => (respond = () => resolve(original(ids)))),
+      );
+      render(<AccountsPage client={client} />);
+      await screen.findByText("甲");
+
+      await userEvent.click(screen.getByRole("button", { name: "下移 甲" }));
+
+      expect(shownOrder()).toEqual(["乙", "甲", "丙"]);
+      expect(client.reorderProfiles).toHaveBeenCalledWith(["prof_b", "prof_a", "prof_c"]);
+      await act(async () => respond());
+      expect(shownOrder()).toEqual(["乙", "甲", "丙"]);
+    });
+
+    it("上移後保存在 Runtime，重新開啟帳號頁時順序不變", async () => {
+      const client = fakeClient(three());
+      const { unmount } = render(<AccountsPage client={client} />);
+      await screen.findByText("甲");
+
+      await userEvent.click(screen.getByRole("button", { name: "上移 丙" }));
+      await waitFor(() => expect(client.reorderProfiles).toHaveBeenCalledWith(["prof_a", "prof_c", "prof_b"]));
+      unmount();
+      render(<AccountsPage client={client} />);
+
+      await screen.findByText("甲");
+      expect(shownOrder()).toEqual(["甲", "丙", "乙"]);
+      expect(screen.getByRole("button", { name: "下移 乙" })).toBeDisabled();
+    });
+
+    it("Runtime 拒絕時顯示原因，並回到 Runtime 目前的順序", async () => {
+      const client = fakeClient(three());
+      vi.mocked(client.reorderProfiles).mockRejectedValueOnce(new Error("帳號清單已經變動"));
+      render(<AccountsPage client={client} />);
+      await screen.findByText("甲");
+
+      await userEvent.click(screen.getByRole("button", { name: "下移 乙" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("帳號清單已經變動");
+      await waitFor(() => expect(shownOrder()).toEqual(["甲", "乙", "丙"]));
+    });
   });
 
   describe("進行中的 Run 與並行容量", () => {
