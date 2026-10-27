@@ -1947,6 +1947,14 @@ const MIGRATIONS: &[Migration] = &[
             SET overrides = (SELECT json_group_object(value, 'requires_decision') FROM json_each(narrowed));
         ALTER TABLE decision_authority_policy DROP COLUMN narrowed;",
     },
+    // 帳號的顯示順序（使用者可調整，只影響帳號頁的排列，不影響派工）。改版前依建立順序（rowid）顯示，
+    // 既有 Profile 的順序依 rowid 編為 0、1、2…，維持原本的排列
+    Migration {
+        name: "account_profile_display_order",
+        sql: "ALTER TABLE account_profile ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
+        UPDATE account_profile
+            SET display_order = (SELECT COUNT(*) FROM account_profile AS earlier WHERE earlier.rowid < account_profile.rowid);",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
@@ -2931,6 +2939,41 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&overrides).unwrap(),
             serde_json::json!({ "arrange_tasks": "requires_decision", "choose_playbook": "requires_decision" })
         );
+    }
+
+    #[tokio::test]
+    async fn the_profile_display_order_migration_keeps_the_existing_order() {
+        // 套用到改版前的版本，依序建立三個 Profile（其中一個已封存）；改版前的顯示順序就是建立順序（rowid）
+        let dir = tempfile::tempdir().unwrap();
+        let before = MIGRATIONS.iter().position(|m| m.name == "account_profile_display_order").unwrap();
+        {
+            let old = raw(dir.path());
+            old.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (index, migration) in MIGRATIONS[..before].iter().enumerate() {
+                old.execute_batch(migration.sql).unwrap();
+                old.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![index + 1, migration.name],
+                )
+                .unwrap();
+            }
+            old.execute_batch(
+                r"INSERT INTO account_profile (id, name, config_dir, status, version, created_at)
+                   VALUES ('p_c', 'c', 'C:\p\c', 'active', 1, 3);
+                 INSERT INTO account_profile (id, name, config_dir, status, version, created_at, archived_at)
+                   VALUES ('p_a', 'a', 'C:\p\a', 'archived', 2, 1, 5);
+                 INSERT INTO account_profile (id, name, config_dir, status, version, created_at)
+                   VALUES ('p_b', 'b', 'C:\p\b', 'active', 1, 2);",
+            )
+            .unwrap();
+        }
+
+        let store = open(dir.path()).await;
+
+        assert_eq!(store.profile_display_order().await.unwrap(), ["p_c", "p_a", "p_b"]);
     }
 
     #[tokio::test]

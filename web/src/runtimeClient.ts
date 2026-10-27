@@ -256,6 +256,7 @@ export interface AccountProfile {
   blockers: ProfileBlocker[];
 }
 
+/** 帳號清單（含已封存），依使用者調整的顯示順序；新增的帳號排在最後。 */
 export interface ProfileList {
   profiles: AccountProfile[];
   limit: number;
@@ -1565,6 +1566,11 @@ export interface AccountClient {
   /** 開啟終端機，以該 Profile 自己的設定目錄執行原生登入。 */
   openLoginTerminal(id: string): Promise<{ opened: boolean }>;
   archiveProfile(id: string): Promise<AccountProfile>;
+  /**
+   * 調整帳號的顯示順序（依序列出每個使用中的 Profile），回傳依新順序排列的清單；只影響顯示，不影響派工。
+   * 清單已變動（有新增或封存）時會被拒（profile_order_mismatch）。
+   */
+  reorderProfiles(profileIds: string[]): Promise<ProfileList>;
   getSetup(): Promise<SetupStatus>;
   /** 重新探測工具並重新核對每個使用中的 Profile。 */
   recheckSetup(): Promise<SetupStatus>;
@@ -3154,6 +3160,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     verifyProfile: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/verify`, { method: "POST" }),
     openLoginTerminal: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/login-terminal`, { method: "POST" }),
     archiveProfile: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/archive`, { method: "POST" }),
+    reorderProfiles: (profileIds) => send(`${PROFILES_PATH}/order`, { method: "PUT", body: { profile_ids: profileIds } }),
     getSetup: () => send(SETUP_PATH),
     recheckSetup: () => send(`${SETUP_PATH}/recheck`, { method: "POST" }),
     acknowledgeBackgroundNotice: () => send(`${SETUP_PATH}/background-notice/acknowledge`, { method: "POST" }),
@@ -3326,6 +3333,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     verifyProfile: (id) => call<AccountProfile>("profile_verify", { id }),
     openLoginTerminal: (id) => call<{ opened: boolean }>("profile_login_terminal", { id }),
     archiveProfile: (id) => call<AccountProfile>("profile_archive", { id }),
+    reorderProfiles: (profileIds) => call<ProfileList>("profile_reorder", { profileIds }),
     getSetup: () => call<SetupStatus>("setup_status"),
     recheckSetup: () => call<SetupStatus>("setup_recheck"),
     acknowledgeBackgroundNotice: () => call<SetupStatus>("setup_acknowledge_notice"),

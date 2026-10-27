@@ -49,9 +49,39 @@ impl Store {
         Ok(outcome?)
     }
 
-    /// 全部 account_profile（含已封存），依建立順序排列。
+    /// 全部 account_profile（含已封存），依建立順序排列。派工與重複帳號的判定都依這個順序。
     pub async fn list_profiles(&self) -> StoreResult<Vec<AccountProfile>> {
         self.read(|conn| Ok(load_profiles(conn)?)).await
+    }
+
+    /// 全部 account_profile（含已封存）的識別，依使用者調整的顯示順序；新增的 Profile 排在最後。
+    pub async fn profile_display_order(&self) -> StoreResult<Vec<String>> {
+        self.read(|conn| Ok(load_display_order(conn)?)).await
+    }
+
+    /// 保存使用者調整的顯示順序：`requested` 必須恰好列出每個使用中的 Profile 一次（Domain 判定），
+    /// 已封存的排在它們之後。回傳全部 Profile 的新順序。只影響顯示，不追加事件、不改變 Profile 的版本。
+    pub async fn reorder_profiles(&self, requested: Vec<String>) -> Result<Vec<String>, ProfileApplyError> {
+        let outcome = self
+            .write(move |tx| {
+                let mut current = load_profiles(tx)?;
+                let order = load_display_order(tx)?;
+                current.sort_by_key(|p| order.iter().position(|id| *id == p.id));
+                match profile::reorder(&current, &requested) {
+                    Err(rejected) => Ok(Err(rejected)),
+                    Ok(next) => {
+                        for (position, id) in next.iter().enumerate() {
+                            tx.execute(
+                                "UPDATE account_profile SET display_order = ?1 WHERE id = ?2",
+                                rusqlite::params![position as i64, id],
+                            )?;
+                        }
+                        Ok(Ok(next))
+                    }
+                }
+            })
+            .await?;
+        Ok(outcome?)
     }
 
     /// 背景執行行為告知被確認的時間；還沒確認為 `None`。
@@ -117,13 +147,21 @@ pub(crate) fn load_profiles(conn: &Connection) -> rusqlite::Result<Vec<AccountPr
     rows.collect()
 }
 
+fn load_display_order(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare("SELECT id FROM account_profile ORDER BY display_order, rowid")?;
+    let rows = statement.query_map([], |r| r.get(0))?;
+    rows.collect()
+}
+
 fn save_profile(tx: &Transaction<'_>, profile: &AccountProfile) -> rusqlite::Result<()> {
     let verification = profile.verification.as_ref().map(|v| serde_json::to_string(v).expect("Verification 可序列化"));
+    // 新增的 Profile 排在顯示順序的最後；更新既有 Profile 時不改變它的位置
     tx.execute(
         "INSERT INTO account_profile
          (id, name, config_dir, expected_account, status, verification, version, created_at, archived_at,
-          config_dir_origin)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+          config_dir_origin, display_order)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 (SELECT COALESCE(MAX(display_order) + 1, 0) FROM account_profile))
          ON CONFLICT(id) DO UPDATE SET
            expected_account = excluded.expected_account, status = excluded.status,
            verification = excluded.verification, version = excluded.version, archived_at = excluded.archived_at",
@@ -142,3 +180,6 @@ fn save_profile(tx: &Transaction<'_>, profile: &AccountProfile) -> rusqlite::Res
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
