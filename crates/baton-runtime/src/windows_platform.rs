@@ -259,10 +259,15 @@ mod tests {
     }
 
     /// 在本機實測：不依賴特定版本，只驗證讀到的事實內部一致。
+    /// 只在 Windows 10／11 桌面版執行；Windows Server（例如 CI 的 windows-latest runner）會略過。
     #[cfg(windows)]
     #[test]
     fn real_implementation_reads_this_machine() {
         let snapshot = WindowsPlatformInfo.snapshot();
+        if snapshot.os_family == OsFamily::WindowsServer {
+            eprintln!("略過：偵測到 Windows Server，這個測試只在 Windows 10／11 桌面版執行");
+            return;
+        }
         let build: u32 = snapshot.os_build.parse().expect("應讀到數字的 OS build");
         let expected = if build >= WINDOWS_11_FIRST_BUILD { OsFamily::Windows11 } else { OsFamily::Windows10 };
         assert_eq!(snapshot.os_family, expected);
