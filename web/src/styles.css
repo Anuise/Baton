@@ -1967,7 +1967,8 @@ body {
 
 .controller-page {
   display: grid;
-  gap: var(--space-5);
+  gap: var(--space-6);
+  max-width: 720px;
 }
 
 .controller-page h2,
@@ -1978,29 +1979,105 @@ body {
 .controller-facts {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: var(--space-2) var(--space-6);
+  gap: var(--space-3) var(--space-7);
   margin: 0;
+}
+
+.controller-facts dt {
+  color: var(--color-text-muted);
 }
 
 .controller-facts dd {
   margin: 0;
 }
 
+/* 狀態：小圓點加文字；開啟中為黃、執行中為綠、中斷為紅，未開啟與已結束為中性灰 */
+.controller-status {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  font-weight: 500;
+}
+
+.controller-status::before {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--color-text-subtle);
+  content: "";
+}
+
+.controller-status-starting::before {
+  background: var(--color-warning);
+}
+
+.controller-status-running::before {
+  background: var(--color-success);
+}
+
+.controller-status-interrupted::before {
+  background: var(--color-danger);
+}
+
 .controller-actions {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-5);
   justify-items: start;
 }
 
-.controller-hint,
-.controller-unavailable {
+/* 選擇框與它的動作按鈕排在同一列 */
+.controller-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: flex-end;
+}
+
+.controller-row label {
+  display: grid;
+  gap: var(--space-2);
   color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
+  font-size: var(--font-size-sm);
+}
+
+.controller-switch {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--color-border);
+}
+
+.controller-hint,
+.controller-quota,
+.controller-quota-error {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.controller-quota-warning,
+.controller-switching {
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+.controller-unavailable-details,
+.controller-more {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.controller-unavailable-details summary,
+.controller-more summary {
+  cursor: pointer;
 }
 
 .controller-unavailable {
-  margin: 0;
+  margin: var(--space-3) 0 0;
   padding-left: var(--space-6);
+}
+
+.controller-more .controller-facts {
+  margin-top: var(--space-3);
 }
 
 /* 開啟失敗或結束的原因 */
@@ -2013,6 +2090,18 @@ body {
 
 .controller-page [role="alert"] {
   color: var(--color-danger);
+}
+
+/* 頁面的主要動作：強調色按鈕（主控台、工作、裁定三頁共用） */
+:is(.controller-page, .task-board, .decision-center) .primary-action {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+:is(.controller-page, .task-board, .decision-center) .primary-action:hover:not(:disabled) {
+  border-color: var(--color-accent-hover);
+  background: var(--color-accent-hover);
 }
 
 /* 崩潰恢復：進行中為黃色、額度用盡為紅色 */

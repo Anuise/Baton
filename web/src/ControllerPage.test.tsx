@@ -127,7 +127,7 @@ describe("ControllerPage", () => {
     const archived = profile({ id: "prof_9", name: "舊帳號", status: "archived", dispatchable: false });
     renderPage(fakeClient(null, [notLoggedIn, profile(), archived]));
 
-    expect(await screen.findByRole("heading", { name: "Controller：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "主控台：筆記" })).toBeInTheDocument();
     // 標題不等狀態讀回就會出現：等狀態區出現再斷言
     await waitFor(() => expect(fact("狀態")).toHaveTextContent("未開啟"));
     const select = await screen.findByLabelText("Controller 帳號");
@@ -141,12 +141,16 @@ describe("ControllerPage", () => {
     expect(screen.getByRole("button", { name: "開啟" })).toBeEnabled();
   });
 
-  it("從未開啟過也顯示操作手冊版本", async () => {
+  it("從未開啟過也顯示操作手冊版本，收在「詳細資訊」裡", async () => {
     renderPage(fakeClient(null));
 
     expect(await screen.findByText("操作手冊版本", { selector: "dt" })).toBeInTheDocument();
     expect(fact("狀態")).toHaveTextContent("未開啟");
+    expect(fact("狀態")?.querySelector(".controller-status-idle")).not.toBeNull();
     expect(fact("操作手冊版本")).toHaveTextContent("1");
+    const more = screen.getByText("詳細資訊").closest("details")!;
+    expect(more).not.toHaveAttribute("open");
+    expect(more).toHaveTextContent("操作手冊版本");
   });
 
   it("有 Run 時也顯示操作手冊版本", async () => {
@@ -170,7 +174,7 @@ describe("ControllerPage", () => {
   it("沒有可用的帳號時不能開啟，並提示到帳號頁簽處理", async () => {
     renderPage(fakeClient(null, [notLoggedIn]));
 
-    expect(await screen.findByText("沒有可用的帳號，請到「帳號」頁簽新增帳號或重新核對")).toBeInTheDocument();
+    expect(await screen.findByText("沒有可用的帳號，請到「帳號」新增或重新核對")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "開啟" })).toBeDisabled();
   });
 
@@ -184,7 +188,7 @@ describe("ControllerPage", () => {
     expect(client.openControllerCli).toHaveBeenCalledWith("ws_1", "prof_1");
     expect(fact("狀態")).toHaveTextContent("開啟中");
     expect(fact("Controller 帳號")).toHaveTextContent("主要帳號");
-    expect(screen.getByText("Controller CLI 已開啟，請切到它的終端機視窗")).toBeInTheDocument();
+    expect(screen.getByText("已在終端機開啟，請切到該視窗操作")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "開啟" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "結束" })).toBeEnabled();
   });
@@ -253,9 +257,9 @@ describe("ControllerPage", () => {
     renderPage(client);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Runtime 重新啟動過，這個 Controller CLI 的平台工具已失效。請按「結束」後以同一個帳號重新開啟（會接續原生 Session）。",
+      "Runtime 重新啟動過，這個視窗的平台工具已失效。請按「結束」，再用同一個帳號重新開啟（會接續 Session）。",
     );
-    expect(screen.queryByText("Controller CLI 已開啟，請切到它的終端機視窗")).not.toBeInTheDocument();
+    expect(screen.queryByText("已在終端機開啟，請切到該視窗操作")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "結束" }));
 
     expect(client.endControllerCli).toHaveBeenCalledWith("ws_1");
@@ -455,7 +459,7 @@ describe("ControllerPage", () => {
   it("沒有其他可用的帳號時不能換帳號重開", async () => {
     renderPage(fakeClient(controllerCliRun(), [notLoggedIn, profile()]));
 
-    expect(await screen.findByText("沒有其他可用的帳號可換")).toBeInTheDocument();
+    expect(await screen.findByText("沒有其他可用的帳號")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "換帳號重開" })).toBeDisabled();
   });
 
