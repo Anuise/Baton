@@ -69,6 +69,13 @@ cargo run -p baton-runtime               # 啟動 Runtime（預設資料目錄 %
 pnpm tauri dev                           # 開桌面殼（會自動啟動 Web UI 開發伺服器）
 ```
 
+根目錄 `Cargo.toml` 的 dev profile（debug／test 建置）只保留行號等級的除錯資訊（`debug = "line-tables-only"`，依賴套件 `debug = false`），並關閉增量編譯（`incremental = false`）。原因是多個 Worker 並行時，每個 worktree 各有一份獨立的 `target`、每個 Task 都從頭編譯；未設定前一份 `target\debug` 約 40 GB，大半是依賴套件的 `.pdb` 除錯符號與 `incremental\`。release profile 不受影響，`pnpm build` 的正式建置與安裝程式維持原樣。手動開發需要時可用環境變數臨時開啟：
+
+```powershell
+$env:CARGO_INCREMENTAL = "1"              # 開啟增量編譯
+$env:CARGO_PROFILE_DEV_DEBUG = "full"     # 完整除錯資訊（只影響 workspace 自己的 crate，依賴套件仍無）
+```
+
 Runtime 的設定環境變數：
 
 | 變數 | 用途 | 預設 |
