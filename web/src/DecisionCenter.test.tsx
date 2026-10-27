@@ -256,7 +256,7 @@ function fakeClient(initial: DecisionRequestView[], options: FakeOptions = {}) {
         revision: table.revision + 1,
         entries: table.entries.map((entry) => {
           const level = effective.get(entry.matter) ?? entry.builtin;
-          return { ...entry, effective: level, narrowed: level !== entry.builtin };
+          return { ...entry, effective: level, overridden: level !== entry.builtin };
         }),
       };
       return table;
@@ -1102,19 +1102,30 @@ describe("裁定中心：批次處理", () => {
 });
 
 describe("裁定中心：決策權限表", () => {
-  it("列出事項的內建與目前生效層級；只有內建可自主處理的能收窄，其他顯示鎖定", async () => {
+  it("列出事項的內建與目前生效層級；每一列都能選三種層級，沒有鎖定的列", async () => {
     renderCenter(fakeClient([]));
 
     const panel = await authorityPanel();
     const row = (label: string) => within(panel).getByText(label).closest("tr")!;
+    const setting = (label: string) => within(panel).getByRole("combobox", { name: `Workspace 設定：${label}` });
     expect(within(row("拆分、合併、排序 Task")).getAllByText("Controller 可自主處理")).toHaveLength(2);
-    expect(within(row("拆分、合併、排序 Task")).getByRole("checkbox", { name: "收窄為必須送裁定：拆分、合併、排序 Task" })).not.toBeChecked();
+    expect(setting("拆分、合併、排序 Task")).toHaveValue("autonomous");
     expect(within(row("重試 Task")).getByText("必須送裁定（已收窄）")).toBeInTheDocument();
-    expect(within(row("重試 Task")).getByRole("checkbox", { name: "收窄為必須送裁定：重試 Task" })).toBeChecked();
-    expect(within(row("修改完成條件或驗收標準")).queryByRole("checkbox")).not.toBeInTheDocument();
-    expect(within(row("修改完成條件或驗收標準")).getByText("不能放寬")).toBeInTheDocument();
-    expect(within(row("三次恢復失敗後的重試")).getByText("不能放寬")).toBeInTheDocument();
-    // 鎖定列的「內建」欄顯示內建層級
+    expect(setting("重試 Task")).toHaveValue("requires_decision");
+    expect(setting("修改完成條件或驗收標準")).toHaveValue("requires_decision");
+    expect(setting("三次恢復失敗後的重試")).toHaveValue("human_only");
+    for (const tr of within(panel).getAllByRole("row").slice(1)) {
+      const select = within(tr).getByRole("combobox");
+      expect(select).toBeEnabled();
+      expect(within(select).getAllByRole("option").map((o) => (o as HTMLOptionElement).value)).toEqual([
+        "autonomous",
+        "requires_decision",
+        "human_only",
+      ]);
+    }
+    expect(within(panel).queryByText("不能放寬")).not.toBeInTheDocument();
+    // 選項標出內建層級供參考
+    expect(within(setting("修改完成條件或驗收標準")).getByRole("option", { name: "必須送裁定（內建）" })).toBeInTheDocument();
     expect(within(panel).getAllByRole("columnheader")[1]).toHaveTextContent("內建");
     expect(within(row("修改完成條件或驗收標準")).getAllByRole("cell")[1]).toHaveTextContent(/^必須送裁定$/);
     expect(within(row("三次恢復失敗後的重試")).getAllByRole("cell")[1]).toHaveTextContent(/^只能人工發起$/);
@@ -1127,7 +1138,7 @@ describe("裁定中心：決策權限表", () => {
     renderCenter(client);
     const panel = await authorityPanel();
 
-    await user.click(within(panel).getByRole("checkbox", { name: "收窄為必須送裁定：拆分、合併、排序 Task" }));
+    await user.selectOptions(within(panel).getByRole("combobox", { name: "Workspace 設定：拆分、合併、排序 Task" }), "requires_decision");
     await user.click(within(panel).getByRole("button", { name: "儲存權限表" }));
 
     expect(client.updateDecisionAuthority).toHaveBeenCalledWith("ws_1", {
@@ -1141,13 +1152,37 @@ describe("裁定中心：決策權限表", () => {
     expect(within(panel).getByText("拆分、合併、排序 Task").closest("tr")).toHaveTextContent("必須送裁定（已收窄）");
   });
 
-  it("取消收窄就回到內建值（不列在 entries 裡）", async () => {
+  it("放寬內建必須送裁定與只能人工發起的事項，存檔後顯示已放寬", async () => {
     const user = userEvent.setup();
     const client = fakeClient([]);
     renderCenter(client);
     const panel = await authorityPanel();
 
-    await user.click(within(panel).getByRole("checkbox", { name: "收窄為必須送裁定：重試 Task" }));
+    await user.selectOptions(within(panel).getByRole("combobox", { name: "Workspace 設定：修改完成條件或驗收標準" }), "autonomous");
+    await user.selectOptions(within(panel).getByRole("combobox", { name: "Workspace 設定：三次恢復失敗後的重試" }), "requires_decision");
+    await user.click(within(panel).getByRole("button", { name: "儲存權限表" }));
+
+    expect(client.updateDecisionAuthority).toHaveBeenCalledWith("ws_1", {
+      expected_revision: 1,
+      entries: [
+        { matter: "retry_task", effective: "requires_decision" },
+        { matter: "change_acceptance", effective: "autonomous" },
+        { matter: "retry_after_recovery_failures", effective: "requires_decision" },
+      ],
+    });
+    expect(await within(panel).findByText("已儲存（第 2 版）")).toBeInTheDocument();
+    const row = (label: string) => within(panel).getByText(label).closest("tr")!;
+    expect(row("修改完成條件或驗收標準")).toHaveTextContent("Controller 可自主處理（已放寬）");
+    expect(row("三次恢復失敗後的重試")).toHaveTextContent("必須送裁定（已放寬）");
+  });
+
+  it("改回內建層級就回到內建值（不列在 entries 裡）", async () => {
+    const user = userEvent.setup();
+    const client = fakeClient([]);
+    renderCenter(client);
+    const panel = await authorityPanel();
+
+    await user.selectOptions(within(panel).getByRole("combobox", { name: "Workspace 設定：重試 Task" }), "autonomous");
     await user.click(within(panel).getByRole("button", { name: "儲存權限表" }));
 
     expect(client.updateDecisionAuthority).toHaveBeenCalledWith("ws_1", { expected_revision: 1, entries: [] });
@@ -1162,7 +1197,7 @@ describe("裁定中心：決策權限表", () => {
     renderCenter(client);
     const panel = await authorityPanel();
 
-    await user.click(within(panel).getByRole("checkbox", { name: "收窄為必須送裁定：拆分、合併、排序 Task" }));
+    await user.selectOptions(within(panel).getByRole("combobox", { name: "Workspace 設定：拆分、合併、排序 Task" }), "requires_decision");
     await user.click(within(panel).getByRole("button", { name: "儲存權限表" }));
 
     expect(await within(panel).findByRole("alert")).toHaveTextContent("決策權限表已被修改，已重新載入，請重新確認。");

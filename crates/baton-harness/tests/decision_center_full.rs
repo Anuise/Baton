@@ -1059,7 +1059,7 @@ async fn a_controller_trying_to_skip_a_gate_is_refused_and_a_rejection_is_report
     assert_ne!(task_status(&harness, &p.ws, &p.b).await, "completed");
 }
 
-// --- 決策權限表：可收窄、不可放寬 ---
+// --- 決策權限表：每個事項都可以收窄或放寬 ---
 
 #[tokio::test]
 async fn the_builtin_authority_table_matches_the_spec() {
@@ -1079,7 +1079,7 @@ async fn the_builtin_authority_table_matches_the_spec() {
             let entry = authority_entry(&table, matter);
             assert_eq!(entry["builtin"], builtin, "{entry}");
             assert_eq!(entry["effective"], builtin, "{entry}");
-            assert_eq!(entry["narrowed"], false, "{entry}");
+            assert_eq!(entry["overridden"], false, "{entry}");
             assert!(!entry["label"].as_str().unwrap_or_default().is_empty(), "{entry}");
         }
     }
@@ -1109,19 +1109,9 @@ async fn autonomous_matters_are_allowed_until_the_workspace_narrows_them() {
     let entry = authority_entry(&table, "arrange_tasks");
     assert_eq!(entry["builtin"], "autonomous");
     assert_eq!(entry["effective"], "requires_decision");
-    assert_eq!(entry["narrowed"], true);
+    assert_eq!(entry["overridden"], true);
     assert_eq!(authority_table(&harness, &p.ws).await, table);
 
-    // 放寬或改動「只有人能做」一律拒絕，表不變
-    for entries in [
-        json!([{ "matter": "modify_done_criteria", "effective": "autonomous" }]),
-        json!([{ "matter": "retry_after_recovery_failures", "effective": "requires_decision" }]),
-        json!([{ "matter": "retry_after_recovery_failures", "effective": "autonomous" }]),
-    ] {
-        let (status, response) = put_authority(&harness, &p.ws, 1, entries.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{entries}：{response}");
-        assert_eq!(error_code(&response), "authority_widening_refused", "{entries}");
-    }
     let (status, response) = put_authority(&harness, &p.ws, 0, narrow.clone()).await;
     assert_eq!(status, StatusCode::CONFLICT, "{response}");
     assert_eq!(error_code(&response), "authority_revision_mismatch");
@@ -1143,8 +1133,56 @@ async fn autonomous_matters_are_allowed_until_the_workspace_narrows_them() {
     assert_eq!(status, StatusCode::OK, "{reset}");
     assert_eq!(reset["revision"], 2);
     assert_eq!(authority_entry(&reset, "arrange_tasks")["effective"], "autonomous");
-    assert_eq!(authority_entry(&reset, "arrange_tasks")["narrowed"], false);
+    assert_eq!(authority_entry(&reset, "arrange_tasks")["overridden"], false);
     assert_eq!(controller(&harness, &p.token_b, "arrange_tasks").await["status"], "allowed");
+}
+
+#[tokio::test]
+async fn every_matter_can_be_set_to_any_level_and_the_controller_follows_it() {
+    let harness = harness().await;
+    let p = two_running_tasks(&harness).await;
+
+    // 每個事項三種等級都能存，API 不再拒絕放寬
+    let all: Vec<&str> =
+        BUILTIN_AUTONOMOUS.iter().chain(BUILTIN_REQUIRES_DECISION.iter()).chain(BUILTIN_HUMAN_ONLY.iter()).copied().collect();
+    let mut revision = 0;
+    for level in ["autonomous", "requires_decision", "human_only"] {
+        let entries: Vec<Value> = all.iter().map(|m| json!({ "matter": m, "effective": level })).collect();
+        let (status, table) = put_authority(&harness, &p.ws, revision, json!(entries)).await;
+        assert_eq!(status, StatusCode::OK, "{level}：{table}");
+        revision += 1;
+        for matter in &all {
+            let entry = authority_entry(&table, matter);
+            assert_eq!(entry["effective"], level, "{entry}");
+            assert_eq!(entry["overridden"], entry["builtin"] != level, "{entry}");
+        }
+    }
+
+    // 放寬：內建必須送裁定與只能人工發起的事項改為可自主處理後，Controller 直接被允許
+    let widen = json!([
+        { "matter": "modify_done_criteria", "effective": "autonomous" },
+        { "matter": "retry_after_recovery_failures", "effective": "autonomous" },
+    ]);
+    let (status, table) = put_authority(&harness, &p.ws, revision, widen).await;
+    assert_eq!(status, StatusCode::OK, "{table}");
+    assert_eq!(authority_entry(&table, "modify_done_criteria")["builtin"], "requires_decision");
+    assert_eq!(authority_entry(&table, "external_write")["effective"], "requires_decision", "沒列出的回到內建值");
+    for matter in ["modify_done_criteria", "retry_after_recovery_failures"] {
+        let allowed = controller(&harness, &p.token_a, matter).await;
+        assert_eq!(allowed["status"], "allowed", "{matter}：{allowed}");
+        assert_eq!(allowed["authority"], "autonomous");
+        assert!(allowed["decision_request_id"].is_null());
+    }
+    assert_eq!(decision_list(&harness, &p.ws).await["pending_count"], 0);
+
+    // 只能人工發起的事項放寬為必須送裁定：改成建立裁定請求
+    let (status, table) =
+        put_authority(&harness, &p.ws, revision + 1, json!([{ "matter": "retry_after_recovery_failures", "effective": "requires_decision" }]))
+            .await;
+    assert_eq!(status, StatusCode::OK, "{table}");
+    let decided = controller(&harness, &p.token_b, "retry_after_recovery_failures").await;
+    assert_eq!(decided["status"], "requires_decision", "{decided}");
+    assert!(decided["decision_request_id"].is_string());
 }
 
 // --- 權限邊界 ---

@@ -100,6 +100,14 @@ const AUTHORITY_LABELS: Record<AuthorityLevel, string> = {
   human_only: "只能人工發起",
 };
 
+/** 由寬到嚴，用來標示 Workspace 設定是收窄還是放寬。 */
+const AUTHORITY_ORDER: AuthorityLevel[] = ["autonomous", "requires_decision", "human_only"];
+
+function overrideNote(builtin: AuthorityLevel, effective: AuthorityLevel): string {
+  const diff = AUTHORITY_ORDER.indexOf(effective) - AUTHORITY_ORDER.indexOf(builtin);
+  return diff > 0 ? "（已收窄）" : diff < 0 ? "（已放寬）" : "";
+}
+
 /** 需要特別說明的錯誤代碼；其餘沿用 Runtime 的說明。 */
 const ERROR_MESSAGES: Record<string, string> = {
   decision_superseded: "目標版本已變更，這個請求已過期，不能套用。",
@@ -1097,7 +1105,7 @@ function RelatedDecisions({ client, decision, all, onSelect, onMerged, reload }:
   );
 }
 
-/** 決策權限表（spec D-15）：Workspace 只能把內建可自主處理的事項收窄為必須送裁定，不能放寬。 */
+/** 決策權限表（spec D-15）：每個事項都可以設為任何層級，收窄或放寬都由使用者決定。 */
 function DecisionAuthorityPanel({ client, workspace }: { client: DecisionClient; workspace: Workspace }) {
   const [table, setTable] = useState<AuthorityTable | null>(null);
   const [draft, setDraft] = useState<Record<string, AuthorityLevel>>({});
@@ -1169,7 +1177,7 @@ function DecisionAuthorityPanel({ client, workspace }: { client: DecisionClient;
     <section className="decision-authority" aria-label="決策權限表">
       <h3>
         決策權限表{" "}
-        <HelpTip label="決策權限表">列出哪些事情 Controller 可以自行處理、哪些一定會送裁定。Workspace 只能收窄，不能放寬。</HelpTip>
+        <HelpTip label="決策權限表">列出哪些事情 Controller 可以自行處理、哪些一定會送裁定。每個事項都可以改成任何層級，收窄或放寬都可以；「內建」欄是預設值，供參考。</HelpTip>
       </h3>
       <table>
         <thead>
@@ -1187,24 +1195,20 @@ function DecisionAuthorityPanel({ client, workspace }: { client: DecisionClient;
               <td>{AUTHORITY_LABELS[entry.builtin]}</td>
               <td>
                 {AUTHORITY_LABELS[entry.effective]}
-                {entry.narrowed && "（已收窄）"}
+                {overrideNote(entry.builtin, entry.effective)}
               </td>
               <td>
-                {entry.builtin === "autonomous" ? (
-                  <label>
-                    <input
-                      type="checkbox"
-                      aria-label={`收窄為必須送裁定：${entry.label}`}
-                      checked={draft[entry.matter] !== "autonomous"}
-                      onChange={(e) =>
-                        setDraft({ ...draft, [entry.matter]: e.target.checked ? "requires_decision" : "autonomous" })
-                      }
-                    />
-                    收窄為必須送裁定
-                  </label>
-                ) : (
-                  <span className="authority-locked">不能放寬</span>
-                )}
+                <select
+                  aria-label={`Workspace 設定：${entry.label}`}
+                  value={draft[entry.matter]}
+                  onChange={(e) => setDraft({ ...draft, [entry.matter]: e.target.value as AuthorityLevel })}
+                >
+                  {AUTHORITY_ORDER.map((level) => (
+                    <option key={level} value={level}>
+                      {`${AUTHORITY_LABELS[level]}${level === entry.builtin ? "（內建）" : ""}`}
+                    </option>
+                  ))}
+                </select>
               </td>
             </tr>
           ))}

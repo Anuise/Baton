@@ -497,7 +497,7 @@ impl RuntimeClient {
         self.get_json(&decision_authority_path(workspace_id)).await
     }
 
-    /// 取代 Workspace 的決策權限表；只能收窄，放寬回 `authority_widening_refused`。
+    /// 取代 Workspace 的決策權限表；任何事項都可以設為任何等級，沒列出的回到內建值。
     pub async fn update_decision_authority(
         &self,
         workspace_id: &str,

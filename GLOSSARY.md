@@ -175,6 +175,11 @@
 - **關係**：由 Worker 在 Run 中提出；對照 Workspace Authorization；範圍外的結果是 `kind = permission` 的 Decision Request，只阻擋提出提示的 Task；使用者回答「允許這一次」只是單次批准（由同一 Task 的同一操作消耗一次），不擴大 Workspace Authorization。
 - **避免使用**：permission request、approval（回答權限提示的結果仍是 Decision）。
 
+### Decision Authority Table（決策權限表）
+- **定義**：列出 Controller 各類事項的權限等級：可自主處理、必須送裁定、只能人工發起。每個事項有內建等級，使用者可以把任何事項改成任何等級（收窄或放寬都可以）；生效等級是使用者的設定，沒設定時是內建等級。
+- **關係**：與 Workspace Authorization 不同：Workspace 授權管 Agent 能做哪些操作，Goal／Task／Stage 只能收窄；決策權限表管 Controller 的哪些決定要送裁定，由使用者自由調整。Controller 嘗試「必須送裁定」的事項時不執行，改成建立 Decision Request。
+- **避免使用**：權限政策、ACL、授權表（易與 Workspace 授權混淆）。
+
 ### Lesson
 - **定義**：從事件與證據得出的教訓，保存觸發條件、根因或待驗假說、有效解法、禁用或重試限制、適用版本與重犯紀錄。是種類為「教訓」的 Knowledge Entry，可信狀態同 Knowledge Entry；Agent（Controller）提交的一律是「候選」，須由使用者在「知識」分頁確認才升為「已驗證」；使用者自己建立的直接是已驗證。
 - **關係**：可轉為一個或多個 Guard（可機械化者），或納入相關 Run 的 context（不可機械化者）；範圍分全域、Workspace、Goal、Task，Agent 只能提交 Workspace、Goal 或 Task 範圍，且範圍以它所屬的 Run 決定；只有有效的 Lesson 會被 Agent 搜尋到。錯誤的 Lesson（含被否決的候選）以撤銷處理，保留歷史、不刪除。

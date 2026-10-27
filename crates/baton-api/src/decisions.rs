@@ -177,7 +177,6 @@ impl From<DecisionApplyError> for ApiError {
             DecisionApplyError::Authority(rejected) => {
                 let status = match rejected {
                     AuthorityError::RevisionMismatch { .. } => StatusCode::CONFLICT,
-                    AuthorityError::WideningRefused(..) | AuthorityError::HumanOnlyFixed(_) => StatusCode::BAD_REQUEST,
                 };
                 ApiError { status, code: rejected.code(), message: rejected.to_string() }
             }
@@ -322,7 +321,7 @@ pub(crate) async fn authority(
     Ok(Json(state.store.decision_authority(&id).await?))
 }
 
-/// 取代 Workspace 的決策權限表：只能收窄，任何放寬整個拒絕（400 `authority_widening_refused`）。
+/// 取代 Workspace 的決策權限表：任何事項都可以設為任何等級（收窄或放寬），沒列出的回到內建值。
 pub(crate) async fn update_authority(
     State(state): State<Arc<ApiState>>,
     UrlPath(id): UrlPath<String>,
