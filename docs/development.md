@@ -51,7 +51,7 @@ powershell -NoProfile -File scripts/with-msvc.ps1 cargo test -p baton-store
 pnpm build
 ```
 
-產物在 `target/release/`：`baton-runtime.exe`（Runtime）、`baton-guardian.exe`（監護程序）與 `baton-desktop.exe`（桌面 App，內嵌 `web/dist`）。三個檔案必須放在同一個資料夾，App 啟動時會到自己旁邊找 Runtime 與監護。
+產物在 `target/release/`：`baton-runtime.exe`（Runtime）、`baton-guardian.exe`（監護程序）、`baton-mcp-shim.exe`（MCP shim）與 `baton-desktop.exe`（桌面 App，內嵌 `web/dist`）。四個檔案必須放在同一個資料夾，App 啟動時會到自己旁邊找 Runtime 與監護，Runtime 再到自己旁邊找 MCP shim（Controller CLI 的宿主與 Worker 的 MCP 伺服器）。
 
 要產生 NSIS 單使用者安裝程式（免系統管理員；首次需下載 NSIS）：
 
@@ -1391,7 +1391,7 @@ pnpm test:e2e                                                       # 即 node s
 ```
 
 - **測試專用的 Runtime 組態**：`crates/baton-harness/tests/ui_e2e/`。Runtime 是 `Harness`（真實 Domain、Store、Supervisor 與 Axum API，Port 全是 fake），`server.rs` 在 loopback 上提供 `web/dist` 並把 `/api/` 轉給 Runtime：轉送時帶上桌面憑證與固定標頭、不帶瀏覽器的 Origin，等同桌面殼的角色，Runtime 的 API 防護不放寬。瀏覽器中的 Web UI 走 `createHttpClient`（真實 HTTP）。`driver.mjs` 以 JSON 行協定替 Rust 測試操作 Playwright + Chromium，`browser.rs` 以定位鏈（角色與無障礙名稱、標籤、文字）描述元素。使用者動作一律經畫面；Worker／Controller 的行為與 Supervisor 的推進在 Rust 端以 harness 的 fake 進行（`call_tool`、`agent_adapter.emit`、`supervise`）。
-- **不進入正式建置**：組態只是 `baton-harness`（測試專用 crate）的測試目標。`crates/baton-harness/tests/test_only_config.rs` 以 `cargo metadata` 與 Tauri 設定檔檢查：安裝程式打包的 `baton-runtime`、`baton-guardian` 與 `baton-desktop` 的一般與建置相依都到不了 `baton-harness`；`baton-harness` 沒有可執行檔、`ui_e2e` 只是測試目標；安裝程式只打包這兩個 sidecar 與 `web/dist`，Web UI 原始碼不引用測試組態。
+- **不進入正式建置**：組態只是 `baton-harness`（測試專用 crate）的測試目標。`crates/baton-harness/tests/test_only_config.rs` 以 `cargo metadata` 與 Tauri 設定檔檢查：安裝程式打包的 `baton-runtime`、`baton-guardian`、`baton-mcp-shim` 與 `baton-desktop` 的一般與建置相依都到不了 `baton-harness`；`baton-harness` 沒有可執行檔、`ui_e2e` 只是測試目標；安裝程式只打包這三個 sidecar 與 `web/dist`，Web UI 原始碼不引用測試組態。
 - **略過**：測試都標為 `#[ignore]`，一般的 `cargo test` 顯示為 ignored。`scripts/test-e2e.mjs` 依序從 `BATON_PLAYWRIGHT_DIR`、repo 根目錄、`web/` 尋找 Playwright：找不到時印出「UI E2E 略過」並以結束碼 0 結束（`pnpm test` 的結果列為「略過」）；設定了 `BATON_PLAYWRIGHT_DIR` 卻找不到時失敗。直接以 `cargo test -p baton-harness --test ui_e2e -- --ignored` 執行而找不到 Playwright 時，測試失敗而不是通過。
 - **清理**：腳本先建置 `web/dist`，再以專用的 TEMP／TMP 執行測試，結束後確認裡面除了 harness 共用的空 `baton-harness` 目錄之外沒有任何遺留（harness 資料目錄、Playwright 的暫存設定檔等），再刪除這個目錄；每個測試結尾關閉瀏覽器，斷言 Chromium 的程序與 driver 都已結束。測試 panic 時 driver 讀到 stdin 結束也會自行關閉瀏覽器。
 - **新增旅程**：在 `tests/ui_e2e/` 新增模組並於 `main.rs` 宣告，以 `UiE2e::start()` 開始、`e2e.finish()` 結束，測試加上同樣的 `#[ignore]` 說明。工作面板沒有輪詢，要看到 Supervisor 推進後的狀態時切到其他頁簽再切回「工作」頁簽。功能頁簽以 `role("tablist", "Workspace 功能")` 下的 `role("tab", …)` 點選；側欄的 Workspace 以 `選擇 {名稱}` 按鈕選擇。Controller 頁簽開著時每 2 秒自行重新讀取，`supervise` 之後直接等畫面即可；狀態欄位這類可能是其他文字一部分的短字串以 `exact_text` 完全比對（例如「執行中」與「執行中 Worker 0」）。

@@ -1,7 +1,7 @@
 // 安裝程式冒煙測試（手動驗收）：node scripts/smoke-installer.mjs（需先 pnpm build --bundle）
 //
 // 以目前的（非系統管理員）使用者身分，把 NSIS 安裝程式靜默安裝到暫存資料夾，確認：
-//   1. 一般使用者帳號可完成安裝：結束碼 0，桌面 App、Runtime、監護與解除安裝程式都在安裝資料夾
+//   1. 一般使用者帳號可完成安裝：結束碼 0，桌面 App、Runtime、監護、MCP shim 與解除安裝程式都在安裝資料夾
 //   2. 已安裝的 Runtime 能以暫存資料目錄啟動並回應
 //   3. 開啟「登入時自動啟動」後解除安裝：Runtime 已結束、HKCU Run 值 Baton 已移除、資料目錄與控制資料庫仍在
 //
@@ -118,7 +118,7 @@ try {
   const install = spawnSync(setup, ["/S", `/D=${installDir}`], { stdio: "inherit", timeout: 300_000 });
   installed = true;
   if (install.status !== 0) throw new Error(`安裝程式結束碼 ${install.status}${install.error ? `：${install.error.message}` : ""}`);
-  const files = ["baton-desktop.exe", "baton-runtime.exe", "baton-guardian.exe", "uninstall.exe"];
+  const files = ["baton-desktop.exe", "baton-runtime.exe", "baton-guardian.exe", "baton-mcp-shim.exe", "uninstall.exe"];
   const missing = files.filter((f) => !existsSync(join(installDir, f)));
   if (missing.length > 0) throw new Error(`安裝資料夾缺少 ${missing.join("、")}`);
   console.log(`✔ 一般使用者安裝完成：${installDir}（${files.join("、")}）`);

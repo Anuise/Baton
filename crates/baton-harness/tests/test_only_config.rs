@@ -1,9 +1,9 @@
 //! 測試專用的 Runtime 組態（fake Port 的 Harness 與 UI E2E 的伺服器、driver，票 53）不會進入正式建置或安裝程式。
 //!
-//! 正式建置是 `scripts/build.mjs`：建置 `baton-runtime`、`baton-guardian` 與桌面殼 `baton-desktop`，
+//! 正式建置是 `scripts/build.mjs`：建置 `baton-runtime`、`baton-guardian`、`baton-mcp-shim` 與桌面殼 `baton-desktop`，
 //! NSIS 安裝程式另外打包 `tauri.bundle.conf.json` 的 `externalBin` 與 `tauri.conf.json` 的 `frontendDist`（`web/dist`）。
 //! 這裡以 `cargo metadata` 與設定檔證明：這些程式的一般與建置相依都到不了 `baton-harness`；
-//! `baton-harness` 沒有可執行檔、UI E2E 只是它的測試目標；安裝程式只打包那兩個 sidecar 與 Web UI，沒有其他資源。
+//! `baton-harness` 沒有可執行檔、UI E2E 只是它的測試目標；安裝程式只打包那三個 sidecar 與 Web UI，沒有其他資源。
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -79,7 +79,8 @@ fn the_shipped_programs_do_not_depend_on_the_harness() {
     let mut roots: Vec<String> =
         bundled_sidecars().iter().map(|bin| bin_owner(&packages, bin)["name"].as_str().unwrap().to_string()).collect();
     roots.push(DESKTOP.to_string());
-    assert_eq!(roots, ["baton-runtime", "baton-guardian", DESKTOP], "安裝程式打包的程式");
+    // Runtime 從自己的資料夾啟動 baton-mcp-shim.exe（Controller CLI 的宿主與 Worker 的 MCP 伺服器），安裝程式必須一起打包
+    assert_eq!(roots, ["baton-runtime", "baton-guardian", "baton-mcp-shim", DESKTOP], "安裝程式打包的程式");
 
     let closure = production_closure(&packages, &roots);
     assert!(closure.contains("baton-runtime") && closure.contains("baton-api"), "相依圖有展開：{closure:?}");
