@@ -414,7 +414,8 @@ function ActionFields({ decision, draft, onChange, name }: ActionFieldsProps) {
                 ))}
               </select>
             </label>
-            <HelpTip label="延後">延後不是同意，工作仍在等待。</HelpTip>
+            {/* 帶有授權意涵，直接顯示，不收在「?」說明裡 */}
+            <span className="decision-note">延後不是同意，工作仍在等待。</span>
           </div>
         </>
       )}
@@ -554,7 +555,7 @@ function DecisionDetail({
       {isPending && decision.deferred && decision.deferred_until !== null && (
         <p className="decision-deferred" role="status">
           延後至 {formatTimestamp(decision.deferred_until, timeZone)}{" "}
-          <HelpTip label="延後">延後不是同意，工作仍在等待。</HelpTip>
+          <span className="decision-note">延後不是同意，工作仍在等待。</span>
         </p>
       )}
       {isPending && decision.overdue && (
@@ -568,9 +569,18 @@ function DecisionDetail({
         <p className="decision-deadline">期限：{formatTimestamp(decision.deadline_at, timeZone)}</p>
       )}
       {isPending && permission?.prior_use && (
-        <p className="decision-prior-use" role="alert">
-          這個操作先前已放行過一次（{formatTimestamp(permission.prior_use.used_at, timeZone)}），結果未知。請先確認是否已生效，再決定要不要再允許一次。
-        </p>
+        <>
+          <p className="decision-prior-use" role="alert">
+            這個操作先前已放行過一次（{formatTimestamp(permission.prior_use.used_at, timeZone)}），結果未知。請先確認是否已生效，再決定要不要再允許一次。
+          </p>
+          <details className="decision-more">
+            <summary>技術細節</summary>
+            <dl>
+              <dt>先前放行的 Run</dt>
+              <dd>{permission.prior_use.run_id}</dd>
+            </dl>
+          </details>
+        </>
       )}
 
       <h4>為什麼需要你決定</h4>
@@ -597,10 +607,9 @@ function DecisionDetail({
       {/* 「允許本次操作」與「修改 Workspace 授權」分開：一次性批准不會變成永久擴權 */}
       {permission && (
         <section className="decision-approve-once" aria-label="允許本次操作">
-          <h4>
-            允許本次操作{" "}
-            <HelpTip label="允許本次操作">只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權。</HelpTip>
-          </h4>
+          <h4>允許本次操作</h4>
+          {/* 帶有授權意涵，直接顯示，不收在「?」說明裡 */}
+          <p className="decision-note">只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權。</p>
           {permission.binding ? (
             <BindingView binding={permission.binding} />
           ) : (
@@ -611,6 +620,25 @@ function DecisionDetail({
               先前的單次批准不能沿用：
               {MISMATCH_LABELS[permission.rejected_approval.reason]}
             </p>
+          )}
+          {(permission.binding || permission.rejected_approval) && (
+            <details className="decision-more">
+              <summary>技術細節</summary>
+              <dl>
+                {permission.binding && (
+                  <>
+                    <dt>要求雜湊</dt>
+                    <dd title={permission.binding.request_hash}>{permission.binding.request_hash.slice(0, 12)}</dd>
+                  </>
+                )}
+                {permission.rejected_approval && (
+                  <>
+                    <dt>不能沿用的批准</dt>
+                    <dd>{permission.rejected_approval.request_id}</dd>
+                  </>
+                )}
+              </dl>
+            </details>
           )}
         </section>
       )}
@@ -705,8 +733,7 @@ function DecisionDetail({
 function BindingView({ binding }: { binding: ApprovalBinding }) {
   const params = Object.entries(binding.params);
   return (
-    <>
-      <dl>
+    <dl>
       <dt>操作</dt>
       <dd>{binding.operation}</dd>
       <dt>目標資源</dt>
@@ -727,15 +754,7 @@ function BindingView({ binding }: { binding: ApprovalBinding }) {
       </dd>
       <dt>成果版本</dt>
       <dd>{binding.artifact_version === "" ? "尚無成果" : binding.artifact_version}</dd>
-      </dl>
-      <details className="decision-more">
-        <summary>技術細節</summary>
-        <dl>
-          <dt>要求雜湊</dt>
-          <dd title={binding.request_hash}>{binding.request_hash.slice(0, 12)}</dd>
-        </dl>
-      </details>
-    </>
+    </dl>
   );
 }
 
@@ -936,9 +955,18 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, onSelect }
         <p>已回答</p>
       )}
       {decision.permission?.approval_use && (
-        <p>
-          這個批准已於 {formatTimestamp(decision.permission.approval_use.used_at, timeZone)} 使用過，已失效
-        </p>
+        <>
+          <p>
+            這個批准已於 {formatTimestamp(decision.permission.approval_use.used_at, timeZone)} 使用過，已失效
+          </p>
+          <details className="decision-more">
+            <summary>技術細節</summary>
+            <dl>
+              <dt>使用批准的 Run</dt>
+              <dd>{decision.permission.approval_use.run_id}</dd>
+            </dl>
+          </details>
+        </>
       )}
       {resumedCount !== null && <p role="status">已恢復：{resumedCount} 個工作</p>}
     </section>

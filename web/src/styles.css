@@ -1484,6 +1484,13 @@ body {
   font-size: var(--font-size-sm);
 }
 
+/* 帶有授權意涵、必須直接看得到的簡短說明（不收在「?」說明裡） */
+.decision-note {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
 .decision-saved {
   color: var(--color-success);
   font-size: var(--font-size-sm);

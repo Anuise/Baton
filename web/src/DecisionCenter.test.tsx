@@ -271,6 +271,21 @@ const renderCenter = (client: DecisionClient & AuthorizationClient, onChange?: (
 
 const detail = () => screen.getByRole("article", { name: "裁定詳情" });
 const form = () => detail().querySelector("form")!;
+
+/** 直接顯示在畫面上，不是收在「?」說明裡（說明內容平時是 hidden）。 */
+function expectShownDirectly(element: HTMLElement) {
+  expect(element).toBeVisible();
+  expect(element.closest(".help-tip")).toBeNull();
+}
+
+/** 收在預設收合的「技術細節」裡。 */
+function expectInTechDetails(element: HTMLElement) {
+  const details = element.closest("details");
+  expect(details).not.toBeNull();
+  expect(details!.querySelector("summary")).toHaveTextContent(/^技術細節$/);
+  expect(details).not.toHaveAttribute("open");
+  expect(element).not.toBeVisible();
+}
 /** 等決策權限表載入完成（區塊會先顯示「載入中…」）。 */
 const authorityPanel = async () => {
   const panel = await screen.findByRole("region", { name: "決策權限表" });
@@ -482,12 +497,14 @@ describe("裁定中心：詳情", () => {
     expect(within(detail()).getByRole("heading", { name: "目標問題" })).toBeInTheDocument();
   });
 
-  it("延後的請求顯示「延後至 …」並以說明提示延後不是同意，仍可處理", async () => {
+  it("延後的請求顯示「延後至 …」並直接說明延後不是同意，仍可處理", async () => {
     renderCenter(fakeClient([decisionView({ deferred: true, deferred_until: CHECKED_AT + 3_600_000 })]));
 
     const deferred = await screen.findByText(/^延後至 2023\/11\/15 07:13/, { selector: "p" });
-    expect(within(deferred).getByRole("button", { name: "延後的說明" })).toBeInTheDocument();
     expect(deferred).toHaveTextContent("延後不是同意，工作仍在等待。");
+    // 延後不是同意帶有授權意涵，直接顯示，不收在「?」說明裡
+    expectShownDirectly(within(deferred).getByText("延後不是同意，工作仍在等待。"));
+    expect(within(deferred).queryByRole("button", { name: "延後的說明" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "送出裁定" })).toBeInTheDocument();
   });
 
@@ -627,6 +644,8 @@ describe("裁定中心：處理單筆", () => {
 
     await user.click(await screen.findByRole("radio", { name: "延後" }));
     expect(within(form()).getByText("延後不是同意，工作仍在等待。")).toBeInTheDocument();
+    expectShownDirectly(within(form()).getByText("延後不是同意，工作仍在等待。"));
+    expect(within(form()).queryByRole("button", { name: "延後的說明" })).not.toBeInTheDocument();
     expect(within(form()).getByLabelText("延後多久")).toHaveValue("1440");
     await user.selectOptions(within(form()).getByLabelText("延後多久"), "3 天");
     await user.click(screen.getByRole("button", { name: "送出裁定" }));
@@ -637,6 +656,9 @@ describe("裁定中心：處理單筆", () => {
     // 仍停在這筆，顯示延後狀態，且仍可處理
     expect(within(detail()).getByRole("heading", { name: "要保留舊的目錄結構嗎？" })).toBeInTheDocument();
     expect(within(detail()).getByText(/^延後至 2023\/11\/18 06:13/, { selector: "p" })).toHaveTextContent("延後不是同意，工作仍在等待。");
+    expectShownDirectly(
+      within(within(detail()).getByText(/^延後至 2023\/11\/18 06:13/, { selector: "p" })).getByText("延後不是同意，工作仍在等待。"),
+    );
     expect(within(detail()).getByRole("button", { name: "送出裁定" })).toBeDisabled();
   });
 
@@ -708,6 +730,9 @@ describe("裁定中心：允許本次操作與修改 Workspace 授權", () => {
     expect(within(once).queryByText(HASH)).not.toBeInTheDocument();
     expect(within(once).getByText("report.md@2,notes.md@1")).toBeInTheDocument();
     expect(within(once).getByText(/只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權/)).toBeInTheDocument();
+    // 「不會修改 Workspace 授權」帶有授權意涵，直接顯示，不收在「?」說明裡
+    expectShownDirectly(within(once).getByText(/只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權/));
+    expect(within(once).queryByRole("button", { name: "允許本次操作的說明" })).not.toBeInTheDocument();
     const modify = screen.getByRole("region", { name: "修改 Workspace 授權" });
     expect(within(modify).getByRole("button", { name: "修改 Workspace 授權" })).toBeInTheDocument();
     // 回答仍用既有的處理方式與選項：權限提示只能接受、延後或駁回，接受時選「允許本次操作」或「拒絕」
@@ -818,6 +843,9 @@ describe("裁定中心：允許本次操作與修改 Workspace 授權", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "這個操作先前已放行過一次（2023/11/15 06:13），結果未知。請先確認是否已生效，再決定要不要再允許一次。",
     );
+    // 先前放行的 Run id 收在預設收合的「技術細節」，不在警示文字裡
+    expect(screen.getByRole("alert")).not.toHaveTextContent("run_7");
+    expectInTechDetails(within(detail()).getByText("run_7"));
     // 建議拒絕：選項與取捨列出「建議」，接受方案時選項也標示（建議）
     const deny = within(detail()).getByText("拒絕（不要重送）").closest("li")!;
     expect(within(deny).getByText("建議")).toBeInTheDocument();
@@ -835,8 +863,11 @@ describe("裁定中心：允許本次操作與修改 Workspace 授權", () => {
     );
 
     expect(await screen.findByText("先前的單次批准不能沿用：目標資源不同")).toBeInTheDocument();
-    // 識別碼不顯示在畫面上
-    expect(screen.queryByText(/dec_old/)).not.toBeInTheDocument();
+    // 識別碼不在主要文字裡，收在預設收合的「技術細節」（和要求雜湊同一處）
+    expect(screen.getByText("先前的單次批准不能沿用：目標資源不同")).not.toHaveTextContent("dec_old");
+    const once = screen.getByRole("region", { name: "允許本次操作" });
+    expectInTechDetails(within(once).getByText("dec_old"));
+    expect(within(once).getAllByText("技術細節")).toHaveLength(1);
   });
 
   it("已回答的權限請求顯示批准已被哪個 Run 使用而失效，不再提供修改授權", async () => {
@@ -862,6 +893,9 @@ describe("裁定中心：允許本次操作與修改 Workspace 授權", () => {
 
     const outcome = await screen.findByRole("region", { name: "裁定結果" });
     expect(within(outcome).getByText("這個批准已於 2023/11/15 06:14 使用過，已失效")).toBeInTheDocument();
+    // 使用批准的 Run id 收在預設收合的「技術細節」，不在主要文字裡
+    expect(within(outcome).getByText("這個批准已於 2023/11/15 06:14 使用過，已失效")).not.toHaveTextContent("run_9");
+    expectInTechDetails(within(outcome).getByText("run_9"));
     expect(screen.queryByRole("button", { name: "修改 Workspace 授權" })).not.toBeInTheDocument();
   });
 });
@@ -1080,6 +1114,10 @@ describe("裁定中心：決策權限表", () => {
     expect(within(row("修改完成條件或驗收標準")).queryByRole("checkbox")).not.toBeInTheDocument();
     expect(within(row("修改完成條件或驗收標準")).getByText("不能放寬")).toBeInTheDocument();
     expect(within(row("三次恢復失敗後的重試")).getByText("不能放寬")).toBeInTheDocument();
+    // 鎖定列的「內建」欄顯示內建層級
+    expect(within(panel).getAllByRole("columnheader")[1]).toHaveTextContent("內建");
+    expect(within(row("修改完成條件或驗收標準")).getAllByRole("cell")[1]).toHaveTextContent(/^必須送裁定$/);
+    expect(within(row("三次恢復失敗後的重試")).getAllByRole("cell")[1]).toHaveTextContent(/^只能人工發起$/);
     expect(within(panel).getByRole("button", { name: "儲存權限表" })).toBeDisabled();
   });
 
