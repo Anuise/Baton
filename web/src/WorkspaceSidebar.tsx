@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
+import { HelpTip } from "./HelpTip";
 import { formatTimestamp } from "./time";
 import type { LifecycleClient, PauseCause, Workspace, WorkspaceClient, WorkspaceLifecycleView } from "./runtimeClient";
 
@@ -136,26 +137,30 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
             </button>
           </div>
         )}
-        <label className="workspace-auto-resume">
-          <input
-            type="checkbox"
-            aria-label={`完全退出後自動續跑 ${workspace.name}`}
-            checked={lifecycle.auto_resume_after_exit}
-            onChange={(e) => void setAutoResume(workspace, e.target.checked)}
-          />
-          完全退出後自動續跑
-        </label>
-        <span className="workspace-auto-resume-hint">只影響下次重新開啟，不會立即啟停目前工作</span>
-        <label className="workspace-auto-resume">
-          <input
-            type="checkbox"
-            aria-label={`跨登入自動續跑 ${workspace.name}`}
-            checked={lifecycle.auto_resume_across_login}
-            onChange={(e) => void setLoginResume(workspace, e.target.checked)}
-          />
-          跨登入自動續跑
-        </label>
-        <span className="workspace-auto-resume-hint">重新登入 Windows 後是否自動續跑；只影響之後的登入</span>
+        <div className="workspace-auto-resume">
+          <label>
+            <input
+              type="checkbox"
+              aria-label={`完全退出後自動續跑 ${workspace.name}`}
+              checked={lifecycle.auto_resume_after_exit}
+              onChange={(e) => void setAutoResume(workspace, e.target.checked)}
+            />
+            完全退出後自動續跑
+          </label>
+          <HelpTip label="完全退出後自動續跑">只影響下次重新開啟，不會立即啟停目前工作</HelpTip>
+        </div>
+        <div className="workspace-auto-resume">
+          <label>
+            <input
+              type="checkbox"
+              aria-label={`跨登入自動續跑 ${workspace.name}`}
+              checked={lifecycle.auto_resume_across_login}
+              onChange={(e) => void setLoginResume(workspace, e.target.checked)}
+            />
+            跨登入自動續跑
+          </label>
+          <HelpTip label="跨登入自動續跑">重新登入 Windows 後是否自動續跑；只影響之後的登入</HelpTip>
+        </div>
       </>
     );
   };

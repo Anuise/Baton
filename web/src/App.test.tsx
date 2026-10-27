@@ -2,7 +2,7 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
-import { App, SHELL_STORAGE_KEY } from "./App";
+import { App, SHELL_STORAGE_KEY, workspaceSectionTabs } from "./App";
 import {
   authorityTable,
   availableUpdateStatus,
@@ -134,6 +134,15 @@ function onlyInThisTest(...mocks: unknown[]) {
 const topTab = (name: string) => within(screen.getByRole("tablist", { name: "主要區塊" })).getByRole("tab", { name });
 const workspaceTab = (name: string) =>
   within(screen.getByRole("tablist", { name: "Workspace 功能" })).getByRole("tab", { name });
+/** 「成果與品質」「更多」入口內的第二層頁簽。 */
+const pageTab = (section: string, name: string) =>
+  within(screen.getByRole("tablist", { name: section })).getByRole("tab", { name });
+
+/** 依「入口／頁面」開啟 Workspace 的某一頁；只有一頁的入口不帶頁面。 */
+async function openPage(user: ReturnType<typeof userEvent.setup>, section: string, page: string | null) {
+  await user.click(workspaceTab(section));
+  if (page) await user.click(pageTab(section, page));
+}
 
 /** 從左側清單選取 Workspace。 */
 async function selectWorkspace(user: ReturnType<typeof userEvent.setup>, name = "筆記") {
@@ -207,7 +216,7 @@ describe("App 外殼", () => {
   });
 
   describe("Workspace 頁簽", () => {
-    it("選中 Workspace 後顯示各功能頁簽，預設開在 Controller，一次只顯示一個功能", async () => {
+    it("選中 Workspace 後只有五個主要入口，預設開在主控台，一次只顯示一個功能", async () => {
       const user = userEvent.setup();
       render(<App />);
 
@@ -215,46 +224,69 @@ describe("App 外殼", () => {
 
       const tabs = within(screen.getByRole("tablist", { name: "Workspace 功能" })).getAllByRole("tab");
       expect(tabs.map((tab) => tab.getAttribute("aria-label") ?? tab.textContent)).toEqual([
-        "Controller",
+        "主控台",
         "工作",
         "裁定",
-        "成果",
-        "審查與驗證",
-        "知識",
-        "流程",
-        "時間線",
-        "授權",
+        "成果與品質",
+        "更多",
       ]);
-      expect(workspaceTab("Controller")).toHaveAttribute("aria-selected", "true");
-      expect(screen.getByRole("tabpanel", { name: "Controller" })).toHaveTextContent("Controller：筆記");
+      expect(workspaceTab("主控台")).toHaveAttribute("aria-selected", "true");
+      expect(screen.getByRole("tabpanel", { name: "主控台" })).toHaveTextContent("Controller：筆記");
       expect(client.getControllerCli).toHaveBeenCalledWith("ws_1");
       expect(screen.queryByText("請從左側選擇或建立 Workspace")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "選擇 筆記" })).toHaveAttribute("aria-current", "true");
+      // 只有一頁的入口沒有第二層頁簽
+      expect(screen.queryAllByRole("tablist")).toHaveLength(2);
       // 其他功能尚未開啟，不會讀取
       expect(client.getTaskBoard).not.toHaveBeenCalled();
       expect(client.getAuthorization).not.toHaveBeenCalled();
     });
 
-    it.each([
-      ["工作", "工作面板：筆記", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
-      ["成果", "成果與驗證：筆記", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
-      ["流程", "流程：筆記", () => expect(client.workflows).toHaveBeenCalledWith("ws_1")],
-      ["時間線", "時間線：筆記", () => expect(client.metrics).toHaveBeenCalledWith("ws_1")],
-    ])("「%s」頁簽開啟「%s」，且只顯示這個功能", async (tab, heading, called) => {
+    it("「成果與品質」與「更多」以第二層頁簽列出原本的頁面", async () => {
       const user = userEvent.setup();
       render(<App />);
       await selectWorkspace(user);
 
-      await user.click(workspaceTab(tab));
+      await user.click(workspaceTab("成果與品質"));
+      const quality = screen.getByRole("tablist", { name: "成果與品質" });
+      expect(within(quality).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["成果", "審查", "驗證", "探索"]);
+      expect(pageTab("成果與品質", "成果")).toHaveAttribute("aria-selected", "true");
 
-      expect(workspaceTab(tab)).toHaveAttribute("aria-selected", "true");
+      await user.click(workspaceTab("更多"));
+      const more = screen.getByRole("tablist", { name: "更多" });
+      expect(within(more).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["知識", "流程", "時間線", "授權"]);
+      expect(pageTab("更多", "知識")).toHaveAttribute("aria-selected", "true");
+      expect(screen.queryByRole("tablist", { name: "成果與品質" })).not.toBeInTheDocument();
+    });
+
+    // 原本九個頁簽（含「審查與驗證」的三個小頁簽）的內容全部仍可到達
+    it.each([
+      ["工作", null, "工作面板：筆記", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
+      ["裁定", null, "裁定：筆記", () => expect(client.listDecisions).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "成果", "成果與驗證：筆記", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "審查", "審查與設計偏離：筆記", () => expect(client.reviews).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "驗證", "驗證：筆記", () => expect(client.verificationOverview).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "探索", "探索：筆記", () => expect(client.explorationOverview).toHaveBeenCalledWith("ws_1")],
+      ["更多", "知識", "知識：筆記", () => expect(client.listKnowledge).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws_1" }))],
+      ["更多", "流程", "流程：筆記", () => expect(client.workflows).toHaveBeenCalledWith("ws_1")],
+      ["更多", "時間線", "時間線：筆記", () => expect(client.metrics).toHaveBeenCalledWith("ws_1")],
+      ["更多", "授權", "模型設定：筆記", () => expect(client.getAuthorization).toHaveBeenCalledWith("ws_1")],
+    ])("「%s」入口的「%s」頁開啟「%s」，且只顯示這個功能", async (section, page, heading, called) => {
+      const user = userEvent.setup();
+      render(<App />);
+      await selectWorkspace(user);
+
+      await openPage(user, section, page);
+
+      expect(workspaceTab(section)).toHaveAttribute("aria-selected", "true");
+      if (page) expect(pageTab(section, page)).toHaveAttribute("aria-selected", "true");
       expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
       called();
-      expect(screen.queryByRole("tabpanel", { name: "Controller" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("tabpanel", { name: "主控台" })).not.toBeInTheDocument();
       expect(screen.queryByText("Controller：筆記")).not.toBeInTheDocument();
     });
 
-    it("裁定頁簽開啟裁定中心", async () => {
+    it("裁定入口開啟裁定中心", async () => {
       const user = userEvent.setup();
       render(<App />);
       await selectWorkspace(user);
@@ -262,54 +294,44 @@ describe("App 外殼", () => {
       await user.click(workspaceTab("裁定"));
 
       expect(await screen.findByRole("heading", { name: "裁定：筆記" })).toBeInTheDocument();
-      expect(client.listDecisions).toHaveBeenCalledWith("ws_1");
       expect(screen.getByRole("heading", { name: "要保留舊的目錄結構嗎？" })).toBeInTheDocument();
     });
 
-    it("知識頁簽同時提供知識與專案理解", async () => {
+    it("知識頁同時提供知識與專案理解", async () => {
       const user = userEvent.setup();
       render(<App />);
       await selectWorkspace(user);
 
-      await user.click(workspaceTab("知識"));
+      await openPage(user, "更多", "知識");
 
       expect(await screen.findByRole("heading", { name: "知識：筆記" })).toBeInTheDocument();
       expect(await screen.findByRole("heading", { name: "專案理解：筆記" })).toBeInTheDocument();
-      expect(client.listKnowledge).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws_1" }));
       expect(client.syncUnderstanding).toHaveBeenCalledWith("ws_1");
     });
 
-    it("授權頁簽同時提供授權設定與模型設定", async () => {
+    it("授權頁同時提供授權設定與模型設定", async () => {
       const user = userEvent.setup();
       render(<App />);
       await selectWorkspace(user);
 
-      await user.click(workspaceTab("授權"));
+      await openPage(user, "更多", "授權");
 
       expect(await screen.findByText(/授權讀取失敗/)).toBeInTheDocument();
       expect(await screen.findByRole("heading", { name: "模型設定：筆記" })).toBeInTheDocument();
     });
 
-    it("審查與驗證頁簽以小頁簽切換審查、驗證、探索，一次只顯示一個", async () => {
+    it("離開再回到同一個入口時停在上次的頁面", async () => {
       const user = userEvent.setup();
       render(<App />);
       await selectWorkspace(user);
+      await openPage(user, "成果與品質", "驗證");
+      await screen.findByRole("heading", { name: "驗證：筆記" });
 
-      await user.click(workspaceTab("審查與驗證"));
-      const inner = screen.getByRole("tablist", { name: "審查與驗證" });
-      expect(within(inner).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["審查", "驗證", "探索"]);
-      expect(await screen.findByRole("heading", { name: "審查與設計偏離：筆記" })).toBeInTheDocument();
-      expect(client.reviews).toHaveBeenCalledWith("ws_1");
+      await user.click(workspaceTab("工作"));
+      await user.click(workspaceTab("成果與品質"));
 
-      await user.click(within(inner).getByRole("tab", { name: "驗證" }));
+      expect(pageTab("成果與品質", "驗證")).toHaveAttribute("aria-selected", "true");
       expect(await screen.findByRole("heading", { name: "驗證：筆記" })).toBeInTheDocument();
-      expect(client.verificationOverview).toHaveBeenCalledWith("ws_1");
-      expect(screen.queryByRole("heading", { name: "審查與設計偏離：筆記" })).not.toBeInTheDocument();
-
-      await user.click(within(inner).getByRole("tab", { name: "探索" }));
-      expect(await screen.findByRole("heading", { name: "探索：筆記" })).toBeInTheDocument();
-      expect(client.explorationOverview).toHaveBeenCalledWith("ws_1");
-      expect(screen.queryByRole("heading", { name: "驗證：筆記" })).not.toBeInTheDocument();
     });
 
     it("切換 Workspace 時停在同一個頁簽", async () => {
@@ -318,13 +340,14 @@ describe("App 外殼", () => {
       const user = userEvent.setup();
       render(<App />);
       await selectWorkspace(user, "筆記");
-      await user.click(workspaceTab("時間線"));
+      await openPage(user, "更多", "時間線");
       expect(await screen.findByRole("heading", { name: "時間線：筆記" })).toBeInTheDocument();
 
       await selectWorkspace(user, "文件");
 
       expect(await screen.findByRole("heading", { name: "時間線：文件" })).toBeInTheDocument();
-      expect(workspaceTab("時間線")).toHaveAttribute("aria-selected", "true");
+      expect(workspaceTab("更多")).toHaveAttribute("aria-selected", "true");
+      expect(pageTab("更多", "時間線")).toHaveAttribute("aria-selected", "true");
       expect(client.timeline).toHaveBeenLastCalledWith("ws_2", undefined);
     });
 
@@ -354,7 +377,7 @@ describe("App 外殼", () => {
       render(<App />);
 
       await selectWorkspace(user, "筆記");
-      await user.click(workspaceTab("授權"));
+      await openPage(user, "更多", "授權");
       await selectWorkspace(user, "文件");
       expect(await screen.findByRole("heading", { name: "授權設定：文件" })).toBeInTheDocument();
       // 「筆記」的回應這時才到
@@ -367,7 +390,7 @@ describe("App 外殼", () => {
   });
 
   describe("待裁定徽章", () => {
-    it("裁定頁簽與側欄顯示待裁定數，回答裁定後隨之更新", async () => {
+    it("裁定入口與側欄顯示待裁定數，回答裁定後隨之更新", async () => {
       const user = userEvent.setup();
       render(<App />);
       expect(await screen.findByText("待裁定：1")).toBeInTheDocument();
@@ -383,6 +406,14 @@ describe("App 外殼", () => {
       await waitFor(() => expect(screen.queryByText("待裁定 1")).not.toBeInTheDocument());
       expect(within(workspaceTab("裁定")).queryByTitle(/待裁定/)).not.toBeInTheDocument();
     });
+
+    it("頁面有徽章時，所在入口加總顯示；「更多」內的頁面有徽章時「更多」入口也有提示", () => {
+      const tabs = workspaceSectionTabs({ decisions: 2, timeline: 3 }, { decisions: "待裁定 2", timeline: "新事件 3" });
+
+      expect(tabs.find((tab) => tab.id === "decisions")).toMatchObject({ badge: 2, badgeTitle: "待裁定 2" });
+      expect(tabs.find((tab) => tab.id === "more")).toMatchObject({ badge: 3, badgeTitle: "新事件 3" });
+      expect(tabs.find((tab) => tab.id === "quality")?.badge ?? 0).toBe(0);
+    });
   });
 
   describe("記住所在位置", () => {
@@ -390,14 +421,15 @@ describe("App 外殼", () => {
       const user = userEvent.setup();
       const first = render(<App />);
       await selectWorkspace(user);
-      await user.click(workspaceTab("流程"));
+      await openPage(user, "更多", "流程");
       await screen.findByRole("heading", { name: "流程：筆記" });
       first.unmount();
 
       render(<App />);
 
       expect(await screen.findByRole("heading", { name: "流程：筆記" })).toBeInTheDocument();
-      expect(workspaceTab("流程")).toHaveAttribute("aria-selected", "true");
+      expect(workspaceTab("更多")).toHaveAttribute("aria-selected", "true");
+      expect(pageTab("更多", "流程")).toHaveAttribute("aria-selected", "true");
     });
 
     it("重新開啟 App 回到上次的頂層頁簽", async () => {
@@ -424,16 +456,40 @@ describe("App 外殼", () => {
       localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify({ top: "不存在", workspaceId: "ws_1", workspaceTab: "不存在" }));
       render(<App />);
 
-      expect(await screen.findByRole("tabpanel", { name: "Controller" })).toHaveTextContent("Controller：筆記");
+      expect(await screen.findByRole("tabpanel", { name: "主控台" })).toHaveTextContent("Controller：筆記");
       expect(topTab("Workspace")).toHaveAttribute("aria-selected", "true");
     });
 
-    it("記住的是已移除的「對話」頁簽時開在 Controller 頁簽", async () => {
+    it("記住的是已移除的「對話」頁簽時開在主控台", async () => {
       localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify({ top: "workspace", workspaceId: "ws_1", workspaceTab: "conversation" }));
       render(<App />);
 
-      expect(await screen.findByRole("tabpanel", { name: "Controller" })).toHaveTextContent("Controller：筆記");
-      expect(workspaceTab("Controller")).toHaveAttribute("aria-selected", "true");
+      expect(await screen.findByRole("tabpanel", { name: "主控台" })).toHaveTextContent("Controller：筆記");
+      expect(workspaceTab("主控台")).toHaveAttribute("aria-selected", "true");
+    });
+
+    // 舊版九個頁簽與「審查與驗證」小頁簽記住的位置，對應到新的入口與頁面，不會落到空白頁
+    it.each([
+      ["controller", "主控台", null],
+      ["tasks", "工作", null],
+      ["decisions", "裁定", null],
+      ["artifacts", "成果與品質", "成果"],
+      ["quality", "成果與品質", "審查"],
+      ["reviews", "成果與品質", "審查"],
+      ["verification", "成果與品質", "驗證"],
+      ["exploration", "成果與品質", "探索"],
+      ["knowledge", "更多", "知識"],
+      ["workflows", "更多", "流程"],
+      ["timeline", "更多", "時間線"],
+      ["authorization", "更多", "授權"],
+    ])("記住的舊位置「%s」開在「%s」入口的「%s」頁", async (saved, section, page) => {
+      localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify({ top: "workspace", workspaceId: "ws_1", workspaceTab: saved }));
+      render(<App />);
+
+      expect(await screen.findByRole("tabpanel", { name: page ?? section })).not.toBeEmptyDOMElement();
+      expect(workspaceTab(section)).toHaveAttribute("aria-selected", "true");
+      if (page) expect(pageTab(section, page)).toHaveAttribute("aria-selected", "true");
+      else expect(screen.queryAllByRole("tablist")).toHaveLength(2);
     });
 
     it("本機儲存無法使用時使用預設值，不報錯", async () => {
@@ -452,7 +508,7 @@ describe("App 外殼", () => {
 
       expect(await screen.findByText("請從左側選擇或建立 Workspace")).toBeInTheDocument();
       await selectWorkspace(user);
-      expect(workspaceTab("Controller")).toHaveAttribute("aria-selected", "true");
+      expect(workspaceTab("主控台")).toHaveAttribute("aria-selected", "true");
     });
 
     it("上次的 Workspace 已不在清單時顯示提示文字", async () => {

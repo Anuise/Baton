@@ -220,7 +220,9 @@ describe("左側 Workspace 清單", () => {
 
     const buttons = within(item)
       .getAllByRole("button")
-      .map((button) => button.getAttribute("aria-label"));
+      .map((button) => button.getAttribute("aria-label"))
+      // 「?」說明提示不是功能按鈕
+      .filter((label) => !label?.endsWith("的說明"));
     expect(buttons).toEqual(["選擇 筆記", "封存 筆記"]);
   });
 
@@ -244,13 +246,17 @@ describe("左側 Workspace 清單", () => {
     await waitFor(() => expect(onWorkspaces).toHaveBeenLastCalledWith([]));
   });
 
-  it("每個 Workspace 有「完全退出後自動續跑」勾選，預設關閉並說明只影響下次重新開啟", async () => {
+  it("每個 Workspace 有「完全退出後自動續跑」勾選，預設關閉，「?」提示說明只影響下次重新開啟", async () => {
     render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
 
     const item = (await screen.findByText("筆記")).closest("li")!;
     const checkbox = await within(item).findByRole("checkbox", { name: "完全退出後自動續跑 筆記" });
     expect(checkbox).not.toBeChecked();
-    expect(within(item).getByText("只影響下次重新開啟，不會立即啟停目前工作")).toBeInTheDocument();
+    // 說明改成「?」提示，平時不佔版面
+    expect(within(item).getByRole("button", { name: "完全退出後自動續跑的說明" })).toHaveAccessibleDescription(
+      "只影響下次重新開啟，不會立即啟停目前工作",
+    );
+    expect(within(item).queryByRole("tooltip")).not.toBeInTheDocument();
     expect(within(item).queryByRole("button", { name: "繼續工作 筆記" })).not.toBeInTheDocument();
   });
 
@@ -310,13 +316,15 @@ describe("左側 Workspace 清單", () => {
     expect(screen.getByText("完全退出後暫停中")).toBeInTheDocument();
   });
 
-  it("每個 Workspace 另有「跨登入自動續跑」勾選，預設關閉並說明只影響之後的登入", async () => {
+  it("每個 Workspace 另有「跨登入自動續跑」勾選，預設關閉，「?」提示說明只影響之後的登入", async () => {
     render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
 
     const item = (await screen.findByText("筆記")).closest("li")!;
     const checkbox = await within(item).findByRole("checkbox", { name: "跨登入自動續跑 筆記" });
     expect(checkbox).not.toBeChecked();
-    expect(within(item).getByText("重新登入 Windows 後是否自動續跑；只影響之後的登入")).toBeInTheDocument();
+    expect(within(item).getByRole("button", { name: "跨登入自動續跑的說明" })).toHaveAccessibleDescription(
+      "重新登入 Windows 後是否自動續跑；只影響之後的登入",
+    );
   });
 
   it("兩項自動續跑設定各自呼叫自己的 API，勾選一項不影響另一項", async () => {

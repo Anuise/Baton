@@ -30,25 +30,36 @@ import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
 /** 頂層頁簽。 */
 type TopTab = "workspace" | "accounts" | "settings";
-/** 選中 Workspace 後的功能頁簽。 */
-type WorkspaceTab =
+/** 選中 Workspace 後的各頁面；本機記住的是頁面 id，入口由頁面推得。 */
+type WorkspacePage =
   | "controller"
   | "tasks"
   | "decisions"
   | "artifacts"
-  | "quality"
+  | "reviews"
+  | "verification"
+  | "exploration"
   | "knowledge"
   | "workflows"
   | "timeline"
   | "authorization";
-/** 「審查與驗證」頁簽內的小頁簽。 */
-type QualityTab = "reviews" | "verification" | "exploration";
+/** Workspace 的五個主要入口（AI-02）。 */
+type WorkspaceSection = "controller" | "tasks" | "decisions" | "quality" | "more";
 
 interface TabItem<T extends string> {
   id: T;
   label: string;
   /** 徽章數字；大於 0 才顯示。 */
   badge?: number;
+  /** 徽章的說明（滑鼠停留時顯示）。 */
+  badgeTitle?: string;
+}
+
+interface SectionItem {
+  id: WorkspaceSection;
+  label: string;
+  /** 入口內的頁面；超過一頁時以第二層頁簽切換。 */
+  pages: TabItem<WorkspacePage>[];
 }
 
 const TOP_TABS: TabItem<TopTab>[] = [
@@ -57,23 +68,59 @@ const TOP_TABS: TabItem<TopTab>[] = [
   { id: "settings", label: "設定" },
 ];
 
-const WORKSPACE_TABS: TabItem<WorkspaceTab>[] = [
-  { id: "controller", label: "Controller" },
-  { id: "tasks", label: "工作" },
-  { id: "decisions", label: "裁定" },
-  { id: "artifacts", label: "成果" },
-  { id: "quality", label: "審查與驗證" },
-  { id: "knowledge", label: "知識" },
-  { id: "workflows", label: "流程" },
-  { id: "timeline", label: "時間線" },
-  { id: "authorization", label: "授權" },
+const WORKSPACE_SECTIONS: SectionItem[] = [
+  { id: "controller", label: "主控台", pages: [{ id: "controller", label: "主控台" }] },
+  { id: "tasks", label: "工作", pages: [{ id: "tasks", label: "工作" }] },
+  { id: "decisions", label: "裁定", pages: [{ id: "decisions", label: "裁定" }] },
+  {
+    id: "quality",
+    label: "成果與品質",
+    pages: [
+      { id: "artifacts", label: "成果" },
+      { id: "reviews", label: "審查" },
+      { id: "verification", label: "驗證" },
+      { id: "exploration", label: "探索" },
+    ],
+  },
+  {
+    id: "more",
+    label: "更多",
+    pages: [
+      { id: "knowledge", label: "知識" },
+      { id: "workflows", label: "流程" },
+      { id: "timeline", label: "時間線" },
+      { id: "authorization", label: "授權" },
+    ],
+  },
 ];
 
-const QUALITY_TABS: TabItem<QualityTab>[] = [
-  { id: "reviews", label: "審查" },
-  { id: "verification", label: "驗證" },
-  { id: "exploration", label: "探索" },
-];
+const WORKSPACE_PAGES = WORKSPACE_SECTIONS.flatMap((section) => section.pages);
+
+/** 舊版記住的頁簽中已不是頁面 id 的值；舊「審查與驗證」頁簽原本開在審查。 */
+const LEGACY_PAGES: Record<string, WorkspacePage> = { quality: "reviews" };
+
+function sectionOf(page: WorkspacePage): SectionItem {
+  return WORKSPACE_SECTIONS.find((section) => section.pages.some((item) => item.id === page))!;
+}
+
+/**
+ * 主要入口的頁簽；入口的徽章是其中各頁徽章的加總，
+ * 讓收在「更多」等入口內的頁面有徽章時，入口本身也看得到提示。
+ */
+export function workspaceSectionTabs(
+  badges: Partial<Record<WorkspacePage, number>>,
+  titles: Partial<Record<WorkspacePage, string>>,
+): TabItem<WorkspaceSection>[] {
+  return WORKSPACE_SECTIONS.map(({ id, label, pages }) => {
+    const marked = pages.filter((page) => (badges[page.id] ?? 0) > 0);
+    return {
+      id,
+      label,
+      badge: marked.reduce((sum, page) => sum + (badges[page.id] ?? 0), 0),
+      badgeTitle: marked.map((page) => titles[page.id]).join("、"),
+    };
+  });
+}
 
 /** 所在頁簽與 Workspace 存在本機（每個檢視者的偏好，spec Q20）。 */
 export const SHELL_STORAGE_KEY = "baton.shell";
@@ -81,13 +128,21 @@ export const SHELL_STORAGE_KEY = "baton.shell";
 interface ShellState {
   top: TopTab;
   workspaceId: string | null;
-  workspaceTab: WorkspaceTab;
+  /** 欄位名稱沿用舊版，內容是頁面 id，讓舊版記住的位置直接對應。 */
+  workspaceTab: WorkspacePage;
 }
 
 const DEFAULT_SHELL: ShellState = { top: "workspace", workspaceId: null, workspaceTab: "controller" };
 
 function isTab<T extends string>(tabs: TabItem<T>[], value: unknown): value is T {
   return tabs.some((tab) => tab.id === value);
+}
+
+/** 記住的頁面；舊版頁簽名稱換成對應頁面，不認得的用預設值。 */
+function savedPage(value: unknown): WorkspacePage {
+  if (isTab(WORKSPACE_PAGES, value)) return value;
+  if (typeof value === "string" && Object.hasOwn(LEGACY_PAGES, value)) return LEGACY_PAGES[value];
+  return DEFAULT_SHELL.workspaceTab;
 }
 
 /** 讀取上次的位置；讀不到、讀不懂或名稱不認得的部分一律用預設值，不報錯。 */
@@ -99,7 +154,7 @@ function loadShell(): ShellState {
     return {
       top: isTab(TOP_TABS, saved?.top) ? saved.top : DEFAULT_SHELL.top,
       workspaceId: typeof saved?.workspaceId === "string" ? saved.workspaceId : null,
-      workspaceTab: isTab(WORKSPACE_TABS, saved?.workspaceTab) ? saved.workspaceTab : DEFAULT_SHELL.workspaceTab,
+      workspaceTab: savedPage(saved?.workspaceTab),
     };
   } catch {
     return DEFAULT_SHELL;
@@ -146,7 +201,7 @@ function TabList<T extends string>({
           >
             {tab.label}
             {badge > 0 && (
-              <span className="tab-badge" title={`待裁定 ${badge}`}>
+              <span className="tab-badge" title={tab.badgeTitle}>
                 {badge}
               </span>
             )}
@@ -178,7 +233,10 @@ export function App() {
   const [setupSkipped, setSetupSkipped] = useState(false);
   const fullScreenSetup = needsSetup && !setupSkipped;
   const [shell, setShell] = useState<ShellState>(loadShell);
-  const [qualityTab, setQualityTab] = useState<QualityTab>("reviews");
+  // 各入口最後停留的頁面（只在這次開啟有效），回到入口時停在原頁
+  const [sectionPages, setSectionPages] = useState<Partial<Record<WorkspaceSection, WorkspacePage>>>(() => ({
+    [sectionOf(shell.workspaceTab).id]: shell.workspaceTab,
+  }));
   // 側欄最近一次讀到的使用中 Workspace；選中的 Workspace 不在其中（例如已封存）時視為未選
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const selected = workspaces.find((workspace) => workspace.id === shell.workspaceId) ?? null;
@@ -210,29 +268,55 @@ export function App() {
   }, [client, accountsVersion]);
 
   const selectWorkspace = (workspace: Workspace) =>
-    // 在 Workspace 之間切換時停在同一頁簽；從未選到選中時從 Controller 開始
+    // 在 Workspace 之間切換時停在同一頁面；從未選到選中時從主控台開始
     setShell((current) => ({
       ...current,
       workspaceId: workspace.id,
       workspaceTab: selected ? current.workspaceTab : "controller",
     }));
 
-  const selectWorkspaceTab = (tab: WorkspaceTab) => {
-    setShell((current) => ({ ...current, workspaceTab: tab }));
-    if (tab === "decisions") setPendingVersion((version) => version + 1);
+  const selectWorkspacePage = (page: WorkspacePage) => {
+    setShell((current) => ({ ...current, workspaceTab: page }));
+    setSectionPages((current) => ({ ...current, [sectionOf(page).id]: page }));
+    if (page === "decisions") setPendingVersion((version) => version + 1);
   };
 
-  const workspaceTabs = WORKSPACE_TABS.map((tab) =>
-    tab.id === "decisions" && selected ? { ...tab, badge: pendingByWorkspace[selected.id] ?? 0 } : tab,
+  const selectSection = (id: WorkspaceSection) => {
+    const target = WORKSPACE_SECTIONS.find((item) => item.id === id)!;
+    selectWorkspacePage(sectionPages[id] ?? target.pages[0].id);
+  };
+
+  const decisionCount = selected ? (pendingByWorkspace[selected.id] ?? 0) : 0;
+  const sectionTabs = workspaceSectionTabs({ decisions: decisionCount }, { decisions: `待裁定 ${decisionCount}` });
+  const section = sectionOf(shell.workspaceTab);
+  const workspaceView = selected && client && (
+    <WorkspaceView
+      client={client}
+      workspace={selected}
+      page={shell.workspaceTab}
+      onDecisionsChange={() => setPendingVersion((version) => version + 1)}
+    />
   );
 
   return (
     <div className="app">
       {client ? <StatusBar client={client} onHealth={setHealth} onPending={setPending} refreshKey={pendingVersion} /> : <header className="status-bar" />}
+      {/* 產品名稱與頂層頁簽同一列；首次精靈全畫面時不顯示頁簽 */}
       <div className="app-heading">
         {/* 產品名稱取自 Runtime 回報，不在前端寫死（spec D-01） */}
         <h1>{health?.product ?? ""}</h1>
-        {/* 有新版本時只通知；更新維護中以覆蓋層顯示進度（spec D-19）。在頁簽之外，切換頁簽不影響 */}
+        {!fullScreenSetup && (
+          <TabList
+            label="主要區塊"
+            idPrefix="top"
+            tabs={TOP_TABS}
+            selected={shell.top}
+            onSelect={(top) => setShell((current) => ({ ...current, top }))}
+          />
+        )}
+      </div>
+      {/* 有新版本時只通知；更新維護中以覆蓋層顯示進度（spec D-19）。在頁簽之外，切換頁簽不影響 */}
+      <div className="app-notices">
         {client && <UpdateNotice client={client} runtimeStartedAt={health?.started_at ?? null} />}
       </div>
       {client && fullScreenSetup && (
@@ -245,71 +329,71 @@ export function App() {
         </main>
       )}
       {!fullScreenSetup && (
-        <>
-          <TabList
-            label="主要區塊"
-            idPrefix="top"
-            tabs={TOP_TABS}
-            selected={shell.top}
-            onSelect={(top) => setShell((current) => ({ ...current, top }))}
-          />
-          <div className="body">
-            {client && shell.top === "workspace" && (
-              <WorkspaceSidebar
-                client={client}
-                onSelect={selectWorkspace}
-                selectedId={selected?.id ?? null}
-                pendingDecisions={pendingByWorkspace}
-                onWorkspaces={setWorkspaces}
-              />
-            )}
-            <main className="main">
-              <TabPanel idPrefix="top" selected={shell.top}>
-                {client && shell.top === "workspace" && !selected && (
-                  <p className="workspace-hint">請從左側選擇或建立 Workspace</p>
-                )}
-                {client && shell.top === "workspace" && selected && (
-                  <>
-                    <TabList
-                      label="Workspace 功能"
-                      idPrefix="workspace"
-                      tabs={workspaceTabs}
-                      selected={shell.workspaceTab}
-                      onSelect={selectWorkspaceTab}
-                    />
-                    <TabPanel idPrefix="workspace" selected={shell.workspaceTab}>
-                      <WorkspaceView
-                        client={client}
-                        workspace={selected}
-                        tab={shell.workspaceTab}
-                        qualityTab={qualityTab}
-                        onQualityTab={setQualityTab}
-                        onDecisionsChange={() => setPendingVersion((version) => version + 1)}
-                      />
-                    </TabPanel>
-                  </>
-                )}
-                {client && shell.top === "accounts" && (
-                  <>
-                    <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
-                    <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
-                    <SchedulingSettings client={client} />
-                    <SharedSettingsPage client={client} />
-                  </>
-                )}
-                {client && shell.top === "settings" && (
-                  <>
-                    <LoginStartupSettings client={client} />
-                    <UpdateSettings client={client} />
-                    <BackupSettings client={client} />
-                    <RecoveryPanel client={client} />
-                    <PlatformPage client={client} />
-                  </>
-                )}
-              </TabPanel>
-            </main>
-          </div>
-        </>
+        <div className="body">
+          {client && shell.top === "workspace" && (
+            <WorkspaceSidebar
+              client={client}
+              onSelect={selectWorkspace}
+              selectedId={selected?.id ?? null}
+              pendingDecisions={pendingByWorkspace}
+              onWorkspaces={setWorkspaces}
+            />
+          )}
+          <main className="main">
+            <TabPanel idPrefix="top" selected={shell.top}>
+              {client && shell.top === "workspace" && !selected && (
+                <p className="workspace-hint">請從左側選擇或建立 Workspace</p>
+              )}
+              {client && shell.top === "workspace" && selected && (
+                <>
+                  <TabList
+                    label="Workspace 功能"
+                    idPrefix="workspace"
+                    tabs={sectionTabs}
+                    selected={section.id}
+                    onSelect={selectSection}
+                  />
+                  <TabPanel idPrefix="workspace" selected={section.id}>
+                    {/* 超過一頁的入口（成果與品質、更多）以第二層頁簽切換 */}
+                    {section.pages.length > 1 ? (
+                      <>
+                        <TabList
+                          label={section.label}
+                          idPrefix="page"
+                          tabs={section.pages}
+                          selected={shell.workspaceTab}
+                          onSelect={selectWorkspacePage}
+                        />
+                        <TabPanel idPrefix="page" selected={shell.workspaceTab}>
+                          {workspaceView}
+                        </TabPanel>
+                      </>
+                    ) : (
+                      workspaceView
+                    )}
+                  </TabPanel>
+                </>
+              )}
+              {client && shell.top === "accounts" && (
+                <>
+                  <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
+                  <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
+                  <SchedulingSettings client={client} />
+                  <SharedSettingsPage client={client} />
+                </>
+              )}
+              {client && shell.top === "settings" && (
+                <>
+                  <LoginStartupSettings client={client} />
+                  <UpdateSettings client={client} />
+                  <BackupSettings client={client} />
+                  <RecoveryPanel client={client} />
+                  <PlatformPage client={client} />
+                </>
+              )}
+            </TabPanel>
+          </main>
+        </div>
       )}
       {/* 系統匣「完全退出」的停止進度，以覆蓋層顯示 */}
       {client && <ExitProgress client={client} />}
@@ -317,24 +401,20 @@ export function App() {
   );
 }
 
-/** 選中 Workspace 後，目前頁簽的功能；各功能元件原樣放入。 */
+/** 選中 Workspace 後，目前頁面的功能；各功能元件原樣放入。 */
 function WorkspaceView({
   client,
   workspace,
-  tab,
-  qualityTab,
-  onQualityTab,
+  page,
   onDecisionsChange,
 }: {
   client: AppClient;
   workspace: Workspace;
-  tab: WorkspaceTab;
-  qualityTab: QualityTab;
-  onQualityTab: (tab: QualityTab) => void;
+  page: WorkspacePage;
   onDecisionsChange: () => void;
 }) {
   // 換 Workspace 時以 key 重新掛載，上一個 Workspace 較晚回來的讀取結果不會蓋掉目前畫面與草稿
-  switch (tab) {
+  switch (page) {
     case "controller":
       return <ControllerPage key={workspace.id} client={client} workspace={workspace} />;
     case "tasks":
@@ -343,18 +423,13 @@ function WorkspaceView({
       return <DecisionCenter key={workspace.id} client={client} workspace={workspace} onChange={onDecisionsChange} />;
     case "artifacts":
       return <ArtifactsPage key={workspace.id} client={client} workspace={workspace} />;
-    case "quality":
-      return (
-        <>
-          <TabList label="審查與驗證" idPrefix="quality" tabs={QUALITY_TABS} selected={qualityTab} onSelect={onQualityTab} />
-          <TabPanel idPrefix="quality" selected={qualityTab}>
-            {qualityTab === "reviews" && <ReviewPage key={workspace.id} client={client} workspace={workspace} />}
-            {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 正在編輯的 Profile 與訊息 */}
-            {qualityTab === "verification" && <VerificationPage key={workspace.id} client={client} workspace={workspace} />}
-            {qualityTab === "exploration" && <ExplorationPage key={workspace.id} client={client} workspace={workspace} />}
-          </TabPanel>
-        </>
-      );
+    case "reviews":
+      return <ReviewPage key={workspace.id} client={client} workspace={workspace} />;
+    case "verification":
+      // 換 Workspace 時重新掛載，清掉上一個 Workspace 正在編輯的 Profile 與訊息
+      return <VerificationPage key={workspace.id} client={client} workspace={workspace} />;
+    case "exploration":
+      return <ExplorationPage key={workspace.id} client={client} workspace={workspace} />;
     case "knowledge":
       return (
         <>
