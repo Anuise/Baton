@@ -259,6 +259,41 @@ describe("App 外殼", () => {
       expect(screen.queryByRole("tablist", { name: "成果與品質" })).not.toBeInTheDocument();
     });
 
+    // 依序切換入口內的每一頁，每切一次上一頁的標題就不在畫面上
+    it.each([
+      [
+        "成果與品質",
+        [
+          ["成果", "成果與驗證：筆記"],
+          ["審查", "審查與設計偏離：筆記"],
+          ["驗證", "驗證：筆記"],
+          ["探索", "探索：筆記"],
+        ],
+      ],
+      [
+        "更多",
+        [
+          ["知識", "知識：筆記"],
+          ["流程", "流程：筆記"],
+          ["時間線", "時間線：筆記"],
+          ["授權", "模型設定：筆記"],
+        ],
+      ],
+    ])("「%s」入口以第二層頁簽切換頁面，一次只顯示一頁", async (section, pages) => {
+      const user = userEvent.setup();
+      render(<App />);
+      await selectWorkspace(user);
+      await user.click(workspaceTab(section));
+
+      let previous: string | null = null;
+      for (const [page, heading] of pages) {
+        await user.click(pageTab(section, page));
+        expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+        if (previous) expect(screen.queryByRole("heading", { name: previous })).not.toBeInTheDocument();
+        previous = heading;
+      }
+    });
+
     // 原本九個頁簽（含「審查與驗證」的三個小頁簽）的內容全部仍可到達
     it.each([
       ["工作", null, "工作面板：筆記", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
