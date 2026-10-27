@@ -320,22 +320,25 @@ body {
   min-height: 100vh;
 }
 
+/* 狀態列：退到背景的一條細列，字小、次要色，異常項目自己再加強 */
 .status-bar {
   display: flex;
-  gap: var(--space-5);
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-6);
   align-items: center;
-  min-height: 32px;
-  padding: 0 var(--space-6);
-  background: var(--color-surface);
+  min-height: 28px;
+  padding: 0 var(--space-7);
+  background: var(--color-bg);
   border-bottom: 1px solid var(--color-border);
-  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
 }
 
 .status::before {
   content: "";
   display: inline-block;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   margin-right: var(--space-3);
   border-radius: 50%;
   background: var(--color-text-subtle);
@@ -389,16 +392,21 @@ body {
 }
 
 .sidebar {
-  width: 280px;
-  padding: var(--space-6);
+  flex: none;
+  width: 260px;
+  padding: var(--space-6) var(--space-5);
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
   font-size: var(--font-size-sm);
 }
 
+/* 側欄標題是小型分類標示，不與頁面標題搶層次 */
 .sidebar h2 {
-  margin: 0 0 var(--space-5);
-  font-size: var(--font-size-md);
+  margin: 0 0 var(--space-4);
+  padding: 0 var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
 }
 
 .sidebar-empty {
@@ -454,14 +462,32 @@ body {
   padding: var(--space-7);
 }
 
-/* App 外殼：產品名稱與更新通知在頁簽之外 */
+/* App 外殼：產品名稱與頂層頁簽同一列 */
 .app-heading {
-  padding: var(--space-5) var(--space-7) 0;
+  display: flex;
+  gap: var(--space-7);
+  align-items: stretch;
+  min-height: 44px;
+  padding: 0 var(--space-7);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .app-heading h1 {
-  margin: 0 0 var(--space-4);
-  font-size: var(--font-size-xl);
+  align-self: center;
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+/* 更新通知在頁簽之外；沒有通知時不佔空間 */
+.app-notices {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-7) 0;
+}
+
+.app-notices:empty {
+  display: none;
 }
 
 .tabs {
@@ -471,9 +497,14 @@ body {
   border-bottom: 1px solid var(--color-border);
 }
 
+/* 頂層頁簽嵌在頂列內，底線與頂列下框重合 */
 .tabs-top {
-  padding: 0 var(--space-7);
-  background: var(--color-surface);
+  align-self: stretch;
+  border-bottom: 0;
+}
+
+.tabs-top [role="tab"] {
+  height: 100%;
 }
 
 .tabs [role="tab"] {
@@ -507,6 +538,33 @@ body {
   background: var(--color-warning-subtle);
   border: 1px solid var(--color-warning-border);
   font-size: var(--font-size-xs);
+}
+
+/* 第二層頁簽（成果與品質、更多）：小型膠囊，不再畫底線，層次低於主要入口 */
+.tabs-page {
+  gap: var(--space-1);
+  border-bottom: 0;
+}
+
+.tabs-page [role="tab"] {
+  padding: var(--space-2) var(--space-5);
+  border-bottom: 0;
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-sm);
+}
+
+.tabs-page [role="tab"]:hover {
+  background: var(--color-surface-hover);
+}
+
+.tabs-page [role="tab"][aria-selected="true"] {
+  background: var(--color-surface-hover);
+  font-weight: 600;
+}
+
+/* 第二層頁簽與其內容之間不必再空一大段 */
+.tabs-page + .tab-panel {
+  padding-top: var(--space-2);
 }
 
 /* 各頁簽內容的標題與間距一致；同一頁簽疊放的功能以相同間距分開 */
@@ -1061,13 +1119,61 @@ body {
 
 .workspace-auto-resume {
   display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.workspace-auto-resume label {
+  display: flex;
   gap: var(--space-3);
   align-items: center;
 }
 
-.workspace-auto-resume-hint {
+/* 「?」說明提示（HelpTip）：取代解釋性小字，懸停或鍵盤聚焦時浮出 */
+.help-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.help-tip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  background: none;
+  box-shadow: none;
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
+  line-height: 1;
+  cursor: help;
+}
+
+.help-tip-trigger:hover,
+.help-tip-trigger:focus-visible {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.help-tip-content {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 10;
+  width: max-content;
+  max-width: 240px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  line-height: 1.5;
 }
 
 .exit-overlay {
