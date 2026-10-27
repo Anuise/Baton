@@ -1112,10 +1112,11 @@ export interface AuthorityEntry {
   label: string;
   builtin: AuthorityLevel;
   effective: AuthorityLevel;
-  narrowed: boolean;
+  /** 這個 Workspace 的設定與內建不同（收窄或放寬）。 */
+  overridden: boolean;
 }
 
-/** 決策權限表（spec D-15）：Workspace 可收窄、不可放寬。 */
+/** 決策權限表（spec D-15）：每個事項都可以由使用者設為任何層級，收窄或放寬都可以。 */
 export interface AuthorityTable {
   revision: number;
   entries: AuthorityEntry[];
@@ -1144,7 +1145,6 @@ export interface DecisionClient {
   mergeDecision(workspaceId: string, requestId: string, request: MergeRequest): Promise<{ decision: DecisionRequestView }>;
   linkDecision(workspaceId: string, requestId: string, otherId: string): Promise<DecisionRequestView>;
   decisionAuthority(workspaceId: string): Promise<AuthorityTable>;
-  /** 放寬會被拒（authority_widening_refused）。 */
   updateDecisionAuthority(workspaceId: string, request: UpdateAuthorityRequest): Promise<AuthorityTable>;
   pendingDecisions(): Promise<PendingDecisions>;
 }

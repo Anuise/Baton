@@ -207,10 +207,10 @@ export function authorityTable(overrides: Partial<AuthorityTable> = {}): Authori
   return {
     revision: 1,
     entries: [
-      { matter: "split_task", label: "拆分、合併、排序 Task", builtin: "autonomous", effective: "autonomous", narrowed: false },
-      { matter: "retry_task", label: "重試 Task", builtin: "autonomous", effective: "requires_decision", narrowed: true },
-      { matter: "change_acceptance", label: "修改完成條件或驗收標準", builtin: "requires_decision", effective: "requires_decision", narrowed: false },
-      { matter: "retry_after_recovery_failures", label: "三次恢復失敗後的重試", builtin: "human_only", effective: "human_only", narrowed: false },
+      { matter: "split_task", label: "拆分、合併、排序 Task", builtin: "autonomous", effective: "autonomous", overridden: false },
+      { matter: "retry_task", label: "重試 Task", builtin: "autonomous", effective: "requires_decision", overridden: true },
+      { matter: "change_acceptance", label: "修改完成條件或驗收標準", builtin: "requires_decision", effective: "requires_decision", overridden: false },
+      { matter: "retry_after_recovery_failures", label: "三次恢復失敗後的重試", builtin: "human_only", effective: "human_only", overridden: false },
     ],
     ...overrides,
   };

@@ -1,8 +1,10 @@
 //! 決策權限表（票 35，spec D-15）：哪些事項 Controller 可以自主處理、哪些一定要送裁定。
 //!
-//! 純邏輯、無 I/O。第一版內建一張表；Workspace 只能把「可自主處理」的事項**收窄**為「必須送裁定」，
-//! 不能把內建「必須送裁定」或「只能人工發起」的事項放寬。Runtime 對 Controller 的每個動作都以
+//! 純邏輯、無 I/O。第一版內建一張表；使用者可以把 Workspace 中任何一個事項設為三種等級中的任一種，
+//! 收窄或放寬都可以（使用者決定，見 ADR-0003 修訂）。Runtime 對 Controller 的每個動作都以
 //! `effective` 判定：必須送裁定的動作不執行，改成建立裁定請求。
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -157,24 +159,19 @@ impl Authority {
     }
 }
 
-/// Workspace 的權限表設定：被收窄為「必須送裁定」的事項（只會是內建可自主處理的事項）。
+/// Workspace 的權限表設定：使用者設定、且與內建等級不同的事項。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthorityPolicy {
     /// 每次修改加一；從未修改為 0。
     pub revision: i64,
-    /// 已排序、不重複。
-    pub narrowed: Vec<Matter>,
+    /// 事項 → 使用者設定的等級；只存與內建不同的事項。
+    pub overrides: BTreeMap<Matter, Authority>,
 }
 
 impl AuthorityPolicy {
-    /// 這個 Workspace 中某事項目前生效的等級：內建等級與收窄設定中較嚴的那個。
+    /// 這個 Workspace 中某事項目前生效的等級：有使用者設定就用設定，否則用內建等級。
     pub fn effective(&self, matter: Matter) -> Authority {
-        let builtin = matter.builtin();
-        if builtin == Authority::Autonomous && self.narrowed.contains(&matter) {
-            Authority::RequiresDecision
-        } else {
-            builtin
-        }
+        self.overrides.get(&matter).copied().unwrap_or_else(|| matter.builtin())
     }
 }
 
@@ -187,10 +184,6 @@ pub struct AuthorityEntryRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorityError {
-    #[error("「{0}」內建為「{1}」，Workspace 只能收窄、不能放寬")]
-    WideningRefused(&'static str, &'static str),
-    #[error("「{0}」只能由使用者從恢復介面發起，不能調整")]
-    HumanOnlyFixed(&'static str),
     #[error("權限表已被修改（目前 revision {current}），請重新整理後再存檔")]
     RevisionMismatch { current: i64 },
 }
@@ -198,21 +191,13 @@ pub enum AuthorityError {
 impl AuthorityError {
     pub fn code(&self) -> &'static str {
         match self {
-            AuthorityError::WideningRefused(..) | AuthorityError::HumanOnlyFixed(_) => "authority_widening_refused",
             AuthorityError::RevisionMismatch { .. } => "authority_revision_mismatch",
         }
     }
 }
 
-fn builtin_label(authority: Authority) -> &'static str {
-    match authority {
-        Authority::Autonomous => "可自主處理",
-        Authority::RequiresDecision => "必須送裁定",
-        Authority::HumanOnly => "只能人工發起",
-    }
-}
-
-/// 以使用者送來的設定取代 Workspace 的權限表（沒列出的事項回到內建值）。任何一項放寬都拒絕整個請求。
+/// 以使用者送來的設定取代 Workspace 的權限表（沒列出的事項回到內建值）。任何事項都可以設為任何等級；
+/// 同一事項列出多次時以最後一個為準。
 pub fn replace_policy(
     current: &AuthorityPolicy,
     expected_revision: i64,
@@ -221,23 +206,15 @@ pub fn replace_policy(
     if expected_revision != current.revision {
         return Err(AuthorityError::RevisionMismatch { current: current.revision });
     }
-    let mut narrowed = Vec::new();
+    let mut overrides = BTreeMap::new();
     for entry in entries {
-        let builtin = entry.matter.builtin();
-        if builtin == Authority::HumanOnly && entry.effective != Authority::HumanOnly {
-            return Err(AuthorityError::HumanOnlyFixed(entry.matter.label()));
-        }
-        if entry.effective < builtin {
-            return Err(AuthorityError::WideningRefused(entry.matter.label(), builtin_label(builtin)));
-        }
-        if builtin == Authority::Autonomous && entry.effective != Authority::Autonomous {
-            // 可自主處理的事項只能收窄為「必須送裁定」；「只能人工發起」視同必須送裁定
-            narrowed.push(entry.matter);
+        if entry.effective == entry.matter.builtin() {
+            overrides.remove(&entry.matter);
+        } else {
+            overrides.insert(entry.matter, entry.effective);
         }
     }
-    narrowed.sort();
-    narrowed.dedup();
-    Ok(AuthorityPolicy { revision: current.revision + 1, narrowed })
+    Ok(AuthorityPolicy { revision: current.revision + 1, overrides })
 }
 
 /// 權限表的一列（給 API 與設定畫面）。
@@ -247,8 +224,8 @@ pub struct AuthorityEntry {
     pub label: String,
     pub builtin: Authority,
     pub effective: Authority,
-    /// 這個 Workspace 是否把它收窄了。
-    pub narrowed: bool,
+    /// 這個 Workspace 的設定是否與內建不同（收窄或放寬）。
+    pub overridden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,7 +246,7 @@ pub fn table(policy: &AuthorityPolicy) -> AuthorityTable {
                     label: matter.label().to_string(),
                     builtin: matter.builtin(),
                     effective,
-                    narrowed: effective != matter.builtin(),
+                    overridden: effective != matter.builtin(),
                 }
             })
             .collect(),
@@ -299,13 +276,21 @@ mod tests {
     }
 
     #[test]
+    fn without_settings_every_matter_is_its_builtin_level() {
+        let policy = AuthorityPolicy::default();
+        for matter in Matter::ALL {
+            assert_eq!(policy.effective(matter), matter.builtin(), "{matter:?}");
+        }
+    }
+
+    #[test]
     fn a_workspace_can_narrow_an_autonomous_matter() {
         let policy = replace_policy(&AuthorityPolicy::default(), 0, &[entry(Matter::ArrangeTasks, Authority::RequiresDecision)])
             .unwrap();
         assert_eq!(policy.revision, 1);
         assert_eq!(policy.effective(Matter::ArrangeTasks), Authority::RequiresDecision);
         assert_eq!(policy.effective(Matter::ChoosePlaybook), Authority::Autonomous);
-        assert!(table(&policy).entries.iter().any(|e| e.matter == Matter::ArrangeTasks && e.narrowed));
+        assert!(table(&policy).entries.iter().any(|e| e.matter == Matter::ArrangeTasks && e.overridden));
 
         // 取代式：沒列出就回到內建值
         let reset = replace_policy(&policy, 1, &[]).unwrap();
@@ -313,20 +298,54 @@ mod tests {
     }
 
     #[test]
-    fn widening_and_changing_human_only_matters_are_refused() {
-        let base = AuthorityPolicy::default();
-        let refused = replace_policy(&base, 0, &[entry(Matter::ModifyDoneCriteria, Authority::Autonomous)]).unwrap_err();
-        assert_eq!(refused.code(), "authority_widening_refused");
-        let refused =
-            replace_policy(&base, 0, &[entry(Matter::RetryAfterRecoveryFailures, Authority::RequiresDecision)]).unwrap_err();
-        assert_eq!(refused.code(), "authority_widening_refused");
-        // 與內建相同的設定不是放寬
-        assert!(replace_policy(&base, 0, &[entry(Matter::SkipStageOrGate, Authority::RequiresDecision)]).is_ok());
+    fn a_workspace_can_widen_builtin_requires_decision_and_human_only_matters() {
+        let policy = replace_policy(
+            &AuthorityPolicy::default(),
+            0,
+            &[
+                entry(Matter::ModifyDoneCriteria, Authority::Autonomous),
+                entry(Matter::RetryAfterRecoveryFailures, Authority::RequiresDecision),
+            ],
+        )
+        .unwrap();
+        assert_eq!(policy.effective(Matter::ModifyDoneCriteria), Authority::Autonomous);
+        assert_eq!(policy.effective(Matter::RetryAfterRecoveryFailures), Authority::RequiresDecision);
+        assert_eq!(policy.effective(Matter::ExternalWrite), Authority::RequiresDecision, "沒列出的維持內建");
+
+        let policy = replace_policy(&policy, 1, &[entry(Matter::RetryAfterRecoveryFailures, Authority::Autonomous)]).unwrap();
+        assert_eq!(policy.effective(Matter::RetryAfterRecoveryFailures), Authority::Autonomous);
+        assert_eq!(policy.effective(Matter::ModifyDoneCriteria), Authority::RequiresDecision, "取代式：回到內建值");
+    }
+
+    #[test]
+    fn every_matter_can_be_set_to_every_level() {
+        let levels = [Authority::Autonomous, Authority::RequiresDecision, Authority::HumanOnly];
+        for matter in Matter::ALL {
+            for level in levels {
+                let policy = replace_policy(&AuthorityPolicy::default(), 0, &[entry(matter, level)]).unwrap();
+                assert_eq!(policy.effective(matter), level, "{matter:?} → {level:?}");
+                let row = table(&policy).entries.into_iter().find(|e| e.matter == matter).unwrap();
+                assert_eq!((row.effective, row.overridden), (level, level != matter.builtin()));
+            }
+        }
+    }
+
+    #[test]
+    fn only_levels_that_differ_from_builtin_are_stored() {
+        let policy = replace_policy(
+            &AuthorityPolicy::default(),
+            0,
+            &[entry(Matter::SkipStageOrGate, Authority::RequiresDecision), entry(Matter::ArrangeTasks, Authority::HumanOnly)],
+        )
+        .unwrap();
+        assert_eq!(policy.overrides, BTreeMap::from([(Matter::ArrangeTasks, Authority::HumanOnly)]));
     }
 
     #[test]
     fn a_stale_revision_is_refused() {
-        let refused = replace_policy(&AuthorityPolicy { revision: 2, narrowed: vec![] }, 1, &[]).unwrap_err();
+        let current = AuthorityPolicy { revision: 2, overrides: BTreeMap::new() };
+        let refused = replace_policy(&current, 1, &[]).unwrap_err();
         assert_eq!(refused, AuthorityError::RevisionMismatch { current: 2 });
+        assert_eq!(refused.code(), "authority_revision_mismatch");
     }
 }
