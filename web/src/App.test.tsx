@@ -261,7 +261,7 @@ describe("App 外殼", () => {
 
     // 原本九個頁簽（含「審查與驗證」的三個小頁簽）的內容全部仍可到達
     it.each([
-      ["工作", null, "工作面板：筆記", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
+      ["工作", null, "工作：筆記", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
       ["裁定", null, "裁定：筆記", () => expect(client.listDecisions).toHaveBeenCalledWith("ws_1")],
       ["成果與品質", "成果", "成果與驗證：筆記", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
       ["成果與品質", "審查", "審查與設計偏離：筆記", () => expect(client.reviews).toHaveBeenCalledWith("ws_1")],

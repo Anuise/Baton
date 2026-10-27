@@ -722,7 +722,15 @@ body {
 
 .task-board {
   display: grid;
+  gap: var(--space-6);
+}
+
+/* 頁面標題與主要動作同一列 */
+.task-board-header {
+  display: flex;
   gap: var(--space-5);
+  align-items: center;
+  justify-content: space-between;
 }
 
 .task-board h2,
@@ -733,6 +741,21 @@ body {
 
 .task-board h3 {
   font-size: var(--font-size-md);
+}
+
+.task-column > h3 {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+}
+
+/* 欄標題的卡片數 */
+.task-count {
+  color: var(--color-text-subtle);
+  font-weight: 400;
 }
 
 .task-board h4 {
@@ -775,10 +798,41 @@ body {
 }
 
 .task-goal,
-.task-kind,
 .task-contract-version,
 .task-dependencies {
   color: var(--color-text-muted);
+}
+
+/* 卡片的種類徽章與所屬 Goal 同一列 */
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.task-kind {
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  color: var(--color-text-muted);
+}
+
+/* 次要與技術資訊收合在 details 裡 */
+.task-details,
+.task-run-more {
+  color: var(--color-text-muted);
+}
+
+.task-details summary,
+.task-run-more summary {
+  cursor: pointer;
+}
+
+.task-details[open],
+.task-run-more[open] {
+  display: grid;
+  gap: var(--space-2);
 }
 
 .task-workdir,

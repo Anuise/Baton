@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
+import { HelpTip } from "./HelpTip";
 import { COLUMNS } from "./TaskBoard";
 import { formatTimestamp } from "./time";
 import {
@@ -302,8 +303,9 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
       )}
       {batchOutcome && (
         <section className="decision-batch-results" aria-label="批次結果">
-          <h3>批次結果</h3>
-          <p className="decision-scope-note">每一項各自保存，不會形成概括授權。</p>
+          <h3>
+            批次結果 <HelpTip label="批次結果">每一項各自保存，不會形成概括授權。</HelpTip>
+          </h3>
           <ul>
             {batchOutcome.results.map((result) => (
               <li key={result.requestId} className={result.ok ? "decision-batch-ok" : "decision-batch-failed"}>
@@ -401,17 +403,19 @@ function ActionFields({ decision, draft, onChange, name }: ActionFieldsProps) {
       )}
       {action === "defer" && (
         <>
-          <label>
-            延後多久
-            <select value={draft.deferMinutes} onChange={(e) => set({ deferMinutes: Number(e.target.value) })}>
-              {DEFER_CHOICES.map((choice) => (
-                <option key={choice.minutes} value={choice.minutes}>
-                  {choice.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <p className="decision-scope-note">延後不是同意，工作仍在等待。</p>
+          <div className="decision-inline">
+            <label>
+              延後多久
+              <select value={draft.deferMinutes} onChange={(e) => set({ deferMinutes: Number(e.target.value) })}>
+                {DEFER_CHOICES.map((choice) => (
+                  <option key={choice.minutes} value={choice.minutes}>
+                    {choice.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <HelpTip label="延後">延後不是同意，工作仍在等待。</HelpTip>
+          </div>
         </>
       )}
       {action !== null && action !== "defer" && (
@@ -461,8 +465,10 @@ function BatchPanel({ client, decisions, drafts, onDraft, onCancel, onSubmitted,
 
   return (
     <form className="decision-batch" aria-label="批次處理" onSubmit={(event) => void submit(event)}>
-      <h3>批次處理（{decisions.length} 項）</h3>
-      <p className="decision-scope-note">逐項選擇處理方式；每一項各自保存，不會形成概括授權。</p>
+      <h3>
+        批次處理（{decisions.length} 項）{" "}
+        <HelpTip label="批次處理">逐項選擇處理方式；每一項各自保存，不會形成概括授權。</HelpTip>
+      </h3>
       {decisions.map((decision) => (
         <fieldset key={decision.id} className="decision-batch-item">
           <legend>{decision.question}</legend>
@@ -474,7 +480,7 @@ function BatchPanel({ client, decisions, drafts, onDraft, onCancel, onSubmitted,
           />
         </fieldset>
       ))}
-      {!complete && <p className="decision-scope-note">每一項都要選好處理方式並填妥必填欄位才能送出。</p>}
+      {!complete && <p className="decision-hint">每一項都選好處理方式、填妥必填欄位後才能送出</p>}
       <button type="submit" disabled={busy || !complete}>
         送出批次（{decisions.length} 項）
       </button>
@@ -545,19 +551,17 @@ function DecisionDetail({
         {KIND_LABELS[decision.kind]}・{STATUS_LABELS[decision.status]}・Task：{decision.task_title}・緊急程度：
         {URGENCY_LABELS[decision.urgency]}・提出於 {formatTimestamp(decision.created_at, timeZone)}
       </p>
-      <p className="decision-detail-meta">
-        目標版本：契約第 {decision.target.contract_version} 版
-        {decision.target.authorization_revision !== null && `・授權第 ${decision.target.authorization_revision} 版`}
-      </p>
       {isPending && decision.deferred && decision.deferred_until !== null && (
         <p className="decision-deferred" role="status">
-          延後至 {formatTimestamp(decision.deferred_until, timeZone)}（延後不是同意，工作仍在等待）
+          延後至 {formatTimestamp(decision.deferred_until, timeZone)}{" "}
+          <HelpTip label="延後">延後不是同意，工作仍在等待。</HelpTip>
         </p>
       )}
       {isPending && decision.overdue && (
         <p className="decision-overdue" role="status">
           已逾期，尚未裁定
-          {decision.deadline_at !== null && `（期限 ${formatTimestamp(decision.deadline_at, timeZone)}）`}。逾期只是提醒，工作仍在等你的裁定。
+          {decision.deadline_at !== null && `（期限 ${formatTimestamp(decision.deadline_at, timeZone)}）`}{" "}
+          <HelpTip label="逾期">逾期只是提醒，工作仍在等你的裁定。</HelpTip>
         </p>
       )}
       {isPending && !decision.overdue && decision.deadline_at !== null && (
@@ -565,8 +569,7 @@ function DecisionDetail({
       )}
       {isPending && permission?.prior_use && (
         <p className="decision-prior-use" role="alert">
-          這個操作先前已經放行過一次（{formatTimestamp(permission.prior_use.used_at, timeZone)}，Run{" "}
-          {permission.prior_use.run_id}），結果未知。請先查證是否已經生效，再決定是否再允許一次。
+          這個操作先前已放行過一次（{formatTimestamp(permission.prior_use.used_at, timeZone)}），結果未知。請先確認是否已生效，再決定要不要再允許一次。
         </p>
       )}
 
@@ -594,16 +597,18 @@ function DecisionDetail({
       {/* 「允許本次操作」與「修改 Workspace 授權」分開：一次性批准不會變成永久擴權 */}
       {permission && (
         <section className="decision-approve-once" aria-label="允許本次操作">
-          <h4>允許本次操作</h4>
-          <p>只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權。</p>
+          <h4>
+            允許本次操作{" "}
+            <HelpTip label="允許本次操作">只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權。</HelpTip>
+          </h4>
           {permission.binding ? (
             <BindingView binding={permission.binding} />
           ) : (
-            <p>這個請求建立於單次批准綁定之前，沒有綁定的操作，允許後也不會被沿用。</p>
+            <p>這個請求建立得較早，沒有綁定的操作；允許後也不會被沿用。</p>
           )}
           {permission.rejected_approval && (
             <p className="decision-rejected-approval">
-              先前的單次批准（{permission.rejected_approval.request_id}）不能沿用：
+              先前的單次批准不能沿用：
               {MISMATCH_LABELS[permission.rejected_approval.reason]}
             </p>
           )}
@@ -615,8 +620,9 @@ function DecisionDetail({
 
       {decision.authority && (
         <section className="decision-permission" aria-label="權限表攔截">
-          <h4>權限表攔截</h4>
-          <p className="decision-scope-note">Controller 想自行處理這件事，但決策權限表規定必須送裁定。</p>
+          <h4>
+            權限表攔截 <HelpTip label="權限表攔截">Controller 想自行處理這件事，但決策權限表規定必須送裁定。</HelpTip>
+          </h4>
           <dl>
             <dt>事項</dt>
             <dd>{decision.authority.matter_label}</dd>
@@ -652,9 +658,11 @@ function DecisionDetail({
         </>
       )}
 
-      <h4>阻擋範圍</h4>
+      <h4>
+        阻擋範圍 <HelpTip label="阻擋範圍">只有這些工作受影響，其他工作不受阻擋。</HelpTip>
+      </h4>
       {decision.blocking.length === 0 ? (
-        <p>目前沒有工作被這個裁定阻擋。</p>
+        <p>沒有工作被這個裁定阻擋</p>
       ) : (
         <ul className="decision-blocking">
           {decision.blocking.map((item) => (
@@ -664,7 +672,6 @@ function DecisionDetail({
           ))}
         </ul>
       )}
-      <p className="decision-scope-note">只有這些工作受影響，其他工作不受阻擋。</p>
 
       <RelatedDecisions client={client} decision={decision} all={all} onSelect={onSelect} onMerged={onMerged} reload={reload} />
 
@@ -683,6 +690,13 @@ function DecisionDetail({
           {error}
         </p>
       )}
+      <details className="decision-more">
+        <summary>詳細資訊</summary>
+        <p className="decision-detail-meta">
+          目標版本：契約第 {decision.target.contract_version} 版
+          {decision.target.authorization_revision !== null && `・授權第 ${decision.target.authorization_revision} 版`}
+        </p>
+      </details>
     </article>
   );
 }
@@ -691,7 +705,8 @@ function DecisionDetail({
 function BindingView({ binding }: { binding: ApprovalBinding }) {
   const params = Object.entries(binding.params);
   return (
-    <dl>
+    <>
+      <dl>
       <dt>操作</dt>
       <dd>{binding.operation}</dd>
       <dt>目標資源</dt>
@@ -710,11 +725,17 @@ function BindingView({ binding }: { binding: ApprovalBinding }) {
           </ul>
         )}
       </dd>
-      <dt>要求雜湊</dt>
-      <dd title={binding.request_hash}>{binding.request_hash.slice(0, 12)}</dd>
       <dt>成果版本</dt>
       <dd>{binding.artifact_version === "" ? "尚無成果" : binding.artifact_version}</dd>
-    </dl>
+      </dl>
+      <details className="decision-more">
+        <summary>技術細節</summary>
+        <dl>
+          <dt>要求雜湊</dt>
+          <dd title={binding.request_hash}>{binding.request_hash.slice(0, 12)}</dd>
+        </dl>
+      </details>
+    </>
   );
 }
 
@@ -788,8 +809,12 @@ function AuthorizationChange({ client, workspace, capability }: ChangeProps) {
 
   return (
     <section className="decision-authorization-change" aria-label="修改 Workspace 授權">
-      <h4>修改 Workspace 授權</h4>
-      <p>把這項能力加入 Workspace 授權後，這個 Workspace 的所有 Task 都能使用，不再逐次詢問。修改授權不會回答這個請求。</p>
+      <h4>
+        修改 Workspace 授權{" "}
+        <HelpTip label="修改 Workspace 授權">
+          把這項能力加入 Workspace 授權後，這個 Workspace 的所有 Task 都能使用，不再逐次詢問。修改授權不會回答這個請求。
+        </HelpTip>
+      </h4>
       {state.step === "idle" && (
         <button type="button" disabled={busy} onClick={() => void start()}>
           修改 Workspace 授權
@@ -866,7 +891,7 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, onSelect }
     return (
       <section className="decision-outcome decision-superseded" aria-label="裁定結果">
         <h4>已過期</h4>
-        <p>目標版本已變更，這個請求不能套用，也不提供任何處理。</p>
+        <p>目標版本已變更，這個請求不能再套用。</p>
         {decision.status_reason && <p>原因：{decision.status_reason}</p>}
       </section>
     );
@@ -912,8 +937,7 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, onSelect }
       )}
       {decision.permission?.approval_use && (
         <p>
-          這個批准已於 {formatTimestamp(decision.permission.approval_use.used_at, timeZone)} 由 Run{" "}
-          {decision.permission.approval_use.run_id} 使用，已失效
+          這個批准已於 {formatTimestamp(decision.permission.approval_use.used_at, timeZone)} 使用過，已失效
         </p>
       )}
       {resumedCount !== null && <p role="status">已恢復：{resumedCount} 個工作</p>}
@@ -1019,7 +1043,7 @@ function RelatedDecisions({ client, decision, all, onSelect, onMerged, reload }:
           <button type="button" disabled={busy || mergeInto === ""} onClick={() => void merge()}>
             合併
           </button>
-          <p className="decision-scope-note">合併後這個請求不再單獨處理，由目標請求一併裁定。</p>
+          <HelpTip label="合併">合併後這個請求不再單獨處理，由目標請求一併裁定。</HelpTip>
         </div>
       )}
       {linkCandidates.length > 0 && (
@@ -1115,10 +1139,10 @@ function DecisionAuthorityPanel({ client, workspace }: { client: DecisionClient;
 
   return (
     <section className="decision-authority" aria-label="決策權限表">
-      <h3>決策權限表</h3>
-      <p className="decision-scope-note">
-        列出哪些事情 Controller 可以自行處理、哪些一定會送裁定。Workspace 只能收窄，不能放寬。
-      </p>
+      <h3>
+        決策權限表{" "}
+        <HelpTip label="決策權限表">列出哪些事情 Controller 可以自行處理、哪些一定會送裁定。Workspace 只能收窄，不能放寬。</HelpTip>
+      </h3>
       <table>
         <thead>
           <tr>
@@ -1151,7 +1175,7 @@ function DecisionAuthorityPanel({ client, workspace }: { client: DecisionClient;
                     收窄為必須送裁定
                   </label>
                 ) : (
-                  <span className="authority-locked">內建{AUTHORITY_LABELS[entry.builtin]}，Workspace 不能放寬</span>
+                  <span className="authority-locked">不能放寬</span>
                 )}
               </td>
             </tr>
@@ -1161,7 +1185,7 @@ function DecisionAuthorityPanel({ client, workspace }: { client: DecisionClient;
       <button type="button" disabled={busy || !changed} onClick={() => void save()}>
         儲存權限表
       </button>
-      {saved && <p className="decision-scope-note">已儲存（第 {table.revision} 版）</p>}
+      {saved && <p className="decision-saved">已儲存（第 {table.revision} 版）</p>}
       {error && <p role="alert">{error}</p>}
     </section>
   );

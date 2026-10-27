@@ -302,7 +302,7 @@ function fakeClient(
 async function renderBoard(client: TaskBoardClient) {
   const user = userEvent.setup();
   render(<TaskBoard client={client} workspace={workspace} timeZone="UTC" />);
-  await screen.findByRole("heading", { name: "工作面板：筆記" });
+  await screen.findByRole("heading", { name: "工作：筆記" });
   return user;
 }
 
@@ -438,6 +438,8 @@ describe("工作面板", () => {
     const client = fakeClient({ tasks: [task("task_1", "寫文件", { contract: history[1] })], history });
     const user = await renderBoard(client);
     expect(within(card("寫文件")).getByText("契約版本 v2")).toBeInTheDocument();
+    // 契約版本是次要資訊，收在預設收合的「詳細資訊」
+    expect(within(card("寫文件")).getByText("契約版本 v2").closest("details")).not.toHaveAttribute("open");
 
     await user.click(within(card("寫文件")).getByRole("button", { name: "契約版本歷史" }));
 
@@ -745,6 +747,11 @@ describe("派工與 Run", () => {
     const status = runStatus("部署");
     expect(status).toHaveTextContent("失敗");
     expect(status).toHaveTextContent("pid 4321");
+    // pid 與心跳是技術資訊，收在預設收合的「技術細節」
+    const more = within(status).getByText("技術細節").closest("details")!;
+    expect(more).not.toHaveAttribute("open");
+    expect(more).toHaveTextContent("pid 4321");
+    expect(more).toHaveTextContent("最後心跳");
     expect(status).toHaveTextContent("結束原因：程序結束碼 1");
     expect(status).toHaveTextContent("最後心跳：2023/11/14 23:13");
     expect(status).not.toHaveTextContent("舊的原因");
@@ -802,7 +809,7 @@ describe("派工與 Run", () => {
       }),
     );
 
-    const details = runStatus("部署").querySelector("details")!;
+    const details = runStatus("部署").querySelector<HTMLElement>(".task-checkpoint details")!;
     expect(details).not.toHaveAttribute("open");
     await user.click(within(details).getByText("細節"));
     expect(details).toHaveAttribute("open");
@@ -818,7 +825,7 @@ describe("派工與 Run", () => {
     );
 
     expect(runStatus("部署")).toHaveTextContent("Checkpoint：資料表遷移完成");
-    expect(runStatus("部署").querySelector("details")).toBeNull();
+    expect(runStatus("部署").querySelector(".task-checkpoint details")).toBeNull();
   });
 
   it("只顯示 generation 最大的 Run 的回報，舊世代的回報不顯示", async () => {
@@ -915,7 +922,7 @@ describe("派工與 Run", () => {
       }),
     );
 
-    expect(runStatus("部署")).toHaveTextContent("沿用舊授權（revision 1，目前 2）");
+    expect(runStatus("部署")).toHaveTextContent("沿用舊授權（第 1 版，目前第 2 版）");
   });
 
   it.each<[string, Partial<RunView>, RunStatus]>([
@@ -1028,7 +1035,7 @@ describe("建立 Task 與契約編輯器", () => {
     await user.selectOptions(within(form).getByLabelText("目標：模式"), "填寫");
     await user.type(within(form).getByLabelText("目標：內容"), "整理文件");
     await user.type(
-      within(form).getByLabelText("目標：引用（每行 kind:target@version）"),
+      within(form).getByLabelText("目標：引用（選填）"),
       "goal:goal_1@1{enter}task_contract:task_9@2",
     );
     await user.selectOptions(within(form).getByLabelText("輸入與依據：模式"), "不適用");
@@ -1067,7 +1074,7 @@ describe("建立 Task 與契約編輯器", () => {
     await user.type(within(form).getByLabelText("Task 標題"), "寫文件");
     await user.selectOptions(within(form).getByLabelText("目標：模式"), "填寫");
     await user.type(within(form).getByLabelText("目標：內容"), "整理文件");
-    await user.type(within(form).getByLabelText("目標：引用（每行 kind:target@version）"), "goal-1");
+    await user.type(within(form).getByLabelText("目標：引用（選填）"), "goal-1");
     await user.selectOptions(within(form).getByLabelText("範圍與限制：模式"), "不適用");
     await user.selectOptions(within(form).getByLabelText("預期成果：模式"), "填寫");
 
@@ -1127,7 +1134,7 @@ describe("編輯契約", () => {
 
     expect(within(form).getByLabelText("目標：模式")).toHaveValue("filled");
     expect(within(form).getByLabelText("目標：內容")).toHaveValue("整理文件");
-    expect(within(form).getByLabelText("目標：引用（每行 kind:target@version）")).toHaveValue("goal:goal_1@1");
+    expect(within(form).getByLabelText("目標：引用（選填）")).toHaveValue("goal:goal_1@1");
     expect(within(form).getByLabelText("輸入與依據：不適用的理由")).toHaveValue("不需要外部資料");
     expect(within(form).getByLabelText("範圍與限制：未知的說明（選填）")).toHaveValue("等客戶回覆");
     expect(within(form).getByLabelText("預期成果：模式")).toHaveValue("missing");
@@ -1190,7 +1197,9 @@ describe("成果驗證", () => {
 
     await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
 
-    expect(await within(panel("部署")).findByText("Runtime 正在執行 2 項確定性檢查，全部通過後自動完成")).toBeInTheDocument();
+    expect(await within(panel("部署")).findByText("正在執行 2 項確定性檢查，全部通過後自動完成")).toBeInTheDocument();
+    // 「驗證中」的解釋改放在「?」說明
+    expect(within(panel("部署")).getByRole("button", { name: "驗證中的說明" })).toBeInTheDocument();
     expect(client.taskVerification).toHaveBeenCalledWith("ws_1", "task_1");
     expect(panel("部署")).toHaveTextContent("指令 cargo test（預期結束碼 0）");
     expect(panel("部署")).toHaveTextContent("成果 report.md（存在即可）");
@@ -1206,7 +1215,7 @@ describe("成果驗證", () => {
 
     await user.click(within(panel("部署")).getByRole("button", { name: "檢視驗證" }));
 
-    expect(await within(panel("部署")).findByText("Runtime 不會自動判定，需要手動接受成果")).toBeInTheDocument();
+    expect(await within(panel("部署")).findByText("沒有自動檢查，需要你手動接受成果")).toBeInTheDocument();
     expect(within(panel("部署")).queryByText("宣告的檢查")).not.toBeInTheDocument();
     expect(within(panel("部署")).getByRole("button", { name: "接受成果" })).toBeEnabled();
   });
@@ -1473,13 +1482,13 @@ describe("Task 種類、工作目錄與整合佇列", () => {
 
     const created = await within(column("待處理（1）")).findByRole("article", { name: "加登入頁" });
     expect(client.createTask).toHaveBeenCalledWith("ws_1", expect.objectContaining({ kind: "development" }));
-    expect(within(created).getByText("種類：程式開發")).toBeInTheDocument();
+    expect(within(created).getByText("程式開發")).toBeInTheDocument();
   });
 
   it("編輯契約時沒有種類選擇", async () => {
     const user = await renderBoard(fakeClient({ tasks: [task("task_1", "寫文件", { kind: "document" })] }));
 
-    expect(within(card("寫文件")).getByText("種類：文件")).toBeInTheDocument();
+    expect(within(card("寫文件")).getByText("文件")).toBeInTheDocument();
     await user.click(within(card("寫文件")).getByRole("button", { name: "編輯契約" }));
     expect(within(screen.getByRole("region", { name: "編輯契約：寫文件" })).queryByLabelText("種類")).not.toBeInTheDocument();
   });
@@ -1502,6 +1511,8 @@ describe("Task 種類、工作目錄與整合佇列", () => {
     expect(group).toHaveTextContent("已就緒");
     expect(group).toHaveTextContent("在此目錄執行過的 Run：第 1 次、第 2 次");
     expect(within(group).queryByRole("alert")).not.toBeInTheDocument();
+    // 工作目錄正常時收在預設收合的「詳細資訊」
+    expect(group.closest("details")).not.toHaveAttribute("open");
     // 還沒有工作目錄的 Task 不顯示這一區
     expect(within(card("研究競品")).queryByRole("group", { name: "工作目錄" })).not.toBeInTheDocument();
   });
@@ -1551,6 +1562,8 @@ describe("Task 種類、工作目錄與整合佇列", () => {
     expect(within(group).getByRole("alert")).toHaveTextContent(
       "工作目錄無法使用，不會派工：Workspace 不是 Git repo，無法建立 worktree",
     );
+    // 失敗時「詳細資訊」預設展開，錯誤看得到
+    expect(group.closest("details")).toHaveAttribute("open");
   });
 
   it("等待原因有「工作目錄」類別時分開標示", async () => {
@@ -1790,6 +1803,7 @@ describe("worktree 清理", () => {
     const region = cleanupRegion();
     expect(region).toHaveTextContent("清理失敗");
     expect(within(region).getByRole("alert")).toHaveTextContent("清理失敗，worktree 已保留：worktree 中有 2 個未保存的變更");
+    expect(region.closest("details")).toHaveAttribute("open");
     expect(region).not.toHaveTextContent("自動重試");
     // worktree 保留：路徑不標成已移除
     expect(within(card("加登入頁")).getByRole("group", { name: "工作目錄" })).not.toHaveTextContent("已移除");
@@ -1864,7 +1878,7 @@ describe("修正與重試預算", () => {
     expect(budgets("部署")).toHaveTextContent("下次重試不早於 2023/11/14 22:23");
   });
 
-  it("預算用盡：提示該類預算已用完、Task 已阻擋，請到裁定中心", async () => {
+  it("預算用盡：提示該類預算已用完，請到「裁定」決定下一步", async () => {
     await renderBoard(
       fakeClient({
         tasks: [task("task_1", "部署", { status: "blocked" })],
@@ -1874,7 +1888,7 @@ describe("修正與重試預算", () => {
 
     const group = budgets("部署")!;
     expect(within(group).getByText("實作失敗修正 3/3")).toBeInTheDocument();
-    expect(within(group).getByRole("alert")).toHaveTextContent("實作失敗修正預算已用完，Task 已阻擋，請到裁定中心決定下一步");
+    expect(within(group).getByRole("alert")).toHaveTextContent("實作失敗修正預算已用完，請到「裁定」決定下一步");
   });
 
   it("用盡的種類即使計數資料為 0 也會顯示提示", async () => {
@@ -2185,7 +2199,7 @@ describe("Context receipt", () => {
 
     await user.click(within(receipt()).getByRole("button", { name: "Context receipt" }));
 
-    expect(await within(receipt()).findByText("這個 Run 沒有 context receipt（在 Context Builder 之前建立）")).toBeInTheDocument();
+    expect(await within(receipt()).findByText("這個 Run 建立得較早，沒有 context receipt")).toBeInTheDocument();
     expect(within(receipt()).queryByRole("alert")).not.toBeInTheDocument();
   });
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import { buildContract, ContractEditor, draftFromContract, emptyDraft, type ContractDraft } from "./ContractEditor";
+import { HelpTip } from "./HelpTip";
 import { formatTimestamp } from "./time";
 import { errorCode } from "./runtimeClient";
 import type {
@@ -301,12 +302,12 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="task-board" aria-label="工作面板">
-      <h2>工作面板：{workspace.name}</h2>
-      <div>
-        <button type="button" onClick={() => setPanel({ kind: "create" })}>
+      <header className="task-board-header">
+        <h2>工作：{workspace.name}</h2>
+        <button type="button" className="primary-action" onClick={() => setPanel({ kind: "create" })}>
           建立 Task
         </button>
-      </div>
+      </header>
 
       <IntegrationQueue entries={board.integrations} titleOf={titleOf} />
 
@@ -329,7 +330,8 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
           return (
             <section key={status} className="task-column" aria-label={`${label}（${tasks.length}）`}>
               <h3>
-                {label}（{tasks.length}）
+                {label}
+                <span className="task-count">{tasks.length}</span>
               </h3>
               {tasks.map((task) => (
                 <TaskCard
@@ -453,9 +455,10 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   return (
     <article className="task-card" aria-label={task.title}>
       <h4>{task.title}</h4>
-      <p className="task-goal">Goal：{goalTitle}</p>
-      <p className="task-kind">種類：{kindLabel(task.kind)}</p>
-      <p className="task-contract-version">契約版本 v{task.contract_version}</p>
+      <p className="task-meta">
+        <span className="task-kind">{kindLabel(task.kind)}</span>
+        <span className="task-goal">Goal：{goalTitle}</span>
+      </p>
       {task.unfinished_dependencies.length > 0 && (
         <p className="task-dependencies">等待相依：{task.unfinished_dependencies.map(titleOf).join("、")}</p>
       )}
@@ -476,8 +479,6 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       )}
 
       {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
-
-      {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} timeZone={timeZone} />}
 
       {run && (
         <RunStatusLine
@@ -502,9 +503,16 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
         <VerificationPanel client={client} workspaceId={workspaceId} taskId={task.id} onAccepted={onAccepted} />
       )}
 
+      {/* 次要資訊收合；工作目錄或清理失敗時預設展開，讓錯誤看得到 */}
+      <details className="task-details" open={workdirNeedsAttention(workdir)}>
+        <summary>詳細資訊</summary>
+        <p className="task-contract-version">契約版本 v{task.contract_version}</p>
+        {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} timeZone={timeZone} />}
+      </details>
+
       <div className="task-actions">
         {task.status === "ready" && (
-          <button type="button" onClick={onDispatch}>
+          <button type="button" className="primary-action" onClick={onDispatch}>
             派工
           </button>
         )}
@@ -514,7 +522,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
           </button>
         )}
         {task.status === "pending" && (
-          <button type="button" onClick={onReady}>
+          <button type="button" className="primary-action" onClick={onReady}>
             標記為可派工
           </button>
         )}
@@ -605,6 +613,10 @@ function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; t
   );
 }
 
+/** 工作目錄準備失敗或 worktree 清理失敗：需要使用者注意。 */
+const workdirNeedsAttention = (workdir: WorkdirView | null) =>
+  workdir !== null && (workdir.status === "failed" || workdir.cleanup?.status === "failed");
+
 /** Task 的工作目錄：種類、路徑、worktree 的分支與整合目標、狀態；準備失敗時醒目顯示原因；有清理登記時顯示清理狀態。 */
 function WorkdirStatus({
   workdir,
@@ -678,7 +690,8 @@ function IntegrationSummary({ entry, awaiting }: { entry: IntegrationEntry; awai
     >
       {awaiting && (
         <p>
-          <strong>成果已通過驗證，等待整合</strong>：整合驗證通過、目標分支更新後才算完成
+          <strong>成果已通過驗證，等待整合</strong>{" "}
+          <HelpTip label="等待整合">整合驗證通過、目標分支更新後才算完成</HelpTip>
         </p>
       )}
       <p>
@@ -754,15 +767,13 @@ function RunStatusLine({
       <p>
         Run（第 {run.generation} 次）：<strong>{runStatusLabel(run)}</strong>
         {accountName && `，帳號 ${accountName}`}
-        {run.process && `，程序 pid ${run.process.pid}`}
       </p>
       {usesOlderAuthorization && (
         <p>
-          沿用舊授權（revision {run.authorization_revision}，目前 {authorizationRevision}）
+          沿用舊授權（第 {run.authorization_revision} 版，目前第 {authorizationRevision} 版）
         </p>
       )}
       {run.end_reason && !(run.end_reason in HANDOFF_END_REASON_LABELS) && <p>結束原因：{run.end_reason}</p>}
-      {run.lease && <p>最後心跳：{formatTimestamp(run.lease.last_heartbeat_at, timeZone)}</p>}
       {isRunActive(run.status) && run.cancel_requested_at !== null && <p>取消中，等待程序停止…</p>}
       {run.latest_progress && (
         <p>
@@ -770,7 +781,7 @@ function RunStatusLine({
         </p>
       )}
       {run.latest_checkpoint && (
-        <div>
+        <div className="task-checkpoint">
           <p>
             Checkpoint：{run.latest_checkpoint.summary}（{formatTimestamp(run.latest_checkpoint.saved_at, timeZone)}）
           </p>
@@ -787,7 +798,13 @@ function RunStatusLine({
           受阻：{run.blocked.reason}（{formatTimestamp(run.blocked.reported_at, timeZone)}）
         </p>
       )}
-      <ContextReceiptPanel client={client} workspaceId={workspaceId} runId={run.id} />
+      {/* 程序、心跳與 context receipt 是除錯用的技術資訊，預設收合 */}
+      <details className="task-run-more">
+        <summary>技術細節</summary>
+        {run.process && <p>程序 pid {run.process.pid}</p>}
+        {run.lease && <p>最後心跳：{formatTimestamp(run.lease.last_heartbeat_at, timeZone)}</p>}
+        <ContextReceiptPanel client={client} workspaceId={workspaceId} runId={run.id} />
+      </details>
     </div>
   );
 }
@@ -844,7 +861,7 @@ function ContextReceiptPanel({ client, workspaceId, runId }: { client: TaskClien
         Context receipt
       </button>
       {open && loaded.state === "loading" && <p>載入中…</p>}
-      {open && loaded.state === "missing" && <p>這個 Run 沒有 context receipt（在 Context Builder 之前建立）</p>}
+      {open && loaded.state === "missing" && <p>這個 Run 建立得較早，沒有 context receipt</p>}
       {open && loaded.state === "failed" && <p role="alert">無法取得 context receipt：{loaded.reason}</p>}
       {open && loaded.state === "ready" && (
         <>
@@ -1015,7 +1032,7 @@ function BudgetStatus({ budget, timeZone }: { budget: BudgetView; timeZone?: str
         ))}
       </ul>
       {budget.retry_not_before !== null && <p>下次重試不早於 {formatTimestamp(budget.retry_not_before, timeZone)}</p>}
-      {budget.exhausted !== null && <p role="alert">{exhaustedLabel}預算已用完，Task 已阻擋，請到裁定中心決定下一步</p>}
+      {budget.exhausted !== null && <p role="alert">{exhaustedLabel}預算已用完，請到「裁定」決定下一步</p>}
     </div>
   );
 }
@@ -1072,7 +1089,7 @@ function VerificationPanel({ client, workspaceId, taskId, onAccepted }: Verifica
   return (
     <div className="task-verification" role="group" aria-label="成果驗證">
       <p>
-        <strong>驗證中</strong>：Worker 已結束，成果尚待確定性檢查或手動接受
+        <strong>驗證中</strong> <HelpTip label="驗證中">Worker 已結束，成果要通過自動檢查或由你手動接受才算完成</HelpTip>
       </p>
       <div className="task-actions">
         <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -1110,8 +1127,8 @@ function VerificationDetail({ view, note, busy, onNoteChange, onAccept }: Verifi
     <>
       <p>
         {view.automatic
-          ? `Runtime 正在執行 ${view.checks.length} 項確定性檢查，全部通過後自動完成`
-          : "Runtime 不會自動判定，需要手動接受成果"}
+          ? `正在執行 ${view.checks.length} 項確定性檢查，全部通過後自動完成`
+          : "沒有自動檢查，需要你手動接受成果"}
       </p>
       {view.checks.length > 0 && (
         <div>
