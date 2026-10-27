@@ -226,9 +226,14 @@ pub(crate) async fn decide(
     reason: &str,
     evidence: Vec<String>,
 ) -> Result<ControllerOutcome, ApiError> {
-    let content = ActionContent::new(matter, Some(task_id), summary, reason, evidence, None)
-        .map_err(DecisionApplyError::from)?
-        .with_subject(subject);
+    gate(state, scope, action_content(matter, task_id, subject, summary, reason, evidence)?).await
+}
+
+fn action_content(matter: Matter, task_id: &str, subject: &str, summary: &str, reason: &str, evidence: Vec<String>) -> Result<ActionContent, ApiError> {
+    Ok(ActionContent::new(matter, Some(task_id), summary, reason, evidence, None).map_err(DecisionApplyError::from)?.with_subject(subject))
+}
+
+async fn gate(state: &ApiState, scope: &ControllerScope, content: ActionContent) -> Result<ControllerOutcome, ApiError> {
     let outcome = state.store.controller_gate(scope, new_id("decision")?, new_id("authz")?, content, state.clock.now()).await?;
     let DecisionOutcome::Controller { outcome, .. } = outcome else { unreachable!("ControllerGate 只會得到 Controller 結果") };
     Ok(outcome)
@@ -408,7 +413,12 @@ pub(crate) async fn classify_review_finding(
                 Classification::Dismiss => format!("駁回{label}"),
                 _ => format!("{label}需要你決定：核准即駁回（不修正），不核准即修正"),
             };
-            match decide(&state, &scope, Matter::DismissReviewFinding, &subject_task, &finding.id, &summary, &request.reason, request.evidence).await? {
+            let mut content = action_content(Matter::DismissReviewFinding, &subject_task, &finding.id, &summary, &request.reason, request.evidence)?;
+            // Controller 判斷不了的 finding 一律交給使用者：駁回放寬為可自主處理時仍建立裁定請求（只能人工發起時照樣拒絕）
+            if classification == Classification::NeedsDecision {
+                content = content.ask_user();
+            }
+            match gate(&state, &scope, content).await? {
                 // 使用者把駁回放寬為可自主處理：等同核准，直接駁回；駁回一定要記下裁定與裁定者，兩者都記為這個 Controller Run
                 ControllerOutcome::Allowed => {
                     let run = format!("controller:{}", scope.controller_run_id);
@@ -424,7 +434,20 @@ pub(crate) async fn classify_review_finding(
                         let change = FindingChange { state: FindingState::AwaitingDecision, classification, reason: request.reason.clone() };
                         state.store.classify_finding(&scope.workspace_id, &finding.id, change, Some(request_id.clone()), None, &scope.controller_run_id, now).await.map_err(ApiError::from)?;
                     }
-                    return Err(requires_decision(Matter::DismissReviewFinding, request_id, existing, "finding 標為等待裁定，在使用者同意駁回之前這一軸不會通過"));
+                    let what = "finding 標為等待裁定，在使用者同意駁回之前這一軸不會通過";
+                    if classification == Classification::Dismiss {
+                        return Err(requires_decision(Matter::DismissReviewFinding, request_id, existing, what));
+                    }
+                    // 權限表可能已放寬，不能說成「依決策權限表必須由使用者裁定」
+                    return Err(ControllerToolError::RequiresDecision {
+                        matter: Matter::DismissReviewFinding,
+                        message: format!(
+                            "你判斷不了的 finding 一律由使用者裁定：已建立裁定請求 {request_id}，{what}。\
+                             使用者回答後，背景執行的 wait 會回報「裁定已回答」事件通知你，屆時以相同內容再呼叫一次這個工具套用結果；不要自行繞過。"
+                        ),
+                        decision_request_id: request_id,
+                        existing,
+                    });
                 }
                 ControllerOutcome::Approved { request_id, .. } => (
                     FindingChange { state: FindingState::Dismissed, classification, reason: request.reason.clone() },

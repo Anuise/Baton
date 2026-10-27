@@ -611,11 +611,27 @@ async fn classifying_a_finding_follows_the_effective_authority_when_the_table_is
     let marker = format!("controller:{controller_run}");
     let decided = (body["finding"]["decision_request_id"].as_str(), body["finding"]["decided_by"].as_str());
     assert_eq!(decided, (Some(marker.as_str()), Some(marker.as_str())), "{body}");
+    assert_eq!(w.decision_rows(), decisions, "可自主處理的駁回不建立裁定請求");
+
+    // 放寬後 Controller 判斷不了（needs_decision）的 finding 仍送使用者裁定：標為等待裁定，這一軸不通過
+    let (status, body) = w.classify(&token, &order, "needs_decision", "欄位順序契約沒有規定").await;
+    assert_eq!((status, error_code(&body), body["matter"].as_str()), (StatusCode::CONFLICT, "requires_decision", Some("dismiss_review_finding")), "{body}");
+    let request = body["decision_request_id"].as_str().unwrap().to_string();
+    let (status, pending) = w.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/decisions/{request}", w.ws), None).await;
+    assert_eq!((status, pending["status"].as_str()), (StatusCode::OK, Some("pending")), "needs_decision 一律建立裁定請求：{pending}");
+    assert!(pending["reason"].as_str().unwrap().contains("Controller 判斷不了"), "{pending}");
+    let waiting = w.review_view(&reviewed["id"]).await;
+    assert_eq!(waiting["spec"]["findings"][1]["state"], "awaiting_decision", "{waiting}");
+    assert_eq!(waiting["spec"]["findings"][1]["decision_request_id"], request.as_str(), "{waiting}");
+    assert_eq!(waiting["passed"], false, "{waiting}");
+
+    // 使用者同意駁回後，Controller 再呼叫一次才套用，裁定者是使用者
+    w.answer(&request, "approve").await;
     let (status, body) = w.classify(&token, &order, "needs_decision", "欄位順序契約沒有規定").await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["finding"]["state"], "dismissed", "{body}");
+    assert_eq!((body["finding"]["state"].as_str(), body["finding"]["decided_by"].as_str()), (Some("dismissed"), Some("desktop")), "{body}");
+    assert_eq!(body["finding"]["decision_request_id"], request.as_str(), "{body}");
     assert_eq!(body["review"]["passed"], true, "{body}");
-    assert_eq!(w.decision_rows(), decisions, "可自主處理的事項不建立裁定請求");
 }
 
 #[tokio::test]

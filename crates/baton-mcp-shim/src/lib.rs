@@ -743,7 +743,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_CLASSIFY_FINDING,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：依理由與證據分類一項審查 finding。fix（需要修正）可以自主處理，修正後要重新審查；dismiss（駁回）與 needs_decision（需要裁定）必須由使用者裁定：Runtime 回 requires_decision 並建立裁定請求，finding 標為 awaiting_decision，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用（核准駁回時 finding 變成 dismissed，沒有核准時改為 fix）。已駁回的 finding 不能再改分類（finding_resolved）。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：依理由與證據分類一項審查 finding。分類依決策權限表處理：fix（需要修正）對應「把 review finding 分類為「修正」」，預設可以自主處理，修正後要重新審查；dismiss（駁回）對應「駁回 review finding」，預設必須由使用者裁定，使用者放寬為可自主處理時直接駁回（finding 變成 dismissed）；needs_decision（你判斷不了）不論權限表是否放寬，一律交給使用者裁定。要裁定時 Runtime 回 requires_decision 並建立裁定請求，finding 標為 awaiting_decision，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用（核准駁回時 finding 變成 dismissed，沒有核准時改為 fix）。對應事項被設為只能由使用者發起時回 human_only，finding 不變、也不建立裁定請求（needs_decision 也一樣）。已駁回的 finding 不能再改分類（finding_resolved）。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -751,7 +751,7 @@ fn tool_definitions() -> Value {
                     "classification": {
                         "type": "string",
                         "enum": Classification::ALL.map(Classification::as_str),
-                        "description": "fix（需要修正，可自主處理）、dismiss（駁回，需使用者裁定）、needs_decision（需要使用者裁定）",
+                        "description": "fix（需要修正）、dismiss（駁回）、needs_decision（判斷不了，一律交給使用者裁定）；fix 與 dismiss 是否要裁定依決策權限表",
                     },
                     "reason": { "type": "string", "maxLength": REVIEW_REASON_MAX_CHARS, "description": "分類的理由與證據" },
                     "evidence": { "type": "array", "items": { "type": "string" }, "description": "支持判斷的證據（選填）" },
@@ -761,7 +761,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_RESOLVE_DESIGN_DEVIATION,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：處理 Worker 回報的設計偏離。reject（拒絕，實作必須依照目前的設計）可以自主處理；accept（接受）必須由使用者裁定：Runtime 回 requires_decision 並建立裁定請求，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用（核准時設計成果追加新版本，內容是偏離提出的設計；沒有核准時偏離改為已拒絕）。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：處理 Worker 回報的設計偏離。reject（拒絕，實作必須依照目前的設計）可以自主處理；accept（接受）依決策權限表的「接受設計偏離」處理：預設必須由使用者裁定，Runtime 回 requires_decision 並建立裁定請求，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用（核准時設計成果追加新版本，內容是偏離提出的設計；沒有核准時偏離改為已拒絕）。使用者放寬為可自主處理時直接接受；設為只能由使用者發起時回 human_only，偏離不變、也不建立裁定請求。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -873,7 +873,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": TOOL_TRIAGE_EXPLORATION_FINDING,
-            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：分流一個探索疑點。exclude（排除，必須附 reason：environment 環境、seed_data 測試資料、tool_limitation 工具限制、expected_design 預期設計）、mark_unverified（無法重現或無法驗證，保留為未驗風險 unverified_risk）、reopen（重新開啟已排除的疑點）。已確認的缺陷（confirmed、fixed、regressed）不能排除或改為未驗風險（exploration_defect_locked），修復後以 reproduce_exploration_finding 驗證。疑點有排隊中的重現時任何分流都被拒絕（exploration_reproduction_pending），等結果出來再分流。排除為 expected_design 是產品取捨，必須由使用者裁定：Runtime 依決策權限表回 requires_decision 並建立裁定請求，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用。排除的疑點仍保留紀錄，可以 reopen；任何疑點都不能刪除。",
+            "description": "Controller 專屬（Worker 呼叫會被拒絕，controller_only）：分流一個探索疑點。exclude（排除，必須附 reason：environment 環境、seed_data 測試資料、tool_limitation 工具限制、expected_design 預期設計）、mark_unverified（無法重現或無法驗證，保留為未驗風險 unverified_risk）、reopen（重新開啟已排除的疑點）。已確認的缺陷（confirmed、fixed、regressed）不能排除或改為未驗風險（exploration_defect_locked），修復後以 reproduce_exploration_finding 驗證。疑點有排隊中的重現時任何分流都被拒絕（exploration_reproduction_pending），等結果出來再分流。排除為 expected_design 是產品取捨，依決策權限表的「產品方向、使用者價值或範圍取捨」處理：預設必須由使用者裁定，Runtime 回 requires_decision 並建立裁定請求，等待裁定、不要自行假設或繞過；使用者回答後以相同內容再呼叫一次套用。使用者放寬為可自主處理時直接排除；設為只能由使用者發起時回 human_only，疑點不變、也不建立裁定請求。排除的疑點仍保留紀錄，可以 reopen；任何疑點都不能刪除。",
             "inputSchema": {
                 "type": "object",
                 "properties": {

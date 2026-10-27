@@ -547,6 +547,9 @@ pub struct ActionContent {
     /// 同一個 Task 內的操作對象（例如某個 review finding、某個設計偏離，票 44）；有的話只有同一個對象才視為同一個操作，
     /// 核准不會被同一個 Task 的其他對象用掉。
     pub subject: Option<String>,
+    /// Controller 自己判斷不了、要使用者決定（例如 needs_decision 的 review finding）：權限表放寬為可自主處理時仍建立裁定請求；
+    /// 設為只能人工發起時照樣拒絕。
+    pub ask_user: bool,
 }
 
 impl ActionContent {
@@ -566,12 +569,19 @@ impl ActionContent {
             evidence: clean_evidence(evidence)?,
             urgency: urgency.unwrap_or(Urgency::Normal),
             subject: None,
+            ask_user: false,
         })
     }
 
     /// 指定操作對象（見 `subject`）。
     pub fn with_subject(mut self, subject: &str) -> Self {
         self.subject = Some(subject.to_string());
+        self
+    }
+
+    /// 不論權限表是否放寬都交給使用者決定（見 `ask_user`）。
+    pub fn ask_user(mut self) -> Self {
+        self.ask_user = true;
         self
     }
 }
@@ -1391,7 +1401,7 @@ fn controller_action(
         )
     };
     match authority {
-        Authority::Autonomous => {
+        Authority::Autonomous if !content.ask_user => {
             let mut change = DecisionChange::new(decided(ControllerOutcome::Allowed));
             change.events.push(audit(EVENT_CONTROLLER_ACTION_ALLOWED));
             return Ok(change);
@@ -1401,7 +1411,7 @@ fn controller_action(
             change.events.push(audit(EVENT_CONTROLLER_ACTION_REFUSED));
             return Ok(change);
         }
-        Authority::RequiresDecision => {}
+        Authority::RequiresDecision | Authority::Autonomous => {}
     }
 
     let fingerprint = match &content.subject {
@@ -1437,7 +1447,11 @@ fn controller_action(
     }
 
     let question = format!("Controller 要「{}」：{}，核准嗎？", matter.label(), content.summary);
-    let reason = format!("依決策權限表，「{}」必須由你裁定，Controller 不能自行處理。Controller 的理由：{}", matter.label(), content.reason);
+    let reason = if authority == Authority::Autonomous {
+        format!("決策權限表允許 Controller 自行「{}」，但 Controller 判斷不了，交給你決定。Controller 的理由：{}", matter.label(), content.reason)
+    } else {
+        format!("依決策權限表，「{}」必須由你裁定，Controller 不能自行處理。Controller 的理由：{}", matter.label(), content.reason)
+    };
     let mut record = new_request(request_id.clone(), &requester, caller, target, DecisionKind::Authority, question, reason, now);
     // 超出授權（票 17）：裁定只記錄使用者的決定，不會擴大 Workspace 授權；要派出這個 Task 必須另外修改授權
     let approve_tradeoff = if matter == Matter::ExceedAuthorization {
