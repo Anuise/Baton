@@ -16,7 +16,7 @@ use baton_api::{
     BatchRequest, BatchResponse, ConfirmAuthorizationRequest, CreateProfileFromDirRequest, CreateProfileRequest, CreateTaskRequest,
     CreateWorkspaceRequest, HealthResponse, ImportPreview, LifecycleStatus, LoginStartupView, LoginTerminalResponse, MergeRequest,
     MergeResponse, PendingDecisions, PlatformResponse, ProfileList, SchedulingOverview, SetupStatus, SharedSettingsStatus,
-    SummaryRequest, TaskBoard, TaskDetail, UpdateAuthorityRequest, WorkspaceLifecycleView, WorkspaceList,
+    SummaryRequest, TaskBoard, TaskDetail, UpdateAuthorityRequest, WorkspaceLifecycleView, WorkspaceList, ModelCatalog,
     ConfirmKnowledgeRequest, CorrectKnowledgeRequest, CreateKnowledgeRequest, KnowledgeDetail, KnowledgeEntryView,
     KnowledgeList, KnowledgeListQuery, KnowledgeReasonRequest,
     CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList, ReportRecurrenceRequest,
@@ -220,6 +220,24 @@ async fn workspace_set_model_overrides(
     link.client.set_model_overrides(&id, &overrides).await.map_err(|e| e.to_string())
 }
 
+/// Web UI 取得模型設定可選的模型清單。
+#[tauri::command]
+async fn model_list(link: State<'_, RuntimeLink>) -> Result<ModelCatalog, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.available_models().await.map_err(|e| e.to_string())
+}
+
+/// Web UI 以使用者貼上的 Anthropic API 金鑰更新可用模型清單；金鑰只轉交給 Runtime 的這一次請求，不保存（AI-33）。
+#[tauri::command]
+async fn model_refresh(link: State<'_, RuntimeLink>, api_key: String) -> Result<ModelCatalog, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.refresh_models(&api_key).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 列出帳號 Profile 與可派工判定。
 #[tauri::command]
 async fn profile_list(link: State<'_, RuntimeLink>) -> Result<ProfileList, String> {
@@ -271,6 +289,15 @@ async fn profile_login_terminal(link: State<'_, RuntimeLink>, id: String) -> Res
         return Err(reason.clone());
     }
     link.client.open_login_terminal(&id).await.map_err(|e| e.to_string())
+}
+
+/// Web UI 調整帳號的顯示順序（只影響顯示，不影響派工）。
+#[tauri::command]
+async fn profile_reorder(link: State<'_, RuntimeLink>, profile_ids: Vec<String>) -> Result<ProfileList, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.reorder_profiles(&profile_ids).await.map_err(|e| e.to_string())
 }
 
 /// Web UI 封存 Profile（釋出名額，不刪除它的登入資料目錄）。
@@ -1381,6 +1408,7 @@ async fn knowledge_report_recurrence(
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(link)
         .invoke_handler(tauri::generate_handler![
             runtime_health,
@@ -1389,12 +1417,15 @@ fn main() {
             workspace_create,
             workspace_archive,
             workspace_set_model_overrides,
+            model_list,
+            model_refresh,
             profile_list,
             profile_create,
             profile_create_from_dir,
             profile_verify,
             profile_login_terminal,
             profile_archive,
+            profile_reorder,
             shared_settings_status,
             shared_settings_preview,
             shared_settings_adopt,

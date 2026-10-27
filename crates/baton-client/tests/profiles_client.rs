@@ -85,3 +85,35 @@ async fn app_registers_an_existing_logged_in_dir_and_sees_the_check_and_rejectio
     assert!(created.dispatchable, "建立後已核對：{:?}", created.blockers);
     assert!(matches!(&again, ClientError::Rejected { code, .. } if code == "profile_config_dir_shared"), "{again:?}");
 }
+
+fn names(list: &baton_api::ProfileList) -> Vec<&str> {
+    list.profiles.iter().map(|p| p.profile.name.as_str()).collect()
+}
+
+#[tokio::test]
+async fn app_reorders_profiles_and_the_list_keeps_that_order_with_new_ones_last() {
+    let harness = Harness::start().await;
+    let client = app_client(&harness);
+    let mut ids = Vec::new();
+    for name in ["一", "二", "三"] {
+        ids.push(client.create_profile(&request(name)).await.unwrap().profile.id);
+    }
+
+    let reordered = client.reorder_profiles(&[ids[2].clone(), ids[0].clone(), ids[1].clone()]).await.unwrap();
+    client.create_profile(&request("四")).await.unwrap();
+
+    assert_eq!(names(&reordered), ["三", "一", "二"]);
+    assert_eq!(names(&client.profiles().await.unwrap()), ["三", "一", "二", "四"]);
+}
+
+#[tokio::test]
+async fn an_order_that_no_longer_matches_the_profiles_is_rejected_with_its_code() {
+    let harness = Harness::start().await;
+    let client = app_client(&harness);
+    let first = client.create_profile(&request("一")).await.unwrap().profile.id;
+    client.create_profile(&request("二")).await.unwrap();
+
+    let stale = client.reorder_profiles(&[first]).await.unwrap_err();
+
+    assert!(matches!(&stale, ClientError::Rejected { code, .. } if code == "profile_order_mismatch"), "{stale:?}");
+}

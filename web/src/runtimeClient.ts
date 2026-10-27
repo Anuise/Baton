@@ -89,6 +89,18 @@ export interface WorkspaceList {
   workspaces: Workspace[];
 }
 
+/** 模型設定可選的一個模型（對應 Rust 的 ModelOption）：`id` 交給 `claude --model`，`label` 給使用者看。 */
+export interface ModelOption {
+  id: string;
+  label: string;
+}
+
+export interface ModelCatalog {
+  models: ModelOption[];
+  /** 清單來源：`null` 是 Runtime 內建清單；有值是使用者以 API 金鑰更新的時間（UTC 毫秒）。 */
+  updated_at: number | null;
+}
+
 export interface CreateWorkspaceRequest {
   path: string;
   name?: string;
@@ -244,6 +256,7 @@ export interface AccountProfile {
   blockers: ProfileBlocker[];
 }
 
+/** 帳號清單（含已封存），依使用者調整的顯示順序；新增的帳號排在最後。 */
 export interface ProfileList {
   profiles: AccountProfile[];
   limit: number;
@@ -350,6 +363,13 @@ export interface WorkspaceClient {
   archiveWorkspace(id: string): Promise<Workspace>;
   /** 整組取代依角色的模型覆寫；只影響之後派出的 Run。 */
   setModelOverrides(id: string, overrides: ModelOverrides): Promise<Workspace>;
+}
+
+/** 模型設定可選的模型清單（Runtime 提供）。 */
+export interface ModelCatalogClient {
+  listModels(): Promise<ModelCatalog>;
+  /** 以使用者貼上的 Anthropic API 金鑰更新清單；金鑰只隨這一次請求送出，不保存（AI-33）。 */
+  refreshModels(apiKey: string): Promise<ModelCatalog>;
 }
 
 /** Workspace 授權：讀取、確認前的摘要、確認並保存（產生新的 revision）。 */
@@ -1112,10 +1132,11 @@ export interface AuthorityEntry {
   label: string;
   builtin: AuthorityLevel;
   effective: AuthorityLevel;
-  narrowed: boolean;
+  /** 這個 Workspace 的設定與內建不同（收窄或放寬）。 */
+  overridden: boolean;
 }
 
-/** 決策權限表（spec D-15）：Workspace 可收窄、不可放寬。 */
+/** 決策權限表（spec D-15）：每個事項都可以由使用者設為任何層級，收窄或放寬都可以。 */
 export interface AuthorityTable {
   revision: number;
   entries: AuthorityEntry[];
@@ -1144,7 +1165,6 @@ export interface DecisionClient {
   mergeDecision(workspaceId: string, requestId: string, request: MergeRequest): Promise<{ decision: DecisionRequestView }>;
   linkDecision(workspaceId: string, requestId: string, otherId: string): Promise<DecisionRequestView>;
   decisionAuthority(workspaceId: string): Promise<AuthorityTable>;
-  /** 放寬會被拒（authority_widening_refused）。 */
   updateDecisionAuthority(workspaceId: string, request: UpdateAuthorityRequest): Promise<AuthorityTable>;
   pendingDecisions(): Promise<PendingDecisions>;
 }
@@ -1546,6 +1566,11 @@ export interface AccountClient {
   /** 開啟終端機，以該 Profile 自己的設定目錄執行原生登入。 */
   openLoginTerminal(id: string): Promise<{ opened: boolean }>;
   archiveProfile(id: string): Promise<AccountProfile>;
+  /**
+   * 調整帳號的顯示順序（依序列出每個使用中的 Profile），回傳依新順序排列的清單；只影響顯示，不影響派工。
+   * 清單已變動（有新增或封存）時會被拒（profile_order_mismatch）。
+   */
+  reorderProfiles(profileIds: string[]): Promise<ProfileList>;
   getSetup(): Promise<SetupStatus>;
   /** 重新探測工具並重新核對每個使用中的 Profile。 */
   recheckSetup(): Promise<SetupStatus>;
@@ -2959,6 +2984,7 @@ export interface ExplorationClient {
 
 export type AppClient = RuntimeClient &
   WorkspaceClient &
+  ModelCatalogClient &
   AuthorizationClient &
   TaskClient &
   AccountClient &
@@ -2991,6 +3017,8 @@ export function errorCode(error: unknown): string | null {
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
 const WORKSPACES_PATH = "/api/v1/workspaces";
+const MODELS_PATH = "/api/v1/models";
+const MODELS_REFRESH_PATH = "/api/v1/models/refresh";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
 const PENDING_DECISIONS_PATH = "/api/v1/decisions/pending";
@@ -3081,6 +3109,8 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     },
     setModelOverrides: (id, overrides) =>
       send(`${workspacePath(id)}/model-overrides`, { method: "PUT", body: overrides }),
+    listModels: () => send<ModelCatalog>(MODELS_PATH),
+    refreshModels: (apiKey) => send<ModelCatalog>(MODELS_REFRESH_PATH, { method: "POST", body: { api_key: apiKey } }),
     async getAuthorization(workspaceId) {
       const response = await fetchFn(authorizationPath(workspaceId));
       if (!response.ok) throw await failure(response);
@@ -3130,6 +3160,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     verifyProfile: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/verify`, { method: "POST" }),
     openLoginTerminal: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/login-terminal`, { method: "POST" }),
     archiveProfile: (id) => send(`${PROFILES_PATH}/${encodeURIComponent(id)}/archive`, { method: "POST" }),
+    reorderProfiles: (profileIds) => send(`${PROFILES_PATH}/order`, { method: "PUT", body: { profile_ids: profileIds } }),
     getSetup: () => send(SETUP_PATH),
     recheckSetup: () => send(`${SETUP_PATH}/recheck`, { method: "POST" }),
     acknowledgeBackgroundNotice: () => send(`${SETUP_PATH}/background-notice/acknowledge`, { method: "POST" }),
@@ -3269,6 +3300,8 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     createWorkspace: ({ path, name }) => call<Workspace>("workspace_create", { path, name }),
     archiveWorkspace: (id) => call<Workspace>("workspace_archive", { id }),
     setModelOverrides: (id, overrides) => call<Workspace>("workspace_set_model_overrides", { id, overrides }),
+    listModels: () => call<ModelCatalog>("model_list"),
+    refreshModels: (apiKey) => call<ModelCatalog>("model_refresh", { apiKey }),
     getAuthorization: (id) => call<AuthorizationView>("workspace_authorization", { id }),
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
     confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion, expectedRevision }) =>
@@ -3300,6 +3333,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     verifyProfile: (id) => call<AccountProfile>("profile_verify", { id }),
     openLoginTerminal: (id) => call<{ opened: boolean }>("profile_login_terminal", { id }),
     archiveProfile: (id) => call<AccountProfile>("profile_archive", { id }),
+    reorderProfiles: (profileIds) => call<ProfileList>("profile_reorder", { profileIds }),
     getSetup: () => call<SetupStatus>("setup_status"),
     recheckSetup: () => call<SetupStatus>("setup_recheck"),
     acknowledgeBackgroundNotice: () => call<SetupStatus>("setup_acknowledge_notice"),

@@ -1937,6 +1937,24 @@ const MIGRATIONS: &[Migration] = &[
         name: "controller_cli_switch",
         sql: "ALTER TABLE controller_run ADD COLUMN switch_to_profile_id TEXT;",
     },
+    // 決策權限表改為使用者可自由設定（ADR-0003 修訂）：改存「事項 → 等級」中與內建不同的項目。
+    // 舊資料的 `narrowed` 只會是內建可自主處理、被收窄為必須送裁定的事項，逐一轉成 `requires_decision`
+    Migration {
+        name: "decision_authority_overrides",
+        sql: "ALTER TABLE decision_authority_policy
+            ADD COLUMN overrides TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(overrides));
+        UPDATE decision_authority_policy
+            SET overrides = (SELECT json_group_object(value, 'requires_decision') FROM json_each(narrowed));
+        ALTER TABLE decision_authority_policy DROP COLUMN narrowed;",
+    },
+    // 帳號的顯示順序（使用者可調整，只影響帳號頁的排列，不影響派工）。改版前依建立順序（rowid）顯示，
+    // 既有 Profile 的順序依 rowid 編為 0、1、2…，維持原本的排列
+    Migration {
+        name: "account_profile_display_order",
+        sql: "ALTER TABLE account_profile ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
+        UPDATE account_profile
+            SET display_order = (SELECT COUNT(*) FROM account_profile AS earlier WHERE earlier.rowid < account_profile.rowid);",
+    },
 ];
 
 /// 必須在 `foreign_keys=OFF` 下套用的 migration（SQLite 官方的重建資料表程序）：重建被其他資料表參照的表時，
@@ -2870,6 +2888,92 @@ mod tests {
         assert!(insert("d3", "ctl_nope", "controller").is_err());
         insert("d4", "r1", "worker").unwrap();
         assert!(conn.execute("UPDATE decision_request SET origin = 'controller', revision = 2 WHERE id = 'd4'", []).is_err());
+    }
+
+    #[tokio::test]
+    async fn the_authority_overrides_migration_keeps_narrowed_matters_effective() {
+        use baton_domain::authority::{Authority, Matter};
+        // 套用到改版前的版本，放一個收窄過兩個事項的 Workspace 與一個收窄後又全部還原的 Workspace
+        let dir = tempfile::tempdir().unwrap();
+        let before = MIGRATIONS.iter().position(|m| m.name == "decision_authority_overrides").unwrap();
+        {
+            let old = raw(dir.path());
+            old.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (index, migration) in MIGRATIONS[..before].iter().enumerate() {
+                old.execute_batch(migration.sql).unwrap();
+                old.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![index + 1, migration.name],
+                )
+                .unwrap();
+            }
+            old.execute_batch(
+                r#"INSERT INTO workspace (id, name, path, status, version, created_at) VALUES ('w1', 'w', 'C:/w1', 'active', 1, 1);
+                 INSERT INTO workspace (id, name, path, status, version, created_at) VALUES ('w2', 'w', 'C:/w2', 'active', 1, 1);
+                 INSERT INTO decision_authority_policy (workspace_id, revision, narrowed, updated_at)
+                   VALUES ('w1', 3, '["arrange_tasks","choose_playbook"]', 1);
+                 INSERT INTO decision_authority_policy (workspace_id, revision, narrowed, updated_at) VALUES ('w2', 2, '[]', 1);"#,
+            )
+            .unwrap();
+        }
+
+        let store = open(dir.path()).await;
+        let narrowed = [Matter::ArrangeTasks, Matter::ChoosePlaybook];
+        let w1 = store.decision_authority("w1").await.unwrap();
+        assert_eq!(w1.revision, 3);
+        for entry in &w1.entries {
+            let expected = if narrowed.contains(&entry.matter) { Authority::RequiresDecision } else { entry.matter.builtin() };
+            assert_eq!(entry.effective, expected, "{:?}", entry.matter);
+        }
+        let w2 = store.decision_authority("w2").await.unwrap();
+        assert_eq!(w2.revision, 2);
+        assert!(w2.entries.iter().all(|e| e.effective == e.matter.builtin() && !e.overridden));
+        drop(store);
+
+        let overrides: String =
+            raw(dir.path()).query_row("SELECT overrides FROM decision_authority_policy WHERE workspace_id = 'w1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&overrides).unwrap(),
+            serde_json::json!({ "arrange_tasks": "requires_decision", "choose_playbook": "requires_decision" })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_profile_display_order_migration_keeps_the_existing_order() {
+        // 套用到改版前的版本，依序建立三個 Profile（其中一個已封存）；改版前的顯示順序就是建立順序（rowid）
+        let dir = tempfile::tempdir().unwrap();
+        let before = MIGRATIONS.iter().position(|m| m.name == "account_profile_display_order").unwrap();
+        {
+            let old = raw(dir.path());
+            old.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+            for (index, migration) in MIGRATIONS[..before].iter().enumerate() {
+                old.execute_batch(migration.sql).unwrap();
+                old.execute(
+                    "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?1, ?2, 1)",
+                    rusqlite::params![index + 1, migration.name],
+                )
+                .unwrap();
+            }
+            old.execute_batch(
+                r"INSERT INTO account_profile (id, name, config_dir, status, version, created_at)
+                   VALUES ('p_c', 'c', 'C:\p\c', 'active', 1, 3);
+                 INSERT INTO account_profile (id, name, config_dir, status, version, created_at, archived_at)
+                   VALUES ('p_a', 'a', 'C:\p\a', 'archived', 2, 1, 5);
+                 INSERT INTO account_profile (id, name, config_dir, status, version, created_at)
+                   VALUES ('p_b', 'b', 'C:\p\b', 'active', 1, 2);",
+            )
+            .unwrap();
+        }
+
+        let store = open(dir.path()).await;
+
+        assert_eq!(store.profile_display_order().await.unwrap(), ["p_c", "p_a", "p_b"]);
     }
 
     #[tokio::test]

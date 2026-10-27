@@ -7,7 +7,7 @@
 
 use baton_domain::approval::ArtifactMark;
 use baton_domain::auth::{AgentScope, ControllerScope};
-use baton_domain::authority::{self, AuthorityEntryRequest, AuthorityError, AuthorityPolicy, AuthorityTable, Matter};
+use baton_domain::authority::{self, AuthorityEntryRequest, AuthorityError, AuthorityPolicy, AuthorityTable};
 use baton_domain::decision::{
     self, ActionContent, ApprovalUse, AuthorityDetail, Decision, DecisionAction, DecisionChange, DecisionCommand,
     DecisionContext, DecisionError, DecisionKind, DecisionOrigin, DecisionOutcome, DecisionRequest, DecisionStatus,
@@ -345,7 +345,7 @@ impl Store {
         Ok(result?)
     }
 
-    /// 以使用者送來的設定取代 Workspace 的決策權限表；只能收窄，放寬整個拒絕。
+    /// 以使用者送來的設定取代 Workspace 的決策權限表；任何事項都可以設為任何等級。
     pub async fn update_decision_authority(
         &self,
         workspace_id: &str,
@@ -364,12 +364,12 @@ impl Store {
                     Ok(policy) => policy,
                     Err(rejected) => return Ok(Err(DecisionApplyError::Authority(rejected))),
                 };
-                let narrowed = serde_json::to_string(&policy.narrowed).expect("事項清單可序列化");
+                let overrides = serde_json::to_string(&policy.overrides).expect("權限設定可序列化");
                 tx.execute(
-                    "INSERT INTO decision_authority_policy (workspace_id, revision, narrowed, updated_at)
+                    "INSERT INTO decision_authority_policy (workspace_id, revision, overrides, updated_at)
                      VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(workspace_id) DO UPDATE SET revision = ?2, narrowed = ?3, updated_at = ?4",
-                    rusqlite::params![workspace_id, policy.revision, narrowed, now.as_millis()],
+                     ON CONFLICT(workspace_id) DO UPDATE SET revision = ?2, overrides = ?3, updated_at = ?4",
+                    rusqlite::params![workspace_id, policy.revision, overrides, now.as_millis()],
                 )?;
                 append_event(
                     tx,
@@ -379,7 +379,7 @@ impl Store {
                         aggregate_version: policy.revision,
                         event_type: "decision_authority_changed",
                         occurred_at: now,
-                        payload: serde_json::json!({ "narrowed": policy.narrowed }),
+                        payload: serde_json::json!({ "overrides": policy.overrides }),
                     },
                 )?;
                 Ok(Ok(authority::table(&policy)))
@@ -463,13 +463,13 @@ fn workspace_exists(conn: &Connection, workspace_id: &str) -> rusqlite::Result<b
 
 fn load_policy(conn: &Connection, workspace_id: &str) -> rusqlite::Result<AuthorityPolicy> {
     let row = conn
-        .prepare("SELECT revision, narrowed FROM decision_authority_policy WHERE workspace_id = ?1")?
+        .prepare("SELECT revision, overrides FROM decision_authority_policy WHERE workspace_id = ?1")?
         .query_map([workspace_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
         .next()
         .transpose()?;
     Ok(match row {
         None => AuthorityPolicy::default(),
-        Some((revision, narrowed)) => AuthorityPolicy { revision, narrowed: json_column::<Vec<Matter>>(1, &narrowed)? },
+        Some((revision, overrides)) => AuthorityPolicy { revision, overrides: json_column(1, &overrides)? },
     })
 }
 

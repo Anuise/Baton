@@ -23,6 +23,8 @@ use crate::ApiState;
 pub const PROFILES_PATH: &str = "/api/v1/profiles";
 /// 以既有目錄建立 Profile 的路徑（POST）。
 pub const PROFILES_FROM_EXISTING_DIR_PATH: &str = "/api/v1/profiles/from-existing-dir";
+/// 調整帳號顯示順序的路徑（PUT）。
+pub const PROFILES_ORDER_PATH: &str = "/api/v1/profiles/order";
 /// 核對登入狀態路徑樣板（`{id}` 是 Profile 識別）。
 pub(crate) const VERIFY_ROUTE: &str = "/api/v1/profiles/{id}/verify";
 pub(crate) const LOGIN_TERMINAL_ROUTE: &str = "/api/v1/profiles/{id}/login-terminal";
@@ -43,7 +45,13 @@ pub struct CreateProfileFromDirRequest {
     pub config_dir: String,
 }
 
-/// 列出端點的回應：全部 Profile（含已封存）與可派工判定，依建立順序。
+/// 調整帳號的顯示順序：依新的順序列出每個使用中的 Profile 恰好一次（只影響顯示，不影響派工）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReorderProfilesRequest {
+    pub profile_ids: Vec<String>,
+}
+
+/// 列出端點的回應：全部 Profile（含已封存）與可派工判定，依使用者調整的顯示順序（新增的在最後）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileList {
     pub profiles: Vec<ProfileView>,
@@ -68,7 +76,8 @@ impl From<ProfileError> for ApiError {
             ProfileError::NameTaken(_)
             | ProfileError::LimitReached
             | ProfileError::ConfigDirShared(_)
-            | ProfileError::AlreadyArchived(_) => StatusCode::CONFLICT,
+            | ProfileError::AlreadyArchived(_)
+            | ProfileError::OrderMismatch => StatusCode::CONFLICT,
         };
         ApiError { status, code: error.code(), message: error.to_string() }
     }
@@ -84,8 +93,28 @@ impl From<ProfileApplyError> for ApiError {
 }
 
 pub(crate) async fn list(State(state): State<Arc<ApiState>>) -> Result<Json<ProfileList>, ApiError> {
-    let profiles = state.store.list_profiles().await?;
-    Ok(Json(ProfileList { profiles: profile::views(&profiles), limit: profile::MAX_PROFILES }))
+    Ok(Json(display_list(&state).await?))
+}
+
+pub(crate) async fn reorder(
+    State(state): State<Arc<ApiState>>,
+    body: Result<Json<ReorderProfilesRequest>, JsonRejection>,
+) -> Result<Json<ProfileList>, ApiError> {
+    let Json(request) = body.map_err(|rejection| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "bad_request",
+        message: format!("請求內容不是有效的 JSON，或缺少必要欄位 profile_ids：{}", rejection.body_text()),
+    })?;
+    state.store.reorder_profiles(request.profile_ids).await?;
+    Ok(Json(display_list(&state).await?))
+}
+
+/// 依顯示順序排列的 Profile 清單；可派工判定（重複帳號只算較早建立的）仍以建立順序計算。
+async fn display_list(state: &ApiState) -> Result<ProfileList, StoreError> {
+    let mut views = profile::views(&state.store.list_profiles().await?);
+    let order = state.store.profile_display_order().await?;
+    views.sort_by_key(|v| order.iter().position(|id| *id == v.profile.id));
+    Ok(ProfileList { profiles: views, limit: profile::MAX_PROFILES })
 }
 
 pub(crate) async fn create(

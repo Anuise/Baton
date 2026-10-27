@@ -352,6 +352,8 @@ pub enum ProfileError {
     NotFound(String),
     #[error("Profile {0} 已經封存")]
     AlreadyArchived(String),
+    #[error("帳號清單已經變動（有新增或封存），無法套用這個順序；請重新整理後再調整")]
+    OrderMismatch,
 }
 
 impl ProfileError {
@@ -367,6 +369,7 @@ impl ProfileError {
             ProfileError::ConfigDirManaged(_) => "profile_config_dir_managed",
             ProfileError::NotFound(_) => "profile_not_found",
             ProfileError::AlreadyArchived(_) => "profile_already_archived",
+            ProfileError::OrderMismatch => "profile_order_mismatch",
         }
     }
 }
@@ -536,6 +539,23 @@ fn find_active<'a>(existing: &'a [AccountProfile], id: &str) -> Result<&'a Accou
         return Err(ProfileError::AlreadyArchived(id.to_string()));
     }
     Ok(current)
+}
+
+/// 調整帳號的顯示順序（只影響帳號頁的排列，不影響派工；派工仍依建立順序）。
+/// `current` 是目前所有的 Profile（含已封存，依顯示順序）；`requested` 必須恰好列出每個使用中的 Profile 一次。
+/// 回傳全部 Profile 的新順序：使用中的依要求排列，已封存的維持原本的相對順序排在後面。
+pub fn reorder(current: &[AccountProfile], requested: &[String]) -> Result<Vec<String>, ProfileError> {
+    // 排序後比較：同時抓到缺少、多出、重複與已封存的項目
+    let mut active: Vec<&str> =
+        current.iter().filter(|p| p.status == ProfileStatus::Active).map(|p| p.id.as_str()).collect();
+    let mut listed: Vec<&str> = requested.iter().map(String::as_str).collect();
+    active.sort_unstable();
+    listed.sort_unstable();
+    if listed != active {
+        return Err(ProfileError::OrderMismatch);
+    }
+    let archived = current.iter().filter(|p| p.status == ProfileStatus::Archived).map(|p| p.id.clone());
+    Ok(requested.iter().cloned().chain(archived).collect())
 }
 
 fn event(
@@ -988,5 +1008,34 @@ mod tests {
         assert_eq!(ProfileError::NotFound("x".into()).code(), "profile_not_found");
         assert_eq!(ConfigDirOrigin::parse(ConfigDirOrigin::External.as_str()), Some(ConfigDirOrigin::External));
         assert_eq!(ConfigDirOrigin::parse(ConfigDirOrigin::Managed.as_str()), Some(ConfigDirOrigin::Managed));
+        assert_eq!(ProfileError::OrderMismatch.code(), "profile_order_mismatch");
+    }
+
+    fn archive(profile: AccountProfile) -> AccountProfile {
+        let id = profile.id.clone();
+        decide(&[profile], ProfileCommand::Archive { id }, T2).unwrap().profile
+    }
+
+    fn ids(order: &[String]) -> Vec<&str> {
+        order.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn reorder_puts_active_profiles_in_the_requested_order_and_archived_ones_after_them() {
+        let current = [created("p1", "一"), archive(created("p2", "二")), created("p3", "三"), created("p4", "四")];
+        let requested = ["p4".to_string(), "p1".to_string(), "p3".to_string()];
+
+        assert_eq!(ids(&reorder(&current, &requested).unwrap()), ["p4", "p1", "p3", "p2"]);
+    }
+
+    #[test]
+    fn reorder_must_list_every_active_profile_exactly_once() {
+        let current = [created("p1", "一"), archive(created("p2", "二")), created("p3", "三")];
+        let order = |raw: &[&str]| raw.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // 少一個、多一個不存在的、重複、包含已封存的：都代表畫面上的清單已經不是目前的狀態
+        for bad in [&["p1"][..], &["p1", "p3", "p9"], &["p1", "p1", "p3"], &["p1", "p2", "p3"]] {
+            assert_eq!(reorder(&current, &order(bad)), Err(ProfileError::OrderMismatch), "{bad:?}");
+        }
     }
 }

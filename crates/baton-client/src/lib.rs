@@ -42,8 +42,8 @@ use baton_api::{
     guard_action_path, recurrences_path, CreateGuardRequest, GuardList, GuardRevisionRequest, GuardView, RecurrenceList,
     ReportRecurrenceRequest, GUARDS_PATH,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
-    PLATFORM_PATH, PROFILES_FROM_EXISTING_DIR_PATH, PROFILES_PATH, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
-    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH,
+    PLATFORM_PATH, PROFILES_FROM_EXISTING_DIR_PATH, PROFILES_ORDER_PATH, PROFILES_PATH, ReorderProfilesRequest, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
+    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH, ModelCatalog, MODELS_PATH, MODELS_REFRESH_PATH, RefreshModelsRequest,
 };
 use baton_domain::authority::AuthorityTable;
 use baton_domain::decision::DecisionView;
@@ -75,6 +75,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 下載成果（最多 10 MiB，仍要讀檔並重新計算雜湊）等待回應的上限。
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 以 API 金鑰更新可用模型清單：Runtime 要向 Anthropic 查詢（可能有多頁），等待回應的上限。
+const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 同意更新的請求要先下載並驗證安裝程式（票 34），等待回應的上限。
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -167,6 +170,17 @@ impl RuntimeClient {
         self.send_json(reqwest::Method::PUT, &format!("{WORKSPACES_PATH}/{workspace_id}/model-overrides"), Some(overrides)).await
     }
 
+    /// 模型設定可選的模型清單。
+    pub async fn available_models(&self) -> Result<ModelCatalog, ClientError> {
+        self.get_json(MODELS_PATH).await
+    }
+
+    /// 以使用者貼上的 Anthropic API 金鑰更新可用模型清單；金鑰只隨這一次請求送出（AI-33）。
+    pub async fn refresh_models(&self, api_key: &str) -> Result<ModelCatalog, ClientError> {
+        let request = RefreshModelsRequest { api_key: api_key.to_string() };
+        self.send_json_within(reqwest::Method::POST, MODELS_REFRESH_PATH, Some(&request), MODELS_REFRESH_TIMEOUT).await
+    }
+
     /// 列出全部帳號 Profile（含已封存）與可派工判定。
     pub async fn profiles(&self) -> Result<ProfileList, ClientError> {
         self.get_json(PROFILES_PATH).await
@@ -191,6 +205,13 @@ impl RuntimeClient {
     /// 開啟終端機，以該 Profile 自己的設定目錄執行原生登入。
     pub async fn open_login_terminal(&self, id: &str) -> Result<LoginTerminalResponse, ClientError> {
         self.send_json::<(), _>(reqwest::Method::POST, &format!("{PROFILES_PATH}/{id}/login-terminal"), None).await
+    }
+
+    /// 調整帳號的顯示順序（依序列出每個使用中的 Profile），回傳依新順序排列的清單；
+    /// 清單已變動（有新增或封存）時回傳 `ClientError::Rejected`（`profile_order_mismatch`）。
+    pub async fn reorder_profiles(&self, profile_ids: &[String]) -> Result<ProfileList, ClientError> {
+        let request = ReorderProfilesRequest { profile_ids: profile_ids.to_vec() };
+        self.send_json(reqwest::Method::PUT, PROFILES_ORDER_PATH, Some(&request)).await
     }
 
     pub async fn archive_profile(&self, id: &str) -> Result<ProfileView, ClientError> {
@@ -497,7 +518,7 @@ impl RuntimeClient {
         self.get_json(&decision_authority_path(workspace_id)).await
     }
 
-    /// 取代 Workspace 的決策權限表；只能收窄，放寬回 `authority_widening_refused`。
+    /// 取代 Workspace 的決策權限表；任何事項都可以設為任何等級，沒列出的回到內建值。
     pub async fn update_decision_authority(
         &self,
         workspace_id: &str,

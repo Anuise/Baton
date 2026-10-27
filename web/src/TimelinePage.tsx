@@ -39,6 +39,9 @@ const CATEGORY_LABELS: Record<TimelineCategory, string> = {
   controller: "Controller",
 };
 
+/** 時間線一頁顯示的事件數。 */
+const PAGE_SIZE = 10;
+
 /** 沒有資料（null）一律顯示的文字，不當成 0。 */
 const NO_DATA = "無資料";
 
@@ -87,12 +90,14 @@ function quotaUsed(used: number | null): string {
 
 /**
  * 時間線（票 41）：上方是由時間線事件計算的觀測指標，下方依 Runtime 回傳順序列出事件，
- * 可依 Task 過濾（過濾由 Runtime 做）。
+ * 可依 Task 過濾（過濾由 Runtime 做）；關鍵字搜尋與每頁 10 筆的分頁在 UI 端對整份時間線做。
  */
 export function TimelinePage({ client, workspace, timeZone }: Props) {
   const [metrics, setMetrics] = useState<Loaded<MetricsResponse>>({ state: "loading" });
   const [timeline, setTimeline] = useState<Loaded<TimelineEvent[]>>({ state: "loading" });
   const [taskId, setTaskId] = useState<string | null>(null);
+  const [keyword, setKeyword] = useState("");
+  const [page, setPage] = useState(0);
   // 過濾選項取自未過濾時間線出現過的 Task，過濾後仍保留
   const [taskOptions, setTaskOptions] = useState<string[]>([]);
   const [titles, setTitles] = useState<Record<string, string>>({});
@@ -124,6 +129,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
     // 換過濾條件後，前一個條件遲到的回應一律忽略
     let cancelled = false;
     setTimeline({ state: "loading" });
+    setPage(0);
     client.timeline(workspace.id, taskId ?? undefined).then(
       ({ events }) => {
         if (cancelled) return;
@@ -139,6 +145,15 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
 
   const taskLabel = (id: string) => titles[id] ?? id;
   const profileLabel = (id: string) => profileNames[id] ?? id;
+
+  // 關鍵字比對畫面上看得到的文字（類別、事件類型、Task 標題、Run、帳號）與事件內容，不分大小寫
+  const needle = keyword.trim().toLowerCase();
+  const events = timeline.state === "ready" ? timeline.value : [];
+  const matched =
+    needle === "" ? events : events.filter((event) => searchText(event, taskLabel, profileLabel).includes(needle));
+  const pageCount = Math.max(1, Math.ceil(matched.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageEvents = matched.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
 
   return (
     <section className="timeline-page" aria-label="時間線">
@@ -170,15 +185,30 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
               清除過濾
             </button>
           )}
+          <label>
+            搜尋事件
+            <input
+              type="search"
+              value={keyword}
+              placeholder="關鍵字"
+              onChange={(e) => {
+                setKeyword(e.target.value);
+                setPage(0);
+              }}
+            />
+          </label>
         </div>
         {timeline.state === "loading" && <p>載入中…</p>}
         {timeline.state === "failed" && <p role="alert">無法取得時間線：{timeline.reason}</p>}
         {timeline.state === "ready" && timeline.value.length === 0 && (
           <p>{taskId === null ? "這個 Workspace 還沒有事件" : "這個 Task 沒有事件"}</p>
         )}
-        {timeline.state === "ready" && timeline.value.length > 0 && (
+        {timeline.state === "ready" && timeline.value.length > 0 && matched.length === 0 && (
+          <p>沒有符合「{keyword.trim()}」的事件</p>
+        )}
+        {matched.length > 0 && (
           <ol className="timeline-list" aria-label="事件">
-            {timeline.value.map((event) => (
+            {pageEvents.map((event) => (
               <li key={event.seq} className={`timeline-event timeline-category-${event.category}`}>
                 <span className="timeline-time">{formatTimestamp(event.occurred_at, timeZone)}</span>
                 <span className="timeline-category">{CATEGORY_LABELS[event.category]}</span>
@@ -190,9 +220,39 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
             ))}
           </ol>
         )}
+        {matched.length > 0 && (
+          <nav className="timeline-pagination" aria-label="時間線分頁">
+            <button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>
+              上一頁
+            </button>
+            <span>
+              第 {currentPage + 1}／{pageCount} 頁
+            </span>
+            <button type="button" disabled={currentPage === pageCount - 1} onClick={() => setPage(currentPage + 1)}>
+              下一頁
+            </button>
+          </nav>
+        )}
       </section>
     </section>
   );
+}
+
+/** 關鍵字比對用的小寫文字：畫面上顯示的欄位加上事件內容。 */
+function searchText(event: TimelineEvent, taskLabel: (id: string) => string, profileLabel: (id: string) => string): string {
+  const profileId = payloadString(event.payload, "profile_id");
+  return [
+    CATEGORY_LABELS[event.category],
+    event.event_type,
+    event.aggregate_id,
+    event.run_id ?? "",
+    ...event.task_ids,
+    ...event.task_ids.map(taskLabel),
+    profileId === null ? "" : profileLabel(profileId),
+    JSON.stringify(event.payload),
+  ]
+    .join("\n")
+    .toLowerCase();
 }
 
 /** Controller CLI 事件的帳號、Controller CLI id 與結束代碼（Run id 為 null，帳號只在 payload）。 */

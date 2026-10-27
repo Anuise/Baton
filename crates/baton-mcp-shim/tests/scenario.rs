@@ -313,6 +313,12 @@ async fn tools_list_has_the_thirty_nine_tools_with_their_required_fields() {
         assert!(description(name).contains("Controller"), "{name}");
     }
     assert!(description(TOOL_SEND_MESSAGE).contains("controller"), "收件人寫 controller 寄給 Controller");
+    // 決策權限表可以放寬或改為只能人工發起：說明不能寫死「必須由使用者裁定」；needs_decision 一律送裁定
+    for name in [TOOL_CLASSIFY_FINDING, TOOL_RESOLVE_DESIGN_DEVIATION, TOOL_TRIAGE_EXPLORATION_FINDING] {
+        let text = description(name);
+        assert!(text.contains("決策權限表") && text.contains("預設必須由使用者裁定") && text.contains("human_only"), "{name}：{text}");
+    }
+    assert!(description(TOOL_CLASSIFY_FINDING).contains("needs_decision（你判斷不了）不論權限表是否放寬，一律交給使用者裁定"));
     assert!(send["properties"]["to"]["description"].as_str().unwrap().contains("controller"));
     assert_eq!(lesson["properties"]["task_id"]["type"], "string");
     assert!(lesson.get("required") == Some(&json!(["title"])), "task_id 只有 Controller 必填，schema 不列為必填");

@@ -69,6 +69,13 @@ cargo run -p baton-runtime               # 啟動 Runtime（預設資料目錄 %
 pnpm tauri dev                           # 開桌面殼（會自動啟動 Web UI 開發伺服器）
 ```
 
+根目錄 `Cargo.toml` 的 dev profile（debug／test 建置）只保留行號等級的除錯資訊（`debug = "line-tables-only"`，依賴套件 `debug = false`），並關閉增量編譯（`incremental = false`）。原因是多個 Worker 並行時，每個 worktree 各有一份獨立的 `target`、每個 Task 都從頭編譯；未設定前一份 `target\debug` 約 40 GB，大半是依賴套件的 `.pdb` 除錯符號與 `incremental\`。release profile 不受影響，`pnpm build` 的正式建置與安裝程式維持原樣。手動開發需要時可用環境變數臨時開啟：
+
+```powershell
+$env:CARGO_INCREMENTAL = "1"              # 開啟增量編譯
+$env:CARGO_PROFILE_DEV_DEBUG = "full"     # 完整除錯資訊（只影響 workspace 自己的 crate，依賴套件仍無）
+```
+
 Runtime 的設定環境變數：
 
 | 變數 | 用途 | 預設 |
@@ -247,7 +254,7 @@ Worker 需要使用者決定的事、超出授權範圍的操作，以及 Contro
 
 | `controller_action` | `matter`（決策權限表的事項）、`task_id?`（同 Workspace，省略時是自己的 Task）、`summary`、`reason`、`evidence?`、`urgency?` | **不執行任何動作**，只依 Workspace 目前生效的權限表判定：`allowed`（可自主處理）、`requires_decision`（動作被拒絕，已建立 `kind: "authority"` 的裁定請求，選項 `approve`／`reject`，阻擋目標 Task；同一 Task 同一事項仍待處理時回既有請求）、`approved`（使用者以接受或修改條件核准，消耗一次，`conditions` 是修改後的條件）、`denied`（消耗一次）、`human_only`（只能人工發起，不建立請求）。細節見 AI-227 |
 
-**決策權限表**（`baton_domain::authority`，spec D-15，AI-227、AI-228）：內建 17 個事項，7 個可自主處理、9 個必須送裁定、1 個只能人工發起（三次恢復失敗後的重試）。Workspace 只能把可自主處理的事項收窄為必須送裁定；放寬或調整只能人工發起的事項一律 400 `authority_widening_refused`。設定存在 `decision_authority_policy`（只記被收窄的事項，`revision` 從 0 起，`PUT` 取代式並以 `expected_revision` 校驗）。Controller 專屬的變更工具（票 16、17）必須由 Runtime 依實際變更推導事項再判定，不能信任 Agent 自報的 `matter`。
+**決策權限表**（`baton_domain::authority`，spec D-15，AI-227、AI-228）：內建 17 個事項，7 個可自主處理、9 個必須送裁定、1 個只能人工發起（三次恢復失敗後的重試）。每個事項都可以由使用者設為三種等級中的任一種，收窄或放寬都可以（使用者的產品決定，見 ADR-0003 修訂）；生效等級＝使用者設定，未設定時＝內建。設定存在 `decision_authority_policy.overrides`（JSON 物件「事項 → 等級」，只記與內建不同的事項；`revision` 從 0 起，`PUT` 取代式並以 `expected_revision` 校驗，不符 409 `authority_revision_mismatch`）。migration `decision_authority_overrides` 把舊的 `narrowed` 清單逐一轉成 `requires_decision` 後移除該欄，生效等級與改版前相同。Controller 專屬的變更工具（票 16、17）必須由 Runtime 依實際變更推導事項再判定，不能信任 Agent 自報的 `matter`。
 
 **權限提示的判定**（`permission::evaluate`，保守的詞法判定，細節與取捨見 AI-138）：把「工具名稱＋輸入」歸類為能力（讀取／編輯檔案、讀取公開網頁、建置測試、安裝專案依賴、全域安裝、遠端寫入），再對照 **Run 准入時固定的授權 revision**（R1-a，票 24；准入時還沒有任何授權的 Run 一律範圍外）；檔案路徑必須落在授權目錄內，寫入 `.git`、本機或內網網址、含 shell 組合語法的指令、未知工具、尚未確認授權一律範圍外。Bash 指令以 bash 規則斷詞（去掉引號；引號不成對或反斜線緊接引號一律無法歸類），每個子命令只接受白名單內的旗標，任何其他旗標（例如 `git commit --amend`、`git diff --output=…`、`npm install --prefix …`、`cargo test --manifest-path …`）都無法歸類；`-g`、`--global=…`、`--location=global` 等全域安裝的各種寫法歸為「全域安裝」；指令參數中像路徑的字詞必須在 Workspace 內。路徑元件比對前依 Win32 規則去掉結尾的 `.` 與空白（`.git.`、`.git ` 視同 `.git`），含 `:`（替代資料流）的元件、只有點的元件、`\\?\` 裝置路徑一律範圍外，`GIT~1` 視同 `.git`。單次批准的規則見 AI-139。
 
@@ -263,7 +270,7 @@ Worker 需要使用者決定的事、超出授權範圍的操作，以及 Contro
 | `POST /api/v1/decisions/batch` | `{items: [{workspace_id, request_id, expected_revision, action, option_id?, note?, defer_minutes?}]}`（1–50 項、同一請求只能出現一次）；每一項各自一個交易，回 `{batch_id, results}`，逐項 `ok` 或錯誤代碼。`batch_id` 只記在每筆裁定上供稽核，不形成概括授權（AI-232） |
 | `POST …/decisions/{request_id}/merge` | `{into, expected_revision, into_expected_revision}`；把請求合併到另一筆（同種類、都待處理、不是權限提示，否則 400 `decision_merge_invalid`），阻擋範圍併入目標，回 `{decision}`（目標）（AI-233） |
 | `POST …/decisions/{request_id}/links` | `{other_id}`；互相連結（冪等、雙向、不改內容版本）。Agent 提出請求時，同 Workspace 正規化後相同的待處理問題會自動連結 |
-| `GET`／`PUT /api/v1/workspaces/{id}/decision-authority` | 決策權限表：`{revision, entries: [{matter, label, builtin, effective, narrowed}]}`；`PUT {expected_revision, entries: [{matter, effective}]}` |
+| `GET`／`PUT /api/v1/workspaces/{id}/decision-authority` | 決策權限表：`{revision, entries: [{matter, label, builtin, effective, overridden}]}`（`overridden`：設定與內建不同）；`PUT {expected_revision, entries: [{matter, effective}]}` |
 | `GET /api/v1/decisions/pending` | 先標記過期的請求，再回 `{pending_count, by_workspace}`，給狀態列的「待裁定數」（延後中的仍計入） |
 
 **版本校驗與過期**（AI-229、AI-230）：請求記下建立時的目標（目標 Task 與它的契約版本）。目標 Task 的契約版本改變或 Task 已結束，請求就標為 `superseded`，不能再套用；只被它阻擋的 Task 回到 `ready` 並重新排隊，喚醒 Outbox 帶 `superseded: true`。標記在開啟裁定中心、查詢待裁定數與提交時進行（不在修改契約的交易中連動）。權限提示記下判定當時的授權 revision 供查閱，但授權變更不會讓它過期（票 23：修改授權與回答請求是兩回事）。提交時必須帶使用者看到的 `revision`：延後、合併、過期、回答都會讓它加一，連結不會。
@@ -939,7 +946,8 @@ Task 有**種類**（`kind`：`development`／`research`／`document`，建立�
 
 每個 account_profile 有自己的 `CLAUDE_CONFIG_DIR`：`<資料目錄>\profiles\<profile id>`（由 Runtime 建立，識別是隨機值；任兩個 Profile 的目錄不相同也不互相包含，已封存的 Profile 目錄不會被重用）。資料庫只保存核對結果（登入與否、認證來源、帳號身分、核對時間），登入資料（token）只存在該目錄中、由 Claude Code 保管，不進資料庫、日誌、事件、API 回應或備份。最多同時 8 個使用中的 Profile（spec D-32）；封存會釋出名額但不刪除目錄。
 
-- `GET /api/v1/profiles`：全部 Profile（含已封存）、`limit`，每個 Profile 帶 `dispatchable` 與 `blockers`（`{code, message}`）。**Scheduler 之後只能派給 `dispatchable` 的 Profile。**
+- `GET /api/v1/profiles`：全部 Profile（含已封存，依使用者調整的顯示順序，新增的排在最後）、`limit`，每個 Profile 帶 `dispatchable` 與 `blockers`（`{code, message}`）。**Scheduler 之後只能派給 `dispatchable` 的 Profile。**
+- `PUT /api/v1/profiles/order`（`{ profile_ids }`）：調整帳號頁的顯示順序，必須依新順序恰好列出每個使用中的 Profile 一次，已封存的排在其後；清單已變動時回 409 `profile_order_mismatch` 且不寫入。回傳依新順序排列的清單。只影響顯示：Scheduler 與重複帳號判定仍依建立順序（`Store::list_profiles`），顯示順序另存在 `account_profile.display_order`（migration `account_profile_display_order`）。
 - `POST /api/v1/profiles`（`{ name, expected_account? }`）：第 9 個回 409 `profile_limit_reached` 並說明上限；被拒絕時不會留下目錄。
 - `POST /api/v1/profiles/{id}/verify`：以該目錄執行 `claude auth status` 核對。實際認證來源不是該 Profile 的原生登入（`ANTHROPIC_API_KEY`、`apiKeyHelper`、`CLAUDE_CODE_OAUTH_TOKEN`、第三方供應商等）、帳號與預期身分不符、設定目錄不符、同一帳號已被較早的 Profile 使用，都會標示並阻擋該 Profile 被派工。沒有預期帳號時，第一次在原生登入核對到的帳號會固定為預期身分。Claude Code 沒有回應時回 502 `profile_check_failed`，不改寫既有結果。
 - `POST /api/v1/profiles/{id}/login-terminal`：開啟終端機，以該 Profile 的 `CLAUDE_CONFIG_DIR` 執行 `claude auth login`（`cmd /c start … cmd /k claude auth login`）。登入完成後由使用者按「重新核對」。
@@ -1117,7 +1125,7 @@ ProcessControl（`windows_process.rs`）依 `SpawnSpec` 的 `env_remove`、`stdi
 
 **准入相同**：Controller 建立與修改的 Task 走與工作面板相同的 `task::decide`、`task::admission_report`；`dispatch_task` 與桌面的 `POST tasks/{task_id}/dispatch` 共用 `runs::dispatch_now`（準備工作目錄、Scheduler 選帳號、派工交易），所以 Controller 派出的 Task 不會繞過任何准入、相依、Guard 或容量判定。
 
-**依決策權限表推導事項**（AI-227 要求不信任 Agent 自報的 `matter`）：Controller 工具不帶事項，由 Runtime 依實際變更推導，再以 `ControllerGate` 判定（規則同 `controller_action`，但提出者是 Controller Run、目標 Task 必填）。兩個事項內建都是「必須送裁定」，Workspace 不能放寬：
+**依決策權限表推導事項**（AI-227 要求不信任 Agent 自報的 `matter`）：Controller 工具不帶事項，由 Runtime 依實際變更推導，再以 `ControllerGate` 判定（規則同 `controller_action`，但提出者是 Controller Run、目標 Task 必填）。兩個事項內建都是「必須送裁定」（使用者可在權限表放寬，放寬後 `ControllerGate` 直接允許）：
 
 | 事項 | 何時推導 | 核准之後 |
 | --- | --- | --- |

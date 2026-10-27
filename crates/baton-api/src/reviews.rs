@@ -203,10 +203,6 @@ impl From<ReviewApplyError> for ApiError {
     }
 }
 
-pub(crate) fn internal(message: &str) -> ApiError {
-    ApiError { status: StatusCode::INTERNAL_SERVER_ERROR, code: "internal_error", message: message.to_string() }
-}
-
 async fn workspace_path(state: &ApiState, id: &str) -> Result<std::path::PathBuf, ApiError> {
     state
         .store
@@ -230,9 +226,14 @@ pub(crate) async fn decide(
     reason: &str,
     evidence: Vec<String>,
 ) -> Result<ControllerOutcome, ApiError> {
-    let content = ActionContent::new(matter, Some(task_id), summary, reason, evidence, None)
-        .map_err(DecisionApplyError::from)?
-        .with_subject(subject);
+    gate(state, scope, action_content(matter, task_id, subject, summary, reason, evidence)?).await
+}
+
+fn action_content(matter: Matter, task_id: &str, subject: &str, summary: &str, reason: &str, evidence: Vec<String>) -> Result<ActionContent, ApiError> {
+    Ok(ActionContent::new(matter, Some(task_id), summary, reason, evidence, None).map_err(DecisionApplyError::from)?.with_subject(subject))
+}
+
+async fn gate(state: &ApiState, scope: &ControllerScope, content: ActionContent) -> Result<ControllerOutcome, ApiError> {
     let outcome = state.store.controller_gate(scope, new_id("decision")?, new_id("authz")?, content, state.clock.now()).await?;
     let DecisionOutcome::Controller { outcome, .. } = outcome else { unreachable!("ControllerGate 只會得到 Controller 結果") };
     Ok(outcome)
@@ -249,6 +250,11 @@ pub(crate) fn requires_decision(matter: Matter, request_id: String, existing: bo
         decision_request_id: request_id,
         existing,
     }
+}
+
+/// 依決策權限表，這個事項只能由使用者發起：Controller 的動作被拒絕，也不建立裁定請求。
+pub(crate) fn human_only(message: &str) -> ControllerToolError {
+    ApiError { status: StatusCode::FORBIDDEN, code: "human_only", message: message.to_string() }.into()
 }
 
 pub(crate) fn clip(text: &str, max: usize) -> String {
@@ -397,7 +403,9 @@ pub(crate) async fn classify_review_finding(
                     }
                     .into());
                 }
-                ControllerOutcome::HumanOnly => return Err(internal("分類 finding 不會是只能人工發起的事項").into()),
+                ControllerOutcome::HumanOnly => {
+                    return Err(human_only("這個 Workspace 的決策權限表規定只有使用者能把 review finding 分類為修正"));
+                }
             }
         }
         classification @ (Classification::Dismiss | Classification::NeedsDecision) => {
@@ -405,13 +413,41 @@ pub(crate) async fn classify_review_finding(
                 Classification::Dismiss => format!("駁回{label}"),
                 _ => format!("{label}需要你決定：核准即駁回（不修正），不核准即修正"),
             };
-            match decide(&state, &scope, Matter::DismissReviewFinding, &subject_task, &finding.id, &summary, &request.reason, request.evidence).await? {
+            let mut content = action_content(Matter::DismissReviewFinding, &subject_task, &finding.id, &summary, &request.reason, request.evidence)?;
+            // Controller 判斷不了的 finding 一律交給使用者：駁回放寬為可自主處理時仍建立裁定請求（只能人工發起時照樣拒絕）
+            if classification == Classification::NeedsDecision {
+                content = content.ask_user();
+            }
+            match gate(&state, &scope, content).await? {
+                // 使用者把駁回放寬為可自主處理：等同核准，直接駁回；駁回一定要記下裁定與裁定者，兩者都記為這個 Controller Run
+                ControllerOutcome::Allowed => {
+                    let run = format!("controller:{}", scope.controller_run_id);
+                    (
+                        FindingChange { state: FindingState::Dismissed, classification, reason: request.reason.clone() },
+                        Some(run.clone()),
+                        Some(run),
+                        "依決策權限表自主駁回：這項 finding 已解決".to_string(),
+                    )
+                }
                 ControllerOutcome::RequiresDecision { request_id, existing } => {
                     if finding.state != FindingState::AwaitingDecision || finding.decision_request_id.as_deref() != Some(&request_id) {
                         let change = FindingChange { state: FindingState::AwaitingDecision, classification, reason: request.reason.clone() };
                         state.store.classify_finding(&scope.workspace_id, &finding.id, change, Some(request_id.clone()), None, &scope.controller_run_id, now).await.map_err(ApiError::from)?;
                     }
-                    return Err(requires_decision(Matter::DismissReviewFinding, request_id, existing, "finding 標為等待裁定，在使用者同意駁回之前這一軸不會通過"));
+                    let what = "finding 標為等待裁定，在使用者同意駁回之前這一軸不會通過";
+                    if classification == Classification::Dismiss {
+                        return Err(requires_decision(Matter::DismissReviewFinding, request_id, existing, what));
+                    }
+                    // 權限表可能已放寬，不能說成「依決策權限表必須由使用者裁定」
+                    return Err(ControllerToolError::RequiresDecision {
+                        matter: Matter::DismissReviewFinding,
+                        message: format!(
+                            "你判斷不了的 finding 一律由使用者裁定：已建立裁定請求 {request_id}，{what}。\
+                             使用者回答後，背景執行的 wait 會回報「裁定已回答」事件通知你，屆時以相同內容再呼叫一次這個工具套用結果；不要自行繞過。"
+                        ),
+                        decision_request_id: request_id,
+                        existing,
+                    });
                 }
                 ControllerOutcome::Approved { request_id, .. } => (
                     FindingChange { state: FindingState::Dismissed, classification, reason: request.reason.clone() },
@@ -429,8 +465,8 @@ pub(crate) async fn classify_review_finding(
                     Some(DECIDED_BY_DESKTOP.to_string()),
                     "使用者不同意駁回：已改為修正，修正後請重新審查".to_string(),
                 ),
-                ControllerOutcome::Allowed | ControllerOutcome::HumanOnly => {
-                    return Err(internal("駁回 review finding 一定要送裁定").into());
+                ControllerOutcome::HumanOnly => {
+                    return Err(human_only("這個 Workspace 的決策權限表規定只有使用者能駁回 review finding"));
                 }
             }
         }
@@ -525,7 +561,15 @@ pub(crate) async fn resolve_design_deviation(
                     }
                     return Err(requires_decision(Matter::AcceptDesignDeviation, request_id, existing, "偏離標為等待裁定，設計還沒有更新"));
                 }
-                ControllerOutcome::Approved { request_id, .. } => {
+                outcome @ (ControllerOutcome::Allowed | ControllerOutcome::Approved { .. }) => {
+                    // 使用者把接受偏離放寬為可自主處理時等同核准；接受的偏離一定要記下裁定與接受者，兩者都記為這個 Controller Run
+                    let (decision, accepted_by, who) = match outcome {
+                        ControllerOutcome::Approved { request_id, .. } => (request_id, DECIDED_BY_DESKTOP.to_string(), "使用者已接受偏離"),
+                        _ => {
+                            let run = format!("controller:{}", scope.controller_run_id);
+                            (run.clone(), run, "依決策權限表自主接受偏離")
+                        }
+                    };
                     // 新設計寫成新的檔案，再在同一個交易中替設計成果追加版本
                     let bytes = deviation.proposed_design.clone().into_bytes();
                     let storage_path = artifact::blob_storage_path(&scope.workspace_id, &new_id("blob")?);
@@ -541,8 +585,8 @@ pub(crate) async fn resolve_design_deviation(
                             &scope.workspace_id,
                             &deviation.id,
                             request.reason,
-                            request_id,
-                            DECIDED_BY_DESKTOP.to_string(),
+                            decision,
+                            accepted_by,
                             &scope.controller_run_id,
                             blob,
                             now,
@@ -550,7 +594,7 @@ pub(crate) async fn resolve_design_deviation(
                         .await
                         .map_err(ApiError::from)?;
                     let version = resolved.accepted_design_version.unwrap_or_default();
-                    (resolved, format!("使用者已接受偏離：設計更新為第 {version} 版，之後派出的 Worker 會拿到新版本"))
+                    (resolved, format!("{who}：設計更新為第 {version} 版，之後派出的 Worker 會拿到新版本"))
                 }
                 ControllerOutcome::Denied { request_id, note } => {
                     let reason = format!("使用者不接受偏離{}；原理由：{}", note.map(|n| format!("（{n}）")).unwrap_or_default(), request.reason);
@@ -567,8 +611,8 @@ pub(crate) async fn resolve_design_deviation(
                         .map_err(ApiError::from)?;
                     (resolved, "使用者不接受偏離：實作必須依照目前的設計".to_string())
                 }
-                ControllerOutcome::Allowed | ControllerOutcome::HumanOnly => {
-                    return Err(internal("接受設計偏離一定要送裁定").into());
+                ControllerOutcome::HumanOnly => {
+                    return Err(human_only("這個 Workspace 的決策權限表規定只有使用者能接受設計偏離"));
                 }
             }
         }
