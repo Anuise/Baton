@@ -229,6 +229,15 @@ async fn model_list(link: State<'_, RuntimeLink>) -> Result<ModelCatalog, String
     link.client.available_models().await.map_err(|e| e.to_string())
 }
 
+/// Web UI 以使用者貼上的 Anthropic API 金鑰更新可用模型清單；金鑰只轉交給 Runtime 的這一次請求，不保存（AI-33）。
+#[tauri::command]
+async fn model_refresh(link: State<'_, RuntimeLink>, api_key: String) -> Result<ModelCatalog, String> {
+    if let Err(reason) = link.ensure_started().await {
+        return Err(reason.clone());
+    }
+    link.client.refresh_models(&api_key).await.map_err(|e| e.to_string())
+}
+
 /// Web UI 列出帳號 Profile 與可派工判定。
 #[tauri::command]
 async fn profile_list(link: State<'_, RuntimeLink>) -> Result<ProfileList, String> {
@@ -1409,6 +1418,7 @@ fn main() {
             workspace_archive,
             workspace_set_model_overrides,
             model_list,
+            model_refresh,
             profile_list,
             profile_create,
             profile_create_from_dir,

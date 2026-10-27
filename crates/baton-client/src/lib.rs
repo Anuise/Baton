@@ -43,7 +43,7 @@ use baton_api::{
     ReportRecurrenceRequest, GUARDS_PATH,
     UpdateContractRequest, WorkspaceList, CLIENT_HEADER, CLIENT_HEADER_VALUE, HEALTH_PATH, PENDING_DECISIONS_PATH,
     PLATFORM_PATH, PROFILES_FROM_EXISTING_DIR_PATH, PROFILES_ORDER_PATH, PROFILES_PATH, ReorderProfilesRequest, SETUP_ACK_PATH, SETUP_PATH, SETUP_RECHECK_PATH, SHARED_SETTINGS_ADOPT_PATH,
-    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH, ModelCatalog, MODELS_PATH,
+    SHARED_SETTINGS_PATH, SHARED_SETTINGS_PREVIEW_PATH, WORKSPACES_PATH, ModelCatalog, MODELS_PATH, MODELS_REFRESH_PATH, RefreshModelsRequest,
 };
 use baton_domain::authority::AuthorityTable;
 use baton_domain::decision::DecisionView;
@@ -75,6 +75,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 下載成果（最多 10 MiB，仍要讀檔並重新計算雜湊）等待回應的上限。
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 以 API 金鑰更新可用模型清單：Runtime 要向 Anthropic 查詢（可能有多頁），等待回應的上限。
+const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 同意更新的請求要先下載並驗證安裝程式（票 34），等待回應的上限。
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -170,6 +173,12 @@ impl RuntimeClient {
     /// 模型設定可選的模型清單。
     pub async fn available_models(&self) -> Result<ModelCatalog, ClientError> {
         self.get_json(MODELS_PATH).await
+    }
+
+    /// 以使用者貼上的 Anthropic API 金鑰更新可用模型清單；金鑰只隨這一次請求送出（AI-33）。
+    pub async fn refresh_models(&self, api_key: &str) -> Result<ModelCatalog, ClientError> {
+        let request = RefreshModelsRequest { api_key: api_key.to_string() };
+        self.send_json_within(reqwest::Method::POST, MODELS_REFRESH_PATH, Some(&request), MODELS_REFRESH_TIMEOUT).await
     }
 
     /// 列出全部帳號 Profile（含已封存）與可派工判定。

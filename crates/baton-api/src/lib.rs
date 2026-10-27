@@ -72,7 +72,7 @@ use baton_domain::workflow::{TOOL_GET_WORKFLOWS, TOOL_RECORD_STAGE_RESULT, TOOL_
 use baton_domain::platform::{self, PlatformAssessment, PlatformSnapshot};
 use baton_domain::{product, Timestamp};
 use baton_ports::{
-    ClaudeEnvironment, Clock, GuardianProbe, PlatformInfo, QuotaObserver, StartupRegistration, UserSettingsSource,
+    ClaudeEnvironment, Clock, GuardianProbe, ModelDirectory, PlatformInfo, QuotaObserver, StartupRegistration, UserSettingsSource,
     VerificationDriver, WorkspaceFs,
 };
 use baton_store::Store;
@@ -97,7 +97,7 @@ pub use controller_cli::{
 };
 pub use external_operations::{external_operations_path, BeginResponse, ExternalOperationList, RecordResponse};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
-pub use models::{ModelCatalog, ModelOption, MODELS_PATH};
+pub use models::{ModelCatalog, ModelOption, RefreshModelsRequest, MODELS_PATH, MODELS_REFRESH_PATH};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
     AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
@@ -267,6 +267,8 @@ pub struct ApiState {
     pub projection_lock: Arc<tokio::sync::Mutex<()>>,
     /// 驗證 Adapter 的 Port（票 45）；回報 Stage 結果前以它觀察受驗目錄目前的 build（票 50）。
     pub verification_driver: Arc<dyn VerificationDriver>,
+    /// 使用者貼上 API 金鑰更新可用模型清單時查詢 Anthropic（AI-33）；金鑰不經過其他地方。
+    pub model_directory: Arc<dyn ModelDirectory>,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -279,6 +281,7 @@ pub fn router(state: ApiState) -> Router {
         .route(workspaces::ARCHIVE_ROUTE, post(workspaces::archive))
         .route(workspaces::MODEL_OVERRIDES_ROUTE, axum::routing::put(workspaces::set_model_overrides))
         .route(MODELS_PATH, get(models::list))
+        .route(MODELS_REFRESH_PATH, post(models::refresh))
         .route(authorization::AUTHORIZATION_ROUTE, get(authorization::view).put(authorization::confirm))
         .route(authorization::SUMMARY_ROUTE, post(authorization::summary))
         .route(authorization::ADMISSION_ROUTE, post(authorization::admission_check))

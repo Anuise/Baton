@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod installer;
 pub mod log;
 mod maintenance;
+pub mod model_directory;
 pub mod production_ports;
 pub mod secret_resolver;
 pub mod semantic_judge;
@@ -269,6 +270,7 @@ impl Runtime {
             updates: updates.clone(),
             projection_lock: Arc::default(),
             verification_driver: ports.verification_driver.clone(),
+            model_directory: ports.model_directory.clone(),
         });
         let task = tokio::spawn(async move {
             let _store = store; // 與 serve 同生命週期：停止後才釋放資料庫連線

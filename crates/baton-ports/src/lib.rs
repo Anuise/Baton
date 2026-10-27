@@ -11,6 +11,7 @@ mod clock;
 mod git;
 mod guardian;
 mod login;
+mod models;
 mod platform;
 mod process;
 mod quota;
@@ -36,6 +37,7 @@ pub use git::{
 };
 pub use guardian::GuardianProbe;
 pub use login::{LoginSession, StartupRegistration};
+pub use models::{ModelDirectory, ModelDirectoryError, ModelPage, RemoteModel};
 pub use platform::{OsFamily, PlatformInfo, PlatformSnapshot};
 pub use process::{command_hash, Liveness, ProcessControl, ProcessIdentity, Receipt, SpawnSpec, StopResult};
 pub use quota::{Confidence, ProfileRef, QuotaObserver, QuotaSample, QuotaSource};
@@ -90,4 +92,6 @@ pub struct Ports {
     pub semantic_judge: Arc<dyn SemanticJudge>,
     /// 驗證用秘密參照的解析（票 46）。
     pub secret_resolver: Arc<dyn SecretResolver>,
+    /// 使用者貼上 API 金鑰時查詢 Anthropic 的可用模型（AI-33）。
+    pub model_directory: Arc<dyn ModelDirectory>,
 }
