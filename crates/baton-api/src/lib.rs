@@ -18,6 +18,7 @@ mod guards;
 mod knowledge;
 mod lifecycle;
 mod messages;
+mod models;
 mod exploration;
 mod profiles;
 pub mod quota;
@@ -96,6 +97,7 @@ pub use controller_cli::{
 };
 pub use external_operations::{external_operations_path, BeginResponse, ExternalOperationList, RecordResponse};
 pub use messages::{DeliveryView, InboxResponse, SendAck};
+pub use models::{ModelCatalog, ModelOption, MODELS_PATH};
 pub use authorization::{
     admission_check_path, authorization_path, authorization_summary_path, AdmissionCheckRequest, AuthorizationStatus,
     AuthorizationView, CapabilityInfo, ConfirmAuthorizationRequest, SummaryRequest,
@@ -276,6 +278,7 @@ pub fn router(state: ApiState) -> Router {
         .route(WORKSPACES_PATH, get(workspaces::list).post(workspaces::create))
         .route(workspaces::ARCHIVE_ROUTE, post(workspaces::archive))
         .route(workspaces::MODEL_OVERRIDES_ROUTE, axum::routing::put(workspaces::set_model_overrides))
+        .route(MODELS_PATH, get(models::list))
         .route(authorization::AUTHORIZATION_ROUTE, get(authorization::view).put(authorization::confirm))
         .route(authorization::SUMMARY_ROUTE, post(authorization::summary))
         .route(authorization::ADMISSION_ROUTE, post(authorization::admission_check))

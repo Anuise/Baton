@@ -89,6 +89,16 @@ export interface WorkspaceList {
   workspaces: Workspace[];
 }
 
+/** 模型設定可選的一個模型（對應 Rust 的 ModelOption）：`id` 交給 `claude --model`，`label` 給使用者看。 */
+export interface ModelOption {
+  id: string;
+  label: string;
+}
+
+export interface ModelCatalog {
+  models: ModelOption[];
+}
+
 export interface CreateWorkspaceRequest {
   path: string;
   name?: string;
@@ -350,6 +360,11 @@ export interface WorkspaceClient {
   archiveWorkspace(id: string): Promise<Workspace>;
   /** 整組取代依角色的模型覆寫；只影響之後派出的 Run。 */
   setModelOverrides(id: string, overrides: ModelOverrides): Promise<Workspace>;
+}
+
+/** 模型設定可選的模型清單（Runtime 提供）。 */
+export interface ModelCatalogClient {
+  listModels(): Promise<ModelCatalog>;
 }
 
 /** Workspace 授權：讀取、確認前的摘要、確認並保存（產生新的 revision）。 */
@@ -2959,6 +2974,7 @@ export interface ExplorationClient {
 
 export type AppClient = RuntimeClient &
   WorkspaceClient &
+  ModelCatalogClient &
   AuthorizationClient &
   TaskClient &
   AccountClient &
@@ -2991,6 +3007,7 @@ export function errorCode(error: unknown): string | null {
 const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
 const WORKSPACES_PATH = "/api/v1/workspaces";
+const MODELS_PATH = "/api/v1/models";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
 const PENDING_DECISIONS_PATH = "/api/v1/decisions/pending";
@@ -3081,6 +3098,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     },
     setModelOverrides: (id, overrides) =>
       send(`${workspacePath(id)}/model-overrides`, { method: "PUT", body: overrides }),
+    listModels: () => send<ModelCatalog>(MODELS_PATH),
     async getAuthorization(workspaceId) {
       const response = await fetchFn(authorizationPath(workspaceId));
       if (!response.ok) throw await failure(response);
@@ -3269,6 +3287,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     createWorkspace: ({ path, name }) => call<Workspace>("workspace_create", { path, name }),
     archiveWorkspace: (id) => call<Workspace>("workspace_archive", { id }),
     setModelOverrides: (id, overrides) => call<Workspace>("workspace_set_model_overrides", { id, overrides }),
+    listModels: () => call<ModelCatalog>("model_list"),
     getAuthorization: (id) => call<AuthorizationView>("workspace_authorization", { id }),
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
     confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion, expectedRevision }) =>
