@@ -208,6 +208,18 @@ impl World {
         assert_eq!(status, StatusCode::OK, "{answered}");
     }
 
+    /// 使用者在桌面以整張表取代決策權限表（沒列出的事項回到內建值）。
+    async fn authority(&self, expected_revision: i64, entries: Value) {
+        let body = json!({ "expected_revision": expected_revision, "entries": entries });
+        let (status, table) =
+            self.h().send_json(Method::PUT, &format!("{WORKSPACES}/{}/decision-authority", self.ws), Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{table}");
+    }
+
+    fn decision_rows(&self) -> i64 {
+        self.h().db().query_row("SELECT COUNT(*) FROM decision", [], |r| r.get(0)).unwrap()
+    }
+
     /// 桌面的審查與設計偏離。
     async fn reviews(&self) -> Value {
         let (status, body) = self.h().send_json(Method::GET, &format!("{WORKSPACES}/{}/reviews", self.ws), None).await;
@@ -555,4 +567,96 @@ async fn an_accepted_design_deviation_keeps_who_accepted_it_and_the_next_worker_
     let desktop = w.reviews().await;
     assert_eq!(desktop["deviations"].as_array().unwrap().len(), 2);
     assert_eq!(desktop["deviations"][1]["accepted_design_version"], 2);
+}
+
+// --- 決策權限表放寬或改為只能人工發起：分類 finding 與接受偏離依生效等級處理 ---
+
+#[tokio::test]
+async fn classifying_a_finding_follows_the_effective_authority_when_the_table_is_relaxed_or_reserved_for_the_user() {
+    let w = world().await;
+    let reviewer = w.worker("審查匯出功能").await;
+    let (controller_run, token) = w.h().open_controller_cli(&w.ws, &w.controller_profile).await;
+    let author = w.task("新增 CSV 匯出", "development").await;
+    let reviewed = w
+        .submitted(
+            &reviewer,
+            review(&author, "c1", 1, axis("規範沒有問題", &["src"], &[]), axis("對照契約第 1 版", &["src/export.rs"], &["匯出的 CSV 沒有標頭", "欄位順序與契約不同"])),
+        )
+        .await;
+    let (header, order) = (reviewed["spec"]["findings"][0].clone(), reviewed["spec"]["findings"][1].clone());
+    let decisions = w.decision_rows();
+
+    // 只能人工發起：分類為修正、駁回、交給使用者都被拒絕，finding 不變，也不建立裁定請求
+    w.authority(
+        0,
+        json!([
+            { "matter": "classify_finding_as_fix", "effective": "human_only" },
+            { "matter": "dismiss_review_finding", "effective": "human_only" },
+        ]),
+    )
+    .await;
+    for classification in ["fix", "dismiss", "needs_decision"] {
+        let (status, body) = w.classify(&token, &header, classification, "標頭由下游的匯入工具補上").await;
+        assert_eq!((status, error_code(&body)), (StatusCode::FORBIDDEN, "human_only"), "{classification}：{body}");
+    }
+    let current = w.review_view(&reviewed["id"]).await;
+    assert_eq!(current["spec"]["findings"][0]["state"], "open", "{current}");
+    assert_eq!(w.decision_rows(), decisions, "只能人工發起的事項不建立裁定請求");
+
+    // 放寬為可自主處理：駁回直接套用（等同使用者已核准），不送裁定；記下由哪個 Controller Run 決定
+    w.authority(1, json!([{ "matter": "dismiss_review_finding", "effective": "autonomous" }])).await;
+    let (status, body) = w.classify(&token, &header, "dismiss", "標頭由下游的匯入工具補上，契約沒有要求").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["finding"]["state"], "dismissed", "{body}");
+    let marker = format!("controller:{controller_run}");
+    let decided = (body["finding"]["decision_request_id"].as_str(), body["finding"]["decided_by"].as_str());
+    assert_eq!(decided, (Some(marker.as_str()), Some(marker.as_str())), "{body}");
+    let (status, body) = w.classify(&token, &order, "needs_decision", "欄位順序契約沒有規定").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["finding"]["state"], "dismissed", "{body}");
+    assert_eq!(body["review"]["passed"], true, "{body}");
+    assert_eq!(w.decision_rows(), decisions, "可自主處理的事項不建立裁定請求");
+}
+
+#[tokio::test]
+async fn accepting_a_design_deviation_follows_the_effective_authority_when_the_table_is_relaxed_or_reserved_for_the_user() {
+    let w = world().await;
+    let author = w.task("新增 CSV 匯出", "development").await;
+    let (_, implementer) = w.dispatch(&author).await;
+    let design = w.artifact(&implementer, "design.md", "# 設計 v1\n一次載入全部資料").await;
+    let report = json!({
+        "design_artifact_id": design,
+        "design_version": 1,
+        "deviation": "改用串流寫檔",
+        "reason": "大檔案一次載入會耗盡記憶體",
+        "affected_contracts": ["匯出 API 的回應時間"],
+        "proposed_design": "# 設計 v2\n改用串流寫檔",
+    });
+    let (status, reported) = w.h().call_tool(&implementer, "report_design_deviation", report).await;
+    assert_eq!(status, StatusCode::CREATED, "{reported}");
+    let (controller_run, token) = w.h().open_controller_cli(&w.ws, &w.controller_profile).await;
+    let resolve = json!({ "deviation_id": reported["id"], "resolution": "accept", "reason": "串流是唯一可行的做法" });
+    let decisions = w.decision_rows();
+
+    // 只能人工發起：Controller 接受偏離被拒絕，偏離維持原狀，也不建立裁定請求
+    w.authority(0, json!([{ "matter": "accept_design_deviation", "effective": "human_only" }])).await;
+    let (status, body) = w.h().call_tool(&token, "resolve_design_deviation", resolve.clone()).await;
+    assert_eq!((status, error_code(&body)), (StatusCode::FORBIDDEN, "human_only"), "{body}");
+    let (status, listed) = w.h().call_tool(&token, "get_reviews", json!({ "task_id": author })).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(listed["deviations"][0]["status"], "proposed", "{listed}");
+    assert_eq!(w.decision_rows(), decisions);
+
+    // 放寬為可自主處理：直接接受（等同使用者已核准），記下由哪個 Controller Run 接受，設計追加新版本
+    w.authority(1, json!([{ "matter": "accept_design_deviation", "effective": "autonomous" }])).await;
+    let (status, body) = w.h().call_tool(&token, "resolve_design_deviation", resolve).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let accepted = &body["deviation"];
+    let marker = format!("controller:{controller_run}");
+    assert_eq!((accepted["status"].as_str(), accepted["accepted_by"].as_str()), (Some("accepted"), Some(marker.as_str())), "{body}");
+    assert_eq!((accepted["decision_request_id"].as_str(), accepted["accepted_design_version"].as_i64()), (Some(marker.as_str()), Some(2)));
+    assert_eq!(w.decision_rows(), decisions, "可自主處理的事項不建立裁定請求");
+    let preview = format!("{WORKSPACES}/{}/artifacts/{design}/versions/2/preview", w.ws);
+    let (status, body) = w.h().send_json(Method::GET, &preview, None).await;
+    assert_eq!((status, body["preview"]["text"].as_str()), (StatusCode::OK, Some("# 設計 v2\n改用串流寫檔")), "{body}");
 }

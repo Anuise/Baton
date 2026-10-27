@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent::{scope_of, Claims};
 use crate::authorization::bad_json;
 use crate::controller::{controller_scope, require_controller, ControllerToolError};
-use crate::reviews::{clip, decide, internal, requires_decision};
+use crate::reviews::{clip, decide, human_only, requires_decision};
 use crate::workspaces::{new_id, ApiError};
 use crate::ApiState;
 
@@ -244,6 +244,8 @@ pub(crate) async fn triage_exploration_finding(
         let summary = format!("把探索疑點「{}」排除為預期設計（不是缺陷）", clip(&finding.report.title, 80));
         let evidence = finding.report.evidence.clone();
         match decide(&state, &scope, Matter::ProductDirection, &finding.task_id, &finding.id, &summary, rationale, evidence).await? {
+            // 使用者把產品取捨放寬為可自主處理：等同核准，記下由哪個 Controller Run 自主排除
+            ControllerOutcome::Allowed => approved = Some(format!("controller:{}", scope.controller_run_id)),
             ControllerOutcome::Approved { request_id, .. } => approved = Some(request_id),
             ControllerOutcome::RequiresDecision { request_id, existing } => {
                 return Err(requires_decision(Matter::ProductDirection, request_id, existing, "疑點維持原狀，在使用者同意之前不會排除"));
@@ -259,8 +261,8 @@ pub(crate) async fn triage_exploration_finding(
                 }
                 .into());
             }
-            ControllerOutcome::Allowed | ControllerOutcome::HumanOnly => {
-                return Err(internal("產品取捨一定要送裁定").into());
+            ControllerOutcome::HumanOnly => {
+                return Err(human_only("這個 Workspace 的決策權限表規定只有使用者能把疑點排除為預期設計"));
             }
         }
     }
