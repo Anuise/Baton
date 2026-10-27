@@ -306,6 +306,127 @@ describe("時間線", () => {
     expect(await screen.findByText("這個 Task 沒有事件")).toBeInTheDocument();
   });
 
+  describe("分頁與關鍵字搜尋", () => {
+    /** 25 筆事件：第 23 筆是唯一的交接事件、唯一關聯到「撰寫報告」，落在第 3 頁。 */
+    const manyEvents: TimelineEvent[] = Array.from({ length: 25 }, (_, i) =>
+      i + 1 === 23
+        ? timelineEvent({
+            seq: 23,
+            category: "handoff",
+            aggregate_type: "handoff",
+            aggregate_id: "ho_23",
+            event_type: "handoff_requested",
+            task_ids: ["task_2"],
+            run_id: "run_23",
+          })
+        : timelineEvent({ seq: i + 1, aggregate_id: `run_${i + 1}`, run_id: `run_${i + 1}` }),
+    );
+    const items = () => within(screen.getByRole("list", { name: "事件" })).getAllByRole("listitem");
+    const runs = () => items().map((item) => item.textContent?.match(/Run：(run_\d+)/)?.[1]);
+
+    it("超過 10 筆時一頁顯示 10 筆，以上一頁／下一頁切換，第一頁與最後一頁的按鈕停用", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient({ events: manyEvents }));
+      await screen.findByRole("list", { name: "事件" });
+
+      expect(items()).toHaveLength(10);
+      expect(runs()[0]).toBe("run_1");
+      expect(screen.getByText("第 1／3 頁")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "上一頁" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "下一頁" })).toBeEnabled();
+
+      await user.click(screen.getByRole("button", { name: "下一頁" }));
+      expect(items()).toHaveLength(10);
+      expect(runs()[0]).toBe("run_11");
+      expect(screen.getByText("第 2／3 頁")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "上一頁" })).toBeEnabled();
+
+      await user.click(screen.getByRole("button", { name: "下一頁" }));
+      expect(items()).toHaveLength(5);
+      expect(runs()).toEqual(["run_21", "run_22", "run_23", "run_24", "run_25"]);
+      expect(screen.getByText("第 3／3 頁")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "下一頁" })).toBeDisabled();
+
+      await user.click(screen.getByRole("button", { name: "上一頁" }));
+      expect(screen.getByText("第 2／3 頁")).toBeInTheDocument();
+    });
+
+    it("關鍵字搜尋整個時間線且不分大小寫，第 3 頁的事件也搜得到", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient({ events: manyEvents }));
+      await screen.findByRole("list", { name: "事件" });
+
+      await user.type(screen.getByRole("searchbox", { name: "搜尋事件" }), "HANDOFF_Requested");
+
+      expect(items()).toHaveLength(1);
+      expect(items()[0]).toHaveTextContent("Run：run_23");
+      expect(screen.getByText("第 1／1 頁")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "上一頁" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "下一頁" })).toBeDisabled();
+    });
+
+    it("關鍵字比對 Task 標題與類別名稱", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient({ events: manyEvents }));
+      const search = await screen.findByRole("searchbox", { name: "搜尋事件" });
+      await screen.findByRole("list", { name: "事件" });
+
+      await user.type(search, "撰寫報告");
+      await waitFor(() => expect(items()).toHaveLength(1));
+      expect(items()[0]).toHaveTextContent("Run：run_23");
+
+      await user.clear(search);
+      await user.type(search, "交接");
+      expect(items()).toHaveLength(1);
+      expect(items()[0]).toHaveTextContent("Run：run_23");
+    });
+
+    it("搜尋結果也以 10 筆一頁分頁，變更關鍵字時回到第 1 頁", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient({ events: manyEvents }));
+      await screen.findByRole("list", { name: "事件" });
+      await user.click(screen.getByRole("button", { name: "下一頁" }));
+      await user.click(screen.getByRole("button", { name: "下一頁" }));
+      expect(screen.getByText("第 3／3 頁")).toBeInTheDocument();
+
+      // 24 筆 run_created 符合，分成 3 頁並回到第 1 頁
+      await user.type(screen.getByRole("searchbox", { name: "搜尋事件" }), "RUN_CREATED");
+
+      expect(screen.getByText("第 1／3 頁")).toBeInTheDocument();
+      expect(items()).toHaveLength(10);
+      expect(runs()[0]).toBe("run_1");
+      await user.click(screen.getByRole("button", { name: "下一頁" }));
+      await user.click(screen.getByRole("button", { name: "下一頁" }));
+      expect(runs()).toEqual(["run_21", "run_22", "run_24", "run_25"]);
+    });
+
+    it("沒有符合關鍵字的事件時顯示空狀態", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient({ events: manyEvents }));
+      await screen.findByRole("list", { name: "事件" });
+
+      await user.type(screen.getByRole("searchbox", { name: "搜尋事件" }), "不存在的字");
+
+      expect(screen.getByText("沒有符合「不存在的字」的事件")).toBeInTheDocument();
+      expect(screen.queryByRole("list", { name: "事件" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "下一頁" })).not.toBeInTheDocument();
+    });
+
+    it("換 Task 過濾時回到第 1 頁", async () => {
+      const user = userEvent.setup();
+      const client = fakeClient({ events: manyEvents, filtered: { task_1: manyEvents.filter((e) => e.seq !== 23) } });
+      renderPage(client);
+      await screen.findByRole("list", { name: "事件" });
+      await user.click(screen.getByRole("button", { name: "下一頁" }));
+
+      await user.selectOptions(screen.getByLabelText("依 Task 過濾"), "整理筆記");
+
+      await waitFor(() => expect(client.timeline).toHaveBeenLastCalledWith("ws_1", "task_1"));
+      expect(await screen.findByText("第 1／3 頁")).toBeInTheDocument();
+      expect(runs()[0]).toBe("run_1");
+    });
+  });
+
   it("讀不到時間線或觀測指標時顯示 Runtime 的說明", async () => {
     const client = fakeClient({
       events: new Error("找不到 Workspace：ws_1"),
