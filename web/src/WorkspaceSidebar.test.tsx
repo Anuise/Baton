@@ -1,10 +1,13 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import { lifecycleStatus, workspaceLifecycle } from "./fixtures";
 import { WorkspaceSidebar } from "./WorkspaceSidebar";
 import type { Workspace, WorkspaceLifecycleView } from "./runtimeClient";
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 /** 2023-11-14 22:13:20 UTC（台北是隔天 06:13）。 */
 const CREATED_AT = 1_700_000_000_000;
@@ -390,6 +393,66 @@ describe("左側 Workspace 清單", () => {
     await waitFor(() => expect(client.lifecycleStatus).toHaveBeenCalled());
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  describe("以檔案總管選擇目錄", () => {
+    afterEach(() => {
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+      vi.mocked(open).mockReset();
+    });
+
+    /** 模擬在 Tauri 視窗中執行。 */
+    function inTauri() {
+      (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    }
+
+    it("不在 Tauri 中時不顯示「瀏覽…」", async () => {
+      render(<WorkspaceSidebar client={fakeClient()} />);
+      await screen.findByText("還沒有 Workspace");
+
+      expect(screen.queryByRole("button", { name: "瀏覽…" })).not.toBeInTheDocument();
+    });
+
+    it("選定資料夾後填入目錄欄位", async () => {
+      inTauri();
+      vi.mocked(open).mockResolvedValueOnce("D:\\picked\\folder");
+      const user = userEvent.setup();
+      render(<WorkspaceSidebar client={fakeClient()} />);
+      await screen.findByText("還沒有 Workspace");
+
+      await user.click(screen.getByRole("button", { name: "瀏覽…" }));
+
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({ directory: true, multiple: false }));
+      await waitFor(() => expect(screen.getByLabelText("目錄")).toHaveValue("D:\\picked\\folder"));
+    });
+
+    it("取消選擇時目錄欄位維持原值", async () => {
+      inTauri();
+      vi.mocked(open).mockResolvedValueOnce(null);
+      const user = userEvent.setup();
+      render(<WorkspaceSidebar client={fakeClient()} />);
+      await screen.findByText("還沒有 Workspace");
+      await user.type(screen.getByLabelText("目錄"), "C:\\work\\docs");
+
+      await user.click(screen.getByRole("button", { name: "瀏覽…" }));
+
+      await waitFor(() => expect(open).toHaveBeenCalled());
+      expect(screen.getByLabelText("目錄")).toHaveValue("C:\\work\\docs");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("對話框開不起來時顯示原因，不丟出例外", async () => {
+      inTauri();
+      vi.mocked(open).mockRejectedValueOnce(new Error("dialog.open not allowed"));
+      const user = userEvent.setup();
+      render(<WorkspaceSidebar client={fakeClient()} />);
+      await screen.findByText("還沒有 Workspace");
+
+      await user.click(screen.getByRole("button", { name: "瀏覽…" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent("dialog.open not allowed");
+      expect(screen.getByLabelText("目錄")).toHaveValue("");
+    });
   });
 
   it("有待裁定時在該 Workspace 顯示數量徽章，沒有時不顯示", async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
 
 import { HelpTip } from "./HelpTip";
 import { formatTimestamp } from "./time";
@@ -41,6 +41,9 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
   const [busy, setBusy] = useState(false);
   // 各 Workspace 的生命週期；讀不到時不顯示設定，不假裝是預設值
   const [lifecycles, setLifecycles] = useState<WorkspaceLifecycleView[]>([]);
+  const pathId = useId();
+  // 系統的資料夾選擇對話框只有在 Tauri 視窗中可用；瀏覽器開發模式只能手動輸入
+  const canBrowse = "__TAURI_INTERNALS__" in window;
 
   const refresh = useCallback(async () => {
     const lifecycle = client.lifecycleStatus().then(
@@ -80,6 +83,18 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
       setFormError(reasonOf(error));
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** 開啟系統的資料夾選擇對話框；選定後填入目錄，取消時不變。 */
+  const browse = async () => {
+    setFormError(null);
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({ directory: true, multiple: false });
+      if (selected !== null) setPath(selected);
+    } catch (error) {
+      setFormError(reasonOf(error));
     }
   };
 
@@ -204,10 +219,22 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
         </ul>
       )}
       <form className="workspace-form" onSubmit={(event) => void create(event)}>
-        <label>
-          目錄
-          <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="C:\work\my-folder" />
-        </label>
+        <div className="workspace-path-field">
+          <label htmlFor={pathId}>目錄</label>
+          <div className="workspace-path-row">
+            <input
+              id={pathId}
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="C:\work\my-folder"
+            />
+            {canBrowse && (
+              <button type="button" disabled={busy} onClick={() => void browse()}>
+                瀏覽…
+              </button>
+            )}
+          </div>
+        </div>
         <label>
           名稱（選填）
           <input value={name} onChange={(e) => setName(e.target.value)} />

@@ -19,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 # 建置時帶入 plugins.updater 設定（產生更新簽章檔）時，generate_context! 展開的程式碼會用到 serde_json
 serde_json = "1"
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["sync", "time"] }
 
 [dev-dependencies]

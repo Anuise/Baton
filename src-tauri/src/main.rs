@@ -1381,6 +1381,7 @@ async fn knowledge_report_recurrence(
 fn main() {
     let link = RuntimeLink::from_env().expect("無法讀取 Runtime 設定");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(link)
         .invoke_handler(tauri::generate_handler![
             runtime_health,

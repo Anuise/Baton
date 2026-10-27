@@ -451,6 +451,21 @@ body {
   gap: var(--space-2);
 }
 
+.workspace-path-field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.workspace-path-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.workspace-path-row input {
+  flex: 1;
+  min-width: 0;
+}
+
 .workspace-form [role="alert"] {
   margin: 0;
   color: var(--color-danger);
