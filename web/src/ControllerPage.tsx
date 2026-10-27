@@ -195,13 +195,17 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
 
   return (
     <section className="controller-page" aria-label="Controller">
-      <h2>Controller：{workspace.name}</h2>
+      <h2>主控台：{workspace.name}</h2>
       {view === null && loadError === null && <p>載入中…</p>}
       {loadError && <p role="alert">無法取得 Controller 狀態：{loadError}</p>}
       {view && (
         <dl className="controller-facts">
           <dt>狀態</dt>
-          <dd>{run === null ? "未開啟" : STATUS_LABELS[run.status]}</dd>
+          <dd>
+            <span className={`controller-status controller-status-${run === null ? "idle" : run.status}`}>
+              {run === null ? "未開啟" : STATUS_LABELS[run.status]}
+            </span>
+          </dd>
           {run && (
             <>
               <dt>Controller 帳號</dt>
@@ -212,8 +216,6 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
               <dd>{sessionLabel(run)}</dd>
             </>
           )}
-          <dt>操作手冊版本</dt>
-          <dd>{view.playbook_version}</dd>
         </dl>
       )}
       {run && !open && run.end_reason !== null && (
@@ -231,12 +233,9 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
       {view && open && (
         <div className="controller-actions">
           {run?.rebound_at != null ? (
-            <p role="alert">
-              Runtime 重新啟動過，這個 Controller CLI 的平台工具已失效。請按「結束」後以同一個帳號重新開啟（會接續原生
-              Session）。
-            </p>
+            <p role="alert">Runtime 重新啟動過，這個視窗的平台工具已失效。請按「結束」，再用同一個帳號重新開啟（會接續 Session）。</p>
           ) : (
-            <p className="controller-hint">Controller CLI 已開啟，請切到它的終端機視窗</p>
+            <p className="controller-hint">已在終端機開啟，請切到該視窗操作</p>
           )}
           {controllerAccount && (
             <div className="controller-quota" role="group" aria-label="Controller 帳號額度">
@@ -248,32 +247,36 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
               Controller 帳號的額度已接近上限，建議換帳號重開
             </p>
           )}
-          <button type="button" disabled={busy || ending} onClick={() => void act(() => client.endControllerCli(workspace.id))}>
-            {ending ? "結束中…" : "結束"}
-          </button>
+          <div className="controller-row">
+            <button type="button" disabled={busy || ending} onClick={() => void act(() => client.endControllerCli(workspace.id))}>
+              {ending ? "結束中…" : "結束"}
+            </button>
+          </div>
           {run !== null && run.switch_to_profile_id !== null && (
             <p className="controller-switching">換帳號重開中：改用 {profileName(run.switch_to_profile_id)}</p>
           )}
           {profiles !== null && (
             <div className="controller-switch">
-              <label>
-                換成帳號
-                <select value={switchTarget} disabled={ending} onChange={(e) => setSwitchTo(e.target.value)}>
-                  {switchTargets.map((profile) => (
-                    <option key={profile.id} value={profile.id}>
-                      {optionLabel(profile)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {switchTargets.length === 0 && <p className="controller-hint">沒有其他可用的帳號可換</p>}
-              <button
-                type="button"
-                disabled={busy || ending || switchTarget === ""}
-                onClick={() => void act(() => client.switchControllerCli(workspace.id, switchTarget))}
-              >
-                換帳號重開
-              </button>
+              <div className="controller-row">
+                <label>
+                  換成帳號
+                  <select value={switchTarget} disabled={ending} onChange={(e) => setSwitchTo(e.target.value)}>
+                    {switchTargets.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {optionLabel(profile)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  disabled={busy || ending || switchTarget === ""}
+                  onClick={() => void act(() => client.switchControllerCli(workspace.id, switchTarget))}
+                >
+                  換帳號重開
+                </button>
+              </div>
+              {switchTargets.length === 0 && <p className="controller-hint">沒有其他可用的帳號</p>}
             </div>
           )}
         </div>
@@ -281,45 +284,60 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
       {view && !open && (
         <div className="controller-actions">
           {profiles === null && profilesError === null && <p>載入帳號中…</p>}
-          {profiles !== null && (
-            <label>
-              Controller 帳號
-              <select value={profileId} onChange={(e) => setPickedProfileId(e.target.value)}>
-                {available.length === 0 && <option value="">（沒有可用的帳號）</option>}
-                {profiles.map((profile) => (
-                  <option key={profile.id} value={profile.id} disabled={!profile.dispatchable}>
-                    {optionLabel(profile)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
+          <div className="controller-row">
+            {profiles !== null && (
+              <label>
+                Controller 帳號
+                <select value={profileId} onChange={(e) => setPickedProfileId(e.target.value)}>
+                  {available.length === 0 && <option value="">（沒有可用的帳號）</option>}
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id} disabled={!profile.dispatchable}>
+                      {optionLabel(profile)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <button
+              type="button"
+              className="primary-action"
+              disabled={busy || !selectable}
+              onClick={() => void act(() => client.openControllerCli(workspace.id, profileId))}
+            >
+              開啟
+            </button>
+          </div>
           {profiles !== null && available.length === 0 && (
-            <p className="controller-hint">沒有可用的帳號，請到「帳號」頁簽新增帳號或重新核對</p>
+            <p className="controller-hint">沒有可用的帳號，請到「帳號」新增或重新核對</p>
           )}
           {unavailable.length > 0 && (
-            <ul className="controller-unavailable" aria-label="不可用的帳號">
-              {unavailable.map((profile) => (
-                <li key={profile.id}>
-                  {profile.name}：
-                  {profile.blockers.length > 0
-                    ? profile.blockers.map((blocker) => blocker.message).join("；")
-                    : profileStateLabel(profile)}
-                </li>
-              ))}
-            </ul>
+            <details className="controller-unavailable-details">
+              <summary>不可用的帳號（{unavailable.length}）</summary>
+              <ul className="controller-unavailable" aria-label="不可用的帳號">
+                {unavailable.map((profile) => (
+                  <li key={profile.id}>
+                    {profile.name}：
+                    {profile.blockers.length > 0
+                      ? profile.blockers.map((blocker) => blocker.message).join("；")
+                      : profileStateLabel(profile)}
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
-          <button
-            type="button"
-            disabled={busy || !selectable}
-            onClick={() => void act(() => client.openControllerCli(workspace.id, profileId))}
-          >
-            開啟
-          </button>
         </div>
       )}
       {overviewError && <p className="controller-quota-error">無法取得額度：{overviewError}</p>}
       {actionError && <p role="alert">{actionError}</p>}
+      {view && (
+        <details className="controller-more">
+          <summary>詳細資訊</summary>
+          <dl className="controller-facts">
+            <dt>操作手冊版本</dt>
+            <dd>{view.playbook_version}</dd>
+          </dl>
+        </details>
+      )}
     </section>
   );
 }

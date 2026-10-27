@@ -1,5 +1,7 @@
 import { Fragment } from "react";
 
+import { HelpTip } from "./HelpTip";
+
 import {
   CONTRACT_FIELDS,
   type Capability,
@@ -215,8 +217,12 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
                     <textarea value={field.text} onChange={(e) => change(name, { text: e.target.value })} />
                   </label>
                   <label>
-                    {label}：引用（每行 kind:target@version）
-                    <textarea value={field.references} onChange={(e) => change(name, { references: e.target.value })} />
+                    {label}：引用（選填）
+                    <textarea
+                      value={field.references}
+                      placeholder="每行一個，格式 kind:target@version"
+                      onChange={(e) => change(name, { references: e.target.value })}
+                    />
                   </label>
                 </>
               )}
@@ -235,11 +241,13 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
             </fieldset>
             {name === "done_criteria" && (
               <fieldset>
-                <legend>確定性檢查</legend>
-                <p>
-                  Worker 成功結束後，Runtime 會執行這些檢查，全部通過才自動完成；也可以在驗證中手動接受成果。每行一項：
-                  {CHECK_FORMATS}（以空白分隔，不支援引號）。
-                </p>
+                <legend>
+                  確定性檢查{" "}
+                  <HelpTip label="確定性檢查">
+                    Worker 成功結束後會自動執行這些檢查，全部通過才自動完成；也可以在驗證中手動接受成果。每行一項：
+                    {CHECK_FORMATS}（以空白分隔，不支援引號）。
+                  </HelpTip>
+                </legend>
                 <label>
                   確定性檢查（每行一項）
                   <textarea value={draft.checks} onChange={(e) => onChange({ ...draft, checks: e.target.value })} />
