@@ -97,6 +97,8 @@ export interface ModelOption {
 
 export interface ModelCatalog {
   models: ModelOption[];
+  /** 清單來源：`null` 是 Runtime 內建清單；有值是使用者以 API 金鑰更新的時間（UTC 毫秒）。 */
+  updated_at: number | null;
 }
 
 export interface CreateWorkspaceRequest {
@@ -365,6 +367,8 @@ export interface WorkspaceClient {
 /** 模型設定可選的模型清單（Runtime 提供）。 */
 export interface ModelCatalogClient {
   listModels(): Promise<ModelCatalog>;
+  /** 以使用者貼上的 Anthropic API 金鑰更新清單；金鑰只隨這一次請求送出，不保存（AI-33）。 */
+  refreshModels(apiKey: string): Promise<ModelCatalog>;
 }
 
 /** Workspace 授權：讀取、確認前的摘要、確認並保存（產生新的 revision）。 */
@@ -3008,6 +3012,7 @@ const HEALTH_PATH = "/api/v1/health";
 const PLATFORM_PATH = "/api/v1/platform";
 const WORKSPACES_PATH = "/api/v1/workspaces";
 const MODELS_PATH = "/api/v1/models";
+const MODELS_REFRESH_PATH = "/api/v1/models/refresh";
 const PROFILES_PATH = "/api/v1/profiles";
 const SETUP_PATH = "/api/v1/setup";
 const PENDING_DECISIONS_PATH = "/api/v1/decisions/pending";
@@ -3099,6 +3104,7 @@ export function createHttpClient(fetchFn: typeof fetch = fetch): AppClient {
     setModelOverrides: (id, overrides) =>
       send(`${workspacePath(id)}/model-overrides`, { method: "PUT", body: overrides }),
     listModels: () => send<ModelCatalog>(MODELS_PATH),
+    refreshModels: (apiKey) => send<ModelCatalog>(MODELS_REFRESH_PATH, { method: "POST", body: { api_key: apiKey } }),
     async getAuthorization(workspaceId) {
       const response = await fetchFn(authorizationPath(workspaceId));
       if (!response.ok) throw await failure(response);
@@ -3288,6 +3294,7 @@ export function createTauriClient(invoke: Invoke, listen: Listen = async () => (
     archiveWorkspace: (id) => call<Workspace>("workspace_archive", { id }),
     setModelOverrides: (id, overrides) => call<Workspace>("workspace_set_model_overrides", { id, overrides }),
     listModels: () => call<ModelCatalog>("model_list"),
+    refreshModels: (apiKey) => call<ModelCatalog>("model_refresh", { apiKey }),
     getAuthorization: (id) => call<AuthorizationView>("workspace_authorization", { id }),
     summarizeAuthorization: (id, grants) => call<ConfirmationSummary>("workspace_authorization_summary", { id, grants }),
     confirmAuthorization: (id, { templateId, grants, acknowledgedRisk, acknowledgedExpansion, expectedRevision }) =>

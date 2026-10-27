@@ -334,6 +334,7 @@ pub fn production_ports(data_dir: &Path, port: u16) -> Ports {
         browser_driver: Arc::new(crate::browser_driver::LocalBrowserDriver::default()),
         semantic_judge: Arc::new(crate::semantic_judge::ClaudeSemanticJudge::default()),
         secret_resolver: Arc::new(crate::secret_resolver::EnvSecretResolver),
+        model_directory: Arc::new(crate::model_directory::AnthropicModelDirectory::default()),
     }
 }
 
