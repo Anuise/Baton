@@ -2307,8 +2307,16 @@ body {
   align-items: center;
 }
 
-.timeline-filter select {
+.timeline-filter select,
+.timeline-filter input {
   margin-left: var(--space-3);
+}
+
+.timeline-pagination {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: center;
 }
 
 .timeline-list {
