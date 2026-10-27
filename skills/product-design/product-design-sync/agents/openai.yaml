@@ -1,4 +1,0 @@
-interface:
-  display_name: "設計決策核准同步"
-  short_description: "產生已審查決策的修改預覽，明確核准後才寫入並驗證 GitHub"
-  default_prompt: "使用 $product-design-sync 預覽已完成審查的決策差異，等待我核准同步。"

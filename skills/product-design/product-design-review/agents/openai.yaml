@@ -1,4 +1,0 @@
-interface:
-  display_name: "產品設計審查入口"
-  short_description: "串接領域探索、決策審查與核准同步，依使用者選擇逐層深入"
-  default_prompt: "使用 $product-design-review 開始 Issue Orchestrator 產品設計審查，先建立領域地圖並等待我選擇。"

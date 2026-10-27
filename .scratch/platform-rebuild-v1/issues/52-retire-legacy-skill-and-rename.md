@@ -12,7 +12,9 @@ Blocked by: 51
 ## Acceptance criteria
 
 - [ ] 產品名稱最終確認，程式內常數、安裝設定與資料目錄名稱一致
-- [ ] README 描述新平台；舊 skill 的去向已記錄
+- [x] README 描述新平台；舊 skill 的去向已記錄
 - [ ] main 包含完整的新平台，issue #3 可由使用者決定是否關閉
 
 ## Comments
+
+- 2026-10-27 主控：README 已改寫為 Baton 的說明（commit 5437d0c）。使用者決定直接移除舊 skill、不移到其他 repo：已從 main 刪除 `skills/`（issue-orchestrator 與 product-design）與只記錄舊 skill 的 `docs/validation.md`，最後版本留在 git 歷史與 tag `archive/legacy-skill`（目前只在本機，尚未推送到 origin）。產品與 repo 改名、移除 AGENTS.md 的 feature 執行方式段落仍待處理。

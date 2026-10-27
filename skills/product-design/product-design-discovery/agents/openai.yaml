@@ -1,4 +1,0 @@
-interface:
-  display_name: "設計領域與模組探索"
-  short_description: "依現有規格建立領域、模組與決策清單，列出依賴並等待選擇"
-  default_prompt: "使用 $product-design-discovery 盤點 Issue Orchestrator 的設計領域並顯示選單。"

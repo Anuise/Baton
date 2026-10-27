@@ -1,6 +1,6 @@
 # 開發者指南
 
-Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常駐 Runtime、React + TypeScript + Vite 的 Web UI、Tauri 桌面殼。舊版 skill（`skills/`、README）在重建期間不動，已用 git tag `archive/legacy-skill` 封存。
+Baton（暫名，見 spec D-01）是 Windows 桌面應用程式：Rust 寫的常駐 Runtime、React + TypeScript + Vite 的 Web UI、Tauri 桌面殼。舊版 issue-orchestrator 與 product-design skill 已從 repo 移除，需要時從 git 歷史（tag `archive/legacy-skill`）取回。
 
 ## 目錄
 
