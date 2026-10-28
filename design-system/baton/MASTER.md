@@ -61,8 +61,8 @@
 | `--color-success` ／ `-subtle` ／ `-border` | `#15803D` ／ `#F0FDF4` ／ `#BBF7D0` | 通過、運作中 | 5.02；在 subtle 上 4.79 | 自訂：Q3 未給 success |
 | `--color-warning` ／ `-subtle` ／ `-border` | `#B45309` ／ `#FFFBEB` ／ `#FDE68A` | 待裁定、逾期、需注意 | 5.02；在 subtle 上 4.84 | 自訂 |
 | `--color-danger` ／ `-subtle` ／ `-border` | `#B91C1C` ／ `#FEF2F2` ／ `#FECACA` | 失敗、錯誤、破壞性動作 | 6.47；在 subtle 上 5.91 | 自訂：Q3 Destructive `#DC2626` 在白底只有 4.83、淡紅底更低，改深一階 |
-| `--color-orange` ／ `-subtle` | `#C2410C` ／ `#FFF7ED` | 只用於驗證判定（環境受阻） | 5.18；在 subtle 上 4.88 | 現行用途保留，值調整 |
-| `--color-purple` ／ `-subtle` | `#6D28D9` ／ `#F5F3FF` | 只用於驗證判定（授權受阻） | 7.10；在 subtle 上 6.48 | 現行用途保留，值調整 |
+| `--color-orange` ／ `-subtle` ／ `-border` | `#C2410C` ／ `#FFF7ED` ／ `#FED7AA` | 只用於驗證判定（環境受阻） | 5.18；在 subtle 上 4.88 | 現行用途保留，值調整 |
+| `--color-purple` ／ `-subtle` ／ `-border` | `#6D28D9` ／ `#F5F3FF` ／ `#DDD6FE` | 只用於驗證判定（授權受阻） | 7.10；在 subtle 上 6.48 | 現行用途保留，值調整 |
 
 ### 2.2 深色（`@media (prefers-color-scheme: dark)`）
 
@@ -88,8 +88,8 @@
 | `--color-success` ／ `-subtle` ／ `-border` | `#4ADE80` ／ `#14301F` ／ `#166534` | 8.99；在 subtle 上 8.19 | 自訂 |
 | `--color-warning` ／ `-subtle` ／ `-border` | `#FBBF24` ／ `#3A2A12` ／ `#854D0E` | 9.39；在 subtle 上 8.28 | 自訂 |
 | `--color-danger` ／ `-subtle` ／ `-border` | `#F87171` ／ `#3B1D24` ／ `#991B1B` | 5.66；在 subtle 上 5.47 | 自訂 |
-| `--color-orange` ／ `-subtle` | `#FB923C` ／ `#3A2216` | 6.92；在 subtle 上 6.53 | 自訂 |
-| `--color-purple` ／ `-subtle` | `#C4B5FD` ／ `#2A2346` | 8.49；在 subtle 上 7.97 | 自訂 |
+| `--color-orange` ／ `-subtle` ／ `-border` | `#FB923C` ／ `#3A2216` ／ `#9A3412` | 6.92；在 subtle 上 6.53 | 自訂 |
+| `--color-purple` ／ `-subtle` ／ `-border` | `#C4B5FD` ／ `#2A2346` ／ `#5B21B6` | 8.49；在 subtle 上 7.97 | 自訂 |
 
 ### 2.3 色彩使用規則
 
@@ -213,6 +213,7 @@
 - `display: inline-flex; white-space: nowrap; flex-shrink: 0;` 高 18px、`--text-caption`、`radius-full`、水平內距 6px。
 - **計數徽章**：`tabular-nums`；超過 999 顯示 `999+`，完整數字放在可存取名稱（`aria-label="待裁定 1,284 項"`）與 `title`（Q6 Contextual Live Badge Updates）。
 - **文字徽章**（例：「候選，尚未驗證」）：一行，最多 6 個全形字；放不下時改用短詞（「未驗證」），不截斷、不換行。
+  - 例外：安全字樣保留完整文字，不為了 6 字縮短語意，例如裁定清單的「已逾期，尚未裁定」（逾期不代表任何決定，AI-85）。超過 6 字的徽章仍一行不換行，靠徽章群組整組換行。
 - 多個徽章並排時整組換行（`flex-wrap: wrap; gap: 4px`），不縮小單一徽章。
 - 語意：成功／警告／危險／中性四種；底 `*-subtle`、字語意色、框 `*-border`。
 
@@ -336,7 +337,7 @@ flex 與 grid 子元素的 `min-width` 預設是 `auto`（＝內容的 min-conte
 |---|---|---|
 | 側欄 | 260px | 232px；Workspace 路徑隱藏，只留名稱與徽章 |
 | 主區內距 | 24px | 16px |
-| 裁定（清單 + 詳情） | `minmax(260px, 340px) minmax(0, 1fr)` | `minmax(220px, 280px) minmax(0, 1fr)` |
+| 裁定（清單 + 詳情） | `minmax(260px, 340px) minmax(0, 1fr)` | `minmax(220px, min(280px, 36%)) minmax(0, 1fr)`：清單欄最多佔 36%，詳情段落不被擠到每行 27 字以下（AI-84） |
 | 工作看板欄寬 | 280px，水平捲動 | 260px，水平捲動；看板左右緣加漸層提示還有欄位 |
 | 觀測指標網格 | `repeat(auto-fill, minmax(200px, 1fr))` | 同左（自動減為 3 欄） |
 | 表單 | 48em 上限 | 滿版（可用寬度已小於 48em） |
@@ -377,7 +378,7 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 
 ### 10.2 Token
 
-- **色彩**：第 2 節的表，名稱與值一一相同（`--color-bg`、`--color-surface`、`-raised`、`-sunken`、`-hover`、`--color-overlay`、`--color-border`、`-strong`、`--color-control-border`、`--color-text`、`-muted`、`-subtle`、`--color-accent`、`-hover`、`-subtle`、`-border`、`--color-on-accent`、`--color-focus`、`--color-{success,warning,danger}` 與 `-subtle`、`-border`、`--color-{orange,purple}` 與 `-subtle`）。只取 token，不寫死色碼。
+- **色彩**：第 2 節的表，名稱與值一一相同（`--color-bg`、`--color-surface`、`-raised`、`-sunken`、`-hover`、`--color-overlay`、`--color-border`、`-strong`、`--color-control-border`、`--color-text`、`-muted`、`-subtle`、`--color-accent`、`-hover`、`-subtle`、`-border`、`--color-on-accent`、`--color-focus`、`--color-{success,warning,danger}` 與 `-subtle`、`-border`、`--color-{orange,purple}` 與 `-subtle`、`-border`）。只取 token，不寫死色碼。
 - **字型**：`--font-sans`、`--font-mono`（3.1）。
 - **字級／行高**：`--text-caption`／`--leading-caption`（12px／1.4）、`--text-meta`／`--leading-meta`（13／1.5）、`--text-body`／`--leading-body`（14／1.65）、`--text-title-sm`／`--leading-title-sm`（14／1.4）、`--text-title`／`--leading-title`（16／1.35）、`--text-title-lg`／`--leading-title-lg`（20／1.3）、`--leading-code`（1.5）。字重 `--font-weight-normal`（400）、`--font-weight-strong`（600）。
   - 舊名 `--font-size-xs～xl` 已在 UI 改版收尾時移除（各包都已改用 `--text-*`）。`--text-caption`（12px）只能用在徽章、計數、時間戳，卡片內文用 `--text-meta`、段落 `--text-body`。
@@ -433,7 +434,7 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 
 - `.badge`：18px 高、12px、600、膠囊、不換行、不縮小、`tabular-nums`；預設中性（sunken 底、muted 字）。語意：`.badge-success`、`.badge-warning`、`.badge-danger`、`.badge-accent`。
 - 多個徽章：外層 `.badge-group`（flex、wrap、gap 4px）。
-- 文字徽章最多 6 個全形字，放不下時換短詞（「未驗證」），不要截斷。
+- 文字徽章最多 6 個全形字，放不下時換短詞（「未驗證」），不要截斷；安全字樣例外（5.4，例：「已逾期，尚未裁定」）。
 - 現行的 `.decision-badge`、`.tab-badge` 已加上不換行與不縮小；`.knowledge-badge`（內容含「不生效：<原因>」長文字）**沒有**加，WP6 改用 `.badge` 並把原因移出徽章。其他頁的徽章類 class（`.verdict`、`.decision-recommended`、`.workflow-gate`、`.task-kind`、`.exploration-badge`）改版時直接換成 `.badge` + 語意 class。
 
 ### 10.7 卡片、狀態色條（5.2、2.3）

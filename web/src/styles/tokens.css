@@ -119,8 +119,10 @@
   /* 輔助色：只用在驗證判定標籤與色條（環境受阻、授權受阻） */
   --color-orange: #c2410c;
   --color-orange-subtle: #fff7ed;
+  --color-orange-border: #fed7aa;
   --color-purple: #6d28d9;
   --color-purple-subtle: #f5f3ff;
+  --color-purple-border: #ddd6fe;
 }
 
 /* 深色模式：覆寫全部色彩 token 與陰影，其餘尺寸 token 共用 */
@@ -163,8 +165,10 @@
 
     --color-orange: #fb923c;
     --color-orange-subtle: #3a2216;
+    --color-orange-border: #9a3412;
     --color-purple: #c4b5fd;
     --color-purple-subtle: #2a2346;
+    --color-purple-border: #5b21b6;
   }
 }
 

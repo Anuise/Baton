@@ -86,7 +86,7 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
               <li key={file.storage_path}>
                 <ShortValue value={file.storage_path} kind="path" />
                 <span className="artifact-meta">
-                  {sizeLabel(file.size_bytes)}・{UNREGISTERED_KIND_LABELS[file.kind]}
+                  <span className="artifact-size">{sizeLabel(file.size_bytes)}</span>・{UNREGISTERED_KIND_LABELS[file.kind]}
                 </span>
               </li>
             ))}

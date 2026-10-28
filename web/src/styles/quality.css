@@ -116,6 +116,11 @@
   margin-left: var(--space-4);
 }
 
+/* 大小（含千分位位元組）是一個單位，放不下時整段換到下一行，不拆成兩行 */
+.artifact-size {
+  white-space: nowrap;
+}
+
 /* ---------- 審查 ---------- */
 
 /* 「審查」「設計偏離」兩個分區之間多留一段 */
@@ -320,13 +325,13 @@
 }
 
 .verdict-environment_blocked {
-  border-color: var(--color-orange);
+  border-color: var(--color-orange-border);
   background: var(--color-orange-subtle);
   color: var(--color-orange);
 }
 
 .verdict-auth_blocked {
-  border-color: var(--color-purple);
+  border-color: var(--color-purple-border);
   background: var(--color-purple-subtle);
   color: var(--color-purple);
 }
