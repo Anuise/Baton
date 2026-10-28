@@ -135,6 +135,7 @@
   color: inherit;
   font: inherit;
   text-align: left;
+  justify-content: flex-start;
   cursor: pointer;
 }
 
@@ -202,14 +203,16 @@
   white-space: nowrap;
 }
 
-/* 「管理」選單：項目右上角的低調按鈕，展開為浮層 */
+/* 「管理」選單：項目右上角的低調按鈕，展開為浮層。
+   選單本身不定位、不設 z-index（不形成堆疊脈絡），浮層才能以 --z-popover 蓋過暫停列與下一個項目；
+   觸發按鈕自己浮在選擇按鈕的 ::after 上面 */
 .workspace-menu {
-  position: relative;
-  z-index: 1;
   flex: none;
 }
 
 .workspace-menu-trigger {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -232,16 +235,17 @@
   color: var(--color-text);
 }
 
+/* 浮層以整個項目定位：在觸發按鈕（高 20px）下方、靠項目右緣；寬度不超過項目，1024 寬時左緣不被裁切 */
 .workspace-menu-panel {
   position: absolute;
-  top: calc(100% + var(--space-2));
+  top: calc(var(--space-2) + 20px + var(--space-2));
   right: 0;
   z-index: var(--z-popover);
   display: grid;
   gap: var(--space-4);
   justify-items: start;
   box-sizing: border-box;
-  width: 224px;
+  width: min(224px, 100%);
   padding: var(--space-5);
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
@@ -261,9 +265,11 @@
   align-items: center;
 }
 
+/* 建立表單左右與側欄標題、項目內容對齊 */
 .workspace-form {
   display: grid;
   gap: var(--space-4);
+  padding-inline: var(--space-4);
 }
 
 .workspace-form label {

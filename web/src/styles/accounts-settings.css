@@ -618,8 +618,10 @@ p.backup-drill-result {
   color: var(--color-text);
 }
 
+/* 來源列是一行中繼資料，不受內文行寬限制，避免「複製網址」被擠到第二行 */
 p.platform-source {
   margin-top: 0;
+  max-inline-size: none;
   font-size: var(--text-caption);
 }
 
