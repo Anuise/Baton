@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { LongText } from "./LongText";
+import { shortPath } from "./textFormat";
 import { formatTimestamp } from "./time";
 import {
   errorCode,
@@ -41,6 +43,20 @@ const PROJECTION_STATUS_LABELS: Record<ProjectionStatus, string> = {
   in_sync: "已同步",
   conflict: "外部已修改・待協調",
   detached: "保留外部版本・Baton 停止寫入",
+};
+
+/** 項目狀態徽章的語意色：已確認為成功、假說與未知要人確認、已移除為中性。 */
+const STATUS_TONES: Record<UnderstandingStatus, string> = {
+  confirmed: "badge badge-success",
+  hypothesis: "badge badge-warning",
+  unknown: "badge badge-warning",
+  retired: "badge",
+};
+
+const PROJECTION_TONES: Record<ProjectionStatus, string> = {
+  in_sync: "badge badge-success",
+  conflict: "badge badge-warning",
+  detached: "badge",
 };
 
 const PROJECTION_CHANGED_NOTICE = "投影檔在檢視後又被修改，已重新檢查，請確認最新狀態後再協調";
@@ -111,10 +127,12 @@ export function ProjectUnderstandingPage({ client, workspace, timeZone }: Props)
 
   return (
     <section className="understanding-page" aria-label="專案理解">
-      <h2>專案理解：{workspace.name}</h2>
-      <button type="button" onClick={recheck} disabled={busy || loaded.state === "loading"}>
-        重新檢查
-      </button>
+      <header className="more-header">
+        <h2>專案理解</h2>
+        <button type="button" onClick={recheck} disabled={busy || loaded.state === "loading"}>
+          重新檢查
+        </button>
+      </header>
       {conflicts > 0 && (
         <p className="understanding-conflict" role="status">
           {conflicts} 個投影檔被外部修改，Baton 沒有覆寫，請協調
@@ -160,15 +178,18 @@ function ItemSection({ title, items, timeZone }: { title: string; items: Underst
   return (
     <section className="understanding-section" aria-labelledby={id}>
       <h3 id={id}>{title}</h3>
-      {items.length === 0 && <p>這個區塊還沒有項目</p>}
+      {items.length === 0 && <p className="more-empty">這個區塊還沒有項目</p>}
       {items.length > 0 && (
         <ul className="understanding-items">
           {items.map((item) => (
             <li key={item.id} aria-label={item.key} className={`understanding-item understanding-${item.status}`}>
-              <span className="understanding-key">{item.key}</span>
-              <span className="understanding-status">{STATUS_LABELS[item.status]}</span>
-              {item.stale && <span className="understanding-stale">來源已變更・需重新查驗</span>}
-              <p className="understanding-text">{item.text}</p>
+              {/* 名稱與狀態分開：名稱等寬，狀態是徽章（audit P-KN-5） */}
+              <div className="understanding-item-header">
+                <code className="understanding-key mono">{item.key}</code>
+                <span className={`understanding-status ${STATUS_TONES[item.status]}`}>{STATUS_LABELS[item.status]}</span>
+                {item.stale && <span className="understanding-stale badge badge-warning">來源已變更・需重新查驗</span>}
+              </div>
+              <LongText text={item.text} className="understanding-text" />
               {item.sources.length > 0 && (
                 <ul className="understanding-sources" aria-label={`${item.key} 的來源`}>
                   {item.sources.map((source, index) => (
@@ -193,7 +214,9 @@ function SourceView({ source, timeZone }: { source: UnderstandingSource; timeZon
   const version = source.kind === "file" ? source.version.slice(0, 12) : source.version;
   return (
     <>
-      <span className="understanding-source-location">{location}</span>
+      <span className="understanding-source-location mono" title={location}>
+        {shortPath(location)}
+      </span>
       <span className="understanding-source-version">・版本 {version}</span>
       <span className="understanding-source-checked">・查驗於 {formatTimestamp(source.checked_at, timeZone)}</span>
       {source.changed && <span className="understanding-source-changed">・已變更</span>}
@@ -215,18 +238,22 @@ function ProjectionSection({
   return (
     <section className="understanding-projections" aria-labelledby="understanding-projections-title">
       <h3 id="understanding-projections-title">repo 投影（GLOSSARY／ADR）</h3>
-      {!view.projection_enabled && <p>這個 Workspace 不是 Git repo，不產生 GLOSSARY／ADR 投影</p>}
-      {view.projection_enabled && view.projections.length === 0 && <p>還沒有投影檔</p>}
+      {!view.projection_enabled && <p className="more-empty">這個 Workspace 不是 Git repo，不產生 GLOSSARY／ADR 投影</p>}
+      {view.projection_enabled && view.projections.length === 0 && <p className="more-empty">還沒有投影檔</p>}
       {view.projection_enabled && view.projections.length > 0 && (
         <ul className="understanding-projection-list">
           {view.projections.map((projection) => (
             <li key={projection.path} aria-label={projection.path} className={`projection-${projection.status}`}>
-              <span className="projection-path">{projection.path}</span>
-              {/* 第 0 版：接入前就已存在的檔案，Baton 還沒寫入過 */}
-              <span className="projection-version">
-                {projection.version === 0 ? "Baton 尚未寫入" : `第 ${projection.version} 版`}
-              </span>
-              <span className="projection-status">{projectionStatusLabel(projection)}</span>
+              <div className="projection-header">
+                <code className="projection-path mono">{projection.path}</code>
+                <span className={`projection-status ${PROJECTION_TONES[projection.status]}`}>
+                  {projectionStatusLabel(projection)}
+                </span>
+                {/* 第 0 版：接入前就已存在的檔案，Baton 還沒寫入過 */}
+                <span className="projection-version badge">
+                  {projection.version === 0 ? "Baton 尚未寫入" : `第 ${projection.version} 版`}
+                </span>
+              </div>
               {projection.status === "conflict" && projection.detected_at !== null && (
                 <span className="projection-detected">偵測於 {formatTimestamp(projection.detected_at, timeZone)}</span>
               )}
