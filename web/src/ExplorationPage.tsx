@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { LongText } from "./LongText";
+import { LongText, ShortValue } from "./LongText";
 import { formatTimestamp } from "./time";
 import type {
   ExclusionReason,
@@ -16,7 +16,7 @@ import type {
   VerificationVerdict,
   Workspace,
 } from "./runtimeClient";
-import { ShortValue, VERDICT_LABELS } from "./VerificationPage";
+import { VERDICT_LABELS } from "./VerificationPage";
 
 type Loaded = { state: "loading" } | { state: "ready"; overview: ExplorationOverview } | { state: "failed"; reason: string };
 
@@ -210,7 +210,7 @@ function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZ
       {/* 疑點與確認它的重現案例共用一個 dl，標籤欄對齊 */}
       <dl className="exploration-summary">
         <dt>Task</dt>
-        <dd>{finding.task_title ?? <ShortValue value={finding.task_id} kind="id" />}</dd>
+        <dd>{finding.task_title ?? <ShortValue value={finding.task_id} kind="id" field="Task" />}</dd>
         <dt>章程</dt>
         <dd>第 {finding.charter_version} 版</dd>
         {finding.feature !== undefined && (
@@ -236,13 +236,13 @@ function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZ
             : finding.evidence.map((id, index) => (
                 <span key={index}>
                   {index > 0 && "、"}
-                  <ShortValue value={id} kind="id" />
+                  <ShortValue value={id} kind="id" field={finding.evidence.length === 1 ? "證據" : `證據 ${index + 1}`} />
                 </span>
               ))}
         </dd>
         <dt>回報者</dt>
         <dd>
-          <ShortValue value={finding.reported_by} kind="id" />
+          <ShortValue value={finding.reported_by} kind="id" field="回報者" />
         </dd>
         <dt>回報於</dt>
         <dd>{formatTimestamp(finding.created_at, timeZone)}</dd>
@@ -259,7 +259,7 @@ function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZ
               {EXCLUSION_LABELS[finding.exclusion.reason]}
               {finding.exclusion.decision_request_id !== undefined && (
                 <>
-                  （裁定請求 <ShortValue value={finding.exclusion.decision_request_id} kind="id" />）
+                  （裁定請求 <ShortValue value={finding.exclusion.decision_request_id} kind="id" field="裁定請求" />）
                 </>
               )}
             </dd>
@@ -287,7 +287,7 @@ function CaseRows({ reproduction, timeZone }: { reproduction: ReproductionCase; 
     <>
       <dt>確認的 Evidence Bundle</dt>
       <dd>
-        <ShortValue value={reproduction.bundle_id} kind="id" />
+        <ShortValue value={reproduction.bundle_id} kind="id" field="確認的 Evidence Bundle" />
       </dd>
       {reproduction.failed_step !== undefined && (
         <>
@@ -329,8 +329,8 @@ function AttemptItem({ attempt, timeZone }: { attempt: ReproductionAttempt; time
         {PURPOSE_LABELS[attempt.purpose]}・{outcome}
       </span>
       <span>
-        驗證要求 <ShortValue value={attempt.request_id} kind="id" />・Bundle{" "}
-        {attempt.bundle_id === undefined ? "尚未產生" : <ShortValue value={attempt.bundle_id} kind="id" />}
+        驗證要求 <ShortValue value={attempt.request_id} kind="id" field="驗證要求" />・Bundle{" "}
+        {attempt.bundle_id === undefined ? "尚未產生" : <ShortValue value={attempt.bundle_id} kind="id" field="Bundle" />}
       </span>
       {attempt.verdict !== undefined && (
         <span>

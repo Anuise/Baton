@@ -255,9 +255,11 @@ describe("驗證", () => {
     expect(within(card).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
     expect(within(card).getByText("e3b0c44298fc…")).toHaveAttribute("title", revision);
     expect(within(card).getByText(String.raw`C:\…\workspaces\notes`)).toHaveAttribute("title", dir);
-    expect(within(card).getAllByRole("button", { name: "複製識別碼" })).toHaveLength(2);
-    expect(within(card).getByRole("button", { name: "複製雜湊" })).toBeInTheDocument();
-    expect(within(card).getByRole("button", { name: "複製路徑" })).toBeInTheDocument();
+    // 同一張卡的複製按鈕以欄位名區分
+    expect(within(card).getByRole("button", { name: "複製識別碼（Evidence Bundle）" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "複製雜湊（候選版本）" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "複製路徑（受驗目錄）" })).toBeInTheDocument();
     expect(within(region("Verification Profile")).getByText("vbun_7b5deb…7314")).toHaveAttribute("title", id);
   });
 

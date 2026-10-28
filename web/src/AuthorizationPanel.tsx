@@ -190,7 +190,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
   const expands = summary?.changes?.expands ?? false;
   return (
     <section className="authorization" aria-label="授權設定">
-      <header className="more-header">
+      <header className="page-header">
         <h2>授權設定</h2>
       </header>
       {effective ? (

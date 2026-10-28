@@ -116,7 +116,7 @@ describe("成果", () => {
     const sha = within(latest).getByText(`${SHA.slice(0, 12)}…`);
     expect(sha).toHaveClass("mono");
     expect(sha).toHaveAttribute("title", SHA);
-    expect(within(latest).getByRole("button", { name: "複製雜湊" })).toBeInTheDocument();
+    expect(within(latest).getByRole("button", { name: "複製雜湊（v2）" })).toBeInTheDocument();
     expect(latest).toHaveTextContent("產生者 Run（第 2 次）：run_2");
     expect(latest).toHaveTextContent("2023/11/15 06:15");
     expect(latest).toHaveTextContent("第 2 版說明");
@@ -144,7 +144,9 @@ describe("成果", () => {
     expect(latest).toHaveTextContent("1.15 GB（1,234,567,892 位元組）");
     expect(within(card).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
     expect(within(latest).getByText("run_0_e3b0…b924")).toHaveAttribute("title", runId);
-    expect(within(card).getAllByRole("button", { name: "複製識別碼" })).toHaveLength(2);
+    // 同一張卡的兩個「複製識別碼」以欄位名區分（可存取名稱包含看得到的按鈕文字）
+    expect(within(card).getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
+    expect(within(latest).getByRole("button", { name: "複製識別碼（v1 產生者 Run）" })).toBeInTheDocument();
   });
 
   it("只有一個版本時不顯示展開按鈕", async () => {

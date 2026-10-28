@@ -259,7 +259,7 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="knowledge-page" aria-label="知識">
-      <header className="more-header">
+      <header className="page-header">
         <h2>知識</h2>
         <button
           type="button"
@@ -296,19 +296,19 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
             </p>
           )}
           <section className="knowledge-section knowledge-candidates" aria-label="待確認的候選教訓">
-            <div className="more-section-header">
+            <div className="section-heading">
               <h3>待確認的候選教訓（{candidates.length}）</h3>
               <p>Agent 提交的候選尚未驗證，確認後才會提供給後續的 Run 使用。</p>
             </div>
-            {candidates.length === 0 && <p className="more-empty">沒有待確認的候選</p>}
+            {candidates.length === 0 && <p className="empty-note">沒有待確認的候選</p>}
             {candidates.length > 0 && cards("candidates", candidates)}
           </section>
           <section className="knowledge-section" aria-label="有效條目">
-            <div className="more-section-header">
+            <div className="section-heading">
               <h3>有效條目（{list.effective.length}）</h3>
             </div>
             {list.effective.length === 0 && (
-              <p className="more-empty">{query === "" ? "還沒有有效的條目" : "沒有符合搜尋的有效條目"}</p>
+              <p className="empty-note">{query === "" ? "還沒有有效的條目" : "沒有符合搜尋的有效條目"}</p>
             )}
             {list.effective.length > 0 && cards("effective", list.effective)}
           </section>
@@ -319,11 +319,11 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
           </label>
           {showHistory && (
             <section className="knowledge-section" aria-label="歷史條目">
-              <div className="more-section-header">
+              <div className="section-heading">
                 <h3>歷史條目（{history.length}）</h3>
                 <p>已撤銷、已淘汰、已被取代或不在有效期間內的條目，不會提供給 Run 使用。</p>
               </div>
-              {history.length === 0 && <p className="more-empty">沒有歷史條目</p>}
+              {history.length === 0 && <p className="empty-note">沒有歷史條目</p>}
               {history.length > 0 && cards("history", history)}
             </section>
           )}
@@ -905,14 +905,14 @@ interface GuardSectionProps {
 function GuardSection({ guards, client, timeZone, act }: GuardSectionProps) {
   return (
     <section className="knowledge-section knowledge-guards" aria-label="Guard">
-      <div className="more-section-header">
+      <div className="section-heading">
         <h3>Guard{guards.state === "ready" && `（${guards.guards.length}）`}</h3>
         <p>派工前會檢查生效中的 Guard，違反就擋下並顯示來源教訓。</p>
       </div>
-      {guards.state === "loading" && <p className="more-empty">載入中…</p>}
+      {guards.state === "loading" && <p className="empty-note">載入中…</p>}
       {guards.state === "failed" && <p role="alert">無法取得 Guard：{guards.reason}</p>}
       {guards.state === "ready" && guards.guards.length === 0 && (
-        <p className="more-empty">還沒有 Guard；可在有效的教訓上「轉為 Guard」</p>
+        <p className="empty-note">還沒有 Guard；可在有效的教訓上「轉為 Guard」</p>
       )}
       {guards.state === "ready" && guards.guards.length > 0 && (
         <ul className="knowledge-cards knowledge-guard-list">

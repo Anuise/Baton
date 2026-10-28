@@ -440,8 +440,8 @@ interface CardStatus {
   text: string | null;
 }
 
-/** 依需要使用者注意的程度挑出卡片最重要的一項狀態；沒有值得一提的狀態時為 null。 */
-function cardStatus({
+/** 依需要使用者注意的程度列出卡片的全部狀態（最重要的在前）。 */
+function cardStatuses({
   task,
   run,
   queued,
@@ -465,46 +465,59 @@ function cardStatus({
   verification: VerificationRecord | null;
   accountName: string | null;
   titleOf: (taskId: string) => string;
-}): CardStatus | null {
+}): CardStatus[] {
+  const statuses: CardStatus[] = [];
   if (budget !== null && budget.exhausted !== null) {
     const label = budget.counters.find((counter) => counter.kind === budget.exhausted)?.label ?? budget.exhausted;
-    return { tone: "danger", label: "預算用盡", text: `${label}預算已用完` };
+    statuses.push({ tone: "danger", label: "預算用盡", text: `${label}預算已用完` });
   }
-  if (workdir?.status === "failed") return { tone: "danger", label: "目錄無法使用", text: workdir.failure };
-  if (run?.blocked) return { tone: "danger", label: "受阻", text: run.blocked.reason };
+  if (workdir?.status === "failed") statuses.push({ tone: "danger", label: "目錄無法使用", text: workdir.failure });
+  if (run?.blocked) statuses.push({ tone: "danger", label: "受阻", text: run.blocked.reason });
   if (queued) {
     const categories = WAIT_CATEGORY_LABELS.filter(([category]) => queued.reasons.some((r) => r.category === category));
-    return {
+    statuses.push({
       tone: "warning",
       label: queued.position === null ? "排隊中" : `排隊第 ${queued.position} 位`,
       text: categories.length === 0 ? "等待排程處理" : categories.map(([, label]) => label).join("、"),
-    };
+    });
   }
   if (task.status === "pending" && task.missing.length > 0) {
-    return { tone: "warning", label: `缺少 ${task.missing.length} 項`, text: task.missing.map((item) => item.message).join("；") };
+    statuses.push({ tone: "warning", label: `缺少 ${task.missing.length} 項`, text: task.missing.map((item) => item.message).join("；") });
   }
   if (handoff && handoff.phase !== "confirmed" && handoff.phase !== "abandoned") {
-    return { tone: "accent", label: "交接中", text: HANDOFF_PHASE_LABELS[handoff.phase] };
+    statuses.push({ tone: "accent", label: "交接中", text: HANDOFF_PHASE_LABELS[handoff.phase] });
   }
   if (integration?.status === "failed" && task.status !== "completed") {
-    return { tone: "danger", label: "整合未通過", text: integration.failure };
+    statuses.push({ tone: "danger", label: "整合未通過", text: integration.failure });
   }
   if (awaitingIntegration && integration) {
-    return { tone: "accent", label: "等待整合", text: INTEGRATION_STATUS_LABELS[integration.status] };
+    statuses.push({ tone: "accent", label: "等待整合", text: INTEGRATION_STATUS_LABELS[integration.status] });
   }
   if (verification && verification.outcome !== "passed" && !isClosed(task.status)) {
-    return verification.outcome === "inconclusive"
-      ? { tone: "warning", label: "驗證不完整", text: verification.note }
-      : { tone: "danger", label: "驗證未通過", text: verification.note };
+    statuses.push(
+      verification.outcome === "inconclusive"
+        ? { tone: "warning", label: "驗證不完整", text: verification.note }
+        : { tone: "danger", label: "驗證未通過", text: verification.note },
+    );
   }
   if (run && isRunActive(run.status)) {
-    return { tone: "success", label: RUN_STATUS_LABELS[run.status], text: accountName && `帳號 ${accountName}` };
+    statuses.push({ tone: "success", label: RUN_STATUS_LABELS[run.status], text: accountName && `帳號 ${accountName}` });
   }
   if (task.unfinished_dependencies.length > 0) {
-    return { tone: "warning", label: "等待相依", text: task.unfinished_dependencies.map(titleOf).join("、") };
+    statuses.push({ tone: "warning", label: "等待相依", text: task.unfinished_dependencies.map(titleOf).join("、") });
   }
-  if (workdir?.cleanup?.status === "failed") return { tone: "danger", label: "清理失敗", text: workdir.cleanup.failure };
-  return null;
+  if (workdir?.cleanup?.status === "failed") statuses.push({ tone: "danger", label: "清理失敗", text: workdir.cleanup.failure });
+  return statuses;
+}
+
+/**
+ * 狀態列：最重要的一項，沒有值得一提的狀態時為 null。第一項是 danger 時，其餘的 danger 也帶出來（`others`），
+ * 讓例如工作目錄失敗不被預算用盡蓋住。
+ */
+function cardStatus(args: Parameters<typeof cardStatuses>[0]): (CardStatus & { others: CardStatus[] }) | null {
+  const [first, ...rest] = cardStatuses(args);
+  if (first === undefined) return null;
+  return { ...first, others: first.tone === "danger" ? rest.filter((status) => status.tone === "danger") : [] };
 }
 
 function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, handoff, profileNameOf, accountName, authorizationRevision, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
@@ -578,6 +591,23 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       {status && (
         <p className="task-status">
           <span className={`badge badge-${status.tone}`}>{status.label}</span>
+          {status.others[0] && (
+            <span className="badge badge-danger" title={status.others[0].text ?? undefined}>
+              {status.others[0].label}
+            </span>
+          )}
+          {status.others.length > 1 && (
+            <span
+              className="badge badge-danger"
+              aria-label={`另有 ${status.others.length - 1} 項：${status.others.slice(1).map((other) => other.label).join("、")}`}
+              title={status.others
+                .slice(1)
+                .map((other) => (other.text ? `${other.label}：${other.text}` : other.label))
+                .join("\n")}
+            >
+              +{status.others.length - 1}
+            </span>
+          )}
           {status.text && (
             <span className="task-status-text truncate" title={status.text}>
               {status.text}
@@ -725,7 +755,8 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
         <div className="task-dependency-form">
           <label>
             相依的 Task
-            <select value={dependsOn} onChange={(e) => setDependsOn(e.target.value)}>
+            {/* 從「更多」開啟時「更多」選單已收起，焦點直接移到這裡，不落到 body */}
+            <select autoFocus value={dependsOn} onChange={(e) => setDependsOn(e.target.value)}>
               <option value="">選擇 Task…</option>
               {others.map((other) => (
                 <option key={other.id} value={other.id}>

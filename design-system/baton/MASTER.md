@@ -61,8 +61,8 @@
 | `--color-success` ／ `-subtle` ／ `-border` | `#15803D` ／ `#F0FDF4` ／ `#BBF7D0` | 通過、運作中 | 5.02；在 subtle 上 4.79 | 自訂：Q3 未給 success |
 | `--color-warning` ／ `-subtle` ／ `-border` | `#B45309` ／ `#FFFBEB` ／ `#FDE68A` | 待裁定、逾期、需注意 | 5.02；在 subtle 上 4.84 | 自訂 |
 | `--color-danger` ／ `-subtle` ／ `-border` | `#B91C1C` ／ `#FEF2F2` ／ `#FECACA` | 失敗、錯誤、破壞性動作 | 6.47；在 subtle 上 5.91 | 自訂：Q3 Destructive `#DC2626` 在白底只有 4.83、淡紅底更低，改深一階 |
-| `--color-orange` ／ `-subtle` | `#C2410C` ／ `#FFF7ED` | 只用於驗證判定（環境受阻） | 5.18；在 subtle 上 4.88 | 現行用途保留，值調整 |
-| `--color-purple` ／ `-subtle` | `#6D28D9` ／ `#F5F3FF` | 只用於驗證判定（授權受阻） | 7.10；在 subtle 上 6.48 | 現行用途保留，值調整 |
+| `--color-orange` ／ `-subtle` ／ `-border` | `#C2410C` ／ `#FFF7ED` ／ `#FED7AA` | 只用於驗證判定（環境受阻） | 5.18；在 subtle 上 4.88 | 現行用途保留，值調整 |
+| `--color-purple` ／ `-subtle` ／ `-border` | `#6D28D9` ／ `#F5F3FF` ／ `#DDD6FE` | 只用於驗證判定（授權受阻） | 7.10；在 subtle 上 6.48 | 現行用途保留，值調整 |
 
 ### 2.2 深色（`@media (prefers-color-scheme: dark)`）
 
@@ -88,8 +88,8 @@
 | `--color-success` ／ `-subtle` ／ `-border` | `#4ADE80` ／ `#14301F` ／ `#166534` | 8.99；在 subtle 上 8.19 | 自訂 |
 | `--color-warning` ／ `-subtle` ／ `-border` | `#FBBF24` ／ `#3A2A12` ／ `#854D0E` | 9.39；在 subtle 上 8.28 | 自訂 |
 | `--color-danger` ／ `-subtle` ／ `-border` | `#F87171` ／ `#3B1D24` ／ `#991B1B` | 5.66；在 subtle 上 5.47 | 自訂 |
-| `--color-orange` ／ `-subtle` | `#FB923C` ／ `#3A2216` | 6.92；在 subtle 上 6.53 | 自訂 |
-| `--color-purple` ／ `-subtle` | `#C4B5FD` ／ `#2A2346` | 8.49；在 subtle 上 7.97 | 自訂 |
+| `--color-orange` ／ `-subtle` ／ `-border` | `#FB923C` ／ `#3A2216` ／ `#9A3412` | 6.92；在 subtle 上 6.53 | 自訂 |
+| `--color-purple` ／ `-subtle` ／ `-border` | `#C4B5FD` ／ `#2A2346` ／ `#5B21B6` | 8.49；在 subtle 上 7.97 | 自訂 |
 
 ### 2.3 色彩使用規則
 
@@ -213,6 +213,7 @@
 - `display: inline-flex; white-space: nowrap; flex-shrink: 0;` 高 18px、`--text-caption`、`radius-full`、水平內距 6px。
 - **計數徽章**：`tabular-nums`；超過 999 顯示 `999+`，完整數字放在可存取名稱（`aria-label="待裁定 1,284 項"`）與 `title`（Q6 Contextual Live Badge Updates）。
 - **文字徽章**（例：「候選，尚未驗證」）：一行，最多 6 個全形字；放不下時改用短詞（「未驗證」），不截斷、不換行。
+  - 例外：安全字樣保留完整文字，不為了 6 字縮短語意，例如裁定清單的「已逾期，尚未裁定」（逾期不代表任何決定，AI-85）。超過 6 字的徽章仍一行不換行，靠徽章群組整組換行。
 - 多個徽章並排時整組換行（`flex-wrap: wrap; gap: 4px`），不縮小單一徽章。
 - 語意：成功／警告／危險／中性四種；底 `*-subtle`、字語意色、框 `*-border`。
 
@@ -336,7 +337,7 @@ flex 與 grid 子元素的 `min-width` 預設是 `auto`（＝內容的 min-conte
 |---|---|---|
 | 側欄 | 260px | 232px；Workspace 路徑隱藏，只留名稱與徽章 |
 | 主區內距 | 24px | 16px |
-| 裁定（清單 + 詳情） | `minmax(260px, 340px) minmax(0, 1fr)` | `minmax(220px, 280px) minmax(0, 1fr)` |
+| 裁定（清單 + 詳情） | `minmax(260px, 340px) minmax(0, 1fr)` | `minmax(220px, min(280px, 36%)) minmax(0, 1fr)`：清單欄最多佔 36%，詳情段落不被擠到每行 27 字以下（AI-84） |
 | 工作看板欄寬 | 280px，水平捲動 | 260px，水平捲動；看板左右緣加漸層提示還有欄位 |
 | 觀測指標網格 | `repeat(auto-fill, minmax(200px, 1fr))` | 同左（自動減為 3 欄） |
 | 表單 | 48em 上限 | 滿版（可用寬度已小於 48em） |
@@ -377,10 +378,10 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 
 ### 10.2 Token
 
-- **色彩**：第 2 節的表，名稱與值一一相同（`--color-bg`、`--color-surface`、`-raised`、`-sunken`、`-hover`、`--color-overlay`、`--color-border`、`-strong`、`--color-control-border`、`--color-text`、`-muted`、`-subtle`、`--color-accent`、`-hover`、`-subtle`、`-border`、`--color-on-accent`、`--color-focus`、`--color-{success,warning,danger}` 與 `-subtle`、`-border`、`--color-{orange,purple}` 與 `-subtle`）。只取 token，不寫死色碼。
+- **色彩**：第 2 節的表，名稱與值一一相同（`--color-bg`、`--color-surface`、`-raised`、`-sunken`、`-hover`、`--color-overlay`、`--color-border`、`-strong`、`--color-control-border`、`--color-text`、`-muted`、`-subtle`、`--color-accent`、`-hover`、`-subtle`、`-border`、`--color-on-accent`、`--color-focus`、`--color-{success,warning,danger}` 與 `-subtle`、`-border`、`--color-{orange,purple}` 與 `-subtle`、`-border`）。只取 token，不寫死色碼。
 - **字型**：`--font-sans`、`--font-mono`（3.1）。
 - **字級／行高**：`--text-caption`／`--leading-caption`（12px／1.4）、`--text-meta`／`--leading-meta`（13／1.5）、`--text-body`／`--leading-body`（14／1.65）、`--text-title-sm`／`--leading-title-sm`（14／1.4）、`--text-title`／`--leading-title`（16／1.35）、`--text-title-lg`／`--leading-title-lg`（20／1.3）、`--leading-code`（1.5）。字重 `--font-weight-normal`（400）、`--font-weight-strong`（600）。
-  - 舊名 `--font-size-xs／sm／md／lg／xl` 仍可用，分別等於 caption／meta／body／title／title-lg；**新規則請用 `--text-*`**，改到自己的規則時順手換掉。`--font-size-xs`（12px）只能用在徽章、計數、時間戳，卡片內文改 `--text-meta`、段落 `--text-body`。
+  - 舊名 `--font-size-xs～xl` 已在 UI 改版收尾時移除（各包都已改用 `--text-*`）。`--text-caption`（12px）只能用在徽章、計數、時間戳，卡片內文用 `--text-meta`、段落 `--text-body`。
 - **間距**：`--space-1`～`--space-8`（2／4／6／8／12／16／24／32px，4.1）。
 - **圓角**：`--radius-sm／md／lg／full`（4.2）。**陰影**：`--shadow-sm`（只給浮在內容上的小元件）、`--shadow-md`（對話框、浮層）；卡片與按鈕不加陰影。
 - **層級**：`--z-sticky`（10）、`--z-popover`（20）、`--z-overlay`（30）、`--z-toast`（40）。
@@ -433,7 +434,7 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 
 - `.badge`：18px 高、12px、600、膠囊、不換行、不縮小、`tabular-nums`；預設中性（sunken 底、muted 字）。語意：`.badge-success`、`.badge-warning`、`.badge-danger`、`.badge-accent`。
 - 多個徽章：外層 `.badge-group`（flex、wrap、gap 4px）。
-- 文字徽章最多 6 個全形字，放不下時換短詞（「未驗證」），不要截斷。
+- 文字徽章最多 6 個全形字，放不下時換短詞（「未驗證」），不要截斷；安全字樣例外（5.4，例：「已逾期，尚未裁定」）。
 - 現行的 `.decision-badge`、`.tab-badge` 已加上不換行與不縮小；`.knowledge-badge`（內容含「不生效：<原因>」長文字）**沒有**加，WP6 改用 `.badge` 並把原因移出徽章。其他頁的徽章類 class（`.verdict`、`.decision-recommended`、`.workflow-gate`、`.task-kind`、`.exploration-badge`）改版時直接換成 `.badge` + 語意 class。
 
 ### 10.7 卡片、狀態色條（5.2、2.3）
@@ -451,6 +452,32 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 - `.card`：surface、1px border、`radius-md`、內距 12px、13px 字、無陰影。
 - `.card-header`：flex；第一個子元素（標題）可縮小，其餘（徽章、按鈕）不縮小。
 - `.stripe-success`／`.stripe-warning`／`.stripe-danger`／`.stripe-accent`：左側 3px 色條。取代整張卡片的淡色底（audit C8）。
+
+### 10.7a 頁面標題列、區塊標題、空清單、「更多」選單
+
+```tsx
+<header className="page-header">
+  <h2>知識</h2>
+  <button type="button">新增條目</button>
+</header>
+<div className="section-heading">
+  <h3>有效條目</h3>
+  <p>共 12 筆</p>
+</div>
+<p className="empty-note">沒有待確認的候選</p>
+<details className="more-menu">
+  <summary>更多</summary>
+  <div className="more-menu-list">
+    <button type="button" className="btn-quiet">轉為 Guard</button>
+    <button type="button" className="btn-quiet more-menu-danger">淘汰</button>
+  </div>
+</details>
+```
+
+- `.page-header`：flex、wrap、gap 8px；`h2` 可縮小，其餘（主要動作）不縮小、靠右（第 7 節）。
+- `.section-heading`：區塊標題 `h3` ＋ 一行 muted 13px 說明（gap 2px）。
+- `.empty-note`：區塊內的空清單，一行 muted 13px 文字、不加框（5.7）。
+- `.more-menu`：卡片中第二順位以後的動作（5.1），`<details>` 浮層（`--z-popover`、`--shadow-md`）；選項是 `.more-menu-list` 中的 `.btn-quiet`，破壞性選項再加 `.more-menu-danger`（danger 字色）。浮層的外部點擊與 Esc 由元件自己處理（參考 `KnowledgePage.tsx` 的 `MoreMenu`）。
 
 ### 10.8 表單、表格
 
@@ -473,13 +500,15 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 | `truncateText(text, max)` | 以字元計、含 `…` 不超過 `max` | 需要硬性字數上限的地方 |
 | `optionLabel(title, id?, max = 60)` | `新增匯入功能（7314）`；標題過長時截斷前段，總長 ≤ 60 | `<option>` 文字（避免 `<select>` 被撐寬） |
 | `splitFirstSentence(text)` | `{ summary, rest }`：第一句與其餘 | 錯誤訊息：`summary` 完整顯示，`rest` 收進「技術細節」`<details>` |
+| `sizeLabel(bytes)` | `1.15 GB（1,234,567,892 位元組）`；小於 1 KB 時 `512 位元組` | 成果、驗證頁的檔案大小 |
+| `docsHost(url)` | `https://docs.example.com/guide` → `docs.example.com`；不是網址時退回 `shortPath` | 首次精靈的說明連結、平台頁的資料來源（完整網址放 `title` + 「複製網址」） |
 
 縮短後的值一定要有完整值的取得路徑：`title` + `CopyButton`，或點開詳情；詳情中顯示完整值（`.mono`）。
 
 ### 10.10 `LongText.tsx`
 
 ```tsx
-import { CopyButton, LongText } from "./LongText";
+import { CopyButton, LongText, ShortValue } from "./LongText";
 
 <LongText text={task.goal} />                                  // 3 行 + 「展開／收合」
 <LongText text={decision.question} lines={2} />                // 2 行
@@ -488,12 +517,14 @@ import { CopyButton, LongText } from "./LongText";
   <code className="mono" title={run.id}>{shortId(run.id)}</code>
   <CopyButton text={run.id} label="複製識別碼" />
 </span>
+<ShortValue value={artifact.task_id} kind="id" />             // 上面三行的簡寫；kind 為 id／hash／path
 ```
 
 - `LongText` props：`text`（純文字，保留換行）、`lines`（1／2／3，預設 3）、`copyLabel`（有值才顯示複製按鈕）、`className`（加在外層）。外層是 `div.long-text`（閱讀寬度 46em），內文是 `p.long-text-body`，**不要放在 `<p>` 裡**。
 - 只有文字真的超過 `lines` 行時才出現「展開」（`aria-expanded`、`aria-controls`），寬度改變時重新判斷；全文一直在 DOM 中。
 - 測試中 jsdom 不排版，「展開」不會出現；要測展開時參考 `LongText.test.tsx` 以 `scrollHeight`／`clientHeight` 模擬。
-- `CopyButton` props：`text`、`label`（預設「複製」）；按下後 1.5 秒內顯示「已複製」或「複製失敗」。測試時注意 `userEvent.setup()` 會換掉 `navigator.clipboard`。
+- `CopyButton` props：`text`、`label`（預設「複製」）、`field`；按下後 1.5 秒內顯示「已複製」或「複製失敗」。同一張卡有多個同名的複製按鈕時傳 `field`（例：「Task」「產生者 Run」），可存取名稱成為「複製識別碼（Task）」，仍包含看得到的按鈕文字。測試時注意 `userEvent.setup()` 會換掉 `navigator.clipboard`。
+- `ShortValue` props：`value`、`kind`（`id`／`hash`／`path`，分別用 `shortId`／`shortHash`／`shortPath`）、`field`（傳給 `CopyButton`）。縮短後等寬顯示、`title` 放完整值、旁邊附「複製識別碼／雜湊／路徑」；本來就夠短時原樣顯示、不附複製。
 
 ### 10.11 WP1 沒有處理、留給各包的項目
 

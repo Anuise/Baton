@@ -114,3 +114,17 @@ export function splitFirstSentence(text: string): { summary: string; rest: strin
   const end = match.index + (match[0] === "\n" ? 0 : match[0].length);
   return { summary: text.slice(0, end).trim(), rest: text.slice(end).trim() };
 }
+
+/** 檔案大小：小於 1 KB 只顯示位元組，否則換算單位並附千分位位元組（`1.15 GB（1,234,567,892 位元組）`）。 */
+export function sizeLabel(bytes: number): string {
+  return bytes < 1024 ? formatBytes(bytes) : `${formatBytes(bytes)}（${formatNumber(bytes)} 位元組）`;
+}
+
+/** 網址只顯示網域（完整網址放在 title，另可複製）；不是網址時退回縮短路徑。首次精靈的說明連結、平台頁的資料來源用這個。 */
+export function docsHost(url: string): string {
+  try {
+    return new URL(url).host || shortPath(url);
+  } catch {
+    return shortPath(url);
+  }
+}

@@ -344,6 +344,108 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 頁面標題列（MASTER 第 7 節）：h2 只寫頁名，主要動作靠右；放不下時動作換到下一列 */
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.page-header > h2 {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.page-header > :not(h2) {
+  flex: none;
+}
+
+/* 區塊標題列：h3 + 計數或說明，與內容間距 8px */
+.section-heading {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.section-heading > :is(h3, p) {
+  margin: 0;
+}
+
+.section-heading > p {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 區塊內的空清單：一行 muted 文字，不加框（MASTER 5.7） */
+.empty-note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 「更多」選單：卡片中第二順位以後的動作（MASTER 5.1）；以 <details> 做成浮層。
+   選項是 .more-menu-list 中的 .btn-quiet，破壞性選項再加 .more-menu-danger */
+.more-menu {
+  position: relative;
+}
+
+.more-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: var(--control-height);
+  padding: 0 var(--space-5);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  list-style: none;
+  white-space: nowrap;
+}
+
+.more-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.more-menu > summary::after {
+  margin-left: var(--space-2);
+  content: "▾";
+  font-size: var(--text-caption);
+}
+
+.more-menu > summary:hover,
+.more-menu[open] > summary {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.more-menu-list {
+  position: absolute;
+  z-index: var(--z-popover);
+  top: calc(100% + var(--space-2));
+  left: 0;
+  display: grid;
+  gap: var(--space-1);
+  min-width: 8em;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-md);
+}
+
+.more-menu-list > button {
+  justify-content: flex-start;
+  justify-self: stretch;
+  white-space: nowrap;
+}
+
+/* 撤銷、淘汰這類破壞性選項用 danger 字色 */
+.more-menu-list > .more-menu-danger {
+  color: var(--color-danger);
+}
+
 /* 長文字（LongText.tsx）：限制行數 + 展開／收合，可選複製 */
 .long-text {
   min-width: 0;

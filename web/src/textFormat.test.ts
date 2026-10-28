@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  docsHost,
   formatBytes,
   formatCount,
   formatNumber,
@@ -8,6 +9,7 @@ import {
   shortHash,
   shortId,
   shortPath,
+  sizeLabel,
   splitFirstSentence,
   truncateText,
 } from "./textFormat";
@@ -167,5 +169,25 @@ describe("splitFirstSentence", () => {
 
   it("只有一句時 rest 為空字串", () => {
     expect(splitFirstSentence("額度已滿")).toEqual({ summary: "額度已滿", rest: "" });
+  });
+});
+
+describe("sizeLabel", () => {
+  it("小於 1 KB 只顯示位元組", () => {
+    expect(sizeLabel(512)).toBe("512 位元組");
+  });
+
+  it("其餘換算單位並附千分位位元組", () => {
+    expect(sizeLabel(1234567892)).toBe("1.15 GB（1,234,567,892 位元組）");
+  });
+});
+
+describe("docsHost", () => {
+  it("網址只留網域", () => {
+    expect(docsHost("https://docs.example.com/guide/install?x=1")).toBe("docs.example.com");
+  });
+
+  it("不是網址時退回縮短路徑", () => {
+    expect(docsHost("C:\\Users\\me\\baton\\docs\\platform.md")).toBe("C:\\…\\docs\\platform.md");
   });
 });

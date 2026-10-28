@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { CopyButton } from "./LongText";
 import type { PlatformResponse, RuntimeClient } from "./runtimeClient";
-import { docsHost } from "./SetupWizard";
+import { docsHost } from "./textFormat";
 
 type Assessment = PlatformResponse["assessment"];
 

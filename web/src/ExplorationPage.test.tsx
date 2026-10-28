@@ -141,7 +141,10 @@ describe("探索", () => {
     const attempt = within(finding).getByRole("listitem", { name: `驗證要求 ${request}` });
     expect(within(attempt).getByText("vreq_e3b0c4…f4c8")).toHaveAttribute("title", request);
     expect(within(attempt).getByText("evb_7b5deb…7314")).toHaveAttribute("title", bundle);
-    expect(within(finding).getAllByRole("button", { name: "複製識別碼" })).toHaveLength(3);
+    // 同一個疑點的多個「複製識別碼」以欄位名區分
+    expect(within(finding).getByRole("button", { name: "複製識別碼（證據）" })).toBeInTheDocument();
+    expect(within(attempt).getByRole("button", { name: "複製識別碼（驗證要求）" })).toBeInTheDocument();
+    expect(within(attempt).getByRole("button", { name: "複製識別碼（Bundle）" })).toBeInTheDocument();
   });
 
   it("重現紀錄新的在前，顯示目的、驗證要求、Bundle、案例與對照判定和結論；沒有結論時是排隊中", async () => {

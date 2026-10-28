@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { LongText } from "./LongText";
+import { LongText, ShortValue } from "./LongText";
+import { sizeLabel } from "./textFormat";
 import { formatTimestamp } from "./time";
-import { ShortValue, sizeLabel } from "./VerificationPage";
 import type {
   ArtifactClient,
   ArtifactFileStatus,
@@ -86,7 +86,7 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
               <li key={file.storage_path}>
                 <ShortValue value={file.storage_path} kind="path" />
                 <span className="artifact-meta">
-                  {sizeLabel(file.size_bytes)}・{UNREGISTERED_KIND_LABELS[file.kind]}
+                  <span className="artifact-size">{sizeLabel(file.size_bytes)}</span>・{UNREGISTERED_KIND_LABELS[file.kind]}
                 </span>
               </li>
             ))}
@@ -122,7 +122,7 @@ function ArtifactCard({ client, workspaceId, artifact, timeZone }: CardProps) {
       </header>
       {/* ArtifactView 沒有 Task 標題（AI 決策紀錄），只顯示縮短的識別碼 */}
       <p className="artifact-task">
-        Task：<ShortValue value={artifact.task_id} kind="id" />
+        Task：<ShortValue value={artifact.task_id} kind="id" field="Task" />
       </p>
       <ul className="artifact-versions">
         {shown.map((version) => (
@@ -207,11 +207,11 @@ function VersionRow({ client, workspaceId, artifact, version, latest, timeZone }
       )}
       <p>
         <span className="artifact-label">雜湊：</span>
-        <ShortValue value={version.sha256} kind="hash" />
+        <ShortValue value={version.sha256} kind="hash" field={`v${version.version}`} />
       </p>
       <p>
         <span className="artifact-label">產生者 Run（第 {version.produced_by_generation} 次）：</span>
-        <ShortValue value={version.produced_by_run_id} kind="id" />
+        <ShortValue value={version.produced_by_run_id} kind="id" field={`v${version.version} 產生者 Run`} />
       </p>
       {version.description !== "" && <LongText text={version.description} />}
       <div className="artifact-actions">

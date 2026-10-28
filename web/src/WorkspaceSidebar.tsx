@@ -290,17 +290,20 @@ function WorkspaceMenu({ label, children }: { label: string; children: ReactNode
     return () => document.removeEventListener("pointerdown", close);
   }, [open]);
 
+  // Esc 常駐監聽在 document：點浮層空白處後焦點落到 body，按鍵事件不會經過 details；
+  // 不等 toggle 事件更新 open 後才掛上，開啟後立刻按 Esc 也收得起來
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !ref.current?.open) return;
+      ref.current.open = false;
+      ref.current.querySelector("summary")?.focus();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, []);
+
   return (
-    <details
-      ref={ref}
-      className="workspace-menu"
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape" || !ref.current?.open) return;
-        ref.current.open = false;
-        ref.current.querySelector("summary")?.focus();
-      }}
-    >
+    <details ref={ref} className="workspace-menu" onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className="workspace-menu-trigger" aria-label={label} title="管理">
         <span aria-hidden="true">⋯</span>
       </summary>

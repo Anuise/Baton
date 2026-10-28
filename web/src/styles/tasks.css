@@ -331,6 +331,11 @@
   white-space: nowrap;
 }
 
+/* 沒有主要動作時「更多」是第一個按鈕：以負邊距抵銷內距，文字與卡片內容左緣對齊（按鈕停在卡片內距邊緣、不壓到色條） */
+.task-actions > .task-more-toggle:first-child {
+  margin-inline-start: calc(-1 * var(--space-5));
+}
+
 .task-more-toggle[aria-expanded="true"] {
   background: var(--color-surface-hover);
   color: var(--color-text);

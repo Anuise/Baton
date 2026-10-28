@@ -35,13 +35,6 @@
   --font-weight-normal: 400;
   --font-weight-strong: 600;
 
-  /* 舊字級名稱：與上方字級一一對應，既有規則沿用；新規則請用 --text-* */
-  --font-size-xs: var(--text-caption);
-  --font-size-sm: var(--text-meta);
-  --font-size-md: var(--text-body);
-  --font-size-lg: var(--text-title);
-  --font-size-xl: var(--text-title-lg);
-
   /* 閱讀寬度（MASTER 6.3）：段落與長內容約每行 46 個中文字；表單 48em */
   --measure: 46em;
   --measure-form: 48em;
@@ -126,8 +119,10 @@
   /* 輔助色：只用在驗證判定標籤與色條（環境受阻、授權受阻） */
   --color-orange: #c2410c;
   --color-orange-subtle: #fff7ed;
+  --color-orange-border: #fed7aa;
   --color-purple: #6d28d9;
   --color-purple-subtle: #f5f3ff;
+  --color-purple-border: #ddd6fe;
 }
 
 /* 深色模式：覆寫全部色彩 token 與陰影，其餘尺寸 token 共用 */
@@ -170,8 +165,10 @@
 
     --color-orange: #fb923c;
     --color-orange-subtle: #3a2216;
+    --color-orange-border: #9a3412;
     --color-purple: #c4b5fd;
     --color-purple-subtle: #2a2346;
+    --color-purple-border: #5b21b6;
   }
 }
 
