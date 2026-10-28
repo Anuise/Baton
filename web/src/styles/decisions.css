@@ -1,166 +1,16 @@
 /* ==========================================================================
    裁定
    裁定清單與詳情、權限提示、批次與連結。
+   清單只放摘要（問題 3 行、Task 1 行、一列徽章），完整內容在右側詳情；
+   詳情內容受閱讀寬度上限（46em）。安全相關的提示（先前已放行、不能沿用的批准、
+   延後不是同意、逾期）一律直接顯示，不收合。
    ========================================================================== */
 
-.decision-center {
-  margin-top: var(--space-6);
-}
+/* 頁簽與標題之間沿用 .tab-panel 的間距，不另加（audit P-DEC-5） */
 
-.decision-center h2,
 .decision-center h3,
 .decision-center h4 {
-  margin: var(--space-4) 0;
-}
-
-.decision-layout {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) 2fr;
-  gap: var(--space-6);
-  align-items: start;
-}
-
-.decision-list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.decision-list li {
-  display: flex;
-  gap: var(--space-3);
-  align-items: flex-start;
-  margin-bottom: var(--space-3);
-}
-
-.decision-batch-check {
-  margin-top: var(--space-5);
-}
-
-.decision-list li button {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: var(--space-1);
-  align-items: stretch;
-  width: 100%;
-  padding: var(--space-4);
-  text-align: left;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  font-weight: 400;
-  cursor: pointer;
-}
-
-.decision-list li button:hover {
-  border-color: var(--color-border-strong);
-}
-
-.decision-selected button {
-  border-color: var(--color-accent);
-  background: var(--color-accent-subtle);
-}
-
-.decision-task,
-.decision-meta,
-.decision-detail-meta,
-.decision-empty,
-.decision-deadline {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
-}
-
-.decision-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-}
-
-.decision-urgency-high {
-  color: var(--color-danger);
-  font-weight: 600;
-}
-
-.decision-overdue {
-  color: var(--color-warning);
-  font-weight: 600;
-}
-
-.decision-detail {
-  padding: var(--space-5);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-
-.decision-permission {
-  padding: var(--space-4) var(--space-5);
-  background: var(--color-surface-sunken);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-
-.decision-permission dl {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-2) var(--space-6);
-  margin: 0;
-}
-
-.decision-permission dd {
-  margin: 0;
-}
-
-.decision-permission pre {
-  overflow: auto;
-}
-
-/* 需要使用者行動的提示（例如批次還不能送出的原因） */
-.decision-hint {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-/* 帶有授權意涵、必須直接看得到的簡短說明（不收在「?」說明裡） */
-.decision-note {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-  font-weight: 400;
-}
-
-.decision-saved {
-  color: var(--color-success);
-  font-size: var(--font-size-sm);
-}
-
-/* 欄位與它的「?」說明排在同一列 */
-.decision-inline {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-}
-
-/* 次要與技術資訊收合在 details 裡 */
-.decision-more {
-  margin-top: var(--space-4);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.decision-more summary {
-  cursor: pointer;
-}
-
-.decision-more dl {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-2) var(--space-6);
-  margin: var(--space-3) 0 0;
-}
-
-.decision-more dd {
-  margin: 0;
+  margin: var(--space-7) 0 var(--space-3);
 }
 
 /* 標題旁的「?」說明垂直置中 */
@@ -170,58 +20,41 @@
   align-items: center;
 }
 
-.decision-form fieldset {
-  margin: var(--space-4) 0;
-}
-
-.decision-option {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  align-items: baseline;
-  margin-bottom: var(--space-3);
-}
-
-.decision-recommended {
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-full);
-  background: var(--color-success-subtle);
-  border: 1px solid var(--color-success-border);
-  font-size: var(--font-size-xs);
-}
-
-.decision-tradeoff {
-  flex-basis: 100%;
-  margin-left: var(--space-7);
+.decision-empty,
+.decision-hint {
   color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
 }
 
-.decision-form textarea {
-  display: block;
-  width: 100%;
-  min-height: 48px;
-  margin-bottom: var(--space-4);
+.decision-empty {
+  margin: 0;
 }
 
-.decision-form [role="alert"],
-.decision-error,
-.decision-batch [role="alert"],
-.decision-related [role="alert"],
-.decision-authority [role="alert"],
-.decision-batch-failed {
-  color: var(--color-danger);
+/* 帶有授權意涵、必須直接看得到的簡短說明（不收在「?」說明裡） */
+.decision-note {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--leading-meta);
 }
+
+.decision-saved {
+  color: var(--color-success);
+  font-size: var(--text-meta);
+}
+
+/* ---- 總覽 ---------------------------------------------------------------- */
 
 .decision-overview dl {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-4) 0;
-  margin: var(--space-4) 0;
+  margin: 0 0 var(--space-7);
 }
 
 .decision-overview-item {
-  padding: var(--space-3) var(--space-5);
+  padding: 0 var(--space-6);
   border-left: 1px solid var(--color-border);
 }
 
@@ -232,13 +65,17 @@
 
 .decision-overview-item dt {
   color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-caption);
+  line-height: var(--leading-caption);
+  white-space: nowrap;
 }
 
 .decision-overview-item dd {
   margin: 0;
-  font-size: var(--font-size-lg);
-  font-weight: 600;
+  font-size: var(--text-title);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title);
+  font-variant-numeric: tabular-nums;
 }
 
 .decision-overview-overdue dd,
@@ -246,66 +83,328 @@
   color: var(--color-warning);
 }
 
-.decision-deferred,
-.decision-status {
+/* ---- 清單 + 詳情（MASTER 第 8 節：≥ 1101px 清單 260～340px） ---------------- */
+
+.decision-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  gap: var(--space-7);
+  align-items: start;
+}
+
+.decision-group + .decision-group {
+  margin-top: var(--space-7);
+}
+
+.decision-lists h3 {
+  margin: 0 0 var(--space-4);
+}
+
+.decision-list {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-list li {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+/* 勾選框對齊清單項的第一行 */
+.decision-batch-check {
+  flex: none;
+  margin: var(--space-6) 0 0;
+}
+
+/* 整個清單項是一個按鈕：問題、Task、徽章由上而下 */
+.decision-list li button {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: stretch;
+  justify-content: flex-start;
+  min-width: 0;
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-weight: var(--font-weight-normal);
+  text-align: left;
+  white-space: normal;
+}
+
+.decision-list li button:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+}
+
+.decision-selected button,
+.decision-selected button:hover:not(:disabled) {
+  border-color: var(--color-accent-border);
+  background: var(--color-accent-subtle);
+}
+
+.decision-question {
+  color: var(--color-text);
+  font-size: var(--text-title-sm);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title-sm);
+  overflow-wrap: anywhere;
+}
+
+.decision-task {
   color: var(--color-text-muted);
-  font-weight: 600;
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+  overflow-wrap: anywhere;
 }
 
-.decision-superseded h4 {
+.decision-meta {
+  margin-top: var(--space-1);
+}
+
+.decision-meta .decision-deferred {
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--leading-caption);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 詳情 ---------------------------------------------------------------- */
+
+.decision-detail {
+  min-width: 0;
+  padding: var(--space-6) var(--space-7);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+/* 詳情中的段落、清單與區塊都受閱讀寬度上限（約每行 46 個中文字） */
+.decision-detail > * {
+  box-sizing: border-box;
+  max-inline-size: var(--measure);
+}
+
+.decision-detail-header h3 {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
+}
+
+.decision-detail-badges {
+  margin-bottom: var(--space-3);
+}
+
+.decision-detail-time {
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+  line-height: var(--leading-caption);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.decision-detail-task {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+/* 狀態提示（逾期、延後、期限）：短句，直接顯示 */
+p.decision-overdue,
+p.decision-deferred,
+.decision-deadline {
+  margin: var(--space-5) 0 0;
+}
+
+p.decision-overdue {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
   color: var(--color-warning);
+  font-weight: var(--font-weight-strong);
 }
 
-.decision-options {
+p.decision-deferred {
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-strong);
+}
+
+.decision-deadline {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 安全警示（先前已放行過一次、不能沿用的批准）：左側色條 + 淡色底，醒目但正文維持 text 色 */
+.decision-alert {
+  margin: var(--space-5) 0 0;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-warning-border);
+  border-left: 3px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-subtle);
+  color: var(--color-text);
+  font-weight: var(--font-weight-strong);
+}
+
+.decision-reason {
+  margin: 0;
+}
+
+/* 權限提示、權限表攔截：沉底的區塊 */
+.decision-permission {
+  margin-top: var(--space-7);
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+.decision-detail .decision-permission h4 {
+  margin-top: 0;
+}
+
+.decision-permission details {
+  margin-top: var(--space-4);
+}
+
+.decision-permission summary {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 工具輸入 JSON：不折行，在 24 行高的框內自己捲動（base.css 的 pre） */
+.decision-permission pre {
+  margin: var(--space-3) 0 0;
+  background: var(--color-surface);
+}
+
+/* 標籤 + 值的兩欄（MASTER 6.4 第 5 條） */
+.decision-dl,
+.decision-more dl {
+  display: grid;
+  grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
+  gap: var(--space-2) var(--space-6);
+  margin: 0;
+}
+
+.decision-dl dt,
+.decision-more dt {
+  max-width: 12em;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-body);
+}
+
+.decision-dl dd,
+.decision-more dd {
+  margin: 0;
+}
+
+.decision-dl ul {
   margin: 0;
   padding-left: var(--space-6);
 }
 
-.decision-actions label,
-.decision-form fieldset label {
-  margin-right: var(--space-5);
+.decision-approve-once p {
+  margin: 0 0 var(--space-4);
 }
 
-.decision-form select,
-.decision-batch select,
-.decision-batch textarea {
-  display: block;
-  margin-bottom: var(--space-4);
+.decision-approve-once .decision-alert {
+  margin: var(--space-4) 0 0;
 }
 
-.decision-batch textarea {
-  width: 100%;
-  min-height: 40px;
+/* 次要與技術資訊收合在 details 裡 */
+.decision-more {
+  margin-top: var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
 }
 
-.decision-batch,
-.decision-batch-results,
-.decision-authority {
-  margin: var(--space-5) 0;
-  padding: var(--space-5);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+.decision-more dl {
+  margin-top: var(--space-3);
 }
 
-.decision-batch {
-  border-color: var(--color-accent-border);
+.decision-more p {
+  margin: var(--space-3) 0 0;
 }
 
-.decision-batch-item {
-  margin: var(--space-4) 0;
+.decision-authorization-change label {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  margin: var(--space-3) 0;
 }
 
-.decision-batch button + button {
-  margin-left: var(--space-4);
+.decision-authorization-change ul {
+  margin: 0 0 var(--space-4);
+  padding-left: var(--space-6);
 }
 
-.decision-related {
-  margin: var(--space-4) 0;
+.decision-authorization-change h5 {
+  margin: var(--space-4) 0 var(--space-2);
 }
+
+/* 選項與取捨：每個選項一段，取捨在下方以次要文字顯示 */
+.decision-options {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-option {
+  display: grid;
+  gap: var(--space-1);
+  padding-left: var(--space-5);
+  border-left: 2px solid var(--color-border);
+}
+
+.decision-option-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.decision-option-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.decision-tradeoff {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+  overflow-wrap: anywhere;
+}
+
+.decision-evidence,
+.decision-blocking {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.decision-evidence li + li,
+.decision-blocking li + li {
+  margin-top: var(--space-2);
+}
+
+/* ---- 相似問題 ------------------------------------------------------------ */
 
 .decision-related h5 {
-  margin: var(--space-2) 0;
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--color-text-muted);
 }
 
 .decision-links {
@@ -316,32 +415,278 @@
 .decision-related-action {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-4);
-  align-items: center;
-  margin: var(--space-3) 0;
+  gap: var(--space-3) var(--space-4);
+  align-items: flex-end;
+  margin: var(--space-4) 0;
 }
 
+/* 選單最寬 32em，按鈕緊跟在選單後面 */
+.decision-related-action label {
+  display: grid;
+  flex: 0 1 32em;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.decision-related-action select {
+  width: 100%;
+  font-weight: var(--font-weight-normal);
+}
+
+.decision-related-action > :not(label) {
+  flex: none;
+}
+
+/* 文字連結樣式的按鈕（前往連結或合併目標的請求） */
 .decision-link-button {
+  display: inline;
   min-height: 0;
   padding: 0;
-  color: var(--color-accent);
+  border: 0;
   background: none;
-  border: none;
-  box-shadow: none;
-  cursor: pointer;
-  text-decoration: underline;
-}
-
-.decision-authority table {
-  width: 100%;
-  margin-bottom: var(--space-4);
-  border-collapse: collapse;
-}
-
-.decision-authority th,
-.decision-authority td {
-  padding: var(--space-2) var(--space-4);
+  color: var(--color-accent);
+  font-size: inherit;
+  line-height: inherit;
   text-align: left;
-  border-bottom: 1px solid var(--color-border);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
 }
 
+.decision-link-button:hover:not(:disabled) {
+  background: none;
+  color: var(--color-accent-hover);
+}
+
+/* ---- 處理（詳情的表單、批次面板共用的欄位） --------------------------------- */
+
+.decision-form,
+.decision-outcome {
+  margin-top: var(--space-7);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+}
+
+.decision-form {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.decision-detail .decision-outcome h4 {
+  margin-top: 0;
+}
+
+.decision-outcome p {
+  margin: 0 0 var(--space-3);
+}
+
+.decision-superseded h4 {
+  color: var(--color-warning);
+}
+
+.decision-detail-meta {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+/* 處理方式：radio 排成可換行的一列 */
+.decision-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-6);
+}
+
+.decision-actions label {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  white-space: nowrap;
+}
+
+/* 選項：radio + 可能很長的選項文字，文字換行時與 radio 頂端對齊 */
+.decision-choice {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.decision-choice + .decision-choice {
+  margin-top: var(--space-3);
+}
+
+.decision-choice input {
+  flex: none;
+  margin-top: 0.3em;
+}
+
+.decision-choice span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.decision-note-field {
+  display: grid;
+  max-inline-size: var(--measure);
+  gap: var(--space-2);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.decision-note-field textarea {
+  width: 100%;
+  font-size: var(--text-body);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--leading-body);
+}
+
+/* 欄位與它的說明排在同一列，放不下時換行 */
+.decision-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  align-items: center;
+}
+
+.decision-inline label {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.decision-inline select {
+  font-weight: var(--font-weight-normal);
+}
+
+/* 錯誤：左側色條 + 危險色短句 */
+.decision-error,
+.decision-batch [role="alert"],
+.decision-related [role="alert"],
+.decision-authority [role="alert"],
+.decision-authorization-change [role="alert"] {
+  margin: var(--space-4) 0 0;
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-danger);
+  color: var(--color-danger);
+}
+
+/* ---- 批次 ---------------------------------------------------------------- */
+
+.decision-batch,
+.decision-batch-results,
+.decision-authority {
+  margin: 0 0 var(--space-7);
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.decision-batch {
+  display: grid;
+  gap: var(--space-5);
+  border-color: var(--color-accent-border);
+}
+
+.decision-center .decision-batch h3,
+.decision-center .decision-batch-results h3,
+.decision-center .decision-authority h3 {
+  margin-top: 0;
+}
+
+.decision-batch .decision-hint {
+  margin: 0;
+}
+
+.decision-batch-item {
+  display: grid;
+  gap: var(--space-4);
+}
+
+/* 問題（最多 2 行）放進框內當標題，不壓在框線上 */
+.decision-batch-item > legend {
+  float: left;
+  max-inline-size: var(--measure);
+  padding: 0;
+  color: var(--color-text);
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
+}
+
+/* 批次項目裡的處理方式、選項不再加框，避免框中有框 */
+.decision-batch-item fieldset {
+  padding: 0;
+  border: 0;
+}
+
+.decision-batch-item fieldset legend {
+  margin-bottom: var(--space-2);
+  padding: 0;
+}
+
+.decision-batch-results ul {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.decision-batch-failed {
+  color: var(--color-danger);
+}
+
+/* ---- 決策權限表 ---------------------------------------------------------- */
+
+.decision-authority {
+  margin: var(--space-8) 0 0;
+}
+
+.decision-authority .table-wrap {
+  margin-bottom: var(--space-5);
+}
+
+.decision-authority-level {
+  width: 12em;
+}
+
+.decision-authority-setting {
+  width: 16em;
+}
+
+.decision-authority-table select {
+  width: 100%;
+}
+
+/* ---- 1024px 寬（MASTER 第 8 節：清單 220～280px） ----------------------------- */
+
+@media (max-width: 1100px) {
+  /* 清單最多佔 36%，讓詳情在側欄較寬時仍有約 420px 以上（見 AI 決策紀錄） */
+  .decision-layout {
+    grid-template-columns: minmax(220px, min(280px, 36%)) minmax(0, 1fr);
+    gap: var(--space-6);
+  }
+
+  .decision-detail {
+    padding: var(--space-5) var(--space-6);
+  }
+
+  .decision-dl,
+  .decision-more dl {
+    grid-template-columns: minmax(5em, max-content) minmax(0, 1fr);
+  }
+
+  .decision-dl dt,
+  .decision-more dt {
+    max-width: 9em;
+  }
+
+  .decision-authority-level {
+    width: 9em;
+  }
+
+  .decision-authority-setting {
+    width: 12em;
+  }
+}
