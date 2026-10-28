@@ -1,0 +1,445 @@
+/* ==========================================================================
+   App 外殼
+   狀態列、側欄與 Workspace 清單、標題列與頁簽、主區、更新通知。
+   ========================================================================== */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* 狀態列：退到背景的一條細列，字小、次要色，異常項目自己再加強 */
+.status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-6);
+  align-items: center;
+  min-height: 28px;
+  padding: 0 var(--space-7);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.status::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: var(--space-3);
+  border-radius: 50%;
+  background: var(--color-text-subtle);
+}
+
+.status-running::before {
+  background: var(--color-success);
+}
+
+.status-offline::before {
+  background: var(--color-danger);
+}
+
+.status-platform-supported::before {
+  background: var(--color-success);
+}
+
+.status-platform-unsupported::before {
+  background: var(--color-warning);
+}
+
+.platform-warning {
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-warning-subtle);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+}
+
+.platform-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-6);
+}
+
+.platform-facts dd {
+  margin: 0;
+}
+
+.platform-source {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.status-reason {
+  color: var(--color-text-muted);
+}
+
+.body {
+  display: flex;
+  flex: 1;
+}
+
+.sidebar {
+  flex: none;
+  width: 260px;
+  padding: var(--space-6) var(--space-5);
+  background: var(--color-surface);
+  border-right: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+}
+
+/* 側欄標題是小型分類標示，不與頁面標題搶層次 */
+.sidebar h2 {
+  margin: 0 0 var(--space-4);
+  padding: 0 var(--space-3);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.sidebar-empty {
+  color: var(--color-text-muted);
+}
+
+.workspace-list {
+  margin: 0 0 var(--space-6);
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-list li {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.workspace-name {
+  font-weight: 600;
+}
+
+.workspace-path,
+.workspace-created {
+  overflow-wrap: anywhere;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.workspace-list button {
+  justify-self: start;
+}
+
+.workspace-form {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.workspace-form label {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.workspace-path-field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.workspace-path-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.workspace-path-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.workspace-form [role="alert"] {
+  margin: 0;
+  color: var(--color-danger);
+  overflow-wrap: anywhere;
+}
+
+.main {
+  flex: 1;
+  padding: var(--space-7);
+}
+
+/* App 外殼：產品名稱與頂層頁簽同一列 */
+.app-heading {
+  display: flex;
+  gap: var(--space-7);
+  align-items: stretch;
+  min-height: 44px;
+  padding: 0 var(--space-7);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.app-heading h1 {
+  align-self: center;
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+/* 更新通知在頁簽之外；沒有通知時不佔空間 */
+.app-notices {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-7) 0;
+}
+
+.app-notices:empty {
+  display: none;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+/* 頂層頁簽嵌在頂列內，底線與頂列下框重合 */
+.tabs-top {
+  align-self: stretch;
+  border-bottom: 0;
+}
+
+.tabs-top [role="tab"] {
+  height: 100%;
+}
+
+.tabs [role="tab"] {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tabs [role="tab"]:hover {
+  color: var(--color-text);
+}
+
+.tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--color-accent);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.tab-badge {
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--color-warning-subtle);
+  border: 1px solid var(--color-warning-border);
+  font-size: var(--font-size-xs);
+}
+
+/* 第二層頁簽（成果與品質、更多）：小型膠囊，不再畫底線，層次低於主要入口 */
+.tabs-page {
+  gap: var(--space-1);
+  border-bottom: 0;
+}
+
+.tabs-page [role="tab"] {
+  padding: var(--space-2) var(--space-5);
+  border-bottom: 0;
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-sm);
+}
+
+.tabs-page [role="tab"]:hover {
+  background: var(--color-surface-hover);
+}
+
+.tabs-page [role="tab"][aria-selected="true"] {
+  background: var(--color-surface-hover);
+  font-weight: 600;
+}
+
+/* 第二層頁簽與其內容之間不必再空一大段 */
+.tabs-page + .tab-panel {
+  padding-top: var(--space-2);
+}
+
+/* 各頁簽內容的標題與間距一致；同一頁簽疊放的功能以相同間距分開 */
+.tab-panel {
+  display: grid;
+  gap: var(--space-7);
+  padding-top: var(--space-6);
+}
+
+.tab-panel h2 {
+  margin-top: 0;
+}
+
+.workspace-hint {
+  color: var(--color-text-muted);
+}
+
+.setup-screen {
+  display: grid;
+  gap: var(--space-7);
+  align-content: start;
+}
+
+.setup-skip {
+  justify-self: start;
+}
+
+.workspace-heading {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.workspace-select {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: none;
+  box-shadow: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-select:hover {
+  background: var(--color-surface-hover);
+}
+
+.workspace-select[aria-current="true"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+
+.workspace-actions {
+  display: flex;
+  gap: var(--space-4);
+}
+
+
+.workspace-paused {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-warning-subtle);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+}
+
+.workspace-auto-resume {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.workspace-auto-resume label {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+
+.status-decisions-pending::before {
+  background: var(--color-warning);
+}
+
+/* 監護程序：運作中為綠色；不在時工作繼續但沒有自動重啟保護，以紅色醒目提示 */
+.status-guardian-active::before {
+  background: var(--color-success);
+}
+
+.status-guardian-unavailable {
+  padding: var(--space-1) var(--space-4);
+  color: var(--color-danger);
+  background: var(--color-danger-subtle);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-md);
+}
+
+.status-guardian-unavailable::before {
+  background: var(--color-danger);
+}
+
+/* 控制資料庫寫不進去、新派工已停止：獨占狀態列一整行 */
+.status-bar:has(.status-storage-fault) {
+  flex-wrap: wrap;
+  padding-bottom: var(--space-3);
+}
+
+.status-storage-fault {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  padding: var(--space-3) var(--space-5);
+  color: var(--color-danger);
+  background: var(--color-danger-subtle);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-md);
+}
+
+.status-storage-detail {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.decision-badge {
+  align-self: center;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-full);
+  background: var(--color-warning-subtle);
+  border: 1px solid var(--color-warning-border);
+  font-size: var(--font-size-xs);
+}
+
+
+/* 崩潰恢復：進行中為黃色、額度用盡為紅色 */
+.status-recovery::before {
+  background: var(--color-warning);
+}
+
+.status-recovery-exhausted::before {
+  background: var(--color-danger);
+}
+
+
+/* 更新通知（spec D-19）：不阻擋操作，放在主畫面頂端 */
+.update-notice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-5);
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-accent-subtle);
+  border: 1px solid var(--color-accent-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+}
+
+.update-notice details {
+  flex-basis: 100%;
+  order: 1;
+}
+
+.update-notes {
+  margin: var(--space-2) 0 0;
+  white-space: pre-wrap;
+}
+
+.update-steps {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+

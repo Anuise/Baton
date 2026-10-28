@@ -1,0 +1,147 @@
+/* ==========================================================================
+   共用元件
+   全站共用、不屬於任何單一頁面的元件：HelpTip、完全退出遮罩、頁面主要動作。
+   ========================================================================== */
+
+/* 「?」說明提示（HelpTip）：取代解釋性小字，懸停或鍵盤聚焦時浮出 */
+.help-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.help-tip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  background: none;
+  box-shadow: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1;
+  cursor: help;
+}
+
+.help-tip-trigger:hover,
+.help-tip-trigger:focus-visible {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.help-tip-content {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 10;
+  width: max-content;
+  max-width: 240px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.exit-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-overlay);
+}
+
+.exit-progress {
+  display: grid;
+  gap: var(--space-5);
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  padding: var(--space-6);
+  overflow-y: auto;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.exit-progress h2,
+.exit-progress p {
+  margin: 0;
+}
+
+.exit-phase {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+}
+
+.exit-runs,
+.exit-notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-sm);
+}
+
+.exit-run {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-5);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  overflow-wrap: anywhere;
+}
+
+.exit-run-anomaly strong,
+.exit-progress [role="alert"] {
+  color: var(--color-danger);
+}
+
+.exit-notes {
+  color: var(--color-text-muted);
+}
+
+.exit-anomalies {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-danger-subtle);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-md);
+}
+
+.exit-anomalies ul {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.exit-anomalies button {
+  justify-self: start;
+}
+
+.exit-actions {
+  display: flex;
+  gap: var(--space-4);
+}
+
+
+/* 頁面的主要動作：強調色按鈕（主控台、工作、裁定三頁共用） */
+:is(.controller-page, .task-board, .decision-center) .primary-action {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+:is(.controller-page, .task-board, .decision-center) .primary-action:hover:not(:disabled) {
+  border-color: var(--color-accent-hover);
+  background: var(--color-accent-hover);
+}
+

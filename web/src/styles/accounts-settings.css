@@ -1,0 +1,302 @@
+/* ==========================================================================
+   帳號與設定
+   首次啟動精靈、帳號與 Profile、額度、備份、崩潰恢復、更新設定。
+   ========================================================================== */
+
+.setup-wizard,
+.accounts-page {
+  margin-bottom: var(--space-7);
+}
+
+.setup-done {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-success-subtle);
+  border: 1px solid var(--color-success-border);
+  border-radius: var(--radius-md);
+}
+
+.setup-tool-missing,
+.setup-tool-too_old,
+.setup-tool-unknown {
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-warning-subtle);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+}
+
+.setup-guidance {
+  padding-left: var(--space-6);
+}
+
+.setup-guidance li {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--space-4);
+}
+
+.setup-guidance code {
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-sm);
+  user-select: all;
+}
+
+.setup-docs {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.profile-list {
+  padding: 0;
+  list-style: none;
+}
+
+.profile-list li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.profile-blocked {
+  border-color: var(--color-danger-border);
+}
+
+.profile-name {
+  font-weight: 600;
+}
+
+.profile-ok .profile-state {
+  color: var(--color-success);
+}
+
+.profile-blocked .profile-state {
+  color: var(--color-danger);
+}
+
+.profile-source,
+.profile-expected,
+.profile-origin {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.profile-blocker {
+  margin: 0;
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-danger-subtle);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-md);
+}
+
+.profile-actions {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.profile-gate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  font-size: var(--font-size-sm);
+}
+
+.profile-gate-paused,
+.profile-gate-draining {
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-warning-subtle);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+}
+
+.profile-gate-draining {
+  background: var(--color-danger-subtle);
+  border-color: var(--color-danger-border);
+}
+
+.profile-quota {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  font-size: var(--font-size-sm);
+}
+
+.quota-used {
+  font-weight: 600;
+}
+
+.quota-incomplete {
+  flex-basis: 100%;
+  margin: 0;
+  padding: var(--space-3) var(--space-5);
+  background: var(--color-warning-subtle);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+}
+
+.quota-windows {
+  flex-basis: 100%;
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.quota-windows li {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.quota-window-label {
+  font-weight: 600;
+}
+
+.quota-limits {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.quota-limits-hint {
+  color: var(--color-text-muted);
+}
+
+.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 360px;
+}
+
+
+.backup-settings {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.backup-settings h2,
+.backup-settings h3,
+.backup-settings p {
+  margin: 0;
+}
+
+.backup-settings h3 {
+  font-size: var(--font-size-md);
+}
+
+.backup-policy {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.backup-drill {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
+}
+
+.backup-drill-passed {
+  color: var(--color-success);
+  font-weight: 600;
+}
+
+.backup-drill-failed {
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-danger-subtle);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.backup-checks,
+.backup-list {
+  margin: 0;
+  padding-left: var(--space-6);
+  font-size: var(--font-size-xs);
+}
+
+.backup-check-failed {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.backup-settings > [role="alert"] {
+  color: var(--color-danger);
+}
+
+
+.recovery-panel {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.recovery-panel h2,
+.recovery-panel p {
+  margin: 0;
+}
+
+.recovery-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  align-items: baseline;
+}
+
+.recovery-status-exhausted strong,
+.recovery-panel [role="alert"] {
+  color: var(--color-danger);
+}
+
+.recovery-attempts,
+.recovery-affected {
+  margin: 0;
+  padding-left: var(--space-6);
+  font-size: var(--font-size-xs);
+}
+
+.recovery-attempt {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.recovery-attempt-failed > span {
+  color: var(--color-danger);
+}
+
+
+.update-settings {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.update-settings h2,
+.update-settings p {
+  margin: 0;
+}
+
+.update-policy {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.update-settings > [role="alert"] {
+  color: var(--color-danger);
+}
+

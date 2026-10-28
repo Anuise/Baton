@@ -1,0 +1,127 @@
+/* ==========================================================================
+   設計 token
+   全站樣式只透過這裡的變數取色與尺寸；淺色值寫在 :root，
+   深色值寫在下方 prefers-color-scheme: dark，跟隨系統自動切換。
+   風格參考 Linear：中性灰階、單一強調色、細邊框、小圓角、間距一致。
+   ========================================================================== */
+:root {
+  color-scheme: light dark;
+
+  /* 字型：介面文字與程式碼／路徑／雜湊等等寬內容 */
+  --font-sans: "Segoe UI", "Microsoft JhengHei UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  /* 字級：xs 次要資訊與徽章、sm 卡片內文與控制項、md 全站基準、lg 區塊標題、xl 頁面標題 */
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-md: 14px;
+  --font-size-lg: 16px;
+  --font-size-xl: 20px;
+
+  /* 間距：以 4px 為基準的級距，padding／margin／gap 一律取用這組 */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 12px;
+  --space-6: 16px;
+  --space-7: 24px;
+  --space-8: 32px;
+
+  /* 圓角：sm 行內小框、md 按鈕／輸入框／卡片、lg 對話框等大面板、full 膠囊徽章 */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 999px;
+
+  /* 陰影：sm 卡片與按鈕的輕微浮起、md 對話框與浮層 */
+  --shadow-sm: 0 1px 2px rgb(16 17 20 / 6%);
+  --shadow-md: 0 8px 24px rgb(16 17 20 / 14%), 0 1px 3px rgb(16 17 20 / 8%);
+
+  /* 底色層次：bg 視窗底、surface 卡片與面板、surface-raised 對話框、
+     surface-sunken 嵌在卡片裡的區塊（程式碼、看板欄、次要資訊框）、
+     surface-hover 可點元素的滑過底色、overlay 對話框背後的遮罩 */
+  --color-bg: #f7f8f9;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f0f1f3;
+  --color-surface-hover: #ebecef;
+  --color-overlay: rgb(16 17 20 / 40%);
+
+  /* 邊框：border 一般分隔線與卡片框、border-strong 輸入框與按鈕框 */
+  --color-border: #e4e5e9;
+  --color-border-strong: #d2d4da;
+
+  /* 文字：text 主要內容、muted 次要說明、subtle 更淡的標示（中性狀態點、placeholder） */
+  --color-text: #1b1c1f;
+  --color-text-muted: #62666e;
+  --color-text-subtle: #9a9ea6;
+
+  /* 強調色：唯一的品牌色，用於選取、連結、主要按鈕與資訊提示；
+     on-accent 是放在強調色底上的文字色 */
+  --color-accent: #5e6ad2;
+  --color-accent-hover: #4f5bc4;
+  --color-accent-subtle: #eef0fc;
+  --color-accent-border: #c4c9f2;
+  --color-on-accent: #ffffff;
+
+  /* 語意色：文字與狀態點用實色，提示框用 subtle 淡底配 border 邊框 */
+  --color-success: #1f7a45;
+  --color-success-subtle: #e9f6ee;
+  --color-success-border: #a8d9ba;
+  --color-warning: #8f5b00;
+  --color-warning-subtle: #fdf6e3;
+  --color-warning-border: #ebd08f;
+  --color-danger: #c4302b;
+  --color-danger-subtle: #fdeeed;
+  --color-danger-border: #f1b5b1;
+
+  /* 輔助色：只用在需要區分多種狀態的判定標籤與色條（環境受阻、授權受阻） */
+  --color-orange: #b4510f;
+  --color-orange-subtle: #fdf0e6;
+  --color-purple: #7a4fd0;
+  --color-purple-subtle: #f4effd;
+}
+
+/* 深色模式：覆寫全部色彩 token 與陰影，其餘尺寸 token 共用 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+    --shadow-md: 0 8px 24px rgb(0 0 0 / 45%), 0 1px 3px rgb(0 0 0 / 30%);
+
+    --color-bg: #0f1012;
+    --color-surface: #18191c;
+    --color-surface-raised: #212226;
+    --color-surface-sunken: #131416;
+    --color-surface-hover: #26272c;
+    --color-overlay: rgb(0 0 0 / 60%);
+
+    --color-border: #2a2b30;
+    --color-border-strong: #3a3c42;
+
+    --color-text: #e6e7ea;
+    --color-text-muted: #9b9ea6;
+    --color-text-subtle: #6c6f78;
+
+    --color-accent: #8b93f5;
+    --color-accent-hover: #a0a7f7;
+    --color-accent-subtle: #22254a;
+    --color-accent-border: #3e4382;
+    --color-on-accent: #101114;
+
+    --color-success: #4fc387;
+    --color-success-subtle: #15291e;
+    --color-success-border: #24563a;
+    --color-warning: #e2b34c;
+    --color-warning-subtle: #2e2511;
+    --color-warning-border: #5e4a1c;
+    --color-danger: #f07a72;
+    --color-danger-subtle: #351a1a;
+    --color-danger-border: #6e2c2a;
+
+    --color-orange: #f0995a;
+    --color-orange-subtle: #33231a;
+    --color-purple: #b79cf5;
+    --color-purple-subtle: #2a2140;
+  }
+}
