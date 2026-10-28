@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { CHECKED_AT, deviationView, failingReviewView, reviewList } from "./fixtures";
+import { CHECKED_AT, deviationView, failingReviewView, reviewList, reviewView } from "./fixtures";
 import type { ReviewList, Workspace } from "./runtimeClient";
 import { ReviewPage } from "./ReviewPage";
 
@@ -31,7 +31,7 @@ describe("審查與設計偏離", () => {
     const client = fakeClient();
     renderPage(client);
 
-    expect(await screen.findByRole("heading", { name: "審查與設計偏離：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "審查與設計偏離" })).toBeInTheDocument();
     const review = await screen.findByRole("region", { name: PASSED });
     expect(client.reviews).toHaveBeenCalledWith("ws_1");
     expect(review).toHaveTextContent("被審 Task修正匯出錯誤");
@@ -40,7 +40,7 @@ describe("審查與設計偏離", () => {
     expect(review).toHaveTextContent("規格第 2 版");
     expect(review).toHaveTextContent("規範來源AGENTS.md");
     expect(review).toHaveTextContent("審查於2023/11/15 06:14");
-    expect(within(review).getByText("通過")).toBeInTheDocument();
+    expect(within(review).getByText("通過")).toHaveClass("badge");
   });
 
   it("規範與需求兩軸分開顯示各自的結果、摘要、檔案與 finding", async () => {
@@ -95,8 +95,38 @@ describe("審查與設計偏離", () => {
     renderPage(fakeClient());
 
     const review = await screen.findByRole("region", { name: FAILING });
-    expect(within(review).getByText("已過期：已有對較新 candidate 的審查")).toBeInTheDocument();
+    // 狀態詞是徽章，原因是一般文字（不整段上色）
+    expect(within(review).getByText("已過期")).toHaveClass("badge");
+    expect(within(review).getByText("已有對較新 candidate 的審查")).not.toHaveClass("badge");
     expect(within(review).queryByText("未通過")).not.toBeInTheDocument();
+  });
+
+  it("過期原因只完整顯示第一句，其餘收進技術細節", async () => {
+    const stale = String.raw`Runtime 拒絕連線。無法寫入 C:\data\baton.sqlite3-wal，SQLITE_IOERR_WRITE。`;
+    renderPage(fakeClient(reviewList({ reviews: [failingReviewView({ stale_reason: stale })] })));
+
+    const review = await screen.findByRole("region", { name: FAILING });
+    expect(within(review).getByText("Runtime 拒絕連線。")).toBeInTheDocument();
+    const details = within(review).getByText("技術細節").closest("details");
+    expect(details).toHaveTextContent(String.raw`無法寫入 C:\data\baton.sqlite3-wal，SQLITE_IOERR_WRITE。`);
+  });
+
+  it("版本雜湊與規範來源路徑以等寬縮短顯示，完整值在 title 並可複製", async () => {
+    const base = "996fb92427ae41e4649b934ca495991b7852b855";
+    const candidate = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4";
+    const source = String.raw`C:\Users\Administrator\AppData\Local\Baton\fixtures\report.md`;
+    renderPage(
+      fakeClient(
+        reviewList({ reviews: [reviewView({ base_revision: base, candidate_revision: candidate, standards_source: source })] }),
+      ),
+    );
+
+    const review = await screen.findByRole("region", { name: "修正匯出錯誤（candidate e3b0c44298fc…）" });
+    expect(within(review).getByText("996fb92427ae…", { selector: "dd code" })).toHaveAttribute("title", base);
+    expect(within(review).getByText("e3b0c44298fc…", { selector: "dd code" })).toHaveAttribute("title", candidate);
+    expect(within(review).getAllByRole("button", { name: "複製雜湊" })).toHaveLength(2);
+    expect(within(review).getByText(String.raw`C:\…\fixtures\report.md`)).toHaveAttribute("title", source);
+    expect(within(review).getByRole("button", { name: "複製路徑" })).toBeInTheDocument();
   });
 
   it("沿用先前審查的軸標示沿用來源", async () => {
