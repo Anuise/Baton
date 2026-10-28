@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 
 import { buildContract, ContractEditor, draftFromContract, emptyDraft, type ContractDraft } from "./ContractEditor";
 import { HelpTip } from "./HelpTip";
+import { optionLabel } from "./textFormat";
 import { formatTimestamp } from "./time";
 import { errorCode } from "./runtimeClient";
 import type {
@@ -235,7 +236,10 @@ function queuedInfo(
  */
 export function TaskBoard({ client, workspace, timeZone }: Props) {
   const [loaded, setLoaded] = useState<ViewState>({ state: "loading" });
-  const [panel, setPanel] = useState<{ kind: "create" } | { kind: "edit"; task: TaskView } | null>(null);
+  // returnFocus：對話框關閉後焦點回到開啟它的按鈕
+  const [panel, setPanel] = useState<
+    ({ kind: "create" } | { kind: "edit"; task: TaskView }) & { returnFocus: HTMLElement | null } | null
+  >(null);
   const [cardError, setCardError] = useState<{ taskId: string; message: string } | null>(null);
   const [queuedNotice, setQueuedNotice] = useState<QueuedNotice | null>(null);
 
@@ -303,8 +307,12 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
   return (
     <section className="task-board" aria-label="工作面板">
       <header className="task-board-header">
-        <h2>工作：{workspace.name}</h2>
-        <button type="button" className="primary-action" onClick={() => setPanel({ kind: "create" })}>
+        <h2>工作</h2>
+        <button
+          type="button"
+          className="primary-action"
+          onClick={(e) => setPanel({ kind: "create", returnFocus: e.currentTarget })}
+        >
           建立 Task
         </button>
       </header>
@@ -321,6 +329,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
           onDone={() => void done()}
           onClose={() => setPanel(null)}
           onGoalCreated={() => void load()}
+          returnFocus={panel.returnFocus}
         />
       )}
 
@@ -331,7 +340,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
             <section key={status} className="task-column" aria-label={`${label}（${tasks.length}）`}>
               <h3>
                 {label}
-                <span className="task-count">{tasks.length}</span>
+                <span className="badge task-count">{tasks.length}</span>
               </h3>
               {tasks.map((task) => (
                 <TaskCard
@@ -364,7 +373,7 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
                     })
                   }
                   onCancelRun={(runId) => void act(task, () => client.cancelRun(workspace.id, runId))}
-                  onEdit={() => setPanel({ kind: "edit", task })}
+                  onEdit={(returnFocus) => setPanel({ kind: "edit", task, returnFocus })}
                   onAddDependency={(dependsOn) => act(task, () => client.addTaskDependency(workspace.id, task.id, dependsOn))}
                   onAccepted={() => void load()}
                 />
@@ -413,7 +422,8 @@ interface CardProps {
   onCancel: () => void;
   onDispatch: () => void;
   onCancelRun: (runId: string) => void;
-  onEdit: () => void;
+  /** 開啟契約對話框；returnFocus 是關閉後焦點要回到的按鈕。 */
+  onEdit: (returnFocus: HTMLElement | null) => void;
   onAddDependency: (dependsOn: string) => Promise<boolean>;
   /** 手動接受成功：看板需要重新載入。 */
   onAccepted: () => void;
@@ -421,11 +431,90 @@ interface CardProps {
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
+type StatusTone = "success" | "warning" | "danger" | "accent";
+
+/** 卡片上的一行狀態：徽章（最多 6 個字）＋ 一行說明；細節在「詳細資訊」裡。 */
+interface CardStatus {
+  tone: StatusTone;
+  label: string;
+  text: string | null;
+}
+
+/** 依需要使用者注意的程度挑出卡片最重要的一項狀態；沒有值得一提的狀態時為 null。 */
+function cardStatus({
+  task,
+  run,
+  queued,
+  budget,
+  workdir,
+  handoff,
+  integration,
+  awaitingIntegration,
+  verification,
+  accountName,
+  titleOf,
+}: {
+  task: TaskView;
+  run: RunView | null;
+  queued: CardProps["queued"];
+  budget: BudgetView | null;
+  workdir: WorkdirView | null;
+  handoff: Handoff | null;
+  integration: IntegrationEntry | null;
+  awaitingIntegration: boolean;
+  verification: VerificationRecord | null;
+  accountName: string | null;
+  titleOf: (taskId: string) => string;
+}): CardStatus | null {
+  if (budget !== null && budget.exhausted !== null) {
+    const label = budget.counters.find((counter) => counter.kind === budget.exhausted)?.label ?? budget.exhausted;
+    return { tone: "danger", label: "預算用盡", text: `${label}預算已用完` };
+  }
+  if (workdir?.status === "failed") return { tone: "danger", label: "目錄無法使用", text: workdir.failure };
+  if (run?.blocked) return { tone: "danger", label: "受阻", text: run.blocked.reason };
+  if (queued) {
+    const categories = WAIT_CATEGORY_LABELS.filter(([category]) => queued.reasons.some((r) => r.category === category));
+    return {
+      tone: "warning",
+      label: queued.position === null ? "排隊中" : `排隊第 ${queued.position} 位`,
+      text: categories.length === 0 ? "等待排程處理" : categories.map(([, label]) => label).join("、"),
+    };
+  }
+  if (task.status === "pending" && task.missing.length > 0) {
+    return { tone: "warning", label: `缺少 ${task.missing.length} 項`, text: task.missing.map((item) => item.message).join("；") };
+  }
+  if (handoff && handoff.phase !== "confirmed" && handoff.phase !== "abandoned") {
+    return { tone: "accent", label: "交接中", text: HANDOFF_PHASE_LABELS[handoff.phase] };
+  }
+  if (integration?.status === "failed" && task.status !== "completed") {
+    return { tone: "danger", label: "整合未通過", text: integration.failure };
+  }
+  if (awaitingIntegration && integration) {
+    return { tone: "accent", label: "等待整合", text: INTEGRATION_STATUS_LABELS[integration.status] };
+  }
+  if (verification && verification.outcome !== "passed" && !isClosed(task.status)) {
+    return verification.outcome === "inconclusive"
+      ? { tone: "warning", label: "驗證不完整", text: verification.note }
+      : { tone: "danger", label: "驗證未通過", text: verification.note };
+  }
+  if (run && isRunActive(run.status)) {
+    return { tone: "success", label: RUN_STATUS_LABELS[run.status], text: accountName && `帳號 ${accountName}` };
+  }
+  if (task.unfinished_dependencies.length > 0) {
+    return { tone: "warning", label: "等待相依", text: task.unfinished_dependencies.map(titleOf).join("、") };
+  }
+  if (workdir?.cleanup?.status === "failed") return { tone: "danger", label: "清理失敗", text: workdir.cleanup.failure };
+  return null;
+}
+
 function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, handoff, profileNameOf, accountName, authorizationRevision, queued, timeZone, error, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<HistoryState>({ state: "loading" });
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreId = useId();
+  const moreToggle = useRef<HTMLButtonElement>(null);
 
   // 展開時載入歷史；契約有新版本時重新載入
   useEffect(() => {
@@ -444,6 +533,14 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   const closed = isClosed(task.status);
   // 開發 Task 的成果已通過驗證、排入整合：整合完成前仍停在 verifying，也不能再手動接受
   const awaitingIntegration = task.status === "verifying" && integration !== null && isIntegrationActive(integration.status);
+  // 驗證中的卡片以「成果驗證」區塊當狀態列與主要動作
+  const verifying = task.status === "verifying" && !awaitingIntegration;
+  const status = verifying
+    ? null
+    : cardStatus({ task, run, queued, budget, workdir, handoff, integration, awaitingIntegration, verification, accountName, titleOf });
+  const stripe = verifying ? "accent" : status?.tone;
+  const canCancelRun = run !== null && isRunActive(run.status) && run.cancel_requested_at === null;
+  const hasMore = canCancelRun || !closed;
 
   const addDependency = async () => {
     if (await onAddDependency(dependsOn)) {
@@ -452,97 +549,177 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
     }
   };
 
+  /** 「更多」裡的動作：先收起選單再執行。 */
+  const pick = (action: () => void) => () => {
+    setMoreOpen(false);
+    action();
+  };
+
+  /** Esc 收起「更多」，焦點回到「更多」按鈕。 */
+  const closeMoreOnEscape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || !moreOpen) return;
+    event.stopPropagation();
+    setMoreOpen(false);
+    moreToggle.current?.focus();
+  };
+
   return (
-    <article className="task-card" aria-label={task.title}>
-      <h4>{task.title}</h4>
+    <article className={stripe ? `card task-card stripe-${stripe}` : "card task-card"} aria-label={task.title}>
+      {/* 標題最多 2 行、Goal 1 行；展開「詳細資訊」時顯示完整文字 */}
+      <h4 className="task-title clamp-2" title={task.title}>
+        {task.title}
+      </h4>
       <p className="task-meta">
-        <span className="task-kind">{kindLabel(task.kind)}</span>
-        <span className="task-goal">Goal：{goalTitle}</span>
+        <span className="badge task-kind">{kindLabel(task.kind)}</span>
+        <span className="task-goal truncate" title={`Goal：${goalTitle}`}>
+          Goal：{goalTitle}
+        </span>
       </p>
-      {task.unfinished_dependencies.length > 0 && (
-        <p className="task-dependencies">等待相依：{task.unfinished_dependencies.map(titleOf).join("、")}</p>
-      )}
-      {task.status === "pending" && task.missing.length > 0 && (
-        <div className="task-missing" role="group" aria-label="缺少項目">
-          <strong>缺少項目</strong>
-          <ul>
-            {task.missing.map((item, index) => {
-              const kind = missingKind(item);
-              return (
-                <li key={index} className={item.code === "field_unknown" ? "task-missing-unknown" : undefined}>
-                  {kind && <strong>{kind}</strong>} <span>{item.message}</span>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
+      {status && (
+        <p className="task-status">
+          <span className={`badge badge-${status.tone}`}>{status.label}</span>
+          {status.text && (
+            <span className="task-status-text truncate" title={status.text}>
+              {status.text}
+            </span>
+          )}
+        </p>
       )}
 
-      {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
-
-      {run && (
-        <RunStatusLine
-          client={client}
-          workspaceId={workspaceId}
-          run={run}
-          accountName={accountName}
-          authorizationRevision={authorizationRevision}
-          timeZone={timeZone}
-        />
-      )}
-
-      {handoff && <HandoffSummary handoff={handoff} profileNameOf={profileNameOf} timeZone={timeZone} />}
-
-      {verification && <VerificationSummary record={verification} timeZone={timeZone} />}
-
-      {integration && <IntegrationSummary entry={integration} awaiting={awaitingIntegration} />}
-
-      {budget && isBudgetUsed(budget) && <BudgetStatus budget={budget} timeZone={timeZone} />}
-
-      {task.status === "verifying" && !awaitingIntegration && (
+      {verifying && (
         <VerificationPanel client={client} workspaceId={workspaceId} taskId={task.id} onAccepted={onAccepted} />
       )}
 
-      {/* 次要資訊收合；工作目錄或清理失敗時預設展開，讓錯誤看得到 */}
-      <details className="task-details" open={workdirNeedsAttention(workdir)}>
+      {/* 細節一律收合，卡片高度可預期；工作目錄或清理失敗的原因已在上方的狀態列 */}
+      <details className="task-details">
         <summary>詳細資訊</summary>
-        <p className="task-contract-version">契約版本 v{task.contract_version}</p>
-        {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} timeZone={timeZone} />}
+        <div className="task-details-body">
+          {task.unfinished_dependencies.length > 0 && (
+            <p className="task-dependencies">等待相依：{task.unfinished_dependencies.map(titleOf).join("、")}</p>
+          )}
+          {task.status === "pending" && task.missing.length > 0 && (
+            <div className="task-missing" role="group" aria-label="缺少項目">
+              <strong>缺少項目</strong>
+              <ul>
+                {task.missing.map((item, index) => {
+                  const kind = missingKind(item);
+                  return (
+                    <li key={index} className={item.code === "field_unknown" ? "task-missing-unknown" : undefined}>
+                      {kind && <strong>{kind}</strong>} <span>{item.message}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
+          {queued && <QueuedStatus position={queued.position} reasons={queued.reasons} />}
+
+          {run && (
+            <RunStatusLine
+              client={client}
+              workspaceId={workspaceId}
+              run={run}
+              accountName={accountName}
+              authorizationRevision={authorizationRevision}
+              timeZone={timeZone}
+            />
+          )}
+
+          {handoff && <HandoffSummary handoff={handoff} profileNameOf={profileNameOf} timeZone={timeZone} />}
+
+          {verification && <VerificationSummary record={verification} timeZone={timeZone} />}
+
+          {integration && <IntegrationSummary entry={integration} awaiting={awaitingIntegration} />}
+
+          {budget && isBudgetUsed(budget) && <BudgetStatus budget={budget} timeZone={timeZone} />}
+
+          {workdir && <WorkdirStatus workdir={workdir} runLabelOf={runLabelOf} timeZone={timeZone} />}
+
+          <p className="task-contract-version">
+            <span>契約版本 v{task.contract_version}</span>
+            <button
+              type="button"
+              className="btn-quiet btn-sm"
+              aria-expanded={historyOpen}
+              onClick={() => setHistoryOpen(!historyOpen)}
+            >
+              契約版本歷史
+            </button>
+          </p>
+          {historyOpen && (
+            <div className="task-history" role="group" aria-label="契約版本歷史">
+              {history.state === "loading" && <p>載入中…</p>}
+              {history.state === "failed" && <p role="alert">無法取得契約版本歷史：{history.reason}</p>}
+              {history.state === "ready" && (
+                <ol>
+                  {[...history.contracts].reverse().map((contract) => (
+                    <li key={contract.version}>
+                      v{contract.version}：{formatTimestamp(contract.created_at, timeZone)}
+                      {contract.note && `，${contract.note}`}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          )}
+        </div>
       </details>
 
-      <div className="task-actions">
-        {task.status === "ready" && (
-          <button type="button" className="primary-action" onClick={onDispatch}>
-            派工
-          </button>
-        )}
-        {run && isRunActive(run.status) && run.cancel_requested_at === null && (
-          <button type="button" onClick={() => onCancelRun(run.id)}>
-            取消 Run
-          </button>
-        )}
-        {task.status === "pending" && (
-          <button type="button" className="primary-action" onClick={onReady}>
-            標記為可派工
-          </button>
-        )}
-        {!closed && (
-          <>
-            <button type="button" onClick={onEdit}>
-              編輯契約
+      {error && <p role="alert">{error}</p>}
+
+      {/* 每張卡片只放一個主要動作，其餘收進「更多」（MASTER 5.1） */}
+      {(task.status === "ready" || task.status === "pending" || hasMore) && (
+        <div className="task-actions">
+          {task.status === "ready" && (
+            <button type="button" className="primary-action" onClick={onDispatch}>
+              派工
             </button>
-            <button type="button" onClick={() => setAddingDependency(true)}>
-              新增相依
+          )}
+          {task.status === "pending" && (
+            <button type="button" className="primary-action" onClick={onReady}>
+              標記為可派工
             </button>
-            <button type="button" onClick={onCancel}>
+          )}
+          {hasMore && (
+            <button
+              ref={moreToggle}
+              type="button"
+              className="btn-quiet task-more-toggle"
+              aria-expanded={moreOpen}
+              aria-controls={moreId}
+              onClick={() => setMoreOpen(!moreOpen)}
+              onKeyDown={closeMoreOnEscape}
+            >
+              更多
+            </button>
+          )}
+        </div>
+      )}
+      {moreOpen && (
+        <div id={moreId} className="task-more" role="group" aria-label="更多動作" onKeyDown={closeMoreOnEscape}>
+          {!closed && (
+            <>
+              <button type="button" className="btn-quiet" onClick={pick(() => onEdit(moreToggle.current))}>
+                編輯契約
+              </button>
+              <button type="button" className="btn-quiet" onClick={pick(() => setAddingDependency(true))}>
+                新增相依
+              </button>
+            </>
+          )}
+          {canCancelRun && (
+            <button type="button" className="btn-danger" onClick={pick(() => onCancelRun(run.id))}>
+              取消 Run
+            </button>
+          )}
+          {!closed && (
+            <button type="button" className="btn-danger" onClick={pick(onCancel)}>
               取消
             </button>
-          </>
-        )}
-        <button type="button" aria-expanded={historyOpen} onClick={() => setHistoryOpen(!historyOpen)}>
-          契約版本歷史
-        </button>
-      </div>
+          )}
+        </div>
+      )}
 
       {addingDependency && (
         <div className="task-dependency-form">
@@ -552,36 +729,19 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
               <option value="">選擇 Task…</option>
               {others.map((other) => (
                 <option key={other.id} value={other.id}>
-                  {other.title}
+                  {optionLabel(other.title)}
                 </option>
               ))}
             </select>
           </label>
-          <button type="button" disabled={dependsOn === ""} onClick={() => void addDependency()}>
-            確定新增
-          </button>
-          <button type="button" onClick={() => setAddingDependency(false)}>
-            關閉
-          </button>
-        </div>
-      )}
-
-      {error && <p role="alert">{error}</p>}
-
-      {historyOpen && (
-        <div className="task-history" role="group" aria-label="契約版本歷史">
-          {history.state === "loading" && <p>載入中…</p>}
-          {history.state === "failed" && <p role="alert">無法取得契約版本歷史：{history.reason}</p>}
-          {history.state === "ready" && (
-            <ol>
-              {[...history.contracts].reverse().map((contract) => (
-                <li key={contract.version}>
-                  v{contract.version}：{formatTimestamp(contract.created_at, timeZone)}
-                  {contract.note && `，${contract.note}`}
-                </li>
-              ))}
-            </ol>
-          )}
+          <div className="form-actions">
+            <button type="button" disabled={dependsOn === ""} onClick={() => void addDependency()}>
+              確定新增
+            </button>
+            <button type="button" className="btn-quiet" onClick={() => setAddingDependency(false)}>
+              關閉
+            </button>
+          </div>
         </div>
       )}
     </article>
@@ -601,9 +761,18 @@ function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; t
           {pending.map((entry) => {
             const processing = isIntegrationProcessing(entry.status);
             return (
+              // 一項一列：標題 1 行、分支等寬 1 行（完整文字在 title），狀態徽章靠右
               <li key={entry.id} aria-current={processing ? "step" : undefined}>
-                {titleOf(entry.task_id)}（{entry.branch} → {entry.target_branch}）：{INTEGRATION_STATUS_LABELS[entry.status]}
-                {processing && <strong>（處理中）</strong>}
+                <span className="integration-title truncate" title={titleOf(entry.task_id)}>
+                  {titleOf(entry.task_id)}
+                </span>
+                <code className="integration-branch truncate" title={`${entry.branch} → ${entry.target_branch}`}>
+                  {entry.branch} → {entry.target_branch}
+                </code>
+                <span className={processing ? "badge badge-accent" : "badge"}>
+                  {INTEGRATION_STATUS_LABELS[entry.status]}
+                  {processing && "（處理中）"}
+                </span>
               </li>
             );
           })}
@@ -612,10 +781,6 @@ function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; t
     </section>
   );
 }
-
-/** 工作目錄準備失敗或 worktree 清理失敗：需要使用者注意。 */
-const workdirNeedsAttention = (workdir: WorkdirView | null) =>
-  workdir !== null && (workdir.status === "failed" || workdir.cleanup?.status === "failed");
 
 /** Task 的工作目錄：種類、路徑、worktree 的分支與整合目標、狀態；準備失敗時醒目顯示原因；有清理登記時顯示清理狀態。 */
 function WorkdirStatus({
@@ -1088,14 +1253,14 @@ function VerificationPanel({ client, workspaceId, taskId, onAccepted }: Verifica
 
   return (
     <div className="task-verification" role="group" aria-label="成果驗證">
-      <p>
-        <strong>驗證中</strong> <HelpTip label="驗證中">Worker 已結束，成果要通過自動檢查或由你手動接受才算完成</HelpTip>
-      </p>
-      <div className="task-actions">
-        <button type="button" aria-expanded={open} onClick={() => setOpen(!open)}>
+      {/* 收合時是卡片的狀態列＋主要動作；「?」說明在展開後才出現，卡片上只留兩個按鈕 */}
+      <p className="task-status">
+        <span className="badge badge-accent">驗證中</span>
+        <button type="button" className="primary-action btn-sm" aria-expanded={open} onClick={() => setOpen(!open)}>
           檢視驗證
         </button>
-      </div>
+        {open && <HelpTip label="驗證中">Worker 已結束，成果要通過自動檢查或由你手動接受才算完成</HelpTip>}
+      </p>
       {open && loaded.state === "loading" && <p>載入中…</p>}
       {open && loaded.state === "failed" && <p role="alert">無法取得驗證資料：{loaded.reason}</p>}
       {open && loaded.state === "ready" && (
@@ -1185,12 +1350,19 @@ interface FormProps {
   onClose: () => void;
   /** 建立 Task 前先建立了新的 Goal：看板需要重新載入才看得到它。 */
   onGoalCreated: () => void;
+  /** 對話框關閉後焦點回到的按鈕；已不在畫面上時退回開啟前的焦點。 */
+  returnFocus: HTMLElement | null;
 }
 
 const NEW_GOAL = "__new__";
 
-/** 建立 Task 與編輯契約共用的表單。 */
-function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCreated }: FormProps) {
+/**
+ * 建立 Task 與編輯契約共用的表單，以 modal 對話框呈現（MASTER 5.6），不把看板推下去：
+ * 開啟時焦點移到第一個欄位，Esc、「關閉」與標題列的關閉鈕都直接關閉（與改版前相同，不另外確認），
+ * 關閉後焦點回到開啟它的按鈕。
+ */
+function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCreated, returnFocus }: FormProps) {
+  const dialog = useRef<HTMLDialogElement>(null);
   const [draft, setDraft] = useState<ContractDraft>(() => (task ? draftFromContract(task.contract) : emptyDraft()));
   const [goalChoice, setGoalChoice] = useState(board.goals[0]?.id ?? NEW_GOAL);
   const [goalTitle, setGoalTitle] = useState("");
@@ -1199,6 +1371,28 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
   const [note, setNote] = useState("");
   const [messages, setMessages] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (element === null) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // jsdom 沒有 showModal：退回以 open 屬性顯示（焦點與 Esc 由下方自行處理，行為相同）
+    if (typeof element.showModal === "function") element.showModal();
+    else element.setAttribute("open", "");
+    element.querySelector<HTMLElement>("input, select, textarea")?.focus();
+    return () => {
+      if (typeof element.close === "function" && element.open) element.close();
+      const target = returnFocus?.isConnected ? returnFocus : previous;
+      if (target?.isConnected) target.focus();
+    };
+    // 只在開啟時執行一次；returnFocus 在同一次開啟中不會改變
+  }, []);
+
+  const closeOnEscape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    onClose();
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -1235,68 +1429,92 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
     }
   };
 
+  const heading = task ? `編輯契約：${task.title}` : "建立 Task";
   return (
-    <section className="task-form" aria-label={task ? `編輯契約：${task.title}` : "建立 Task"}>
-      <h3>{task ? `編輯契約：${task.title}` : "建立 Task"}</h3>
-      <form onSubmit={(event) => void submit(event)}>
-        {!task && (
-          <>
-            <label>
-              Goal
-              <select value={goalChoice} onChange={(e) => setGoalChoice(e.target.value)}>
-                {board.goals.map((goal) => (
-                  <option key={goal.id} value={goal.id}>
-                    {goal.title}
-                  </option>
-                ))}
-                <option value={NEW_GOAL}>新增 Goal…</option>
-              </select>
-            </label>
-            {goalChoice === NEW_GOAL && (
-              <label>
-                新 Goal 名稱
-                <input value={goalTitle} onChange={(e) => setGoalTitle(e.target.value)} />
-              </label>
-            )}
-            <label>
-              Task 標題
-              <input value={title} onChange={(e) => setTitle(e.target.value)} />
-            </label>
-            <label>
-              種類
-              <select value={kind} onChange={(e) => setKind(e.target.value as TaskKind)}>
-                {TASK_KIND_LABELS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </>
-        )}
-        <ContractEditor draft={draft} onChange={setDraft} capabilities={board.capabilities} />
-        {task && (
-          <label>
-            變更說明（選填）
-            <input value={note} onChange={(e) => setNote(e.target.value)} />
-          </label>
-        )}
-        <div className="task-actions">
-          <button type="submit" disabled={busy}>
-            {task ? "儲存契約" : "建立"}
-          </button>
-          <button type="button" onClick={onClose}>
-            關閉
-          </button>
+    <dialog
+      ref={dialog}
+      className="task-form task-dialog"
+      aria-label={heading}
+      // 瀏覽器原生的 Esc（cancel 事件）也交給 React 狀態關閉，不讓 dialog 自己關掉
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onKeyDown={closeOnEscape}
+    >
+      {/* 標題列：動作名稱 + Task 標題（完整換行，不截斷） */}
+      <header className="task-dialog-header">
+        <div className="task-dialog-title">
+          <h3>{task ? "編輯契約" : "建立 Task"}</h3>
+          {task && <p>{task.title}</p>}
         </div>
-        {messages.length > 0 && (
-          <div role="alert">
-            {messages.map((message) => (
-              <p key={message}>{message}</p>
-            ))}
+        <button type="button" className="btn-quiet btn-icon" aria-label="關閉對話框" onClick={onClose}>
+          ×
+        </button>
+      </header>
+      <form className="task-dialog-form" onSubmit={(event) => void submit(event)}>
+        <div className="task-dialog-body">
+          {!task && (
+            <>
+              <label>
+                Goal
+                <select className="task-form-select" value={goalChoice} onChange={(e) => setGoalChoice(e.target.value)}>
+                  {board.goals.map((goal) => (
+                    <option key={goal.id} value={goal.id}>
+                      {optionLabel(goal.title)}
+                    </option>
+                  ))}
+                  <option value={NEW_GOAL}>新增 Goal…</option>
+                </select>
+              </label>
+              {goalChoice === NEW_GOAL && (
+                <label>
+                  新 Goal 名稱
+                  <input value={goalTitle} onChange={(e) => setGoalTitle(e.target.value)} />
+                </label>
+              )}
+              <label>
+                Task 標題
+                <input value={title} onChange={(e) => setTitle(e.target.value)} />
+              </label>
+              <label>
+                種類
+                <select className="contract-mode" value={kind} onChange={(e) => setKind(e.target.value as TaskKind)}>
+                  {TASK_KIND_LABELS.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
+          <ContractEditor draft={draft} onChange={setDraft} capabilities={board.capabilities} />
+          {task && (
+            <label>
+              變更說明（選填）
+              <input value={note} onChange={(e) => setNote(e.target.value)} />
+            </label>
+          )}
+        </div>
+        <footer className="task-dialog-footer">
+          {messages.length > 0 && (
+            <div role="alert" className="task-dialog-errors">
+              {messages.map((message) => (
+                <p key={message}>{message}</p>
+              ))}
+            </div>
+          )}
+          <div className="form-actions">
+            <button type="button" onClick={onClose}>
+              關閉
+            </button>
+            <button type="submit" disabled={busy}>
+              {task ? "儲存契約" : "建立"}
+            </button>
           </div>
-        )}
+        </footer>
       </form>
-    </section>
+    </dialog>
   );
 }

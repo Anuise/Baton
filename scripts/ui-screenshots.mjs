@@ -108,9 +108,9 @@ async function capture(context, origin, job, outDir) {
         timeout: READY_TIMEOUT_MS,
       });
     await ready().catch(() => notes.push(`${READY_TIMEOUT_MS / 1000} 秒後畫面仍有「載入中」`));
-    if (job.page.click) {
-      await page.getByRole("button", { name: job.page.click, exact: true }).first().click();
-      await ready().catch(() => notes.push(`點擊「${job.page.click}」後仍有「載入中」`));
+    for (const name of job.page.click ?? []) {
+      await page.getByRole("button", { name, exact: true }).first().click();
+      await ready().catch(() => notes.push(`點擊「${name}」後仍有「載入中」`));
     }
     // 讓輪詢的第一輪結果與版面穩定下來
     await page.waitForTimeout(300);
