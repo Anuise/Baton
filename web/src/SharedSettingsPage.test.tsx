@@ -66,7 +66,8 @@ describe("共同設定頁", () => {
 
     const items = await screen.findAllByRole("listitem", { name: /^版本 \d+$/ });
     expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["版本 2", "版本 1"]);
-    expect(within(items[0]).getByText("2222eeeeffff")).toBeInTheDocument();
+    // 雜湊縮短為前 12 碼（加 … 表示截斷），完整值在 title
+    expect(within(items[0]).getByText("2222eeeeffff…")).toHaveAttribute("title", "2222eeeeffff00001111");
     expect(within(items[0]).queryByText(/2222eeeeffff0000/)).not.toBeInTheDocument();
     expect(within(items[0]).getByText(/2023\/11\/16 10:00/)).toBeInTheDocument();
     expect(within(items[0]).getByText(/偏好 5/)).toBeInTheDocument();

@@ -51,14 +51,18 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
   const { assessment } = platform;
   return (
     <>
-      <p className={`platform-status platform-${assessment.status}`}>{platformStatusLabel(assessment.status)}</p>
+      <p className={`platform-status platform-${assessment.status}`}>
+        <span className={`badge ${assessment.status === "supported" ? "badge-success" : "badge-warning"}`}>
+          {platformStatusLabel(assessment.status)}
+        </span>
+      </p>
       {assessment.issues.map((issue) => (
         <p key={issue.code} role="alert" className="platform-warning">
           {issue.message}
         </p>
       ))}
       {assessment.status !== "supported" && <p>平台警告不會阻擋使用，也不會阻擋派工、交接或恢復。</p>}
-      <dl className="platform-facts">
+      <dl className="platform-facts settings-facts">
         <dt>OS build</dt>
         <dd>{platform.platform.os_build}</dd>
         <dt>功能版本</dt>
@@ -78,8 +82,9 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
           </>
         )}
       </dl>
-      <p className="platform-source">
-        支援期限資料來源：{platform.support_table_source}（查閱日期 {platform.support_table_checked_on}）
+      <p className="platform-source section-hint">
+        支援期限資料來源：<span className="mono">{platform.support_table_source}</span>
+        <span className="platform-checked-on">（查閱日期 {platform.support_table_checked_on}）</span>
       </p>
     </>
   );

@@ -48,21 +48,21 @@ export function UpdateSettings({ client, timeZone }: Props) {
   return (
     <section className="update-settings" aria-labelledby="update-settings-title">
       <h2 id="update-settings-title">更新</h2>
-      <p className="update-policy">啟動時與每天自動檢查；有新版本只會通知，不會自動更新。</p>
+      <p className="section-hint">啟動時與每天自動檢查；有新版本只會通知，不會自動更新。</p>
       {loaded.state === "loading" && <p>載入中…</p>}
       {loaded.state === "failed" && <p role="alert">無法取得更新狀態：{loaded.reason}</p>}
       {loaded.state === "ready" && (
         <>
-          <p>目前版本：{loaded.view.current_version}</p>
-          <p>狀態：{statusText(loaded.view)}</p>
-          <p>
-            上次檢查：
-            {loaded.view.checked_at === null ? "尚未檢查" : formatTimestamp(loaded.view.checked_at, timeZone)}
-          </p>
-          <p>
-            下次檢查：
-            {loaded.view.next_check_at === null ? "未排定" : formatTimestamp(loaded.view.next_check_at, timeZone)}
-          </p>
+          <dl className="settings-facts">
+            <dt>目前版本</dt>
+            <dd className="mono">{loaded.view.current_version}</dd>
+            <dt>狀態</dt>
+            <dd>{statusText(loaded.view)}</dd>
+            <dt>上次檢查</dt>
+            <dd>{loaded.view.checked_at === null ? "尚未檢查" : formatTimestamp(loaded.view.checked_at, timeZone)}</dd>
+            <dt>下次檢查</dt>
+            <dd>{loaded.view.next_check_at === null ? "未排定" : formatTimestamp(loaded.view.next_check_at, timeZone)}</dd>
+          </dl>
         </>
       )}
     </section>

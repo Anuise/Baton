@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
+import { CopyButton } from "./LongText";
+import { shortPath } from "./textFormat";
 import { formatTimestamp } from "./time";
 import { GATE_REASON_LABELS, RUN_STATUS_LABELS } from "./TaskBoard";
 import type {
@@ -208,10 +210,12 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
 
   return (
     <section className="accounts-page" aria-labelledby="accounts-title">
-      <h2 id="accounts-title">帳號</h2>
-      <p className="accounts-count">
-        <span>{active.length} / {limit}</span>
-      </p>
+      <header className="section-header">
+        <h2 id="accounts-title">帳號</h2>
+        <span className="badge accounts-count" title="使用中的 Profile／上限">
+          {active.length} / {limit}
+        </span>
+      </header>
       {list.state === "loading" && <p>載入中…</p>}
       {list.state === "failed" && <p role="alert">無法取得帳號清單：{list.reason}</p>}
       {list.state === "ready" && active.length === 0 && <p>還沒有帳號 Profile</p>}
@@ -219,12 +223,18 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       {active.length > 0 && (
         <ul className="profile-list">
           {active.map((profile, index) => (
-            <li key={profile.id} className={profile.dispatchable ? "profile-ok" : "profile-blocked"}>
-              <span className="profile-name">{profile.name}</span>
-              <span className="profile-state">{profileStateLabel(profile)}</span>
-              {profile.config_dir_origin === "external" && (
-                <span className="profile-origin">外部目錄：{profile.config_dir}</span>
-              )}
+            <li
+              key={profile.id}
+              className={`profile-card card ${profile.dispatchable ? "profile-ok" : "profile-blocked stripe-danger"}`}
+            >
+              <header className="card-header">
+                <h3 className="profile-name clamp-2" title={profile.name}>
+                  {profile.name}
+                </h3>
+                <span className={`badge profile-state ${profile.dispatchable ? "badge-success" : "badge-danger"}`}>
+                  {profileStateLabel(profile)}
+                </span>
+              </header>
               <ProfileFacts profile={profile} timeZone={timeZone} />
               {scheduling.state === "ready" && (
                 <AccountLoad
@@ -239,22 +249,6 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                 </p>
               ))}
               <div className="profile-actions">
-                <button
-                  type="button"
-                  aria-label={`上移 ${profile.name}`}
-                  disabled={reordering || index === 0}
-                  onClick={() => void move(index, -1)}
-                >
-                  上移
-                </button>
-                <button
-                  type="button"
-                  aria-label={`下移 ${profile.name}`}
-                  disabled={reordering || index === active.length - 1}
-                  onClick={() => void move(index, 1)}
-                >
-                  下移
-                </button>
                 <button
                   type="button"
                   aria-label={`在終端機登入 ${profile.name}`}
@@ -274,8 +268,29 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                 >
                   重新核對
                 </button>
+                {/* 排序與封存是次要動作，靠右、低調 */}
+                <span className="profile-actions-spacer" />
                 <button
                   type="button"
+                  className="btn-quiet"
+                  aria-label={`上移 ${profile.name}`}
+                  disabled={reordering || index === 0}
+                  onClick={() => void move(index, -1)}
+                >
+                  上移
+                </button>
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  aria-label={`下移 ${profile.name}`}
+                  disabled={reordering || index === active.length - 1}
+                  onClick={() => void move(index, 1)}
+                >
+                  下移
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
                   aria-label={`封存 ${profile.name}`}
                   onClick={() => void act(() => client.archiveProfile(profile.id))}
                 >
@@ -288,26 +303,31 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       )}
       {terminalNotice && <p role="status">{terminalNotice}</p>}
       {actionError && <p role="alert">{actionError}</p>}
-      <form className="profile-form" aria-label="新增 Profile" onSubmit={(event) => void create(event)}>
-        <label>
-          名稱
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label>
-          預期帳號（選填）
-          <input
-            value={expectedAccount}
-            onChange={(e) => setExpectedAccount(e.target.value)}
-            placeholder="name@example.com"
-          />
-        </label>
-        <button type="submit" disabled={busy || full}>
-          新增 Profile
-        </button>
-        {formError && <p role="alert">{formError}</p>}
-      </form>
-      <ProfileFromDirForm disabled={full} onCreate={createFromDir} />
-      {full && <p>已達上限：最多 {limit} 個帳號 Profile。請先封存用不到的 Profile，再新增。</p>}
+      {full && <p className="accounts-full">已達上限：最多 {limit} 個帳號 Profile。請先封存用不到的 Profile，再新增。</p>}
+      <div className="profile-forms">
+        <form className="profile-form" aria-label="新增 Profile" onSubmit={(event) => void create(event)}>
+          <h3>新增帳號</h3>
+          <label className="field">
+            名稱
+            <input value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="field">
+            預期帳號（選填）
+            <input
+              value={expectedAccount}
+              onChange={(e) => setExpectedAccount(e.target.value)}
+              placeholder="name@example.com"
+            />
+          </label>
+          <div className="form-actions">
+            <button type="submit" disabled={busy || full}>
+              新增 Profile
+            </button>
+          </div>
+          {formError && <p role="alert">{formError}</p>}
+        </form>
+        <ProfileFromDirForm disabled={full} onCreate={createFromDir} />
+      </div>
     </section>
   );
 }
@@ -351,11 +371,12 @@ function ProfileFromDirForm({
 
   return (
     <form className="profile-form" aria-label="以既有目錄建立 Profile" onSubmit={(event) => void submit(event)}>
-      <label>
+      <h3>以既有目錄建立</h3>
+      <label className="field">
         名稱
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </label>
-      <label>
+      <label className="field">
         設定目錄
         <input
           value={configDir}
@@ -363,32 +384,67 @@ function ProfileFromDirForm({
           placeholder="C:\Users\me\.claude-Work-3"
         />
       </label>
-      <button type="submit" disabled={busy || disabled}>
-        以既有目錄建立
-      </button>
+      <div className="form-actions">
+        <button type="submit" disabled={busy || disabled}>
+          以既有目錄建立
+        </button>
+      </div>
       {error && <p role="alert">{error}</p>}
     </form>
   );
 }
 
-/** 一個 Profile 的事實：實際認證來源、帳號、最近核對時間、Claude Code 版本；尚未核對時只顯示預期帳號。 */
+/**
+ * 一個 Profile 的事實（兩欄）：實際認證來源、帳號、最近核對時間、Claude Code 版本；
+ * 帳號與預期不同或尚未核對時列出預期帳號；外部目錄縮短顯示（完整在 title，可複製）。
+ */
 function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone?: string }) {
   const { verification } = profile;
   const showExpected =
     profile.expected_account !== null &&
     (verification === null || verification.account?.toLowerCase() !== profile.expected_account.toLowerCase());
+  const external = profile.config_dir_origin === "external";
+  if (!verification && !showExpected && !external) return null;
   return (
-    <>
+    <dl className="profile-facts">
       {verification && (
-        <span className="profile-source">
-          認證來源：{sourceLabel(verification.source, verification.source_detail)}
-          {verification.account ? `；帳號：${verification.account}` : ""}；最近核對：
-          {formatTimestamp(verification.checked_at, timeZone)}
-          {verification.cli_version ? `；Claude Code 版本：${verification.cli_version}` : ""}
-        </span>
+        <>
+          <dt>認證來源</dt>
+          <dd className="profile-source">{sourceLabel(verification.source, verification.source_detail)}</dd>
+          {verification.account && (
+            <>
+              <dt>帳號</dt>
+              <dd>{verification.account}</dd>
+            </>
+          )}
+          <dt>最近核對</dt>
+          <dd>{formatTimestamp(verification.checked_at, timeZone)}</dd>
+          {verification.cli_version && (
+            <>
+              <dt>Claude Code 版本</dt>
+              <dd className="mono">{verification.cli_version}</dd>
+            </>
+          )}
+        </>
       )}
-      {showExpected && <span className="profile-expected">預期帳號：{profile.expected_account}</span>}
-    </>
+      {showExpected && (
+        <>
+          <dt>預期帳號</dt>
+          <dd className="profile-expected">{profile.expected_account}</dd>
+        </>
+      )}
+      {external && (
+        <>
+          <dt>外部目錄</dt>
+          <dd className="profile-origin copy-text">
+            <span className="mono truncate" title={profile.config_dir}>
+              {shortPath(profile.config_dir)}
+            </span>
+            <CopyButton text={profile.config_dir} label="複製路徑" />
+          </dd>
+        </>
+      )}
+    </dl>
   );
 }
 
@@ -579,13 +635,27 @@ function PlanLimitsForm({
 
   return (
     <form className="quota-limits" onSubmit={(event) => void submit(event)}>
-      <label>
+      <label className="field-inline">
         五小時方案上限
-        <input type="number" min={1} step={1} value={fiveHour} onChange={(e) => setFiveHour(e.target.value)} />
+        <input
+          type="number"
+          className="input-short"
+          min={1}
+          step={1}
+          value={fiveHour}
+          onChange={(e) => setFiveHour(e.target.value)}
+        />
       </label>
-      <label>
+      <label className="field-inline">
         七日方案上限
-        <input type="number" min={1} step={1} value={sevenDay} onChange={(e) => setSevenDay(e.target.value)} />
+        <input
+          type="number"
+          className="input-short"
+          min={1}
+          step={1}
+          value={sevenDay}
+          onChange={(e) => setSevenDay(e.target.value)}
+        />
       </label>
       <span className="quota-limits-hint">單位為 token；留空代表未設定</span>
       <button type="submit" disabled={busy} aria-label={`儲存 ${account.name} 的方案上限`}>
