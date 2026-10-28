@@ -203,7 +203,13 @@ const CATEGORIES: TimelineCategory[] = ["dispatch", "handoff", "decision", "reco
 /** long 資料集。 */
 export function longData(): PreviewData {
   const workspace = workspaceOf({ name: LONG_NAME(1), path: LONG_PATH });
-  const workspaces = [workspace, ...Array.from({ length: 14 }, (_, i) => workspaceOf({ id: `ws_${i + 2}_${LONG_SHA256.slice(0, 16)}`, name: LONG_NAME(i + 2), path: LONG_PATH }))];
+  // 其餘 14 個路徑只有最後幾字不同（…-10-28-2.md），檢查側欄縮短後仍看得出差異
+  const workspaces = [
+    workspace,
+    ...Array.from({ length: 14 }, (_, i) =>
+      workspaceOf({ id: `ws_${i + 2}_${LONG_SHA256.slice(0, 16)}`, name: LONG_NAME(i + 2), path: LONG_PATH.replace(/\.md$/, `-${i + 2}.md`) }),
+    ),
+  ];
   const tasks = longTasks();
   const decisions = longDecisions();
   const profiles = longProfiles(true);

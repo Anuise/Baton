@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
-import { CopyButton } from "./LongText";
+import { CopyButton, PathText } from "./LongText";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { BackupSettings } from "./BackupSettings";
 import { ControllerPage } from "./ControllerPage";
@@ -21,7 +21,7 @@ import { SharedSettingsPage } from "./SharedSettingsPage";
 import { StatusBar } from "./StatusBar";
 import { createRuntimeClient, type AppClient, type HealthResponse, type PendingDecisions, type Workspace } from "./runtimeClient";
 import { TaskBoard } from "./TaskBoard";
-import { formatCount, shortPath } from "./textFormat";
+import { formatCount } from "./textFormat";
 import { TimelinePage } from "./TimelinePage";
 import { UpdateNotice } from "./UpdateNotice";
 import { UpdateSettings } from "./UpdateSettings";
@@ -432,7 +432,7 @@ function WorkspaceEmpty() {
   );
 }
 
-/** 頁簽列上方的情境列：目前 Workspace 的名稱與縮短路徑，一行；完整值在 title，路徑可複製（完整名稱在側欄）。 */
+/** 頁簽列上方的情境列：目前 Workspace 的名稱與縮短路徑（與側欄同一種寫法，保留結尾），一行；完整值在 title，路徑可複製（完整名稱在側欄）。 */
 function WorkspaceContext({ workspace }: { workspace: Workspace }) {
   return (
     <div className="workspace-context" aria-label="目前的 Workspace">
@@ -440,9 +440,7 @@ function WorkspaceContext({ workspace }: { workspace: Workspace }) {
         {workspace.name}
       </span>
       <span className="workspace-context-path copy-text">
-        <span className="mono truncate" title={workspace.path}>
-          {shortPath(workspace.path)}
-        </span>
+        <PathText path={workspace.path} />
         <CopyButton text={workspace.path} label="複製路徑" />
       </span>
     </div>

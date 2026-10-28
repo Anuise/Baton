@@ -154,6 +154,13 @@ describe("探索", () => {
     expect(within(regressed).getByText("確認的 Evidence Bundle").closest("dl")).toBe(within(regressed).getByText("Task").closest("dl"));
   });
 
+  it("「確認的 Evidence Bundle」在 8rem 標籤欄折行時「Evidence Bundle」不拆開（不讓「Bundle」單獨一行）", async () => {
+    renderPage(fakeClient());
+
+    const defect = await screen.findByRole("region", { name: "折扣後總額少算" });
+    expect(within(defect).getByText("確認的 Evidence Bundle", { selector: "dt" }).textContent).toBe("確認的 Evidence Bundle");
+  });
+
   it("長的 Bundle、驗證要求與證據識別碼以等寬縮短顯示，完整值在 title 並可複製", async () => {
     const bundle = "evb_7b5deb026d9841b0cced7314";
     const request = "vreq_e3b0c44298fc1c149afbf4c8";

@@ -170,30 +170,13 @@
   display: none;
 }
 
-/* 縮短路徑：開頭（磁碟與省略的中段）先縮小到只剩「C:…」，能區分 Workspace 的結尾最後才截斷 */
+/* 縮短路徑（PathText）：開頭「C:\…」與能區分 Workspace 的結尾一定顯示，窄時只截斷中段 */
 .workspace-path {
   display: flex;
   flex: 1 1 auto;
-  min-width: 0;
   color: var(--color-text-muted);
   font-size: var(--text-caption);
   line-height: var(--leading-caption);
-  white-space: nowrap;
-}
-
-.workspace-path > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.workspace-path-head {
-  flex: 0 1000 auto;
-  min-width: 3ch;
-}
-
-.workspace-path-tail {
-  flex: 0 1 auto;
-  min-width: 0;
 }
 
 .workspace-created {

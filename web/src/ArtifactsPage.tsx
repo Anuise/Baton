@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { LongText, ShortValue } from "./LongText";
-import { sizeLabel } from "./textFormat";
+import { sizeLabel, splitExtension } from "./textFormat";
 import { formatTimestamp } from "./time";
 import type {
   ArtifactClient,
@@ -125,6 +125,44 @@ interface CardProps {
   timeZone?: string;
 }
 
+/**
+ * 成果名稱：長檔名最多兩行，完整名稱在 title。超過兩行時改成「主檔名（兩行，以 … 截斷）＋副檔名」，截斷後仍看得到副檔名。
+ * 分開後主檔名少了副檔名的寬度仍放得下時，代表整個名稱也放得下，改回不分開。
+ */
+function ArtifactName({ name }: { name: string }) {
+  const ref = useRef<HTMLHeadingElement>(null);
+  const [split, setSplit] = useState(false);
+  const { base, ext } = splitExtension(name);
+
+  useLayoutEffect(() => {
+    const heading = ref.current;
+    if (heading === null || ext === "") return;
+    const measure = () => {
+      const body = split ? heading.firstElementChild : heading;
+      if (body !== null) setSplit(body.scrollHeight > body.clientHeight + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(heading);
+    return () => observer.disconnect();
+  }, [name, ext, split]);
+
+  if (!split) {
+    return (
+      <h3 ref={ref} className="clamp-2" title={name}>
+        {name}
+      </h3>
+    );
+  }
+  return (
+    <h3 ref={ref} className="artifact-name-split" title={name}>
+      <span className="clamp-2">{base}</span>
+      <span className="artifact-name-ext">{ext}</span>
+    </h3>
+  );
+}
+
 /** 一個成果：預設只列最新版本，可展開全部版本（由新到舊）。 */
 function ArtifactCard({ client, workspaceId, artifact, taskTitle, timeZone }: CardProps) {
   const [expanded, setExpanded] = useState(false);
@@ -134,10 +172,7 @@ function ArtifactCard({ client, workspaceId, artifact, taskTitle, timeZone }: Ca
   return (
     <article className="card artifact-card" aria-label={artifact.name}>
       <header className="card-header">
-        {/* 長檔名最多兩行，完整名稱在 title */}
-        <h3 className="clamp-2" title={artifact.name}>
-          {artifact.name}
-        </h3>
+        <ArtifactName name={artifact.name} />
         {artifact.versions.length > 1 && (
           <button type="button" className="btn-quiet btn-sm" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
             全部版本（{artifact.versions.length}）

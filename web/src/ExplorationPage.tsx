@@ -290,7 +290,8 @@ function CaseRows({ reproduction, timeZone }: { reproduction: ReproductionCase; 
   const failed = reproduction.journey.steps.find((step) => step.key === reproduction.failed_step);
   return (
     <>
-      <dt>確認的 Evidence Bundle</dt>
+      {/* 標籤欄 8rem 放不下時只在「確認的」後面換行，「Evidence Bundle」不拆開 */}
+      <dt>確認的 Evidence&nbsp;Bundle</dt>
       <dd>
         <ShortValue value={reproduction.bundle_id} kind="id" field="確認的 Evidence Bundle" />
       </dd>

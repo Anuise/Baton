@@ -93,7 +93,7 @@ describe("左側 Workspace 清單", () => {
     expect(screen.queryByText("舊專案")).not.toBeInTheDocument();
   });
 
-  it("路徑保留磁碟與結尾，結尾段數多到足以和其他 Workspace 區分；窄時先省略開頭、結尾最後才截斷", async () => {
+  it("路徑保留磁碟與結尾，結尾段數多到足以和其他 Workspace 區分；窄時只截斷中段，開頭與結尾一定顯示", async () => {
     const client = fakeClient([
       workspace({ id: "ws_1", name: "甲", path: "C:\\Users\\me\\work\\client-a\\repo\\src" }),
       workspace({ id: "ws_2", name: "乙", path: "C:\\Users\\me\\work\\client-b\\repo\\src" }),
@@ -106,9 +106,10 @@ describe("左側 Workspace 清單", () => {
     expect(pathOf("甲")).toHaveTextContent(/^C:\\…\\client-a\\repo\\src$/);
     expect(pathOf("乙")).toHaveTextContent(/^C:\\…\\client-b\\repo\\src$/);
     expect(pathOf("丙")).toHaveTextContent(/^C:\\…\\projects\\notes$/);
-    // 能區分的結尾放在不先縮小的那一段；完整路徑在 title
-    expect(pathOf("甲").querySelector(".workspace-path-tail")).toHaveTextContent(/^client-a\\repo\\src$/);
-    expect(pathOf("丙").querySelector(".workspace-path-tail")).toHaveTextContent(/^notes$/);
+    // 與頁簽列上方的情境列同一種寫法（PathText）：開頭「C:\…」與結尾不縮小，窄時只截斷中段；完整路徑在 title
+    expect(pathOf("甲").querySelector(".path-text-head")).toHaveTextContent(/^C:\\…$/);
+    expect(pathOf("甲").querySelector(".path-text-end")).toHaveTextContent(/^a\\repo\\src$/);
+    expect(pathOf("丙").querySelector(".path-text-end")).toHaveTextContent(/^notes$/);
     expect(pathOf("甲")).toHaveAttribute("title", "C:\\Users\\me\\work\\client-a\\repo\\src");
   });
 

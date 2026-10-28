@@ -79,7 +79,10 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
         <dd>{platform.app_version}</dd>
         {assessment.support_ends_on && (
           <>
-            <dt>Microsoft 服務結束日</dt>
+            {/* 標籤欄放不下時在空白處換行，不在「服務結束日」中間拆開 */}
+            <dt>
+              Microsoft <span className="nowrap">服務結束日</span>
+            </dt>
             <dd>{assessment.support_ends_on}</dd>
           </>
         )}

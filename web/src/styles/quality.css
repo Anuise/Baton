@@ -54,6 +54,20 @@
   gap: var(--space-4);
 }
 
+/* 成果名稱超過兩行時（ArtifactName）：主檔名兩行後以「…」截斷，副檔名接在第二行末端 */
+.artifact-name-split {
+  display: flex;
+  align-items: flex-end;
+}
+
+.artifact-name-split > .clamp-2 {
+  flex: 0 1 auto;
+}
+
+.artifact-name-ext {
+  flex: none;
+}
+
 .artifact-task,
 .artifact-meta,
 .artifact-label {

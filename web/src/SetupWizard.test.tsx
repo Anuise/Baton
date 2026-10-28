@@ -116,8 +116,9 @@ describe("首次啟動精靈", () => {
 
     const notice = await screen.findByRole("region", { name: "背景執行" });
     expect(notice).toHaveTextContent("關閉視窗後，Baton 會在背景繼續執行已派出的工作");
-    // 告知是段落：以 LongText 限 3 行，超過時才出現「展開」（jsdom 不排版，這裡只看結構）
-    expect(within(notice).getByText(/關閉視窗後，Baton 會在背景繼續執行已派出的工作/).closest(".long-text")).not.toBeNull();
+    // 告知是段落：以 LongText 限 3 行，超過時才出現「展開」（jsdom 不排版，這裡只看結構）；
+    // 「展開」與頁面上的「▶ 技術細節」同一種收合摘要樣式（long-text-disclosure）
+    expect(within(notice).getByText(/關閉視窗後，Baton 會在背景繼續執行已派出的工作/).closest(".long-text")).toHaveClass("long-text-disclosure");
 
     await user.click(within(notice).getByRole("button", { name: "我知道了" }));
 

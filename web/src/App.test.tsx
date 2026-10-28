@@ -250,7 +250,8 @@ describe("App 外殼", () => {
 
       const context = await screen.findByLabelText("目前的 Workspace");
       expect(within(context).getByTitle("筆記")).toHaveTextContent("筆記");
-      expect(within(context).getByTitle("C:\\work\\notes")).toBeInTheDocument();
+      // 路徑與側欄同一種寫法（PathText：開頭與結尾一定顯示，窄時只截斷中段）
+      expect(within(context).getByTitle("C:\\work\\notes")).toHaveClass("path-text");
       expect(within(context).getByRole("button", { name: "複製路徑" })).toBeInTheDocument();
     });
   });

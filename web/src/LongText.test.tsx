@@ -2,7 +2,7 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CopyButton, LongText, ShortValue } from "./LongText";
+import { CopyButton, LongText, PathText, ShortValue } from "./LongText";
 
 const LONG = "第一段說明，內容很長。\n第二段說明，仍然很長。\n第三段。\n第四段。";
 
@@ -138,5 +138,35 @@ describe("ShortValue", () => {
 
     expect(screen.getByText("abc123")).not.toHaveAttribute("title");
     expect(screen.queryByRole("button")).toBeNull();
+  });
+});
+
+describe("PathText", () => {
+  const PATH = "C:\\Users\\me\\fixtures\\deeply_nested\\report-final-revision-2026-10-28.md";
+
+  it("開頭「C:\…」與結尾放在不縮小的兩段，窄時只截斷中段；完整路徑在 title", () => {
+    const { container } = render(<PathText path={PATH} />);
+
+    const text = container.querySelector(".path-text")!;
+    expect(text).toHaveTextContent(/^C:\\…\\deeply_nested\\report-final-revision-2026-10-28\.md$/);
+    expect(text).toHaveAttribute("title", PATH);
+    expect(text.querySelector(".path-text-head")).toHaveTextContent(/^C:\\…$/);
+    expect(text.querySelector(".path-text-start")).toHaveTextContent(/^\\deeply_nested\\report-final-revision-2026-$/);
+    expect(text.querySelector(".path-text-end")).toHaveTextContent(/^10-28\.md$/);
+  });
+
+  it("可以指定保留的段數與加上自己的 class；沒有省略時不輸出開頭", () => {
+    const { container } = render(
+      <>
+        <PathText path={PATH} keep={1} className="extra" />
+        <PathText path="C:\work\notes" />
+      </>,
+    );
+
+    const [kept, short] = container.querySelectorAll(".path-text");
+    expect(kept).toHaveClass("extra");
+    expect(kept).toHaveTextContent(/^C:\\…\\report-final-revision-2026-10-28\.md$/);
+    expect(short).toHaveTextContent(/^C:\\work\\notes$/);
+    expect(short.querySelector(".path-text-head")).toBeNull();
   });
 });
