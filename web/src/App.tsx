@@ -221,7 +221,8 @@ function TabPanel<T extends string>({ idPrefix, selected, children }: { idPrefix
   );
 }
 
-export function App() {
+/** `createClient` 只供開發用預覽注入假資料；正式畫面不傳，依執行環境挑選用戶端。 */
+export function App({ createClient = createRuntimeClient }: { createClient?: () => Promise<AppClient> } = {}) {
   const [client, setClient] = useState<AppClient | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   // 精靈與帳號頁其中一邊改變了 Profile 狀態時，讓另一邊重新讀取
@@ -246,8 +247,8 @@ export function App() {
   const pendingByWorkspace = Object.fromEntries((pending?.by_workspace ?? []).map((w) => [w.workspace_id, w.pending_count]));
 
   useEffect(() => {
-    void createRuntimeClient().then(setClient);
-  }, []);
+    void createClient().then(setClient);
+  }, [createClient]);
 
   useEffect(() => saveShell(shell), [shell]);
 

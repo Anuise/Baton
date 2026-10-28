@@ -620,6 +620,17 @@ describe("App 外殼", () => {
       expect(client.requestFullExit).toHaveBeenCalledTimes(1);
     });
 
+    it("指定 createClient 時改用它建立用戶端（開發用預覽注入假資料）", async () => {
+      const injected = {
+        ...client,
+        getHealth: vi.fn(async () => ({ status: "ok", product: "預覽產品", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 })),
+      } as AppClient;
+      render(<App createClient={async () => injected} />);
+
+      expect(await screen.findByRole("heading", { name: "預覽產品" })).toBeInTheDocument();
+      expect(injected.getHealth).toHaveBeenCalled();
+    });
+
     it("有新版本時在頁簽之外通知、在設定頁簽顯示更新狀態，不會自己開始更新（spec D-19）", async () => {
       const user = userEvent.setup();
       render(<App />);
