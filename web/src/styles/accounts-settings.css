@@ -534,6 +534,10 @@ p.backup-drill-result {
 }
 
 /* 結果是徽章，說明是一般文字；未通過不再整行紅色粗體（P-SET-3） */
+.backup-check {
+  max-inline-size: var(--measure);
+}
+
 .backup-check .badge {
   margin-inline: var(--space-1) var(--space-2);
 }
@@ -606,10 +610,12 @@ p.backup-drill-result {
 
 /* ---------- 平台狀態 ---------- */
 
-.platform-warning {
+/* 平台警示：左側色條，正文用一般文字色（C8） */
+.platform-page > .platform-warning {
   max-inline-size: var(--measure);
   padding-left: var(--space-4);
   border-left: 3px solid var(--color-warning);
+  color: var(--color-text);
 }
 
 p.platform-source {

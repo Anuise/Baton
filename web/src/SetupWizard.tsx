@@ -35,8 +35,8 @@ const TOOL_TONE: Record<ToolCheck["status"], "success" | "warning"> = {
   unknown: "warning",
 };
 
-/** 官方說明網址只顯示網域（完整網址在 title，另可複製）；不是網址時退回縮短路徑。 */
-function docsHost(url: string): string {
+/** 網址只顯示網域（完整網址在 title，另可複製）；不是網址時退回縮短路徑。平台頁的資料來源也用這個。 */
+export function docsHost(url: string): string {
   try {
     return new URL(url).host || shortPath(url);
   } catch {

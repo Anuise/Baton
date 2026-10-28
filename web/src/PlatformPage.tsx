@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 
+import { CopyButton } from "./LongText";
 import type { PlatformResponse, RuntimeClient } from "./runtimeClient";
+import { docsHost } from "./SetupWizard";
 
 type Assessment = PlatformResponse["assessment"];
 
@@ -83,7 +85,11 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
         )}
       </dl>
       <p className="platform-source section-hint">
-        支援期限資料來源：<span className="mono">{platform.support_table_source}</span>
+        支援期限資料來源：
+        <span className="mono" title={platform.support_table_source}>
+          {docsHost(platform.support_table_source)}
+        </span>
+        <CopyButton text={platform.support_table_source} label="複製網址" />
         <span className="platform-checked-on">（查閱日期 {platform.support_table_checked_on}）</span>
       </p>
     </>
