@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { platformStatusLabel } from "./PlatformPage";
+import { splitFirstSentence } from "./textFormat";
 import type {
   AccountClient,
   DecisionClient,
@@ -122,17 +123,31 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
         </span>
       )}
       {status.state === "running" && status.health.storage?.dispatch_halted && (
-        <div className="status-storage-fault" role="alert">
-          <strong>新派工已停止</strong>
-          {status.health.storage.fault && (
-            <>
-              <span>{status.health.storage.fault.summary}</span>
-              <span>{status.health.storage.fault.action}</span>
-              <small className="status-storage-detail">{status.health.storage.fault.detail}</small>
-            </>
-          )}
-        </div>
+        <StorageFault fault={status.health.storage.fault ?? null} />
       )}
     </header>
+  );
+}
+
+type StorageFaultView = NonNullable<NonNullable<HealthResponse["storage"]>["fault"]>;
+
+/** 儲存故障：狀態詞做成徽章；原因的第一句與處理方式完整顯示，其餘與技術細節收進「技術細節」。 */
+function StorageFault({ fault }: { fault: StorageFaultView | null }) {
+  const reason = fault && splitFirstSentence(fault.summary);
+  return (
+    <div className="status-storage-fault" role="alert">
+      <strong className="badge badge-danger">新派工已停止</strong>
+      {fault && reason && (
+        <div className="status-storage-body">
+          <p>{reason.summary}</p>
+          <p>{fault.action}</p>
+          <details className="status-storage-detail">
+            <summary>技術細節</summary>
+            {reason.rest && <p>{reason.rest}</p>}
+            <p className="mono">{fault.detail}</p>
+          </details>
+        </div>
+      )}
+    </div>
   );
 }

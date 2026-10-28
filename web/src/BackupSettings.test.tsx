@@ -51,7 +51,8 @@ describe("備份與還原演練", () => {
     renderSettings(fakeClient(backupStatus({ latest_drill: drill })));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("還原演練未通過");
-    expect(screen.getByText("成果檔案雜湊：未通過（1 個成果檔案的 SHA-256 不符）")).toBeInTheDocument();
+    const checks = within(screen.getByRole("list", { name: "核對項目" })).getAllByRole("listitem");
+    expect(checks.map((item) => item.textContent)).toContain("成果檔案雜湊：未通過（1 個成果檔案的 SHA-256 不符）");
   });
 
   it("演練沒有可用的備份時，說明沒有被演練的備份", async () => {

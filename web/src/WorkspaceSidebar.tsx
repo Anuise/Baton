@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useId, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { HelpTip } from "./HelpTip";
+import { formatCount, formatNumber, shortPath } from "./textFormat";
 import { formatTimestamp } from "./time";
 import type { LifecycleClient, PauseCause, Workspace, WorkspaceClient, WorkspaceLifecycleView } from "./runtimeClient";
 
@@ -32,6 +33,9 @@ const PAUSE_LABELS: Record<PauseCause, string> = {
   login_unverified: "無法核對是否跨登入，暫停中",
 };
 
+/** 建立表單「目錄」欄位的 id；主區的空狀態以「建立 Workspace」把焦點移到這裡。 */
+export const WORKSPACE_PATH_INPUT_ID = "workspace-path-input";
+
 /** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace，並提供各自的完全退出後與跨登入自動續跑設定。 */
 export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendingDecisions, onWorkspaces }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
@@ -41,7 +45,7 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
   const [busy, setBusy] = useState(false);
   // 各 Workspace 的生命週期；讀不到時不顯示設定，不假裝是預設值
   const [lifecycles, setLifecycles] = useState<WorkspaceLifecycleView[]>([]);
-  const pathId = useId();
+  const pathId = WORKSPACE_PATH_INPUT_ID;
   // 系統的資料夾選擇對話框只有在 Tauri 視窗中可用；瀏覽器開發模式只能手動輸入
   const canBrowse = "__TAURI_INTERNALS__" in window;
 
@@ -138,45 +142,61 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
     }
   };
 
-  /** 暫停狀態（依原因說明）與「繼續工作」，以及兩項各自獨立的自動續跑設定；沒有生命週期資料時不顯示。 */
-  const lifecycleControls = (workspace: Workspace) => {
+  /** 暫停狀態（依原因說明）與「繼續工作」：需要立即處理，留在清單項目內，一行。沒有生命週期資料時不顯示。 */
+  const pausedRow = (workspace: Workspace) => {
     const lifecycle = lifecycles.find((view) => view.workspace_id === workspace.id);
-    if (!lifecycle) return null;
+    if (!lifecycle?.awaiting_resume) return null;
+    const label = PAUSE_LABELS[lifecycle.paused_by ?? "full_exit"];
     return (
-      <>
-        {lifecycle.awaiting_resume && (
-          <div className="workspace-paused">
-            <span>{PAUSE_LABELS[lifecycle.paused_by ?? "full_exit"]}</span>
-            <button type="button" aria-label={`繼續工作 ${workspace.name}`} onClick={() => void resume(workspace)}>
-              繼續工作
-            </button>
-          </div>
+      <div className="workspace-paused">
+        <span className="truncate" title={label}>
+          {label}
+        </span>
+        <button type="button" className="btn-sm" aria-label={`繼續工作 ${workspace.name}`} onClick={() => void resume(workspace)}>
+          繼續工作
+        </button>
+      </div>
+    );
+  };
+
+  /** 「管理」選單：建立時間、封存，以及兩項各自獨立的自動續跑設定（沒有生命週期資料時不顯示設定）。 */
+  const manageMenu = (workspace: Workspace) => {
+    const lifecycle = lifecycles.find((view) => view.workspace_id === workspace.id);
+    return (
+      <WorkspaceMenu label={`管理 ${workspace.name}`}>
+        <span className="workspace-created">建立於 {formatTimestamp(workspace.created_at, timeZone)}</span>
+        {lifecycle && (
+          <>
+            <div className="workspace-auto-resume">
+              <label>
+                <input
+                  type="checkbox"
+                  aria-label={`完全退出後自動續跑 ${workspace.name}`}
+                  checked={lifecycle.auto_resume_after_exit}
+                  onChange={(e) => void setAutoResume(workspace, e.target.checked)}
+                />
+                完全退出後自動續跑
+              </label>
+              <HelpTip label="完全退出後自動續跑">只影響下次重新開啟，不會立即啟停目前工作</HelpTip>
+            </div>
+            <div className="workspace-auto-resume">
+              <label>
+                <input
+                  type="checkbox"
+                  aria-label={`跨登入自動續跑 ${workspace.name}`}
+                  checked={lifecycle.auto_resume_across_login}
+                  onChange={(e) => void setLoginResume(workspace, e.target.checked)}
+                />
+                跨登入自動續跑
+              </label>
+              <HelpTip label="跨登入自動續跑">重新登入 Windows 後是否自動續跑；只影響之後的登入</HelpTip>
+            </div>
+          </>
         )}
-        <div className="workspace-auto-resume">
-          <label>
-            <input
-              type="checkbox"
-              aria-label={`完全退出後自動續跑 ${workspace.name}`}
-              checked={lifecycle.auto_resume_after_exit}
-              onChange={(e) => void setAutoResume(workspace, e.target.checked)}
-            />
-            完全退出後自動續跑
-          </label>
-          <HelpTip label="完全退出後自動續跑">只影響下次重新開啟，不會立即啟停目前工作</HelpTip>
-        </div>
-        <div className="workspace-auto-resume">
-          <label>
-            <input
-              type="checkbox"
-              aria-label={`跨登入自動續跑 ${workspace.name}`}
-              checked={lifecycle.auto_resume_across_login}
-              onChange={(e) => void setLoginResume(workspace, e.target.checked)}
-            />
-            跨登入自動續跑
-          </label>
-          <HelpTip label="跨登入自動續跑">重新登入 Windows 後是否自動續跑；只影響之後的登入</HelpTip>
-        </div>
-      </>
+        <button type="button" className="btn-danger btn-sm" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
+          封存
+        </button>
+      </WorkspaceMenu>
     );
   };
 
@@ -191,29 +211,27 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
       {active.length > 0 && (
         <ul className="workspace-list">
           {active.map((workspace) => (
-            <li key={workspace.id}>
+            <li key={workspace.id} className={`workspace-item${workspace.id === selectedId ? " workspace-item-current" : ""}`}>
               <div className="workspace-heading">
+                {/* 名稱最多 2 行；整個項目都可點選（按鈕的 ::after 蓋滿項目），完整名稱與路徑在 title */}
                 <button
                   type="button"
                   className="workspace-select"
                   aria-label={`選擇 ${workspace.name}`}
                   aria-current={workspace.id === selectedId ? true : undefined}
+                  title={`${workspace.name}
+${workspace.path}`}
                   onClick={() => onSelect?.(workspace)}
                 >
-                  <span className="workspace-name">{workspace.name}</span>
+                  <span className="workspace-name clamp-2">{workspace.name}</span>
                 </button>
-                {(pendingDecisions?.[workspace.id] ?? 0) > 0 && (
-                  <span className="decision-badge">待裁定 {pendingDecisions?.[workspace.id]}</span>
-                )}
+                {manageMenu(workspace)}
               </div>
-              <span className="workspace-path">{workspace.path}</span>
-              <span className="workspace-created">建立於 {formatTimestamp(workspace.created_at, timeZone)}</span>
-              <div className="workspace-actions">
-                <button type="button" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
-                  封存
-                </button>
+              <div className="workspace-meta">
+                {pendingBadge(pendingDecisions?.[workspace.id] ?? 0)}
+                <span className="workspace-path mono truncate">{shortPath(workspace.path)}</span>
               </div>
-              {lifecycleControls(workspace)}
+              {pausedRow(workspace)}
             </li>
           ))}
         </ul>
@@ -245,5 +263,48 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
         {formError && <p role="alert">{formError}</p>}
       </form>
     </aside>
+  );
+}
+
+/** 待裁定數徽章：超過 999 顯示 999+，完整數字在可存取名稱與 title。 */
+function pendingBadge(count: number) {
+  if (count <= 0) return null;
+  return (
+    <span className="badge badge-warning workspace-badge" aria-label={`待裁定 ${formatNumber(count)} 項`} title={`待裁定 ${formatNumber(count)}`}>
+      待裁定 {formatCount(count)}
+    </span>
+  );
+}
+
+/** 清單項目的「管理」選單（`<details>` 浮層）：Esc 或點選單外面時收起，Esc 後焦點回到觸發按鈕。 */
+function WorkspaceMenu({ label, children }: { label: string; children: ReactNode }) {
+  const ref = useRef<HTMLDetailsElement>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: PointerEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) ref.current.open = false;
+    };
+    document.addEventListener("pointerdown", close);
+    return () => document.removeEventListener("pointerdown", close);
+  }, [open]);
+
+  return (
+    <details
+      ref={ref}
+      className="workspace-menu"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !ref.current?.open) return;
+        ref.current.open = false;
+        ref.current.querySelector("summary")?.focus();
+      }}
+    >
+      <summary className="workspace-menu-trigger" aria-label={label} title="管理">
+        <span aria-hidden="true">⋯</span>
+      </summary>
+      <div className="workspace-menu-panel">{children}</div>
+    </details>
   );
 }

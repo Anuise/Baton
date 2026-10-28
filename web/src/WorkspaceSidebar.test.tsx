@@ -237,6 +237,35 @@ describe("左側 Workspace 清單", () => {
     expect(screen.getByRole("button", { name: "選擇 筆記" })).not.toHaveAttribute("aria-current");
   });
 
+  it("封存、自動續跑與建立時間收在項目的「管理」選單；Esc 收起並把焦點還給觸發鈕", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} timeZone="Asia/Taipei" />);
+
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+    const menu = within(item).getByText("建立於 2023/11/15 06:13").closest("details")!;
+    const trigger = within(menu).getByLabelText("管理 筆記");
+    expect(menu).not.toHaveAttribute("open");
+    expect(within(menu).getByRole("button", { name: "封存 筆記" })).toBeInTheDocument();
+    expect(await within(menu).findByRole("checkbox", { name: "完全退出後自動續跑 筆記" })).toBeInTheDocument();
+    expect(within(menu).getByRole("checkbox", { name: "跨登入自動續跑 筆記" })).toBeInTheDocument();
+
+    // <summary> 在瀏覽器中原生可用 Enter／空白鍵開啟；jsdom 只模擬點擊
+    await user.click(trigger);
+    expect(menu).toHaveAttribute("open");
+
+    within(menu).getByRole("checkbox", { name: "跨登入自動續跑 筆記" }).focus();
+    await user.keyboard("{Escape}");
+    expect(menu).not.toHaveAttribute("open");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("待裁定數超過 999 時徽章顯示 999+，完整數字在可存取名稱", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} pendingDecisions={{ ws_1: 1284 }} />);
+
+    const badge = await screen.findByText("待裁定 999+");
+    expect(badge).toHaveAttribute("aria-label", "待裁定 1,284 項");
+  });
+
   it("讀到清單後把使用中的 Workspace 告訴上層，封存後再告知一次", async () => {
     const onWorkspaces = vi.fn();
     const archived = workspace({ id: "ws_2", name: "舊的", status: "archived", archived_at: CREATED_AT + 1 });

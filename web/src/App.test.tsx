@@ -215,6 +215,29 @@ describe("App 外殼", () => {
     });
   });
 
+  describe("Workspace 情境列與空狀態", () => {
+    it("未選 Workspace 時，空狀態的「建立 Workspace」把焦點移到側欄的目錄欄位", async () => {
+      const user = userEvent.setup();
+      render(<App />);
+
+      const empty = await screen.findByRole("region", { name: "尚未選擇 Workspace" });
+      await user.click(within(empty).getByRole("button", { name: "建立 Workspace" }));
+
+      expect(screen.getByLabelText("目錄")).toHaveFocus();
+    });
+
+    it("選中 Workspace 後，頁簽列上方的情境列顯示名稱與路徑（完整值在 title），路徑可複製", async () => {
+      const user = userEvent.setup();
+      render(<App />);
+      await selectWorkspace(user);
+
+      const context = await screen.findByLabelText("目前的 Workspace");
+      expect(within(context).getByTitle("筆記")).toHaveTextContent("筆記");
+      expect(within(context).getByTitle("C:\\work\\notes")).toBeInTheDocument();
+      expect(within(context).getByRole("button", { name: "複製路徑" })).toBeInTheDocument();
+    });
+  });
+
   describe("Workspace 頁簽", () => {
     it("選中 Workspace 後只有五個主要入口，預設開在主控台，一次只顯示一個功能", async () => {
       const user = userEvent.setup();
@@ -637,7 +660,8 @@ describe("App 外殼", () => {
 
       expect(await screen.findByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
       await user.click(screen.getByRole("tab", { name: "設定" }));
-      expect(await screen.findByText("狀態：有新版本 0.2.0")).toBeInTheDocument();
+      const updates = await screen.findByRole("region", { name: "更新" });
+      expect(within(updates).getByText("狀態", { selector: "dt" }).nextElementSibling).toHaveTextContent("有新版本 0.2.0");
       // 切換頁簽不影響更新通知
       expect(screen.getByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
       expect(client.applyUpdate).not.toHaveBeenCalled();
