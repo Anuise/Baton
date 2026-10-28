@@ -187,6 +187,13 @@
   color: var(--color-accent);
 }
 
+/* 知識卡標題列的狀態徽章：標題的 overflow-wrap: anywhere 會讓它被擠成直排，
+   改為不縮小；「不生效：<原因>」這類長文字在上限內換行 */
+.knowledge-badge {
+  flex-shrink: 0;
+  max-width: 16em;
+}
+
 /* 多個徽章並排：整組換行，不縮小單一徽章 */
 .badge-group {
   display: flex;

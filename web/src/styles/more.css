@@ -356,6 +356,8 @@
 
 .timeline-metric {
   display: grid;
+  /* 與同一列較高的卡片等高時，內容靠上，不把列間距拉散 */
+  align-content: start;
   gap: var(--space-1);
   padding: var(--space-4);
   background: var(--color-surface);
