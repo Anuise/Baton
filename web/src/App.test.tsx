@@ -264,10 +264,10 @@ describe("App 外殼", () => {
       [
         "成果與品質",
         [
-          ["成果", "成果與驗證：筆記"],
-          ["審查", "審查與設計偏離：筆記"],
-          ["驗證", "驗證：筆記"],
-          ["探索", "探索：筆記"],
+          ["成果", "成果"],
+          ["審查", "審查與設計偏離"],
+          ["驗證", "驗證"],
+          ["探索", "探索"],
         ],
       ],
       [
@@ -298,10 +298,10 @@ describe("App 外殼", () => {
     it.each([
       ["工作", null, "工作：筆記", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
       ["裁定", null, "裁定：筆記", () => expect(client.listDecisions).toHaveBeenCalledWith("ws_1")],
-      ["成果與品質", "成果", "成果與驗證：筆記", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
-      ["成果與品質", "審查", "審查與設計偏離：筆記", () => expect(client.reviews).toHaveBeenCalledWith("ws_1")],
-      ["成果與品質", "驗證", "驗證：筆記", () => expect(client.verificationOverview).toHaveBeenCalledWith("ws_1")],
-      ["成果與品質", "探索", "探索：筆記", () => expect(client.explorationOverview).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "成果", "成果", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "審查", "審查與設計偏離", () => expect(client.reviews).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "驗證", "驗證", () => expect(client.verificationOverview).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "探索", "探索", () => expect(client.explorationOverview).toHaveBeenCalledWith("ws_1")],
       ["更多", "知識", "知識：筆記", () => expect(client.listKnowledge).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws_1" }))],
       ["更多", "流程", "流程：筆記", () => expect(client.workflows).toHaveBeenCalledWith("ws_1")],
       ["更多", "時間線", "時間線：筆記", () => expect(client.metrics).toHaveBeenCalledWith("ws_1")],
@@ -360,13 +360,13 @@ describe("App 外殼", () => {
       render(<App />);
       await selectWorkspace(user);
       await openPage(user, "成果與品質", "驗證");
-      await screen.findByRole("heading", { name: "驗證：筆記" });
+      await screen.findByRole("heading", { name: "驗證" });
 
       await user.click(workspaceTab("工作"));
       await user.click(workspaceTab("成果與品質"));
 
       expect(pageTab("成果與品質", "驗證")).toHaveAttribute("aria-selected", "true");
-      expect(await screen.findByRole("heading", { name: "驗證：筆記" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "驗證" })).toBeInTheDocument();
     });
 
     it("切換 Workspace 時停在同一個頁簽", async () => {

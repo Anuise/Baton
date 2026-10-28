@@ -71,7 +71,7 @@ describe("驗證", () => {
     const client = fakeClient();
     renderPage(client);
 
-    expect(await screen.findByRole("heading", { name: "驗證：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "驗證" })).toBeInTheDocument();
     const profile = await screen.findByRole("region", { name: "Verification Profile" });
     expect(client.verificationOverview).toHaveBeenCalledWith("ws_1");
     expect(profile).toHaveTextContent("第 2 版");
@@ -81,6 +81,8 @@ describe("驗證", () => {
 
     const features = within(profile).getByRole("list", { name: "Feature Map" });
     expect(within(features).getByRole("listitem", { name: "命令列" })).toHaveTextContent("驗收準則：可以顯示版本旅程：冒煙測試");
+    // 功能名是小標題，與其下的準則、旅程分開
+    expect(within(features).getByRole("heading", { level: 5, name: "命令列" })).toBeInTheDocument();
     expect(within(features).getByRole("listitem", { name: "匯出" })).toHaveTextContent("旅程：匯出報表");
     expect(within(features).getByRole("listitem", { name: "匯入" })).toHaveTextContent("沒有旅程（未覆蓋）");
 
@@ -233,6 +235,32 @@ describe("驗證", () => {
     expect(bundle).toHaveTextContent("清理：已移除本次驗證的狀態目錄；證據已保留");
   });
 
+  it("Bundle、Task 識別碼、revision 與受驗目錄以等寬縮短顯示，完整值在 title 並可複製", async () => {
+    const id = "vbun_7b5deb026d9841b0cced7314";
+    const taskId = "task_7b5deb026d9841b0cced7314aa0f9e8d";
+    const revision = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4";
+    const dir = String.raw`C:\Users\Administrator\AppData\Local\Baton\workspaces\notes`;
+    renderPage(
+      fakeClient(
+        verificationOverview({
+          proven_by: id,
+          bundles: [evidenceBundle({ id, task_id: taskId, candidate_revision: revision, subject_dir: dir })],
+        }),
+      ),
+    );
+
+    // 區塊的可存取名稱保留完整識別碼
+    const card = await screen.findByRole("region", { name: `Evidence Bundle ${id}` });
+    expect(within(card).getByText("vbun_7b5deb…7314", { selector: "h4 code" })).toHaveAttribute("title", id);
+    expect(within(card).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
+    expect(within(card).getByText("e3b0c44298fc…")).toHaveAttribute("title", revision);
+    expect(within(card).getByText(String.raw`C:\…\workspaces\notes`)).toHaveAttribute("title", dir);
+    expect(within(card).getAllByRole("button", { name: "複製識別碼" })).toHaveLength(2);
+    expect(within(card).getByRole("button", { name: "複製雜湊" })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "複製路徑" })).toBeInTheDocument();
+    expect(within(region("Verification Profile")).getByText("vbun_7b5deb…7314")).toHaveAttribute("title", id);
+  });
+
   it("沒有 Task、取不到 build 與 revision、清理失敗時如實顯示", async () => {
     const bundle = evidenceBundle({
       task_id: null,
@@ -245,7 +273,7 @@ describe("驗證", () => {
 
     const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_1" });
     expect(card).toHaveTextContent("沒有綁定 Task");
-    expect(card).toHaveTextContent("build無法取得");
+    expect(card).toHaveTextContent("建置識別無法取得");
     expect(card).toHaveTextContent("無（不是 Git repo）");
     expect(card).toHaveTextContent("本次驗證的狀態目錄沒有移除；服務沒有停止；證據已保留");
     expect(within(card).getByRole("list", { name: "清理問題" })).toHaveTextContent("目錄被占用");
@@ -431,7 +459,7 @@ describe("驗證", () => {
     expect(link).toHaveAttribute("download", "browse.webm");
 
     const shot = within(files).getByRole("listitem", { name: "截圖：open_orders.png" });
-    expect(shot).toHaveTextContent("截圖・open_orders.png・旅程：管理訂單／步驟：開啟訂單頁・2048 位元組");
+    expect(shot).toHaveTextContent("截圖・open_orders.png・旅程：管理訂單／步驟：開啟訂單頁・2 KB（2,048 位元組）");
     expect(within(shot).queryByRole("img")).not.toBeInTheDocument();
     await user.click(within(shot).getByRole("button", { name: "開啟截圖" }));
     expect(client.evidenceArtifact).toHaveBeenLastCalledWith("ws_1", "vbun_web", 0);

@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
-import { CHECKED_AT, explorationFinding, explorationOverview } from "./fixtures";
+import { CHECKED_AT, explorationFinding, explorationOverview, reproductionAttempt } from "./fixtures";
 import type { ExplorationOverview, Workspace } from "./runtimeClient";
 import { ExplorationPage } from "./ExplorationPage";
 
@@ -31,7 +31,7 @@ describe("探索", () => {
     const client = fakeClient();
     renderPage(client);
 
-    expect(await screen.findByRole("heading", { name: "探索：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "探索" })).toBeInTheDocument();
     const charter = await screen.findByRole("region", { name: "探索結帳" });
     expect(client.explorationOverview).toHaveBeenCalledWith("ws_1");
     expect(charter).toHaveTextContent("區域結帳流程");
@@ -115,6 +115,33 @@ describe("探索", () => {
     expect(regressed).toHaveTextContent("確認的 Evidence Bundleevb_21");
     expect(regressed).not.toHaveTextContent("功能");
     expect(regressed).toHaveTextContent("證據沒有附證據");
+    // 狀態徽章與標題同列；確認的 Bundle 與疑點的欄位在同一個清單中，標籤欄對齊
+    expect(within(regressed).getByText("回歸失敗").parentElement).toBe(within(regressed).getByRole("heading", { level: 4 }).parentElement);
+    expect(within(regressed).getByText("確認的 Evidence Bundle").closest("dl")).toBe(within(regressed).getByText("Task").closest("dl"));
+  });
+
+  it("長的 Bundle、驗證要求與證據識別碼以等寬縮短顯示，完整值在 title 並可複製", async () => {
+    const bundle = "evb_7b5deb026d9841b0cced7314";
+    const request = "vreq_e3b0c44298fc1c149afbf4c8";
+    renderPage(
+      fakeClient(
+        explorationOverview({
+          findings: [
+            explorationFinding({
+              evidence: ["art_0123456789abcdef0123"],
+              attempts: [reproductionAttempt({ request_id: request, bundle_id: bundle })],
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const finding = await screen.findByRole("region", { name: "優惠碼欄位接受負數" });
+    expect(within(finding).getByText("art_012345…0123")).toHaveAttribute("title", "art_0123456789abcdef0123");
+    const attempt = within(finding).getByRole("listitem", { name: `驗證要求 ${request}` });
+    expect(within(attempt).getByText("vreq_e3b0c4…f4c8")).toHaveAttribute("title", request);
+    expect(within(attempt).getByText("evb_7b5deb…7314")).toHaveAttribute("title", bundle);
+    expect(within(finding).getAllByRole("button", { name: "複製識別碼" })).toHaveLength(3);
   });
 
   it("重現紀錄新的在前，顯示目的、驗證要求、Bundle、案例與對照判定和結論；沒有結論時是排隊中", async () => {

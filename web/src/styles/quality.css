@@ -1,287 +1,315 @@
 /* ==========================================================================
    成果與品質
    成果、審查、驗證、探索。
+   卡片框線最多兩層（區塊 > 卡片）；卡片內的子項以上框線分隔，不再加框。
+   狀態以左側色條（.stripe-*）與徽章（.badge）表示，長內容維持一般文字色（MASTER.md 2.3、5.2）。
    ========================================================================== */
 
-.artifacts-page {
+.artifacts-page,
+.review-page,
+.verification-page,
+.exploration-page {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
   gap: var(--space-5);
 }
 
-.artifacts-page h2,
-.artifacts-page h3 {
+:is(.artifacts-page, .review-page, .verification-page, .exploration-page) :is(h2, h3, h4, h5, p, dl, ul, ol) {
   margin: 0;
 }
 
-.artifacts-page h3 {
-  font-size: var(--font-size-md);
+/* 識別碼與雜湊（ShortValue）後面接著文字時不黏在一起 */
+:is(.artifacts-page, .review-page, .verification-page, .exploration-page) .copy-text {
+  vertical-align: middle;
 }
+
+/* 兩欄的說明清單（MASTER.md 6.4 第 5 條）：標籤欄依最長標籤、最多 12em，內容欄可縮小並受閱讀寬度限制 */
+.review-summary,
+.verification-summary,
+.exploration-summary {
+  display: grid;
+  grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
+  gap: var(--space-3) var(--space-6);
+  align-items: baseline;
+}
+
+:is(.review-summary, .verification-summary, .exploration-summary) dt {
+  max-width: 12em;
+  color: var(--color-text-muted);
+}
+
+:is(.review-summary, .verification-summary, .exploration-summary) dd {
+  min-width: 0;
+  max-inline-size: var(--measure);
+  margin: 0;
+}
+
+/* ---------- 成果 ---------- */
 
 .artifact-card,
 .artifact-unregistered {
   display: grid;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  font-size: var(--font-size-xs);
-  overflow-wrap: anywhere;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
 }
 
-.artifact-card p,
-.artifact-card ul,
-.artifact-unregistered p,
-.artifact-unregistered ul {
-  margin: 0;
+.artifact-task,
+.artifact-meta,
+.artifact-label {
+  color: var(--color-text-muted);
 }
 
+/* 版本之間以上框線分隔（不在卡片內再加一層底色框） */
 .artifact-versions {
   display: grid;
-  gap: var(--space-3);
   padding: 0;
   list-style: none;
 }
 
 .artifact-version {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background: var(--color-surface-sunken);
-  border-radius: var(--radius-md);
+  padding: var(--space-4) 0 0;
+  border-top: 1px solid var(--color-border);
 }
 
-.artifact-task {
-  color: var(--color-text-muted);
+.artifact-version + .artifact-version {
+  margin-top: var(--space-4);
 }
 
-.artifact-sha,
-.artifact-path {
-  font-family: var(--font-mono);
+/* 檔案遺失或大小不符：左側色條 + 紅字提示，不整塊上色 */
+.artifact-version.stripe-danger {
+  padding-left: var(--space-5);
+}
+
+.artifact-warning {
+  color: var(--color-danger);
 }
 
 .artifact-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.artifact-warning {
-  padding: var(--space-2) var(--space-3);
-  background: var(--color-danger-subtle);
-  border: 1px solid var(--color-danger-border);
-  border-radius: var(--radius-sm);
-  font-weight: 600;
+  gap: var(--space-4);
+  margin-top: var(--space-2);
 }
 
 .artifact-card [role="alert"] {
   color: var(--color-danger);
 }
 
+/* 預覽的是文件內容：保留換行、可折行 */
 .artifact-preview pre {
   margin: 0;
-  max-height: 320px;
-  padding: var(--space-3) var(--space-4);
-  overflow: auto;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
   white-space: pre-wrap;
-}
-
-.artifact-unregistered {
-  background: var(--color-warning-subtle);
-  border-color: var(--color-warning-border);
+  overflow-wrap: anywhere;
 }
 
 .artifact-unregistered ul {
-  padding-left: var(--space-6);
-}
-
-
-.review-page {
   display: grid;
-  gap: var(--space-5);
+  gap: var(--space-2);
+  padding-left: var(--space-7);
 }
 
-.review-page h3 {
-  margin: 0;
+.artifact-unregistered li > .artifact-meta {
+  margin-left: var(--space-4);
+}
+
+/* ---------- 審查 ---------- */
+
+/* 「審查」「設計偏離」兩個分區之間多留一段 */
+.review-page > h3:not(:first-of-type) {
+  margin-top: var(--space-5);
 }
 
 .review {
   display: grid;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-5);
 }
 
-.review h4,
-.review h5,
-.review p {
-  margin: 0;
+.review-candidate {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-normal);
 }
 
-.review-badge {
-  font-weight: 600;
+.review-label {
+  color: var(--color-text-muted);
 }
 
-.review-passed .review-badge,
-.deviation-accepted .review-badge,
-.axis-passed h5 {
-  color: var(--color-success);
+.review-stale-reason {
+  display: grid;
+  gap: var(--space-2);
+  max-inline-size: var(--measure);
 }
 
-.review-failed .review-badge,
-.axis-failed h5 {
-  color: var(--color-danger);
+.review-stale-reason summary {
+  color: var(--color-text-muted);
+  cursor: pointer;
 }
 
-.review-stale .review-badge,
-.deviation-awaiting_decision .review-badge {
-  color: var(--color-warning);
+.review-stale-reason details p {
+  margin-top: var(--space-2);
 }
 
 .review-axis {
   display: grid;
-  gap: var(--space-2);
-  padding-left: var(--space-4);
+  gap: var(--space-3);
+  padding-left: var(--space-5);
   border-left: 3px solid var(--color-border);
-  font-size: var(--font-size-sm);
+}
+
+.axis-passed h5 {
+  color: var(--color-success);
+}
+
+.axis-failed h5 {
+  color: var(--color-danger);
 }
 
 .review-reused {
   color: var(--color-text-muted);
 }
 
-.review-finding {
-  overflow-wrap: anywhere;
-}
-
-.verification-page {
+.review-list {
   display: grid;
-  gap: var(--space-5);
+  gap: var(--space-2);
+  padding-left: var(--space-7);
 }
 
-.verification-reload {
+/* finding 保留清單符號（display: grid 會拿掉 ::marker），子項以上邊距分隔 */
+.review-finding > * + * {
+  margin-top: var(--space-1);
+}
+
+/* ---------- 驗證 ---------- */
+
+.verification-reload,
+.exploration-reload {
   justify-self: start;
 }
 
-.verification-section,
-.verification-bundle {
+/* 頁面區塊：只有這一層有框；Bundle、未覆蓋範圍等內層以上框線或左側色條分隔 */
+.verification-section {
   display: grid;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-5);
+  padding: var(--space-6);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-}
-
-.verification-section h3,
-.verification-section h4,
-.verification-section p,
-.verification-summary {
-  margin: 0;
-}
-
-.verification-summary {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-2) var(--space-5);
-}
-
-.verification-summary dt {
-  color: var(--color-text-muted);
-}
-
-.verification-summary dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.verification-proven {
-  color: var(--color-success);
-}
-
-.verification-unproven {
-  color: var(--color-warning);
-  font-weight: 600;
-}
-
-.verification-features,
-.verification-journeys,
-.verification-uncovered ul,
-.verification-cleanup ul,
-.verification-steps ol {
-  margin: 0;
-  padding-left: var(--space-6);
-}
-
-.verification-features li {
-  display: grid;
-  gap: var(--space-1);
-}
-
-.verification-feature-title {
-  font-weight: 600;
-}
-
-.verification-feature-uncovered {
-  color: var(--color-warning);
-}
-
-/* 未覆蓋範圍要醒目：不在自動驗證內的部分不能被當成已驗證 */
-.verification-uncovered {
-  padding: var(--space-3) var(--space-5);
-  border: 1px solid var(--color-warning-border);
-  border-left-width: 4px;
-  border-radius: var(--radius-md);
-  background: var(--color-warning-subtle);
+  background: var(--color-surface);
 }
 
 .verification-section [role="alert"] {
   color: var(--color-danger);
 }
 
+/* Feature Map：功能名是小標題，準則與旅程縮排並以淡色標籤開頭 */
+.verification-feature-map {
+  display: grid;
+  gap: var(--space-5);
+  padding: 0;
+  list-style: none;
+}
+
+.verification-feature-map li {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.verification-feature-map li > p {
+  padding-left: var(--space-5);
+}
+
+.verification-label {
+  color: var(--color-text-muted);
+}
+
+.verification-feature-uncovered {
+  color: var(--color-warning);
+}
+
+.verification-features,
+.verification-journeys,
+.verification-uncovered ul,
+.verification-cleanup ul,
+.verification-usage ul,
+.verification-steps ol {
+  padding-left: var(--space-7);
+}
+
+/* 未覆蓋範圍要醒目（不在自動驗證內的部分不能被當成已驗證）：左側色條，不整塊上底色 */
+.verification-uncovered {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) 0 var(--space-2) var(--space-5);
+}
+
 .verification-publish,
 .verification-run {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-5);
+  max-inline-size: var(--measure-form);
 }
 
 .verification-publish textarea {
-  display: block;
-  width: 100%;
   box-sizing: border-box;
+  width: 100%;
   font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-meta);
 }
 
 .verification-run fieldset {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2) var(--space-5);
+  gap: var(--space-2) var(--space-6);
 }
 
-.verification-run button,
-.verification-publish button {
-  justify-self: start;
+.verification-run .verification-check {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  font-weight: var(--font-weight-normal);
 }
 
-/* 判定標籤：只有 passed 是綠色，其餘六種都不能看起來像通過 */
-.verdict {
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-full);
-  font-size: var(--font-size-xs);
-  font-weight: 600;
+/* Evidence Bundle：區塊內的子項，以上框線分隔 */
+.verification-bundle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-5);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--text-meta);
 }
 
+.verification-bundle-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  align-items: center;
+}
+
+.verification-usage,
+.verification-artifacts,
+.verification-attempts,
+.verification-actions {
+  display: grid;
+  gap: var(--space-2);
+}
+
+/* 判定標籤（.badge）：只有 passed 是綠色，其餘六種都不能看起來像通過 */
 .verdict-passed {
+  border-color: var(--color-success-border);
   background: var(--color-success-subtle);
   color: var(--color-success);
 }
 
 .verdict-product_failure {
+  border-color: var(--color-danger-border);
   background: var(--color-danger-subtle);
   color: var(--color-danger);
 }
@@ -292,35 +320,42 @@
 }
 
 .verdict-environment_blocked {
+  border-color: var(--color-orange);
   background: var(--color-orange-subtle);
   color: var(--color-orange);
 }
 
 .verdict-auth_blocked {
+  border-color: var(--color-purple);
   background: var(--color-purple-subtle);
   color: var(--color-purple);
 }
 
 .verdict-budget_exhausted {
+  border-color: var(--color-warning-border);
   background: var(--color-warning-subtle);
   color: var(--color-warning);
 }
 
 .verdict-automation_unsupported {
+  border-color: var(--color-accent-border);
   background: var(--color-accent-subtle);
   color: var(--color-accent);
 }
 
+.verification-steps summary {
+  cursor: pointer;
+}
+
 .verification-steps ol {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-5);
+  margin-top: var(--space-4);
 }
 
 .verification-step {
   display: grid;
   gap: var(--space-1);
-  font-size: var(--font-size-sm);
-  overflow-wrap: anywhere;
 }
 
 .verification-step-operation {
@@ -331,15 +366,13 @@
   color: var(--color-danger);
 }
 
+/* 命令輸出：保留換行、可折行，超出時自己捲動 */
 .verification-step-output {
   margin: 0;
-  padding: var(--space-2) var(--space-4);
-  max-height: 200px;
-  overflow: auto;
-  background: var(--color-surface-sunken);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-xs);
+  max-height: 16lh;
+  font-size: var(--text-caption);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* 語意判斷沒有做出判定（例如模型限流）：不是產品缺陷，不用失敗的紅色 */
@@ -347,27 +380,21 @@
   color: var(--color-text-muted);
 }
 
-.verification-reason {
-  color: var(--color-text-muted);
-}
-
+.verification-reason,
 .verification-journey-actor {
   color: var(--color-text-muted);
 }
 
 .verification-artifacts ul {
   display: grid;
-  gap: var(--space-3);
-  margin: 0;
-  padding-left: var(--space-6);
+  gap: var(--space-4);
+  padding-left: var(--space-7);
 }
 
 .verification-artifact {
   display: grid;
   gap: var(--space-2);
   justify-items: start;
-  font-size: var(--font-size-sm);
-  overflow-wrap: anywhere;
 }
 
 .verification-artifact img {
@@ -379,130 +406,105 @@
   color: var(--color-warning);
 }
 
-.verification-usage ul {
-  margin: 0;
-  padding-left: var(--space-6);
-}
-
 .verification-no-live-model {
   color: var(--color-warning);
-  font-weight: 600;
 }
 
+/* 7 欄的動作表：欄數超過 6，允許表格自己水平捲動（MASTER.md 5.3） */
 .verification-actions {
-  display: grid;
-  gap: var(--space-2);
   overflow-x: auto;
 }
 
 .verification-actions p {
-  margin: 0;
   color: var(--color-text-muted);
 }
 
 .verification-actions table {
   border-collapse: collapse;
-  font-size: var(--font-size-sm);
 }
 
 .verification-actions th,
 .verification-actions td {
-  padding: var(--space-2) var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--color-border);
   text-align: left;
   vertical-align: top;
-  border-bottom: 1px solid var(--color-border);
-  overflow-wrap: anywhere;
 }
 
+/* ---------- 探索 ---------- */
+
+/* 分區不加框，只有疑點卡有框：區塊 > 卡片最多兩層（audit P-EXP-2） */
 .exploration-page {
+  gap: var(--space-7);
+}
+
+.exploration-section {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-5);
-}
-
-.exploration-reload {
-  justify-self: start;
-}
-
-.exploration-section,
-.exploration-card {
-  display: grid;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-
-.exploration-section h3,
-.exploration-card h4,
-.exploration-card h5,
-.exploration-section p {
-  margin: 0;
 }
 
 .exploration-note {
   color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-meta);
 }
 
-/* 各區塊以左側色條區分，疑點與已確認缺陷不能看起來一樣 */
-.exploration-group {
-  border-left-width: 4px;
+.exploration-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
 }
 
-.exploration-group-defects {
+/* 各分區的卡片以左側色條區分，疑點與已確認缺陷不能看起來一樣 */
+.exploration-group .exploration-card {
+  border-left-width: 3px;
+}
+
+.exploration-group-defects .exploration-card {
   border-left-color: var(--color-danger);
 }
 
-.exploration-group-suspected {
-  border-left-color: var(--color-warning-border);
+.exploration-group-suspected .exploration-card {
+  border-left-color: var(--color-warning);
 }
 
-.exploration-group-risks {
+.exploration-group-risks .exploration-card {
   border-left-color: var(--color-orange);
 }
 
-.exploration-group-fixed {
+.exploration-group-fixed .exploration-card {
   border-left-color: var(--color-success);
 }
 
-.exploration-group-excluded {
-  border-left-color: var(--color-text-subtle);
-}
-
 .exploration-group-excluded .exploration-card {
+  border-left-color: var(--color-text-subtle);
   color: var(--color-text-muted);
 }
 
-.exploration-badge {
-  justify-self: start;
-  padding: 0 var(--space-3);
-  border-radius: var(--radius-full);
-  background: var(--color-danger-subtle);
-  color: var(--color-danger);
-  font-size: var(--font-size-xs);
-  font-weight: 600;
+.exploration-list {
+  padding-left: var(--space-7);
 }
 
-.exploration-list,
-.exploration-attempts {
-  margin: 0;
-  padding-left: var(--space-6);
-}
-
+/* 重現紀錄：以上框線分隔的清單，不再加框 */
 .exploration-attempts {
   display: grid;
-  gap: var(--space-3);
+  padding: 0;
+  list-style: none;
 }
 
 .exploration-attempt {
   display: grid;
   gap: var(--space-1);
-  font-size: var(--font-size-sm);
-  overflow-wrap: anywhere;
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.exploration-attempt:last-child {
+  padding-bottom: 0;
 }
 
 .exploration-attempt-outcome {
-  font-weight: 600;
+  font-weight: var(--font-weight-strong);
 }
 
 .outcome-queued .exploration-attempt-outcome {

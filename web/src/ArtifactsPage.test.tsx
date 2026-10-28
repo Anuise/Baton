@@ -79,14 +79,14 @@ const previewOf = (preview: ArtifactPreview["preview"]): ArtifactPreview => ({
 
 const renderPage = (client: ArtifactClient) => render(<ArtifactsPage client={client} workspace={workspace} timeZone="Asia/Taipei" />);
 
-describe("成果與驗證", () => {
+describe("成果", () => {
   it("載入中先顯示提示，讀取該 Workspace 的成果", async () => {
     const client = fakeClient({ artifacts: [], unregistered_files: [] });
 
     renderPage(client);
 
     expect(screen.getByText("載入中…")).toBeInTheDocument();
-    expect(await screen.findByRole("heading", { name: "成果與驗證：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "成果" })).toBeInTheDocument();
     expect(client.listArtifacts).toHaveBeenCalledWith("ws_1");
   });
 
@@ -108,12 +108,16 @@ describe("成果與驗證", () => {
     renderPage(fakeClient({ artifacts: [artifact()], unregistered_files: [] }));
 
     const card = await screen.findByRole("article", { name: "report.md" });
-    expect(within(card).getByText("Task：task_1")).toBeInTheDocument();
+    expect(card).toHaveTextContent("Task：task_1");
     const latest = within(card).getByRole("listitem", { name: "report.md v2" });
     expect(latest).toHaveTextContent("最新");
     expect(latest).toHaveTextContent("24 位元組");
-    expect(latest).toHaveTextContent(SHA);
-    expect(latest).toHaveTextContent("Run：run_2（第 2 次）");
+    // 雜湊縮短為前 12 字，完整值在 title 與「複製雜湊」
+    const sha = within(latest).getByText(`${SHA.slice(0, 12)}…`);
+    expect(sha).toHaveClass("mono");
+    expect(sha).toHaveAttribute("title", SHA);
+    expect(within(latest).getByRole("button", { name: "複製雜湊" })).toBeInTheDocument();
+    expect(latest).toHaveTextContent("產生者 Run（第 2 次）：run_2");
     expect(latest).toHaveTextContent("2023/11/15 06:15");
     expect(latest).toHaveTextContent("第 2 版說明");
     expect(within(card).queryByRole("listitem", { name: "report.md v1" })).not.toBeInTheDocument();
@@ -123,6 +127,24 @@ describe("成果與驗證", () => {
     const items = within(card).getAllByRole("listitem");
     expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["report.md v2", "report.md v1"]);
     expect(within(card).getByRole("button", { name: "全部版本（2）" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("大檔案換算單位並附千分位位元組；長的 Task 與 Run 識別碼縮短，完整值可複製", async () => {
+    const taskId = "task_7b5deb026d9841b0cced7314aa0f9e8d";
+    const runId = "run_0_e3b0c44298fc1c149afbf4c8996fb924";
+    renderPage(
+      fakeClient({
+        artifacts: [artifact({ task_id: taskId, versions: [version(1, { size_bytes: 1_234_567_892, produced_by_run_id: runId })] })],
+        unregistered_files: [],
+      }),
+    );
+
+    const card = await screen.findByRole("article", { name: "report.md" });
+    const latest = within(card).getByRole("listitem", { name: "report.md v1" });
+    expect(latest).toHaveTextContent("1.15 GB（1,234,567,892 位元組）");
+    expect(within(card).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
+    expect(within(latest).getByText("run_0_e3b0…b924")).toHaveAttribute("title", runId);
+    expect(within(card).getAllByRole("button", { name: "複製識別碼" })).toHaveLength(2);
   });
 
   it("只有一個版本時不顯示展開按鈕", async () => {
@@ -290,7 +312,7 @@ describe("成果與驗證", () => {
     expect(items[0]).toHaveTextContent("ws/blob_a.partial");
     expect(items[0]).toHaveTextContent("暫存檔，內容不完整");
     expect(items[1]).toHaveTextContent("ws/blob_b");
-    expect(items[1]).toHaveTextContent("2048 位元組");
+    expect(items[1]).toHaveTextContent("2 KB（2,048 位元組）");
     expect(items[1]).toHaveTextContent("檔案完整但沒有登記");
     // 它們不是成果：沒有預覽、下載
     expect(within(section).queryByRole("button")).not.toBeInTheDocument();
