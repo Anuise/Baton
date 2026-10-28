@@ -156,7 +156,7 @@ function fakeClient(initial: AuthorizationRevision[] = [], initialLegacy: Legacy
 async function renderPanel(client: AuthorizationPanelClient) {
   const user = userEvent.setup();
   render(<AuthorizationPanel client={client} workspace={workspace} timeZone="UTC" />);
-  await screen.findByRole("heading", { name: "授權設定：筆記" });
+  await screen.findByRole("heading", { name: "授權設定" });
   return user;
 }
 

@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 
 import { FIELD_LABELS } from "./ContractEditor";
+import { LongText } from "./LongText";
+import { shortId } from "./textFormat";
 import { formatTimestamp } from "./time";
 import {
   CONTRACT_FIELDS,
@@ -43,13 +45,16 @@ type Act = (operation: () => Promise<unknown>) => Promise<string | null>;
 
 const KIND_LABELS: Record<KnowledgeKind, string> = { decision: "決策", lesson: "教訓", fact: "知識" };
 
+/** 狀態徽章的文字：一行、最多 6 個全形字（MASTER 5.4）；候選的完整說明放在徽章的 title。 */
 const STATUS_LABELS: Record<KnowledgeStatus, string> = {
-  candidate: "候選・尚未驗證",
+  candidate: "未驗證",
   verified: "已驗證",
   revoked: "無效：已撤銷",
   retired: "無效：已淘汰",
   superseded: "無效：已被取代",
 };
+
+const CANDIDATE_TITLE = "候選，尚未驗證：確認後才會提供給後續的 Run 使用";
 
 const EVENT_LABELS: Record<string, string> = {
   knowledge_created: "建立",
@@ -103,7 +108,7 @@ function reasonOf(error: unknown): string {
 /** 已驗證但不在有效期間內的條目分成「已過期」與「尚未生效」；其他依狀態。 */
 function statusLabel(entry: KnowledgeEntryView): string {
   if (entry.status !== "verified" || entry.effective) return STATUS_LABELS[entry.status];
-  return entry.valid_until !== null && entry.valid_until <= Date.now() ? "無效：已過期" : "無效：尚未生效";
+  return entry.valid_until !== null && entry.valid_until <= Date.now() ? "無效：已過期" : "無效：未生效";
 }
 
 function scopeLabel(entry: KnowledgeEntryView): string {
@@ -114,9 +119,9 @@ function scopeLabel(entry: KnowledgeEntryView): string {
     case "workspace":
       return "Workspace";
     case "goal":
-      return `Goal ${scope.goal_id ?? ""}`;
+      return `Goal ${shortId(scope.goal_id ?? "")}`;
     case "task":
-      return `Task ${scope.task_id ?? ""}`;
+      return `Task ${shortId(scope.task_id ?? "")}`;
   }
 }
 
@@ -126,9 +131,9 @@ function sourceLabel(entry: KnowledgeEntryView): string {
     case "user":
       return "使用者";
     case "agent":
-      return `Agent（Run ${source.run_id}，第 ${source.generation} 次，Task ${source.task_id}）`;
+      return `Agent（Run ${shortId(source.run_id)}，第 ${source.generation} 次，Task ${shortId(source.task_id)}）`;
     case "controller":
-      return `Controller（Run ${source.controller_run_id}，Task ${source.task_id}）`;
+      return `Controller（Run ${shortId(source.controller_run_id)}，Task ${shortId(source.task_id)}）`;
   }
 }
 
@@ -153,7 +158,9 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
   const [queryError, setQueryError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<DetailTarget | null>(null);
+  // 新增條目的表單收在標題列的按鈕後面，不常駐展開（audit P-KN-6）
+  const [creating, setCreating] = useState(false);
   // 操作後讓詳情重新讀取
   const [detailRefresh, setDetailRefresh] = useState(0);
 
@@ -219,8 +226,32 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
     setQuery(draftQuery.trim());
   };
 
-  const card = (entry: KnowledgeEntryView) => (
-    <EntryCard key={entry.id} client={client} entry={entry} timeZone={timeZone} act={act} onOpenDetail={setDetailId} />
+  /** 一組卡片；詳情展開在開啟它的那張卡片後面（同一條目可能同時出現在兩個清單，所以連清單一起記）。 */
+  const cards = (listName: DetailTarget["list"], entries: KnowledgeEntryView[]) => (
+    <div className="knowledge-cards">
+      {entries.map((entry) => (
+        <Fragment key={entry.id}>
+          <EntryCard
+            client={client}
+            entry={entry}
+            timeZone={timeZone}
+            act={act}
+            onOpenDetail={(id) => setDetail({ id, list: listName })}
+          />
+          {detail !== null && detail.id === entry.id && detail.list === listName && (
+            <DetailPanel
+              client={client}
+              id={detail.id}
+              workspace={workspace}
+              refreshKey={detailRefresh}
+              timeZone={timeZone}
+              act={act}
+              onClose={() => setDetail(null)}
+            />
+          )}
+        </Fragment>
+      ))}
+    </div>
   );
 
   const candidates = list.state === "ready" ? list.all.filter((e) => e.status === "candidate") : [];
@@ -228,7 +259,18 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="knowledge-page" aria-label="知識">
-      <h2>知識：{workspace.name}</h2>
+      <header className="more-header">
+        <h2>知識</h2>
+        <button
+          type="button"
+          className={creating ? undefined : "btn-primary"}
+          aria-expanded={creating}
+          onClick={() => setCreating((value) => !value)}
+        >
+          {creating ? "收起新增條目" : "新增條目"}
+        </button>
+      </header>
+      {creating && <CreateForm client={client} workspace={workspace} act={act} onCancel={() => setCreating(false)} />}
       <form className="knowledge-search" role="search" onSubmit={search}>
         <input
           aria-label="搜尋關鍵字"
@@ -254,15 +296,21 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
             </p>
           )}
           <section className="knowledge-section knowledge-candidates" aria-label="待確認的候選教訓">
-            <h3>待確認的候選教訓（{candidates.length}）</h3>
-            <p>Agent 提交的候選尚未驗證，確認後才會提供給後續的 Run 使用。</p>
-            {candidates.length === 0 && <p>沒有待確認的候選</p>}
-            {candidates.map(card)}
+            <div className="more-section-header">
+              <h3>待確認的候選教訓（{candidates.length}）</h3>
+              <p>Agent 提交的候選尚未驗證，確認後才會提供給後續的 Run 使用。</p>
+            </div>
+            {candidates.length === 0 && <p className="more-empty">沒有待確認的候選</p>}
+            {candidates.length > 0 && cards("candidates", candidates)}
           </section>
           <section className="knowledge-section" aria-label="有效條目">
-            <h3>有效條目（{list.effective.length}）</h3>
-            {list.effective.length === 0 && <p>{query === "" ? "還沒有有效的條目" : "沒有符合搜尋的有效條目"}</p>}
-            {list.effective.map(card)}
+            <div className="more-section-header">
+              <h3>有效條目（{list.effective.length}）</h3>
+            </div>
+            {list.effective.length === 0 && (
+              <p className="more-empty">{query === "" ? "還沒有有效的條目" : "沒有符合搜尋的有效條目"}</p>
+            )}
+            {list.effective.length > 0 && cards("effective", list.effective)}
           </section>
           <GuardSection guards={guards} client={client} timeZone={timeZone} act={act} />
           <label className="knowledge-history-toggle">
@@ -271,29 +319,24 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
           </label>
           {showHistory && (
             <section className="knowledge-section" aria-label="歷史條目">
-              <h3>歷史條目（{history.length}）</h3>
-              <p>已撤銷、已淘汰、已被取代或不在有效期間內的條目，不會提供給 Run 使用。</p>
-              {history.length === 0 && <p>沒有歷史條目</p>}
-              {history.map(card)}
+              <div className="more-section-header">
+                <h3>歷史條目（{history.length}）</h3>
+                <p>已撤銷、已淘汰、已被取代或不在有效期間內的條目，不會提供給 Run 使用。</p>
+              </div>
+              {history.length === 0 && <p className="more-empty">沒有歷史條目</p>}
+              {history.length > 0 && cards("history", history)}
             </section>
           )}
         </>
       )}
-      {detailId !== null && (
-        <DetailPanel
-          key={detailId}
-          client={client}
-          id={detailId}
-          workspace={workspace}
-          refreshKey={detailRefresh}
-          timeZone={timeZone}
-          act={act}
-          onClose={() => setDetailId(null)}
-        />
-      )}
-      <CreateForm client={client} workspace={workspace} act={act} />
     </section>
   );
+}
+
+/** 開啟中的詳情：條目與開啟它的清單。 */
+interface DetailTarget {
+  id: string;
+  list: "candidates" | "effective" | "history";
 }
 
 /** 表單中編輯的內容；標籤與證據先以文字編輯，送出時才拆成清單。 */
@@ -384,10 +427,21 @@ function ContentFields({ draft, onChange, lesson }: { draft: ContentDraft; onCha
   );
 }
 
+/** 詳情中的完整內容：內文、教訓欄位、標籤與證據都完整顯示。 */
 function ContentView({ content }: { content: KnowledgeContent }) {
   return (
     <>
       {content.body !== "" && <p className="knowledge-body">{content.body}</p>}
+      <LessonAndEvidence content={content} />
+      {content.tags.length > 0 && <TagList tags={content.tags} />}
+    </>
+  );
+}
+
+/** 教訓的觸發條件、根因與解法，以及證據（每項是路徑或網址，等寬、可在任何字元斷開）。 */
+function LessonAndEvidence({ content }: { content: KnowledgeContent }) {
+  return (
+    <>
       {content.lesson && (
         <dl className="knowledge-lesson">
           <dt>觸發條件</dt>
@@ -398,24 +452,76 @@ function ContentView({ content }: { content: KnowledgeContent }) {
           <dd>{content.lesson.resolution || "（未填）"}</dd>
         </dl>
       )}
-      {content.tags.length > 0 && (
-        <ul className="knowledge-tags" aria-label="標籤">
-          {content.tags.map((tag) => (
-            <li key={tag}>{tag}</li>
-          ))}
-        </ul>
-      )}
       {content.evidence.length > 0 && (
-        <div className="knowledge-evidence">
+        <div className="knowledge-evidence knowledge-meta">
           證據：
           <ul>
             {content.evidence.map((item) => (
-              <li key={item}>{item}</li>
+              <li key={item} className="mono">
+                {item}
+              </li>
             ))}
           </ul>
         </div>
       )}
     </>
+  );
+}
+
+/** 標籤：一行一個膠囊，過長的以 … 結尾（完整文字在 title 與詳情）。 */
+function TagList({ tags }: { tags: string[] }) {
+  return (
+    <ul className="knowledge-tags" aria-label="標籤">
+      {tags.map((tag) => (
+        <li key={tag} title={tag}>
+          {tag}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** 「更多」選單：卡片中第二順位以後的動作；選了之後收起選單。Esc 收起並把焦點移回「更多」，點選單外面也會收起。 */
+function MoreMenu({ items }: { items: { label: string; onSelect: () => void; danger?: boolean }[] }) {
+  const ref = useRef<HTMLDetailsElement>(null);
+
+  // 直接讀 details.open 而不追蹤 toggle 事件：toggle 是排入佇列的 task，開啟後立刻點外面時會晚於 pointerdown
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const menu = ref.current;
+      if (menu?.open && !menu.contains(event.target as Node)) menu.open = false;
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, []);
+
+  return (
+    <details
+      className="more-menu"
+      ref={ref}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !event.currentTarget.open) return;
+        event.currentTarget.open = false;
+        event.currentTarget.querySelector("summary")?.focus();
+      }}
+    >
+      <summary>更多</summary>
+      <div className="more-menu-list">
+        {items.map((item) => (
+          <button
+            key={item.label}
+            type="button"
+            className={item.danger ? "btn-quiet more-menu-danger" : "btn-quiet"}
+            onClick={() => {
+              if (ref.current) ref.current.open = false;
+              item.onSelect();
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -443,39 +549,72 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
     else setError(failure);
   };
 
+  const { content } = entry;
+  // 收合的細節裡有什麼：教訓欄位、來源、證據
+  const extraLabel = [
+    content.lesson ? "教訓欄位" : null,
+    "來源",
+    content.evidence.length > 0 ? `證據（${content.evidence.length}）` : null,
+  ]
+    .filter((part) => part !== null)
+    .join("、");
+  const badgeTone = tone === "candidate" ? " badge-warning" : tone === "effective" ? " badge-success" : "";
+
+  // 卡片＝標題列（標題 2 行＋狀態徽章）→ 一行事實 → 內文 3 行＋展開 → 收合的細節 → 動作（MASTER 5.2）
   return (
-    <article className={`knowledge-card knowledge-${tone}`} aria-label={entry.content.title}>
-      <h4>
-        <span className="knowledge-badge">{statusLabel(entry)}</span>
-        {entry.content.title}
-      </h4>
+    <article
+      className={`knowledge-card card knowledge-${tone}${tone === "candidate" ? " stripe-warning" : ""}`}
+      aria-label={content.title}
+    >
+      <header className="card-header">
+        <h4 className="clamp-2" title={content.title}>
+          {content.title}
+        </h4>
+        <span className={`badge${badgeTone}`} title={tone === "candidate" ? CANDIDATE_TITLE : undefined}>
+          {statusLabel(entry)}
+        </span>
+      </header>
       <p className="knowledge-meta">
         {KIND_LABELS[entry.kind]}・範圍：{scopeLabel(entry)}・v{entry.version}・有效期間：{fmt(entry.valid_from)} 起，
         {entry.valid_until === null ? "無期限" : `至 ${fmt(entry.valid_until)}`}
       </p>
-      <p className="knowledge-meta">來源：{sourceLabel(entry)}</p>
-      {entry.status_reason && <p>原因：{entry.status_reason}</p>}
-      {entry.superseded_by && <p>已被 {entry.superseded_by} 取代</p>}
-      <ContentView content={entry.content} />
+      {entry.status_reason && <LongText text={`原因：${entry.status_reason}`} lines={2} className="knowledge-reason" />}
+      {entry.superseded_by && (
+        <p className="knowledge-meta">
+          已被{" "}
+          <code className="mono" title={entry.superseded_by}>
+            {shortId(entry.superseded_by)}
+          </code>{" "}
+          取代
+        </p>
+      )}
+      {content.body !== "" && <LongText text={content.body} />}
+      {content.tags.length > 0 && <TagList tags={content.tags} />}
+      <details className="knowledge-extra">
+        <summary>{extraLabel}</summary>
+        <div className="knowledge-extra-body">
+          <p className="knowledge-meta">來源：{sourceLabel(entry)}</p>
+          <LessonAndEvidence content={content} />
+        </div>
+      </details>
       <div className="knowledge-actions">
         {entry.status === "candidate" && (
-          <button type="button" onClick={() => void run(() => client.confirmKnowledge(entry.id, entry.revision))}>
-            確認為已驗證
-          </button>
+          <>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void run(() => client.confirmKnowledge(entry.id, entry.revision))}
+            >
+              確認為已驗證
+            </button>
+            <button type="button" className="btn-danger" onClick={() => setMode("revoke")}>
+              撤銷
+            </button>
+          </>
         )}
         {entry.status === "verified" && (
           <button type="button" onClick={() => setMode("correct")}>
             修正
-          </button>
-        )}
-        {(entry.status === "candidate" || entry.status === "verified") && (
-          <button type="button" onClick={() => setMode("revoke")}>
-            撤銷
-          </button>
-        )}
-        {entry.status === "verified" && (
-          <button type="button" onClick={() => setMode("retire")}>
-            淘汰
           </button>
         )}
         {entry.kind === "lesson" && entry.effective && (
@@ -483,9 +622,18 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
             轉為 Guard
           </button>
         )}
-        <button type="button" onClick={() => onOpenDetail(entry.id)}>
+        <button type="button" className="btn-quiet" onClick={() => onOpenDetail(entry.id)}>
           詳情
         </button>
+        {/* 撤銷、淘汰是第二順位以後的動作，收進「更多」（MASTER 5.1） */}
+        {entry.status === "verified" && (
+          <MoreMenu
+            items={[
+              { label: "撤銷", onSelect: () => setMode("revoke"), danger: true },
+              { label: "淘汰", onSelect: () => setMode("retire"), danger: true },
+            ]}
+          />
+        )}
       </div>
       {mode === "guard" && (
         <GuardForm
@@ -534,9 +682,10 @@ function ReasonForm({ action, onSubmit, onCancel }: { action: string; onSubmit: 
     <form className="knowledge-form" aria-label={action} onSubmit={submit}>
       <label>
         {action}原因
-        <textarea value={reason} onChange={(e) => setReason(e.target.value)} />
+        {/* 從「更多」選單或撤銷按鈕開啟時，焦點直接到原因欄，不會掉到 body */}
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
       </label>
-      <div className="knowledge-actions">
+      <div className="form-actions">
         <button type="submit">確認{action}</button>
         <button type="button" onClick={onCancel}>
           取消
@@ -578,7 +727,7 @@ function CorrectForm({ entry, onSubmit, onCancel }: CorrectFormProps) {
         修正說明（選填）
         <input value={note} onChange={(e) => setNote(e.target.value)} />
       </label>
-      <div className="knowledge-actions">
+      <div className="form-actions">
         <button type="submit">送出修正</button>
         <button type="button" onClick={onCancel}>
           取消
@@ -593,10 +742,11 @@ interface CreateFormProps {
   client: KnowledgeClient;
   workspace: Workspace;
   act: Act;
+  onCancel: () => void;
 }
 
 /** 新增條目（使用者建立的直接是已驗證）；範圍只提供全域或此 Workspace。 */
-function CreateForm({ client, workspace, act }: CreateFormProps) {
+function CreateForm({ client, workspace, act, onCancel }: CreateFormProps) {
   const [kind, setKind] = useState<KnowledgeKind>("lesson");
   const [scope, setScope] = useState<"workspace" | "global">("workspace");
   const [draft, setDraft] = useState(EMPTY_DRAFT);
@@ -625,27 +775,34 @@ function CreateForm({ client, workspace, act }: CreateFormProps) {
   };
 
   return (
-    <form className="knowledge-form knowledge-create" aria-label="新增條目" onSubmit={(e) => void submit(e)}>
+    <form className="knowledge-form knowledge-create card" aria-label="新增條目" onSubmit={(e) => void submit(e)}>
       <h3>新增條目</h3>
-      <label>
-        種類
-        <select value={kind} onChange={(e) => setKind(e.target.value as KnowledgeKind)}>
-          <option value="lesson">教訓</option>
-          <option value="decision">決策</option>
-          <option value="fact">知識</option>
-        </select>
-      </label>
-      <label>
-        範圍
-        <select value={scope} onChange={(e) => setScope(e.target.value as "workspace" | "global")}>
-          <option value="workspace">此 Workspace</option>
-          <option value="global">全域</option>
-        </select>
-      </label>
+      <div className="knowledge-form-row">
+        <label>
+          種類
+          <select value={kind} onChange={(e) => setKind(e.target.value as KnowledgeKind)}>
+            <option value="lesson">教訓</option>
+            <option value="decision">決策</option>
+            <option value="fact">知識</option>
+          </select>
+        </label>
+        <label>
+          範圍
+          <select value={scope} onChange={(e) => setScope(e.target.value as "workspace" | "global")}>
+            <option value="workspace">此 Workspace</option>
+            <option value="global">全域</option>
+          </select>
+        </label>
+      </div>
       <ContentFields draft={draft} onChange={setDraft} lesson={kind === "lesson"} />
-      <button type="submit" disabled={busy}>
-        新增
-      </button>
+      <div className="form-actions">
+        <button type="submit" disabled={busy}>
+          新增
+        </button>
+        <button type="button" onClick={onCancel}>
+          取消
+        </button>
+      </div>
       {error && <p role="alert">{error}</p>}
     </form>
   );
@@ -680,15 +837,17 @@ function DetailPanel({ client, id, workspace, refreshKey, timeZone, act, onClose
   }, [client, id, refreshKey]);
 
   return (
-    <section className="knowledge-section knowledge-detail" aria-label="條目詳情">
-      <button type="button" onClick={onClose}>
-        關閉詳情
-      </button>
+    <section className="knowledge-detail card" aria-label="條目詳情">
+      <header className="card-header">
+        {loaded.state === "ready" ? <h3>詳情：{loaded.detail.entry.content.title}</h3> : <span />}
+        <button type="button" onClick={onClose}>
+          關閉詳情
+        </button>
+      </header>
       {loaded.state === "loading" && <p>載入中…</p>}
       {loaded.state === "failed" && <p role="alert">無法取得詳情：{loaded.reason}</p>}
       {loaded.state === "ready" && (
         <>
-          <h3>詳情：{loaded.detail.entry.content.title}</h3>
           <h4>版本（由舊到新）</h4>
           <ol className="knowledge-versions">
             {[...loaded.detail.versions]
@@ -714,7 +873,7 @@ function DetailPanel({ client, id, workspace, refreshKey, timeZone, act, onClose
                 <li key={event.revision}>
                   {fmt(event.occurred_at)} {EVENT_LABELS[event.event_type] ?? event.event_type}
                   {typeof payload.reason === "string" && `：${payload.reason}`}
-                  {typeof payload.superseded_by === "string" && `（由 ${payload.superseded_by} 取代）`}
+                  {typeof payload.superseded_by === "string" && `（由 ${shortId(payload.superseded_by)} 取代）`}
                 </li>
               );
             })}
@@ -746,13 +905,17 @@ interface GuardSectionProps {
 function GuardSection({ guards, client, timeZone, act }: GuardSectionProps) {
   return (
     <section className="knowledge-section knowledge-guards" aria-label="Guard">
-      <h3>Guard{guards.state === "ready" && `（${guards.guards.length}）`}</h3>
-      <p>派工前會檢查生效中的 Guard，違反就擋下並顯示來源教訓。</p>
-      {guards.state === "loading" && <p>載入中…</p>}
+      <div className="more-section-header">
+        <h3>Guard{guards.state === "ready" && `（${guards.guards.length}）`}</h3>
+        <p>派工前會檢查生效中的 Guard，違反就擋下並顯示來源教訓。</p>
+      </div>
+      {guards.state === "loading" && <p className="more-empty">載入中…</p>}
       {guards.state === "failed" && <p role="alert">無法取得 Guard：{guards.reason}</p>}
-      {guards.state === "ready" && guards.guards.length === 0 && <p>還沒有 Guard；可在有效的教訓上「轉為 Guard」</p>}
+      {guards.state === "ready" && guards.guards.length === 0 && (
+        <p className="more-empty">還沒有 Guard；可在有效的教訓上「轉為 Guard」</p>
+      )}
       {guards.state === "ready" && guards.guards.length > 0 && (
-        <ul className="knowledge-guard-list">
+        <ul className="knowledge-cards knowledge-guard-list">
           {guards.guards.map((guard) => (
             <GuardItem key={guard.id} guard={guard} client={client} timeZone={timeZone} act={act} />
           ))}
@@ -775,20 +938,29 @@ function GuardItem({ guard, client, timeZone, act }: { guard: GuardView; client:
   };
 
   return (
-    <li className={`knowledge-guard ${guard.active ? "knowledge-effective" : "knowledge-inactive"}`} aria-label={guard.description}>
-      <p>
-        <span className="knowledge-badge">{guard.active ? "生效中" : `不生效：${guard.inactive_reason ?? "原因不明"}`}</span>
-        <strong>{guard.description}</strong>
-      </p>
-      <p className="knowledge-meta">
+    <li
+      className={`knowledge-guard card ${guard.active ? "knowledge-effective" : "knowledge-inactive"}`}
+      aria-label={guard.description}
+    >
+      <header className="card-header">
+        <strong className="clamp-2" title={guard.description}>
+          {guard.description}
+        </strong>
+        <span className={guard.active ? "badge badge-success" : "badge"}>{guard.active ? "生效中" : "不生效"}</span>
+      </header>
+      {/* 不生效的原因可能是整段錯誤訊息：2 行＋展開 */}
+      {!guard.active && (
+        <LongText text={`原因：${guard.inactive_reason ?? "原因不明"}`} lines={2} className="knowledge-reason" />
+      )}
+      <p className="knowledge-meta clamp-1" title={guard.lesson.title}>
         {RULE_KIND_LABELS[guard.rule.kind]}・來源教訓：{guard.lesson.title}
       </p>
-      <p className="knowledge-meta">
-        成效：攔下 {guard.prevented_count} 次・最近攔下：
-        {guard.last_prevented_at === null ? "尚無" : formatTimestamp(guard.last_prevented_at, timeZone)}・未攔下的回報{" "}
-        {guard.reported_count} 次
-      </p>
-      <div className="knowledge-actions">
+      <div className="knowledge-guard-footer">
+        <p className="knowledge-meta">
+          成效：攔下 {guard.prevented_count} 次・最近攔下：
+          {guard.last_prevented_at === null ? "尚無" : formatTimestamp(guard.last_prevented_at, timeZone)}・未攔下的回報{" "}
+          {guard.reported_count} 次
+        </p>
         <button type="button" onClick={() => void toggle()}>
           {enabled ? "停用" : "啟用"}
         </button>
@@ -883,7 +1055,7 @@ function GuardForm({ onSubmit, onCancel }: { onSubmit: (rule: GuardRule) => Prom
           <input type="number" value={maxFailed} onChange={(e) => setMaxFailed(e.target.value)} />
         </label>
       )}
-      <div className="knowledge-actions">
+      <div className="form-actions">
         <button type="submit">建立 Guard</button>
         <button type="button" onClick={onCancel}>
           取消
@@ -956,7 +1128,7 @@ function RecurrencePanel({ client, lesson, workspace, refreshKey, timeZone, act 
           {loaded.recurrences.map((recurrence) => (
             <li key={recurrence.id}>
               <strong>{RECURRENCE_KIND_LABELS[recurrence.kind]}</strong>・{formatTimestamp(recurrence.occurred_at, timeZone)}
-              ・Task：{recurrence.task_id ?? "未指定"}・{recurrence.message}
+              ・Task：{recurrence.task_id === null ? "未指定" : shortId(recurrence.task_id)}・{recurrence.message}
             </li>
           ))}
         </ol>
@@ -971,7 +1143,9 @@ function RecurrencePanel({ client, lesson, workspace, refreshKey, timeZone, act 
             Task 識別（選填）
             <input value={taskId} onChange={(e) => setTaskId(e.target.value)} />
           </label>
-          <button type="submit">回報重犯</button>
+          <div className="form-actions">
+            <button type="submit">回報重犯</button>
+          </div>
           {error && <p role="alert">{error}</p>}
         </form>
       )}
