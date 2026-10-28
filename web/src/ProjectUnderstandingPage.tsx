@@ -212,14 +212,21 @@ function SourceView({ source, timeZone }: { source: UnderstandingSource; timeZon
   const location =
     source.kind === "file" ? (source.line === null ? source.path : `${source.path}:${source.line}`) : source.reference;
   const version = source.kind === "file" ? source.version.slice(0, 12) : source.version;
+  // 分隔號「・」接在前一段的結尾：窄欄換行時新的一行從下一段開始，不會以「・」開頭
   return (
     <>
-      <span className="understanding-source-location mono" title={location}>
-        {shortPath(location)}
+      <span className="understanding-source-location">
+        <span className="mono" title={location}>
+          {shortPath(location)}
+        </span>
+        ・
       </span>
-      <span className="understanding-source-version">・版本 {version}</span>
-      <span className="understanding-source-checked">・查驗於 {formatTimestamp(source.checked_at, timeZone)}</span>
-      {source.changed && <span className="understanding-source-changed">・已變更</span>}
+      <span className="understanding-source-version">版本 {version}・</span>
+      <span className="understanding-source-checked">
+        查驗於 {formatTimestamp(source.checked_at, timeZone)}
+        {source.changed && "・"}
+      </span>
+      {source.changed && <span className="understanding-source-changed">已變更</span>}
     </>
   );
 }
