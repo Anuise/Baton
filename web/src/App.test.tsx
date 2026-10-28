@@ -213,6 +213,23 @@ describe("App 外殼", () => {
       }
       expect(screen.queryByRole("complementary", { name: "Workspace" })).not.toBeInTheDocument();
     });
+
+    it("帳號與設定頁的頂端通知與內容同寬（右緣對齊），Workspace 頁維持滿版", async () => {
+      const user = userEvent.setup();
+      const { container } = render(<App />);
+      const notices = container.querySelector(".app-notices")!;
+      await screen.findByText("Baton 0.2.0 可以更新");
+      expect(notices).not.toHaveClass("settings-column");
+
+      for (const name of ["帳號", "設定"]) {
+        await user.click(topTab(name));
+        expect(notices).toHaveClass("settings-column");
+        expect(screen.getByRole("tabpanel", { name })).toHaveClass("settings-column");
+      }
+
+      await user.click(topTab("Workspace"));
+      expect(notices).not.toHaveClass("settings-column");
+    });
   });
 
   describe("Workspace 情境列與空狀態", () => {
@@ -592,9 +609,10 @@ describe("App 外殼", () => {
       expect(screen.getByRole("heading", { name: "帳號" })).toBeInTheDocument();
       expect(screen.queryByRole("tablist", { name: "主要區塊" })).not.toBeInTheDocument();
       expect(screen.queryByRole("complementary", { name: "Workspace" })).not.toBeInTheDocument();
-      // 狀態列與更新通知不受影響
+      // 狀態列與更新通知不受影響；通知與精靈內容同寬
       expect(await screen.findByText("待裁定：1")).toBeInTheDocument();
       expect(await screen.findByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+      expect(screen.getByText("Baton 0.2.0 可以更新").closest(".app-notices")).toHaveClass("settings-column");
     });
 
     it("首次精靈中出現可用的 Profile 後回到頁簽畫面", async () => {

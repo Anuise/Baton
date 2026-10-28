@@ -333,8 +333,9 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
           />
         )}
       </div>
-      {/* 有新版本時只通知；更新維護中以覆蓋層顯示進度（spec D-19）。在頁簽之外，切換頁簽不影響 */}
-      <div className="app-notices">
+      {/* 有新版本時只通知；更新維護中以覆蓋層顯示進度（spec D-19）。在頁簽之外，切換頁簽不影響。
+          帳號、設定與全畫面精靈的內容限寬 72em，通知跟著同寬，左右緣與下方區塊對齊 */}
+      <div className={fullScreenSetup || shell.top !== "workspace" ? "app-notices settings-column" : "app-notices"}>
         {client && <UpdateNotice client={client} runtimeStartedAt={health?.started_at ?? null} />}
       </div>
       {client && fullScreenSetup && (

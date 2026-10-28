@@ -68,6 +68,11 @@ function fakeClient(initial: Workspace[] = [], lifecycles: Partial<WorkspaceLife
   return client;
 }
 
+/** 清單項目中的縮短路徑（不含「管理」選單裡的完整路徑）。 */
+function pathOf(name: string): HTMLElement {
+  return screen.getByRole("button", { name: `選擇 ${name}` }).closest("li")!.querySelector(".workspace-meta .workspace-path")!;
+}
+
 describe("左側 Workspace 清單", () => {
   it("沒有 Workspace 時顯示空狀態", async () => {
     render(<WorkspaceSidebar client={fakeClient()} />);
@@ -84,8 +89,36 @@ describe("左側 Workspace 清單", () => {
     render(<WorkspaceSidebar client={client} />);
 
     expect(await screen.findByText("筆記")).toBeInTheDocument();
-    expect(screen.getByText("C:\\work\\notes")).toBeInTheDocument();
+    expect(pathOf("筆記")).toHaveTextContent(/^C:\\work\\notes$/);
     expect(screen.queryByText("舊專案")).not.toBeInTheDocument();
+  });
+
+  it("路徑保留磁碟與結尾，結尾段數多到足以和其他 Workspace 區分；窄時先省略開頭、結尾最後才截斷", async () => {
+    const client = fakeClient([
+      workspace({ id: "ws_1", name: "甲", path: "C:\\Users\\me\\work\\client-a\\repo\\src" }),
+      workspace({ id: "ws_2", name: "乙", path: "C:\\Users\\me\\work\\client-b\\repo\\src" }),
+      workspace({ id: "ws_3", name: "丙", path: "C:\\Users\\me\\projects\\notes" }),
+    ]);
+    render(<WorkspaceSidebar client={client} />);
+    await screen.findByText("甲");
+
+    // 只保留結尾 2 段時三者中有兩個都是 C:\…\repo\src，所以多保留到能區分的那一段
+    expect(pathOf("甲")).toHaveTextContent(/^C:\\…\\client-a\\repo\\src$/);
+    expect(pathOf("乙")).toHaveTextContent(/^C:\\…\\client-b\\repo\\src$/);
+    expect(pathOf("丙")).toHaveTextContent(/^C:\\…\\projects\\notes$/);
+    // 能區分的結尾放在不先縮小的那一段；完整路徑在 title
+    expect(pathOf("甲").querySelector(".workspace-path-tail")).toHaveTextContent(/^client-a\\repo\\src$/);
+    expect(pathOf("丙").querySelector(".workspace-path-tail")).toHaveTextContent(/^notes$/);
+    expect(pathOf("甲")).toHaveAttribute("title", "C:\\Users\\me\\work\\client-a\\repo\\src");
+  });
+
+  it("「管理」選單顯示完整路徑並可複製（窄螢幕與只看 title 以外的取得方式）", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace({ path: "C:\\Users\\me\\projects\\notes" })])} />);
+
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+    const panel = item.querySelector(".workspace-menu-panel") as HTMLElement;
+    expect(within(panel).getByText("C:\\Users\\me\\projects\\notes")).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "複製路徑（筆記）" })).toBeInTheDocument();
   });
 
   it("輸入目錄後建立，新的 Workspace 立刻出現在清單，表單清空", async () => {
@@ -97,7 +130,8 @@ describe("左側 Workspace 清單", () => {
     await user.type(screen.getByLabelText("目錄"), "C:\\work\\docs");
     await user.click(screen.getByRole("button", { name: "建立 Workspace" }));
 
-    expect(await screen.findByText("docs")).toBeInTheDocument();
+    // 名稱預設取目錄名，與路徑的結尾同字，以選擇按鈕確認
+    expect(await screen.findByRole("button", { name: "選擇 docs" })).toBeInTheDocument();
     expect(client.createWorkspace).toHaveBeenCalledWith({ path: "C:\\work\\docs", name: undefined });
     expect(screen.getByLabelText("目錄")).toHaveValue("");
     expect(screen.queryByText("還沒有 Workspace")).not.toBeInTheDocument();
@@ -226,7 +260,8 @@ describe("左側 Workspace 清單", () => {
       .map((button) => button.getAttribute("aria-label"))
       // 「?」說明提示不是功能按鈕
       .filter((label) => !label?.endsWith("的說明"));
-    expect(buttons).toEqual(["選擇 筆記", "封存 筆記"]);
+    // 「複製路徑」是「管理」選單中完整路徑的附屬動作，不是功能按鈕
+    expect(buttons).toEqual(["選擇 筆記", "複製路徑（筆記）", "封存 筆記"]);
   });
 
   it("標示目前選中的 Workspace", async () => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { profileStateLabel, profileTone } from "./AccountsPage";
-import { CopyButton } from "./LongText";
+import { CopyButton, LongText } from "./LongText";
 import { docsHost } from "./textFormat";
 import type { AccountClient, SetupStatus, ToolCheck } from "./runtimeClient";
 
@@ -119,7 +119,8 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
 
       <section aria-labelledby="setup-notice-title" className="setup-notice">
         <h3 id="setup-notice-title">背景執行</h3>
-        <p>{status.background_notice.text}</p>
+        {/* 告知是段落：限 3 行，超過時可展開（MASTER 6.1） */}
+        <LongText text={status.background_notice.text} />
         {acknowledged ? (
           <p className="setup-acknowledged">已確認</p>
         ) : (

@@ -743,6 +743,26 @@ describe("帳號頁", () => {
       expect(within(complete).queryByRole("note")).not.toBeInTheDocument();
     });
 
+    it("整頁只有「新增 Profile」是主要按鈕；每張卡的「儲存方案上限」與「以既有目錄建立」改為次要樣式", async () => {
+      const client = {
+        ...withQuota(),
+        schedulingOverview: vi.fn(async () =>
+          schedulingOverview({ accounts: [accountScheduling(), accountScheduling({ profile_id: "prof_2", name: "備用帳號" })] }),
+        ),
+        listProfiles: vi.fn(async () => ({ profiles: [profile(), profile({ id: "prof_2", name: "備用帳號" })], limit: 8 })),
+      };
+      render(<AccountsPage client={client} />);
+      await screen.findByRole("group", { name: "備用帳號 的額度" });
+
+      // 送出鈕預設是實心主要按鈕（base.css）；加 btn-secondary 的才改回次要樣式
+      const primary = screen
+        .getAllByRole("button")
+        .filter((button) => button.getAttribute("type") === "submit" && !button.classList.contains("btn-secondary"));
+      expect(primary.map((button) => button.textContent)).toEqual(["新增 Profile"]);
+      expect(screen.getByRole("button", { name: "儲存 主要帳號 的方案上限" })).toHaveClass("btn-secondary");
+      expect(screen.getByRole("button", { name: "以既有目錄建立" })).toHaveClass("btn-secondary");
+    });
+
     it("方案上限表單預先填入目前設定；送出時空白送 null，並以回傳的總覽更新畫面", async () => {
       const client = withQuota(accountScheduling({ plan_limits: { five_hour_tokens: null, seven_day_tokens: 3_000_000 } }));
       const user = userEvent.setup();

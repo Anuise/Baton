@@ -55,6 +55,46 @@ describe("備份與還原演練", () => {
     expect(checks.map((item) => item.textContent)).toContain("成果檔案雜湊：未通過（1 個成果檔案的 SHA-256 不符）");
   });
 
+  it("核對說明很長時只顯示摘要（第一個子句），其餘收進預設收合的「技術細節」", async () => {
+    const longError =
+      "Runtime 拒絕連線（storage_unwritable）：無法寫入控制資料庫 C:\\Users\\me\\AppData\\Local\\Baton\\data\\baton.sqlite3-wal，" +
+      "SQLite 回報 SQLITE_IOERR_WRITE（disk I/O error, extended code 778），可能是防毒軟體鎖定了檔案、磁碟已滿或使用者帳號沒有寫入權限。";
+    const drill = drillReport({
+      passed: false,
+      checks: [
+        { kind: "restore", passed: true, detail: "已還原到暫存目錄" },
+        { kind: "database_integrity", passed: false, detail: longError },
+      ],
+    });
+    renderSettings(fakeClient(backupStatus({ latest_drill: drill })));
+
+    const checks = within(await screen.findByRole("list", { name: "核對項目" })).getAllByRole("listitem");
+    // 短的說明照舊一行，不加「技術細節」
+    expect(checks[0].textContent).toBe("還原：通過（已還原到暫存目錄）");
+    expect(within(checks[0]).queryByText("技術細節")).not.toBeInTheDocument();
+
+    const failed = checks[1];
+    expect(within(failed).getByText("未通過")).toBeInTheDocument();
+    expect(within(failed).getByText("（Runtime 拒絕連線（storage_unwritable））")).toBeInTheDocument();
+    const details = within(failed).getByText("技術細節").closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(details).toHaveTextContent("無法寫入控制資料庫 C:\\Users\\me\\AppData\\Local\\Baton\\data\\baton.sqlite3-wal");
+    expect(details).toHaveTextContent("磁碟已滿或使用者帳號沒有寫入權限。");
+  });
+
+  it("很長的核對說明找不到短摘要時，整段收進「技術細節」，結果只看徽章", async () => {
+    const sentence =
+      "在 Windows 11 26H2 Pro x64（build 26300.1742）上以 Claude Code 2.1.307 執行 cargo test -p baton-store --release 時，" +
+      "第 3 次 Run 於 14:32:05 回報 exit code 101（LNK1104: cannot open file 'msvcrt.lib'），已用 87.5% 的五小時額度與 1,234,567 tokens。";
+    const drill = drillReport({ checks: [{ kind: "foreign_keys", passed: true, detail: sentence }] });
+    renderSettings(fakeClient(backupStatus({ latest_drill: drill })));
+
+    const [check] = within(await screen.findByRole("list", { name: "核對項目" })).getAllByRole("listitem");
+    expect(within(check).getByText("通過")).toBeInTheDocument();
+    expect(within(check).getByText("技術細節").closest("details")).toHaveTextContent(sentence);
+    expect(check.querySelector(".backup-check-detail")).toBeNull();
+  });
+
   it("演練沒有可用的備份時，說明沒有被演練的備份", async () => {
     const drill = drillReport({
       passed: false,
