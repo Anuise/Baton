@@ -1,0 +1,347 @@
+/* ==========================================================================
+   裁定
+   裁定清單與詳情、權限提示、批次與連結。
+   ========================================================================== */
+
+.decision-center {
+  margin-top: var(--space-6);
+}
+
+.decision-center h2,
+.decision-center h3,
+.decision-center h4 {
+  margin: var(--space-4) 0;
+}
+
+.decision-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) 2fr;
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.decision-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-list li {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  margin-bottom: var(--space-3);
+}
+
+.decision-batch-check {
+  margin-top: var(--space-5);
+}
+
+.decision-list li button {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: stretch;
+  width: 100%;
+  padding: var(--space-4);
+  text-align: left;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.decision-list li button:hover {
+  border-color: var(--color-border-strong);
+}
+
+.decision-selected button {
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+
+.decision-task,
+.decision-meta,
+.decision-detail-meta,
+.decision-empty,
+.decision-deadline {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.decision-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.decision-urgency-high {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.decision-overdue {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
+.decision-detail {
+  padding: var(--space-5);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.decision-permission {
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.decision-permission dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-6);
+  margin: 0;
+}
+
+.decision-permission dd {
+  margin: 0;
+}
+
+.decision-permission pre {
+  overflow: auto;
+}
+
+/* 需要使用者行動的提示（例如批次還不能送出的原因） */
+.decision-hint {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* 帶有授權意涵、必須直接看得到的簡短說明（不收在「?」說明裡） */
+.decision-note {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 400;
+}
+
+.decision-saved {
+  color: var(--color-success);
+  font-size: var(--font-size-sm);
+}
+
+/* 欄位與它的「?」說明排在同一列 */
+.decision-inline {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+/* 次要與技術資訊收合在 details 裡 */
+.decision-more {
+  margin-top: var(--space-4);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.decision-more summary {
+  cursor: pointer;
+}
+
+.decision-more dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-6);
+  margin: var(--space-3) 0 0;
+}
+
+.decision-more dd {
+  margin: 0;
+}
+
+/* 標題旁的「?」說明垂直置中 */
+.decision-center :is(h3, h4):has(.help-tip) {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.decision-form fieldset {
+  margin: var(--space-4) 0;
+}
+
+.decision-option {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: baseline;
+  margin-bottom: var(--space-3);
+}
+
+.decision-recommended {
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--color-success-subtle);
+  border: 1px solid var(--color-success-border);
+  font-size: var(--font-size-xs);
+}
+
+.decision-tradeoff {
+  flex-basis: 100%;
+  margin-left: var(--space-7);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.decision-form textarea {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin-bottom: var(--space-4);
+}
+
+.decision-form [role="alert"],
+.decision-error,
+.decision-batch [role="alert"],
+.decision-related [role="alert"],
+.decision-authority [role="alert"],
+.decision-batch-failed {
+  color: var(--color-danger);
+}
+
+.decision-overview dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) 0;
+  margin: var(--space-4) 0;
+}
+
+.decision-overview-item {
+  padding: var(--space-3) var(--space-5);
+  border-left: 1px solid var(--color-border);
+}
+
+.decision-overview-item:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.decision-overview-item dt {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.decision-overview-item dd {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.decision-overview-overdue dd,
+.decision-overview-high_urgency dd {
+  color: var(--color-warning);
+}
+
+.decision-deferred,
+.decision-status {
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.decision-superseded h4 {
+  color: var(--color-warning);
+}
+
+.decision-options {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.decision-actions label,
+.decision-form fieldset label {
+  margin-right: var(--space-5);
+}
+
+.decision-form select,
+.decision-batch select,
+.decision-batch textarea {
+  display: block;
+  margin-bottom: var(--space-4);
+}
+
+.decision-batch textarea {
+  width: 100%;
+  min-height: 40px;
+}
+
+.decision-batch,
+.decision-batch-results,
+.decision-authority {
+  margin: var(--space-5) 0;
+  padding: var(--space-5);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.decision-batch {
+  border-color: var(--color-accent-border);
+}
+
+.decision-batch-item {
+  margin: var(--space-4) 0;
+}
+
+.decision-batch button + button {
+  margin-left: var(--space-4);
+}
+
+.decision-related {
+  margin: var(--space-4) 0;
+}
+
+.decision-related h5 {
+  margin: var(--space-2) 0;
+}
+
+.decision-links {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.decision-related-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+  margin: var(--space-3) 0;
+}
+
+.decision-link-button {
+  min-height: 0;
+  padding: 0;
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.decision-authority table {
+  width: 100%;
+  margin-bottom: var(--space-4);
+  border-collapse: collapse;
+}
+
+.decision-authority th,
+.decision-authority td {
+  padding: var(--space-2) var(--space-4);
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+}
+

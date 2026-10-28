@@ -1,0 +1,510 @@
+/* ==========================================================================
+   成果與品質
+   成果、審查、驗證、探索。
+   ========================================================================== */
+
+.artifacts-page {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.artifacts-page h2,
+.artifacts-page h3 {
+  margin: 0;
+}
+
+.artifacts-page h3 {
+  font-size: var(--font-size-md);
+}
+
+.artifact-card,
+.artifact-unregistered {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.artifact-card p,
+.artifact-card ul,
+.artifact-unregistered p,
+.artifact-unregistered ul {
+  margin: 0;
+}
+
+.artifact-versions {
+  display: grid;
+  gap: var(--space-3);
+  padding: 0;
+  list-style: none;
+}
+
+.artifact-version {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+}
+
+.artifact-task {
+  color: var(--color-text-muted);
+}
+
+.artifact-sha,
+.artifact-path {
+  font-family: var(--font-mono);
+}
+
+.artifact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.artifact-warning {
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-danger-subtle);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-sm);
+  font-weight: 600;
+}
+
+.artifact-card [role="alert"] {
+  color: var(--color-danger);
+}
+
+.artifact-preview pre {
+  margin: 0;
+  max-height: 320px;
+  padding: var(--space-3) var(--space-4);
+  overflow: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+}
+
+.artifact-unregistered {
+  background: var(--color-warning-subtle);
+  border-color: var(--color-warning-border);
+}
+
+.artifact-unregistered ul {
+  padding-left: var(--space-6);
+}
+
+
+.review-page {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.review-page h3 {
+  margin: 0;
+}
+
+.review {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.review h4,
+.review h5,
+.review p {
+  margin: 0;
+}
+
+.review-badge {
+  font-weight: 600;
+}
+
+.review-passed .review-badge,
+.deviation-accepted .review-badge,
+.axis-passed h5 {
+  color: var(--color-success);
+}
+
+.review-failed .review-badge,
+.axis-failed h5 {
+  color: var(--color-danger);
+}
+
+.review-stale .review-badge,
+.deviation-awaiting_decision .review-badge {
+  color: var(--color-warning);
+}
+
+.review-axis {
+  display: grid;
+  gap: var(--space-2);
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-border);
+  font-size: var(--font-size-sm);
+}
+
+.review-reused {
+  color: var(--color-text-muted);
+}
+
+.review-finding {
+  overflow-wrap: anywhere;
+}
+
+.verification-page {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.verification-reload {
+  justify-self: start;
+}
+
+.verification-section,
+.verification-bundle {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.verification-section h3,
+.verification-section h4,
+.verification-section p,
+.verification-summary {
+  margin: 0;
+}
+
+.verification-summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-5);
+}
+
+.verification-summary dt {
+  color: var(--color-text-muted);
+}
+
+.verification-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.verification-proven {
+  color: var(--color-success);
+}
+
+.verification-unproven {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
+.verification-features,
+.verification-journeys,
+.verification-uncovered ul,
+.verification-cleanup ul,
+.verification-steps ol {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.verification-features li {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.verification-feature-title {
+  font-weight: 600;
+}
+
+.verification-feature-uncovered {
+  color: var(--color-warning);
+}
+
+/* 未覆蓋範圍要醒目：不在自動驗證內的部分不能被當成已驗證 */
+.verification-uncovered {
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--color-warning-border);
+  border-left-width: 4px;
+  border-radius: var(--radius-md);
+  background: var(--color-warning-subtle);
+}
+
+.verification-section [role="alert"] {
+  color: var(--color-danger);
+}
+
+.verification-publish,
+.verification-run {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.verification-publish textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.verification-run fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+}
+
+.verification-run button,
+.verification-publish button {
+  justify-self: start;
+}
+
+/* 判定標籤：只有 passed 是綠色，其餘六種都不能看起來像通過 */
+.verdict {
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.verdict-passed {
+  background: var(--color-success-subtle);
+  color: var(--color-success);
+}
+
+.verdict-product_failure {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+
+.verdict-inconclusive {
+  background: var(--color-surface-sunken);
+  color: var(--color-text-muted);
+}
+
+.verdict-environment_blocked {
+  background: var(--color-orange-subtle);
+  color: var(--color-orange);
+}
+
+.verdict-auth_blocked {
+  background: var(--color-purple-subtle);
+  color: var(--color-purple);
+}
+
+.verdict-budget_exhausted {
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+}
+
+.verdict-automation_unsupported {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.verification-steps ol {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.verification-step {
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.verification-step-operation {
+  color: var(--color-text-muted);
+}
+
+.assertion-failed {
+  color: var(--color-danger);
+}
+
+.verification-step-output {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  max-height: 200px;
+  overflow: auto;
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-xs);
+  white-space: pre-wrap;
+}
+
+/* 語意判斷沒有做出判定（例如模型限流）：不是產品缺陷，不用失敗的紅色 */
+.assertion-undecided {
+  color: var(--color-text-muted);
+}
+
+.verification-reason {
+  color: var(--color-text-muted);
+}
+
+.verification-journey-actor {
+  color: var(--color-text-muted);
+}
+
+.verification-artifacts ul {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.verification-artifact {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.verification-artifact img {
+  max-width: 100%;
+  border: 1px solid var(--color-border);
+}
+
+.verification-artifact-withheld {
+  color: var(--color-warning);
+}
+
+.verification-usage ul {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.verification-no-live-model {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
+.verification-actions {
+  display: grid;
+  gap: var(--space-2);
+  overflow-x: auto;
+}
+
+.verification-actions p {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.verification-actions table {
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.verification-actions th,
+.verification-actions td {
+  padding: var(--space-2) var(--space-4);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-border);
+  overflow-wrap: anywhere;
+}
+
+.exploration-page {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.exploration-reload {
+  justify-self: start;
+}
+
+.exploration-section,
+.exploration-card {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.exploration-section h3,
+.exploration-card h4,
+.exploration-card h5,
+.exploration-section p {
+  margin: 0;
+}
+
+.exploration-note {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* 各區塊以左側色條區分，疑點與已確認缺陷不能看起來一樣 */
+.exploration-group {
+  border-left-width: 4px;
+}
+
+.exploration-group-defects {
+  border-left-color: var(--color-danger);
+}
+
+.exploration-group-suspected {
+  border-left-color: var(--color-warning-border);
+}
+
+.exploration-group-risks {
+  border-left-color: var(--color-orange);
+}
+
+.exploration-group-fixed {
+  border-left-color: var(--color-success);
+}
+
+.exploration-group-excluded {
+  border-left-color: var(--color-text-subtle);
+}
+
+.exploration-group-excluded .exploration-card {
+  color: var(--color-text-muted);
+}
+
+.exploration-badge {
+  justify-self: start;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+}
+
+.exploration-list,
+.exploration-attempts {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.exploration-attempts {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.exploration-attempt {
+  display: grid;
+  gap: var(--space-1);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.exploration-attempt-outcome {
+  font-weight: 600;
+}
+
+.outcome-queued .exploration-attempt-outcome {
+  color: var(--color-text-muted);
+}
