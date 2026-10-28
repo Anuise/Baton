@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { profileStateLabel } from "./AccountsPage";
+import { profileStateLabel, profileTone } from "./AccountsPage";
 import { CopyButton } from "./LongText";
 import { shortPath } from "./textFormat";
 import type { AccountClient, SetupStatus, ToolCheck } from "./runtimeClient";
@@ -118,7 +118,7 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
                 <span className="setup-profile-name clamp-2" title={profile.name}>
                   {profile.name}
                 </span>
-                <span className={`badge ${profile.dispatchable ? "badge-success" : "badge-warning"}`}>{profileStateLabel(profile)}</span>
+                <span className={`badge badge-${profileTone(profile)}`}>{profileStateLabel(profile)}</span>
               </li>
             ))}
           </ul>

@@ -85,6 +85,12 @@ export function profileStateLabel(profile: AccountProfile): string {
   return "已阻擋派工";
 }
 
+/** 狀態徽章與色條的語意：可派工為成功、尚未核對為警告、其他阻擋為危險（精靈與帳號頁共用）。 */
+export function profileTone(profile: AccountProfile): "success" | "warning" | "danger" {
+  if (profile.dispatchable) return "success";
+  return profile.verification === null ? "warning" : "danger";
+}
+
 /** 帳號頁：新增最多 8 個 Profile、在終端機完成原生登入、核對實際認證來源與帳號身分（spec D-32、D-20）。 */
 export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
@@ -225,13 +231,13 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
           {active.map((profile, index) => (
             <li
               key={profile.id}
-              className={`profile-card card ${profile.dispatchable ? "profile-ok" : "profile-blocked stripe-danger"}`}
+              className={`profile-card card ${profile.dispatchable ? "profile-ok" : `profile-blocked stripe-${profileTone(profile)}`}`}
             >
               <header className="card-header">
                 <h3 className="profile-name clamp-2" title={profile.name}>
                   {profile.name}
                 </h3>
-                <span className={`badge profile-state ${profile.dispatchable ? "badge-success" : "badge-danger"}`}>
+                <span className={`badge profile-state badge-${profileTone(profile)}`}>
                   {profileStateLabel(profile)}
                 </span>
               </header>
