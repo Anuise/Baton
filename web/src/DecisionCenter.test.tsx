@@ -724,9 +724,10 @@ describe("裁定中心：允許本次操作與修改 Workspace 授權", () => {
     expect(within(once).getByText("Bash:git push")).toBeInTheDocument();
     expect(within(once).getByText("origin main")).toBeInTheDocument();
     expect(within(once).getByText('flags：["--force"]')).toBeInTheDocument();
-    expect(within(once).getByText(HASH.slice(0, 12))).toBeInTheDocument();
+    // 要求雜湊以 textFormat 的 shortHash 縮短（前 12 字 + …）
+    expect(within(once).getByText(`${HASH.slice(0, 12)}…`)).toBeInTheDocument();
     // 要求雜湊是技術資訊，收在預設收合的「技術細節」
-    expect(within(once).getByText(HASH.slice(0, 12)).closest("details")).not.toHaveAttribute("open");
+    expect(within(once).getByText(`${HASH.slice(0, 12)}…`).closest("details")).not.toHaveAttribute("open");
     expect(within(once).queryByText(HASH)).not.toBeInTheDocument();
     expect(within(once).getByText("report.md@2,notes.md@1")).toBeInTheDocument();
     expect(within(once).getByText(/只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權/)).toBeInTheDocument();
@@ -1214,5 +1215,109 @@ describe("裁定中心：決策權限表", () => {
     const panel = await authorityPanel();
     expect(await within(panel).findByRole("alert")).toHaveTextContent("無法取得決策權限表：Runtime 回應 503");
     expect(screen.getByRole("article", { name: "裁定詳情" })).toBeInTheDocument();
+  });
+});
+
+describe("裁定中心：長文字的呈現", () => {
+  const SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  const LONG_QUESTION = `${"整合佇列中第 17 個項目的合併提交與目標分支的最新提交衝突，".repeat(3)}要怎麼處理？`;
+
+  it("頁面標題只寫頁名，不重複 Workspace 名稱", async () => {
+    renderCenter(fakeClient([decisionView()]));
+
+    expect(await screen.findByRole("heading", { level: 2, name: "裁定" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /筆記/ })).not.toBeInTheDocument();
+  });
+
+  it("清單項只放摘要：問題限 3 行、Task 名限 1 行（title 放全文），種類與緊急程度是同一列的徽章", async () => {
+    renderCenter(fakeClient([decisionView({ question: LONG_QUESTION, urgency: "high", overdue: true })]));
+
+    const button = await screen.findByRole("button", { name: `查看裁定 ${LONG_QUESTION}` });
+    const question = within(button).getByText(LONG_QUESTION);
+    expect(question).toHaveClass("clamp-3");
+    expect(question).toHaveAttribute("title", LONG_QUESTION);
+    const task = within(button).getByText("整理文件");
+    expect(task).toHaveClass("clamp-1");
+    expect(task).toHaveAttribute("title", "整理文件");
+    const badges = within(button).getByText("緊急程度：高").closest(".badge-group")!;
+    expect(within(badges as HTMLElement).getByText("Agent 請求")).toHaveClass("badge");
+    expect(within(badges as HTMLElement).getByText("緊急程度：高")).toHaveClass("badge", "badge-danger");
+    expect(within(badges as HTMLElement).getByText("已逾期，尚未裁定")).toHaveClass("badge", "badge-warning");
+    // 詳情中問題完整顯示，不截斷
+    expect(within(detail()).getByRole("heading", { name: LONG_QUESTION })).not.toHaveClass("clamp-3");
+  });
+
+  it("選項、證據與原因中的 SHA-256 以縮短的等寬形式顯示，title 與複製按鈕提供完整值", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderCenter(
+      fakeClient([
+        decisionView({
+          reason: `基準報告的 SHA-256 為 ${SHA}，需要確認`,
+          options: [{ id: "revert", label: SHA, tradeoff: null }],
+          evidence: [`SHA-256 ${SHA}`],
+        }),
+      ]),
+    );
+
+    const article = await screen.findByRole("article", { name: "裁定詳情" });
+    expect(within(article).queryByText(SHA)).not.toBeInTheDocument();
+    const shorts = within(article).getAllByText(`${SHA.slice(0, 12)}…`);
+    // 原因、選項、證據各一處
+    expect(shorts).toHaveLength(3);
+    for (const short of shorts) {
+      expect(short.tagName).toBe("CODE");
+      expect(short).toHaveClass("mono");
+      expect(short).toHaveAttribute("title", SHA);
+    }
+    expect(within(article).getByText(/^基準報告的 SHA-256 為/)).toHaveTextContent(`基準報告的 SHA-256 為 ${SHA.slice(0, 12)}…`);
+    const copies = within(article).getAllByRole("button", { name: "複製雜湊" });
+    expect(copies).toHaveLength(3);
+    await user.click(copies[0]);
+    expect(writeText).toHaveBeenCalledWith(SHA);
+  });
+
+  it("處理方式的選項是雜湊時也縮短（label 內不放按鈕），radio 的名稱仍是完整值", async () => {
+    const user = userEvent.setup();
+    renderCenter(fakeClient([decisionView({ options: [{ id: "revert", label: SHA, tradeoff: null }], recommendation: null })]));
+
+    await user.click(await screen.findByRole("radio", { name: "接受方案" }));
+    const radio = within(form()).getByRole("radio", { name: SHA });
+    const label = radio.closest("label")!;
+    expect(label).toHaveTextContent(`${SHA.slice(0, 12)}…`);
+    expect(within(label).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("權限提示的工具名稱以等寬字顯示；工具輸入收在 details 的捲動框", async () => {
+    renderCenter(fakeClient([permissionDecision()]));
+
+    const permission = await screen.findByRole("region", { name: "權限提示" });
+    expect(within(permission).getByText("Bash")).toHaveClass("mono");
+    const input = permission.querySelector("details > pre")!;
+    expect(input).toHaveTextContent("git push --force origin main");
+  });
+
+  it("要求雜湊在技術細節中以縮短形式顯示並可複製完整值", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    renderCenter(fakeClient([permissionDecision()]));
+
+    const once = await screen.findByRole("region", { name: "允許本次操作" });
+    const hash = within(once).getByText(`${HASH.slice(0, 12)}…`);
+    expect(hash).toHaveClass("mono");
+    expect(hash).toHaveAttribute("title", HASH);
+    await user.click(within(once).getByRole("button", { name: "複製要求雜湊", hidden: true }));
+    expect(writeText).toHaveBeenCalledWith(HASH);
+  });
+
+  it("連結與合併的選單選項縮短到 60 字以內", async () => {
+    renderCenter(fakeClient([decisionView(), decisionView({ id: "dec_long", question: LONG_QUESTION })]));
+
+    const related = await screen.findByRole("region", { name: "相似問題" });
+    const options = within(within(related).getByLabelText("連結另一個請求")).getAllByRole("option");
+    expect(options.map((o) => Array.from(o.textContent ?? "").length).every((length) => length <= 60)).toBe(true);
+    expect(options[1].textContent).toMatch(/…$/);
   });
 });
