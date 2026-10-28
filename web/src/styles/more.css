@@ -896,6 +896,13 @@
   border-left: 3px solid var(--color-warning);
 }
 
+/* 「（高風險…）」「（擴大授權）」：接在能力名稱後的 danger 色小字 */
+.authorization-high-risk {
+  margin-left: var(--space-2);
+  color: var(--color-danger);
+  font-size: var(--text-meta);
+}
+
 /* 範本：每列＝套用按鈕 + 說明 */
 .authorization-templates {
   display: grid;

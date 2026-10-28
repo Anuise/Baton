@@ -193,6 +193,18 @@ describe("Workspace 授權設定", () => {
     expect(checkbox("部署")).not.toBeChecked();
   });
 
+  it("高風險警示帶有 authorization-high-risk，且這個 class 有 danger 色的樣式規則", async () => {
+    await renderPanel(fakeClient());
+
+    expect(screen.getByText("（高風險，需要明確授權）")).toHaveClass("authorization-high-risk");
+    // Vitest 會把 CSS 匯入換成空字串，專案也沒有 @types/node，所以以非字面的動態匯入讀檔（同 WorkspaceSidebar.test.tsx）
+    const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
+    const url: { fileURLToPath(url: string): string } = await import(/* @vite-ignore */ `node:${"url"}`);
+    const here = import.meta.url;
+    const css = fs.readFileSync(url.fileURLToPath(new URL("./styles/more.css", here).href), "utf8");
+    expect(css).toMatch(/\.authorization-high-risk\s*\{[^}]*color:\s*var\(--color-danger\)/);
+  });
+
   it("P3 的確認摘要揭露以 Windows 使用者身分執行的風險，承認後才能確認並保存", async () => {
     const client = fakeClient();
     const user = await renderPanel(client);
