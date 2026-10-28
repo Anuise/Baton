@@ -89,6 +89,9 @@ const STAGE_STATE_TONES: Record<StageState, string> = {
   invalidated: "badge badge-danger",
 };
 
+/** 已完成的 Stage：預設收合細節。 */
+const DONE_STATES: ReadonlySet<StageState> = new Set(["passed", "skipped"]);
+
 const OUTCOME_TONES: Record<StageAttemptOutcome, string> = {
   passed: "badge badge-success",
   incomplete: "badge badge-warning",
@@ -263,6 +266,7 @@ function WorkflowCard({
         {workflow.stages.map((stage) => {
           // 只有未完成 Workflow 的目前 Stage 能操作；有 Gate 的不能跳過
           const isCurrent = workflow.status !== "completed" && stage.key === workflow.current_stage;
+          const facts = <StageFacts stage={stage} stageTitle={stageTitle} timeZone={timeZone} />;
           return (
             <li key={stage.key} aria-label={stage.title} className={`workflow-stage stage-${stage.state}`}>
               <div className="workflow-stage-header">
@@ -272,59 +276,16 @@ function WorkflowCard({
                 </span>
                 {stage.gate !== "none" && <span className="workflow-gate badge badge-warning">{GATE_LABELS[stage.gate]}</span>}
               </div>
-              <dl className="workflow-stage-facts">
-                {stage.method && (
-                  <>
-                    <dt>方法</dt>
-                    <dd>{stage.method}</dd>
-                  </>
-                )}
-                <TextList title="進入條件" stage={stage} items={stage.entry_conditions} />
-                <TextList title="預期產出" stage={stage} items={stage.expected_outputs} />
-                <TextList title="允許的動作" stage={stage} items={stage.allowed_actions} />
-                {stage.exit_checks.length > 0 && (
-                  <>
-                    <dt>離開條件</dt>
-                    <dd>
-                      <ul className="workflow-stage-list" aria-label={`${stage.title} 的離開條件`}>
-                        {stage.exit_checks.map((check) => (
-                          <li key={check.key}>
-                            {check.description}（需要：{EVIDENCE_KIND_LABELS[check.requires]}）
-                          </li>
-                        ))}
-                      </ul>
-                    </dd>
-                  </>
-                )}
-                <dt>預算</dt>
-                <dd>最多失敗 {stage.budget.max_attempts} 次</dd>
-                <dt>失敗去向</dt>
-                <dd>{failureRouteLabel(stage.failure_route, stageTitle)}</dd>
-              </dl>
-              {stage.attempts.length > 0 && (
-                <div className="table-wrap">
-                  <table className="data-table workflow-attempts" aria-label={`${stage.title} 的嘗試紀錄`}>
-                    <colgroup>
-                      <col style={{ width: "5.5em" }} />
-                      <col style={{ width: "7em" }} />
-                      <col style={{ width: "9.5em" }} />
-                      <col />
-                    </colgroup>
-                    <thead>
-                      <tr>
-                        <th scope="col">次數</th>
-                        <th scope="col">結果</th>
-                        <th scope="col">時間</th>
-                        <th scope="col">說明</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {stage.attempts.map((attempt) => (
-                        <AttemptView key={attempt.id} attempt={attempt} timeZone={timeZone} />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+              {/* 已完成（通過、跳過）的 Stage 只留標題列，事實與嘗試紀錄收合 */}
+              {DONE_STATES.has(stage.state) ? (
+                <details className="workflow-stage-details">
+                  <summary>
+                    細節{stage.attempts.length > 0 && `與嘗試紀錄（${stage.attempts.length} 次）`}
+                  </summary>
+                  {facts}
+                </details>
+              ) : (
+                facts
               )}
               {isCurrent && stage.gate !== "none" && <p className="workflow-gate-locked">此 Gate 不能跳過</p>}
               {isCurrent && stage.gate === "none" && (
@@ -343,6 +304,76 @@ function WorkflowCard({
         })}
       </ol>
     </section>
+  );
+}
+
+/** Stage 的事實（方法、條件、預算、去向）與嘗試紀錄表格。 */
+function StageFacts({
+  stage,
+  stageTitle,
+  timeZone,
+}: {
+  stage: StageView;
+  stageTitle: (key: string) => string;
+  timeZone?: string;
+}) {
+  return (
+    <>
+      <dl className="workflow-stage-facts">
+        {stage.method && (
+          <>
+            <dt>方法</dt>
+            <dd>{stage.method}</dd>
+          </>
+        )}
+        <TextList title="進入條件" stage={stage} items={stage.entry_conditions} />
+        <TextList title="預期產出" stage={stage} items={stage.expected_outputs} />
+        <TextList title="允許的動作" stage={stage} items={stage.allowed_actions} />
+        {stage.exit_checks.length > 0 && (
+          <>
+            <dt>離開條件</dt>
+            <dd>
+              <ul className="workflow-stage-list" aria-label={`${stage.title} 的離開條件`}>
+                {stage.exit_checks.map((check) => (
+                  <li key={check.key}>
+                    {check.description}（需要：{EVIDENCE_KIND_LABELS[check.requires]}）
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </>
+        )}
+        <dt>預算</dt>
+        <dd>最多失敗 {stage.budget.max_attempts} 次</dd>
+        <dt>失敗去向</dt>
+        <dd>{failureRouteLabel(stage.failure_route, stageTitle)}</dd>
+      </dl>
+      {stage.attempts.length > 0 && (
+        <div className="table-wrap">
+          <table className="data-table workflow-attempts" aria-label={`${stage.title} 的嘗試紀錄`}>
+            <colgroup>
+              <col style={{ width: "5.5em" }} />
+              <col style={{ width: "7em" }} />
+              <col style={{ width: "9.5em" }} />
+              <col />
+            </colgroup>
+            <thead>
+              <tr>
+                <th scope="col">次數</th>
+                <th scope="col">結果</th>
+                <th scope="col">時間</th>
+                <th scope="col">說明</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stage.attempts.map((attempt) => (
+                <AttemptView key={attempt.id} attempt={attempt} timeZone={timeZone} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 

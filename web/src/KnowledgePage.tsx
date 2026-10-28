@@ -433,7 +433,7 @@ function ContentView({ content }: { content: KnowledgeContent }) {
     <>
       {content.body !== "" && <p className="knowledge-body">{content.body}</p>}
       <LessonAndEvidence content={content} />
-      {content.tags.length > 0 && <TagList tags={content.tags} />}
+      {content.tags.length > 0 && <TagList tags={content.tags} full />}
     </>
   );
 }
@@ -468,12 +468,12 @@ function LessonAndEvidence({ content }: { content: KnowledgeContent }) {
   );
 }
 
-/** 標籤：一行一個膠囊，過長的以 … 結尾（完整文字在 title 與詳情）。 */
-function TagList({ tags }: { tags: string[] }) {
+/** 標籤膠囊：卡片中過長的以 … 結尾（完整文字在 title 與詳情）；詳情中（full）完整顯示、可換行。 */
+function TagList({ tags, full = false }: { tags: string[]; full?: boolean }) {
   return (
-    <ul className="knowledge-tags" aria-label="標籤">
+    <ul className={full ? "knowledge-tags knowledge-tags-full" : "knowledge-tags"} aria-label="標籤">
       {tags.map((tag) => (
-        <li key={tag} title={tag}>
+        <li key={tag} title={full ? undefined : tag}>
           {tag}
         </li>
       ))}
@@ -535,7 +535,10 @@ interface CardProps {
   onOpenDetail: (id: string) => void;
 }
 
-/** 一個條目；可用的操作依狀態：候選可確認或撤銷，已驗證可修正、撤銷或淘汰（有效的教訓還可轉為 Guard），其他只能看詳情。 */
+/**
+ * 一個條目；可用的操作依狀態：候選可確認或撤銷，已驗證可修正、撤銷或淘汰（有效的教訓還可轉為 Guard），其他只能看詳情。
+ * 直接看得到的動作最多 3 個（MASTER 5.1）：候選＝確認、撤銷、詳情；已驗證＝修正、詳情、更多。
+ */
 function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
   const [mode, setMode] = useState<CardMode>(null);
   const [error, setError] = useState<string | null>(null);
@@ -617,18 +620,14 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
             修正
           </button>
         )}
-        {entry.kind === "lesson" && entry.effective && (
-          <button type="button" onClick={() => setMode("guard")}>
-            轉為 Guard
-          </button>
-        )}
         <button type="button" className="btn-quiet" onClick={() => onOpenDetail(entry.id)}>
           詳情
         </button>
-        {/* 撤銷、淘汰是第二順位以後的動作，收進「更多」（MASTER 5.1） */}
+        {/* 轉為 Guard、撤銷、淘汰是第二順位以後的動作，收進「更多」（MASTER 5.1）；只有有效的已驗證教訓能轉為 Guard */}
         {entry.status === "verified" && (
           <MoreMenu
             items={[
+              ...(entry.kind === "lesson" && entry.effective ? [{ label: "轉為 Guard", onSelect: () => setMode("guard") }] : []),
               { label: "撤銷", onSelect: () => setMode("revoke"), danger: true },
               { label: "淘汰", onSelect: () => setMode("retire"), danger: true },
             ]}
@@ -915,7 +914,7 @@ function GuardSection({ guards, client, timeZone, act }: GuardSectionProps) {
         <p className="empty-note">還沒有 Guard；可在有效的教訓上「轉為 Guard」</p>
       )}
       {guards.state === "ready" && guards.guards.length > 0 && (
-        <ul className="knowledge-cards knowledge-guard-list">
+        <ul className="knowledge-cards">
           {guards.guards.map((guard) => (
             <GuardItem key={guard.id} guard={guard} client={client} timeZone={timeZone} act={act} />
           ))}
@@ -1010,7 +1009,8 @@ function GuardForm({ onSubmit, onCancel }: { onSubmit: (rule: GuardRule) => Prom
     <form className="knowledge-form" aria-label="轉為 Guard" onSubmit={submit}>
       <label>
         規則種類
-        <select value={kind} onChange={(e) => setKind(e.target.value as GuardRule["kind"])}>
+        {/* 從「更多」選單開啟時，焦點直接到第一個欄位，不會掉到 body */}
+        <select value={kind} onChange={(e) => setKind(e.target.value as GuardRule["kind"])} autoFocus>
           {(Object.keys(RULE_KIND_LABELS) as GuardRule["kind"][]).map((k) => (
             <option key={k} value={k}>
               {RULE_KIND_LABELS[k]}

@@ -113,6 +113,22 @@ describe("流程", () => {
     expect(within(review).queryByRole("list", { name: "修正確認 的允許的動作" })).not.toBeInTheDocument();
   });
 
+  it("已通過、已跳過的 Stage 只顯示標題列，事實與嘗試紀錄收合；其他 Stage 攤開", async () => {
+    const workflow = workflowView();
+    workflow.stages[2] = { ...workflow.stages[2], state: "skipped" };
+    renderPage(fakeClient(workflowList({ workflows: [workflow] })));
+    await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
+
+    const collapsed = (name: string) => stage(name).querySelector(":scope > details.workflow-stage-details");
+    const passed = collapsed("建立重現");
+    expect(passed).not.toBeNull();
+    expect(passed).not.toHaveAttribute("open");
+    // 摘要說明裡面有什麼（嘗試次數）
+    expect(passed?.querySelector("summary")).toHaveTextContent(`細節與嘗試紀錄（${workflow.stages[0].attempts.length} 次）`);
+    expect(collapsed("修正確認")).not.toBeNull();
+    expect(collapsed("縮小範圍")).toBeNull();
+  });
+
   it("安全 Gate 另外標示", async () => {
     const safety = workflowView({ stages: [stageView({ gate: "safety", title: "部署前確認" })] });
     renderPage(fakeClient(workflowList({ workflows: [safety] })));
