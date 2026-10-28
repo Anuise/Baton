@@ -357,3 +357,146 @@ flex 與 grid 子元素的 `min-width` 預設是 `auto`（＝內容的 min-conte
 - [ ] 識別碼／路徑／雜湊等寬、縮短、可複製；詳情中完整
 - [ ] 焦點外框可見；`prefers-reduced-motion` 下無過渡
 - [ ] 不使用 emoji 當圖示（Q3 Anti-Patterns）
+
+---
+
+## 10. 實作對照（WP1 完成後的共用規則使用說明）
+
+WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全站規則與共用元件。WP2～WP6 只寫自己的 CSS 檔與 `.tsx`，**不改** `tokens.css`、`base.css`、`components.css`、`textFormat.ts`、`LongText.tsx`；需要新的共用規則時先寫在自己的檔案並在回報中列出（audit.md §3.2）。
+
+### 10.1 檔案
+
+| 檔案 | 內容 |
+|---|---|
+| `web/src/styles.css` | 只有 `@import`，順序即層疊順序：tokens → base → components → shell → accounts-settings → tasks → decisions → quality → more |
+| `web/src/styles/tokens.css` | 全部 token（第 2～4 節） |
+| `web/src/styles/base.css` | 元素層級的預設（權重 0 的 `:where()`），各頁 class 一律可覆寫 |
+| `web/src/styles/components.css` | 工具 class 與共用元件（本節 10.4～10.8）、HelpTip、完全退出遮罩 |
+| `web/src/textFormat.ts` | 縮短與數字格式（10.9） |
+| `web/src/LongText.tsx` | `LongText`、`CopyButton`（10.10） |
+
+### 10.2 Token
+
+- **色彩**：第 2 節的表，名稱與值一一相同（`--color-bg`、`--color-surface`、`-raised`、`-sunken`、`-hover`、`--color-overlay`、`--color-border`、`-strong`、`--color-control-border`、`--color-text`、`-muted`、`-subtle`、`--color-accent`、`-hover`、`-subtle`、`-border`、`--color-on-accent`、`--color-focus`、`--color-{success,warning,danger}` 與 `-subtle`、`-border`、`--color-{orange,purple}` 與 `-subtle`）。只取 token，不寫死色碼。
+- **字型**：`--font-sans`、`--font-mono`（3.1）。
+- **字級／行高**：`--text-caption`／`--leading-caption`（12px／1.4）、`--text-meta`／`--leading-meta`（13／1.5）、`--text-body`／`--leading-body`（14／1.65）、`--text-title-sm`／`--leading-title-sm`（14／1.4）、`--text-title`／`--leading-title`（16／1.35）、`--text-title-lg`／`--leading-title-lg`（20／1.3）、`--leading-code`（1.5）。字重 `--font-weight-normal`（400）、`--font-weight-strong`（600）。
+  - 舊名 `--font-size-xs／sm／md／lg／xl` 仍可用，分別等於 caption／meta／body／title／title-lg；**新規則請用 `--text-*`**，改到自己的規則時順手換掉。`--font-size-xs`（12px）只能用在徽章、計數、時間戳，卡片內文改 `--text-meta`、段落 `--text-body`。
+- **間距**：`--space-1`～`--space-8`（2／4／6／8／12／16／24／32px，4.1）。
+- **圓角**：`--radius-sm／md／lg／full`（4.2）。**陰影**：`--shadow-sm`（只給浮在內容上的小元件）、`--shadow-md`（對話框、浮層）；卡片與按鈕不加陰影。
+- **層級**：`--z-sticky`（10）、`--z-popover`（20）、`--z-overlay`（30）、`--z-toast`（40）。
+- **其他**：`--measure`（46em，段落閱讀寬度）、`--measure-form`（48em）、`--control-height`（28px）、`--duration-fast`（120ms；`prefers-reduced-motion` 下為 0）、`--ease-out`。
+
+### 10.3 全站已經生效的規則（base.css，不必再寫）
+
+- 長 token 斷行：`p, li, dt, dd, td, th, h1–h5, summary, label, legend, figcaption, blockquote` 為 `overflow-wrap: anywhere`；`code, kbd, samp` 也是。其餘元素（例如直接放在 `div`／`span` 裡的文字）只有 `break-word`，放在 flex／grid 中的長字串要自己加 `.mono` 或 `overflow-wrap: anywhere`。
+- `p` 有閱讀寬度 `max-inline-size: 46em` 與 `text-wrap: pretty`。不想受限的段落（例如寬表格說明）以自己的 class 設 `max-inline-size: none`。
+- 主區（`.main`）內的 `section, article, aside, header, footer, nav, form, fieldset, label, div, details, dl, dt, dd, ul, ol, li, p, figure, table` 一律 `min-width: 0`（權重 0）。所以一般情況不必再寫；但**多欄 grid 仍要寫 `minmax(0, Nfr)`，不寫裸的 `1fr`／`2fr`**（6.4 第 1 條）。
+- `.main`、`.tab-panel`、`.setup-screen` 已修正（`min-width: 0`、`grid-template-columns: minmax(0, 1fr)`）。
+- 輸入框、`<select>`、`<textarea>`：`min-width: 0; max-width: 100%`，邊界 `--color-control-border`；焦點外框 `2px solid var(--color-focus)`、`outline-offset: 2px`。
+- `<textarea>` 依內容長高：`field-sizing: content; min-height: 3lh; max-height: 16lh`。各頁若寫了固定的 `min-height`（例：`.task-form textarea`）會覆寫它，改版時刪掉。
+- `<pre>`：`max-width: 100%; max-height: 24lh; overflow: auto`，不折行。單行指令要折行時加 `.pre-wrap`。
+- 按鈕：預設是次要按鈕（surface 底、`border-strong` 框、400 字重、28px 高、**沒有陰影**）；`type="submit"` 是主要按鈕（accent 底、600）。**所有按鈕 `justify-self: start`**，放在 grid 中不會被拉滿；要滿版的按鈕自己寫 `justify-self: stretch` 或 `width: 100%`。
+- 表頭 `th` 是 `--text-meta`、muted、600。
+
+### 10.4 長文字工具 class（6.1、6.2）
+
+| class | 作用 | 用在 |
+|---|---|---|
+| `.mono` | 等寬、0.92em、`overflow-wrap: anywhere` | 識別碼、雜湊、路徑、URL、分支名 |
+| `.truncate` | 1 行、超出以 `…` 結尾（需要有寬度限制的父層） | 情境列的 Workspace 名稱、側欄路徑；**一定要加 `title` 或旁邊有複製／詳情** |
+| `.clamp-1`／`.clamp-2`／`.clamp-3` | 限制 1／2／3 行 | 清單中的標題（2 行）、Task 名（1 行）；段落 3 行請用 `LongText`（有展開） |
+| `.pre-wrap` | `white-space: pre-wrap` + `anywhere` | 單行安裝指令等 `<pre>`／`<code>` |
+| `.measure`／`.measure-form` | `max-inline-size` 46em／48em | 段落以外的長內容容器（dd、div）／表單（取代各頁的 `max-width: 720px`） |
+| `.tabular` | `tabular-nums` | 數字欄、計數、百分比、版本號 |
+| `.grow`／`.no-shrink` | flex 中 `flex: 1 1 auto; min-width: 0`／`flex: none` | 標題列中的文字／按鈕、徽章、時間 |
+
+### 10.5 按鈕（5.1）
+
+| class | 樣式 | 用法 |
+|---|---|---|
+| （預設 `<button>`） | 次要 | 一般動作 |
+| `.btn-primary` | accent 底、600、不換行 | 每個區域最多一個。`.primary-action`（主控台、工作、裁定三頁的現行 class）與 `type="submit"` 同樣式 |
+| `.btn-quiet` | 無框無底、muted 字，滑過 surface-hover | 第三順位以後的動作、「展開」「複製」 |
+| `.btn-danger` | surface 底、danger 字與框；滑過 danger-subtle | 取消 Task、封存。確認對話框裡的最終確認加 `.btn-danger.btn-solid`（danger 實心） |
+| `.btn-sm` | 24px 高、12px 字 | 行內的小按鈕 |
+| `.btn-icon` | 28×28、無內距 | 圖示按鈕（不用 emoji） |
+
+`.btn-primary`／`.btn-quiet`／`.btn-danger` 不換行；預設按鈕**沒有**加 `nowrap`（側欄、裁定清單把整個項目做成按鈕，裡面是長文字）。一組按鈕放在 `.form-actions` 中會整組換行。
+
+### 10.6 徽章（5.4）
+
+```tsx
+<span className="badge badge-warning" aria-label={`待裁定 ${formatNumber(n)} 項`} title={formatNumber(n)}>
+  待裁定 {formatCount(n)}
+</span>
+```
+
+- `.badge`：18px 高、12px、600、膠囊、不換行、不縮小、`tabular-nums`；預設中性（sunken 底、muted 字）。語意：`.badge-success`、`.badge-warning`、`.badge-danger`、`.badge-accent`。
+- 多個徽章：外層 `.badge-group`（flex、wrap、gap 4px）。
+- 文字徽章最多 6 個全形字，放不下時換短詞（「未驗證」），不要截斷。
+- 現行的 `.decision-badge`、`.tab-badge` 已加上不換行與不縮小；`.knowledge-badge`（內容含「不生效：<原因>」長文字）**沒有**加，WP6 改用 `.badge` 並把原因移出徽章。其他頁的徽章類 class（`.verdict`、`.decision-recommended`、`.workflow-gate`、`.task-kind`、`.exploration-badge`）改版時直接換成 `.badge` + 語意 class。
+
+### 10.7 卡片、狀態色條（5.2、2.3）
+
+```tsx
+<article className="card stripe-warning">
+  <header className="card-header">
+    <h4 className="clamp-2" title={task.title}>{task.title}</h4>
+    <span className="badge badge-warning">排隊中</span>
+  </header>
+  <LongText text={task.goal} />
+</article>
+```
+
+- `.card`：surface、1px border、`radius-md`、內距 12px、13px 字、無陰影。
+- `.card-header`：flex；第一個子元素（標題）可縮小，其餘（徽章、按鈕）不縮小。
+- `.stripe-success`／`.stripe-warning`／`.stripe-danger`／`.stripe-accent`：左側 3px 色條。取代整張卡片的淡色底（audit C8）。
+
+### 10.8 表單、表格
+
+- `.field`：一個欄位（grid、gap 4px）：`label`（或 `.field-label`，13px、600）→ 控制項 → `.field-hint`（muted）→ `.field-error`（danger）。欄位之間的 12px 由外層 grid 的 gap 決定。
+- `.field-inline`：同一列的 label + 控制項（inline-flex、gap 6px），例：帳號頁的方案上限。
+- `.input-short`（`width: 12em`，數字與上限）、`.select-fit`（`width: 100%; max-width: 32em`）、`.select-shrink`（flex 中要縮小的 `<select>`：`flex: 1 1 0; width: 0; min-width: 0`）。
+- `.form-actions`：表單底部的動作列（flex、wrap、gap 8px），其中的按鈕依內容寬、不換行。
+- `.table-wrap`：表格外層（`overflow-x: auto`）。`.data-table`：`width: 100%; table-layout: fixed`、表頭不換行、儲存格 `anywhere`、滑過整列 surface-hover；數字欄的 `th`／`td` 加 `.num`（靠右、tabular-nums）。欄寬以 `<colgroup>` 指定，只留一個文字欄不給寬度（5.3）。
+
+### 10.9 `textFormat.ts`
+
+| 函式 | 結果 | 用在 |
+|---|---|---|
+| `shortId(id)` | `task_7b5deb026d9841b0cced7314` → `task_7b5deb…7314`（前綴 + 主體前 6 碼 + `…` + 後 4 碼；沒有前綴時前 10 碼） | 清單中的識別碼 |
+| `shortHash(hash)` | 前 12 字 + `…`（取代 `TaskBoard.tsx` 的 `shortHash` 與各處的 `slice(0, 12)`） | SHA-256、commit |
+| `shortPath(path, keep = 2)` | `C:\Users\…\fixtures\report.md` → `C:\…\fixtures\report.md`；UNC 保留 `\\server\share\`、URL 保留網域 | 路徑、URL |
+| `formatCount(n, max = 999)` | `1284` → `999+` | 計數徽章 |
+| `formatNumber(n)` | `1284` → `1,284` | 徽章的 `aria-label`／`title`、大數字 |
+| `formatBytes(n)` | `1234567892` → `1.15 GB`；`512` → `512 位元組` | 檔案大小（audit P-ART-3：`1.15 GB（1,234,567,892 位元組）`） |
+| `truncateText(text, max)` | 以字元計、含 `…` 不超過 `max` | 需要硬性字數上限的地方 |
+| `optionLabel(title, id?, max = 60)` | `新增匯入功能（7314）`；標題過長時截斷前段，總長 ≤ 60 | `<option>` 文字（避免 `<select>` 被撐寬） |
+| `splitFirstSentence(text)` | `{ summary, rest }`：第一句與其餘 | 錯誤訊息：`summary` 完整顯示，`rest` 收進「技術細節」`<details>` |
+
+縮短後的值一定要有完整值的取得路徑：`title` + `CopyButton`，或點開詳情；詳情中顯示完整值（`.mono`）。
+
+### 10.10 `LongText.tsx`
+
+```tsx
+import { CopyButton, LongText } from "./LongText";
+
+<LongText text={task.goal} />                                  // 3 行 + 「展開／收合」
+<LongText text={decision.question} lines={2} />                // 2 行
+<LongText text={workflow.router_reason} copyLabel="複製理由" />  // 附「複製理由」
+<span className="copy-text">
+  <code className="mono" title={run.id}>{shortId(run.id)}</code>
+  <CopyButton text={run.id} label="複製識別碼" />
+</span>
+```
+
+- `LongText` props：`text`（純文字，保留換行）、`lines`（1／2／3，預設 3）、`copyLabel`（有值才顯示複製按鈕）、`className`（加在外層）。外層是 `div.long-text`（閱讀寬度 46em），內文是 `p.long-text-body`，**不要放在 `<p>` 裡**。
+- 只有文字真的超過 `lines` 行時才出現「展開」（`aria-expanded`、`aria-controls`），寬度改變時重新判斷；全文一直在 DOM 中。
+- 測試中 jsdom 不排版，「展開」不會出現；要測展開時參考 `LongText.test.tsx` 以 `scrollHeight`／`clientHeight` 模擬。
+- `CopyButton` props：`text`、`label`（預設「複製」）；按下後 1.5 秒內顯示「已複製」或「複製失敗」。測試時注意 `userEvent.setup()` 會換掉 `navigator.clipboard`。
+
+### 10.11 WP1 沒有處理、留給各包的項目
+
+- 時間線 `.timeline-filter input { margin-left }`（more.css）在 long 資料下讓輸入框超出頁面內容區 6px（沒有產生水平捲軸）：WP6 改成 6.4 第 3 條的 flex 寫法時一併處理。
+- 各頁卡片的 `box-shadow: var(--shadow-sm)`（`.task-card`、`.artifact-card`、`.knowledge-*`）與 12px 內文：WP3／WP5／WP6。
+- 側欄項目、Workspace 路徑、情境列：WP2（徽章已不換行，數字改 `formatCount` 也在 WP2）。
