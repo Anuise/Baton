@@ -391,7 +391,8 @@ function ProfileFromDirForm({
         />
       </label>
       <div className="form-actions">
-        <button type="submit" disabled={busy || disabled}>
+        {/* 一頁只留一個主要動作（新增 Profile），其餘送出鈕用次要樣式（MASTER 5.1） */}
+        <button type="submit" className="btn-secondary" disabled={busy || disabled}>
           以既有目錄建立
         </button>
       </div>
@@ -664,7 +665,7 @@ function PlanLimitsForm({
         />
       </label>
       <span className="quota-limits-hint">單位為 token；留空代表未設定</span>
-      <button type="submit" disabled={busy} aria-label={`儲存 ${account.name} 的方案上限`}>
+      <button type="submit" className="btn-secondary" disabled={busy} aria-label={`儲存 ${account.name} 的方案上限`}>
         儲存方案上限
       </button>
       {error && <p role="alert">無法儲存方案上限：{error}</p>}

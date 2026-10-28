@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { HelpTip } from "./HelpTip";
+import { CopyButton } from "./LongText";
 import { formatCount, formatNumber, shortPath } from "./textFormat";
 import { formatTimestamp } from "./time";
 import type { LifecycleClient, PauseCause, Workspace, WorkspaceClient, WorkspaceLifecycleView } from "./runtimeClient";
@@ -165,6 +166,11 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
     return (
       <WorkspaceMenu label={`管理 ${workspace.name}`}>
         <span className="workspace-created">建立於 {formatTimestamp(workspace.created_at, timeZone)}</span>
+        {/* 完整路徑：清單只放縮短形式，這裡是不靠 title 的完整取得方式 */}
+        <div className="workspace-menu-path">
+          <span className="mono">{workspace.path}</span>
+          <CopyButton text={workspace.path} label="複製路徑" field={workspace.name} />
+        </div>
         {lifecycle && (
           <>
             <div className="workspace-auto-resume">
@@ -201,6 +207,7 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
   };
 
   const active = list.state === "ready" ? list.workspaces.filter((w) => w.status === "active") : [];
+  const paths = distinctPaths(active.map((w) => w.path));
 
   return (
     <aside className="sidebar" aria-labelledby="workspaces-title">
@@ -210,7 +217,7 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
       {list.state === "ready" && active.length === 0 && <p className="sidebar-empty">還沒有 Workspace</p>}
       {active.length > 0 && (
         <ul className="workspace-list">
-          {active.map((workspace) => (
+          {active.map((workspace, index) => (
             <li key={workspace.id} className={`workspace-item${workspace.id === selectedId ? " workspace-item-current" : ""}`}>
               <div className="workspace-heading">
                 {/* 名稱最多 2 行；整個項目都可點選（按鈕的 ::after 蓋滿項目），完整名稱與路徑在 title */}
@@ -229,7 +236,11 @@ ${workspace.path}`}
               </div>
               <div className="workspace-meta">
                 {pendingBadge(pendingDecisions?.[workspace.id] ?? 0)}
-                <span className="workspace-path mono truncate">{shortPath(workspace.path)}</span>
+                {/* 窄時先省略開頭，能和其他 Workspace 區分的結尾最後才截斷；完整路徑在 title 與「管理」選單 */}
+                <span className="workspace-path mono" title={workspace.path}>
+                  {paths[index].head !== "" && <span className="workspace-path-head">{paths[index].head}</span>}
+                  <span className="workspace-path-tail">{paths[index].tail}</span>
+                </span>
               </div>
               {pausedRow(workspace)}
             </li>
@@ -264,6 +275,31 @@ ${workspace.path}`}
       </form>
     </aside>
   );
+}
+
+/** 路徑的段落（含開頭的磁碟）。 */
+function segmentsOf(path: string): string[] {
+  return path.split(/[\\/]/).filter((segment) => segment !== "");
+}
+
+/**
+ * 側欄的縮短路徑：結尾保留足以和清單中其他 Workspace 區分的最少段數，整體至少保留結尾 2 段（同 shortPath）；
+ * 分成開頭（窄時先省略）與結尾（能區分的部分，最後才截斷）。比較不分大小寫（Windows 路徑）；
+ * 完全相同的路徑無從區分，只保留 1 段當結尾。
+ */
+function distinctPaths(paths: string[]): { head: string; tail: string }[] {
+  const keys = paths.map((path) => segmentsOf(path).map((segment) => segment.toLowerCase()));
+  const suffix = (segments: string[], count: number) => (segments.length < count ? null : segments.slice(-count).join("\\"));
+  return paths.map((path, i) => {
+    const own = keys[i];
+    const others = keys.filter((other, j) => j !== i && other.join("\\") !== own.join("\\"));
+    let count = 1;
+    while (count < own.length && others.some((other) => suffix(other, count) === suffix(own, count))) count++;
+    const sep = path.includes("\\") ? "\\" : "/";
+    const tail = segmentsOf(path).slice(-count).join(sep);
+    const short = shortPath(path, Math.max(2, count));
+    return short.endsWith(tail) ? { head: short.slice(0, short.length - tail.length), tail } : { head: "", tail: short };
+  });
 }
 
 /** 待裁定數徽章：超過 999 顯示 999+，完整數字在可存取名稱與 title。 */

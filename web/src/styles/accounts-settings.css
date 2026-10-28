@@ -72,11 +72,16 @@ p.section-hint {
   line-height: var(--leading-meta);
 }
 
-/* 兩欄事實（MASTER 6.4 第 5 條）：標籤欄依內容寬，最多 12em；值欄可縮小 */
+/* 兩欄事實（MASTER 6.4 第 5 條）：標籤欄固定 10em（≤ 1100px 時 9em），讓同一頁的各張卡片、各個區塊
+   與額度視窗列的值欄從同一條線開始；放不下的標籤換行；值欄可縮小 */
+:root {
+  --facts-label: 10em;
+}
+
 .settings-facts,
 .profile-facts {
   display: grid;
-  grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
+  grid-template-columns: var(--facts-label) minmax(0, 1fr);
   gap: var(--space-2) var(--space-6);
   margin: 0;
   font-size: var(--text-meta);
@@ -84,7 +89,6 @@ p.section-hint {
 }
 
 :is(.settings-facts, .profile-facts) dt {
-  max-width: 12em;
   color: var(--color-text-muted);
 }
 
@@ -278,9 +282,10 @@ p.section-hint {
   list-style: none;
 }
 
+/* 視窗名稱欄與上方事實的標籤欄同寬，已觀測與推估從同一條線開始 */
 .quota-windows li {
   display: grid;
-  grid-template-columns: 4em minmax(0, max-content) minmax(0, 1fr);
+  grid-template-columns: var(--facts-label) minmax(0, max-content) minmax(0, 1fr);
   gap: var(--space-6);
 }
 
@@ -360,6 +365,20 @@ p.section-hint {
 
 .profile-form .field input {
   font-weight: var(--font-weight-normal);
+}
+
+/* 一頁只留一個主要動作（新增 Profile）：其餘送出鈕改回次要樣式（MASTER 5.1）。
+   需要時可收進 components.css 成為共用的 .btn-secondary */
+.accounts-page button[type="submit"].btn-secondary {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: var(--font-weight-normal);
+}
+
+.accounts-page button[type="submit"].btn-secondary:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
 }
 
 .profile-form [role="alert"] {
@@ -550,6 +569,22 @@ p.backup-drill-result {
   color: var(--color-text);
 }
 
+/* 長說明的其餘部分：預設收合，一行低調的「技術細節」，縮排表示屬於上面那一項 */
+.backup-check-more {
+  margin: var(--space-1) 0 0 var(--space-5);
+  color: var(--color-text-muted);
+}
+
+.backup-check-more summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.backup-check-more p {
+  margin-top: var(--space-2);
+  color: var(--color-text);
+}
+
 .backup-list {
   margin: 0;
   padding-left: var(--space-6);
@@ -627,4 +662,11 @@ p.platform-source {
 
 .platform-checked-on {
   white-space: nowrap;
+}
+
+/* 1024 寬：dl 標籤欄最多 9em（MASTER 第 8 節） */
+@media (max-width: 1100px) {
+  :root {
+    --facts-label: 9em;
+  }
 }
