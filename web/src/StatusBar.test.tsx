@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { profile, recoveryEvent, recoveryStatus, supportedPlatform, unofficialPlatform } from "./fixtures";
@@ -322,6 +322,24 @@ describe("頂部狀態列", () => {
       expect(alert).toHaveTextContent("請釋放資料目錄所在磁碟的空間；空間足夠後 Baton 會自動恢復派工");
       expect(alert).toHaveTextContent("database or disk is full");
       expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+    });
+
+    it("原因的第一句與處理方式直接顯示，其餘與技術細節收進「技術細節」", async () => {
+      const long = {
+        dispatch_halted: true,
+        fault: { ...diskFull!.fault!, summary: "控制資料庫無法寫入。SQLite 回報 SQLITE_FULL（extended code 13）" },
+      };
+      render(<StatusBar client={clientWithStorage(long)} pollMs={5000} />);
+
+      await settle();
+
+      const alert = screen.getByRole("alert");
+      expect(within(alert).getByText("控制資料庫無法寫入。")).toBeVisible();
+      expect(within(alert).getByText("請釋放資料目錄所在磁碟的空間；空間足夠後 Baton 會自動恢復派工")).toBeVisible();
+      const details = within(alert).getByText("技術細節").closest("details")!;
+      expect(details).not.toHaveAttribute("open");
+      expect(within(details).getByText("SQLite 回報 SQLITE_FULL（extended code 13）")).toBeInTheDocument();
+      expect(within(details).getByText("database or disk is full")).toBeInTheDocument();
     });
 
     it("舊版 Runtime 沒有 storage 欄位時不顯示警示", async () => {

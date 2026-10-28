@@ -237,6 +237,66 @@ describe("左側 Workspace 清單", () => {
     expect(screen.getByRole("button", { name: "選擇 筆記" })).not.toHaveAttribute("aria-current");
   });
 
+  it("封存、自動續跑與建立時間收在項目的「管理」選單；Esc 收起並把焦點還給觸發鈕", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} timeZone="Asia/Taipei" />);
+
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+    const menu = within(item).getByText("建立於 2023/11/15 06:13").closest("details")!;
+    const trigger = within(menu).getByLabelText("管理 筆記");
+    expect(menu).not.toHaveAttribute("open");
+    expect(within(menu).getByRole("button", { name: "封存 筆記" })).toBeInTheDocument();
+    expect(await within(menu).findByRole("checkbox", { name: "完全退出後自動續跑 筆記" })).toBeInTheDocument();
+    expect(within(menu).getByRole("checkbox", { name: "跨登入自動續跑 筆記" })).toBeInTheDocument();
+
+    // <summary> 在瀏覽器中原生可用 Enter／空白鍵開啟；jsdom 只模擬點擊
+    await user.click(trigger);
+    expect(menu).toHaveAttribute("open");
+
+    within(menu).getByRole("checkbox", { name: "跨登入自動續跑 筆記" }).focus();
+    await user.keyboard("{Escape}");
+    expect(menu).not.toHaveAttribute("open");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("展開的「管理」選單不被暫停列與下一個項目蓋住：浮層以項目定位，中間沒有層級較低的堆疊脈絡", async () => {
+    // jsdom 不排版，只能檢查決定蓋疊的樣式；實際點擊命中以 Playwright 探針驗證
+    // Vitest 會把 CSS 匯入（含 ?raw）換成空字串，專案也沒有 @types/node，所以以非字面的動態匯入讀檔
+    const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
+    const style = document.createElement("style");
+    style.textContent = fs.readFileSync("src/styles/shell.css", "utf8"); // 測試在 web/ 下執行
+    document.head.append(style);
+    try {
+      const user = userEvent.setup();
+      const paused = { workspace_id: "ws_1", name: "筆記", awaiting_resume: true, paused_by: "full_exit" as const };
+      render(<WorkspaceSidebar client={fakeClient([workspace(), workspace({ id: "ws_2", name: "專案" })], [paused])} />);
+
+      const item = (await screen.findByRole("button", { name: "繼續工作 筆記" })).closest("li")!;
+      await user.click(within(item).getByLabelText("管理 筆記"));
+      const panel = item.querySelector(".workspace-menu-panel")!;
+
+      // 浮層與項目之間的祖先都不定位、不設 z-index：浮層的定位基準是整個項目（寬度以項目為上限），
+      // 它的 --z-popover 也不會被困在 z-index: 1 的選單裡、輸給同一項目的暫停列或下一個項目
+      for (let el = panel.parentElement!; el !== item; el = el.parentElement!) {
+        expect(getComputedStyle(el).position).toBe("static");
+        expect(getComputedStyle(el).zIndex).toMatch(/^(auto|)$/);
+      }
+      expect(getComputedStyle(item).position).toBe("relative");
+      expect(getComputedStyle(item).zIndex).toMatch(/^(auto|)$/);
+      expect(getComputedStyle(panel).zIndex).toBe("var(--z-popover)");
+      expect(getComputedStyle(item.querySelector(".workspace-paused")!).zIndex).toBe("1");
+    } finally {
+      style.remove();
+    }
+  });
+
+  it("待裁定數超過 999 時徽章顯示 999+，完整數字在可存取名稱", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} pendingDecisions={{ ws_1: 1284 }} />);
+
+    const badge = await screen.findByText("待裁定 999+");
+    expect(badge).toHaveAttribute("aria-label", "待裁定 1,284 項");
+  });
+
   it("讀到清單後把使用中的 Workspace 告訴上層，封存後再告知一次", async () => {
     const onWorkspaces = vi.fn();
     const archived = workspace({ id: "ws_2", name: "舊的", status: "archived", archived_at: CREATED_AT + 1 });

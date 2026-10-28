@@ -85,6 +85,12 @@ async function settle(ms = 0) {
 const createForm = () => screen.getByRole("form", { name: "新增 Profile" });
 const fromDirForm = () => screen.getByRole("form", { name: "以既有目錄建立 Profile" });
 
+/** Profile 卡片中某一項事實（dt）的值（dd）；沒有這一項時為 null。 */
+function fact(item: HTMLElement, term: string): HTMLElement | null {
+  const dt = within(item).queryByText(term, { selector: "dt" });
+  return (dt?.nextElementSibling as HTMLElement | null) ?? null;
+}
+
 const overridden = profile({
   id: "prof_2",
   name: "被覆蓋的帳號",
@@ -160,10 +166,11 @@ describe("帳號頁", () => {
     render(<AccountsPage client={fakeClient([outdated, unknown])} />);
 
     const item = (await screen.findByText("舊版")).closest("li")!;
-    expect(within(item).getByText(/Claude Code 版本：2\.0\.5 \(Claude Code\)/, { selector: ".profile-source" })).toBeInTheDocument();
+    expect(fact(item, "Claude Code 版本")).toHaveTextContent("2.0.5 (Claude Code)");
     expect(within(item).getByRole("alert")).toHaveTextContent("低於支援的最低版本");
     const unknownItem = screen.getByText("不明版本").closest("li")!;
-    expect(within(unknownItem).getByText(/原生登入/, { selector: ".profile-source" })).not.toHaveTextContent("Claude Code 版本：");
+    expect(fact(unknownItem, "認證來源")).toHaveTextContent("原生登入");
+    expect(fact(unknownItem, "Claude Code 版本")).toBeNull();
     expect(within(unknownItem).getByRole("alert")).toHaveTextContent("沒有取得 Claude Code 的版本");
   });
 
@@ -277,8 +284,9 @@ describe("帳號頁", () => {
       expect(client.createProfileFromExistingDir).toHaveBeenCalledWith({ name: "工作三", configDir: WORK3_DIR });
       expect(client.createProfile).not.toHaveBeenCalled();
       expect(within(item).getByText("可派工")).toBeInTheDocument();
-      expect(within(item).getByText(/work3@example\.com/, { selector: ".profile-source" })).toBeInTheDocument();
-      expect(within(item).getByText(`外部目錄：${WORK3_DIR}`)).toBeInTheDocument();
+      expect(fact(item, "帳號")).toHaveTextContent("work3@example.com");
+      // 外部目錄縮短顯示，完整路徑在 title
+      expect(within(fact(item, "外部目錄")!).getByTitle(WORK3_DIR)).toBeInTheDocument();
       // 平台建立的 Profile 不標示外部目錄
       expect(within(screen.getByText("主要帳號").closest("li")!).queryByText(/外部目錄/)).not.toBeInTheDocument();
       expect(within(form).getByLabelText("名稱")).toHaveValue("");

@@ -34,6 +34,17 @@ describe("首次啟動精靈", () => {
     expect(screen.getByRole("button", { name: "重新檢查" })).toBeInTheDocument();
   });
 
+  it("官方說明只顯示網域，完整網址在 title 並可複製；狀態以徽章顯示在標題列", async () => {
+    const client = fakeClient(setupStatus({ claude_code: missingClaude, ready: false }));
+    render(<SetupWizard client={client} />);
+
+    const section = await screen.findByRole("region", { name: "Claude Code" });
+    const host = within(section).getByText("code.claude.com");
+    expect(host).toHaveAttribute("title", "https://code.claude.com/docs/en/setup");
+    expect(within(section).getByRole("button", { name: "複製網址" })).toBeInTheDocument();
+    expect(within(section).getByText("缺少")).toHaveClass("badge");
+  });
+
   it("版本過舊時顯示目前版本、最低版本與更新指令", async () => {
     const tooOld = {
       ...okTool,

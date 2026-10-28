@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
+import { CopyButton } from "./LongText";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { BackupSettings } from "./BackupSettings";
 import { ControllerPage } from "./ControllerPage";
@@ -20,13 +21,14 @@ import { SharedSettingsPage } from "./SharedSettingsPage";
 import { StatusBar } from "./StatusBar";
 import { createRuntimeClient, type AppClient, type HealthResponse, type PendingDecisions, type Workspace } from "./runtimeClient";
 import { TaskBoard } from "./TaskBoard";
+import { formatCount, shortPath } from "./textFormat";
 import { TimelinePage } from "./TimelinePage";
 import { UpdateNotice } from "./UpdateNotice";
 import { UpdateSettings } from "./UpdateSettings";
 import { ReviewPage } from "./ReviewPage";
 import { VerificationPage } from "./VerificationPage";
 import { WorkflowPage } from "./WorkflowPage";
-import { WorkspaceSidebar } from "./WorkspaceSidebar";
+import { WORKSPACE_PATH_INPUT_ID, WorkspaceSidebar } from "./WorkspaceSidebar";
 
 /** 頂層頁簽。 */
 type TopTab = "workspace" | "accounts" | "settings";
@@ -202,7 +204,7 @@ function TabList<T extends string>({
             {tab.label}
             {badge > 0 && (
               <span className="tab-badge" title={tab.badgeTitle}>
-                {badge}
+                {formatCount(badge)}
               </span>
             )}
           </button>
@@ -212,10 +214,25 @@ function TabList<T extends string>({
   );
 }
 
-/** 一排頁簽對應的內容區。 */
-function TabPanel<T extends string>({ idPrefix, selected, children }: { idPrefix: string; selected: T; children: React.ReactNode }) {
+/** 一排頁簽對應的內容區；`className` 加在 `.tab-panel` 之後（例如帳號、設定頁的欄寬）。 */
+function TabPanel<T extends string>({
+  idPrefix,
+  selected,
+  className,
+  children,
+}: {
+  idPrefix: string;
+  selected: T;
+  className?: string;
+  children: React.ReactNode;
+}) {
   return (
-    <div role="tabpanel" id={`${idPrefix}-panel`} aria-labelledby={`${idPrefix}-tab-${selected}`} className="tab-panel">
+    <div
+      role="tabpanel"
+      id={`${idPrefix}-panel`}
+      aria-labelledby={`${idPrefix}-tab-${selected}`}
+      className={className ? `tab-panel ${className}` : "tab-panel"}
+    >
       {children}
     </div>
   );
@@ -321,7 +338,7 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
         {client && <UpdateNotice client={client} runtimeStartedAt={health?.started_at ?? null} />}
       </div>
       {client && fullScreenSetup && (
-        <main className="main setup-screen">
+        <main className="main setup-screen settings-column">
           <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
           <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
           <button type="button" className="setup-skip" onClick={() => setSetupSkipped(true)}>
@@ -341,12 +358,11 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
             />
           )}
           <main className="main">
-            <TabPanel idPrefix="top" selected={shell.top}>
-              {client && shell.top === "workspace" && !selected && (
-                <p className="workspace-hint">請從左側選擇或建立 Workspace</p>
-              )}
+            <TabPanel idPrefix="top" selected={shell.top} className={shell.top === "workspace" ? undefined : "settings-column"}>
+              {client && shell.top === "workspace" && !selected && <WorkspaceEmpty />}
               {client && shell.top === "workspace" && selected && (
                 <>
+                  <WorkspaceContext workspace={selected} />
                   <TabList
                     label="Workspace 功能"
                     idPrefix="workspace"
@@ -398,6 +414,36 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
       )}
       {/* 系統匣「完全退出」的停止進度，以覆蓋層顯示 */}
       {client && <ExitProgress client={client} />}
+    </div>
+  );
+}
+
+/** 未選 Workspace 時的空狀態：「建立 Workspace」把焦點移到側欄建立表單的目錄欄位。 */
+function WorkspaceEmpty() {
+  return (
+    <section className="workspace-empty" aria-labelledby="workspace-empty-title">
+      <h2 id="workspace-empty-title">尚未選擇 Workspace</h2>
+      <p className="workspace-hint">請從左側選擇或建立 Workspace</p>
+      <button type="button" className="btn-primary" onClick={() => document.getElementById(WORKSPACE_PATH_INPUT_ID)?.focus()}>
+        建立 Workspace
+      </button>
+    </section>
+  );
+}
+
+/** 頁簽列上方的情境列：目前 Workspace 的名稱與縮短路徑，一行；完整值在 title，路徑可複製（完整名稱在側欄）。 */
+function WorkspaceContext({ workspace }: { workspace: Workspace }) {
+  return (
+    <div className="workspace-context" aria-label="目前的 Workspace">
+      <span className="workspace-context-name truncate" title={workspace.name}>
+        {workspace.name}
+      </span>
+      <span className="workspace-context-path copy-text">
+        <span className="mono truncate" title={workspace.path}>
+          {shortPath(workspace.path)}
+        </span>
+        <CopyButton text={workspace.path} label="複製路徑" />
+      </span>
     </div>
   );
 }
