@@ -161,8 +161,10 @@
   overflow-wrap: anywhere;
 }
 
+/* 主區是 flex 子元素：min-width: 0 讓長內容在主區內換行或捲動，不把整頁撐寬 */
 .main {
   flex: 1;
+  min-width: 0;
   padding: var(--space-7);
 }
 
@@ -274,6 +276,7 @@
 /* 各頁簽內容的標題與間距一致；同一頁簽疊放的功能以相同間距分開 */
 .tab-panel {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-7);
   padding-top: var(--space-6);
 }
@@ -288,6 +291,7 @@
 
 .setup-screen {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-7);
   align-content: start;
 }
