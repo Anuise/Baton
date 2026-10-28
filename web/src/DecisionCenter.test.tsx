@@ -1321,3 +1321,52 @@ describe("裁定中心：長文字的呈現", () => {
     expect(options[1].textContent).toMatch(/…$/);
   });
 });
+
+describe("裁定中心：版面樣式", () => {
+  /** 讀 decisions.css（Vitest 會把 CSS 匯入換成空字串，所以以非字面的動態匯入讀檔，同 WorkspaceSidebar.test.tsx）。 */
+  const decisionsCss = async () => {
+    const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
+    const url: { fileURLToPath(url: string): string } = await import(/* @vite-ignore */ `node:${"url"}`);
+    const here = import.meta.url;
+    return fs.readFileSync(url.fileURLToPath(new URL("./styles/decisions.css", here).href), "utf8");
+  };
+
+  /** 掛上 decisions.css，回傳解析後的樣式表；測試結束時移除。 */
+  const withStyles = async (run: (sheet: CSSStyleSheet) => Promise<void>) => {
+    const style = document.createElement("style");
+    style.textContent = await decisionsCss();
+    document.head.append(style);
+    try {
+      await run(style.sheet!);
+    } finally {
+      style.remove();
+    }
+  };
+
+  it("詳情欄在清單很長時保持可見：sticky、高度不超過視窗，內容在欄內自己捲動", async () => {
+    await withStyles(async () => {
+      renderCenter(fakeClient([decisionView()]));
+      const style = getComputedStyle(await screen.findByRole("article", { name: "裁定詳情" }));
+      expect(style.position).toBe("sticky");
+      expect(style.overflowY).toBe("auto");
+    });
+    // jsdom 不解析 calc()，高度上限直接檢查規則文字
+    expect(await decisionsCss()).toMatch(/\.decision-detail\s*\{[^}]*max-block-size:\s*calc\(100vh\s*-/);
+  });
+
+  it("1024 寬的決策權限表每列上下排列：事項佔整列，內建、目前生效、設定在下一列，設定欄寬不變", async () => {
+    await withStyles(async (sheet) => {
+      const narrow = Array.from(sheet.cssRules).find(
+        (rule): rule is CSSMediaRule => rule instanceof CSSMediaRule && rule.media.mediaText.includes("max-width: 1100px"),
+      )!;
+      const rules = new Map(
+        Array.from(narrow.cssRules)
+          .filter((rule): rule is CSSStyleRule => rule instanceof CSSStyleRule)
+          .flatMap((rule) => rule.selectorText.split(",").map((selector) => [selector.trim(), rule.style] as const)),
+      );
+      expect(rules.get(".decision-authority-table tr")?.getPropertyValue("display")).toBe("grid");
+      expect(rules.get(".decision-authority-table tr")?.getPropertyValue("grid-template-columns")).toMatch(/17em$/);
+      expect(rules.get(".decision-authority-table td:first-child")?.getPropertyValue("grid-column")).toBe("1 / -1");
+    });
+  });
+});
