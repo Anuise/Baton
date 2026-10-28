@@ -1,14 +1,16 @@
 /* ==========================================================================
    主控台與工作
-   工作看板、Task 表單與契約編輯器、主控台。
+   工作看板、整合佇列、Task 表單與契約編輯器（對話框）、主控台。
+   共用的按鈕、徽章、狀態色條、長文字工具見 components.css（MASTER.md 第 10 節）。
    ========================================================================== */
 
 .task-board {
   display: grid;
-  gap: var(--space-6);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-7);
 }
 
-/* 頁面標題與主要動作同一列 */
+/* 頁面標題列：頁名 + 主要動作靠右；按鈕不被擠成兩行 */
 .task-board-header {
   display: flex;
   gap: var(--space-5);
@@ -22,28 +24,72 @@
   margin: 0;
 }
 
+.task-board-header > button {
+  flex: none;
+  white-space: nowrap;
+}
+
 .task-board h3 {
-  font-size: var(--font-size-md);
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
 }
 
-.task-column > h3 {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
+/* --- 整合佇列：一項一列（序號｜標題｜分支｜狀態） --- */
+
+.integration-queue {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.integration-queue p {
+  margin: 0;
   color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-  font-weight: 500;
+  font-size: var(--text-meta);
 }
 
-/* 欄標題的卡片數 */
-.task-count {
-  color: var(--color-text-subtle);
-  font-weight: 400;
+.integration-queue ol {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: integration;
+  font-size: var(--text-meta);
 }
 
-.task-board h4 {
-  font-size: var(--font-size-sm);
+.integration-queue li {
+  display: grid;
+  grid-template-columns: 2.5ch minmax(0, 1fr) minmax(0, 22em) max-content;
+  gap: var(--space-5);
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  counter-increment: integration;
 }
+
+.integration-queue li::before {
+  color: var(--color-text-muted);
+  content: counter(integration) ".";
+  font-variant-numeric: tabular-nums;
+}
+
+/* 處理中的那一項 */
+.integration-queue li[aria-current] {
+  background: var(--color-accent-subtle);
+}
+
+/* 分支依內容寬（短分支不拉滿整欄），太長時在欄寬內截斷 */
+.integration-branch {
+  justify-self: start;
+  max-width: 100%;
+  color: var(--color-text-muted);
+}
+
+/* --- 看板：欄寬固定、水平捲動；兩側以漸層提示還有欄位 --- */
 
 .task-columns {
   display: flex;
@@ -51,27 +97,83 @@
   align-items: flex-start;
   padding-bottom: var(--space-4);
   overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+/* 捲動驅動的邊緣漸層：還能往左／右捲時，該側淡出 32px；沒有水平捲動時不套用遮罩 */
+@property --task-fade-start {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --task-fade-end {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@supports (animation-timeline: scroll()) {
+  .task-columns {
+    animation: task-columns-fade linear both;
+    animation-timeline: scroll(self inline);
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 var(--task-fade-start),
+      #000 calc(100% - var(--task-fade-end)),
+      transparent 100%
+    );
+  }
+}
+
+@keyframes task-columns-fade {
+  0% {
+    --task-fade-start: 0px;
+    --task-fade-end: 32px;
+  }
+
+  5% {
+    --task-fade-start: 32px;
+  }
+
+  95% {
+    --task-fade-end: 32px;
+  }
+
+  100% {
+    --task-fade-start: 32px;
+    --task-fade-end: 0px;
+  }
 }
 
 .task-column {
   display: grid;
-  flex: 0 0 240px;
+  flex: 0 0 280px;
   gap: var(--space-4);
   padding: var(--space-4);
   background: var(--color-surface-sunken);
   border-radius: var(--radius-md);
 }
 
+/* 欄標題：狀態名 + 卡片數徽章 */
+.task-column > h3 {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-1) var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+/* --- Task 卡片：標題 2 行 → 種類與 Goal 1 行 → 狀態 1 行 → 詳細資訊（收合）→ 動作
+   外框、內距、字級與狀態色條用共用的 .card、.stripe-*（components.css） --- */
+
 .task-card {
   display: grid;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  font-size: var(--font-size-xs);
-  overflow-wrap: anywhere;
+  gap: var(--space-4);
+  line-height: var(--leading-meta);
 }
 
 .task-card p,
@@ -80,63 +182,104 @@
   margin: 0;
 }
 
+.task-card ul,
+.task-card ol {
+  padding-left: var(--space-6);
+}
+
+.task-board .task-title {
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
+}
+
+.task-meta,
+.task-status {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  min-width: 0;
+}
+
+.task-goal,
+.task-status-text {
+  flex: 1 1 auto;
+}
+
 .task-goal,
 .task-contract-version,
 .task-dependencies {
   color: var(--color-text-muted);
 }
 
-/* 卡片的種類徽章與所屬 Goal 同一列 */
-.task-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: center;
+/* 展開「詳細資訊」時，標題與 Goal 顯示完整文字（清單中截斷的完整取得路徑） */
+.task-card:has(> .task-details[open]) .task-title {
+  display: block;
+  overflow: visible;
 }
 
-.task-kind {
-  padding: 0 var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-full);
-  color: var(--color-text-muted);
+.task-card:has(> .task-details[open]) .task-meta {
+  align-items: flex-start;
 }
 
-/* 次要與技術資訊收合在 details 裡 */
-.task-details,
-.task-run-more {
-  color: var(--color-text-muted);
-}
-
-.task-details summary,
-.task-run-more summary {
-  cursor: pointer;
-}
-
-.task-details[open],
-.task-run-more[open] {
-  display: grid;
-  gap: var(--space-2);
-}
-
-.task-workdir,
-.task-integration,
-.task-handoff,
-.task-budget {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background: var(--color-surface-sunken);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+.task-card:has(> .task-details[open]) .task-goal {
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 
+/* 次要與技術資訊收合在 details 裡 */
+.task-details > summary,
+.task-run-more > summary {
+  color: var(--color-text-muted);
+}
+
+.task-details > summary:hover,
+.task-run-more > summary:hover {
+  color: var(--color-text);
+}
+
+.task-details-body {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+}
+
+/* 細節中的每一段：細線分隔，不另外加框；需要注意時以左側色條表示（MASTER 2.3） */
+.task-details-body > :is(div, p) + :is(div, p) {
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.task-run,
+.task-workdir,
+.task-integration,
+.task-handoff,
+.task-budget,
+.task-queued,
+.task-missing,
+.task-verification-failed,
+.task-run-more[open],
+.task-workdir-cleanup {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.task-missing,
 .task-workdir-failed,
 .task-integration-failed,
 .task-handoff-abandoned,
-.task-budget-exhausted {
-  background: var(--color-danger-subtle);
-  border-color: var(--color-danger-border);
+.task-budget-exhausted,
+.task-verification-failed,
+.task-workdir-cleanup-failed {
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-danger);
+}
+
+.task-missing {
+  border-left-color: var(--color-warning);
+}
+
+.task-missing-unknown strong {
+  color: var(--color-warning);
 }
 
 .task-workdir-removed {
@@ -144,77 +287,30 @@
   text-decoration: line-through;
 }
 
-.task-workdir-cleanup {
-  display: grid;
-  gap: var(--space-2);
-  padding-top: var(--space-2);
-  border-top: 1px dashed var(--color-border);
-}
-
-.task-workdir-cleanup-failed [role="alert"] {
-  color: var(--color-danger);
-}
-
-.task-integration ul,
-.task-handoff ul,
-.task-budget ul,
-.integration-queue ol {
-  padding-left: var(--space-6);
-}
-
-.integration-queue {
-  padding: var(--space-4);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-
-.integration-queue ol {
-  margin: var(--space-2) 0 0;
-}
-
-.integration-queue p {
-  margin: var(--space-2) 0 0;
+.task-guard-source {
   color: var(--color-text-muted);
 }
 
-.task-missing {
-  padding: var(--space-3) var(--space-4);
-  background: var(--color-warning-subtle);
-  border: 1px solid var(--color-warning-border);
-  border-radius: var(--radius-md);
+.task-history {
+  color: var(--color-text-muted);
 }
 
-.task-missing ul,
-.task-history ol {
-  padding-left: var(--space-6);
+/* 契約版本與「契約版本歷史」同一列 */
+.task-contract-version {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
 }
 
-.task-missing-unknown {
-  color: var(--color-warning);
+.task-card pre {
+  font-size: var(--text-caption);
 }
 
-.task-verification,
-.task-verification-failed {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-md);
-}
-
+/* 驗證中：狀態列（徽章 + 檢視驗證），展開後是檢查清單與接受成果 */
 .task-verification {
-  background: var(--color-accent-subtle);
-  border: 1px solid var(--color-accent-border);
-}
-
-.task-verification-failed {
-  background: var(--color-danger-subtle);
-  border: 1px solid var(--color-danger-border);
-}
-
-.task-verification ul,
-.task-verification-failed ul {
-  padding-left: var(--space-6);
+  display: grid;
+  gap: var(--space-3);
 }
 
 .task-verification label {
@@ -222,13 +318,53 @@
   gap: var(--space-2);
 }
 
+/* 動作列：主要動作 + 「更多」；放不下時整組換行 */
 .task-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
+  align-items: center;
+}
+
+.task-actions > button {
+  flex: none;
+  white-space: nowrap;
+}
+
+.task-more-toggle[aria-expanded="true"] {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/* 「更多」展開的動作：直排、靠左；危險動作只用文字色，與其他項目同樣式 */
+.task-more {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+}
+
+.task-more > button {
+  justify-content: flex-start;
+  justify-self: stretch;
+}
+
+.task-more > .btn-danger {
+  border-color: transparent;
+  background: none;
+}
+
+.task-more > .btn-danger:hover:not(:disabled) {
+  background: var(--color-danger-subtle);
 }
 
 .task-dependency-form {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.task-dependency-form label {
   display: grid;
   gap: var(--space-2);
 }
@@ -236,56 +372,204 @@
 .task-card [role="alert"],
 .task-form [role="alert"] {
   color: var(--color-danger);
-  overflow-wrap: anywhere;
 }
 
-.task-form {
-  max-width: 720px;
+/* --- 建立 Task／編輯契約：modal 對話框（MASTER 5.6） --- */
+
+.task-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(720px, calc(100vw - 48px));
+  max-width: none;
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  overflow: hidden;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  color: var(--color-text);
+}
+
+.task-dialog::backdrop {
+  background: var(--color-overlay);
+}
+
+.task-dialog-header {
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.task-dialog-title {
+  display: grid;
+  flex: 1 1 auto;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.task-dialog-title h3 {
+  margin: 0;
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
+}
+
+.task-dialog-title p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+}
+
+.task-dialog-header > button {
+  flex: none;
+  font-size: var(--text-title);
+}
+
+.task-dialog-form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 內容區自己捲動，標題列與動作列固定 */
+.task-dialog-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-6);
+  min-height: 0;
+  padding: var(--space-6);
+  overflow-y: auto;
+}
+
+.task-dialog-footer {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-6);
+  border-top: 1px solid var(--color-border);
+}
+
+/* 動作列靠右：次要在左、主要在右 */
+.task-dialog-footer .form-actions {
+  justify-content: flex-end;
+}
+
+.task-dialog-errors {
+  display: grid;
+  gap: var(--space-1);
+  max-height: 8lh;
+  overflow-y: auto;
+}
+
+.task-dialog-errors p {
+  margin: 0;
+}
+
+/* 欄位：label（13px、600）→ 控制項，間距 4px；控制項維持一般字重 */
+.task-form label {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.task-form :is(input, select, textarea) {
+  font-weight: var(--font-weight-normal);
+}
+
+.task-form-select {
+  width: 100%;
+  max-width: 32em;
+}
+
+.contract-editor {
+  display: grid;
+  gap: var(--space-6);
+}
+
+/* fieldset 內欄位之間 12px（P-TC-2） */
+.contract-field {
+  display: grid;
+  gap: var(--space-5);
+}
+
+/* 模式只有 2～4 個選項：依內容寬，不滿版（P-TC-4） */
+.task-form .contract-mode {
+  justify-self: start;
+  width: auto;
+  max-width: 16em;
+}
+
+.contract-capabilities label:has(input[type="checkbox"]) {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  font-weight: var(--font-weight-normal);
+}
+
+/* --- 主控台 --- */
+
+.controller-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-7);
+}
+
+.controller-page h2,
+.controller-page h3,
+.controller-page p {
+  margin: 0;
+}
+
+/* 頁面標題列：頁名 + 開著時的「結束」 */
+.controller-header {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.controller-header > button {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* 狀態與帳號兩張卡片：寬時並排，1024 寬時上下排列 */
+.controller-layout {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.controller-card {
+  display: grid;
+  gap: var(--space-5);
   padding: var(--space-6);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
 }
 
-.task-form form,
-.contract-editor {
-  display: grid;
-  gap: var(--space-5);
+.controller-card h3 {
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
 }
 
-.task-form label {
-  display: grid;
-  gap: var(--space-2);
-}
-
-.task-form fieldset label:has(input[type="checkbox"]) {
-  display: flex;
-  gap: var(--space-3);
-}
-
-.task-form textarea {
-  min-height: 48px;
-}
-
-
-.controller-page {
-  display: grid;
-  gap: var(--space-6);
-}
-
-.controller-page h2,
-.controller-page p {
-  margin: 0;
-}
-
+/* 事實清單：標籤欄依內容寬、最多 12em，值欄可縮小（MASTER 6.4 第 5 條） */
 .controller-facts {
   display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-3) var(--space-7);
+  grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
+  gap: var(--space-3) var(--space-6);
   margin: 0;
 }
 
 .controller-facts dt {
+  max-width: 12em;
   color: var(--color-text-muted);
 }
 
@@ -298,7 +582,7 @@
   display: inline-flex;
   gap: var(--space-3);
   align-items: center;
-  font-weight: 500;
+  font-weight: var(--font-weight-strong);
 }
 
 .controller-status::before {
@@ -321,13 +605,37 @@
   background: var(--color-danger);
 }
 
-.controller-actions {
+/* 額度：三個小指標，數值在上、標籤在下 */
+.controller-quota {
   display: grid;
-  gap: var(--space-5);
-  justify-items: start;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin: 0;
 }
 
-/* 選擇框與它的動作按鈕排在同一列 */
+.controller-metric {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+}
+
+.controller-metric dt {
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+  line-height: var(--leading-caption);
+}
+
+.controller-metric dd {
+  margin: 0;
+  font-size: var(--text-title);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title);
+}
+
+/* 選擇框與它的動作按鈕排在同一列；選單可縮小，按鈕不換行 */
 .controller-row {
   display: flex;
   flex-wrap: wrap;
@@ -337,40 +645,40 @@
 
 .controller-row label {
   display: grid;
+  flex: 1 1 16em;
   gap: var(--space-2);
   color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-meta);
 }
 
-.controller-switch {
-  display: grid;
-  gap: var(--space-3);
-  padding-top: var(--space-5);
-  border-top: 1px solid var(--color-border);
+.controller-row select {
+  width: 100%;
+}
+
+.controller-row > button {
+  flex: none;
+  white-space: nowrap;
 }
 
 .controller-hint,
-.controller-quota,
 .controller-quota-error {
   color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-meta);
 }
 
+/* 警告與結束原因：左側色條標示，正文維持內文色（MASTER 2.3） */
 .controller-quota-warning,
-.controller-switching {
-  color: var(--color-warning);
-  font-size: var(--font-size-sm);
+.controller-switching,
+.controller-end-reason {
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-warning);
+  font-size: var(--text-meta);
 }
 
 .controller-unavailable-details,
 .controller-more {
   color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.controller-unavailable-details summary,
-.controller-more summary {
-  cursor: pointer;
+  font-size: var(--text-meta);
 }
 
 .controller-unavailable {
@@ -382,15 +690,23 @@
   margin-top: var(--space-3);
 }
 
-/* 開啟失敗或結束的原因 */
-.controller-end-reason {
-  padding: var(--space-4) var(--space-5);
-  background: var(--color-warning-subtle);
-  border: 1px solid var(--color-warning-border);
-  border-radius: var(--radius-md);
-}
-
 .controller-page [role="alert"] {
   color: var(--color-danger);
 }
 
+/* --- 1024 寬（MASTER 8） --- */
+
+@media (max-width: 1100px) {
+  .task-column {
+    flex-basis: 260px;
+  }
+
+  .integration-queue li {
+    grid-template-columns: 2.5ch minmax(0, 1fr) minmax(0, 14em) max-content;
+    gap: var(--space-4);
+  }
+
+  .controller-facts dt {
+    max-width: 9em;
+  }
+}
