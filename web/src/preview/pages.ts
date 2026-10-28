@@ -13,8 +13,8 @@ export interface PreviewPage {
   workspacePage?: string | null;
   /** 以沒有可派工帳號的資料呈現，讓首次啟動精靈以全畫面顯示。 */
   setup?: boolean;
-  /** 截圖前要點擊的按鈕（第一個符合名稱者），用來呈現頁面內才展開的內容。 */
-  click?: string;
+  /** 截圖前依序點擊的按鈕（各取第一個符合名稱者），用來呈現頁面內才展開的內容。 */
+  click?: string[];
 }
 
 export const PREVIEW_PAGES: PreviewPage[] = [
@@ -22,7 +22,7 @@ export const PREVIEW_PAGES: PreviewPage[] = [
   { id: "workspace", label: "Workspace（未選擇）", top: "workspace", workspacePage: null },
   { id: "controller", label: "Workspace／主控台", top: "workspace", workspacePage: "controller" },
   { id: "tasks", label: "Workspace／工作", top: "workspace", workspacePage: "tasks" },
-  { id: "tasks-contract", label: "Workspace／工作（編輯契約）", top: "workspace", workspacePage: "tasks", click: "編輯契約" },
+  { id: "tasks-contract", label: "Workspace／工作（編輯契約）", top: "workspace", workspacePage: "tasks", click: ["更多", "編輯契約"] },
   { id: "decisions", label: "Workspace／裁定", top: "workspace", workspacePage: "decisions" },
   { id: "artifacts", label: "成果與品質／成果", top: "workspace", workspacePage: "artifacts" },
   { id: "reviews", label: "成果與品質／審查", top: "workspace", workspacePage: "reviews" },
