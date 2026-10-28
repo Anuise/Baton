@@ -284,8 +284,13 @@ describe("左側 Workspace 清單", () => {
     // jsdom 不排版，只能檢查決定蓋疊的樣式；實際點擊命中以 Playwright 探針驗證
     // Vitest 會把 CSS 匯入（含 ?raw）換成空字串，專案也沒有 @types/node，所以以非字面的動態匯入讀檔
     const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
+    const url: { fileURLToPath(url: string): string } = await import(/* @vite-ignore */ `node:${"url"}`);
     const style = document.createElement("style");
-    style.textContent = fs.readFileSync("src/styles/shell.css", "utf8"); // 測試在 web/ 下執行
+    // 相對於本檔解析，不依賴 cwd（從 repo 根目錄以 --root web 執行也讀得到）。
+    // import.meta.url 先放進變數：Vite 會把字面的 new URL("…", import.meta.url) 改寫成開發伺服器網址；
+    // jsdom 環境的全域 URL 也不是 Node 的 URL，fs 不收，所以轉成路徑字串
+    const here = import.meta.url;
+    style.textContent = fs.readFileSync(url.fileURLToPath(new URL("./styles/shell.css", here).href), "utf8");
     document.head.append(style);
     try {
       const user = userEvent.setup();
