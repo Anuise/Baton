@@ -1262,6 +1262,33 @@ describe("編輯契約", () => {
     expect(vi.mocked(client.updateTaskContract).mock.calls[0][3]).toBeUndefined();
   });
 
+  it("儲存中按鈕以 aria-disabled 標示、不設 disabled：焦點留在按鈕上，重按不重複送出", async () => {
+    const client = fakeClient({ tasks: [existing()] });
+    let finish: () => void = () => {};
+    vi.mocked(client.updateTaskContract).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = () => resolve(existing());
+      }),
+    );
+    const user = await renderBoard(client);
+
+    await openMore(user, "寫文件");
+    await user.click(within(card("寫文件")).getByRole("button", { name: "編輯契約" }));
+    const form = screen.getByRole("dialog", { name: "編輯契約：寫文件" });
+    const save = within(form).getByRole("button", { name: "儲存契約" });
+    await user.click(save);
+
+    // 瀏覽器會把焦點從 disabled 的按鈕移到 body；aria-disabled 不會
+    await waitFor(() => expect(save).toHaveAttribute("aria-disabled", "true"));
+    expect(save).toBeEnabled();
+    expect(save).toHaveFocus();
+    await user.click(save);
+    expect(client.updateTaskContract).toHaveBeenCalledTimes(1);
+
+    finish();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "編輯契約：寫文件" })).not.toBeInTheDocument());
+  });
+
   it("契約以對話框開啟：焦點在對話框內的第一個欄位；Esc 直接關閉、不送出，焦點回到「更多」", async () => {
     const client = fakeClient({ tasks: [existing()] });
     const user = await renderBoard(client);

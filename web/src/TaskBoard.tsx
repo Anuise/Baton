@@ -1427,6 +1427,8 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    // 儲存中按鈕只標 aria-disabled（保留焦點），重按在這裡擋下
+    if (busy) return;
     const problems: string[] = [];
     if (!task && title.trim() === "") problems.push("請輸入 Task 標題");
     if (!task && goalChoice === NEW_GOAL && goalTitle.trim() === "") problems.push("請輸入 Goal 名稱");
@@ -1540,7 +1542,8 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
             <button type="button" onClick={onClose}>
               關閉
             </button>
-            <button type="submit" disabled={busy}>
+            {/* 不用 disabled：按鈕被停用時瀏覽器會把焦點移到 body，離開對話框 */}
+            <button type="submit" aria-disabled={busy}>
               {task ? "儲存契約" : "建立"}
             </button>
           </div>

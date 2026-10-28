@@ -463,6 +463,23 @@
   justify-content: flex-end;
 }
 
+/* 儲存中：外觀同 :disabled，但不設 disabled（焦點才不會落到 body），hover 也不變色 */
+.task-dialog-footer button[aria-disabled="true"],
+.task-dialog-footer button[aria-disabled="true"]:hover {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 視窗矮（如 1024×768）時多行輸入最多 8 行，不是 16 行：
+   第一組欄位撐滿也不會佔掉整個內容區，下一組的標題會露出來，看得出下方還有欄位 */
+@media (max-height: 800px) {
+  .task-dialog textarea {
+    max-height: 8lh;
+  }
+}
+
 .task-dialog-errors {
   display: grid;
   gap: var(--space-1);
@@ -656,8 +673,10 @@
   font-size: var(--text-meta);
 }
 
+/* 選項文字（帳號名稱＋額度摘要）比選單寬時，收合狀態以「…」結尾，不在字中間切掉 */
 .controller-row select {
   width: 100%;
+  text-overflow: ellipsis;
 }
 
 .controller-row > button {
