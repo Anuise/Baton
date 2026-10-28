@@ -207,12 +207,10 @@ function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZ
         <h4 id={headingId}>{finding.title}</h4>
         {finding.status === "regressed" && <span className="badge badge-danger exploration-badge">回歸失敗</span>}
       </header>
-      {/* 疑點與確認它的重現案例共用一個 dl，標籤欄對齊 */}
+      {/* 摘要：判斷這個疑點要看的欄位；疑點與確認它的重現案例共用一個 dl */}
       <dl className="exploration-summary">
         <dt>Task</dt>
         <dd>{finding.task_title ?? <ShortValue value={finding.task_id} kind="id" field="Task" />}</dd>
-        <dt>章程</dt>
-        <dd>第 {finding.charter_version} 版</dd>
         {finding.feature !== undefined && (
           <>
             <dt>功能</dt>
@@ -227,25 +225,6 @@ function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZ
         <dd>
           <LongText text={finding.actual} />
         </dd>
-        <dt>環境</dt>
-        <dd>{finding.environment}</dd>
-        <dt>證據</dt>
-        <dd>
-          {finding.evidence.length === 0
-            ? "沒有附證據"
-            : finding.evidence.map((id, index) => (
-                <span key={index}>
-                  {index > 0 && "、"}
-                  <ShortValue value={id} kind="id" field={finding.evidence.length === 1 ? "證據" : `證據 ${index + 1}`} />
-                </span>
-              ))}
-        </dd>
-        <dt>回報者</dt>
-        <dd>
-          <ShortValue value={finding.reported_by} kind="id" field="回報者" />
-        </dd>
-        <dt>回報於</dt>
-        <dd>{formatTimestamp(finding.created_at, timeZone)}</dd>
         {finding.unverified_reason !== undefined && (
           <>
             <dt>未驗原因</dt>
@@ -269,12 +248,38 @@ function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZ
         )}
         {finding.case !== undefined && <CaseRows reproduction={finding.case} timeZone={timeZone} />}
       </dl>
-      <h5>重現步驟</h5>
-      <ol className="exploration-list" aria-label={`${finding.title} 的重現步驟`}>
-        {finding.steps.map((step, index) => (
-          <li key={index}>{step}</li>
-        ))}
-      </ol>
+      {/* 重現步驟與回報資訊預設收合，長清單時整頁不會被步驟撐長；dl 與摘要同欄寬，值欄起點一致 */}
+      <details className="exploration-details">
+        <summary>重現步驟與詳細資訊（{finding.steps.length} 步）</summary>
+        <ol className="exploration-list" aria-label={`${finding.title} 的重現步驟`}>
+          {finding.steps.map((step, index) => (
+            <li key={index}>{step}</li>
+          ))}
+        </ol>
+        <dl className="exploration-summary">
+          <dt>章程</dt>
+          <dd>第 {finding.charter_version} 版</dd>
+          <dt>環境</dt>
+          <dd>{finding.environment}</dd>
+          <dt>證據</dt>
+          <dd>
+            {finding.evidence.length === 0
+              ? "沒有附證據"
+              : finding.evidence.map((id, index) => (
+                  <span key={index}>
+                    {index > 0 && "、"}
+                    <ShortValue value={id} kind="id" field={finding.evidence.length === 1 ? "證據" : `證據 ${index + 1}`} />
+                  </span>
+                ))}
+          </dd>
+          <dt>回報者</dt>
+          <dd>
+            <ShortValue value={finding.reported_by} kind="id" field="回報者" />
+          </dd>
+          <dt>回報於</dt>
+          <dd>{formatTimestamp(finding.created_at, timeZone)}</dd>
+        </dl>
+      </details>
       <AttemptList finding={finding} timeZone={timeZone} />
     </section>
   );
