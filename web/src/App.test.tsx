@@ -297,7 +297,7 @@ describe("App 外殼", () => {
     // 原本九個頁簽（含「審查與驗證」的三個小頁簽）的內容全部仍可到達
     it.each([
       ["工作", null, "工作：筆記", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
-      ["裁定", null, "裁定：筆記", () => expect(client.listDecisions).toHaveBeenCalledWith("ws_1")],
+      ["裁定", null, "裁定", () => expect(client.listDecisions).toHaveBeenCalledWith("ws_1")],
       ["成果與品質", "成果", "成果", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
       ["成果與品質", "審查", "審查與設計偏離", () => expect(client.reviews).toHaveBeenCalledWith("ws_1")],
       ["成果與品質", "驗證", "驗證", () => expect(client.verificationOverview).toHaveBeenCalledWith("ws_1")],
@@ -328,7 +328,7 @@ describe("App 外殼", () => {
 
       await user.click(workspaceTab("裁定"));
 
-      expect(await screen.findByRole("heading", { name: "裁定：筆記" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "裁定" })).toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "要保留舊的目錄結構嗎？" })).toBeInTheDocument();
     });
 
