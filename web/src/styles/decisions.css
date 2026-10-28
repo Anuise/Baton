@@ -179,7 +179,14 @@
 
 /* ---- 詳情 ---------------------------------------------------------------- */
 
+/* 清單很長時詳情欄停在視窗內：高度不超過視窗，內容在欄內自己捲動。
+   換一筆時詳情重新掛載，捲動位置回到頂端，標題與安全警示先出現 */
 .decision-detail {
+  position: sticky;
+  top: var(--space-6);
+  box-sizing: border-box;
+  max-block-size: calc(100vh - 2 * var(--space-6));
+  overflow-y: auto;
   min-width: 0;
   padding: var(--space-6) var(--space-7);
   border: 1px solid var(--color-border);
@@ -685,7 +692,38 @@ p.decision-deferred {
     max-width: 9em;
   }
 
-  .decision-authority-level {
-    width: 9em;
+  /* 決策權限表每列上下排列：事項佔整列，內建、目前生效、設定在下一列。
+     事項欄不再被三個層級欄擠到約 236px，長事項名稱不再折成 3 行以上；設定欄維持 17em，選單文字不裁切 */
+  .decision-authority-table,
+  .decision-authority-table thead,
+  .decision-authority-table tbody {
+    display: block;
+  }
+
+  .decision-authority-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 17em;
+    align-items: center;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .decision-authority-table th,
+  .decision-authority-table td {
+    border-bottom: 0;
+  }
+
+  .decision-authority-table td:first-child {
+    grid-column: 1 / -1;
+    padding-bottom: 0;
+  }
+
+  /* 每列第一行就是事項名稱，表頭的「事項」只留給螢幕閱讀器 */
+  .decision-authority-table th:first-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 }
