@@ -190,9 +190,11 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
   const expands = summary?.changes?.expands ?? false;
   return (
     <section className="authorization" aria-label="授權設定">
-      <h2>授權設定：{workspace.name}</h2>
+      <header className="page-header">
+        <h2>授權設定</h2>
+      </header>
       {effective ? (
-        <p>
+        <p className="authorization-current">
           目前授權：revision {effective.revision}，確認於 {formatTimestamp(effective.confirmed_at, timeZone)}，來源：
           {sourceLabel(effective, view)}
         </p>
@@ -216,7 +218,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
       <div className="authorization-templates">
         <h3>建議範本（可編輯）</h3>
         {view.templates.map((template) => (
-          <div key={template.id}>
+          <div key={template.id} className="authorization-template">
             <button type="button" onClick={() => edit(draftFrom(template.grants), template.id)}>
               套用「{template.name}」
             </button>
@@ -231,34 +233,42 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
           const entry = draft[capability];
           return (
             <div key={capability} className="authorization-capability">
-              <label>
+              <label className="authorization-capability-toggle">
                 <input type="checkbox" checked={entry !== undefined} onChange={(e) => toggle(capability, e.target.checked)} />
                 {label}
                 {high_risk && <span className="authorization-high-risk">（高風險，需要明確授權）</span>}
               </label>
+              {/* 欄位就在能力下方，畫面上不重複能力名稱；可存取名稱仍帶能力名稱（MASTER 5.5） */}
               {entry && (
-                <>
+                <div className="authorization-capability-fields">
                   <label>
-                    {label}：目標資源（每行一項）
-                    <textarea value={entry.targets} onChange={(e) => change(capability, "targets", e.target.value)} />
+                    目標資源（每行一項）
+                    <textarea
+                      aria-label={`${label}：目標資源（每行一項）`}
+                      value={entry.targets}
+                      onChange={(e) => change(capability, "targets", e.target.value)}
+                    />
                   </label>
                   <label>
-                    {label}：限制（每行一項）
+                    限制（每行一項）
                     <textarea
+                      aria-label={`${label}：限制（每行一項）`}
                       value={entry.restrictions}
                       onChange={(e) => change(capability, "restrictions", e.target.value)}
                     />
                   </label>
-                </>
+                </div>
               )}
             </div>
           );
         })}
       </fieldset>
 
-      <button type="button" disabled={busy} onClick={() => void review()}>
-        檢視確認摘要
-      </button>
+      <div className="form-actions">
+        <button type="button" disabled={busy} onClick={() => void review()}>
+          檢視確認摘要
+        </button>
+      </div>
 
       {summary && (
         <section className="authorization-summary" aria-label="確認摘要">
@@ -284,13 +294,13 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
             </p>
           ))}
           {summary.requires_risk_acknowledgement && (
-            <label>
+            <label className="authorization-ack">
               <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
               我了解並接受上述風險
             </label>
           )}
           {expands && (
-            <label>
+            <label className="authorization-ack">
               <input
                 type="checkbox"
                 checked={acknowledgedExpansion}
@@ -299,13 +309,16 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
               我了解這會擴大 Workspace 授權
             </label>
           )}
-          <button
-            type="button"
-            disabled={busy || (summary.requires_risk_acknowledgement && !acknowledged) || (expands && !acknowledgedExpansion)}
-            onClick={() => void confirm()}
-          >
-            確認並保存授權
-          </button>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={busy || (summary.requires_risk_acknowledgement && !acknowledged) || (expands && !acknowledgedExpansion)}
+              onClick={() => void confirm()}
+            >
+              確認並保存授權
+            </button>
+          </div>
         </section>
       )}
 
@@ -313,7 +326,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
       {error && <p role="alert">{error}</p>}
 
       {view.revisions.length > 0 && (
-        <section aria-label="授權歷史">
+        <section className="authorization-history" aria-label="授權歷史">
           <h3>授權歷史</h3>
           <ol>
             {[...view.revisions].reverse().map((revision) => (
@@ -354,24 +367,40 @@ function LegacyRunsNotice({
     <section className="authorization-legacy-runs" role="status" aria-labelledby={headingId}>
       <h3 id={headingId}>後續執行已停用，仍有 {runs.length} 個 Run 沿用舊授權</h3>
       <p>已准入的 Run 撤權沒有固定完成時間，可以自行暫停或取消。</p>
-      <ul>
+      {/* 每列＝標題（2 行）與狀態說明｜按鈕組（audit P-AUTH-2） */}
+      <ul className="authorization-legacy-list">
         {runs.map((run) => (
-          <li key={run.run_id}>
-            <strong>{run.task_title}</strong>：沿用 revision {run.authorization_revision}
-            {run.revoked_capabilities.length > 0 && <>；已撤銷：{run.revoked_capabilities.map(labelOf).join("、")}</>}
-            {run.admitted_at !== null && <>；准入於 {formatTimestamp(run.admitted_at, timeZone)}</>}
-            {run.cancel_requested && <p>已要求停止，等待程序確認</p>}
-            <button
-              type="button"
-              disabled={busy || run.cancel_requested}
-              title="停止這個 Run，Task 回到可派工；之後重新派工時依目前授權准入"
-              onClick={() => onPause(run)}
-            >
-              暫停
-            </button>
-            <button type="button" disabled={busy || run.cancel_requested} title="取消整個 Task" onClick={() => onCancel(run)}>
-              取消
-            </button>
+          <li key={run.run_id} className="authorization-legacy-run">
+            <div className="authorization-legacy-text">
+              <strong className="clamp-2" title={run.task_title}>
+                {run.task_title}
+              </strong>
+              <p>
+                沿用 revision {run.authorization_revision}
+                {run.revoked_capabilities.length > 0 && <>；已撤銷：{run.revoked_capabilities.map(labelOf).join("、")}</>}
+                {run.admitted_at !== null && <>；准入於 {formatTimestamp(run.admitted_at, timeZone)}</>}
+              </p>
+              {run.cancel_requested && <p>已要求停止，等待程序確認</p>}
+            </div>
+            <div className="authorization-legacy-actions">
+              <button
+                type="button"
+                disabled={busy || run.cancel_requested}
+                title="停止這個 Run，Task 回到可派工；之後重新派工時依目前授權准入"
+                onClick={() => onPause(run)}
+              >
+                暫停
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                disabled={busy || run.cancel_requested}
+                title="取消整個 Task"
+                onClick={() => onCancel(run)}
+              >
+                取消
+              </button>
+            </div>
           </li>
         ))}
       </ul>

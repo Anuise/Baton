@@ -127,7 +127,7 @@ describe("ControllerPage", () => {
     const archived = profile({ id: "prof_9", name: "舊帳號", status: "archived", dispatchable: false });
     renderPage(fakeClient(null, [notLoggedIn, profile(), archived]));
 
-    expect(await screen.findByRole("heading", { name: "主控台：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "主控台" })).toBeInTheDocument();
     // 標題不等狀態讀回就會出現：等狀態區出現再斷言
     await waitFor(() => expect(fact("狀態")).toHaveTextContent("未開啟"));
     const select = await screen.findByLabelText("Controller 帳號");
@@ -390,6 +390,15 @@ describe("ControllerPage", () => {
     expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
   });
 
+  it("帳號名稱很長時選項只取前段（17 字含…）再接額度：半寬的「換成帳號」選單收合時仍看得到名稱與 5h／7d 額度", async () => {
+    const longName = "長文字壓力測試專用標記的帳號 0：研發部門共用的高額度訂閱（請勿用於個人專案）";
+    const overview = schedulingOverview({ accounts: [accountWith("prof_1", 0.4, 0.15, 1)] });
+    renderPage(fakeClient(null, [profile({ name: longName })], overview));
+
+    const option = await screen.findByRole("option", { name: /（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）$/ });
+    expect(option.textContent).toBe("長文字壓力測試專用標記的帳號 0…（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）");
+  });
+
   it("額度讀取失敗時仍可開啟，只提示無法取得額度", async () => {
     const client = fakeClient();
     client.schedulingOverview.mockRejectedValue(new Error("Runtime 離線"));
@@ -414,12 +423,17 @@ describe("ControllerPage", () => {
     // 用很短的輪詢間隔與真實計時器，避免假計時器在負載下多跑一輪
     renderPage(client, 50);
 
-    const quota = await screen.findByRole("group", { name: "Controller 帳號額度" });
-    expect(quota).toHaveTextContent("5h 剩 70%｜7d 剩 80%｜執行中 Worker 0");
+    // 額度是三個指標（dt 標籤、dd 數值）
+    await screen.findByRole("group", { name: "Controller 帳號額度" });
+    expect(fact("5h 剩餘")).toHaveTextContent("70%");
+    expect(fact("7d 剩餘")).toHaveTextContent("80%");
+    expect(fact("執行中 Worker")).toHaveTextContent("0");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
 
     release();
-    expect(await screen.findByText("5h 剩 45%｜7d 剩 75%｜執行中 Worker 2")).toBeInTheDocument();
+    await waitFor(() => expect(fact("5h 剩餘")).toHaveTextContent("45%"));
+    expect(fact("7d 剩餘")).toHaveTextContent("75%");
+    expect(fact("執行中 Worker")).toHaveTextContent("2");
     expect(client.schedulingOverview.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 

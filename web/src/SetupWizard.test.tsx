@@ -34,6 +34,17 @@ describe("首次啟動精靈", () => {
     expect(screen.getByRole("button", { name: "重新檢查" })).toBeInTheDocument();
   });
 
+  it("官方說明只顯示網域，完整網址在 title 並可複製；狀態以徽章顯示在標題列", async () => {
+    const client = fakeClient(setupStatus({ claude_code: missingClaude, ready: false }));
+    render(<SetupWizard client={client} />);
+
+    const section = await screen.findByRole("region", { name: "Claude Code" });
+    const host = within(section).getByText("code.claude.com");
+    expect(host).toHaveAttribute("title", "https://code.claude.com/docs/en/setup");
+    expect(within(section).getByRole("button", { name: "複製網址" })).toBeInTheDocument();
+    expect(within(section).getByText("缺少")).toHaveClass("badge");
+  });
+
   it("版本過舊時顯示目前版本、最低版本與更新指令", async () => {
     const tooOld = {
       ...okTool,
@@ -105,6 +116,9 @@ describe("首次啟動精靈", () => {
 
     const notice = await screen.findByRole("region", { name: "背景執行" });
     expect(notice).toHaveTextContent("關閉視窗後，Baton 會在背景繼續執行已派出的工作");
+    // 告知是段落：以 LongText 限 3 行，超過時才出現「展開」（jsdom 不排版，這裡只看結構）；
+    // 「展開」與頁面上的「▶ 技術細節」同一種收合摘要樣式（long-text-disclosure）
+    expect(within(notice).getByText(/關閉視窗後，Baton 會在背景繼續執行已派出的工作/).closest(".long-text")).toHaveClass("long-text-disclosure");
 
     await user.click(within(notice).getByRole("button", { name: "我知道了" }));
 

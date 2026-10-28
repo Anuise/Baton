@@ -213,6 +213,47 @@ describe("App 外殼", () => {
       }
       expect(screen.queryByRole("complementary", { name: "Workspace" })).not.toBeInTheDocument();
     });
+
+    it("帳號與設定頁的頂端通知與內容同寬（右緣對齊），Workspace 頁維持滿版", async () => {
+      const user = userEvent.setup();
+      const { container } = render(<App />);
+      const notices = container.querySelector(".app-notices")!;
+      await screen.findByText("Baton 0.2.0 可以更新");
+      expect(notices).not.toHaveClass("settings-column");
+
+      for (const name of ["帳號", "設定"]) {
+        await user.click(topTab(name));
+        expect(notices).toHaveClass("settings-column");
+        expect(screen.getByRole("tabpanel", { name })).toHaveClass("settings-column");
+      }
+
+      await user.click(topTab("Workspace"));
+      expect(notices).not.toHaveClass("settings-column");
+    });
+  });
+
+  describe("Workspace 情境列與空狀態", () => {
+    it("未選 Workspace 時，空狀態的「建立 Workspace」把焦點移到側欄的目錄欄位", async () => {
+      const user = userEvent.setup();
+      render(<App />);
+
+      const empty = await screen.findByRole("region", { name: "尚未選擇 Workspace" });
+      await user.click(within(empty).getByRole("button", { name: "建立 Workspace" }));
+
+      expect(screen.getByLabelText("目錄")).toHaveFocus();
+    });
+
+    it("選中 Workspace 後，頁簽列上方的情境列顯示名稱與路徑（完整值在 title），路徑可複製", async () => {
+      const user = userEvent.setup();
+      render(<App />);
+      await selectWorkspace(user);
+
+      const context = await screen.findByLabelText("目前的 Workspace");
+      expect(within(context).getByTitle("筆記")).toHaveTextContent("筆記");
+      // 路徑與側欄同一種寫法（PathText：開頭與結尾一定顯示，窄時只截斷中段）
+      expect(within(context).getByTitle("C:\\work\\notes")).toHaveClass("path-text");
+      expect(within(context).getByRole("button", { name: "複製路徑" })).toBeInTheDocument();
+    });
   });
 
   describe("Workspace 頁簽", () => {
@@ -231,7 +272,7 @@ describe("App 外殼", () => {
         "更多",
       ]);
       expect(workspaceTab("主控台")).toHaveAttribute("aria-selected", "true");
-      expect(screen.getByRole("tabpanel", { name: "主控台" })).toHaveTextContent("主控台：筆記");
+      expect(within(screen.getByRole("tabpanel", { name: "主控台" })).getByRole("heading", { name: "主控台" })).toBeInTheDocument();
       expect(client.getControllerCli).toHaveBeenCalledWith("ws_1");
       expect(screen.queryByText("請從左側選擇或建立 Workspace")).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "選擇 筆記" })).toHaveAttribute("aria-current", "true");
@@ -264,19 +305,19 @@ describe("App 外殼", () => {
       [
         "成果與品質",
         [
-          ["成果", "成果與驗證：筆記"],
-          ["審查", "審查與設計偏離：筆記"],
-          ["驗證", "驗證：筆記"],
-          ["探索", "探索：筆記"],
+          ["成果", "成果"],
+          ["審查", "審查與設計偏離"],
+          ["驗證", "驗證"],
+          ["探索", "探索"],
         ],
       ],
       [
         "更多",
         [
-          ["知識", "知識：筆記"],
-          ["流程", "流程：筆記"],
-          ["時間線", "時間線：筆記"],
-          ["授權", "模型設定：筆記"],
+          ["知識", "知識"],
+          ["流程", "流程"],
+          ["時間線", "時間線"],
+          ["授權", "模型設定"],
         ],
       ],
     ])("「%s」入口以第二層頁簽切換頁面，一次只顯示一頁", async (section, pages) => {
@@ -296,16 +337,16 @@ describe("App 外殼", () => {
 
     // 原本九個頁簽（含「審查與驗證」的三個小頁簽）的內容全部仍可到達
     it.each([
-      ["工作", null, "工作：筆記", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
-      ["裁定", null, "裁定：筆記", () => expect(client.listDecisions).toHaveBeenCalledWith("ws_1")],
-      ["成果與品質", "成果", "成果與驗證：筆記", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
-      ["成果與品質", "審查", "審查與設計偏離：筆記", () => expect(client.reviews).toHaveBeenCalledWith("ws_1")],
-      ["成果與品質", "驗證", "驗證：筆記", () => expect(client.verificationOverview).toHaveBeenCalledWith("ws_1")],
-      ["成果與品質", "探索", "探索：筆記", () => expect(client.explorationOverview).toHaveBeenCalledWith("ws_1")],
-      ["更多", "知識", "知識：筆記", () => expect(client.listKnowledge).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws_1" }))],
-      ["更多", "流程", "流程：筆記", () => expect(client.workflows).toHaveBeenCalledWith("ws_1")],
-      ["更多", "時間線", "時間線：筆記", () => expect(client.metrics).toHaveBeenCalledWith("ws_1")],
-      ["更多", "授權", "模型設定：筆記", () => expect(client.getAuthorization).toHaveBeenCalledWith("ws_1")],
+      ["工作", null, "工作", () => expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1")],
+      ["裁定", null, "裁定", () => expect(client.listDecisions).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "成果", "成果", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "審查", "審查與設計偏離", () => expect(client.reviews).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "驗證", "驗證", () => expect(client.verificationOverview).toHaveBeenCalledWith("ws_1")],
+      ["成果與品質", "探索", "探索", () => expect(client.explorationOverview).toHaveBeenCalledWith("ws_1")],
+      ["更多", "知識", "知識", () => expect(client.listKnowledge).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws_1" }))],
+      ["更多", "流程", "流程", () => expect(client.workflows).toHaveBeenCalledWith("ws_1")],
+      ["更多", "時間線", "時間線", () => expect(client.metrics).toHaveBeenCalledWith("ws_1")],
+      ["更多", "授權", "模型設定", () => expect(client.getAuthorization).toHaveBeenCalledWith("ws_1")],
     ])("「%s」入口的「%s」頁開啟「%s」，且只顯示這個功能", async (section, page, heading, called) => {
       const user = userEvent.setup();
       render(<App />);
@@ -318,7 +359,7 @@ describe("App 外殼", () => {
       expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
       called();
       expect(screen.queryByRole("tabpanel", { name: "主控台" })).not.toBeInTheDocument();
-      expect(screen.queryByText("主控台：筆記")).not.toBeInTheDocument();
+      expect(screen.queryByRole("heading", { name: "主控台" })).not.toBeInTheDocument();
     });
 
     it("裁定入口開啟裁定中心", async () => {
@@ -328,7 +369,7 @@ describe("App 外殼", () => {
 
       await user.click(workspaceTab("裁定"));
 
-      expect(await screen.findByRole("heading", { name: "裁定：筆記" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "裁定" })).toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "要保留舊的目錄結構嗎？" })).toBeInTheDocument();
     });
 
@@ -339,8 +380,8 @@ describe("App 外殼", () => {
 
       await openPage(user, "更多", "知識");
 
-      expect(await screen.findByRole("heading", { name: "知識：筆記" })).toBeInTheDocument();
-      expect(await screen.findByRole("heading", { name: "專案理解：筆記" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "知識" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "專案理解" })).toBeInTheDocument();
       expect(client.syncUnderstanding).toHaveBeenCalledWith("ws_1");
     });
 
@@ -352,7 +393,7 @@ describe("App 外殼", () => {
       await openPage(user, "更多", "授權");
 
       expect(await screen.findByText(/授權讀取失敗/)).toBeInTheDocument();
-      expect(await screen.findByRole("heading", { name: "模型設定：筆記" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "模型設定" })).toBeInTheDocument();
     });
 
     it("離開再回到同一個入口時停在上次的頁面", async () => {
@@ -360,13 +401,13 @@ describe("App 外殼", () => {
       render(<App />);
       await selectWorkspace(user);
       await openPage(user, "成果與品質", "驗證");
-      await screen.findByRole("heading", { name: "驗證：筆記" });
+      await screen.findByRole("heading", { name: "驗證" });
 
       await user.click(workspaceTab("工作"));
       await user.click(workspaceTab("成果與品質"));
 
       expect(pageTab("成果與品質", "驗證")).toHaveAttribute("aria-selected", "true");
-      expect(await screen.findByRole("heading", { name: "驗證：筆記" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "驗證" })).toBeInTheDocument();
     });
 
     it("切換 Workspace 時停在同一個頁簽", async () => {
@@ -376,11 +417,12 @@ describe("App 外殼", () => {
       render(<App />);
       await selectWorkspace(user, "筆記");
       await openPage(user, "更多", "時間線");
-      expect(await screen.findByRole("heading", { name: "時間線：筆記" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "時間線" })).toBeInTheDocument();
 
       await selectWorkspace(user, "文件");
 
-      expect(await screen.findByRole("heading", { name: "時間線：文件" })).toBeInTheDocument();
+      await waitFor(() => expect(client.timeline).toHaveBeenLastCalledWith("ws_2", undefined));
+      expect(await screen.findByRole("heading", { name: "時間線" })).toBeInTheDocument();
       expect(workspaceTab("更多")).toHaveAttribute("aria-selected", "true");
       expect(pageTab("更多", "時間線")).toHaveAttribute("aria-selected", "true");
       expect(client.timeline).toHaveBeenLastCalledWith("ws_2", undefined);
@@ -414,11 +456,12 @@ describe("App 外殼", () => {
       await selectWorkspace(user, "筆記");
       await openPage(user, "更多", "授權");
       await selectWorkspace(user, "文件");
-      expect(await screen.findByRole("heading", { name: "授權設定：文件" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "授權設定" })).toBeInTheDocument();
+      expect(client.getAuthorization).toHaveBeenLastCalledWith("ws_2");
       // 「筆記」的回應這時才到
       await act(async () => resolveFirst(authorizationOf(workspace, "deploy")));
 
-      expect(screen.getByRole("heading", { name: "授權設定：文件" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "授權設定" })).toBeInTheDocument();
       expect(screen.getByRole("checkbox", { name: /^讀取檔案/ })).toBeChecked();
       expect(screen.getByRole("checkbox", { name: /^部署/ })).not.toBeChecked();
     });
@@ -457,12 +500,13 @@ describe("App 外殼", () => {
       const first = render(<App />);
       await selectWorkspace(user);
       await openPage(user, "更多", "流程");
-      await screen.findByRole("heading", { name: "流程：筆記" });
+      await screen.findByRole("heading", { name: "流程" });
       first.unmount();
 
       render(<App />);
 
-      expect(await screen.findByRole("heading", { name: "流程：筆記" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "流程" })).toBeInTheDocument();
+      expect(client.workflows).toHaveBeenLastCalledWith("ws_1");
       expect(workspaceTab("更多")).toHaveAttribute("aria-selected", "true");
       expect(pageTab("更多", "流程")).toHaveAttribute("aria-selected", "true");
     });
@@ -491,7 +535,7 @@ describe("App 外殼", () => {
       localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify({ top: "不存在", workspaceId: "ws_1", workspaceTab: "不存在" }));
       render(<App />);
 
-      expect(await screen.findByRole("tabpanel", { name: "主控台" })).toHaveTextContent("主控台：筆記");
+      expect(within(await screen.findByRole("tabpanel", { name: "主控台" })).getByRole("heading", { name: "主控台" })).toBeInTheDocument();
       expect(topTab("Workspace")).toHaveAttribute("aria-selected", "true");
     });
 
@@ -499,7 +543,7 @@ describe("App 外殼", () => {
       localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify({ top: "workspace", workspaceId: "ws_1", workspaceTab: "conversation" }));
       render(<App />);
 
-      expect(await screen.findByRole("tabpanel", { name: "主控台" })).toHaveTextContent("主控台：筆記");
+      expect(within(await screen.findByRole("tabpanel", { name: "主控台" })).getByRole("heading", { name: "主控台" })).toBeInTheDocument();
       expect(workspaceTab("主控台")).toHaveAttribute("aria-selected", "true");
     });
 
@@ -566,9 +610,10 @@ describe("App 外殼", () => {
       expect(screen.getByRole("heading", { name: "帳號" })).toBeInTheDocument();
       expect(screen.queryByRole("tablist", { name: "主要區塊" })).not.toBeInTheDocument();
       expect(screen.queryByRole("complementary", { name: "Workspace" })).not.toBeInTheDocument();
-      // 狀態列與更新通知不受影響
+      // 狀態列與更新通知不受影響；通知與精靈內容同寬
       expect(await screen.findByText("待裁定：1")).toBeInTheDocument();
       expect(await screen.findByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+      expect(screen.getByText("Baton 0.2.0 可以更新").closest(".app-notices")).toHaveClass("settings-column");
     });
 
     it("首次精靈中出現可用的 Profile 後回到頁簽畫面", async () => {
@@ -620,13 +665,25 @@ describe("App 外殼", () => {
       expect(client.requestFullExit).toHaveBeenCalledTimes(1);
     });
 
+    it("指定 createClient 時改用它建立用戶端（開發用預覽注入假資料）", async () => {
+      const injected = {
+        ...client,
+        getHealth: vi.fn(async () => ({ status: "ok", product: "預覽產品", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 })),
+      } as AppClient;
+      render(<App createClient={async () => injected} />);
+
+      expect(await screen.findByRole("heading", { name: "預覽產品" })).toBeInTheDocument();
+      expect(injected.getHealth).toHaveBeenCalled();
+    });
+
     it("有新版本時在頁簽之外通知、在設定頁簽顯示更新狀態，不會自己開始更新（spec D-19）", async () => {
       const user = userEvent.setup();
       render(<App />);
 
       expect(await screen.findByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
       await user.click(screen.getByRole("tab", { name: "設定" }));
-      expect(await screen.findByText("狀態：有新版本 0.2.0")).toBeInTheDocument();
+      const updates = await screen.findByRole("region", { name: "更新" });
+      expect(within(updates).getByText("狀態", { selector: "dt" }).nextElementSibling).toHaveTextContent("有新版本 0.2.0");
       // 切換頁簽不影響更新通知
       expect(screen.getByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
       expect(client.applyUpdate).not.toHaveBeenCalled();

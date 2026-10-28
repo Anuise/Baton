@@ -188,13 +188,31 @@ const renderPage = (client: KnowledgeClient & GuardClient) => render(<KnowledgeP
 
 const region = (name: string) => screen.findByRole("region", { name });
 
+/** 卡片動作列上直接看得到的動作（「更多」本身算一個，選單裡的不算）。 */
+const visibleActions = (card: HTMLElement) =>
+  [...card.querySelectorAll(".knowledge-actions > button, .knowledge-actions > details > summary")].map((e) => e.textContent);
+
+/** 從「更多」選單開啟「轉為 Guard」表單；回傳選單。 */
+async function openGuardForm(user: ReturnType<typeof userEvent.setup>, card: HTMLElement) {
+  const summary = within(card).getByText("更多");
+  await user.click(summary);
+  await user.click(within(card).getByRole("button", { name: "轉為 Guard" }));
+  return summary.closest("details")!;
+}
+
+/** 新增條目的表單收在標題列的「新增條目」按鈕後面。 */
+async function openCreateForm(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "新增條目" }));
+  return screen.getByRole("form", { name: "新增條目" });
+}
+
 describe("知識", () => {
   it("以目前的 Workspace 讀取有效條目與含無效的條目", async () => {
     const client = fakeClient([]);
 
     renderPage(client);
 
-    expect(await screen.findByRole("heading", { name: "知識：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "知識" })).toBeInTheDocument();
     await waitFor(() => expect(client.listKnowledge).toHaveBeenCalledTimes(2));
     expect(client.listKnowledge).toHaveBeenCalledWith({ workspaceId: "ws_1", q: undefined, includeInactive: false });
     expect(client.listKnowledge).toHaveBeenCalledWith({ workspaceId: "ws_1", q: undefined, includeInactive: true });
@@ -245,12 +263,21 @@ describe("知識", () => {
 
       const section = await region("待確認的候選教訓");
       const card = within(section).getByRole("article", { name: "測試前清空快取" });
-      expect(card).toHaveTextContent("候選・尚未驗證");
+      expect(within(card).getByText("未驗證")).toHaveAttribute("title", expect.stringContaining("候選，尚未驗證"));
       expect(card).toHaveTextContent("來源：Agent（Run run_7，第 2 次，Task task_3）");
       expect(card).toHaveTextContent("疑似快取殘留（待驗）");
       expect(card).toHaveTextContent("證據：run_7 的日誌第 40 行");
       expect(within(section).getByRole("heading", { name: "待確認的候選教訓（1）" })).toBeInTheDocument();
       expect(within(await region("有效條目")).queryByRole("article", { name: "測試前清空快取" })).not.toBeInTheDocument();
+    });
+
+    it("候選卡片直接顯示確認、撤銷、詳情三個動作（MASTER 5.1），撤銷是危險按鈕", async () => {
+      // 預覽資料的候選教訓帶 effective: true；不能因此多出「轉為 Guard」
+      renderPage(fakeClient([{ ...candidate, effective: true }]));
+
+      const card = within(await region("待確認的候選教訓")).getByRole("article", { name: "測試前清空快取" });
+      expect(visibleActions(card)).toEqual(["確認為已驗證", "撤銷", "詳情"]);
+      expect(within(card).getByRole("button", { name: "撤銷" })).toHaveClass("btn-danger");
     });
 
     it("Controller 提交的候選教訓顯示 Controller 與來源 Task", async () => {
@@ -364,6 +391,7 @@ describe("知識", () => {
     renderPage(client);
 
     const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+    await user.click(within(card).getByText("更多"));
     await user.click(within(card).getByRole("button", { name: "淘汰" }));
     await user.type(within(card).getByLabelText("淘汰原因"), "已改用自動備份");
     await user.click(within(card).getByRole("button", { name: "確認淘汰" }));
@@ -377,6 +405,59 @@ describe("知識", () => {
     expect(retired).toHaveTextContent("原因：已改用自動備份");
     // 已淘汰的條目沒有操作，只能看詳情
     expect(within(retired).getAllByRole("button").map((b) => b.textContent)).toEqual(["詳情"]);
+  });
+
+  it("有效的已驗證教訓直接顯示修正、詳情與「更多」；轉為 Guard、撤銷、淘汰在「更多」中", async () => {
+    renderPage(fakeClient([entry()]));
+
+    const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+    expect(visibleActions(card)).toEqual(["修正", "詳情", "更多"]);
+    const menu = card.querySelector(".more-menu-list") as HTMLElement;
+    expect(within(menu).getAllByRole("button").map((b) => b.textContent)).toEqual(["轉為 Guard", "撤銷", "淘汰"]);
+  });
+
+  describe("「更多」選單", () => {
+    const openMenu = async (user: ReturnType<typeof userEvent.setup>) => {
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      const summary = within(card).getByText("更多");
+      await user.click(summary);
+      const menu = summary.closest("details")!;
+      expect(menu.open).toBe(true);
+      return { card, summary, menu };
+    };
+
+    it("按 Esc 關閉選單，焦點回到「更多」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { card, summary, menu } = await openMenu(user);
+
+      within(card).getByRole("button", { name: "淘汰" }).focus();
+      await user.keyboard("{Escape}");
+
+      expect(menu.open).toBe(false);
+      expect(summary).toHaveFocus();
+    });
+
+    it("點選單外面時關閉選單", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { menu } = await openMenu(user);
+
+      await user.click(screen.getByRole("heading", { name: "部署前先備份資料庫" }));
+
+      expect(menu.open).toBe(false);
+    });
+
+    it("選了撤銷後焦點移到原因欄，不會掉到 body", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { card, menu } = await openMenu(user);
+
+      await user.click(within(card).getByRole("button", { name: "撤銷" }));
+
+      expect(menu.open).toBe(false);
+      expect(within(card).getByLabelText("撤銷原因")).toHaveFocus();
+    });
   });
 
   it("別人已改過（revision 衝突）時提示已重新整理並重新讀取", async () => {
@@ -403,6 +484,7 @@ describe("知識", () => {
     renderPage(client);
 
     const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+    await user.click(within(card).getByText("更多"));
     await user.click(within(card).getByRole("button", { name: "撤銷" }));
     await user.type(within(card).getByLabelText("撤銷原因"), "錯誤");
     await user.click(within(card).getByRole("button", { name: "確認撤銷" }));
@@ -535,12 +617,36 @@ describe("知識", () => {
     expect(screen.queryByRole("region", { name: "條目詳情" })).not.toBeInTheDocument();
   });
 
+  it("詳情中的標籤完整顯示（不截斷）；卡片中的標籤截斷、完整文字在 title", async () => {
+    const user = userEvent.setup();
+    const longTag = "very-long-tag-without-spaces-for-layout-stress-testing";
+    const current = entry({ content: { ...entry().content, tags: ["部署", longTag] } });
+    const client = fakeClient([current]);
+    client.knowledgeDetail.mockResolvedValue({
+      entry: current,
+      versions: [{ version: 1, content: current.content, note: null, created_at: T0 }],
+      history: [],
+    });
+    renderPage(client);
+
+    const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+    const cardTags = within(card).getByRole("list", { name: "標籤" });
+    expect(cardTags).not.toHaveClass("knowledge-tags-full");
+    expect(within(cardTags).getByText(longTag)).toHaveAttribute("title", longTag);
+
+    await user.click(within(card).getByRole("button", { name: "詳情" }));
+    const detail = await region("條目詳情");
+    const detailTags = await within(detail).findByRole("list", { name: "標籤" });
+    expect(detailTags).toHaveClass("knowledge-tags-full");
+    expect(within(detailTags).getByText(longTag)).not.toHaveAttribute("title");
+  });
+
   describe("新增條目", () => {
     it("教訓欄位只在種類為教訓時顯示", async () => {
       const user = userEvent.setup();
       renderPage(fakeClient([]));
 
-      const form = await screen.findByRole("form", { name: "新增條目" });
+      const form = await openCreateForm(user);
       expect(within(form).getByLabelText("觸發條件")).toBeInTheDocument();
 
       await user.selectOptions(within(form).getByLabelText("種類"), "決策");
@@ -552,7 +658,7 @@ describe("知識", () => {
       const client = fakeClient([]);
       renderPage(client);
 
-      const form = await screen.findByRole("form", { name: "新增條目" });
+      const form = await openCreateForm(user);
       await user.type(within(form).getByLabelText("標題"), "不要在週五部署");
       await user.type(within(form).getByLabelText("內文"), "週末沒人值班");
       await user.type(within(form).getByLabelText("觸發條件"), "週五下午");
@@ -578,7 +684,7 @@ describe("知識", () => {
       const client = fakeClient([]);
       renderPage(client);
 
-      const form = await screen.findByRole("form", { name: "新增條目" });
+      const form = await openCreateForm(user);
       await user.selectOptions(within(form).getByLabelText("種類"), "決策");
       await user.selectOptions(within(form).getByLabelText("範圍"), "全域");
       await user.type(within(form).getByLabelText("標題"), "統一使用 pnpm");
@@ -601,7 +707,7 @@ describe("知識", () => {
       client.createKnowledge.mockRejectedValueOnce(new Error("標題最多 200 個字元"));
       renderPage(client);
 
-      const form = await screen.findByRole("form", { name: "新增條目" });
+      const form = await openCreateForm(user);
       await user.click(within(form).getByRole("button", { name: "新增" }));
       expect(within(form).getByRole("alert")).toHaveTextContent("請輸入標題");
       expect(client.createKnowledge).not.toHaveBeenCalled();
@@ -644,7 +750,8 @@ describe("知識", () => {
       expect(within(active).getByRole("button", { name: "停用" })).toBeInTheDocument();
 
       const disabled = within(section).getByRole("listitem", { name: "工具限制：Task 不得要求「部署」" });
-      expect(disabled).toHaveTextContent("不生效：已停用");
+      expect(within(disabled).getByText("不生效")).toBeInTheDocument();
+      expect(disabled).toHaveTextContent("原因：已停用");
       expect(disabled).toHaveTextContent("攔下 0 次・最近攔下：尚無");
       expect(within(disabled).getByRole("button", { name: "啟用" })).toBeInTheDocument();
     });
@@ -661,7 +768,8 @@ describe("知識", () => {
 
       expect(client.disableGuard).toHaveBeenCalledWith("gd_1", 2);
       expect(await within(item).findByRole("button", { name: "啟用" })).toBeInTheDocument();
-      expect(item).toHaveTextContent("不生效：已停用");
+      expect(within(item).getByText("不生效")).toBeInTheDocument();
+      expect(item).toHaveTextContent("原因：已停用");
 
       await user.click(within(item).getByRole("button", { name: "啟用" }));
       expect(client.enableGuard).toHaveBeenCalledWith("gd_1", 3);
@@ -699,19 +807,34 @@ describe("知識", () => {
       expect(within(item).queryByRole("alert")).not.toBeInTheDocument();
     });
 
-    it("只有有效的教訓可以轉為 Guard", async () => {
+    it("只有有效的已驗證教訓可以轉為 Guard（在「更多」選單中）", async () => {
       renderPage(
         fakeClient([
           entry(),
           entry({ id: "kn_f", kind: "fact", content: { title: "伺服器在台北", body: "", tags: [], evidence: [], lesson: null } }),
-          candidate,
+          // 候選即使帶 effective（預覽資料就是這樣）也不能轉為 Guard
+          { ...candidate, effective: true },
         ]),
       );
 
       const lesson = await screen.findByRole("article", { name: "部署前先備份資料庫" });
-      expect(within(lesson).getByRole("button", { name: "轉為 Guard" })).toBeInTheDocument();
+      expect(within(lesson.querySelector(".more-menu-list") as HTMLElement).getByRole("button", { name: "轉為 Guard" })).toBeInTheDocument();
       expect(within(screen.getByRole("article", { name: "伺服器在台北" })).queryByRole("button", { name: "轉為 Guard" })).toBeNull();
-      expect(within(screen.getByRole("article", { name: "測試前清空快取" })).queryByRole("button", { name: "轉為 Guard" })).toBeNull();
+      // 帶 effective 的候選也會出現在有效條目，兩張卡片都沒有
+      for (const card of screen.getAllByRole("article", { name: "測試前清空快取" })) {
+        expect(within(card).queryByRole("button", { name: "轉為 Guard" })).toBeNull();
+      }
+    });
+
+    it("選了「轉為 Guard」後選單收起，焦點移到規則種類", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      const menu = await openGuardForm(user, card);
+
+      expect(menu.open).toBe(false);
+      expect(within(card).getByLabelText("規則種類")).toHaveFocus();
     });
 
     it("轉為 Guard：啟動前檢查送出契約欄位與必須提到的文字，成功後重新讀取 Guard 清單", async () => {
@@ -721,7 +844,7 @@ describe("知識", () => {
 
       const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
       await waitFor(() => expect(client.listGuards).toHaveBeenCalledTimes(1));
-      await user.click(within(card).getByRole("button", { name: "轉為 Guard" }));
+      await openGuardForm(user, card);
       const form = within(card).getByRole("form", { name: "轉為 Guard" });
 
       // 沒填文字時提示且不送出
@@ -748,7 +871,7 @@ describe("知識", () => {
       renderPage(client);
 
       const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
-      await user.click(within(card).getByRole("button", { name: "轉為 Guard" }));
+      await openGuardForm(user, card);
       let form = within(card).getByRole("form", { name: "轉為 Guard" });
       await user.selectOptions(within(form).getByLabelText("規則種類"), "工具限制");
       await user.selectOptions(within(form).getByLabelText("禁止要求的能力"), "部署");
@@ -757,7 +880,7 @@ describe("知識", () => {
       expect(client.createGuard).toHaveBeenLastCalledWith({ lesson_id: "kn_1", rule: { kind: "tool_restriction", capability: "deploy" } });
 
       await waitFor(() => expect(within(card).queryByRole("form", { name: "轉為 Guard" })).not.toBeInTheDocument());
-      await user.click(within(card).getByRole("button", { name: "轉為 Guard" }));
+      await openGuardForm(user, card);
       form = within(card).getByRole("form", { name: "轉為 Guard" });
       await user.selectOptions(within(form).getByLabelText("規則種類"), "重試政策");
       const count = within(form).getByLabelText("同一份契約失敗幾次後不再派工");
@@ -782,7 +905,7 @@ describe("知識", () => {
       renderPage(client);
 
       const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
-      await user.click(within(card).getByRole("button", { name: "轉為 Guard" }));
+      await openGuardForm(user, card);
       await user.selectOptions(within(card).getByLabelText("規則種類"), "工具限制");
       await user.click(within(card).getByRole("button", { name: "建立 Guard" }));
 

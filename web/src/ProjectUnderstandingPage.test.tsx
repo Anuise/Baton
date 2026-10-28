@@ -87,7 +87,7 @@ describe("專案理解", () => {
     const client = fakeClient();
     renderPage(client);
 
-    expect(await screen.findByRole("heading", { name: "專案理解：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "專案理解" })).toBeInTheDocument();
     await screen.findByRole("region", { name: "Project Brief" });
     expect(client.syncUnderstanding).toHaveBeenCalledWith("ws_1");
     expect(client.understanding).not.toHaveBeenCalled();
@@ -135,6 +135,18 @@ describe("專案理解", () => {
     expect(glossary[0]).not.toHaveTextContent("docs/workspace.md:");
     expect(glossary[1]).toHaveTextContent("https://example.test/spec・版本 2026-10-01・查驗於 2023/11/15 06:14");
     expect(glossary[1]).not.toHaveTextContent("已變更");
+  });
+
+  it("來源的分隔號「・」接在前一段的結尾：窄欄換行時新的一行不會以「・」開頭", async () => {
+    renderPage(fakeClient());
+    await screen.findByRole("region", { name: "Project Brief" });
+
+    const source = within(screen.getByRole("list", { name: "Workspace 的來源" })).getAllByRole("listitem")[0];
+    // 每一段是 flex 中各自換行的單位；文字節點也會成為一段，所以只能有元素子節點
+    const parts = [...source.childNodes].map((node) => node.textContent ?? "");
+    expect(source.childNodes).toHaveLength(source.children.length);
+    expect(parts.filter((part) => part.startsWith("・"))).toEqual([]);
+    expect(parts.slice(0, -1).every((part) => part.endsWith("・"))).toBe(true);
   });
 
   it("沒有任何項目時說明 Controller 尚未建立專案理解", async () => {

@@ -50,7 +50,7 @@ export function LoginStartupSettings({ client }: Props) {
       {loaded.state === "failed" && <p role="alert">無法取得登入時自動啟動設定：{loaded.reason}</p>}
       {loaded.state === "ready" && (
         <>
-          <label>
+          <label className="login-startup-toggle">
             <input
               type="checkbox"
               checked={loaded.view.enabled}

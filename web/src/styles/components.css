@@ -1,0 +1,661 @@
+/* ==========================================================================
+   共用元件
+   全站共用、不屬於任何單一頁面的元件與工具 class（design-system/baton/MASTER.md 第 5、6 節）：
+   長文字工具、按鈕變體、徽章、卡片與狀態色條、表單、表格、LongText、HelpTip、完全退出遮罩。
+   用法對照見 MASTER.md 檔尾「實作對照」。
+   ========================================================================== */
+
+/* 長文字工具（MASTER 6.1、6.2）：截斷一定要另有完整文字的取得路徑（title、展開、複製或詳情） */
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 不拆開的詞組（例：標籤欄中的「服務結束日」），放不下時在詞組前換行 */
+.nowrap {
+  white-space: nowrap;
+}
+
+.truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clamp-1,
+.clamp-2,
+.clamp-3 {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+}
+
+.clamp-1 {
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+}
+
+.clamp-2 {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.clamp-3 {
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+/* 單行指令等需要保留換行、又不能撐破版面的程式碼 */
+.pre-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 閱讀寬度：段落以外的長內容容器（dd、li、div）；表單用 measure-form */
+.measure {
+  max-inline-size: var(--measure);
+}
+
+.measure-form {
+  max-inline-size: var(--measure-form);
+}
+
+/* flex 列中放文字、應該縮小的那一個 */
+.grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* flex 列中不該縮小的（按鈕、徽章、時間） */
+.no-shrink {
+  flex: none;
+}
+
+/* 按鈕變體（MASTER 5.1）：每個區域最多一個主要按鈕；按鈕文字不換行，放不下時整組換行 */
+.btn-primary,
+.btn-quiet,
+.btn-danger {
+  white-space: nowrap;
+}
+
+.btn-primary,
+:is(.controller-page, .task-board, .decision-center) .primary-action {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-weight: var(--font-weight-strong);
+}
+
+.btn-primary:hover:not(:disabled),
+:is(.controller-page, .task-board, .decision-center) .primary-action:hover:not(:disabled) {
+  border-color: var(--color-accent-hover);
+  background: var(--color-accent-hover);
+}
+
+/* 低調：卡片內第三順位以後的動作、「展開」「複製」 */
+.btn-quiet {
+  border-color: transparent;
+  background: none;
+  color: var(--color-text-muted);
+}
+
+.btn-quiet:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+/* 危險：取消、封存；確認對話框內的最終確認才用 .btn-danger.btn-solid */
+.btn-danger {
+  border-color: var(--color-danger-border);
+  background: var(--color-surface);
+  color: var(--color-danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+  border-color: var(--color-danger);
+  background: var(--color-danger-subtle);
+}
+
+.btn-danger.btn-solid {
+  border-color: var(--color-danger);
+  background: var(--color-danger);
+  color: var(--color-on-accent);
+}
+
+/* 小尺寸：行內的「展開」「複製」 */
+.btn-sm {
+  min-height: 24px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-caption);
+}
+
+/* 圖示按鈕：28×28 */
+.btn-icon {
+  width: var(--control-height);
+  padding: 0;
+}
+
+/* 徽章與狀態標籤（MASTER 5.4）：一行不換行、不被擠小；計數超過 999 以 formatCount 顯示 999+。
+   .decision-badge、.tab-badge 是改版前的計數徽章，一併保護 */
+.badge,
+.decision-badge,
+.tab-badge {
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 18px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-caption);
+  vertical-align: middle;
+}
+
+.badge-success {
+  border-color: var(--color-success-border);
+  background: var(--color-success-subtle);
+  color: var(--color-success);
+}
+
+.badge-warning {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-subtle);
+  color: var(--color-warning);
+}
+
+.badge-danger {
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+
+.badge-accent {
+  border-color: var(--color-accent-border);
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+/* 知識卡標題列的狀態徽章：標題的 overflow-wrap: anywhere 會讓它被擠成直排，
+   改為不縮小；「不生效：<原因>」這類長文字在上限內換行 */
+.knowledge-badge {
+  flex-shrink: 0;
+  max-width: 16em;
+}
+
+/* 多個徽章並排：整組換行，不縮小單一徽章 */
+.badge-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* 卡片（MASTER 5.2）：細框、無陰影；標題列＝標題（可縮小）＋ 狀態徽章 */
+.card {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-size: var(--text-meta);
+}
+
+.card-header {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+.card-header > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.card-header > :not(:first-child) {
+  flex: none;
+}
+
+/* 狀態色條（MASTER 2.3）：語意色只標示狀態，長內容不整塊上色 */
+.stripe-success,
+.stripe-warning,
+.stripe-danger,
+.stripe-accent {
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+
+.stripe-success {
+  border-left-color: var(--color-success);
+}
+
+.stripe-warning {
+  border-left-color: var(--color-warning);
+}
+
+.stripe-danger {
+  border-left-color: var(--color-danger);
+}
+
+.stripe-accent {
+  border-left-color: var(--color-accent);
+}
+
+/* 表單（MASTER 5.5）：label → 控制項 → 說明 → 錯誤，label 與控制項間 4px */
+.field {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.field > :is(label, .field-label) {
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.field-hint {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+.field-error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--text-meta);
+}
+
+/* 同一列的 label + 控制項（例：方案上限） */
+.field-inline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+/* 控制項寬度依內容性質：短值 12em、選單最多 32em */
+.input-short {
+  width: 12em;
+}
+
+.select-fit {
+  width: 100%;
+  max-width: 32em;
+}
+
+/* flex 中要縮小的選單 */
+.select-shrink {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+}
+
+/* 表單底部的動作列：按鈕依內容寬、整組換行 */
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.form-actions > button {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* 表格（MASTER 5.3）：外層自己水平捲動；資料表以 <colgroup> 指定欄寬，只給一個文字欄彈性寬度 */
+.table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.data-table th {
+  white-space: nowrap;
+}
+
+.data-table td {
+  overflow-wrap: anywhere;
+}
+
+.data-table tbody tr:hover {
+  background: var(--color-surface-hover);
+}
+
+.data-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 頁面標題列（MASTER 第 7 節）：h2 只寫頁名，主要動作靠右；放不下時動作換到下一列 */
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.page-header > h2 {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.page-header > :not(h2) {
+  flex: none;
+}
+
+/* 區塊標題列：h3 + 計數或說明，與內容間距 8px */
+.section-heading {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.section-heading > :is(h3, p) {
+  margin: 0;
+}
+
+.section-heading > p {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 區塊內的空清單：一行 muted 文字，不加框（MASTER 5.7） */
+.empty-note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 「更多」選單：卡片中第二順位以後的動作（MASTER 5.1）；以 <details> 做成浮層。
+   選項是 .more-menu-list 中的 .btn-quiet，破壞性選項再加 .more-menu-danger */
+.more-menu {
+  position: relative;
+}
+
+.more-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: var(--control-height);
+  padding: 0 var(--space-5);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  list-style: none;
+  white-space: nowrap;
+}
+
+.more-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.more-menu > summary::after {
+  margin-left: var(--space-2);
+  content: "▾";
+  font-size: var(--text-caption);
+}
+
+.more-menu > summary:hover,
+.more-menu[open] > summary {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+
+.more-menu-list {
+  position: absolute;
+  z-index: var(--z-popover);
+  top: calc(100% + var(--space-2));
+  left: 0;
+  display: grid;
+  gap: var(--space-1);
+  min-width: 8em;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-md);
+}
+
+.more-menu-list > button {
+  justify-content: flex-start;
+  justify-self: stretch;
+  white-space: nowrap;
+}
+
+/* 撤銷、淘汰這類破壞性選項用 danger 字色 */
+.more-menu-list > .more-menu-danger {
+  color: var(--color-danger);
+}
+
+/* 長文字（LongText.tsx）：限制行數 + 展開／收合，可選複製 */
+.long-text {
+  min-width: 0;
+  max-inline-size: var(--measure);
+}
+
+.long-text-body {
+  margin: 0;
+  white-space: pre-line;
+}
+
+.long-text-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* 收合摘要樣式的「展開／收合」（.long-text-disclosure）：與 <details> 的「▶ 技術細節」相同——
+   原生摘要的三角形（disclosure-closed／open）＋次要文字、沒有按鈕內距，與內文左緣對齊 */
+.long-text-disclosure .long-text-actions > [aria-expanded] {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+.long-text-disclosure .long-text-actions > [aria-expanded]::before {
+  content: counter(list-item, disclosure-closed) " ";
+}
+
+.long-text-disclosure .long-text-actions > [aria-expanded="true"]::before {
+  content: counter(list-item, disclosure-open) " ";
+}
+
+.long-text-disclosure .long-text-actions > [aria-expanded]:hover:not(:disabled) {
+  background: none;
+}
+
+/* 複製按鈕（CopyButton）緊跟在縮短的識別碼、路徑、雜湊後面 */
+.copy-text {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 縮短路徑（PathText）：開頭「C:\…」與結尾不縮小，寬度不夠時中段先以「…」截斷，結尾最後才截斷 */
+.path-text {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.path-text > span {
+  flex: none;
+}
+
+.path-text > .path-text-start,
+.path-text > .path-text-end {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.path-text > .path-text-start {
+  flex: 0 1 auto;
+}
+
+/* 結尾的縮小權重近乎 0：中段還有寬度時不分攤（分攤到不足 1px 也會出現「…」），中段縮到 0 後才截斷 */
+.path-text > .path-text-end {
+  flex: 0 0.0001 auto;
+}
+
+/* 「?」說明提示（HelpTip）：取代解釋性小字，懸停或鍵盤聚焦時浮出 */
+.help-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.help-tip-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-full);
+  background: none;
+  box-shadow: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+  line-height: 1;
+  cursor: help;
+}
+
+.help-tip-trigger:hover,
+.help-tip-trigger:focus-visible {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.help-tip-content {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  z-index: var(--z-popover);
+  width: max-content;
+  max-width: 240px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  color: var(--color-text);
+  font-size: var(--text-caption);
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.exit-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-toast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-overlay);
+}
+
+.exit-progress {
+  display: grid;
+  gap: var(--space-5);
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  padding: var(--space-6);
+  overflow-y: auto;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.exit-progress h2,
+.exit-progress p {
+  margin: 0;
+}
+
+.exit-phase {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+}
+
+.exit-runs,
+.exit-notes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-meta);
+}
+
+.exit-run {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-5);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  overflow-wrap: anywhere;
+}
+
+.exit-run-anomaly strong,
+.exit-progress [role="alert"] {
+  color: var(--color-danger);
+}
+
+.exit-notes {
+  color: var(--color-text-muted);
+}
+
+.exit-anomalies {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-danger-subtle);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-md);
+}
+
+.exit-anomalies ul {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.exit-anomalies button {
+  justify-self: start;
+}
+
+.exit-actions {
+  display: flex;
+  gap: var(--space-4);
+}

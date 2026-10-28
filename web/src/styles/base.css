@@ -1,0 +1,240 @@
+/* ==========================================================================
+   基礎元素
+   以 :where() 包住讓權重為 0，各元件的 class 規則一律可以覆寫。
+   ========================================================================== */
+:where(html) {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+}
+
+/* 長 token 不撐破版面（MASTER 6.2）：全站至少在單字邊界放不下時斷開；
+   會進入 flex／grid 的文字元素用 anywhere，斷點才會算進 min-content、欄位才真的能縮小。
+   不用 word-break: break-all（中文本來就逐字可斷，break-all 只會把英文單字從中間切開） */
+:where(body) {
+  overflow-wrap: break-word;
+}
+
+:where(p, li, dt, dd, td, th, h1, h2, h3, h4, h5, summary, label, legend, figcaption, blockquote) {
+  overflow-wrap: anywhere;
+}
+
+:where(h1, h2, h3, h4, h5) {
+  margin: 0 0 var(--space-4);
+  font-weight: var(--font-weight-strong);
+}
+
+:where(h1) {
+  font-size: var(--text-title-lg);
+  line-height: var(--leading-title-lg);
+}
+
+:where(h2) {
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
+}
+
+:where(h3, h4) {
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
+}
+
+:where(h5) {
+  font-size: var(--text-meta);
+  line-height: var(--leading-title-sm);
+}
+
+/* 段落：閱讀寬度上限約每行 46 個中文字，減少段尾孤字 */
+:where(p) {
+  max-inline-size: var(--measure);
+  margin: 0 0 var(--space-4);
+  text-wrap: pretty;
+}
+
+:where(strong, b) {
+  font-weight: var(--font-weight-strong);
+}
+
+:where(a) {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+:where(a:hover) {
+  text-decoration: underline;
+}
+
+/* 等寬內容（識別碼、路徑、雜湊、URL）：可在任何字元斷開 */
+:where(code, pre, kbd, samp) {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+:where(code, kbd, samp) {
+  overflow-wrap: anywhere;
+}
+
+:where(:not(pre) > code) {
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-sunken);
+}
+
+/* 程式碼區塊：不折行（折行會改變意義），超出時自己捲動，不撐破外層 */
+:where(pre) {
+  box-sizing: border-box;
+  max-width: 100%;
+  max-height: 24lh;
+  padding: var(--space-4) var(--space-5);
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+  line-height: var(--leading-code);
+}
+
+/* 按鈕：預設為次要按鈕（中性細框、不加陰影）；送出鈕（type="submit"）是表單的主要動作，用強調色。
+   其他變體（.btn-primary、.btn-quiet、.btn-danger）在 components.css。
+   在 grid 容器中不被拉滿整列（justify-self 對 flex 與一般區塊沒有作用） */
+:where(button) {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: center;
+  justify-self: start;
+  box-sizing: border-box;
+  min-height: var(--control-height);
+  padding: 0 var(--space-5);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--leading-meta);
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+:where(button:hover:not(:disabled)) {
+  background: var(--color-surface-hover);
+}
+
+:where(button[type="submit"]) {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-weight: var(--font-weight-strong);
+}
+
+:where(button[type="submit"]:hover:not(:disabled)) {
+  border-color: var(--color-accent-hover);
+  background: var(--color-accent-hover);
+}
+
+:where(button:disabled) {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 輸入框與選單：與按鈕同高、同圓角；邊界用 control-border（對底色 ≥ 3:1）。
+   max-width／min-width 讓 <select> 不會被最長的選項撐寬整頁 */
+:where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]), select, textarea) {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-height);
+  padding: var(--space-1) var(--space-4);
+  border: 1px solid var(--color-control-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+/* 多行輸入依內容長高：最少 3 行、最多 16 行，再多就在框內捲動；
+   不支援 field-sizing 的環境維持 rows 屬性的高度 */
+:where(textarea) {
+  min-height: 3lh;
+  max-height: 16lh;
+  padding: var(--space-3) var(--space-4);
+  overflow-y: auto;
+  field-sizing: content;
+  resize: vertical;
+}
+
+:where(input::placeholder, textarea::placeholder) {
+  color: var(--color-text-subtle);
+}
+
+:where(input[type="checkbox"], input[type="radio"]) {
+  accent-color: var(--color-accent);
+}
+
+:where(button, input, select, textarea, summary, a):focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* fieldset 的瀏覽器預設 min-inline-size 是 min-content，長內容會把它撐破 */
+:where(fieldset) {
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+:where(legend) {
+  padding: 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+:where(summary) {
+  cursor: pointer;
+}
+
+/* 表格：只留橫向細線，表頭用次要文字色；資料表的欄寬規則見 components.css 的 .data-table */
+:where(table) {
+  border-collapse: collapse;
+}
+
+:where(th, td) {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+:where(th) {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+:where(hr) {
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}
+
+/* flex／grid 子元素可以縮小（MASTER 6.4）：min-width 預設 auto＝內容的 min-content，
+   一個不能斷的長 token、<pre> 或 <select> 就會把整欄、進而整頁撐寬。
+   只套用在主區的區塊容器；權重為 0，需要最小寬度的元件以自己的 class 覆寫 */
+:where(.main) :where(section, article, aside, header, footer, nav, form, fieldset, label, div, details, dl, dt, dd, ul, ol, li, p, figure, table) {
+  min-width: 0;
+}

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { profileStateLabel } from "./AccountsPage";
+import { profileStateLabel, profileTone } from "./AccountsPage";
+import { CopyButton, LongText } from "./LongText";
+import { docsHost } from "./textFormat";
 import type { AccountClient, SetupStatus, ToolCheck } from "./runtimeClient";
 
 export type SetupClient = Pick<AccountClient, "getSetup" | "recheckSetup" | "acknowledgeBackgroundNotice">;
@@ -23,6 +25,14 @@ const TOOL_STATE_LABEL: Record<ToolCheck["status"], string> = {
   missing: "缺少",
   too_old: "版本過舊",
   unknown: "無法確認",
+};
+
+/** 狀態徽章與左側色條的語意：可用為成功，其餘都需要使用者處理。 */
+const TOOL_TONE: Record<ToolCheck["status"], "success" | "warning"> = {
+  ok: "success",
+  missing: "warning",
+  too_old: "warning",
+  unknown: "warning",
 };
 
 function reasonOf(error: unknown): string {
@@ -74,7 +84,7 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
   const acknowledged = status.background_notice.acknowledged_at !== null;
   if (status.ready && acknowledged) {
     return (
-      <section className="setup-wizard setup-done" aria-label="首次設定">
+      <section className="setup-wizard setup-done stripe-success" aria-label="首次設定">
         <p>首次設定已完成</p>
         <RecheckButton busy={busy} onClick={() => void run(() => client.recheckSetup())} />
       </section>
@@ -93,10 +103,13 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
         {status.profiles.length === 0 ? (
           <p>還沒有帳號 Profile。請在下方「帳號」新增一個，並在終端機完成原生登入。</p>
         ) : (
-          <ul>
+          <ul className="setup-profiles">
             {status.profiles.map((profile) => (
               <li key={profile.id}>
-                <span className="setup-profile-name">{profile.name}</span>：{profileStateLabel(profile)}
+                <span className="setup-profile-name clamp-2" title={profile.name}>
+                  {profile.name}
+                </span>
+                <span className={`badge badge-${profileTone(profile)}`}>{profileStateLabel(profile)}</span>
               </li>
             ))}
           </ul>
@@ -104,11 +117,12 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
         {status.profiles.length > 0 && needsAttention && <p>需要處理的 Profile 請在下方「帳號」處理。</p>}
       </section>
 
-      <section aria-labelledby="setup-notice-title">
+      <section aria-labelledby="setup-notice-title" className="setup-notice">
         <h3 id="setup-notice-title">背景執行</h3>
-        <p>{status.background_notice.text}</p>
+        {/* 告知是段落：限 3 行，超過時可展開（MASTER 6.1）；「展開」與「▶ 技術細節」同一種收合摘要樣式 */}
+        <LongText text={status.background_notice.text} className="long-text-disclosure" />
         {acknowledged ? (
-          <p>已確認</p>
+          <p className="setup-acknowledged">已確認</p>
         ) : (
           <button type="button" disabled={busy} onClick={() => void run(() => client.acknowledgeBackgroundNotice())}>
             我知道了
@@ -133,9 +147,11 @@ function RecheckButton({ busy, onClick }: { busy: boolean; onClick: () => void }
 function ToolSection({ title, check }: { title: string; check: ToolCheck }) {
   const id = `setup-tool-${title.replace(/\W+/g, "-")}`;
   return (
-    <section aria-labelledby={id} className={`setup-tool setup-tool-${check.status}`}>
-      <h3 id={id}>{title}</h3>
-      <p className="setup-tool-state">{TOOL_STATE_LABEL[check.status]}</p>
+    <section aria-labelledby={id} className={`setup-tool card stripe-${TOOL_TONE[check.status]} setup-tool-${check.status}`}>
+      <header className="card-header">
+        <h3 id={id}>{title}</h3>
+        <span className={`badge badge-${TOOL_TONE[check.status]}`}>{TOOL_STATE_LABEL[check.status]}</span>
+      </header>
       {check.version && (
         <p>
           目前版本 {check.version}
@@ -150,13 +166,21 @@ function ToolSection({ title, check }: { title: string; check: ToolCheck }) {
             {check.guidance.map((item) => (
               <li key={item.command}>
                 <span>{item.title}</span>
-                <code>{item.command}</code>
+                <code className="pre-wrap">{item.command}</code>
               </li>
             ))}
           </ul>
         </>
       )}
-      {check.status !== "ok" && <p className="setup-docs">官方說明：{check.docs_url}</p>}
+      {check.status !== "ok" && (
+        <p className="setup-docs copy-text">
+          官方說明：
+          <span className="mono truncate" title={check.docs_url}>
+            {docsHost(check.docs_url)}
+          </span>
+          <CopyButton text={check.docs_url} label="複製網址" />
+        </p>
+      )}
     </section>
   );
 }

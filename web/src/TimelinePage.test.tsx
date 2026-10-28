@@ -87,6 +87,11 @@ const renderPage = (client: ReturnType<typeof fakeClient>) =>
   render(<TimelinePage client={client} workspace={workspace} timeZone="Asia/Taipei" />);
 
 const metric = (name: string) => screen.getByRole("group", { name });
+/** 服務端額度表格中一個帳號那一列的儲存格（帳號、五小時、七日）。 */
+const quotaCells = (name: string) =>
+  within(screen.getByRole("row", { name: `服務端額度 ${name}` }))
+    .getAllByRole("cell")
+    .map((cell) => cell.textContent);
 
 describe("時間線", () => {
   it("觀測指標原樣顯示 Runtime 回傳的數字", async () => {
@@ -99,20 +104,24 @@ describe("時間線", () => {
     expect(metric("工作完成率")).toHaveTextContent("已取消 1");
     expect(metric("交接成功率")).toHaveTextContent("50%（1／2）");
     expect(metric("交接成功率")).toHaveTextContent("已放棄 1・已確認接手 1・進行中 0");
-    expect(metric("恢復耗時")).toHaveTextContent("平均 40 秒・最長 40 秒");
+    expect(metric("恢復耗時")).toHaveTextContent("平均 40 秒");
+    expect(metric("恢復耗時")).toHaveTextContent("最長 40 秒");
     expect(metric("恢復耗時")).toHaveTextContent("已恢復 1 次・尚未恢復 0");
     expect(metric("重複操作事件")).toHaveTextContent("被擋下 3 次");
     expect(metric("重複操作事件")).toHaveTextContent("已成功 2・結果未知 1・他處進行中 0");
     expect(metric("重複操作事件")).toHaveTextContent("變成結果未知 1 次");
-    expect(metric("裁定等待時間")).toHaveTextContent("平均 40 秒・最長 2 分 30 秒");
+    expect(metric("裁定等待時間")).toHaveTextContent("平均 40 秒");
+    expect(metric("裁定等待時間")).toHaveTextContent("最長 2 分 30 秒");
     expect(metric("裁定等待時間")).toHaveTextContent("已回答 2・等待中 1");
     expect(metric("教訓重犯率")).toHaveTextContent("25%（1／4）");
     expect(metric("教訓重犯率")).toHaveTextContent("重犯 2 次・Guard 擋下 1・使用者回報 1");
-    expect(metric("每階段用量")).toHaveTextContent("總計 2,000 tokens（3 個 Run）");
+    expect(metric("每階段用量")).toHaveTextContent("總計 2,000 tokens");
+    expect(metric("每階段用量")).toHaveTextContent("共 3 個 Run");
     expect(metric("每階段用量")).toHaveTextContent("implement：2,000 tokens（3 個 Run）");
-    expect(metric("Context 使用量")).toHaveTextContent("平均 45,000 tokens・最長 60,000 tokens");
+    expect(metric("Context 使用量")).toHaveTextContent("平均 45,000 tokens");
+    expect(metric("Context 使用量")).toHaveTextContent("最長 60,000 tokens");
     expect(metric("Context 使用量")).toHaveTextContent("已回報 2 個 Run・未回報 1 個 Run");
-    expect(screen.getByLabelText("服務端額度 Work-1")).toHaveTextContent("Work-1：五小時 42%・七日 10%");
+    expect(quotaCells("Work-1")).toEqual(["Work-1", "42%", "10%"]);
   });
 
   it("沒有資料的比率、耗時與 Context 顯示「無資料」而不是 0；沒有 Stage 顯示「未分階段」", async () => {
@@ -138,10 +147,13 @@ describe("時間線", () => {
       expect(metric(name)).toHaveTextContent("無資料");
       expect(metric(name)).not.toHaveTextContent("0%");
     }
-    expect(metric("恢復耗時")).toHaveTextContent("平均 無資料・最長 無資料");
-    expect(metric("裁定等待時間")).toHaveTextContent("平均 無資料・最長 無資料");
+    expect(metric("恢復耗時")).toHaveTextContent("平均 無資料");
+    expect(metric("恢復耗時")).toHaveTextContent("最長 無資料");
+    expect(metric("裁定等待時間")).toHaveTextContent("平均 無資料");
+    expect(metric("裁定等待時間")).toHaveTextContent("最長 無資料");
     expect(metric("裁定等待時間")).toHaveTextContent("等待中 1");
-    expect(metric("Context 使用量")).toHaveTextContent("平均 無資料・最長 無資料");
+    expect(metric("Context 使用量")).toHaveTextContent("平均 無資料");
+    expect(metric("Context 使用量")).toHaveTextContent("最長 無資料");
     expect(metric("每階段用量")).toHaveTextContent("未分階段：500 tokens（1 個 Run）");
   });
 
@@ -156,8 +168,9 @@ describe("時間線", () => {
     });
     renderPage(client);
 
-    expect(await screen.findByLabelText("服務端額度 Work-1")).toHaveTextContent("Work-1：五小時 42%・七日 未知");
-    expect(screen.getByLabelText("服務端額度 Work-2")).toHaveTextContent("Work-2：五小時 未知・七日 未知");
+    expect(await screen.findByLabelText("服務端額度 Work-1")).toBeInTheDocument();
+    expect(quotaCells("Work-1")).toEqual(["Work-1", "42%", "未知"]);
+    expect(quotaCells("Work-2")).toEqual(["Work-2", "未知", "未知"]);
   });
 
   it("依 Runtime 回傳的順序列出事件的時間、類別、事件類型、Task 與 Run，不依時間重排", async () => {
@@ -286,6 +299,21 @@ describe("時間線", () => {
     expect(screen.getByRole("option", { name: "task_1" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "task_2" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("過長的 Task 標題在過濾選項中縮短到 60 字並附識別碼後 4 碼，完整標題在 title；選了仍以 Task id 過濾", async () => {
+    const user = userEvent.setup();
+    const longTitle = "很長的標題".repeat(20);
+    const client = fakeClient({ filtered: { task_1: [] } });
+    client.getTaskBoard.mockResolvedValueOnce({ ...board, tasks: [{ id: "task_1", title: longTitle }] } as unknown as TaskBoard);
+    renderPage(client);
+
+    const option = await screen.findByRole("option", { name: /（sk_1）$/ });
+    expect([...(option.textContent ?? "")].length).toBeLessThanOrEqual(60);
+    expect(option).toHaveAttribute("title", longTitle);
+
+    await user.selectOptions(screen.getByLabelText("依 Task 過濾"), option);
+    expect(client.timeline).toHaveBeenLastCalledWith("ws_1", "task_1");
   });
 
   it("沒有事件時顯示空狀態", async () => {

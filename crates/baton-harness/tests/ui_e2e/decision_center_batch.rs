@@ -10,7 +10,7 @@ use baton_ports::AdapterEvent;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
-use crate::browser::{nth, role, text, Browser};
+use crate::browser::{exact_text, label, nth, role, text, Browser};
 use crate::UiE2e;
 
 const WORKSPACES: &str = "/api/v1/workspaces";
@@ -186,7 +186,9 @@ fn tab(name: &str) -> [Value; 2] {
 async fn open_center(browser: &Browser, workspace: &str) {
     browser.click(&[role("button", &format!("選擇 {workspace}"))]).await;
     browser.click(&tab("裁定")).await;
-    browser.wait_visible(&[center(), role("heading", &format!("裁定：{workspace}"))]).await;
+    browser.wait_visible(&[center(), role("heading", "裁定")]).await;
+    // 頁面標題只寫頁名，Workspace 名稱由頁簽列上方的情境列顯示
+    browser.wait_visible(&[label("目前的 Workspace"), exact_text(workspace)]).await;
 }
 
 /// 批次面板中的一項：以問題（fieldset 的 legend）找到它；問題相同時以 `index` 區分。
@@ -256,9 +258,18 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     }
     browser.check(&[center(), role("checkbox", &format!("批次選取 {q_question}"))]).await;
     browser.check(&[center(), role("checkbox", &format!("批次選取 {c_question}"))]).await;
-    browser.wait_visible(&[center(), role("form", "批次處理"), role("heading", "批次處理（4 項）")]).await;
+    // 標題旁的「?」說明按鈕也算在標題的可及名稱內
+    let batch_heading = [center(), role("form", "批次處理"), role("heading", "批次處理（4 項） 批次處理的說明")];
+    browser.wait_visible(&batch_heading).await;
+    // 「不會形成概括授權」的說明收在「?」提示中：點開後才在畫面上；
+    // 讀完點表單底部的提示文字讓焦點與滑鼠離開「?」而收起，免得蓋住下方的選項
+    let tip = [center(), role("form", "批次處理"), role("tooltip", "逐項選擇處理方式；每一項各自保存，不會形成概括授權。")];
+    browser.click(&[center(), role("form", "批次處理"), role("button", "批次處理的說明")]).await;
+    browser.wait_visible(&tip).await;
     let note = browser.text(&[center(), role("form", "批次處理")]).await;
     assert!(note.contains("每一項各自保存，不會形成概括授權"), "{note}");
+    browser.click(&[center(), role("form", "批次處理"), text("每一項都選好處理方式、填妥必填欄位後才能送出")]).await;
+    browser.wait_hidden(&tip).await;
 
     // 每一項各自選擇處理方式：兩筆權限提示各允許本次操作、Agent 問題選「先出貨」、Controller 的動作核准這一次
     accept_in_batch(browser, &push_question, 0, &option_label(&view_a, "allow_once")).await;
@@ -367,7 +378,7 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
         let outcome = [center(), role("article", "裁定詳情"), role("region", "裁定結果")];
         browser.wait_visible(&outcome).await;
         let shown = browser.text(&outcome).await;
-        assert!(shown.contains("使用，已失效"), "單次批准用過一次就失效：{shown}");
+        assert!(shown.contains("使用過，已失效"), "單次批准用過一次就失效：{shown}");
     }
 
     e2e.finish().await;

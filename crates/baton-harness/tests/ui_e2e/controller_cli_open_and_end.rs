@@ -9,7 +9,7 @@
 use reqwest::{Method, StatusCode};
 use serde_json::json;
 
-use crate::browser::{exact_text, role, text};
+use crate::browser::{exact_text, label, role, text};
 use crate::UiE2e;
 
 const WORKSPACES: &str = "/api/v1/workspaces";
@@ -29,11 +29,13 @@ async fn a_controller_cli_opened_from_the_controller_tab_runs_and_ends() {
     let (ws, ws_path) = new_workspace(harness, "beta").await;
     browser.goto(&e2e.server.url("/")).await;
 
-    // 1. 在側欄選 Workspace，切到 Controller 頁簽：尚未開啟
+    // 1. 在側欄選 Workspace，切到「主控台」頁簽：尚未開啟
     browser.click(&[role("button", "選擇 beta")]).await;
-    browser.click(&[role("tablist", "Workspace 功能"), role("tab", "Controller")]).await;
+    browser.click(&[role("tablist", "Workspace 功能"), role("tab", "主控台")]).await;
     let page = role("region", "Controller");
-    browser.wait_visible(&[page.clone(), role("heading", "Controller：beta")]).await;
+    browser.wait_visible(&[page.clone(), role("heading", "主控台")]).await;
+    // 頁面標題只寫頁名，Workspace 名稱由頁簽列上方的情境列顯示
+    browser.wait_visible(&[label("目前的 Workspace"), exact_text("beta")]).await;
     browser.wait_visible(&[page.clone(), exact_text("未開啟")]).await;
 
     // 2. 選 Controller 帳號（兩個帳號都還沒有額度觀測、沒有執行中的 Worker）並開啟
@@ -46,7 +48,7 @@ async fn a_controller_cli_opened_from_the_controller_tab_runs_and_ends() {
     harness.supervise().await;
     browser.wait_visible(&[page.clone(), exact_text("執行中")]).await;
     browser.wait_visible(&[page.clone(), exact_text(CONTROLLER_PROFILE)]).await;
-    browser.wait_visible(&[page.clone(), text("Controller CLI 已開啟，請切到它的終端機視窗")]).await;
+    browser.wait_visible(&[page.clone(), text("已在終端機開啟，請切到該視窗操作")]).await;
     // 只開了一個視窗：以選的帳號目錄、在 Workspace 目錄中執行 Controller 宿主
     let launches = harness.claude_env.controller_terminals();
     assert_eq!(launches.len(), 1, "{launches:?}");

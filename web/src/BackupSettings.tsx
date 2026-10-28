@@ -9,6 +9,7 @@ import type {
   DrillReport,
   RetentionReason,
 } from "./runtimeClient";
+import { splitFirstSentence } from "./textFormat";
 import { formatTimestamp } from "./time";
 
 type StatusState = { state: "loading" } | { state: "ready"; status: BackupStatus } | { state: "failed"; reason: string };
@@ -61,7 +62,7 @@ export function BackupSettings({ client, timeZone }: Props) {
   return (
     <section className="backup-settings" aria-labelledby="backup-title">
       <h2 id="backup-title">備份與還原演練</h2>
-      <p className="backup-policy">
+      <p className="section-hint">
         每日自動備份，保留 7 份每日與 4 份每週備份；每週自動進行一次還原演練。備份不含登入秘密。
       </p>
       {loaded.state === "loading" && <p>載入中…</p>}
@@ -94,10 +95,12 @@ function Drill({ drill, timeZone }: { drill: DrillReport; timeZone?: string }) {
   return (
     <div className="backup-drill">
       {drill.passed ? (
-        <p className="backup-drill-passed">還原演練通過</p>
+        <p className="backup-drill-result">
+          <span className="badge badge-success">還原演練通過</span>
+        </p>
       ) : (
-        <p className="backup-drill-failed" role="alert">
-          還原演練未通過
+        <p className="backup-drill-result" role="alert">
+          <span className="badge badge-danger">還原演練未通過</span>
         </p>
       )}
       <p>演練時間：{formatTimestamp(drill.performed_at, timeZone)}</p>
@@ -106,15 +109,44 @@ function Drill({ drill, timeZone }: { drill: DrillReport; timeZone?: string }) {
         {drill.backup_created_at === null ? "沒有可演練的備份" : formatTimestamp(drill.backup_created_at, timeZone)}
       </p>
       <ul className="backup-checks" aria-label="核對項目">
-        {drill.checks.map((check) => (
-          <li key={check.kind} className={check.passed ? undefined : "backup-check-failed"}>
-            {CHECK_LABELS[check.kind]}：{check.passed ? "通過" : "未通過"}（{check.detail}）
-          </li>
-        ))}
+        {/* 結果是徽章，說明維持一般文字；未通過不再整行紅色粗體。長說明只留摘要，其餘收進「技術細節」 */}
+        {drill.checks.map((check) => {
+          const { summary, rest } = briefDetail(check.detail);
+          return (
+            <li key={check.kind} className={check.passed ? "backup-check" : "backup-check backup-check-failed"}>
+              <span className="backup-check-name">{CHECK_LABELS[check.kind]}：</span>
+              <span className={`badge ${check.passed ? "badge-success" : "badge-danger"}`}>{check.passed ? "通過" : "未通過"}</span>
+              {summary !== "" && <span className="backup-check-detail">（{summary}）</span>}
+              {rest !== "" && (
+                <details className="backup-check-more">
+                  <summary>技術細節</summary>
+                  <p>{rest}</p>
+                </details>
+              )}
+            </li>
+          );
+        })}
       </ul>
       <p>還原時標為中斷的 Run：{drill.interrupted_runs} 個（還原後不會自動重做）</p>
     </div>
   );
+}
+
+/** 核對說明的摘要上限（字元）：約一行，超過就不放在徽章旁。 */
+const BRIEF_MAX = 60;
+
+/**
+ * 核對說明拆成摘要（徽章旁完整顯示）與其餘（收進「技術細節」）。
+ * 先取第一句；第一句太長時改取第一個「：」「；」之前的子句；仍太長就整段收起，結果只看徽章。
+ */
+function briefDetail(detail: string): { summary: string; rest: string } {
+  const sentence = splitFirstSentence(detail);
+  if (sentence.summary.length <= BRIEF_MAX) return sentence;
+  const clause = /[：；]/.exec(detail);
+  if (clause !== null && clause.index > 0 && clause.index <= BRIEF_MAX) {
+    return { summary: detail.slice(0, clause.index).trim(), rest: detail.slice(clause.index + 1).trim() };
+  }
+  return { summary: "", rest: detail.trim() };
 }
 
 /** 一份備份的一行說明；沒有保留原因時省略該段。 */
