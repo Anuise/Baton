@@ -484,22 +484,21 @@ function TagList({ tags }: { tags: string[] }) {
 /** 「更多」選單：卡片中第二順位以後的動作；選了之後收起選單。Esc 收起並把焦點移回「更多」，點選單外面也會收起。 */
 function MoreMenu({ items }: { items: { label: string; onSelect: () => void; danger?: boolean }[] }) {
   const ref = useRef<HTMLDetailsElement>(null);
-  const [open, setOpen] = useState(false);
 
+  // 直接讀 details.open 而不追蹤 toggle 事件：toggle 是排入佇列的 task，開啟後立刻點外面時會晚於 pointerdown
   useEffect(() => {
-    if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) ref.current.open = false;
+      const menu = ref.current;
+      if (menu?.open && !menu.contains(event.target as Node)) menu.open = false;
     };
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [open]);
+  }, []);
 
   return (
     <details
       className="more-menu"
       ref={ref}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
       onKeyDown={(event) => {
         if (event.key !== "Escape" || !event.currentTarget.open) return;
         event.currentTarget.open = false;
