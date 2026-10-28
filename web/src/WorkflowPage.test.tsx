@@ -28,6 +28,12 @@ const renderPage = (client: ReturnType<typeof fakeClient>) =>
   render(<WorkflowPage client={client} workspace={workspace} timeZone="Asia/Taipei" />);
 
 const stage = (name: string) => screen.getByRole("listitem", { name });
+/** 嘗試紀錄一列的前三欄（次數、結果、時間）。 */
+const cells = (row: HTMLElement) =>
+  within(row)
+    .getAllByRole("cell")
+    .slice(0, 3)
+    .map((cell) => cell.textContent);
 
 /** 目前 Stage 是需要裁定的「修正確認」。 */
 const atDecisionGate = workflowView({
@@ -42,7 +48,7 @@ describe("流程", () => {
     const client = fakeClient();
     renderPage(client);
 
-    expect(await screen.findByRole("heading", { name: "流程：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "流程" })).toBeInTheDocument();
     const workflow = await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
     expect(client.workflows).toHaveBeenCalledWith("ws_1");
     expect(workflow).toHaveTextContent("已有第 2 版；此 Workflow 維持第 1 版");
@@ -71,7 +77,7 @@ describe("流程", () => {
     });
     renderPage(fakeClient(workflowList({ workflows: [blocked, completed] })));
 
-    expect(await screen.findByRole("region", { name: "缺陷處理 第 1 版" })).toHaveTextContent("已阻擋：失敗次數用盡");
+    expect(await screen.findByRole("region", { name: "缺陷處理 第 1 版" })).toHaveTextContent("阻擋原因失敗次數用盡");
     const done = screen.getByRole("region", { name: "新功能 第 1 版" });
     expect(done).toHaveTextContent("已完成");
     expect(within(done).queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
@@ -84,26 +90,26 @@ describe("流程", () => {
 
     const reproduction = stage("建立重現");
     expect(reproduction).toHaveTextContent("已通過");
-    expect(reproduction).toHaveTextContent("方法：reproduction");
+    expect(reproduction).toHaveTextContent("方法reproduction");
     expect(within(reproduction).getByRole("list", { name: "建立重現 的進入條件" })).toHaveTextContent("已有症狀描述");
     expect(within(reproduction).getByRole("list", { name: "建立重現 的預期產出" })).toHaveTextContent("能捕捉原症狀的重現");
     expect(within(reproduction).getByRole("list", { name: "建立重現 的允許的動作" })).toHaveTextContent("讀取程式碼撰寫測試");
-    expect(reproduction).toHaveTextContent("預算：最多失敗 3 次");
+    expect(reproduction).toHaveTextContent("預算最多失敗 3 次");
     expect(within(reproduction).getByRole("list", { name: "建立重現 的離開條件" })).toHaveTextContent(
       "能捕捉原症狀的重現（需要：產出物）",
     );
-    expect(reproduction).toHaveTextContent("失敗去向：重試");
+    expect(reproduction).toHaveTextContent("失敗去向重試");
 
     const minimization = stage("縮小範圍");
     expect(minimization).toHaveTextContent("目前");
-    expect(minimization).not.toHaveTextContent("方法：");
-    expect(minimization).toHaveTextContent("失敗去向：回到「建立重現」");
+    expect(minimization).not.toHaveTextContent("方法");
+    expect(minimization).toHaveTextContent("失敗去向回到「建立重現」");
 
     const review = stage("修正確認");
     expect(review).toHaveTextContent("待進行");
     expect(review).toHaveTextContent("裁定 Gate");
     expect(review).toHaveTextContent("（需要：裁定）");
-    expect(review).toHaveTextContent("失敗去向：阻擋");
+    expect(review).toHaveTextContent("失敗去向阻擋");
     expect(within(review).queryByRole("list", { name: "修正確認 的允許的動作" })).not.toBeInTheDocument();
   });
 
@@ -129,21 +135,21 @@ describe("流程", () => {
     renderPage(fakeClient(workflowList({ workflows: [workflow] })));
     await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
 
-    const attempts = within(screen.getByRole("list", { name: "建立重現 的嘗試紀錄" })).getAllByRole("listitem", {
+    const attempts = within(screen.getByRole("table", { name: "建立重現 的嘗試紀錄" })).getAllByRole("row", {
       name: /^第 \d 次$/,
     });
     expect(attempts).toHaveLength(2);
-    expect(attempts[0]).toHaveTextContent("第 1 次・缺少證據・2023/11/15 06:13");
+    expect(cells(attempts[0])).toEqual(["第 1 次", "缺少證據", "2023/11/15 06:13"]);
     expect(within(attempts[0]).getByRole("list", { name: "缺少的證據" })).toHaveTextContent(
       "reproduction：缺少證據：能捕捉原症狀的重現",
     );
     expect(attempts[0]).toHaveTextContent("還沒有重現");
-    expect(attempts[1]).toHaveTextContent("第 2 次・通過・2023/11/15 06:14");
+    expect(cells(attempts[1])).toEqual(["第 2 次", "通過", "2023/11/15 06:14"]);
     expect(within(attempts[1]).getByRole("list", { name: "證據" })).toHaveTextContent("reproduction：產出物 art_1・有效");
     expect(attempts[1]).toHaveTextContent("記錄者：ctl_1・帳號 prof_1");
 
-    const skipped = within(screen.getByRole("list", { name: "修正確認 的嘗試紀錄" })).getByRole("listitem", { name: "第 1 次" });
-    expect(skipped).toHaveTextContent("第 1 次・已跳過");
+    const skipped = within(screen.getByRole("table", { name: "修正確認 的嘗試紀錄" })).getByRole("row", { name: "第 1 次" });
+    expect(cells(skipped).slice(0, 2)).toEqual(["第 1 次", "已跳過"]);
     expect(skipped).toHaveTextContent("approved：裁定 dec_1・尚未完成");
     expect(skipped).toHaveTextContent("記錄者：使用者");
     expect(skipped).not.toHaveTextContent("帳號");
@@ -179,11 +185,12 @@ describe("流程", () => {
     expect(region).toHaveTextContent("Gate 失效後重驗中：重驗通過後，在「縮小範圍」之前仍有效的 Gate 會直接沿用");
     expect(stage("建立重現")).toHaveTextContent("需重驗");
 
-    const attempts = within(screen.getByRole("list", { name: "建立重現 的嘗試紀錄" })).getAllByRole("listitem", {
+    const attempts = within(screen.getByRole("table", { name: "建立重現 的嘗試紀錄" })).getAllByRole("row", {
       name: /^第 \d 次$/,
     });
-    expect(attempts[0]).toHaveTextContent("第 1 次・通過・2023/11/15 06:13・build：c1");
-    expect(attempts[1]).toHaveTextContent("第 2 次・已失效");
+    expect(cells(attempts[0])).toEqual(["第 1 次", "通過", "2023/11/15 06:13"]);
+    expect(attempts[0]).toHaveTextContent("build：c1");
+    expect(cells(attempts[1]).slice(0, 2)).toEqual(["第 2 次", "已失效"]);
     expect(attempts[1]).not.toHaveTextContent("build：");
     expect(within(attempts[1]).getByRole("list", { name: "失效原因" })).toHaveTextContent(
       "reproduction：build 已改變：通過時是 c1，目前是 c2",

@@ -87,7 +87,7 @@ describe("專案理解", () => {
     const client = fakeClient();
     renderPage(client);
 
-    expect(await screen.findByRole("heading", { name: "專案理解：筆記" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "專案理解" })).toBeInTheDocument();
     await screen.findByRole("region", { name: "Project Brief" });
     expect(client.syncUnderstanding).toHaveBeenCalledWith("ws_1");
     expect(client.understanding).not.toHaveBeenCalled();
