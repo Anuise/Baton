@@ -386,6 +386,50 @@ describe("知識", () => {
     expect(within(retired).getAllByRole("button").map((b) => b.textContent)).toEqual(["詳情"]);
   });
 
+  describe("「更多」選單", () => {
+    const openMenu = async (user: ReturnType<typeof userEvent.setup>) => {
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      const summary = within(card).getByText("更多");
+      await user.click(summary);
+      const menu = summary.closest("details")!;
+      expect(menu.open).toBe(true);
+      return { card, summary, menu };
+    };
+
+    it("按 Esc 關閉選單，焦點回到「更多」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { card, summary, menu } = await openMenu(user);
+
+      within(card).getByRole("button", { name: "淘汰" }).focus();
+      await user.keyboard("{Escape}");
+
+      expect(menu.open).toBe(false);
+      expect(summary).toHaveFocus();
+    });
+
+    it("點選單外面時關閉選單", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { menu } = await openMenu(user);
+
+      await user.click(screen.getByRole("heading", { name: "部署前先備份資料庫" }));
+
+      expect(menu.open).toBe(false);
+    });
+
+    it("選了撤銷後焦點移到原因欄，不會掉到 body", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { card, menu } = await openMenu(user);
+
+      await user.click(within(card).getByRole("button", { name: "撤銷" }));
+
+      expect(menu.open).toBe(false);
+      expect(within(card).getByLabelText("撤銷原因")).toHaveFocus();
+    });
+  });
+
   it("別人已改過（revision 衝突）時提示已重新整理並重新讀取", async () => {
     const user = userEvent.setup();
     const client = fakeClient([candidate]);

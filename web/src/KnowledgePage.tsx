@@ -481,18 +481,38 @@ function TagList({ tags }: { tags: string[] }) {
   );
 }
 
-/** 「更多」選單：卡片中第二順位以後的動作；選了之後收起選單。 */
-function MoreMenu({ items }: { items: { label: string; onSelect: () => void }[] }) {
+/** 「更多」選單：卡片中第二順位以後的動作；選了之後收起選單。Esc 收起並把焦點移回「更多」，點選單外面也會收起。 */
+function MoreMenu({ items }: { items: { label: string; onSelect: () => void; danger?: boolean }[] }) {
   const ref = useRef<HTMLDetailsElement>(null);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) ref.current.open = false;
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
   return (
-    <details className="more-menu" ref={ref}>
+    <details
+      className="more-menu"
+      ref={ref}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !event.currentTarget.open) return;
+        event.currentTarget.open = false;
+        event.currentTarget.querySelector("summary")?.focus();
+      }}
+    >
       <summary>更多</summary>
       <div className="more-menu-list">
         {items.map((item) => (
           <button
             key={item.label}
             type="button"
-            className="btn-quiet"
+            className={item.danger ? "btn-quiet more-menu-danger" : "btn-quiet"}
             onClick={() => {
               if (ref.current) ref.current.open = false;
               item.onSelect();
@@ -610,8 +630,8 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
         {entry.status === "verified" && (
           <MoreMenu
             items={[
-              { label: "撤銷", onSelect: () => setMode("revoke") },
-              { label: "淘汰", onSelect: () => setMode("retire") },
+              { label: "撤銷", onSelect: () => setMode("revoke"), danger: true },
+              { label: "淘汰", onSelect: () => setMode("retire"), danger: true },
             ]}
           />
         )}
@@ -663,7 +683,8 @@ function ReasonForm({ action, onSubmit, onCancel }: { action: string; onSubmit: 
     <form className="knowledge-form" aria-label={action} onSubmit={submit}>
       <label>
         {action}原因
-        <textarea value={reason} onChange={(e) => setReason(e.target.value)} />
+        {/* 從「更多」選單或撤銷按鈕開啟時，焦點直接到原因欄，不會掉到 body */}
+        <textarea value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
       </label>
       <div className="form-actions">
         <button type="submit">確認{action}</button>

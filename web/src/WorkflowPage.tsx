@@ -405,36 +405,36 @@ function AttemptView({ attempt, timeZone }: { attempt: StageAttempt; timeZone?: 
       <td className="tabular">{formatTimestamp(attempt.created_at, timeZone)}</td>
       <td>
         <div className="workflow-attempt-detail">
-      {attempt.build !== undefined && (
-        <span>
-          build：<code className="mono">{attempt.build}</code>
-        </span>
-      )}
-      {attempt.missing.length > 0 && (
-        <ul className="workflow-attempt-missing" aria-label={attempt.outcome === "invalidated" ? "失效原因" : "缺少的證據"}>
-          {attempt.missing.map((missing, index) => (
-            <li key={index}>
-              {missing.check}：{missing.reason}
-            </li>
-          ))}
-        </ul>
-      )}
-      {attempt.evidence.length > 0 && (
-        <ul className="workflow-attempt-evidence" aria-label="證據">
-          {attempt.evidence.map((evidence, index) => (
-            <li key={index}>
-              {evidence.check}：{EVIDENCE_KIND_LABELS[evidence.kind]}
-              {` ${evidence.artifact_id ?? evidence.decision_request_id ?? evidence.task_id ?? ""}`.trimEnd()}・
-              {EVIDENCE_STATUS_LABELS[evidence.status]}
-            </li>
-          ))}
-        </ul>
-      )}
-      {attempt.note !== "" && <p className="workflow-attempt-note">{attempt.note}</p>}
-      <span className="workflow-attempt-recorder">
-        記錄者：{recorder}
-        {attempt.profile_id !== null && `・帳號 ${attempt.profile_id}`}
-      </span>
+          {attempt.build !== undefined && (
+            <span>
+              build：<code className="mono">{attempt.build}</code>
+            </span>
+          )}
+          {attempt.missing.length > 0 && (
+            <ul className="workflow-attempt-missing" aria-label={attempt.outcome === "invalidated" ? "失效原因" : "缺少的證據"}>
+              {attempt.missing.map((missing, index) => (
+                <li key={index}>
+                  {missing.check}：{missing.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          {attempt.evidence.length > 0 && (
+            <ul className="workflow-attempt-evidence" aria-label="證據">
+              {attempt.evidence.map((evidence, index) => (
+                <li key={index}>
+                  {evidence.check}：{EVIDENCE_KIND_LABELS[evidence.kind]}
+                  {` ${evidence.artifact_id ?? evidence.decision_request_id ?? evidence.task_id ?? ""}`.trimEnd()}・
+                  {EVIDENCE_STATUS_LABELS[evidence.status]}
+                </li>
+              ))}
+            </ul>
+          )}
+          {attempt.note !== "" && <p className="workflow-attempt-note">{attempt.note}</p>}
+          <span className="workflow-attempt-recorder">
+            記錄者：{recorder}
+            {attempt.profile_id !== null && `・帳號 ${attempt.profile_id}`}
+          </span>
         </div>
       </td>
     </tr>
