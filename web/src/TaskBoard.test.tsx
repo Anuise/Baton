@@ -483,6 +483,17 @@ describe("工作面板", () => {
     expect(await within(card("整理資料")).findByText("等待相依：寫文件")).toBeInTheDocument();
   });
 
+  it("從「更多」選「新增相依」後，焦點移到相依表單的選單", async () => {
+    const client = fakeClient({ tasks: [task("task_1", "寫文件"), task("task_2", "整理資料")] });
+    const user = await renderBoard(client);
+
+    await openMore(user, "整理資料");
+    within(card("整理資料")).getByRole("button", { name: "新增相依" }).focus();
+    await user.keyboard("{Enter}");
+
+    expect(within(card("整理資料")).getByLabelText("相依的 Task")).toHaveFocus();
+  });
+
   it("新增相依失敗（例如循環）時顯示 Runtime 的說明", async () => {
     const client = fakeClient({ tasks: [task("task_1", "寫文件"), task("task_2", "整理資料")] });
     vi.mocked(client.addTaskDependency).mockRejectedValueOnce(new Error("相依會形成循環：寫文件 → 整理資料 → 寫文件"));
@@ -1708,6 +1719,47 @@ describe("Task 種類、工作目錄與整合佇列", () => {
     const status = statusLine("加登入頁");
     expect(status.closest("details")).toBeNull();
     expect(status).toHaveTextContent("目錄無法使用Workspace 不是 Git repo，無法建立 worktree");
+  });
+
+  it("同時有多個 danger 時，狀態列在第一項後面加上第二個徽章，工作目錄失敗不被預算用盡蓋住", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask("task_1", "加登入頁", { status: "blocked" })],
+        workdirs: [workdirView({ status: "failed", failure: "Workspace 不是 Git repo，無法建立 worktree", run_ids: [] })],
+        budgets: [budgetView({ exhausted: "implementation" })],
+      }),
+    );
+
+    const status = statusLine("加登入頁");
+    const badges = Array.from(status.querySelectorAll(".badge")).map((badge) => badge.textContent);
+    expect(badges).toEqual(["預算用盡", "目錄無法使用"]);
+    expect(status.querySelectorAll(".badge-danger")).toHaveLength(2);
+    // 第二項的原因放在徽章的 title，主文字仍是第一項的說明
+    expect(within(status).getByText("目錄無法使用")).toHaveAttribute("title", "Workspace 不是 Git repo，無法建立 worktree");
+    expect(status).toHaveTextContent("實作失敗修正預算已用完");
+  });
+
+  it("超過兩個 danger 時，第三項以後收成「+N」徽章，可存取名稱列出其餘項目", async () => {
+    await renderBoard(
+      fakeClient({
+        tasks: [devTask("task_1", "加登入頁", { status: "blocked" })],
+        workdirs: [
+          workdirView({
+            status: "failed",
+            failure: "無法建立 worktree",
+            run_ids: [],
+            cleanup: worktreeCleanup({ status: "failed", failure: "檔案被鎖住" }),
+          }),
+        ],
+        budgets: [budgetView({ exhausted: "implementation" })],
+      }),
+    );
+
+    const status = statusLine("加登入頁");
+    const badges = Array.from(status.querySelectorAll(".badge")).map((badge) => badge.textContent);
+    expect(badges).toEqual(["預算用盡", "目錄無法使用", "+1"]);
+    expect(within(status).getByText("+1")).toHaveAttribute("aria-label", "另有 1 項：清理失敗");
+    expect(within(status).getByText("+1")).toHaveAttribute("title", "清理失敗：檔案被鎖住");
   });
 
   it("等待原因有「工作目錄」類別時分開標示", async () => {

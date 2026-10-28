@@ -259,6 +259,27 @@ describe("左側 Workspace 清單", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("點「管理」浮層空白處（焦點落到 body）後按 Esc 仍收起選單，焦點回觸發鈕", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+    const trigger = within(item).getByLabelText("管理 筆記");
+    const menu = trigger.closest("details")!;
+    await user.click(trigger);
+    expect(menu).toHaveAttribute("open");
+
+    // 點浮層空白處：不收起，焦點移出選單
+    await user.click(item.querySelector(".workspace-menu-panel")!);
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(menu).toHaveAttribute("open");
+    expect(document.body).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(menu).not.toHaveAttribute("open");
+    expect(trigger).toHaveFocus();
+  });
+
   it("展開的「管理」選單不被暫停列與下一個項目蓋住：浮層以項目定位，中間沒有層級較低的堆疊脈絡", async () => {
     // jsdom 不排版，只能檢查決定蓋疊的樣式；實際點擊命中以 Playwright 探針驗證
     // Vitest 會把 CSS 匯入（含 ?raw）換成空字串，專案也沒有 @types/node，所以以非字面的動態匯入讀檔

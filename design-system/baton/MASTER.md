@@ -522,8 +522,8 @@ import { CopyButton, LongText, ShortValue } from "./LongText";
 - `LongText` props：`text`（純文字，保留換行）、`lines`（1／2／3，預設 3）、`copyLabel`（有值才顯示複製按鈕）、`className`（加在外層）。外層是 `div.long-text`（閱讀寬度 46em），內文是 `p.long-text-body`，**不要放在 `<p>` 裡**。
 - 只有文字真的超過 `lines` 行時才出現「展開」（`aria-expanded`、`aria-controls`），寬度改變時重新判斷；全文一直在 DOM 中。
 - 測試中 jsdom 不排版，「展開」不會出現；要測展開時參考 `LongText.test.tsx` 以 `scrollHeight`／`clientHeight` 模擬。
-- `CopyButton` props：`text`、`label`（預設「複製」）；按下後 1.5 秒內顯示「已複製」或「複製失敗」。測試時注意 `userEvent.setup()` 會換掉 `navigator.clipboard`。
-- `ShortValue` props：`value`、`kind`（`id`／`hash`／`path`，分別用 `shortId`／`shortHash`／`shortPath`）。縮短後等寬顯示、`title` 放完整值、旁邊附「複製識別碼／雜湊／路徑」；本來就夠短時原樣顯示、不附複製。
+- `CopyButton` props：`text`、`label`（預設「複製」）、`field`；按下後 1.5 秒內顯示「已複製」或「複製失敗」。同一張卡有多個同名的複製按鈕時傳 `field`（例：「Task」「產生者 Run」），可存取名稱成為「複製識別碼（Task）」，仍包含看得到的按鈕文字。測試時注意 `userEvent.setup()` 會換掉 `navigator.clipboard`。
+- `ShortValue` props：`value`、`kind`（`id`／`hash`／`path`，分別用 `shortId`／`shortHash`／`shortPath`）、`field`（傳給 `CopyButton`）。縮短後等寬顯示、`title` 放完整值、旁邊附「複製識別碼／雜湊／路徑」；本來就夠短時原樣顯示、不附複製。
 
 ### 10.11 WP1 沒有處理、留給各包的項目
 

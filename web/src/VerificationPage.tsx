@@ -596,7 +596,7 @@ function BundleCard({
             {shortId(bundle.id)}
           </code>
         </h4>
-        {shortId(bundle.id) !== bundle.id && <CopyButton text={bundle.id} label="複製識別碼" />}
+        {shortId(bundle.id) !== bundle.id && <CopyButton text={bundle.id} label="複製識別碼" field="Evidence Bundle" />}
       </header>
       <p className="verification-bundle-verdict">
         判定：<VerdictBadge verdict={bundle.verdict} /> <ReasonCode code={bundle.reason_code} />
@@ -606,7 +606,7 @@ function BundleCard({
         <dd>{bundle.build ?? "無法取得"}</dd>
         <dt>候選版本</dt>
         <dd>
-          {bundle.candidate_revision === null ? "無（不是 Git repo）" : <ShortValue value={bundle.candidate_revision} kind="hash" />}
+          {bundle.candidate_revision === null ? "無（不是 Git repo）" : <ShortValue value={bundle.candidate_revision} kind="hash" field="候選版本" />}
         </dd>
         <dt>需求版本</dt>
         <dd>
@@ -614,7 +614,7 @@ function BundleCard({
             "沒有綁定 Task"
           ) : (
             <>
-              Task <ShortValue value={bundle.task_id} kind="id" /> 契約第 {bundle.requirement_version ?? "?"} 版
+              Task <ShortValue value={bundle.task_id} kind="id" field="Task" /> 契約第 {bundle.requirement_version ?? "?"} 版
             </>
           )}
         </dd>
@@ -622,7 +622,7 @@ function BundleCard({
         <dd>第 {bundle.profile_version} 版</dd>
         <dt>受驗目錄</dt>
         <dd>
-          <ShortValue value={bundle.subject_dir} kind="path" />
+          <ShortValue value={bundle.subject_dir} kind="path" field="受驗目錄" />
         </dd>
         <dt>時間</dt>
         <dd>

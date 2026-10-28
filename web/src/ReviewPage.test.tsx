@@ -124,9 +124,11 @@ describe("審查與設計偏離", () => {
     const review = await screen.findByRole("region", { name: "修正匯出錯誤（candidate e3b0c44298fc…）" });
     expect(within(review).getByText("996fb92427ae…", { selector: "dd code" })).toHaveAttribute("title", base);
     expect(within(review).getByText("e3b0c44298fc…", { selector: "dd code" })).toHaveAttribute("title", candidate);
-    expect(within(review).getAllByRole("button", { name: "複製雜湊" })).toHaveLength(2);
+    // 兩個「複製雜湊」以欄位名區分
+    expect(within(review).getByRole("button", { name: "複製雜湊（基準版本）" })).toBeInTheDocument();
+    expect(within(review).getByRole("button", { name: "複製雜湊（候選版本）" })).toBeInTheDocument();
     expect(within(review).getByText(String.raw`C:\…\fixtures\report.md`)).toHaveAttribute("title", source);
-    expect(within(review).getByRole("button", { name: "複製路徑" })).toBeInTheDocument();
+    expect(within(review).getByRole("button", { name: "複製路徑（規範來源）" })).toBeInTheDocument();
   });
 
   it("沿用先前審查的軸標示沿用來源", async () => {

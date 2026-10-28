@@ -88,8 +88,10 @@ const FEEDBACK_MS = 1500;
  * </span>
  * ```
  * 按下後暫時顯示「已複製」或「複製失敗」（aria-live 讓螢幕報讀器唸出結果）。
+ * 同一區塊有多個同名的複製按鈕時傳 `field`（例：「Task」「產生者 Run」），可存取名稱成為「複製識別碼（Task）」，
+ * 仍包含看得到的按鈕文字。
  */
-export function CopyButton({ text, label = "複製" }: { text: string; label?: string }) {
+export function CopyButton({ text, label = "複製", field }: { text: string; label?: string; field?: string }) {
   const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
 
   useEffect(() => {
@@ -108,7 +110,13 @@ export function CopyButton({ text, label = "複製" }: { text: string; label?: s
   };
 
   return (
-    <button type="button" className="btn-quiet btn-sm" aria-live="polite" onClick={() => void copy()}>
+    <button
+      type="button"
+      className="btn-quiet btn-sm"
+      aria-live="polite"
+      aria-label={field !== undefined && status === "idle" ? `${label}（${field}）` : undefined}
+      onClick={() => void copy()}
+    >
       {status === "copied" ? "已複製" : status === "failed" ? "複製失敗" : label}
     </button>
   );
@@ -126,9 +134,10 @@ const COPY_LABELS = { id: "複製識別碼", hash: "複製雜湊", path: "複製
  * <ShortValue value={artifact.task_id} kind="id" />
  * <ShortValue value={version.sha256} kind="hash" />
  * <ShortValue value={file.storage_path} kind="path" />
+ * <ShortValue value={version.produced_by_run_id} kind="id" field="產生者 Run" />  // 同一區塊有多個時帶欄位名
  * ```
  */
-export function ShortValue({ value, kind }: { value: string; kind: keyof typeof SHORTEN }) {
+export function ShortValue({ value, kind, field }: { value: string; kind: keyof typeof SHORTEN; field?: string }) {
   const short = SHORTEN[kind](value);
   if (short === value) return <code className="mono">{value}</code>;
   return (
@@ -136,7 +145,7 @@ export function ShortValue({ value, kind }: { value: string; kind: keyof typeof 
       <code className="mono" title={value}>
         {short}
       </code>
-      <CopyButton text={value} label={COPY_LABELS[kind]} />
+      <CopyButton text={value} label={COPY_LABELS[kind]} field={field} />
     </span>
   );
 }

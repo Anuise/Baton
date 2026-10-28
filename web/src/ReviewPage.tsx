@@ -130,15 +130,15 @@ function ReviewCard({ review, timeZone }: { review: ReviewView; timeZone?: strin
         <dd>{review.reviewer_task_title ?? review.reviewer_task_id}</dd>
         <dt>版本</dt>
         <dd>
-          <ShortValue value={review.base_revision} kind="hash" />
+          <ShortValue value={review.base_revision} kind="hash" field="基準版本" />
           {" → "}
-          <ShortValue value={review.candidate_revision} kind="hash" />
+          <ShortValue value={review.candidate_revision} kind="hash" field="候選版本" />
         </dd>
         <dt>規格</dt>
         <dd>規格第 {review.spec_version} 版</dd>
         <dt>規範來源</dt>
         <dd>
-          <ShortValue value={review.standards_source} kind="path" />
+          <ShortValue value={review.standards_source} kind="path" field="規範來源" />
         </dd>
         <dt>審查於</dt>
         <dd>{formatTimestamp(review.created_at, timeZone)}</dd>

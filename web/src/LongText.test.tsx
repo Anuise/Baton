@@ -100,6 +100,16 @@ describe("CopyButton", () => {
     expect(screen.getByRole("button", { name: "複製識別碼" })).toBeInTheDocument();
   });
 
+  it("有欄位名時可存取名稱帶欄位名，複製後改唸「已複製」", async () => {
+    const user = setup(vi.fn().mockResolvedValue(undefined));
+    render(<CopyButton text="run_1" label="複製識別碼" field="產生者 Run" />);
+
+    const button = screen.getByRole("button", { name: "複製識別碼（產生者 Run）" });
+    expect(button).toHaveTextContent("複製識別碼");
+    await user.click(button);
+    expect(await screen.findByRole("button", { name: "已複製" })).toBeInTheDocument();
+  });
+
   it("剪貼簿拒絕時顯示「複製失敗」", async () => {
     const user = setup(vi.fn().mockRejectedValue(new Error("denied")));
     render(<CopyButton text="abc" />);
@@ -115,6 +125,12 @@ describe("ShortValue", () => {
 
     expect(screen.getByText("task_7b5deb…7314")).toHaveAttribute("title", "task_7b5deb026d9841b0cced7314");
     expect(screen.getByRole("button", { name: "複製識別碼" })).toBeInTheDocument();
+  });
+
+  it("field 帶到複製按鈕的可存取名稱", () => {
+    render(<ShortValue value="task_7b5deb026d9841b0cced7314" kind="id" field="Task" />);
+
+    expect(screen.getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
   });
 
   it("本來就夠短時原樣顯示、不附複製", () => {
