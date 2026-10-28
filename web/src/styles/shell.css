@@ -20,7 +20,8 @@
   background: var(--color-bg);
   border-bottom: 1px solid var(--color-border);
   color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
+  font-size: var(--text-caption);
+  line-height: var(--leading-caption);
 }
 
 .status::before {
@@ -49,28 +50,6 @@
   background: var(--color-warning);
 }
 
-.platform-warning {
-  padding: var(--space-4) var(--space-5);
-  background: var(--color-warning-subtle);
-  border: 1px solid var(--color-warning-border);
-  border-radius: var(--radius-md);
-}
-
-.platform-facts {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-2) var(--space-6);
-}
-
-.platform-facts dd {
-  margin: 0;
-}
-
-.platform-source {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
-}
-
 .status-reason {
   color: var(--color-text-muted);
 }
@@ -82,52 +61,204 @@
 
 .sidebar {
   flex: none;
+  box-sizing: border-box;
   width: 260px;
-  padding: var(--space-6) var(--space-5);
+  padding: var(--space-6) var(--space-4);
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
 }
 
 /* 側欄標題是小型分類標示，不與頁面標題搶層次 */
 .sidebar h2 {
   margin: 0 0 var(--space-4);
-  padding: 0 var(--space-3);
+  padding: 0 var(--space-4);
   color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
-  font-weight: 600;
+  font-size: var(--text-caption);
+  font-weight: var(--font-weight-strong);
 }
 
 .sidebar-empty {
+  padding: 0 var(--space-4);
   color: var(--color-text-muted);
 }
 
 .workspace-list {
+  display: grid;
+  gap: var(--space-1);
   margin: 0 0 var(--space-6);
   padding: 0;
   list-style: none;
 }
 
-.workspace-list li {
+/* 一個項目：名稱（2 行）＋「管理」→ 待裁定徽章＋1 行縮短路徑 →（暫停中時）1 行狀態與「繼續工作」。
+   整個項目可點：選擇按鈕的 ::after 蓋滿項目，其他按鈕以 z-index 浮在上面 */
+.workspace-item {
+  position: relative;
   display: grid;
   gap: var(--space-1);
-  padding: var(--space-4) 0;
-  border-bottom: 1px solid var(--color-border);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  transition: background-color var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
+}
+
+.workspace-item:hover {
+  background: var(--color-surface-hover);
+}
+
+.workspace-item-current,
+.workspace-item-current:hover {
+  border-color: var(--color-accent-border);
+  background: var(--color-accent-subtle);
+}
+
+.workspace-item:has(.workspace-select:focus-visible) {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 1px;
+}
+
+.workspace-heading {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.workspace-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-select::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.workspace-select:focus-visible {
+  outline: none;
 }
 
 .workspace-name {
-  font-weight: 600;
-}
-
-.workspace-path,
-.workspace-created {
+  font-weight: var(--font-weight-strong);
   overflow-wrap: anywhere;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
 }
 
-.workspace-list button {
-  justify-self: start;
+.workspace-item-current .workspace-name {
+  color: var(--color-accent);
+}
+
+.workspace-meta {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  min-width: 0;
+}
+
+.workspace-meta:empty {
+  display: none;
+}
+
+.workspace-path {
+  flex: 1 1 auto;
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+  line-height: var(--leading-caption);
+}
+
+.workspace-created {
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+}
+
+/* 暫停中：需要立即處理，一行警示色文字＋「繼續工作」 */
+.workspace-paused {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--color-warning);
+  font-size: var(--text-caption);
+  font-weight: var(--font-weight-strong);
+}
+
+.workspace-paused > span {
+  flex: 1 1 auto;
+}
+
+.workspace-paused > button {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* 「管理」選單：項目右上角的低調按鈕，展開為浮層 */
+.workspace-menu {
+  position: relative;
+  z-index: 1;
+  flex: none;
+}
+
+.workspace-menu-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-strong);
+  list-style: none;
+  cursor: pointer;
+}
+
+.workspace-menu-trigger::-webkit-details-marker {
+  display: none;
+}
+
+.workspace-menu-trigger:hover,
+.workspace-menu[open] > .workspace-menu-trigger {
+  background: var(--color-surface-sunken);
+  color: var(--color-text);
+}
+
+.workspace-menu-panel {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: var(--z-popover);
+  display: grid;
+  gap: var(--space-4);
+  justify-items: start;
+  box-sizing: border-box;
+  width: 224px;
+  padding: var(--space-5);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.workspace-auto-resume {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.workspace-auto-resume label {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
 }
 
 .workspace-form {
@@ -182,7 +313,8 @@
 .app-heading h1 {
   align-self: center;
   margin: 0;
-  font-size: var(--font-size-lg);
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
 }
 
 /* 更新通知在頁簽之外；沒有通知時不佔空間 */
@@ -196,11 +328,13 @@
   display: none;
 }
 
+/* 頁簽列一列；放不下時水平捲動，不換成兩列（MASTER 5.8） */
 .tabs {
   display: flex;
-  flex-wrap: wrap;
   gap: var(--space-2);
+  overflow-x: auto;
   border-bottom: 1px solid var(--color-border);
+  scrollbar-width: thin;
 }
 
 /* 頂層頁簽嵌在頂列內，底線與頂列下框重合 */
@@ -215,6 +349,7 @@
 
 .tabs [role="tab"] {
   display: flex;
+  flex: none;
   gap: var(--space-3);
   align-items: center;
   padding: var(--space-4) var(--space-5);
@@ -225,6 +360,8 @@
   box-shadow: none;
   color: var(--color-text-muted);
   font: inherit;
+  font-size: var(--text-meta);
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -235,15 +372,21 @@
 .tabs [role="tab"][aria-selected="true"] {
   border-bottom-color: var(--color-accent);
   color: var(--color-text);
-  font-weight: 600;
+  font-weight: var(--font-weight-strong);
 }
 
 .tab-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
   padding: 0 var(--space-3);
   border-radius: var(--radius-full);
   background: var(--color-warning-subtle);
   border: 1px solid var(--color-warning-border);
-  font-size: var(--font-size-xs);
+  color: var(--color-warning);
+  font-size: var(--text-caption);
+  font-weight: var(--font-weight-strong);
+  line-height: 1;
 }
 
 /* 第二層頁簽（成果與品質、更多）：小型膠囊，不再畫底線，層次低於主要入口 */
@@ -256,7 +399,6 @@
   padding: var(--space-2) var(--space-5);
   border-bottom: 0;
   border-radius: var(--radius-full);
-  font-size: var(--font-size-sm);
 }
 
 .tabs-page [role="tab"]:hover {
@@ -265,28 +407,90 @@
 
 .tabs-page [role="tab"][aria-selected="true"] {
   background: var(--color-surface-hover);
-  font-weight: 600;
+  font-weight: var(--font-weight-strong);
 }
 
-/* 第二層頁簽與其內容之間不必再空一大段 */
-.tabs-page + .tab-panel {
-  padding-top: var(--space-2);
-}
-
-/* 各頁簽內容的標題與間距一致；同一頁簽疊放的功能以相同間距分開 */
+/* 間距層次（MASTER 4.1）：頂層內容直接接主區內距；Workspace 頁簽到內容 16px；第二層膠囊到內容 8px */
 .tab-panel {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--space-7);
-  padding-top: var(--space-6);
+  align-content: start;
+}
+
+/* 版面 grid 的 gap 是 24px；頁簽與它控制的內容要更靠近，以負的 margin 扣回 */
+.tabs + .tab-panel {
+  margin-top: calc(var(--space-6) - var(--space-7));
+}
+
+.tabs-page + .tab-panel {
+  margin-top: calc(var(--space-4) - var(--space-7));
 }
 
 .tab-panel h2 {
   margin-top: 0;
 }
 
-.workspace-hint {
+/* 帳號、設定與全畫面精靈：設定類內容不必橫跨整個寬螢幕，各區塊同寬 */
+.settings-column {
+  max-inline-size: 72em;
+}
+
+/* Workspace 情境列：頁簽列上方一行，名稱（截斷）＋縮短路徑（可複製） */
+.workspace-context {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  min-width: 0;
+  margin-bottom: calc(var(--space-4) - var(--space-7));
+}
+
+.workspace-context-name {
+  flex: 0 1 auto;
+  min-width: 8em;
+  font-size: var(--text-title-sm);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title-sm);
+}
+
+.workspace-context-path {
+  flex: 0 0 auto;
+  max-width: 40%;
   color: var(--color-text-muted);
+  font-size: var(--text-caption);
+}
+
+.workspace-context-path > .mono {
+  flex: 0 1 auto;
+}
+
+.workspace-context-path > button {
+  flex: none;
+}
+
+/* 未選 Workspace 的空狀態（MASTER 5.7）：置中、上方留白、一個主要動作 */
+.workspace-empty {
+  display: grid;
+  gap: var(--space-4);
+  justify-items: center;
+  max-inline-size: 40em;
+  margin: 15vh auto 0;
+  text-align: center;
+}
+
+.workspace-empty h2 {
+  margin: 0;
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
+}
+
+.workspace-hint {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.workspace-empty button {
+  justify-self: center;
 }
 
 .setup-screen {
@@ -300,114 +504,77 @@
   justify-self: start;
 }
 
-.workspace-heading {
-  display: flex;
-  gap: var(--space-4);
-  align-items: center;
-}
-
-.workspace-select {
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: none;
-  box-shadow: none;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.workspace-select:hover {
-  background: var(--color-surface-hover);
-}
-
-.workspace-select[aria-current="true"] {
-  border-color: var(--color-accent);
-  background: var(--color-accent-subtle);
-}
-
-.workspace-actions {
-  display: flex;
-  gap: var(--space-4);
-}
-
-
-.workspace-paused {
-  display: flex;
-  gap: var(--space-4);
-  align-items: center;
-  padding: var(--space-2) var(--space-4);
-  background: var(--color-warning-subtle);
-  border: 1px solid var(--color-warning-border);
-  border-radius: var(--radius-md);
-}
-
-.workspace-auto-resume {
-  display: flex;
-  gap: var(--space-2);
-  align-items: center;
-}
-
-.workspace-auto-resume label {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-}
-
-
 .status-decisions-pending::before {
   background: var(--color-warning);
 }
 
-/* 監護程序：運作中為綠色；不在時工作繼續但沒有自動重啟保護，以紅色醒目提示 */
+/* 監護程序：運作中為綠色；不在時工作繼續但沒有自動重啟保護，以紅色醒目提示（長訊息在狀態列內換行） */
 .status-guardian-active::before {
   background: var(--color-success);
 }
 
 .status-guardian-unavailable {
+  min-width: 0;
+  max-width: 100%;
   padding: var(--space-1) var(--space-4);
   color: var(--color-danger);
   background: var(--color-danger-subtle);
   border: 1px solid var(--color-danger-border);
   border-radius: var(--radius-md);
+  overflow-wrap: anywhere;
 }
 
 .status-guardian-unavailable::before {
   background: var(--color-danger);
 }
 
-/* 控制資料庫寫不進去、新派工已停止：獨占狀態列一整行 */
+/* 控制資料庫寫不進去、新派工已停止：獨占狀態列一整行；狀態詞是徽章，正文用一般文字色 */
 .status-bar:has(.status-storage-fault) {
-  flex-wrap: wrap;
   padding-bottom: var(--space-3);
 }
 
 .status-storage-fault {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   flex-basis: 100%;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-5);
+  gap: var(--space-4);
+  align-items: start;
+  min-width: 0;
   padding: var(--space-3) var(--space-5);
-  color: var(--color-danger);
-  background: var(--color-danger-subtle);
+  background: var(--color-surface);
   border: 1px solid var(--color-danger-border);
+  border-left: 3px solid var(--color-danger);
   border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+.status-storage-fault > .badge {
+  margin-top: 1px;
+}
+
+.status-storage-body {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.status-storage-body p {
+  margin: 0;
 }
 
 .status-storage-detail {
   color: var(--color-text-muted);
-  font-size: var(--font-size-xs);
 }
 
-.decision-badge {
-  align-self: center;
-  padding: 0 var(--space-4);
-  border-radius: var(--radius-full);
-  background: var(--color-warning-subtle);
-  border: 1px solid var(--color-warning-border);
-  font-size: var(--font-size-xs);
+.status-storage-detail summary {
+  cursor: pointer;
 }
 
+.status-storage-detail p {
+  margin-top: var(--space-2);
+}
 
 /* 崩潰恢復：進行中為黃色、額度用盡為紅色 */
 .status-recovery::before {
@@ -418,23 +585,37 @@
   background: var(--color-danger);
 }
 
-
-/* 更新通知（spec D-19）：不阻擋操作，放在主畫面頂端 */
+/* 更新通知（spec D-19）：不阻擋操作，放在主畫面頂端；一行訊息＋動作，說明展開在下方 */
 .update-notice {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-4) var(--space-5);
+  gap: var(--space-2) var(--space-5);
   align-items: center;
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-3) var(--space-5);
   background: var(--color-accent-subtle);
   border: 1px solid var(--color-accent-border);
   border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
+  font-size: var(--text-meta);
+}
+
+.update-notice > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.update-notice > button {
+  flex: none;
+  white-space: nowrap;
 }
 
 .update-notice details {
   flex-basis: 100%;
   order: 1;
+}
+
+.update-notice summary {
+  color: var(--color-text-muted);
+  cursor: pointer;
 }
 
 .update-notes {
@@ -447,3 +628,26 @@
   padding-left: var(--space-6);
 }
 
+/* 1024 寬（設計下限）：側欄 232px、隱藏路徑；主區內距 16px（MASTER 第 8 節） */
+@media (max-width: 1100px) {
+  .sidebar {
+    width: 232px;
+  }
+
+  .workspace-path {
+    display: none;
+  }
+
+  .main {
+    padding: var(--space-6);
+  }
+
+  .app-heading,
+  .app-notices {
+    padding-inline: var(--space-6);
+  }
+
+  .status-bar {
+    padding-inline: var(--space-6);
+  }
+}
