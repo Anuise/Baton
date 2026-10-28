@@ -1,6 +1,6 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
-import { shortHash, shortId, shortPath } from "./textFormat";
+import { shortHash, shortId, shortPath, shortPathParts } from "./textFormat";
 
 /**
  * 長段落（說明、理由、Goal、契約內容、知識內文）：清單／卡片中限制行數，超過時附「展開」低調按鈕；
@@ -146,6 +146,27 @@ export function ShortValue({ value, kind, field }: { value: string; kind: keyof 
         {short}
       </code>
       <CopyButton text={value} label={COPY_LABELS[kind]} field={field} />
+    </span>
+  );
+}
+
+/**
+ * 縮短路徑，中段省略、保留結尾（textFormat.ts 的 shortPathParts）：開頭「C:\…」與最後約 10 字一定顯示，
+ * 寬度不夠時只截斷中段（`C:\…\deeply_ne…10-28.md`），完整路徑在 title。單行、不換行；側欄與頁簽列上方的情境列共用。
+ *
+ * 用法：
+ * ```tsx
+ * <PathText path={workspace.path} />                        // 保留結尾 2 段
+ * <PathText path={workspace.path} keep={3} className="workspace-path" />
+ * ```
+ */
+export function PathText({ path, keep, className }: { path: string; keep?: number; className?: string }) {
+  const { head, start, end } = shortPathParts(path, keep);
+  return (
+    <span className={className === undefined ? "path-text mono" : `path-text mono ${className}`} title={path}>
+      {head !== "" && <span className="path-text-head">{head}</span>}
+      {start !== "" && <span className="path-text-start">{start}</span>}
+      <span className="path-text-end">{end}</span>
     </span>
   );
 }

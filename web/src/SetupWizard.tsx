@@ -119,8 +119,8 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
 
       <section aria-labelledby="setup-notice-title" className="setup-notice">
         <h3 id="setup-notice-title">背景執行</h3>
-        {/* 告知是段落：限 3 行，超過時可展開（MASTER 6.1） */}
-        <LongText text={status.background_notice.text} />
+        {/* 告知是段落：限 3 行，超過時可展開（MASTER 6.1）；「展開」與「▶ 技術細節」同一種收合摘要樣式 */}
+        <LongText text={status.background_notice.text} className="long-text-disclosure" />
         {acknowledged ? (
           <p className="setup-acknowledged">已確認</p>
         ) : (

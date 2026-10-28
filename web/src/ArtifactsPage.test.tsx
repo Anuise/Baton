@@ -105,6 +105,10 @@ const previewOf = (preview: ArtifactPreview["preview"]): ArtifactPreview => ({
 const renderPage = (client: ArtifactClient & Pick<TaskClient, "getTaskBoard">) => render(<ArtifactsPage client={client} workspace={workspace} timeZone="Asia/Taipei" />);
 
 describe("成果", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("載入中先顯示提示，讀取該 Workspace 的成果", async () => {
     const client = fakeClient({ artifacts: [], unregistered_files: [] });
 
@@ -214,6 +218,22 @@ describe("成果", () => {
     const heading = within(card).getByRole("heading", { level: 3, name });
     expect(heading).toHaveClass("clamp-2");
     expect(heading).toHaveAttribute("title", name);
+  });
+
+  it("名稱超過兩行時主檔名截斷、副檔名另外接在後面（截斷後仍看得到），可存取名稱與 title 仍是全名", async () => {
+    // jsdom 不排版：clamp-2 的元素一律視為超過兩行
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains("clamp-2") ? 200 : 40;
+    });
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(40);
+    const name = `fixtures/${"very_long_artifact_file_name_".repeat(6)}.json`;
+    renderPage(fakeClient({ artifacts: [artifact({ name })], unregistered_files: [] }));
+
+    const card = await screen.findByRole("article", { name });
+    const heading = within(card).getByRole("heading", { level: 3, name });
+    expect(heading).toHaveAttribute("title", name);
+    expect(heading.querySelector(".clamp-2")).toHaveTextContent(`fixtures/${"very_long_artifact_file_name_".repeat(6)}`);
+    expect(heading.querySelector(".artifact-name-ext")).toHaveTextContent(/^\.json$/);
   });
 
   it("只有一個版本時不顯示展開按鈕", async () => {

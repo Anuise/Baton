@@ -390,13 +390,13 @@ describe("ControllerPage", () => {
     expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
   });
 
-  it("帳號名稱很長時選項只取前段（24 字含…）再接額度，避免選單把頁面撐寬", async () => {
+  it("帳號名稱很長時選項只取前段（17 字含…）再接額度：半寬的「換成帳號」選單收合時仍看得到名稱與 5h／7d 額度", async () => {
     const longName = "長文字壓力測試專用標記的帳號 0：研發部門共用的高額度訂閱（請勿用於個人專案）";
     const overview = schedulingOverview({ accounts: [accountWith("prof_1", 0.4, 0.15, 1)] });
     renderPage(fakeClient(null, [profile({ name: longName })], overview));
 
     const option = await screen.findByRole("option", { name: /（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）$/ });
-    expect(option.textContent).toBe(`${[...longName].slice(0, 23).join("")}…（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）`);
+    expect(option.textContent).toBe("長文字壓力測試專用標記的帳號 0…（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）");
   });
 
   it("額度讀取失敗時仍可開啟，只提示無法取得額度", async () => {

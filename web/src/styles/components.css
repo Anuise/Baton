@@ -16,6 +16,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 不拆開的詞組（例：標籤欄中的「服務結束日」），放不下時在詞組前換行 */
+.nowrap {
+  white-space: nowrap;
+}
+
 .truncate {
   min-width: 0;
   overflow: hidden;
@@ -464,6 +469,28 @@
   margin-top: var(--space-1);
 }
 
+/* 收合摘要樣式的「展開／收合」（.long-text-disclosure）：與 <details> 的「▶ 技術細節」相同——
+   原生摘要的三角形（disclosure-closed／open）＋次要文字、沒有按鈕內距，與內文左緣對齊 */
+.long-text-disclosure .long-text-actions > [aria-expanded] {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+.long-text-disclosure .long-text-actions > [aria-expanded]::before {
+  content: counter(list-item, disclosure-closed) " ";
+}
+
+.long-text-disclosure .long-text-actions > [aria-expanded="true"]::before {
+  content: counter(list-item, disclosure-open) " ";
+}
+
+.long-text-disclosure .long-text-actions > [aria-expanded]:hover:not(:disabled) {
+  background: none;
+}
+
 /* 複製按鈕（CopyButton）緊跟在縮短的識別碼、路徑、雜湊後面 */
 .copy-text {
   display: inline-flex;
@@ -471,6 +498,35 @@
   align-items: center;
   min-width: 0;
   max-width: 100%;
+}
+
+/* 縮短路徑（PathText）：開頭「C:\…」與結尾不縮小，寬度不夠時中段先以「…」截斷，結尾最後才截斷 */
+.path-text {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.path-text > span {
+  flex: none;
+}
+
+.path-text > .path-text-start,
+.path-text > .path-text-end {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.path-text > .path-text-start {
+  flex: 0 1 auto;
+}
+
+/* 結尾的縮小權重近乎 0：中段還有寬度時不分攤（分攤到不足 1px 也會出現「…」），中段縮到 0 後才截斷 */
+.path-text > .path-text-end {
+  flex: 0 0.0001 auto;
 }
 
 /* 「?」說明提示（HelpTip）：取代解釋性小字，懸停或鍵盤聚焦時浮出 */

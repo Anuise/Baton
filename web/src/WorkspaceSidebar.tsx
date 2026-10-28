@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { HelpTip } from "./HelpTip";
-import { CopyButton } from "./LongText";
-import { formatCount, formatNumber, shortPath } from "./textFormat";
+import { CopyButton, PathText } from "./LongText";
+import { formatCount, formatNumber } from "./textFormat";
 import { formatTimestamp } from "./time";
 import type { LifecycleClient, PauseCause, Workspace, WorkspaceClient, WorkspaceLifecycleView } from "./runtimeClient";
 
@@ -207,7 +207,7 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
   };
 
   const active = list.state === "ready" ? list.workspaces.filter((w) => w.status === "active") : [];
-  const paths = distinctPaths(active.map((w) => w.path));
+  const keeps = distinctKeeps(active.map((w) => w.path));
 
   return (
     <aside className="sidebar" aria-labelledby="workspaces-title">
@@ -236,11 +236,8 @@ ${workspace.path}`}
               </div>
               <div className="workspace-meta">
                 {pendingBadge(pendingDecisions?.[workspace.id] ?? 0)}
-                {/* 窄時先省略開頭，能和其他 Workspace 區分的結尾最後才截斷；完整路徑在 title 與「管理」選單 */}
-                <span className="workspace-path mono" title={workspace.path}>
-                  {paths[index].head !== "" && <span className="workspace-path-head">{paths[index].head}</span>}
-                  <span className="workspace-path-tail">{paths[index].tail}</span>
-                </span>
+                {/* 窄時只截斷中段，開頭與結尾一定顯示；完整路徑在 title 與「管理」選單 */}
+                <PathText path={workspace.path} keep={keeps[index]} className="workspace-path" />
               </div>
               {pausedRow(workspace)}
             </li>
@@ -283,22 +280,17 @@ function segmentsOf(path: string): string[] {
 }
 
 /**
- * 側欄的縮短路徑：結尾保留足以和清單中其他 Workspace 區分的最少段數，整體至少保留結尾 2 段（同 shortPath）；
- * 分成開頭（窄時先省略）與結尾（能區分的部分，最後才截斷）。比較不分大小寫（Windows 路徑）；
- * 完全相同的路徑無從區分，只保留 1 段當結尾。
+ * 側欄縮短路徑保留的結尾段數：足以和清單中其他 Workspace 區分的最少段數，至少 2 段（同 shortPath）。
+ * 比較不分大小寫（Windows 路徑）；完全相同的路徑無從區分，只算 1 段。
  */
-function distinctPaths(paths: string[]): { head: string; tail: string }[] {
+function distinctKeeps(paths: string[]): number[] {
   const keys = paths.map((path) => segmentsOf(path).map((segment) => segment.toLowerCase()));
   const suffix = (segments: string[], count: number) => (segments.length < count ? null : segments.slice(-count).join("\\"));
-  return paths.map((path, i) => {
-    const own = keys[i];
-    const others = keys.filter((other, j) => j !== i && other.join("\\") !== own.join("\\"));
+  return keys.map((own) => {
+    const others = keys.filter((other) => other.join("\\") !== own.join("\\"));
     let count = 1;
     while (count < own.length && others.some((other) => suffix(other, count) === suffix(own, count))) count++;
-    const sep = path.includes("\\") ? "\\" : "/";
-    const tail = segmentsOf(path).slice(-count).join(sep);
-    const short = shortPath(path, Math.max(2, count));
-    return short.endsWith(tail) ? { head: short.slice(0, short.length - tail.length), tail } : { head: "", tail: short };
+    return Math.max(2, count);
   });
 }
 

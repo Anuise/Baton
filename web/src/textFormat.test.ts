@@ -9,7 +9,9 @@ import {
   shortHash,
   shortId,
   shortPath,
+  shortPathParts,
   sizeLabel,
+  splitExtension,
   splitFirstSentence,
   truncateText,
 } from "./textFormat";
@@ -71,6 +73,52 @@ describe("shortPath", () => {
 
   it("可以指定保留的段數", () => {
     expect(shortPath("C:\\a\\b\\c\\d\\e.md", 1)).toBe("C:\\…\\e.md");
+  });
+});
+
+describe("shortPathParts", () => {
+  const LONG = "C:\\Users\\me\\fixtures\\deeply_nested\\report-final-revision-2026-10-28.md";
+
+  it("分成開頭（磁碟＋省略號）、中段與一定顯示的結尾，三段相接等於 shortPath", () => {
+    const parts = shortPathParts(LONG);
+    // 結尾最多 10 字，從最靠前的分隔字元（\ / . _ - 空白）後面開始，不把「2026」切成兩半
+    expect(parts).toEqual({ head: "C:\\…", start: "\\deeply_nested\\report-final-revision-2026-", end: "10-28.md" });
+    expect(parts.head + parts.start + parts.end).toBe(shortPath(LONG));
+  });
+
+  it("可以指定保留的段數與結尾字數；結尾範圍內沒有分隔字元時直接取最後幾字", () => {
+    expect(shortPathParts(LONG, 1, 5)).toEqual({ head: "C:\\…", start: "\\report-final-revision-2026-10-", end: "28.md" });
+    expect(shortPathParts("C:\\a\\b\\c\\abcdefghijklmnop", 1, 4)).toEqual({ head: "C:\\…", start: "\\abcdefghijkl", end: "mnop" });
+  });
+
+  it("沒有省略時開頭為空；中段不比結尾長時全部放在結尾", () => {
+    expect(shortPathParts("C:\\work\\notes")).toEqual({ head: "", start: "C:\\", end: "work\\notes" });
+    expect(shortPathParts("C:\\a\\b\\c\\d.md")).toEqual({ head: "C:\\…", start: "", end: "\\c\\d.md" });
+    expect(shortPathParts("report.md")).toEqual({ head: "", start: "", end: "report.md" });
+  });
+
+  it("UNC 與 URL 的開頭含伺服器或網域", () => {
+    expect(shortPathParts("\\\\server\\share\\team\\project\\docs\\a.md").head).toBe("\\\\server\\share\\…");
+    expect(shortPathParts("https://docs.example.com/en/setup/windows/install.html").head).toBe("https://docs.example.com/…");
+  });
+});
+
+describe("splitExtension", () => {
+  it("分出最後一個副檔名（含點）", () => {
+    expect(splitExtension("fixtures/report-final.md")).toEqual({ base: "fixtures/report-final", ext: ".md" });
+    expect(splitExtension("archive.tar.gz")).toEqual({ base: "archive.tar", ext: ".gz" });
+  });
+
+  it("沒有副檔名、點開頭的檔名或點在資料夾名稱中時 ext 為空", () => {
+    expect(splitExtension("README")).toEqual({ base: "README", ext: "" });
+    expect(splitExtension(".gitignore")).toEqual({ base: ".gitignore", ext: "" });
+    expect(splitExtension("v1.2/notes")).toEqual({ base: "v1.2/notes", ext: "" });
+    expect(splitExtension("C:\\a.b\\notes")).toEqual({ base: "C:\\a.b\\notes", ext: "" });
+  });
+
+  it("「副檔名」太長或含空白時不當成副檔名", () => {
+    expect(splitExtension("報告 v2.最終版本與附錄說明")).toEqual({ base: "報告 v2.最終版本與附錄說明", ext: "" });
+    expect(splitExtension("name.with spaces")).toEqual({ base: "name.with spaces", ext: "" });
   });
 });
 

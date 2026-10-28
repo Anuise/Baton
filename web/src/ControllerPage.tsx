@@ -73,8 +73,11 @@ function remainingLabel(account: AccountScheduling, window: QuotaWindow, short: 
 /** 指標卡上的百分比；未知顯示「未知」。 */
 const percentText = (percent: number | null) => (percent === null ? "未知" : `${percent}%`);
 
-/** 帳號名稱在選單選項中最多的字數：額度摘要另外接在後面，避免長名稱把選單撐寬（MASTER 6.1）。 */
-const OPTION_NAME_MAX = 24;
+/**
+ * 帳號名稱在選單選項中最多的字數：額度摘要另外接在後面，避免長名稱把選單撐寬（MASTER 6.1）。
+ * 1440 寬時「換成帳號」選單只有半欄寬（約 425px），17 字的名稱加上 5h／7d 額度剛好放得下，收合時看得到名稱與主要額度。
+ */
+const OPTION_NAME_MAX = 17;
 
 /** 帳號的 5h／7d 剩餘額度與執行中 Worker 數，例如「5h 剩 60%｜7d 剩 85%｜執行中 Worker 1」。 */
 function quotaSummary(account: AccountScheduling): string {

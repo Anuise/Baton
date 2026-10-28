@@ -63,6 +63,36 @@ export function shortPath(path: string, keep = 2): string {
   return `${root}${ELLIPSIS}${sep}${segments.slice(-keep).join(sep)}`;
 }
 
+/** 路徑與檔名中可以當作切點的字元：分隔符號、點、底線、連字號、空白。 */
+const BOUNDARY = /[\\/._\- ]/;
+
+/**
+ * `shortPath` 拆成三段，給「中段省略、保留結尾」的顯示（LongText.tsx 的 `PathText`）：
+ * `head` 是開頭與省略號（`C:\…`，沒有省略時為空）、`start` 是窄時先截斷的中段、`end` 是最後最多 `endChars` 字，
+ * 從範圍內最靠前的分隔字元後面開始（`…revision-2026-10-28.md` → `10-28.md`），範圍內沒有分隔字元時直接取最後幾字。
+ * 三段相接等於 `shortPath(path, keep)`。
+ */
+export function shortPathParts(path: string, keep = 2, endChars = 10): { head: string; start: string; end: string } {
+  const short = shortPath(path, keep);
+  const omitted = short.indexOf(ELLIPSIS);
+  const head = short === path || omitted < 0 ? "" : short.slice(0, omitted + 1);
+  const rest = chars(short.slice(head.length));
+  if (rest.length <= endChars) return { head, start: "", end: rest.join("") };
+  let cut = rest.length - endChars;
+  while (cut < rest.length - 1 && !BOUNDARY.test(rest[cut - 1])) cut++;
+  if (cut === rest.length - 1) cut = rest.length - endChars;
+  return { head, start: rest.slice(0, cut).join(""), end: rest.slice(cut).join("") };
+}
+
+/**
+ * 檔名的副檔名（最後一個 `.` 之後、1～10 個英數字）：`report.md` → `{ base: "report", ext: ".md" }`。
+ * 點開頭的檔名（`.gitignore`）、點在資料夾名稱中、「副檔名」含空白或其他文字時 `ext` 為空。
+ */
+export function splitExtension(name: string): { base: string; ext: string } {
+  const match = /(?<=[^\\/.])\.[A-Za-z0-9]{1,10}$/.exec(name);
+  return match === null ? { base: name, ext: "" } : { base: name.slice(0, match.index), ext: match[0] };
+}
+
 /** 計數徽章：超過 `max`（預設 999）顯示 `999+`。完整數字以 `formatNumber` 放在可存取名稱與 title。 */
 export function formatCount(count: number, max = 999): string {
   return count > max ? `${max}+` : String(count);
