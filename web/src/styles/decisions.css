@@ -652,11 +652,14 @@ p.decision-deferred {
 }
 
 .decision-authority-setting {
-  width: 16em;
+  /* 最長選項「Controller 可自主處理（內建）」連同下拉箭頭約 216px，加上儲存格左右留白 */
+  width: 17em;
 }
 
 .decision-authority-table select {
   width: 100%;
+  /* 備援：字型較寬時選單仍至少容納最長選項，不裁切 */
+  min-inline-size: max-content;
 }
 
 /* ---- 1024px 寬（MASTER 第 8 節：清單 220～280px） ----------------------------- */
@@ -684,9 +687,5 @@ p.decision-deferred {
 
   .decision-authority-level {
     width: 9em;
-  }
-
-  .decision-authority-setting {
-    width: 12em;
   }
 }
