@@ -2,7 +2,7 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CopyButton, LongText } from "./LongText";
+import { CopyButton, LongText, ShortValue } from "./LongText";
 
 const LONG = "第一段說明，內容很長。\n第二段說明，仍然很長。\n第三段。\n第四段。";
 
@@ -106,5 +106,21 @@ describe("CopyButton", () => {
 
     await user.click(screen.getByRole("button", { name: "複製" }));
     expect(await screen.findByRole("button", { name: "複製失敗" })).toBeInTheDocument();
+  });
+});
+
+describe("ShortValue", () => {
+  it("縮短後等寬顯示，title 放完整值，旁邊附複製", () => {
+    render(<ShortValue value="task_7b5deb026d9841b0cced7314" kind="id" />);
+
+    expect(screen.getByText("task_7b5deb…7314")).toHaveAttribute("title", "task_7b5deb026d9841b0cced7314");
+    expect(screen.getByRole("button", { name: "複製識別碼" })).toBeInTheDocument();
+  });
+
+  it("本來就夠短時原樣顯示、不附複製", () => {
+    render(<ShortValue value="abc123" kind="hash" />);
+
+    expect(screen.getByText("abc123")).not.toHaveAttribute("title");
+    expect(screen.queryByRole("button")).toBeNull();
   });
 });

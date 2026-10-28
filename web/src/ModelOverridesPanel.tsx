@@ -145,7 +145,7 @@ export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="model-overrides" aria-label="模型設定">
-      <header className="more-header">
+      <header className="page-header">
         <h2>模型設定</h2>
       </header>
       <p className="model-overrides-hint">{DEFAULT_HINT}。變更只影響之後派出的 Run，已派出的 Run 維持派工時的模型。</p>

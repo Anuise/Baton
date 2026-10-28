@@ -35,13 +35,6 @@
   --font-weight-normal: 400;
   --font-weight-strong: 600;
 
-  /* 舊字級名稱：與上方字級一一對應，既有規則沿用；新規則請用 --text-* */
-  --font-size-xs: var(--text-caption);
-  --font-size-sm: var(--text-meta);
-  --font-size-md: var(--text-body);
-  --font-size-lg: var(--text-title);
-  --font-size-xl: var(--text-title-lg);
-
   /* 閱讀寬度（MASTER 6.3）：段落與長內容約每行 46 個中文字；表單 48em */
   --measure: 46em;
   --measure-form: 48em;

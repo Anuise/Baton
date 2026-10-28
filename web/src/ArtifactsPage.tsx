@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { LongText } from "./LongText";
+import { LongText, ShortValue } from "./LongText";
+import { sizeLabel } from "./textFormat";
 import { formatTimestamp } from "./time";
-import { ShortValue, sizeLabel } from "./VerificationPage";
 import type {
   ArtifactClient,
   ArtifactFileStatus,

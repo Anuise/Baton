@@ -186,7 +186,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="timeline-page" aria-label="時間線">
-      <header className="more-header">
+      <header className="page-header">
         <h2>時間線</h2>
       </header>
 
@@ -422,7 +422,7 @@ function QuotaTable({ quotas }: { quotas: ServerQuota[] }) {
     <section className="timeline-quota" aria-labelledby={headingId}>
       <h4 id={headingId}>服務端額度</h4>
       {quotas.length === 0 ? (
-        <p className="more-empty">沒有帳號</p>
+        <p className="empty-note">沒有帳號</p>
       ) : (
         <div className="table-wrap">
           <table className="data-table" aria-labelledby={headingId}>

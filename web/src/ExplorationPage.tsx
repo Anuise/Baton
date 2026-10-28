@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { LongText } from "./LongText";
+import { LongText, ShortValue } from "./LongText";
 import { formatTimestamp } from "./time";
 import type {
   ExclusionReason,
@@ -16,7 +16,7 @@ import type {
   VerificationVerdict,
   Workspace,
 } from "./runtimeClient";
-import { ShortValue, VERDICT_LABELS } from "./VerificationPage";
+import { VERDICT_LABELS } from "./VerificationPage";
 
 type Loaded = { state: "loading" } | { state: "ready"; overview: ExplorationOverview } | { state: "failed"; reason: string };
 

@@ -142,7 +142,7 @@ export function WorkflowPage({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="workflow-page" aria-label="流程">
-      <header className="more-header">
+      <header className="page-header">
         <h2>流程</h2>
       </header>
       {loaded.state === "loading" && <p>載入中…</p>}

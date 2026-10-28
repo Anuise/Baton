@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
-import { CopyButton } from "./LongText";
-import { formatBytes, formatNumber, shortHash, shortId, shortPath } from "./textFormat";
+import { CopyButton, ShortValue } from "./LongText";
+import { shortId, sizeLabel } from "./textFormat";
 import { formatTimestamp } from "./time";
 import {
   errorCode,
@@ -217,31 +217,6 @@ function titledKey(items: { key: string; title: string }[] | undefined, key: str
 
 function VerdictBadge({ verdict }: { verdict: VerificationVerdict }) {
   return <span className={`badge verdict verdict-${verdict}`}>{VERDICT_LABELS[verdict]}</span>;
-}
-
-const SHORTEN = { id: shortId, hash: shortHash, path: shortPath };
-const COPY_LABELS = { id: "複製識別碼", hash: "複製雜湊", path: "複製路徑" };
-
-/**
- * 識別碼、雜湊、路徑（MASTER.md 6.1）：等寬並縮短，完整值放在 title，旁邊附複製；
- * 本來就夠短時原樣顯示、不附複製。成果與品質四頁共用。
- */
-export function ShortValue({ value, kind }: { value: string; kind: keyof typeof SHORTEN }) {
-  const short = SHORTEN[kind](value);
-  if (short === value) return <code className="mono">{value}</code>;
-  return (
-    <span className="copy-text">
-      <code className="mono" title={value}>
-        {short}
-      </code>
-      <CopyButton text={value} label={COPY_LABELS[kind]} />
-    </span>
-  );
-}
-
-/** 檔案大小：小於 1 KB 只顯示位元組，否則換算單位並附千分位位元組（`1.15 GB（1,234,567,892 位元組）`）。 */
-export function sizeLabel(bytes: number): string {
-  return bytes < 1024 ? formatBytes(bytes) : `${formatBytes(bytes)}（${formatNumber(bytes)} 位元組）`;
 }
 
 /**

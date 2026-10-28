@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 
+import { ShortValue } from "./LongText";
 import { shortHash, splitFirstSentence } from "./textFormat";
 import { formatTimestamp } from "./time";
-import { ShortValue } from "./VerificationPage";
 import type {
   DeviationStatus,
   DeviationView,

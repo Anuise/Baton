@@ -127,7 +127,7 @@ export function ProjectUnderstandingPage({ client, workspace, timeZone }: Props)
 
   return (
     <section className="understanding-page" aria-label="專案理解">
-      <header className="more-header">
+      <header className="page-header">
         <h2>專案理解</h2>
         <button type="button" onClick={recheck} disabled={busy || loaded.state === "loading"}>
           重新檢查
@@ -178,7 +178,7 @@ function ItemSection({ title, items, timeZone }: { title: string; items: Underst
   return (
     <section className="understanding-section" aria-labelledby={id}>
       <h3 id={id}>{title}</h3>
-      {items.length === 0 && <p className="more-empty">這個區塊還沒有項目</p>}
+      {items.length === 0 && <p className="empty-note">這個區塊還沒有項目</p>}
       {items.length > 0 && (
         <ul className="understanding-items">
           {items.map((item) => (
@@ -238,8 +238,8 @@ function ProjectionSection({
   return (
     <section className="understanding-projections" aria-labelledby="understanding-projections-title">
       <h3 id="understanding-projections-title">repo 投影（GLOSSARY／ADR）</h3>
-      {!view.projection_enabled && <p className="more-empty">這個 Workspace 不是 Git repo，不產生 GLOSSARY／ADR 投影</p>}
-      {view.projection_enabled && view.projections.length === 0 && <p className="more-empty">還沒有投影檔</p>}
+      {!view.projection_enabled && <p className="empty-note">這個 Workspace 不是 Git repo，不產生 GLOSSARY／ADR 投影</p>}
+      {view.projection_enabled && view.projections.length === 0 && <p className="empty-note">還沒有投影檔</p>}
       {view.projection_enabled && view.projections.length > 0 && (
         <ul className="understanding-projection-list">
           {view.projections.map((projection) => (

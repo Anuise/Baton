@@ -380,7 +380,7 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 - **色彩**：第 2 節的表，名稱與值一一相同（`--color-bg`、`--color-surface`、`-raised`、`-sunken`、`-hover`、`--color-overlay`、`--color-border`、`-strong`、`--color-control-border`、`--color-text`、`-muted`、`-subtle`、`--color-accent`、`-hover`、`-subtle`、`-border`、`--color-on-accent`、`--color-focus`、`--color-{success,warning,danger}` 與 `-subtle`、`-border`、`--color-{orange,purple}` 與 `-subtle`）。只取 token，不寫死色碼。
 - **字型**：`--font-sans`、`--font-mono`（3.1）。
 - **字級／行高**：`--text-caption`／`--leading-caption`（12px／1.4）、`--text-meta`／`--leading-meta`（13／1.5）、`--text-body`／`--leading-body`（14／1.65）、`--text-title-sm`／`--leading-title-sm`（14／1.4）、`--text-title`／`--leading-title`（16／1.35）、`--text-title-lg`／`--leading-title-lg`（20／1.3）、`--leading-code`（1.5）。字重 `--font-weight-normal`（400）、`--font-weight-strong`（600）。
-  - 舊名 `--font-size-xs／sm／md／lg／xl` 仍可用，分別等於 caption／meta／body／title／title-lg；**新規則請用 `--text-*`**，改到自己的規則時順手換掉。`--font-size-xs`（12px）只能用在徽章、計數、時間戳，卡片內文改 `--text-meta`、段落 `--text-body`。
+  - 舊名 `--font-size-xs～xl` 已在 UI 改版收尾時移除（各包都已改用 `--text-*`）。`--text-caption`（12px）只能用在徽章、計數、時間戳，卡片內文用 `--text-meta`、段落 `--text-body`。
 - **間距**：`--space-1`～`--space-8`（2／4／6／8／12／16／24／32px，4.1）。
 - **圓角**：`--radius-sm／md／lg／full`（4.2）。**陰影**：`--shadow-sm`（只給浮在內容上的小元件）、`--shadow-md`（對話框、浮層）；卡片與按鈕不加陰影。
 - **層級**：`--z-sticky`（10）、`--z-popover`（20）、`--z-overlay`（30）、`--z-toast`（40）。
@@ -452,6 +452,32 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 - `.card-header`：flex；第一個子元素（標題）可縮小，其餘（徽章、按鈕）不縮小。
 - `.stripe-success`／`.stripe-warning`／`.stripe-danger`／`.stripe-accent`：左側 3px 色條。取代整張卡片的淡色底（audit C8）。
 
+### 10.7a 頁面標題列、區塊標題、空清單、「更多」選單
+
+```tsx
+<header className="page-header">
+  <h2>知識</h2>
+  <button type="button">新增條目</button>
+</header>
+<div className="section-heading">
+  <h3>有效條目</h3>
+  <p>共 12 筆</p>
+</div>
+<p className="empty-note">沒有待確認的候選</p>
+<details className="more-menu">
+  <summary>更多</summary>
+  <div className="more-menu-list">
+    <button type="button" className="btn-quiet">轉為 Guard</button>
+    <button type="button" className="btn-quiet more-menu-danger">淘汰</button>
+  </div>
+</details>
+```
+
+- `.page-header`：flex、wrap、gap 8px；`h2` 可縮小，其餘（主要動作）不縮小、靠右（第 7 節）。
+- `.section-heading`：區塊標題 `h3` ＋ 一行 muted 13px 說明（gap 2px）。
+- `.empty-note`：區塊內的空清單，一行 muted 13px 文字、不加框（5.7）。
+- `.more-menu`：卡片中第二順位以後的動作（5.1），`<details>` 浮層（`--z-popover`、`--shadow-md`）；選項是 `.more-menu-list` 中的 `.btn-quiet`，破壞性選項再加 `.more-menu-danger`（danger 字色）。浮層的外部點擊與 Esc 由元件自己處理（參考 `KnowledgePage.tsx` 的 `MoreMenu`）。
+
 ### 10.8 表單、表格
 
 - `.field`：一個欄位（grid、gap 4px）：`label`（或 `.field-label`，13px、600）→ 控制項 → `.field-hint`（muted）→ `.field-error`（danger）。欄位之間的 12px 由外層 grid 的 gap 決定。
@@ -473,13 +499,15 @@ WP1（task_bb7b65185ed9cedf499bca05）把上面第 2～6 節做成 token、全�
 | `truncateText(text, max)` | 以字元計、含 `…` 不超過 `max` | 需要硬性字數上限的地方 |
 | `optionLabel(title, id?, max = 60)` | `新增匯入功能（7314）`；標題過長時截斷前段，總長 ≤ 60 | `<option>` 文字（避免 `<select>` 被撐寬） |
 | `splitFirstSentence(text)` | `{ summary, rest }`：第一句與其餘 | 錯誤訊息：`summary` 完整顯示，`rest` 收進「技術細節」`<details>` |
+| `sizeLabel(bytes)` | `1.15 GB（1,234,567,892 位元組）`；小於 1 KB 時 `512 位元組` | 成果、驗證頁的檔案大小 |
+| `docsHost(url)` | `https://docs.example.com/guide` → `docs.example.com`；不是網址時退回 `shortPath` | 首次精靈的說明連結、平台頁的資料來源（完整網址放 `title` + 「複製網址」） |
 
 縮短後的值一定要有完整值的取得路徑：`title` + `CopyButton`，或點開詳情；詳情中顯示完整值（`.mono`）。
 
 ### 10.10 `LongText.tsx`
 
 ```tsx
-import { CopyButton, LongText } from "./LongText";
+import { CopyButton, LongText, ShortValue } from "./LongText";
 
 <LongText text={task.goal} />                                  // 3 行 + 「展開／收合」
 <LongText text={decision.question} lines={2} />                // 2 行
@@ -488,12 +516,14 @@ import { CopyButton, LongText } from "./LongText";
   <code className="mono" title={run.id}>{shortId(run.id)}</code>
   <CopyButton text={run.id} label="複製識別碼" />
 </span>
+<ShortValue value={artifact.task_id} kind="id" />             // 上面三行的簡寫；kind 為 id／hash／path
 ```
 
 - `LongText` props：`text`（純文字，保留換行）、`lines`（1／2／3，預設 3）、`copyLabel`（有值才顯示複製按鈕）、`className`（加在外層）。外層是 `div.long-text`（閱讀寬度 46em），內文是 `p.long-text-body`，**不要放在 `<p>` 裡**。
 - 只有文字真的超過 `lines` 行時才出現「展開」（`aria-expanded`、`aria-controls`），寬度改變時重新判斷；全文一直在 DOM 中。
 - 測試中 jsdom 不排版，「展開」不會出現；要測展開時參考 `LongText.test.tsx` 以 `scrollHeight`／`clientHeight` 模擬。
 - `CopyButton` props：`text`、`label`（預設「複製」）；按下後 1.5 秒內顯示「已複製」或「複製失敗」。測試時注意 `userEvent.setup()` 會換掉 `navigator.clipboard`。
+- `ShortValue` props：`value`、`kind`（`id`／`hash`／`path`，分別用 `shortId`／`shortHash`／`shortPath`）。縮短後等寬顯示、`title` 放完整值、旁邊附「複製識別碼／雜湊／路徑」；本來就夠短時原樣顯示、不附複製。
 
 ### 10.11 WP1 沒有處理、留給各包的項目
 

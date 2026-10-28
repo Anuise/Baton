@@ -1,5 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
+import { shortHash, shortId, shortPath } from "./textFormat";
+
 /**
  * 長段落（說明、理由、Goal、契約內容、知識內文）：清單／卡片中限制行數，超過時附「展開」低調按鈕；
  * 全文一直在 DOM 中（只是視覺上截斷），螢幕報讀器讀得到。design-system/baton/MASTER.md 6.1。
@@ -109,5 +111,32 @@ export function CopyButton({ text, label = "複製" }: { text: string; label?: s
     <button type="button" className="btn-quiet btn-sm" aria-live="polite" onClick={() => void copy()}>
       {status === "copied" ? "已複製" : status === "failed" ? "複製失敗" : label}
     </button>
+  );
+}
+
+const SHORTEN = { id: shortId, hash: shortHash, path: shortPath };
+const COPY_LABELS = { id: "複製識別碼", hash: "複製雜湊", path: "複製路徑" };
+
+/**
+ * 識別碼、雜湊、路徑（MASTER.md 6.1）：等寬並縮短，完整值放在 title，旁邊附複製；
+ * 本來就夠短時原樣顯示、不附複製。
+ *
+ * 用法：
+ * ```tsx
+ * <ShortValue value={artifact.task_id} kind="id" />
+ * <ShortValue value={version.sha256} kind="hash" />
+ * <ShortValue value={file.storage_path} kind="path" />
+ * ```
+ */
+export function ShortValue({ value, kind }: { value: string; kind: keyof typeof SHORTEN }) {
+  const short = SHORTEN[kind](value);
+  if (short === value) return <code className="mono">{value}</code>;
+  return (
+    <span className="copy-text">
+      <code className="mono" title={value}>
+        {short}
+      </code>
+      <CopyButton text={value} label={COPY_LABELS[kind]} />
+    </span>
   );
 }
