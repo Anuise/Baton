@@ -24,18 +24,18 @@
   vertical-align: middle;
 }
 
-/* 兩欄的說明清單（MASTER.md 6.4 第 5 條）：標籤欄依最長標籤、最多 12em，內容欄可縮小並受閱讀寬度限制 */
+/* 兩欄的說明清單（MASTER.md 6.4 第 5 條）：標籤欄固定 8rem（各卡片標籤長短、字級不同時，同一頁的值欄起點仍一致；
+   較長的標籤如「確認的 Evidence Bundle」在欄內折行），內容欄可縮小並受閱讀寬度限制 */
 .review-summary,
 .verification-summary,
 .exploration-summary {
   display: grid;
-  grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
+  grid-template-columns: 8rem minmax(0, 1fr);
   gap: var(--space-3) var(--space-6);
   align-items: baseline;
 }
 
 :is(.review-summary, .verification-summary, .exploration-summary) dt {
-  max-width: 12em;
   color: var(--color-text-muted);
 }
 
@@ -462,6 +462,8 @@
 
 /* 各分區的卡片以左側色條區分，疑點與已確認缺陷不能看起來一樣 */
 .exploration-group .exploration-card {
+  /* 色條比一般框線寬 2px，從左內距扣回，內容（含 dl 值欄）與章程卡對齊 */
+  padding-left: calc(var(--space-5) - 2px);
   border-left-width: 3px;
 }
 
@@ -486,8 +488,35 @@
   color: var(--color-text-muted);
 }
 
+/* 卡片標題、清單項目與重現紀錄的文字受閱讀寬度限制（段落已由 base.css 限制） */
+.exploration-card h4,
+.exploration-list li,
+.exploration-attempt > * {
+  max-inline-size: var(--measure);
+}
+
 .exploration-list {
   padding-left: var(--space-7);
+}
+
+/* 標題受閱讀寬度限制後，狀態徽章仍靠卡片右緣，不停在標題後方的半途 */
+.exploration-badge {
+  margin-left: auto;
+}
+
+/* 重現步驟與詳細資訊：預設收合，展開後步驟與說明清單依序排列 */
+.exploration-details > summary {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.exploration-details[open] > summary {
+  margin-bottom: var(--space-4);
+}
+
+.exploration-details > ol + dl {
+  margin-top: var(--space-4);
 }
 
 /* 重現紀錄：以上框線分隔的清單，不再加框 */

@@ -102,6 +102,40 @@ describe("探索", () => {
     ]);
   });
 
+  it("疑點卡只攤開摘要；重現步驟與回報資訊收在預設收合的詳細資訊中，可展開", async () => {
+    const user = userEvent.setup();
+    renderPage(fakeClient());
+
+    const finding = await screen.findByRole("region", { name: "優惠碼欄位接受負數" });
+    const toggle = within(finding).getByText("重現步驟與詳細資訊（3 步）");
+    expect(toggle.tagName).toBe("SUMMARY");
+    const details = toggle.closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    // 摘要：Task、功能、預期、實際觀察在收合區之外
+    for (const label of ["Task", "功能", "預期", "實際觀察"]) {
+      expect(details).not.toContainElement(within(finding).getByText(label, { selector: "dt" }));
+    }
+    // 收合區：重現步驟、章程、環境、證據、回報者、回報於
+    expect(details).toContainElement(within(finding).getByRole("list", { name: "優惠碼欄位接受負數 的重現步驟", hidden: true }));
+    for (const label of ["章程", "環境", "證據", "回報者", "回報於"]) {
+      expect(details).toContainElement(within(finding).getByText(label, { selector: "dt" }));
+    }
+    // 摘要與收合區的說明清單同一種欄寬（值欄起點一致）
+    expect(within(details).getByText("環境", { selector: "dt" }).closest("dl")).toHaveClass("exploration-summary");
+
+    await user.click(toggle);
+    expect(details).toHaveAttribute("open");
+  });
+
+  it("已確認缺陷的重現案例欄位留在摘要中", async () => {
+    renderPage(fakeClient());
+
+    const defect = await screen.findByRole("region", { name: "折扣後總額少算" });
+    const details = within(defect).getByText(/^重現步驟與詳細資訊/).closest("details")!;
+    expect(details).not.toContainElement(within(defect).getByText("確認的 Evidence Bundle", { selector: "dt" }));
+    expect(details).not.toContainElement(within(defect).getByText("失敗的步驟", { selector: "dt" }));
+  });
+
   it("已確認缺陷顯示確認它的 Evidence Bundle 與失敗的步驟", async () => {
     renderPage(fakeClient());
 

@@ -10,14 +10,20 @@ import type {
   ArtifactPreview,
   ArtifactVersionView,
   ArtifactView,
+  TaskClient,
   UnregisteredFile,
   Workspace,
 } from "./runtimeClient";
 
-type ViewState = { state: "loading" } | { state: "ready"; list: ArtifactList } | { state: "failed"; reason: string };
+/** `taskTitles`：Task 識別碼 → 標題；讀不到 Task 清單時是空的，卡片退回顯示識別碼。 */
+type ViewState =
+  | { state: "loading" }
+  | { state: "ready"; list: ArtifactList; taskTitles: Map<string, string> }
+  | { state: "failed"; reason: string };
 
 interface Props {
-  client: ArtifactClient;
+  /** 成果卡的 Task 標題另外從 Task 清單取得（ArtifactView 只有 task_id）。 */
+  client: ArtifactClient & Pick<TaskClient, "getTaskBoard">;
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
@@ -47,7 +53,13 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
 
   const load = useCallback(async () => {
     try {
-      setLoaded({ state: "ready", list: await client.listArtifacts(workspace.id) });
+      // Task 清單只用來顯示標題：讀取失敗不影響成果列表
+      const [list, board] = await Promise.all([
+        client.listArtifacts(workspace.id),
+        client.getTaskBoard(workspace.id).catch(() => null),
+      ]);
+      const taskTitles = new Map((board?.tasks ?? []).map((task) => [task.id, task.title]));
+      setLoaded({ state: "ready", list, taskTitles });
     } catch (e) {
       setLoaded({ state: "failed", reason: reasonOf(e) });
     }
@@ -73,7 +85,14 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
       <h2>成果</h2>
       {artifacts.length === 0 && <p>這個 Workspace 還沒有成果</p>}
       {artifacts.map((artifact) => (
-        <ArtifactCard key={artifact.id} client={client} workspaceId={workspace.id} artifact={artifact} timeZone={timeZone} />
+        <ArtifactCard
+          key={artifact.id}
+          client={client}
+          workspaceId={workspace.id}
+          artifact={artifact}
+          taskTitle={loaded.taskTitles.get(artifact.task_id)}
+          timeZone={timeZone}
+        />
       ))}
       {unregistered_files.length > 0 && (
         <section className="card stripe-warning artifact-unregistered" aria-label="未登記的檔案">
@@ -101,11 +120,13 @@ interface CardProps {
   client: ArtifactClient;
   workspaceId: string;
   artifact: ArtifactView;
+  /** 所屬 Task 的標題；取不到時顯示縮短的識別碼。 */
+  taskTitle?: string;
   timeZone?: string;
 }
 
 /** 一個成果：預設只列最新版本，可展開全部版本（由新到舊）。 */
-function ArtifactCard({ client, workspaceId, artifact, timeZone }: CardProps) {
+function ArtifactCard({ client, workspaceId, artifact, taskTitle, timeZone }: CardProps) {
   const [expanded, setExpanded] = useState(false);
   const newestFirst = [...artifact.versions].reverse();
   const shown = expanded ? newestFirst : newestFirst.slice(0, 1);
@@ -113,16 +134,24 @@ function ArtifactCard({ client, workspaceId, artifact, timeZone }: CardProps) {
   return (
     <article className="card artifact-card" aria-label={artifact.name}>
       <header className="card-header">
-        <h3>{artifact.name}</h3>
+        {/* 長檔名最多兩行，完整名稱在 title */}
+        <h3 className="clamp-2" title={artifact.name}>
+          {artifact.name}
+        </h3>
         {artifact.versions.length > 1 && (
           <button type="button" className="btn-quiet btn-sm" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
             全部版本（{artifact.versions.length}）
           </button>
         )}
       </header>
-      {/* ArtifactView 沒有 Task 標題（AI 決策紀錄），只顯示縮短的識別碼 */}
-      <p className="artifact-task">
-        Task：<ShortValue value={artifact.task_id} kind="id" field="Task" />
+      {/* 長的 Task 標題最多兩行（完整標題在 title）；識別碼本來就縮短，不截行以免遮住複製按鈕的焦點框 */}
+      <p className={taskTitle === undefined ? "artifact-task" : "artifact-task clamp-2"}>
+        Task：
+        {taskTitle === undefined ? (
+          <ShortValue value={artifact.task_id} kind="id" field="Task" />
+        ) : (
+          <span title={taskTitle}>{taskTitle}</span>
+        )}
       </p>
       <ul className="artifact-versions">
         {shown.map((version) => (

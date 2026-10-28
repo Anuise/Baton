@@ -3,12 +3,16 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ArtifactsPage } from "./ArtifactsPage";
+import { taskOf } from "./preview/data";
 import type {
   ArtifactClient,
   ArtifactList,
   ArtifactPreview,
   ArtifactVersionView,
   ArtifactView,
+  TaskBoard,
+  TaskClient,
+  TaskView,
   Workspace,
 } from "./runtimeClient";
 
@@ -54,8 +58,29 @@ function artifact(overrides: Partial<ArtifactView> = {}): ArtifactView {
   };
 }
 
-function fakeClient(list: ArtifactList | Error, preview?: ArtifactPreview | Error) {
+/** 只有 Task 清單的看板（成果頁只讀 tasks 取標題）。 */
+function boardOf(tasks: TaskView[]): TaskBoard {
   return {
+    workspace_id: "ws_1",
+    goals: [],
+    tasks,
+    runs: [],
+    capabilities: [],
+    verifications: [],
+    authorization_revision: null,
+    workdirs: [],
+    integrations: [],
+    budgets: [],
+  };
+}
+
+/** `board` 省略時看板沒有任何 Task（卡片退回顯示識別碼）。 */
+function fakeClient(list: ArtifactList | Error, preview?: ArtifactPreview | Error, board: TaskBoard | Error = boardOf([])) {
+  return {
+    getTaskBoard: vi.fn(async () => {
+      if (board instanceof Error) throw board;
+      return board;
+    }),
     listArtifacts: vi.fn(async () => {
       if (list instanceof Error) throw list;
       return list;
@@ -65,7 +90,7 @@ function fakeClient(list: ArtifactList | Error, preview?: ArtifactPreview | Erro
       return preview!;
     }),
     downloadArtifact: vi.fn(async () => ({ blob: new Blob(["內容"]), sha256: SHA })),
-  } satisfies ArtifactClient;
+  } satisfies ArtifactClient & Pick<TaskClient, "getTaskBoard">;
 }
 
 const previewOf = (preview: ArtifactPreview["preview"]): ArtifactPreview => ({
@@ -77,7 +102,7 @@ const previewOf = (preview: ArtifactPreview["preview"]): ArtifactPreview => ({
   preview,
 });
 
-const renderPage = (client: ArtifactClient) => render(<ArtifactsPage client={client} workspace={workspace} timeZone="Asia/Taipei" />);
+const renderPage = (client: ArtifactClient & Pick<TaskClient, "getTaskBoard">) => render(<ArtifactsPage client={client} workspace={workspace} timeZone="Asia/Taipei" />);
 
 describe("成果", () => {
   it("載入中先顯示提示，讀取該 Workspace 的成果", async () => {
@@ -147,6 +172,48 @@ describe("成果", () => {
     // 同一張卡的兩個「複製識別碼」以欄位名區分（可存取名稱包含看得到的按鈕文字）
     expect(within(card).getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
     expect(within(latest).getByRole("button", { name: "複製識別碼（v1 產生者 Run）" })).toBeInTheDocument();
+  });
+
+  it("成果卡顯示所屬 Task 的標題（完整標題在 title），不顯示識別碼", async () => {
+    const title = "整理文件目錄，讓新成員能找到各模組的說明";
+    const client = fakeClient({ artifacts: [artifact()], unregistered_files: [] }, undefined, boardOf([taskOf("task_1", title, "completed")]));
+    renderPage(client);
+
+    const card = await screen.findByRole("article", { name: "report.md" });
+    const task = within(card).getByText(title);
+    expect(task).toHaveAttribute("title", title);
+    expect(card).toHaveTextContent(`Task：${title}`);
+    expect(card).not.toHaveTextContent("task_1");
+    expect(within(card).queryByRole("button", { name: "複製識別碼（Task）" })).not.toBeInTheDocument();
+    expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1");
+  });
+
+  it("讀不到 Task 清單時，成果仍然列出，Task 退回顯示縮短的識別碼", async () => {
+    const taskId = "task_7b5deb026d9841b0cced7314aa0f9e8d";
+    renderPage(fakeClient({ artifacts: [artifact({ task_id: taskId })], unregistered_files: [] }, undefined, new Error("需要桌面憑證")));
+
+    const card = await screen.findByRole("article", { name: "report.md" });
+    expect(within(card).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
+    expect(within(card).getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("Task 清單中找不到所屬 Task 時退回顯示識別碼", async () => {
+    renderPage(fakeClient({ artifacts: [artifact()], unregistered_files: [] }, undefined, boardOf([taskOf("task_9", "別的 Task", "running")])));
+
+    const card = await screen.findByRole("article", { name: "report.md" });
+    expect(card).toHaveTextContent("Task：task_1");
+    expect(card).not.toHaveTextContent("別的 Task");
+  });
+
+  it("成果名稱最多顯示兩行，完整名稱在 title", async () => {
+    const name = `fixtures/${"very_long_artifact_file_name_".repeat(6)}.json`;
+    renderPage(fakeClient({ artifacts: [artifact({ name })], unregistered_files: [] }));
+
+    const card = await screen.findByRole("article", { name });
+    const heading = within(card).getByRole("heading", { level: 3, name });
+    expect(heading).toHaveClass("clamp-2");
+    expect(heading).toHaveAttribute("title", name);
   });
 
   it("只有一個版本時不顯示展開按鈕", async () => {
