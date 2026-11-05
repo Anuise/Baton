@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 
+import { ShortValue } from "./LongText";
+import { shortHash, splitFirstSentence } from "./textFormat";
 import { formatTimestamp } from "./time";
 import type {
   DeviationStatus,
@@ -36,6 +38,14 @@ const DEVIATION_STATUS_LABELS: Record<DeviationStatus, string> = {
   rejected: "已拒絕",
 };
 
+/** 設計偏離狀態的語意色（徽章與左側色條）；已拒絕是中性。 */
+const DEVIATION_TONES: Record<DeviationStatus, string | null> = {
+  proposed: "accent",
+  awaiting_decision: "warning",
+  accepted: "success",
+  rejected: null,
+};
+
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -66,7 +76,7 @@ export function ReviewPage({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="review-page" aria-label="審查">
-      <h2>審查與設計偏離：{workspace.name}</h2>
+      <h2>審查與設計偏離</h2>
       {loaded.state === "loading" && <p>載入中…</p>}
       {loaded.state === "failed" && <p role="alert">無法取得審查：{loaded.reason}</p>}
       {loaded.state === "ready" && (
@@ -87,37 +97,74 @@ export function ReviewPage({ client, workspace, timeZone }: Props) {
   );
 }
 
+/** 整體結果：狀態詞做成徽章，卡片以左側色條標示（長的過期原因用一般文字，不整段上色）。 */
+const OVERALL = {
+  passed: { label: "通過", tone: "success" },
+  failed: { label: "未通過", tone: "danger" },
+  stale: { label: "已過期", tone: "warning" },
+} as const;
+
 function ReviewCard({ review, timeZone }: { review: ReviewView; timeZone?: string }) {
   const headingId = `review-${review.id}`;
   // 已過期的審查不論兩軸結果都不能當作證據
-  const overall = review.stale_reason !== null ? "stale" : review.passed ? "passed" : "failed";
+  const overall = OVERALL[review.stale_reason !== null ? "stale" : review.passed ? "passed" : "failed"];
+  const subject = review.subject_task_title ?? review.subject_task_id;
   return (
-    <section className={`review review-${overall}`} aria-labelledby={headingId}>
-      <h4 id={headingId}>
-        {review.subject_task_title ?? review.subject_task_id}（candidate {review.candidate_revision}）
-      </h4>
-      <p className="review-badge">
-        {overall === "stale" ? `已過期：${review.stale_reason}` : overall === "passed" ? "通過" : "未通過"}
-      </p>
-      <dl className="workflow-summary">
+    <section className={`card stripe-${overall.tone} review`} aria-labelledby={headingId}>
+      <header className="card-header">
+        <h4 id={headingId}>
+          <span className="clamp-2" title={subject}>
+            {subject}
+          </span>
+          <span className="review-candidate">
+            （candidate <code className="mono">{shortHash(review.candidate_revision)}</code>）
+          </span>
+        </h4>
+        <span className={`badge badge-${overall.tone}`}>{overall.label}</span>
+      </header>
+      {review.stale_reason !== null && <StaleReason reason={review.stale_reason} />}
+      <dl className="review-summary">
         <dt>被審 Task</dt>
-        <dd>{review.subject_task_title ?? review.subject_task_id}</dd>
+        <dd>{subject}</dd>
         <dt>Reviewer</dt>
         <dd>{review.reviewer_task_title ?? review.reviewer_task_id}</dd>
         <dt>版本</dt>
         <dd>
-          {review.base_revision} → {review.candidate_revision}
+          <ShortValue value={review.base_revision} kind="hash" field="基準版本" />
+          {" → "}
+          <ShortValue value={review.candidate_revision} kind="hash" field="候選版本" />
         </dd>
         <dt>規格</dt>
         <dd>規格第 {review.spec_version} 版</dd>
         <dt>規範來源</dt>
-        <dd>{review.standards_source}</dd>
+        <dd>
+          <ShortValue value={review.standards_source} kind="path" field="規範來源" />
+        </dd>
         <dt>審查於</dt>
         <dd>{formatTimestamp(review.created_at, timeZone)}</dd>
       </dl>
       <AxisSection title="規範（Standards）" axis={review.standards} />
       <AxisSection title="需求（Spec）" axis={review.spec} />
     </section>
+  );
+}
+
+/** 過期原因（錯誤訊息）：第一句完整顯示，其餘收進「技術細節」。 */
+function StaleReason({ reason }: { reason: string }) {
+  const { summary, rest } = splitFirstSentence(reason);
+  return (
+    <div className="review-stale-reason">
+      <p>
+        <span className="review-label">過期原因：</span>
+        {summary}
+      </p>
+      {rest !== "" && (
+        <details>
+          <summary>技術細節</summary>
+          <p>{rest}</p>
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -130,14 +177,16 @@ function AxisSection({ title, axis }: { title: string; axis: ReviewAxisView }) {
       {axis.reused_from !== null && <p className="review-reused">沿用自 {axis.reused_from}</p>}
       {axis.summary !== "" && <p>{axis.summary}</p>}
       {axis.paths.length > 0 && (
-        <ul className="workflow-stage-list" aria-label={`${title}的檔案`}>
+        <ul className="review-list" aria-label={`${title}的檔案`}>
           {axis.paths.map((path) => (
-            <li key={path}>{path}</li>
+            <li key={path}>
+              <code className="mono">{path}</code>
+            </li>
           ))}
         </ul>
       )}
       {axis.findings.length > 0 && (
-        <ul className="workflow-stage-list" aria-label={`${title}的 finding`}>
+        <ul className="review-list" aria-label={`${title}的 finding`}>
           {axis.findings.map((finding) => (
             <FindingItem key={finding.id} finding={finding} />
           ))}
@@ -163,11 +212,14 @@ function FindingItem({ finding }: { finding: ReviewFinding }) {
 
 function DeviationCard({ deviation, timeZone }: { deviation: DeviationView; timeZone?: string }) {
   const headingId = `deviation-${deviation.id}`;
+  const tone = DEVIATION_TONES[deviation.status];
   return (
-    <section className={`review deviation-${deviation.status}`} aria-labelledby={headingId}>
-      <h4 id={headingId}>{deviation.deviation}</h4>
-      <p className="review-badge">{DEVIATION_STATUS_LABELS[deviation.status]}</p>
-      <dl className="workflow-summary">
+    <section className={tone === null ? "card review" : `card stripe-${tone} review`} aria-labelledby={headingId}>
+      <header className="card-header">
+        <h4 id={headingId}>{deviation.deviation}</h4>
+        <span className={tone === null ? "badge" : `badge badge-${tone}`}>{DEVIATION_STATUS_LABELS[deviation.status]}</span>
+      </header>
+      <dl className="review-summary">
         <dt>Task</dt>
         <dd>{deviation.task_title ?? deviation.task_id}</dd>
         <dt>設計</dt>
@@ -180,7 +232,7 @@ function DeviationCard({ deviation, timeZone }: { deviation: DeviationView; time
         <dd>{formatTimestamp(deviation.created_at, timeZone)}</dd>
       </dl>
       {deviation.affected_contracts.length > 0 && (
-        <ul className="workflow-stage-list" aria-label={`${deviation.deviation} 受影響的契約`}>
+        <ul className="review-list" aria-label={`${deviation.deviation} 受影響的契約`}>
           {deviation.affected_contracts.map((contract, index) => (
             <li key={index}>{contract}</li>
           ))}

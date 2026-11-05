@@ -27,6 +27,15 @@ describe("平台狀態頁", () => {
     expect(screen.getByText("正式支援")).toBeInTheDocument();
   });
 
+  it("「Microsoft 服務結束日」標籤欄放不下時在空白處換行，「服務結束日」不拆開（不留單獨一個「日」）", async () => {
+    render(<PlatformPage client={clientWith(supportedPlatform)} />);
+
+    const label = await screen.findByText("服務結束日");
+    expect(label).toHaveClass("nowrap");
+    expect(label.closest("dt")).toHaveTextContent(/^Microsoft 服務結束日$/);
+    expect(label.closest("dt")!.nextElementSibling).toHaveTextContent("2028-10-10");
+  });
+
   it("標示支援期限資料的來源與查閱日期", async () => {
     render(<PlatformPage client={clientWith(supportedPlatform)} />);
 

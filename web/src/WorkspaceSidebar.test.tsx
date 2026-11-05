@@ -68,6 +68,11 @@ function fakeClient(initial: Workspace[] = [], lifecycles: Partial<WorkspaceLife
   return client;
 }
 
+/** 清單項目中的縮短路徑（不含「管理」選單裡的完整路徑）。 */
+function pathOf(name: string): HTMLElement {
+  return screen.getByRole("button", { name: `選擇 ${name}` }).closest("li")!.querySelector(".workspace-meta .workspace-path")!;
+}
+
 describe("左側 Workspace 清單", () => {
   it("沒有 Workspace 時顯示空狀態", async () => {
     render(<WorkspaceSidebar client={fakeClient()} />);
@@ -84,8 +89,37 @@ describe("左側 Workspace 清單", () => {
     render(<WorkspaceSidebar client={client} />);
 
     expect(await screen.findByText("筆記")).toBeInTheDocument();
-    expect(screen.getByText("C:\\work\\notes")).toBeInTheDocument();
+    expect(pathOf("筆記")).toHaveTextContent(/^C:\\work\\notes$/);
     expect(screen.queryByText("舊專案")).not.toBeInTheDocument();
+  });
+
+  it("路徑保留磁碟與結尾，結尾段數多到足以和其他 Workspace 區分；窄時只截斷中段，開頭與結尾一定顯示", async () => {
+    const client = fakeClient([
+      workspace({ id: "ws_1", name: "甲", path: "C:\\Users\\me\\work\\client-a\\repo\\src" }),
+      workspace({ id: "ws_2", name: "乙", path: "C:\\Users\\me\\work\\client-b\\repo\\src" }),
+      workspace({ id: "ws_3", name: "丙", path: "C:\\Users\\me\\projects\\notes" }),
+    ]);
+    render(<WorkspaceSidebar client={client} />);
+    await screen.findByText("甲");
+
+    // 只保留結尾 2 段時三者中有兩個都是 C:\…\repo\src，所以多保留到能區分的那一段
+    expect(pathOf("甲")).toHaveTextContent(/^C:\\…\\client-a\\repo\\src$/);
+    expect(pathOf("乙")).toHaveTextContent(/^C:\\…\\client-b\\repo\\src$/);
+    expect(pathOf("丙")).toHaveTextContent(/^C:\\…\\projects\\notes$/);
+    // 與頁簽列上方的情境列同一種寫法（PathText）：開頭「C:\…」與結尾不縮小，窄時只截斷中段；完整路徑在 title
+    expect(pathOf("甲").querySelector(".path-text-head")).toHaveTextContent(/^C:\\…$/);
+    expect(pathOf("甲").querySelector(".path-text-end")).toHaveTextContent(/^a\\repo\\src$/);
+    expect(pathOf("丙").querySelector(".path-text-end")).toHaveTextContent(/^notes$/);
+    expect(pathOf("甲")).toHaveAttribute("title", "C:\\Users\\me\\work\\client-a\\repo\\src");
+  });
+
+  it("「管理」選單顯示完整路徑並可複製（窄螢幕與只看 title 以外的取得方式）", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace({ path: "C:\\Users\\me\\projects\\notes" })])} />);
+
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+    const panel = item.querySelector(".workspace-menu-panel") as HTMLElement;
+    expect(within(panel).getByText("C:\\Users\\me\\projects\\notes")).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "複製路徑（筆記）" })).toBeInTheDocument();
   });
 
   it("輸入目錄後建立，新的 Workspace 立刻出現在清單，表單清空", async () => {
@@ -97,7 +131,8 @@ describe("左側 Workspace 清單", () => {
     await user.type(screen.getByLabelText("目錄"), "C:\\work\\docs");
     await user.click(screen.getByRole("button", { name: "建立 Workspace" }));
 
-    expect(await screen.findByText("docs")).toBeInTheDocument();
+    // 名稱預設取目錄名，與路徑的結尾同字，以選擇按鈕確認
+    expect(await screen.findByRole("button", { name: "選擇 docs" })).toBeInTheDocument();
     expect(client.createWorkspace).toHaveBeenCalledWith({ path: "C:\\work\\docs", name: undefined });
     expect(screen.getByLabelText("目錄")).toHaveValue("");
     expect(screen.queryByText("還沒有 Workspace")).not.toBeInTheDocument();
@@ -226,7 +261,8 @@ describe("左側 Workspace 清單", () => {
       .map((button) => button.getAttribute("aria-label"))
       // 「?」說明提示不是功能按鈕
       .filter((label) => !label?.endsWith("的說明"));
-    expect(buttons).toEqual(["選擇 筆記", "封存 筆記"]);
+    // 「複製路徑」是「管理」選單中完整路徑的附屬動作，不是功能按鈕
+    expect(buttons).toEqual(["選擇 筆記", "複製路徑（筆記）", "封存 筆記"]);
   });
 
   it("標示目前選中的 Workspace", async () => {
@@ -235,6 +271,92 @@ describe("左側 Workspace 清單", () => {
 
     expect(await screen.findByRole("button", { name: "選擇 專案" })).toHaveAttribute("aria-current", "true");
     expect(screen.getByRole("button", { name: "選擇 筆記" })).not.toHaveAttribute("aria-current");
+  });
+
+  it("封存、自動續跑與建立時間收在項目的「管理」選單；Esc 收起並把焦點還給觸發鈕", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} timeZone="Asia/Taipei" />);
+
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+    const menu = within(item).getByText("建立於 2023/11/15 06:13").closest("details")!;
+    const trigger = within(menu).getByLabelText("管理 筆記");
+    expect(menu).not.toHaveAttribute("open");
+    expect(within(menu).getByRole("button", { name: "封存 筆記" })).toBeInTheDocument();
+    expect(await within(menu).findByRole("checkbox", { name: "完全退出後自動續跑 筆記" })).toBeInTheDocument();
+    expect(within(menu).getByRole("checkbox", { name: "跨登入自動續跑 筆記" })).toBeInTheDocument();
+
+    // <summary> 在瀏覽器中原生可用 Enter／空白鍵開啟；jsdom 只模擬點擊
+    await user.click(trigger);
+    expect(menu).toHaveAttribute("open");
+
+    within(menu).getByRole("checkbox", { name: "跨登入自動續跑 筆記" }).focus();
+    await user.keyboard("{Escape}");
+    expect(menu).not.toHaveAttribute("open");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("點「管理」浮層空白處（焦點落到 body）後按 Esc 仍收起選單，焦點回觸發鈕", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+    const trigger = within(item).getByLabelText("管理 筆記");
+    const menu = trigger.closest("details")!;
+    await user.click(trigger);
+    expect(menu).toHaveAttribute("open");
+
+    // 點浮層空白處：不收起，焦點移出選單
+    await user.click(item.querySelector(".workspace-menu-panel")!);
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(menu).toHaveAttribute("open");
+    expect(document.body).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(menu).not.toHaveAttribute("open");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("展開的「管理」選單不被暫停列與下一個項目蓋住：浮層以項目定位，中間沒有層級較低的堆疊脈絡", async () => {
+    // jsdom 不排版，只能檢查決定蓋疊的樣式；實際點擊命中以 Playwright 探針驗證
+    // Vitest 會把 CSS 匯入（含 ?raw）換成空字串，專案也沒有 @types/node，所以以非字面的動態匯入讀檔
+    const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
+    const url: { fileURLToPath(url: string): string } = await import(/* @vite-ignore */ `node:${"url"}`);
+    const style = document.createElement("style");
+    // 相對於本檔解析，不依賴 cwd（從 repo 根目錄以 --root web 執行也讀得到）。
+    // import.meta.url 先放進變數：Vite 會把字面的 new URL("…", import.meta.url) 改寫成開發伺服器網址；
+    // jsdom 環境的全域 URL 也不是 Node 的 URL，fs 不收，所以轉成路徑字串
+    const here = import.meta.url;
+    style.textContent = fs.readFileSync(url.fileURLToPath(new URL("./styles/shell.css", here).href), "utf8");
+    document.head.append(style);
+    try {
+      const user = userEvent.setup();
+      const paused = { workspace_id: "ws_1", name: "筆記", awaiting_resume: true, paused_by: "full_exit" as const };
+      render(<WorkspaceSidebar client={fakeClient([workspace(), workspace({ id: "ws_2", name: "專案" })], [paused])} />);
+
+      const item = (await screen.findByRole("button", { name: "繼續工作 筆記" })).closest("li")!;
+      await user.click(within(item).getByLabelText("管理 筆記"));
+      const panel = item.querySelector(".workspace-menu-panel")!;
+
+      // 浮層與項目之間的祖先都不定位、不設 z-index：浮層的定位基準是整個項目（寬度以項目為上限），
+      // 它的 --z-popover 也不會被困在 z-index: 1 的選單裡、輸給同一項目的暫停列或下一個項目
+      for (let el = panel.parentElement!; el !== item; el = el.parentElement!) {
+        expect(getComputedStyle(el).position).toBe("static");
+        expect(getComputedStyle(el).zIndex).toMatch(/^(auto|)$/);
+      }
+      expect(getComputedStyle(item).position).toBe("relative");
+      expect(getComputedStyle(item).zIndex).toMatch(/^(auto|)$/);
+      expect(getComputedStyle(panel).zIndex).toBe("var(--z-popover)");
+      expect(getComputedStyle(item.querySelector(".workspace-paused")!).zIndex).toBe("1");
+    } finally {
+      style.remove();
+    }
+  });
+
+  it("待裁定數超過 999 時徽章顯示 999+，完整數字在可存取名稱", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} pendingDecisions={{ ws_1: 1284 }} />);
+
+    const badge = await screen.findByText("待裁定 999+");
+    expect(badge).toHaveAttribute("aria-label", "待裁定 1,284 項");
   });
 
   it("讀到清單後把使用中的 Workspace 告訴上層，封存後再告知一次", async () => {

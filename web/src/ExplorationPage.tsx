@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { LongText, ShortValue } from "./LongText";
 import { formatTimestamp } from "./time";
 import type {
   ExclusionReason,
@@ -121,7 +122,7 @@ export function ExplorationPage({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="exploration-page" aria-label="探索">
-      <h2>探索：{workspace.name}</h2>
+      <h2>探索</h2>
       {loaded.state === "loading" && <p>載入中…</p>}
       {loaded.state !== "loading" && (
         <button type="button" className="exploration-reload" onClick={() => void reload()}>
@@ -166,7 +167,7 @@ function CharterCard({ charter, timeZone }: { charter: ExplorationCharter; timeZ
   const headingId = `exploration-charter-${charter.id}`;
   const task = charter.task_title ?? charter.task_id;
   return (
-    <section className="exploration-card" aria-labelledby={headingId}>
+    <section className="card exploration-card" aria-labelledby={headingId}>
       <h4 id={headingId}>{task}</h4>
       <dl className="verification-summary">
         <dt>區域</dt>
@@ -201,14 +202,15 @@ function CharterCard({ charter, timeZone }: { charter: ExplorationCharter; timeZ
 function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZone?: string }) {
   const headingId = `exploration-finding-${finding.id}`;
   return (
-    <section className={`exploration-card exploration-finding finding-status-${finding.status}`} aria-labelledby={headingId}>
-      <h4 id={headingId}>{finding.title}</h4>
-      {finding.status === "regressed" && <p className="exploration-badge">回歸失敗</p>}
-      <dl className="verification-summary">
+    <section className={`card exploration-card exploration-finding finding-status-${finding.status}`} aria-labelledby={headingId}>
+      <header className="card-header">
+        <h4 id={headingId}>{finding.title}</h4>
+        {finding.status === "regressed" && <span className="badge badge-danger exploration-badge">回歸失敗</span>}
+      </header>
+      {/* 摘要：判斷這個疑點要看的欄位；疑點與確認它的重現案例共用一個 dl */}
+      <dl className="exploration-summary">
         <dt>Task</dt>
-        <dd>{finding.task_title ?? finding.task_id}</dd>
-        <dt>章程</dt>
-        <dd>第 {finding.charter_version} 版</dd>
+        <dd>{finding.task_title ?? <ShortValue value={finding.task_id} kind="id" field="Task" />}</dd>
         {finding.feature !== undefined && (
           <>
             <dt>功能</dt>
@@ -216,17 +218,13 @@ function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZ
           </>
         )}
         <dt>預期</dt>
-        <dd>{finding.expected}</dd>
+        <dd>
+          <LongText text={finding.expected} />
+        </dd>
         <dt>實際觀察</dt>
-        <dd>{finding.actual}</dd>
-        <dt>環境</dt>
-        <dd>{finding.environment}</dd>
-        <dt>證據</dt>
-        <dd>{finding.evidence.length === 0 ? "沒有附證據" : finding.evidence.join("、")}</dd>
-        <dt>回報者</dt>
-        <dd>{finding.reported_by}</dd>
-        <dt>回報於</dt>
-        <dd>{formatTimestamp(finding.created_at, timeZone)}</dd>
+        <dd>
+          <LongText text={finding.actual} />
+        </dd>
         {finding.unverified_reason !== undefined && (
           <>
             <dt>未驗原因</dt>
@@ -238,32 +236,65 @@ function FindingCard({ finding, timeZone }: { finding: ExplorationFinding; timeZ
             <dt>排除原因</dt>
             <dd>
               {EXCLUSION_LABELS[finding.exclusion.reason]}
-              {finding.exclusion.decision_request_id !== undefined && `（裁定請求 ${finding.exclusion.decision_request_id}）`}
+              {finding.exclusion.decision_request_id !== undefined && (
+                <>
+                  （裁定請求 <ShortValue value={finding.exclusion.decision_request_id} kind="id" field="裁定請求" />）
+                </>
+              )}
             </dd>
             <dt>排除理由</dt>
             <dd>{finding.exclusion.rationale}</dd>
           </>
         )}
+        {finding.case !== undefined && <CaseRows reproduction={finding.case} timeZone={timeZone} />}
       </dl>
-      <h5>重現步驟</h5>
-      <ol className="exploration-list" aria-label={`${finding.title} 的重現步驟`}>
-        {finding.steps.map((step, index) => (
-          <li key={index}>{step}</li>
-        ))}
-      </ol>
-      {finding.case !== undefined && <CaseSummary reproduction={finding.case} timeZone={timeZone} />}
+      {/* 重現步驟與回報資訊預設收合，長清單時整頁不會被步驟撐長；dl 與摘要同欄寬，值欄起點一致 */}
+      <details className="exploration-details">
+        <summary>重現步驟與詳細資訊（{finding.steps.length} 步）</summary>
+        <ol className="exploration-list" aria-label={`${finding.title} 的重現步驟`}>
+          {finding.steps.map((step, index) => (
+            <li key={index}>{step}</li>
+          ))}
+        </ol>
+        <dl className="exploration-summary">
+          <dt>章程</dt>
+          <dd>第 {finding.charter_version} 版</dd>
+          <dt>環境</dt>
+          <dd>{finding.environment}</dd>
+          <dt>證據</dt>
+          <dd>
+            {finding.evidence.length === 0
+              ? "沒有附證據"
+              : finding.evidence.map((id, index) => (
+                  <span key={index}>
+                    {index > 0 && "、"}
+                    <ShortValue value={id} kind="id" field={finding.evidence.length === 1 ? "證據" : `證據 ${index + 1}`} />
+                  </span>
+                ))}
+          </dd>
+          <dt>回報者</dt>
+          <dd>
+            <ShortValue value={finding.reported_by} kind="id" field="回報者" />
+          </dd>
+          <dt>回報於</dt>
+          <dd>{formatTimestamp(finding.created_at, timeZone)}</dd>
+        </dl>
+      </details>
       <AttemptList finding={finding} timeZone={timeZone} />
     </section>
   );
 }
 
-/** 確認缺陷時的重現案例：確認它的 Evidence Bundle 與失敗的步驟。 */
-function CaseSummary({ reproduction, timeZone }: { reproduction: ReproductionCase; timeZone?: string }) {
+/** 確認缺陷時的重現案例：確認它的 Evidence Bundle 與失敗的步驟（放在疑點的 dl 中）。 */
+function CaseRows({ reproduction, timeZone }: { reproduction: ReproductionCase; timeZone?: string }) {
   const failed = reproduction.journey.steps.find((step) => step.key === reproduction.failed_step);
   return (
-    <dl className="verification-summary exploration-case">
-      <dt>確認的 Evidence Bundle</dt>
-      <dd>{reproduction.bundle_id}</dd>
+    <>
+      {/* 標籤欄 8rem 放不下時只在「確認的」後面換行，「Evidence Bundle」不拆開 */}
+      <dt>確認的 Evidence&nbsp;Bundle</dt>
+      <dd>
+        <ShortValue value={reproduction.bundle_id} kind="id" field="確認的 Evidence Bundle" />
+      </dd>
       {reproduction.failed_step !== undefined && (
         <>
           <dt>失敗的步驟</dt>
@@ -274,7 +305,7 @@ function CaseSummary({ reproduction, timeZone }: { reproduction: ReproductionCas
       )}
       <dt>確認於</dt>
       <dd>{formatTimestamp(reproduction.confirmed_at, timeZone)}</dd>
-    </dl>
+    </>
   );
 }
 
@@ -304,7 +335,8 @@ function AttemptItem({ attempt, timeZone }: { attempt: ReproductionAttempt; time
         {PURPOSE_LABELS[attempt.purpose]}・{outcome}
       </span>
       <span>
-        驗證要求 {attempt.request_id}・Bundle {attempt.bundle_id ?? "尚未產生"}
+        驗證要求 <ShortValue value={attempt.request_id} kind="id" field="驗證要求" />・Bundle{" "}
+        {attempt.bundle_id === undefined ? "尚未產生" : <ShortValue value={attempt.bundle_id} kind="id" field="Bundle" />}
       </span>
       {attempt.verdict !== undefined && (
         <span>
@@ -326,5 +358,5 @@ function AttemptItem({ attempt, timeZone }: { attempt: ReproductionAttempt; time
 }
 
 function Verdict({ verdict }: { verdict: VerificationVerdict }) {
-  return <span className={`verdict verdict-${verdict}`}>{VERDICT_LABELS[verdict]}</span>;
+  return <span className={`badge verdict verdict-${verdict}`}>{VERDICT_LABELS[verdict]}</span>;
 }

@@ -69,7 +69,7 @@ export function SchedulingSettings({ client }: Props) {
                   onChange={() => void choose(info.mode)}
                 />
                 <strong>{info.label}</strong>
-                <span>{info.description}</span>
+                <span className="scheduling-mode-description">{info.description}</span>
               </label>
             ))}
           </div>

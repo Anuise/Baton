@@ -1,0 +1,672 @@
+/* ==========================================================================
+   帳號與設定
+   首次啟動精靈、帳號與 Profile、額度、排程、共同設定、登入啟動、更新、備份、崩潰恢復、平台狀態。
+   ========================================================================== */
+
+/* 帳號與設定頁的每個區塊同一種容器（audit C11、P-SET-2）：surface 底、細框、16px 內距，
+   區塊內以 grid 的 gap 決定間距，段落與標題不再各自帶 margin */
+:is(
+    .setup-wizard,
+    .accounts-page,
+    .scheduling-settings,
+    .shared-settings-page,
+    .login-startup-settings,
+    .update-settings,
+    .backup-settings,
+    .recovery-panel,
+    .platform-page
+  ) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-5);
+  align-content: start;
+  padding: var(--space-6);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+:is(
+    .setup-wizard,
+    .accounts-page,
+    .scheduling-settings,
+    .shared-settings-page,
+    .login-startup-settings,
+    .update-settings,
+    .backup-settings,
+    .recovery-panel,
+    .platform-page
+  )
+  :is(h2, h3, h4, p) {
+  margin: 0;
+}
+
+:is(
+    .setup-wizard,
+    .accounts-page,
+    .scheduling-settings,
+    .shared-settings-page,
+    .login-startup-settings,
+    .update-settings,
+    .backup-settings,
+    .recovery-panel,
+    .platform-page
+  )
+  > [role="alert"] {
+  color: var(--color-danger);
+}
+
+/* 區塊標題列：h2 ＋ 旁邊的計數或狀態 */
+.section-header {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  min-width: 0;
+}
+
+/* 區塊說明：一行次要文字，緊接在標題下 */
+p.section-hint {
+  margin-top: calc(var(--space-2) - var(--space-5));
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+/* 兩欄事實（MASTER 6.4 第 5 條）：標籤欄固定 10em（≤ 1100px 時 9em），讓同一頁的各張卡片、各個區塊
+   與額度視窗列的值欄從同一條線開始；放不下的標籤換行；值欄可縮小 */
+:root {
+  --facts-label: 10em;
+}
+
+.settings-facts,
+.profile-facts {
+  display: grid;
+  grid-template-columns: var(--facts-label) minmax(0, 1fr);
+  gap: var(--space-2) var(--space-6);
+  margin: 0;
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+:is(.settings-facts, .profile-facts) dt {
+  color: var(--color-text-muted);
+}
+
+:is(.settings-facts, .profile-facts) dd {
+  margin: 0;
+  min-width: 0;
+}
+
+/* ---------- 首次啟動精靈 ---------- */
+
+/* 已完成：一行，左側成功色條 */
+.setup-done {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-5);
+  align-items: center;
+  padding-block: var(--space-4);
+  border-left: 3px solid var(--color-success);
+}
+
+/* 各工具：中性卡片＋左側色條＋標題列徽章（P-SETUP-2、3） */
+.setup-tool {
+  display: grid;
+  gap: var(--space-4);
+  font-size: var(--text-body);
+}
+
+.setup-guidance {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-guidance li {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-meta);
+}
+
+/* 單行指令：可在任何字元斷行，不撐寬版面（P-SETUP-1） */
+.setup-guidance code {
+  display: block;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  line-height: var(--leading-code);
+  user-select: all;
+}
+
+/* 官方說明：只顯示網域，完整網址在 title，可複製（P-SETUP-4） */
+.setup-docs {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+.setup-docs .mono {
+  color: var(--color-text);
+}
+
+.setup-profiles {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-meta);
+}
+
+.setup-profiles li {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.setup-profiles li:last-child {
+  border-bottom: 0;
+}
+
+.setup-profile-name {
+  flex: 1 1 auto;
+}
+
+.setup-profiles .badge {
+  margin-top: 1px;
+}
+
+:is(.setup-wizard) > section:not(.setup-tool) {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.setup-acknowledged {
+  color: var(--color-success);
+  font-weight: var(--font-weight-strong);
+}
+
+/* ---------- 帳號與 Profile ---------- */
+
+.accounts-full {
+  color: var(--color-text-muted);
+}
+
+.profile-list {
+  display: grid;
+  gap: var(--space-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 帳號卡片：標題列（名稱＋狀態徽章）→ 兩欄事實 → 進行中 Run、額度 → 阻擋原因 → 動作（P-ACC-5） */
+.profile-card {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.profile-card h3 {
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
+}
+
+.profile-card .card-header .badge {
+  margin-top: 1px;
+}
+
+.profile-load {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-meta);
+}
+
+.profile-running {
+  font-weight: var(--font-weight-strong);
+}
+
+.profile-runs {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding-left: var(--space-6);
+  color: var(--color-text-muted);
+}
+
+/* 額度門檻與額度：同一列的小事實，換行時整項換行 */
+.profile-gate,
+.profile-quota {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-6);
+  align-items: baseline;
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+.profile-gate-paused,
+.profile-gate-draining {
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-warning);
+}
+
+.profile-gate-draining {
+  border-left-color: var(--color-danger);
+}
+
+.quota-used {
+  font-weight: var(--font-weight-strong);
+}
+
+:is(.quota-source, .quota-confidence, .quota-reset, .quota-observed-at, .gate-since, .gate-hint, .gate-reset) {
+  color: var(--color-text-muted);
+}
+
+/* 觀測不完整：可能是長說明，用左側色條而不是整塊淡色底（C8） */
+.quota-incomplete {
+  flex-basis: 100%;
+  max-inline-size: var(--measure);
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-warning);
+}
+
+.quota-windows {
+  display: grid;
+  flex-basis: 100%;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 視窗名稱欄與上方事實的標籤欄同寬，已觀測與推估從同一條線開始 */
+.quota-windows li {
+  display: grid;
+  grid-template-columns: var(--facts-label) minmax(0, max-content) minmax(0, 1fr);
+  gap: var(--space-6);
+}
+
+.quota-window-label {
+  font-weight: var(--font-weight-strong);
+}
+
+/* 方案上限：同列的 label＋輸入框（P-ACC-1），整組放不下時換行 */
+.quota-limits {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-6);
+  align-items: center;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.quota-limits-hint {
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+}
+
+.quota-limits [role="alert"] {
+  flex-basis: 100%;
+  color: var(--color-danger);
+}
+
+.profile-blocker {
+  max-inline-size: var(--measure);
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-danger);
+  color: var(--color-text);
+}
+
+/* 動作列：主要的登入與核對在左，排序與封存靠右 */
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.profile-actions > button {
+  flex: none;
+  white-space: nowrap;
+}
+
+.profile-actions-spacer {
+  flex: 1 1 0;
+}
+
+/* 兩個新增表單並排（窄時上下），各有小標題（P-ACC-2） */
+.profile-forms {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18em), 1fr));
+  gap: var(--space-6);
+}
+
+.profile-form {
+  display: grid;
+  gap: var(--space-5);
+  align-content: start;
+  padding: var(--space-5);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+}
+
+.profile-form h3 {
+  font-size: var(--text-title-sm);
+}
+
+.profile-form .field {
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.profile-form .field input {
+  font-weight: var(--font-weight-normal);
+}
+
+/* 一頁只留一個主要動作（新增 Profile）：其餘送出鈕改回次要樣式（MASTER 5.1）。
+   需要時可收進 components.css 成為共用的 .btn-secondary */
+.accounts-page button[type="submit"].btn-secondary {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: var(--font-weight-normal);
+}
+
+.accounts-page button[type="submit"].btn-secondary:hover:not(:disabled) {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
+}
+
+.profile-form [role="alert"] {
+  color: var(--color-danger);
+  font-size: var(--text-meta);
+}
+
+/* ---------- 排程（並行容量） ---------- */
+
+.scheduling-usage {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 每個選項一列：radio ＋ 名稱（600）＋ 說明（muted）（P-ACC-3） */
+.scheduling-modes {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.scheduling-mode {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-1) var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-out), background-color var(--duration-fast) var(--ease-out);
+}
+
+.scheduling-mode:hover {
+  border-color: var(--color-border-strong);
+}
+
+.scheduling-mode:has(input:checked) {
+  border-color: var(--color-accent-border);
+  background: var(--color-accent-subtle);
+}
+
+.scheduling-mode input {
+  grid-row: 1 / span 2;
+  margin: 3px 0 0;
+}
+
+.scheduling-mode-description {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* ---------- 共同設定 ---------- */
+
+/* 版本列：版本｜雜湊｜採用時間｜各類別項目數與排除數，欄位分開對齊（P-ACC-4） */
+.settings-version-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+.settings-version {
+  display: grid;
+  grid-template-columns: 5em max-content max-content minmax(0, 1fr);
+  gap: var(--space-2) var(--space-6);
+  align-items: baseline;
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.settings-version:last-child {
+  border-bottom: 0;
+}
+
+.settings-version-number {
+  font-weight: var(--font-weight-strong);
+  white-space: nowrap;
+}
+
+.settings-version > code,
+.settings-version-time {
+  white-space: nowrap;
+}
+
+.settings-version-time {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-version-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-5);
+}
+
+.settings-version-excluded {
+  color: var(--color-text-muted);
+}
+
+.settings-preview {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+  font-size: var(--text-meta);
+}
+
+.settings-preview ul {
+  margin: 0;
+  padding-left: var(--space-6);
+}
+
+.settings-preview section {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.settings-preview > button {
+  justify-self: start;
+}
+
+/* ---------- 登入時自動啟動 ---------- */
+
+.login-startup-toggle {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  justify-self: start;
+}
+
+/* 說明緊接在控制項下（4px）、次要色（P-SET-1） */
+p.login-startup-hint {
+  margin-top: calc(var(--space-2) - var(--space-5));
+  padding-left: calc(13px + var(--space-3) + var(--space-1));
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+.login-startup-warning {
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-warning);
+}
+
+/* ---------- 備份與還原演練 ---------- */
+
+.backup-settings h3 {
+  font-size: var(--text-title-sm);
+}
+
+.backup-drill {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-5);
+  background: var(--color-surface-sunken);
+  border-radius: var(--radius-md);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+p.backup-drill-result {
+  margin-bottom: var(--space-2);
+}
+
+.backup-checks {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 結果是徽章，說明是一般文字；未通過不再整行紅色粗體（P-SET-3） */
+.backup-check {
+  max-inline-size: var(--measure);
+}
+
+.backup-check .badge {
+  margin-inline: var(--space-1) var(--space-2);
+}
+
+.backup-check-detail {
+  color: var(--color-text-muted);
+}
+
+.backup-check-failed .backup-check-detail {
+  color: var(--color-text);
+}
+
+/* 長說明的其餘部分：預設收合，一行低調的「技術細節」，縮排表示屬於上面那一項 */
+.backup-check-more {
+  margin: var(--space-1) 0 0 var(--space-5);
+  color: var(--color-text-muted);
+}
+
+.backup-check-more summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.backup-check-more p {
+  margin-top: var(--space-2);
+  color: var(--color-text);
+}
+
+.backup-list {
+  margin: 0;
+  padding-left: var(--space-6);
+  font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 崩潰恢復 ---------- */
+
+.recovery-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  align-items: center;
+}
+
+.recovery-blocking {
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-danger);
+}
+
+.recovery-blocking strong {
+  color: var(--color-danger);
+}
+
+.recovery-panel > .recovery-blocking[role="alert"] {
+  color: var(--color-text);
+}
+
+.recovery-actions {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.recovery-attempts,
+.recovery-affected {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-left: var(--space-6);
+  font-size: var(--text-meta);
+}
+
+.recovery-attempt {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.recovery-failure {
+  color: var(--color-text-muted);
+}
+
+/* ---------- 更新 ---------- */
+
+.update-settings > [role="alert"] {
+  color: var(--color-danger);
+}
+
+/* ---------- 平台狀態 ---------- */
+
+/* 平台警示：左側色條，正文用一般文字色（C8） */
+.platform-page > .platform-warning {
+  max-inline-size: var(--measure);
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--color-warning);
+  color: var(--color-text);
+}
+
+/* 來源列是一行中繼資料，不受內文行寬限制，避免「複製網址」被擠到第二行 */
+p.platform-source {
+  margin-top: 0;
+  max-inline-size: none;
+  font-size: var(--text-caption);
+}
+
+.platform-checked-on {
+  white-space: nowrap;
+}
+
+/* 1024 寬：dl 標籤欄最多 9em（MASTER 第 8 節） */
+@media (max-width: 1100px) {
+  :root {
+    --facts-label: 9em;
+  }
+}

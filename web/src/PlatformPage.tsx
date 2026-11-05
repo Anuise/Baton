@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 
+import { CopyButton } from "./LongText";
 import type { PlatformResponse, RuntimeClient } from "./runtimeClient";
+import { docsHost } from "./textFormat";
 
 type Assessment = PlatformResponse["assessment"];
 
@@ -51,14 +53,18 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
   const { assessment } = platform;
   return (
     <>
-      <p className={`platform-status platform-${assessment.status}`}>{platformStatusLabel(assessment.status)}</p>
+      <p className={`platform-status platform-${assessment.status}`}>
+        <span className={`badge ${assessment.status === "supported" ? "badge-success" : "badge-warning"}`}>
+          {platformStatusLabel(assessment.status)}
+        </span>
+      </p>
       {assessment.issues.map((issue) => (
         <p key={issue.code} role="alert" className="platform-warning">
           {issue.message}
         </p>
       ))}
       {assessment.status !== "supported" && <p>平台警告不會阻擋使用，也不會阻擋派工、交接或恢復。</p>}
-      <dl className="platform-facts">
+      <dl className="platform-facts settings-facts">
         <dt>OS build</dt>
         <dd>{platform.platform.os_build}</dd>
         <dt>功能版本</dt>
@@ -73,13 +79,21 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
         <dd>{platform.app_version}</dd>
         {assessment.support_ends_on && (
           <>
-            <dt>Microsoft 服務結束日</dt>
+            {/* 標籤欄放不下時在空白處換行，不在「服務結束日」中間拆開 */}
+            <dt>
+              Microsoft <span className="nowrap">服務結束日</span>
+            </dt>
             <dd>{assessment.support_ends_on}</dd>
           </>
         )}
       </dl>
-      <p className="platform-source">
-        支援期限資料來源：{platform.support_table_source}（查閱日期 {platform.support_table_checked_on}）
+      <p className="platform-source section-hint">
+        支援期限資料來源：
+        <span className="mono" title={platform.support_table_source}>
+          {docsHost(platform.support_table_source)}
+        </span>
+        <CopyButton text={platform.support_table_source} label="複製網址" />
+        <span className="platform-checked-on">（查閱日期 {platform.support_table_checked_on}）</span>
       </p>
     </>
   );

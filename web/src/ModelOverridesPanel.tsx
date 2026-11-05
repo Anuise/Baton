@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 
 import type { ModelCatalogClient, ModelOption, ModelOverrides, Workspace, WorkspaceClient } from "./runtimeClient";
+import { truncateText } from "./textFormat";
 import { formatTimestamp } from "./time";
 
 type Role = keyof ModelOverrides;
@@ -25,6 +26,9 @@ const ROLES: { role: Role; label: string }[] = [
 
 const DEFAULT_LABEL = "預設（不指定）";
 const DEFAULT_HINT = `${DEFAULT_LABEL}＝沿用帳號的 Claude Code 預設模型`;
+
+/** 選項文字的上限：原生選單以最長選項為最小寬度（MASTER 6.1），完整文字放在選項的 title。 */
+const OPTION_MAX_CHARS = 60;
 
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -141,7 +145,9 @@ export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
 
   return (
     <section className="model-overrides" aria-label="模型設定">
-      <h2>模型設定：{current.name}</h2>
+      <header className="page-header">
+        <h2>模型設定</h2>
+      </header>
       <p className="model-overrides-hint">{DEFAULT_HINT}。變更只影響之後派出的 Run，已派出的 Run 維持派工時的模型。</p>
       {catalog.failure && (
         <p className="model-overrides-hint">無法取得可用模型清單：{catalog.failure}。仍可選擇預設或保留目前的設定。</p>
@@ -156,17 +162,21 @@ export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
                 <option value="">{DEFAULT_LABEL}</option>
                 {/* 已存的值不在清單裡時也列為選項，避免下拉選單把它靜默清掉 */}
                 {saved[role] !== "" && !catalog.models.some((m) => m.id === saved[role]) && (
-                  <option value={saved[role]}>{saved[role]}（目前的設定，不在可用清單中）</option>
+                  <option value={saved[role]} title={saved[role]}>
+                    {truncateText(saved[role], OPTION_MAX_CHARS - 16)}（目前的設定，不在可用清單中）
+                  </option>
                 )}
                 {catalog.models.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {model.label}（{model.id}）
+                  <option key={model.id} value={model.id} title={`${model.label}（${model.id}）`}>
+                    {truncateText(`${model.label}（${model.id}）`, OPTION_MAX_CHARS)}
                   </option>
                 ))}
               </select>
             </label>
           ))}
-          <button type="submit">儲存模型設定</button>
+          <div className="form-actions">
+            <button type="submit">儲存模型設定</button>
+          </div>
         </fieldset>
       </form>
       {notice && <p role="status">{notice}</p>}

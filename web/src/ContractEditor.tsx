@@ -198,11 +198,17 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
         );
         return (
           <Fragment key={name}>
-            <fieldset>
+            {/* legend 已說明是哪一項：label 只寫「模式」「內容」，完整名稱留在控制項的 aria-label */}
+            <fieldset className="contract-field">
               <legend>{label}</legend>
               <label>
-                {label}：模式
-                <select value={field.mode} onChange={(e) => change(name, { mode: e.target.value as Mode })}>
+                模式
+                <select
+                  className="contract-mode"
+                  aria-label={`${label}：模式`}
+                  value={field.mode}
+                  onChange={(e) => change(name, { mode: e.target.value as Mode })}
+                >
                   {modes.map((mode) => (
                     <option key={mode} value={mode}>
                       {MODE_LABELS[mode]}
@@ -213,12 +219,17 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
               {field.mode === "filled" && (
                 <>
                   <label>
-                    {label}：內容
-                    <textarea value={field.text} onChange={(e) => change(name, { text: e.target.value })} />
+                    內容
+                    <textarea
+                      aria-label={`${label}：內容`}
+                      value={field.text}
+                      onChange={(e) => change(name, { text: e.target.value })}
+                    />
                   </label>
                   <label>
-                    {label}：引用（選填）
+                    引用（選填）
                     <textarea
+                      aria-label={`${label}：引用（選填）`}
                       value={field.references}
                       placeholder="每行一個，格式 kind:target@version"
                       onChange={(e) => change(name, { references: e.target.value })}
@@ -228,19 +239,27 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
               )}
               {field.mode === "not_applicable" && (
                 <label>
-                  {label}：不適用的理由
-                  <input value={field.reason} onChange={(e) => change(name, { reason: e.target.value })} />
+                  不適用的理由
+                  <input
+                    aria-label={`${label}：不適用的理由`}
+                    value={field.reason}
+                    onChange={(e) => change(name, { reason: e.target.value })}
+                  />
                 </label>
               )}
               {field.mode === "unknown" && (
                 <label>
-                  {label}：未知的說明（選填）
-                  <input value={field.note} onChange={(e) => change(name, { note: e.target.value })} />
+                  未知的說明（選填）
+                  <input
+                    aria-label={`${label}：未知的說明（選填）`}
+                    value={field.note}
+                    onChange={(e) => change(name, { note: e.target.value })}
+                  />
                 </label>
               )}
             </fieldset>
             {name === "done_criteria" && (
-              <fieldset>
+              <fieldset className="contract-field">
                 <legend>
                   確定性檢查{" "}
                   <HelpTip label="確定性檢查">
@@ -249,15 +268,19 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
                   </HelpTip>
                 </legend>
                 <label>
-                  確定性檢查（每行一項）
-                  <textarea value={draft.checks} onChange={(e) => onChange({ ...draft, checks: e.target.value })} />
+                  每行一項
+                  <textarea
+                    aria-label="確定性檢查（每行一項）"
+                    value={draft.checks}
+                    onChange={(e) => onChange({ ...draft, checks: e.target.value })}
+                  />
                 </label>
               </fieldset>
             )}
           </Fragment>
         );
       })}
-      <fieldset>
+      <fieldset className="contract-field contract-capabilities">
         <legend>所需能力</legend>
         {capabilities.map(({ capability, label }) => (
           <label key={capability}>

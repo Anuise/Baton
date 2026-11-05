@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { LongText, ShortValue } from "./LongText";
+import { sizeLabel, splitExtension } from "./textFormat";
 import { formatTimestamp } from "./time";
 import type {
   ArtifactClient,
@@ -8,14 +10,20 @@ import type {
   ArtifactPreview,
   ArtifactVersionView,
   ArtifactView,
+  TaskClient,
   UnregisteredFile,
   Workspace,
 } from "./runtimeClient";
 
-type ViewState = { state: "loading" } | { state: "ready"; list: ArtifactList } | { state: "failed"; reason: string };
+/** `taskTitles`：Task 識別碼 → 標題；讀不到 Task 清單時是空的，卡片退回顯示識別碼。 */
+type ViewState =
+  | { state: "loading" }
+  | { state: "ready"; list: ArtifactList; taskTitles: Map<string, string> }
+  | { state: "failed"; reason: string };
 
 interface Props {
-  client: ArtifactClient;
+  /** 成果卡的 Task 標題另外從 Task 清單取得（ArtifactView 只有 task_id）。 */
+  client: ArtifactClient & Pick<TaskClient, "getTaskBoard">;
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
@@ -37,7 +45,7 @@ function reasonOf(error: unknown): string {
 }
 
 /**
- * 成果與驗證（spec D-21）：列出 Workspace 的成果，預覽與下載每個版本。
+ * 成果（spec D-21）：列出 Workspace 的成果，預覽與下載每個版本。
  * 沒有 manifest 的檔案不是成果，獨立列在「未登記的檔案」。
  */
 export function ArtifactsPage({ client, workspace, timeZone }: Props) {
@@ -45,7 +53,13 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
 
   const load = useCallback(async () => {
     try {
-      setLoaded({ state: "ready", list: await client.listArtifacts(workspace.id) });
+      // Task 清單只用來顯示標題：讀取失敗不影響成果列表
+      const [list, board] = await Promise.all([
+        client.listArtifacts(workspace.id),
+        client.getTaskBoard(workspace.id).catch(() => null),
+      ]);
+      const taskTitles = new Map((board?.tasks ?? []).map((task) => [task.id, task.title]));
+      setLoaded({ state: "ready", list, taskTitles });
     } catch (e) {
       setLoaded({ state: "failed", reason: reasonOf(e) });
     }
@@ -56,10 +70,10 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
     void load();
   }, [load]);
 
-  if (loaded.state === "loading") return <section aria-label="成果與驗證">載入中…</section>;
+  if (loaded.state === "loading") return <section aria-label="成果">載入中…</section>;
   if (loaded.state === "failed") {
     return (
-      <section aria-label="成果與驗證">
+      <section aria-label="成果">
         <p role="alert">無法取得成果：{loaded.reason}</p>
       </section>
     );
@@ -67,14 +81,21 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
   const { artifacts, unregistered_files } = loaded.list;
 
   return (
-    <section className="artifacts-page" aria-label="成果與驗證">
-      <h2>成果與驗證：{workspace.name}</h2>
+    <section className="artifacts-page" aria-label="成果">
+      <h2>成果</h2>
       {artifacts.length === 0 && <p>這個 Workspace 還沒有成果</p>}
       {artifacts.map((artifact) => (
-        <ArtifactCard key={artifact.id} client={client} workspaceId={workspace.id} artifact={artifact} timeZone={timeZone} />
+        <ArtifactCard
+          key={artifact.id}
+          client={client}
+          workspaceId={workspace.id}
+          artifact={artifact}
+          taskTitle={loaded.taskTitles.get(artifact.task_id)}
+          timeZone={timeZone}
+        />
       ))}
       {unregistered_files.length > 0 && (
-        <section className="artifact-unregistered" aria-label="未登記的檔案">
+        <section className="card stripe-warning artifact-unregistered" aria-label="未登記的檔案">
           <h3>未登記的檔案（{unregistered_files.length}）</h3>
           <p>
             這些檔案是寫入中途中斷留下、沒有登記（沒有 manifest）的檔案，不是成果：未登記、不可使用。
@@ -82,8 +103,10 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
           <ul>
             {unregistered_files.map((file) => (
               <li key={file.storage_path}>
-                <span className="artifact-path">{file.storage_path}</span>，{file.size_bytes} 位元組，
-                {UNREGISTERED_KIND_LABELS[file.kind]}
+                <ShortValue value={file.storage_path} kind="path" />
+                <span className="artifact-meta">
+                  <span className="artifact-size">{sizeLabel(file.size_bytes)}</span>・{UNREGISTERED_KIND_LABELS[file.kind]}
+                </span>
               </li>
             ))}
           </ul>
@@ -97,24 +120,74 @@ interface CardProps {
   client: ArtifactClient;
   workspaceId: string;
   artifact: ArtifactView;
+  /** 所屬 Task 的標題；取不到時顯示縮短的識別碼。 */
+  taskTitle?: string;
   timeZone?: string;
 }
 
+/**
+ * 成果名稱：長檔名最多兩行，完整名稱在 title。超過兩行時改成「主檔名（兩行，以 … 截斷）＋副檔名」，截斷後仍看得到副檔名。
+ * 分開後主檔名少了副檔名的寬度仍放得下時，代表整個名稱也放得下，改回不分開。
+ */
+function ArtifactName({ name }: { name: string }) {
+  const ref = useRef<HTMLHeadingElement>(null);
+  const [split, setSplit] = useState(false);
+  const { base, ext } = splitExtension(name);
+
+  useLayoutEffect(() => {
+    const heading = ref.current;
+    if (heading === null || ext === "") return;
+    const measure = () => {
+      const body = split ? heading.firstElementChild : heading;
+      if (body !== null) setSplit(body.scrollHeight > body.clientHeight + 1);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(heading);
+    return () => observer.disconnect();
+  }, [name, ext, split]);
+
+  if (!split) {
+    return (
+      <h3 ref={ref} className="clamp-2" title={name}>
+        {name}
+      </h3>
+    );
+  }
+  return (
+    <h3 ref={ref} className="artifact-name-split" title={name}>
+      <span className="clamp-2">{base}</span>
+      <span className="artifact-name-ext">{ext}</span>
+    </h3>
+  );
+}
+
 /** 一個成果：預設只列最新版本，可展開全部版本（由新到舊）。 */
-function ArtifactCard({ client, workspaceId, artifact, timeZone }: CardProps) {
+function ArtifactCard({ client, workspaceId, artifact, taskTitle, timeZone }: CardProps) {
   const [expanded, setExpanded] = useState(false);
   const newestFirst = [...artifact.versions].reverse();
   const shown = expanded ? newestFirst : newestFirst.slice(0, 1);
 
   return (
-    <article className="artifact-card" aria-label={artifact.name}>
-      <h3>{artifact.name}</h3>
-      <p className="artifact-task">Task：{artifact.task_id}</p>
-      {artifact.versions.length > 1 && (
-        <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
-          全部版本（{artifact.versions.length}）
-        </button>
-      )}
+    <article className="card artifact-card" aria-label={artifact.name}>
+      <header className="card-header">
+        <ArtifactName name={artifact.name} />
+        {artifact.versions.length > 1 && (
+          <button type="button" className="btn-quiet btn-sm" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
+            全部版本（{artifact.versions.length}）
+          </button>
+        )}
+      </header>
+      {/* 長的 Task 標題最多兩行（完整標題在 title）；識別碼本來就縮短，不截行以免遮住複製按鈕的焦點框 */}
+      <p className={taskTitle === undefined ? "artifact-task" : "artifact-task clamp-2"}>
+        Task：
+        {taskTitle === undefined ? (
+          <ShortValue value={artifact.task_id} kind="id" field="Task" />
+        ) : (
+          <span title={taskTitle}>{taskTitle}</span>
+        )}
+      </p>
       <ul className="artifact-versions">
         {shown.map((version) => (
           <VersionRow
@@ -183,10 +256,13 @@ function VersionRow({ client, workspaceId, artifact, version, latest, timeZone }
   };
 
   return (
-    <li className="artifact-version" aria-label={label}>
+    <li className={version.file_status === "ok" ? "artifact-version" : "artifact-version stripe-danger"} aria-label={label}>
       <p>
         <strong>v{version.version}</strong>
-        {latest && "（最新）"}，{version.size_bytes} 位元組，{formatTimestamp(version.created_at, timeZone)}
+        {latest && "（最新）"}
+        <span className="artifact-meta">
+          ・{sizeLabel(version.size_bytes)}・{formatTimestamp(version.created_at, timeZone)}
+        </span>
       </p>
       {version.file_status !== "ok" && (
         <p className="artifact-warning" role="alert">
@@ -194,12 +270,14 @@ function VersionRow({ client, workspaceId, artifact, version, latest, timeZone }
         </p>
       )}
       <p>
-        雜湊：<code className="artifact-sha">{version.sha256}</code>
+        <span className="artifact-label">雜湊：</span>
+        <ShortValue value={version.sha256} kind="hash" field={`v${version.version}`} />
       </p>
       <p>
-        產生者 Run：{version.produced_by_run_id}（第 {version.produced_by_generation} 次）
+        <span className="artifact-label">產生者 Run（第 {version.produced_by_generation} 次）：</span>
+        <ShortValue value={version.produced_by_run_id} kind="id" field={`v${version.version} 產生者 Run`} />
       </p>
-      {version.description !== "" && <p>{version.description}</p>}
+      {version.description !== "" && <LongText text={version.description} />}
       <div className="artifact-actions">
         <button type="button" aria-label={`預覽 ${label}`} aria-expanded={preview !== null} onClick={() => void togglePreview()}>
           預覽

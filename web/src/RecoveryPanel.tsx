@@ -37,6 +37,15 @@ const DISPOSITION_LABELS: Record<RunDisposition, string> = {
   unconfirmed: "無法確認停止",
 };
 
+/** 恢復事件狀態徽章的語意色。 */
+const RECOVERY_BADGE: Record<RecoveryEvent["status"], string> = {
+  waiting: "badge-warning",
+  attempting: "badge-warning",
+  observing: "badge-accent",
+  succeeded: "badge-success",
+  exhausted: "badge-danger",
+};
+
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -109,7 +118,9 @@ export function RecoveryPanel({ client, pollMs = 5000, timeZone }: Props) {
       {loaded.state === "ready" && loaded.status.event !== null && (
         <>
           <p className={`recovery-status recovery-status-${loaded.status.event.status}`}>
-            <strong>{recoveryStatusLabel(loaded.status.event)}</strong>
+            <strong className={`badge ${RECOVERY_BADGE[loaded.status.event.status]}`}>
+              {recoveryStatusLabel(loaded.status.event)}
+            </strong>
             <span>第 {loaded.status.event.round} 輪</span>
             <span>
               本輪嘗試：{loaded.status.event.attempts_used}/{loaded.status.max_attempts}
@@ -124,7 +135,7 @@ export function RecoveryPanel({ client, pollMs = 5000, timeZone }: Props) {
           {loaded.status.event.last_failure !== null && <p>最後失敗原因：{loaded.status.event.last_failure}</p>}
           {loaded.status.blocking !== null && (
             <p className="recovery-blocking" role="alert">
-              新派工已暫停：{loaded.status.blocking.message}
+              <strong>新派工已暫停</strong>：{loaded.status.blocking.message}
             </p>
           )}
           {loaded.status.can_retry && (

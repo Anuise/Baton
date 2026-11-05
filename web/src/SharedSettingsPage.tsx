@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { shortHash } from "./textFormat";
 import { formatTimestamp } from "./time";
 import {
   errorCode,
@@ -129,10 +130,12 @@ export function SharedSettingsPage({ client, timeZone }: Props) {
   return (
     <section className="shared-settings-page" aria-labelledby="shared-settings-title">
       <h2 id="shared-settings-title">共同設定</h2>
-      <p>這只讀取你平常的 Claude Code 設定，不會修改它們，也不會複製任何登入資料。</p>
-      <button type="button" disabled={busy} onClick={() => void runPreview()}>
-        預覽匯入
-      </button>
+      <p className="section-hint">這只讀取你平常的 Claude Code 設定，不會修改它們，也不會複製任何登入資料。</p>
+      <div className="form-actions">
+        <button type="button" disabled={busy} onClick={() => void runPreview()}>
+          預覽匯入
+        </button>
+      </div>
       {notice && <p role="status">{notice}</p>}
       {error && <p role="alert">{error}</p>}
       {preview && <PreviewPanel preview={preview} busy={busy} onAdopt={() => void adopt(preview)} />}
@@ -144,15 +147,20 @@ export function SharedSettingsPage({ client, timeZone }: Props) {
       {versions.length > 0 && (
         <ul className="settings-version-list">
           {versions.map((item) => (
-            <li key={item.version} aria-label={`版本 ${item.version}`}>
-              <span className="settings-version-number">版本 {item.version}</span>{" "}
-              <code>{item.content_hash.slice(0, 12)}</code>{" "}
-              <span>採用於 {formatTimestamp(item.adopted_at, timeZone)}</span>
+            <li key={item.version} aria-label={`版本 ${item.version}`} className="settings-version">
+              {/* 欄位：版本｜雜湊｜採用時間｜各類別項目數與排除數 */}
+              <span className="settings-version-number">版本 {item.version}</span>
+              <code className="mono" title={item.content_hash}>
+                {shortHash(item.content_hash)}
+              </code>
+              <span className="settings-version-time">採用於 {formatTimestamp(item.adopted_at, timeZone)}</span>
               <span className="settings-version-counts">
-                偏好 {item.counts.preferences}、指示 {item.counts.instructions}、hooks {item.counts.hooks}、MCP{" "}
-                {item.counts.mcp_servers}、plugins {item.counts.plugins}
+                <span>
+                  偏好 {item.counts.preferences}、指示 {item.counts.instructions}、hooks {item.counts.hooks}、MCP{" "}
+                  {item.counts.mcp_servers}、plugins {item.counts.plugins}
+                </span>
+                <span className="settings-version-excluded">排除 {item.exclusion_count} 項</span>
               </span>
-              <span>排除 {item.exclusion_count} 項</span>
             </li>
           ))}
         </ul>
