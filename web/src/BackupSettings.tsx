@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import type {
   BackupClient,
   BackupStatus,
-  BackupSummary,
   BackupTrigger,
   DrillCheckKind,
   DrillReport,
@@ -60,31 +59,60 @@ export function BackupSettings({ client, timeZone }: Props) {
   }, [client]);
 
   return (
-    <section className="backup-settings" aria-labelledby="backup-title">
-      <h2 id="backup-title">備份與還原演練</h2>
-      <p className="section-hint">
-        每日自動備份，保留 7 份每日與 4 份每週備份；每週自動進行一次還原演練。備份不含登入秘密。
-      </p>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得備份狀態：{loaded.reason}</p>}
+    <section className="section backup-settings" aria-labelledby="backup-title">
+      <div className="section-heading">
+        <h3 id="backup-title">備份與還原演練</h3>
+        <p>每日自動備份，保留 7 份每日與 4 份每週備份；每週自動進行一次還原演練。備份不含登入秘密。</p>
+      </div>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {loaded.state === "failed" && (
+        <p role="alert" className="callout callout-danger">
+          無法取得備份狀態：{loaded.reason}
+        </p>
+      )}
       {loaded.state === "ready" && (
         <>
-          <h3>最新一次還原演練</h3>
           {loaded.status.latest_drill ? (
             <Drill drill={loaded.status.latest_drill} timeZone={timeZone} />
           ) : (
-            <p>尚未進行還原演練（每週自動一次）</p>
+            <div className="panel">
+              <h4>最新一次還原演練</h4>
+              <p className="empty-note">尚未進行還原演練（每週自動一次）</p>
+            </div>
           )}
-          <h3>備份清單</h3>
-          {loaded.status.backups.length === 0 ? (
-            <p>尚無備份</p>
-          ) : (
-            <ul className="backup-list" aria-label="備份清單">
-              {loaded.status.backups.map((backup) => (
-                <li key={backup.id}>{describeBackup(backup, timeZone)}</li>
-              ))}
-            </ul>
-          )}
+          <div className="panel backup-list">
+            <h4>
+              備份清單 <span className="count">{loaded.status.backups.length}</span>
+            </h4>
+            {loaded.status.backups.length === 0 ? (
+              <p className="empty-note">尚無備份</p>
+            ) : (
+              <div className="table-wrap">
+                <table className="data-table" aria-label="備份清單">
+                  <thead>
+                    <tr>
+                      <th scope="col">建立時間</th>
+                      <th scope="col">觸發原因</th>
+                      <th scope="col" className="num">
+                        成果檔案
+                      </th>
+                      <th scope="col">保留原因</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {loaded.status.backups.map((backup) => (
+                      <tr key={backup.id}>
+                        <td className="tabular">{formatTimestamp(backup.created_at, timeZone)}</td>
+                        <td>{TRIGGER_LABELS[backup.trigger]}</td>
+                        <td className="num">{backup.artifact_count} 個</td>
+                        <td>{backup.retained_as.map((reason) => RETENTION_LABELS[reason]).join("、")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </>
       )}
     </section>
@@ -93,41 +121,46 @@ export function BackupSettings({ client, timeZone }: Props) {
 
 function Drill({ drill, timeZone }: { drill: DrillReport; timeZone?: string }) {
   return (
-    <div className="backup-drill">
-      {drill.passed ? (
-        <p className="backup-drill-result">
+    <div className="panel backup-drill">
+      <div className="backup-drill-head">
+        <h4>最新一次還原演練</h4>
+        {drill.passed ? (
           <span className="badge badge-success">還原演練通過</span>
-        </p>
-      ) : (
-        <p className="backup-drill-result" role="alert">
-          <span className="badge badge-danger">還原演練未通過</span>
-        </p>
-      )}
-      <p>演練時間：{formatTimestamp(drill.performed_at, timeZone)}</p>
-      <p>
-        被演練的備份：
-        {drill.backup_created_at === null ? "沒有可演練的備份" : formatTimestamp(drill.backup_created_at, timeZone)}
-      </p>
+        ) : (
+          <span className="badge badge-danger" role="alert">
+            還原演練未通過
+          </span>
+        )}
+      </div>
+      <dl className="facts">
+        <dt>演練時間</dt>
+        <dd className="tabular">{formatTimestamp(drill.performed_at, timeZone)}</dd>
+        <dt>被演練的備份</dt>
+        <dd className="tabular">
+          {drill.backup_created_at === null ? "沒有可演練的備份" : formatTimestamp(drill.backup_created_at, timeZone)}
+        </dd>
+        <dt>還原時標為中斷的 Run</dt>
+        <dd>{drill.interrupted_runs} 個（還原後不會自動重做）</dd>
+      </dl>
       <ul className="backup-checks" aria-label="核對項目">
-        {/* 結果是徽章，說明維持一般文字；未通過不再整行紅色粗體。長說明只留摘要，其餘收進「技術細節」 */}
+        {/* 結果是徽章，說明維持一般文字。長說明只留摘要，其餘收進「技術細節」 */}
         {drill.checks.map((check) => {
           const { summary, rest } = briefDetail(check.detail);
           return (
             <li key={check.kind} className={check.passed ? "backup-check" : "backup-check backup-check-failed"}>
-              <span className="backup-check-name">{CHECK_LABELS[check.kind]}：</span>
+              <span className="backup-check-name">{CHECK_LABELS[check.kind]}</span>
               <span className={`badge ${check.passed ? "badge-success" : "badge-danger"}`}>{check.passed ? "通過" : "未通過"}</span>
-              {summary !== "" && <span className="backup-check-detail">（{summary}）</span>}
+              {summary !== "" && <span className="backup-check-detail">{summary}</span>}
               {rest !== "" && (
                 <details className="backup-check-more">
                   <summary>技術細節</summary>
-                  <p>{rest}</p>
+                  <p className="pre-wrap">{rest}</p>
                 </details>
               )}
             </li>
           );
         })}
       </ul>
-      <p>還原時標為中斷的 Run：{drill.interrupted_runs} 個（還原後不會自動重做）</p>
     </div>
   );
 }
@@ -147,17 +180,4 @@ function briefDetail(detail: string): { summary: string; rest: string } {
     return { summary: detail.slice(0, clause.index).trim(), rest: detail.slice(clause.index + 1).trim() };
   }
   return { summary: "", rest: detail.trim() };
-}
-
-/** 一份備份的一行說明；沒有保留原因時省略該段。 */
-function describeBackup(backup: BackupSummary, timeZone?: string): string {
-  const parts = [
-    formatTimestamp(backup.created_at, timeZone),
-    TRIGGER_LABELS[backup.trigger],
-    `成果檔案 ${backup.artifact_count} 個`,
-  ];
-  if (backup.retained_as.length > 0) {
-    parts.push(`保留原因：${backup.retained_as.map((reason) => RETENTION_LABELS[reason]).join("、")}`);
-  }
-  return parts.join("・");
 }

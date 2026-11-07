@@ -85,6 +85,9 @@ async function settle(ms = 0) {
 const createForm = () => screen.getByRole("form", { name: "新增 Profile" });
 const fromDirForm = () => screen.getByRole("form", { name: "以既有目錄建立 Profile" });
 
+/** 已有帳號時新增表單平時收起，按「新增帳號」展開。 */
+const addToggle = () => screen.getByRole("button", { name: "新增帳號" });
+
 /** Profile 卡片中某一項事實（dt）的值（dd）；沒有這一項時為 null。 */
 function fact(item: HTMLElement, term: string): HTMLElement | null {
   const dt = within(item).queryByText(term, { selector: "dt" });
@@ -209,15 +212,40 @@ describe("帳號頁", () => {
     render(<AccountsPage client={client} onChange={onChange} />);
     await screen.findByText("還沒有帳號 Profile");
 
-    await user.type(within(createForm()).getByLabelText("名稱"), "工作帳號");
+    // 還沒有任何帳號時新增表單直接展開
+    const form = createForm();
+    await user.type(within(form).getByLabelText("名稱"), "工作帳號");
     await user.type(screen.getByLabelText("預期帳號（選填）"), "work@example.com");
     await user.click(screen.getByRole("button", { name: "新增 Profile" }));
 
     expect(await screen.findByText("工作帳號")).toBeInTheDocument();
     expect(client.createProfile).toHaveBeenCalledWith({ name: "工作帳號", expectedAccount: "work@example.com" });
-    expect(within(createForm()).getByLabelText("名稱")).toHaveValue("");
     expect(screen.getByText("1 / 8")).toBeInTheDocument();
     expect(onChange).toHaveBeenCalled();
+    // 新增後表單收起；再展開時欄位已清空
+    expect(form).not.toBeVisible();
+    await user.click(addToggle());
+    expect(within(createForm()).getByLabelText("名稱")).toHaveValue("");
+    expect(within(createForm()).getByLabelText("預期帳號（選填）")).toHaveValue("");
+  });
+
+  it("已有帳號時新增表單平時收起，按「新增帳號」展開、再按一次收起", async () => {
+    const user = userEvent.setup();
+    render(<AccountsPage client={fakeClient([profile()])} />);
+    await screen.findByText("主要帳號");
+
+    expect(screen.queryByRole("form", { name: "新增 Profile" })).not.toBeInTheDocument();
+    expect(addToggle()).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(addToggle());
+
+    expect(addToggle()).toHaveAttribute("aria-expanded", "true");
+    expect(createForm()).toBeVisible();
+    expect(fromDirForm()).toBeVisible();
+
+    await user.click(addToggle());
+
+    expect(screen.queryByRole("form", { name: "新增 Profile" })).not.toBeInTheDocument();
   });
 
   it("名稱是空的時不送出請求", async () => {
@@ -256,12 +284,15 @@ describe("帳號頁", () => {
     render(<AccountsPage client={client} />);
 
     expect(await screen.findByText("8 / 8")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新增 Profile" })).toBeDisabled();
+    expect(addToggle()).toBeDisabled();
+    // 表單即使展開也不能送出
+    expect(screen.getByRole("button", { name: "新增 Profile", hidden: true })).toBeDisabled();
     expect(screen.getByText(/最多 8 個/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "封存 帳號 1" }));
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "新增 Profile" })).toBeEnabled());
+    await waitFor(() => expect(addToggle()).toBeEnabled());
+    expect(screen.getByRole("button", { name: "新增 Profile", hidden: true })).toBeEnabled();
     expect(screen.getByText("7 / 8")).toBeInTheDocument();
   });
 
@@ -274,6 +305,7 @@ describe("帳號頁", () => {
       const user = userEvent.setup();
       render(<AccountsPage client={client} onChange={onChange} timeZone="Asia/Taipei" />);
       await screen.findByText("主要帳號");
+      await user.click(addToggle());
 
       const form = fromDirForm();
       await user.type(within(form).getByLabelText("名稱"), "工作三");
@@ -289,6 +321,8 @@ describe("帳號頁", () => {
       expect(within(fact(item, "外部目錄")!).getByTitle(WORK3_DIR)).toBeInTheDocument();
       // 平台建立的 Profile 不標示外部目錄
       expect(within(screen.getByText("主要帳號").closest("li")!).queryByText(/外部目錄/)).not.toBeInTheDocument();
+      // 建立後表單收起，欄位已清空
+      expect(form).not.toBeVisible();
       expect(within(form).getByLabelText("名稱")).toHaveValue("");
       expect(within(form).getByLabelText("設定目錄")).toHaveValue("");
       expect(screen.getByText("2 / 8")).toBeInTheDocument();
@@ -339,7 +373,9 @@ describe("帳號頁", () => {
       render(<AccountsPage client={fakeClient(eight)} />);
 
       expect(await screen.findByText("8 / 8")).toBeInTheDocument();
-      expect(within(fromDirForm()).getByRole("button", { name: "以既有目錄建立" })).toBeDisabled();
+      expect(addToggle()).toBeDisabled();
+      const form = screen.getByRole("form", { name: "以既有目錄建立 Profile", hidden: true });
+      expect(within(form).getByRole("button", { name: "以既有目錄建立", hidden: true })).toBeDisabled();
       expect(screen.getByText(/最多 8 個/)).toBeInTheDocument();
     });
   });
@@ -414,6 +450,13 @@ describe("帳號頁", () => {
     it("每個帳號有上移／下移；第一個不能上移，最後一個不能下移", async () => {
       render(<AccountsPage client={fakeClient(three())} />);
       await screen.findByText("甲");
+
+      // 排序與封存收在每張卡片的「更多」選單
+      const menu = screen.getAllByText("更多", { selector: "summary" })[0].closest("details")!;
+      expect(menu).toHaveClass("more-menu");
+      expect(within(menu).getByRole("button", { name: "上移 甲" })).toBeInTheDocument();
+      expect(within(menu).getByRole("button", { name: "下移 甲" })).toBeInTheDocument();
+      expect(within(menu).getByRole("button", { name: "封存 甲" })).toBeInTheDocument();
 
       expect(screen.getByRole("button", { name: "上移 甲" })).toBeDisabled();
       expect(screen.getByRole("button", { name: "下移 甲" })).toBeEnabled();
@@ -751,8 +794,10 @@ describe("帳號頁", () => {
         ),
         listProfiles: vi.fn(async () => ({ profiles: [profile(), profile({ id: "prof_2", name: "備用帳號" })], limit: 8 })),
       };
+      const user = userEvent.setup();
       render(<AccountsPage client={client} />);
       await screen.findByRole("group", { name: "備用帳號 的額度" });
+      await user.click(addToggle());
 
       // 送出鈕預設是實心主要按鈕（base.css）；加 btn-secondary 的才改回次要樣式
       const primary = screen
@@ -768,6 +813,11 @@ describe("帳號頁", () => {
       const user = userEvent.setup();
       render(<AccountsPage client={client} />);
       const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      // 方案上限很少改，收在「設定方案上限」裡
+      const limits = within(quota).getByText("設定方案上限").closest("details")!;
+      expect(limits).not.toHaveAttribute("open");
+      await user.click(within(quota).getByText("設定方案上限"));
+      expect(limits).toHaveAttribute("open");
       expect(within(quota).getByLabelText("七日方案上限")).toHaveValue(3_000_000);
 
       await user.type(within(quota).getByLabelText("五小時方案上限"), "200000");

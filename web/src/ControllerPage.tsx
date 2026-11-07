@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { profileStateLabel } from "./AccountsPage";
 import { truncateText } from "./textFormat";
@@ -70,8 +70,27 @@ function remainingLabel(account: AccountScheduling, window: QuotaWindow, short: 
   return percent === null ? `${short} 未知` : `${short} 剩 ${percent}%`;
 }
 
-/** 指標卡上的百分比；未知顯示「未知」。 */
+/** 額度量表上的百分比；未知顯示「未知」。 */
 const percentText = (percent: number | null) => (percent === null ? "未知" : `${percent}%`);
+
+/** 最近一次 Run 是開啟失敗（Controller CLI 沒有成功開起來）。 */
+const launchFailed = (run: ControllerCliRun) => run.end_code !== null && LAUNCH_FAILURE_CODES.has(run.end_code);
+
+type Tone = "success" | "warning" | "danger" | "accent";
+
+/** 狀態點的語意：開啟中為進行中（群青）、執行中為成功、中斷為危險；未開啟與已結束為中性。 */
+const STATUS_TONES: Record<ControllerCliStatus, Tone | null> = {
+  starting: "accent",
+  running: "success",
+  ended: null,
+  interrupted: "danger",
+};
+
+/** 卡片左側色條：與狀態點相同；開啟失敗雖然是「已結束」，也以危險標示。 */
+function stripeTone(run: ControllerCliRun | null): Tone | null {
+  if (run === null) return null;
+  return run.status === "ended" && launchFailed(run) ? "danger" : STATUS_TONES[run.status];
+}
 
 /**
  * 帳號名稱在選單選項中最多的字數：額度摘要另外接在後面，避免長名稱把選單撐寬（MASTER 6.1）。
@@ -209,110 +228,223 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   // 換帳號的目標：與目前帳號不同、可用的 Profile；預設第一個
   const switchTargets = available.filter((profile) => profile.id !== run?.profile_id);
   const switchTarget = switchTargets.some((profile) => profile.id === switchTo) ? switchTo : (switchTargets[0]?.id ?? "");
+  const statusTone = run === null ? null : STATUS_TONES[run.status];
+  const stripe = stripeTone(run);
+  const openSelectId = useId();
+  const switchSelectId = useId();
+  const pickHintId = useId();
 
   return (
-    <section className="controller-page" aria-label="Controller">
-      {/* 頁面標題列：頁名 + 開著時的「結束」（Workspace 名稱由外殼的情境列顯示） */}
-      <header className="controller-header">
+    <section className="page controller-page" aria-label="Controller">
+      {/* 頁面標題只寫頁名；Workspace 名稱由外殼的情境列顯示 */}
+      <header className="page-header">
         <h2>主控台</h2>
-        {view && open && (
-          <button type="button" disabled={busy || ending} onClick={() => void act(() => client.endControllerCli(workspace.id))}>
-            {ending ? "結束中…" : "結束"}
-          </button>
-        )}
       </header>
-      {view === null && loadError === null && <p>載入中…</p>}
-      {loadError && <p role="alert">無法取得 Controller 狀態：{loadError}</p>}
-      {actionError && <p role="alert">{actionError}</p>}
+      {view === null && loadError === null && <p className="empty-note">載入中…</p>}
+      {loadError && (
+        <div role="alert" className="callout callout-danger">
+          <p>無法取得 Controller 狀態：{loadError}</p>
+        </div>
+      )}
+      {actionError && (
+        <div role="alert" className="callout callout-danger">
+          <p>{actionError}</p>
+        </div>
+      )}
       {/* 開著與未開啟都要提示：開著時「換帳號重開」需要帳號清單 */}
-      {view && profilesError && <p role="alert">無法取得帳號清單：{profilesError}</p>}
+      {view && profilesError && (
+        <div role="alert" className="callout callout-danger">
+          <p>無法取得帳號清單：{profilesError}</p>
+        </div>
+      )}
       {view && (
-        <div className="controller-layout">
-          <section className="controller-card" aria-label="Controller 狀態">
-            <h3>狀態</h3>
-            <dl className="controller-facts">
-              <dt>狀態</dt>
-              <dd>
-                <span className={`controller-status controller-status-${run === null ? "idle" : run.status}`}>
-                  {run === null ? "未開啟" : STATUS_LABELS[run.status]}
-                </span>
-              </dd>
-              {run && (
-                <>
-                  <dt>Controller 帳號</dt>
-                  <dd>{profileName(run.profile_id)}</dd>
-                  <dt>開啟時間</dt>
-                  <dd>{formatTimestamp(run.opened_at, timeZone)}</dd>
-                  <dt>Session</dt>
-                  <dd>{sessionLabel(run)}</dd>
-                </>
+        <>
+          {/* 駕駛艙：最上面一列是目前狀態的讀數，主要動作緊跟在右；提示、額度、開啟表單與技術細節依序在下 */}
+          <section
+            className={stripe ? `card controller-run stripe-${stripe}` : "card controller-run"}
+            aria-label="Controller 狀態"
+          >
+            <div className="controller-run-head">
+              <dl className="controller-readout">
+                <div>
+                  <dt>狀態</dt>
+                  <dd>
+                    <span
+                      className={`dot${statusTone ? ` dot-${statusTone}` : ""} controller-status controller-status-${
+                        run === null ? "idle" : run.status
+                      }`}
+                    >
+                      {run === null ? "未開啟" : STATUS_LABELS[run.status]}
+                    </span>
+                  </dd>
+                </div>
+                {run && (
+                  <>
+                    <div>
+                      <dt>Controller 帳號</dt>
+                      <dd>{profileName(run.profile_id)}</dd>
+                    </div>
+                    <div>
+                      <dt>開啟時間</dt>
+                      <dd className="tabular">{formatTimestamp(run.opened_at, timeZone)}</dd>
+                    </div>
+                    <div>
+                      <dt>Session</dt>
+                      <dd>{sessionLabel(run)}</dd>
+                    </div>
+                  </>
+                )}
+              </dl>
+              {open && (
+                <button
+                  type="button"
+                  className="no-shrink"
+                  disabled={busy || ending}
+                  onClick={() => void act(() => client.endControllerCli(workspace.id))}
+                >
+                  {ending ? "結束中…" : "結束"}
+                </button>
               )}
-            </dl>
-            {run && !open && run.end_reason !== null && (
-              <p className="controller-end-reason">
-                {run.end_code !== null && LAUNCH_FAILURE_CODES.has(run.end_code)
-                  ? "開啟失敗："
-                  : run.status === "interrupted"
-                    ? "中斷原因："
-                    : "結束原因："}
-                {run.end_reason}
-              </p>
-            )}
+            </div>
+
             {open &&
               (run?.rebound_at != null ? (
-                <p role="alert">Runtime 重新啟動過，這個視窗的平台工具已失效。請按「結束」，再用同一個帳號重新開啟（會接續 Session）。</p>
+                <div role="alert" className="callout callout-warning">
+                  <p>Runtime 重新啟動過，這個視窗的平台工具已失效。請按「結束」，再用同一個帳號重新開啟（會接續 Session）。</p>
+                </div>
               ) : (
                 <p className="controller-hint">已在終端機開啟，請切到該視窗操作</p>
               ))}
+            {open && run !== null && run.switch_to_profile_id !== null && (
+              <div className="callout callout-accent">
+                <p>換帳號重開中：改用 {profileName(run.switch_to_profile_id)}</p>
+              </div>
+            )}
+            {open && controllerAccount?.quota_gate?.state === "draining" && (
+              <div role="status" className="callout callout-warning">
+                <p>Controller 帳號的額度已接近上限，建議換帳號重開</p>
+              </div>
+            )}
+            {run && !open && run.end_reason !== null && (
+              <div
+                className={
+                  launchFailed(run)
+                    ? "callout callout-danger"
+                    : run.status === "interrupted"
+                      ? "callout callout-warning"
+                      : "callout"
+                }
+              >
+                <p>
+                  {launchFailed(run) ? "開啟失敗：" : run.status === "interrupted" ? "中斷原因：" : "結束原因："}
+                  {run.end_reason}
+                </p>
+              </div>
+            )}
+
             {open && controllerAccount && (
-              // 額度以三個小指標呈現：數值在上、標籤在下
-              <dl className="controller-quota" role="group" aria-label="Controller 帳號額度">
-                <div className="controller-metric">
-                  <dt>5h 剩餘</dt>
-                  <dd className="tabular">{percentText(remainingPercent(controllerAccount, "five_hour"))}</dd>
-                </div>
-                <div className="controller-metric">
-                  <dt>7d 剩餘</dt>
-                  <dd className="tabular">{percentText(remainingPercent(controllerAccount, "seven_day"))}</dd>
-                </div>
-                <div className="controller-metric">
+              // 額度：數字在上、量表在下；未知時只寫「未知」，不畫空的量表
+              <dl className="controller-gauges" role="group" aria-label="Controller 帳號額度">
+                <QuotaGauge label="5h 剩餘" percent={remainingPercent(controllerAccount, "five_hour")} />
+                <QuotaGauge label="7d 剩餘" percent={remainingPercent(controllerAccount, "seven_day")} />
+                <div className="controller-gauge">
                   <dt>執行中 Worker</dt>
-                  <dd className="tabular">{controllerAccount.running}</dd>
+                  <dd>
+                    <span className="controller-gauge-value tabular">{controllerAccount.running}</span>
+                  </dd>
                 </div>
               </dl>
             )}
-            {open && run !== null && run.switch_to_profile_id !== null && (
-              <p className="controller-switching">換帳號重開中：改用 {profileName(run.switch_to_profile_id)}</p>
+            {overviewError && <p className="controller-hint">無法取得額度：{overviewError}</p>}
+
+            {!open && (
+              <section className="inset controller-launch" aria-label="開啟 Controller">
+                {profiles === null && profilesError === null && <p className="controller-hint">載入帳號中…</p>}
+                <div className="controller-pick">
+                  {profiles !== null && (
+                    <div className="field">
+                      <label htmlFor={openSelectId}>Controller 帳號</label>
+                      <select
+                        id={openSelectId}
+                        aria-describedby={pickHintId}
+                        value={profileId}
+                        onChange={(e) => setPickedProfileId(e.target.value)}
+                      >
+                        {available.length === 0 && <option value="">（沒有可用的帳號）</option>}
+                        {profiles.map((profile) => (
+                          <option key={profile.id} value={profile.id} disabled={!profile.dispatchable}>
+                            {optionLabel(profile)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={busy || !selectable}
+                    onClick={() => void act(() => client.openControllerCli(workspace.id, profileId))}
+                  >
+                    開啟
+                  </button>
+                </div>
+                {profiles !== null && (
+                  <p id={pickHintId} className="field-hint">
+                    {available.length === 0
+                      ? "沒有可用的帳號，請到「帳號」新增或重新核對"
+                      : "在外部終端機開啟互動式 Claude Code；選上次用過的帳號會接續上次的 Session"}
+                  </p>
+                )}
+                {unavailable.length > 0 && (
+                  <details className="controller-unavailable">
+                    <summary>不可用的帳號（{unavailable.length}）</summary>
+                    <ul aria-label="不可用的帳號">
+                      {unavailable.map((profile) => (
+                        <li key={profile.id}>
+                          {profile.name}：
+                          {profile.blockers.length > 0
+                            ? profile.blockers.map((blocker) => blocker.message).join("；")
+                            : profileStateLabel(profile)}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </section>
             )}
-            {open && controllerAccount?.quota_gate?.state === "draining" && (
-              <p role="status" className="controller-quota-warning">
-                Controller 帳號的額度已接近上限，建議換帳號重開
-              </p>
-            )}
-            {overviewError && <p className="controller-quota-error">無法取得額度：{overviewError}</p>}
+
             <details className="controller-more">
               <summary>詳細資訊</summary>
-              <dl className="controller-facts">
+              <dl className="facts">
                 <dt>操作手冊版本</dt>
                 <dd>{view.playbook_version}</dd>
               </dl>
             </details>
           </section>
 
+          {/* 換帳號重開是次要動作：放在駕駛艙下方，不與目前狀態搶位置 */}
           {open && profiles !== null && (
-            <section className="controller-card" aria-label="換帳號重開">
-              <h3>換帳號重開</h3>
-              <div className="controller-row">
-                <label>
-                  換成帳號
-                  <select value={switchTarget} disabled={ending} onChange={(e) => setSwitchTo(e.target.value)}>
+            <section className="section controller-switch" aria-label="換帳號重開">
+              <div className="section-heading">
+                <h3>換帳號重開</h3>
+                <p>結束目前的終端機視窗，改用另一個帳號開啟新的 Session</p>
+              </div>
+              <div className="controller-pick">
+                <div className="field">
+                  <label htmlFor={switchSelectId}>換成帳號</label>
+                  <select
+                    id={switchSelectId}
+                    value={switchTarget}
+                    disabled={ending}
+                    onChange={(e) => setSwitchTo(e.target.value)}
+                  >
                     {switchTargets.map((profile) => (
                       <option key={profile.id} value={profile.id}>
                         {optionLabel(profile)}
                       </option>
                     ))}
                   </select>
-                </label>
+                </div>
                 <button
                   type="button"
                   disabled={busy || ending || switchTarget === ""}
@@ -321,59 +453,28 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
                   換帳號重開
                 </button>
               </div>
-              {switchTargets.length === 0 && <p className="controller-hint">沒有其他可用的帳號</p>}
+              {switchTargets.length === 0 && <p className="field-hint">沒有其他可用的帳號</p>}
             </section>
           )}
-
-          {!open && (
-            <section className="controller-card" aria-label="開啟 Controller">
-              <h3>開啟 Controller</h3>
-              {profiles === null && profilesError === null && <p>載入帳號中…</p>}
-              <div className="controller-row">
-                {profiles !== null && (
-                  <label>
-                    Controller 帳號
-                    <select value={profileId} onChange={(e) => setPickedProfileId(e.target.value)}>
-                      {available.length === 0 && <option value="">（沒有可用的帳號）</option>}
-                      {profiles.map((profile) => (
-                        <option key={profile.id} value={profile.id} disabled={!profile.dispatchable}>
-                          {optionLabel(profile)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                <button
-                  type="button"
-                  className="primary-action"
-                  disabled={busy || !selectable}
-                  onClick={() => void act(() => client.openControllerCli(workspace.id, profileId))}
-                >
-                  開啟
-                </button>
-              </div>
-              {profiles !== null && available.length === 0 && (
-                <p className="controller-hint">沒有可用的帳號，請到「帳號」新增或重新核對</p>
-              )}
-              {unavailable.length > 0 && (
-                <details className="controller-unavailable-details">
-                  <summary>不可用的帳號（{unavailable.length}）</summary>
-                  <ul className="controller-unavailable" aria-label="不可用的帳號">
-                    {unavailable.map((profile) => (
-                      <li key={profile.id}>
-                        {profile.name}：
-                        {profile.blockers.length > 0
-                          ? profile.blockers.map((blocker) => blocker.message).join("；")
-                          : profileStateLabel(profile)}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-            </section>
-          )}
-        </div>
+        </>
       )}
     </section>
+  );
+}
+
+/** 一個視窗的剩餘額度：數字在上、量表在下；未知時只寫「未知」，不畫空的量表。 */
+function QuotaGauge({ label, percent }: { label: string; percent: number | null }) {
+  return (
+    <div className="controller-gauge">
+      <dt>{label}</dt>
+      <dd>
+        <span className="controller-gauge-value tabular">{percentText(percent)}</span>
+        {percent !== null && (
+          <div className="meter" aria-hidden="true">
+            <span style={{ width: `${percent}%` }} />
+          </div>
+        )}
+      </dd>
+    </div>
   );
 }

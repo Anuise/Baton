@@ -100,6 +100,19 @@
   background: var(--color-accent-hover);
 }
 
+/* 次要：送出鈕（type="submit"）預設是主要按鈕；同一區已有主要動作時以此改回次要樣式（例：搜尋） */
+.btn-secondary {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: var(--font-weight-normal);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--color-control-border);
+  background: var(--color-surface-hover);
+}
+
 /* 低調：物件內第三順位以後的動作、「展開」「複製」 */
 .btn-quiet {
   border-color: transparent;
@@ -206,9 +219,10 @@
 }
 
 /* 純文字的中性標籤（分類、標籤）：沒有框，與狀態徽章區分 */
+/* 半透明疊色：放在選取列（accent-subtle）或 sunken 底上也看得出是徽章 */
 .badge-plain {
   border-color: transparent;
-  background: var(--color-surface-sunken);
+  background: color-mix(in srgb, var(--color-text) 7%, transparent);
   font-weight: var(--font-weight-normal);
 }
 
@@ -323,6 +337,7 @@
 
 .section-heading > p {
   flex-basis: 100%;
+  max-inline-size: none;
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--text-meta);
@@ -448,42 +463,12 @@
   background: var(--color-surface-sunken);
 }
 
-/* 狀態色條：語意色只標示狀態，長內容不整塊上色 */
-.stripe-success,
-.stripe-warning,
-.stripe-danger,
-.stripe-accent,
-.stripe-muted {
-  border-left-width: 3px;
-  border-left-style: solid;
-}
-
-.stripe-success {
-  border-left-color: var(--color-success);
-}
-
-.stripe-warning {
-  border-left-color: var(--color-warning);
-}
-
-.stripe-danger {
-  border-left-color: var(--color-danger);
-}
-
-.stripe-accent {
-  border-left-color: var(--color-accent);
-}
-
-.stripe-muted {
-  border-left-color: var(--color-border-strong);
-}
-
 /* ---------- 分隔清單：一串同類物件（知識條目、成果、Guard），一個外框、列與列之間細線 ---------- */
+/* 不用 overflow: hidden 裁圓角（會裁掉列中按鈕的焦點外框），改讓第一列與最後一列自己帶圓角 */
 .row-list {
   display: grid;
   margin: 0;
   padding: 0;
-  overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   background: var(--color-surface);
@@ -496,6 +481,16 @@
   gap: var(--space-3);
   min-width: 0;
   padding: var(--space-5) var(--space-6);
+}
+
+.row-list > :first-child {
+  border-top-left-radius: calc(var(--radius-lg) - 1px);
+  border-top-right-radius: calc(var(--radius-lg) - 1px);
+}
+
+.row-list > :last-child {
+  border-bottom-right-radius: calc(var(--radius-lg) - 1px);
+  border-bottom-left-radius: calc(var(--radius-lg) - 1px);
 }
 
 .row-list > li + li,
@@ -524,9 +519,41 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1) var(--space-6);
+  max-inline-size: none;
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--text-meta);
+}
+
+/* 狀態色條：語意色只標示狀態，長內容不整塊上色。
+   寫在所有外框（.card、.panel、.row-list）之後，才不會被它們的 border 簡寫蓋掉 */
+.stripe-success,
+.stripe-warning,
+.stripe-danger,
+.stripe-accent,
+.stripe-muted {
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+
+.stripe-success {
+  border-left-color: var(--color-success);
+}
+
+.stripe-warning {
+  border-left-color: var(--color-warning);
+}
+
+.stripe-danger {
+  border-left-color: var(--color-danger);
+}
+
+.stripe-accent {
+  border-left-color: var(--color-accent);
+}
+
+.stripe-muted {
+  border-left-color: var(--color-border-strong);
 }
 
 /* ---------- 事實表（dl）：左欄標籤、右欄值；窄時上下排列 ---------- */
@@ -659,6 +686,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 14em), 1fr));
   gap: var(--space-5);
+  align-items: start;
 }
 
 .field-inline {
@@ -726,9 +754,13 @@
 }
 
 .choice > input {
-  grid-row: span 2;
   align-self: start;
   margin-top: 0.2em;
+}
+
+/* 名稱與說明都在第二欄；只有名稱時不多出空白列 */
+.choice > :not(input) {
+  grid-column: 2;
 }
 
 /* ---------- 表格（MASTER 5.3）：外層自己水平捲動 ---------- */
@@ -743,8 +775,13 @@
   font-size: var(--text-meta);
 }
 
-.data-table th {
+/* 欄標題不折行；列標題（th scope="row"）與內文一樣可以折行 */
+.data-table thead th {
   white-space: nowrap;
+}
+
+.data-table tbody th {
+  overflow-wrap: anywhere;
 }
 
 .data-table td {
@@ -808,6 +845,12 @@
   border-radius: var(--radius-lg);
   background: var(--color-surface-raised);
   box-shadow: var(--shadow-popover);
+}
+
+/* 放在列尾的選單：往左展開，不超出視窗 */
+.more-menu-end > .more-menu-list {
+  right: 0;
+  left: auto;
 }
 
 .more-menu-list > button {
@@ -977,6 +1020,11 @@
   border-radius: var(--radius-xl);
   background: var(--color-surface-raised);
   box-shadow: var(--shadow-popover);
+}
+
+/* 原生 <dialog> 關閉時不顯示（上面的 display: grid 會蓋過瀏覽器預設的 display: none） */
+dialog.dialog-panel:not([open]) {
+  display: none;
 }
 
 .exit-progress h2,

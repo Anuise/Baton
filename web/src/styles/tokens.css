@@ -42,9 +42,10 @@
   --font-weight-strong: 600;
   --font-weight-heavy: 700;
 
-  /* 閱讀寬度：段落約每行 44 個中文字；表單 46em */
-  --measure: 44em;
-  --measure-form: 46em;
+  /* 閱讀寬度：以內文字級計算（不用 em），13px 的欄位與提示和 14px 的段落在同一欄時右緣對齊；
+     段落約每行 44 個中文字，表單 46 字寬 */
+  --measure: calc(var(--text-body) * 44);
+  --measure-form: calc(var(--text-body) * 46);
 
   /* 控制項高度 */
   --control-height: 30px;

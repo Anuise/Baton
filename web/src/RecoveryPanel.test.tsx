@@ -29,6 +29,24 @@ const renderPanel = (client: RecoveryClient, pollMs = 5000) =>
 
 const blocking = (code: string, message: string) => ({ category: "lifecycle" as const, code, message });
 
+/** 兩欄 dl 中的一項，組成畫面上的說法「名稱：值」以便比對；沒有這一項時為 null。 */
+function fact(term: string): string | null {
+  const dt = screen.queryByText(term, { selector: "dt" });
+  return dt === null ? null : `${term}：${dt.nextElementSibling?.textContent ?? ""}`;
+}
+
+/** 一次嘗試的摘要：「第 n 輪第 m 次」、結果與時間各自分開顯示，這裡以空白串起來比對。 */
+function attemptSummary(item: HTMLElement): string {
+  const head = item.querySelector(".row-head")!;
+  const times = Array.from(item.querySelectorAll(":scope > .meta > span"), (span) => span.textContent);
+  return [...Array.from(head.children, (child) => child.textContent), ...times].join(" ");
+}
+
+/** 受影響工作的一列：Run、Task、處置各自分開顯示，這裡以空白串起來比對。 */
+function affectedSummary(item: HTMLElement): string {
+  return Array.from(item.children, (child) => child.textContent).join(" ");
+}
+
 /** 第 1 輪三次都失敗、恢復額度用盡。 */
 const exhausted = recoveryStatus({
   can_retry: true,
@@ -78,9 +96,10 @@ describe("崩潰恢復面板", () => {
     expect(await screen.findByText("退避中")).toBeInTheDocument();
     expect(screen.getByText("第 1 輪")).toBeInTheDocument();
     expect(screen.getByText("本輪嘗試：1/3")).toBeInTheDocument();
-    expect(screen.getByText("偵測到崩潰：2023/11/15 06:13")).toBeInTheDocument();
-    expect(screen.getByText("下一次嘗試最早：2023/11/15 06:15")).toBeInTheDocument();
-    expect(screen.getByText("最後失敗原因：Runtime 再次終止")).toBeInTheDocument();
+    expect(fact("偵測到崩潰")).toBe("偵測到崩潰：2023/11/15 06:13");
+    expect(fact("下一次嘗試最早")).toBe("下一次嘗試最早：2023/11/15 06:15");
+    expect(fact("最後失敗原因")).toBe("最後失敗原因：Runtime 再次終止");
+    expect(fact("觀察期滿")).toBeNull();
     expect(screen.getByRole("alert")).toHaveTextContent("新派工已暫停：崩潰恢復進行中");
     expect(screen.queryByRole("button", { name: "重新嘗試恢復" })).not.toBeInTheDocument();
   });
@@ -111,13 +130,13 @@ describe("崩潰恢復面板", () => {
     renderPanel(fakeClient([status]));
 
     expect(await screen.findByText("穩定觀察中", { selector: "strong" })).toBeInTheDocument();
-    expect(screen.getByText("觀察期滿：2023/11/15 06:23")).toBeInTheDocument();
-    const attempts = within(screen.getByRole("list", { name: "恢復嘗試" }));
-    expect(attempts.getByText("第 1 輪第 1 次・穩定觀察中・開始 2023/11/15 06:13")).toBeInTheDocument();
+    expect(fact("觀察期滿")).toBe("觀察期滿：2023/11/15 06:23");
+    const attempt = screen.getByRole("list", { name: "恢復嘗試" }).querySelector<HTMLElement>(".recovery-attempt")!;
+    expect(attemptSummary(attempt)).toBe("第 1 輪第 1 次 穩定觀察中 開始 2023/11/15 06:13");
     const affected = within(screen.getByRole("list", { name: "第 1 輪第 1 次的受影響工作" })).getAllByRole("listitem");
-    expect(affected.map((item) => item.textContent)).toEqual([
-      "Run run_1・Task task_1・已重新排隊",
-      "Run run_2・Task task_2・已完成取消（崩潰前已要求取消）",
+    expect(affected.map(affectedSummary)).toEqual([
+      "Run run_1 Task task_1 已重新排隊",
+      "Run run_2 Task task_2 已完成取消（崩潰前已要求取消）",
     ]);
   });
 
@@ -132,7 +151,7 @@ describe("崩潰恢復面板", () => {
     renderPanel(fakeClient([status]));
 
     expect(await screen.findByText("已恢復")).toBeInTheDocument();
-    expect(screen.getByText("恢復完成：2023/11/15 06:24")).toBeInTheDocument();
+    expect(fact("恢復完成")).toBe("恢復完成：2023/11/15 06:24");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -142,12 +161,10 @@ describe("崩潰恢復面板", () => {
     expect(await screen.findByText("恢復額度用盡")).toBeInTheDocument();
     expect(screen.getByText("本輪嘗試：3/3")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("新派工已暫停：崩潰恢復額度用盡，等待重新嘗試恢復");
-    expect(within(screen.getByRole("list", { name: "恢復嘗試" })).getAllByText(/^第 1 輪第 \d 次・失敗/)).toHaveLength(3);
-    expect(
-      within(screen.getByRole("list", { name: "第 1 輪第 3 次的受影響工作" })).getByText(
-        "Run run_1・Task task_1・無法確認停止（程序仍在執行）",
-      ),
-    ).toBeInTheDocument();
+    const attempts = Array.from(document.querySelectorAll<HTMLElement>(".recovery-attempt"));
+    expect(attempts.map(attemptSummary).filter((text) => /^第 1 輪第 \d 次 失敗/.test(text))).toHaveLength(3);
+    const [affected] = within(screen.getByRole("list", { name: "第 1 輪第 3 次的受影響工作" })).getAllByRole("listitem");
+    expect(affectedSummary(affected)).toBe("Run run_1 Task task_1 無法確認停止（程序仍在執行）");
     expect(screen.getByRole("button", { name: "重新嘗試恢復" })).toBeEnabled();
   });
 
@@ -172,8 +189,9 @@ describe("崩潰恢復面板", () => {
     expect(await screen.findByText("第 2 輪")).toBeInTheDocument();
     expect(screen.getByText("嘗試中")).toBeInTheDocument();
     expect(screen.getByText("本輪嘗試：1/3")).toBeInTheDocument();
-    expect(screen.getByText("第 1 輪第 3 次・失敗・開始 2023/11/15 06:13・結束 2023/11/15 06:16")).toBeInTheDocument();
-    expect(screen.getByText("第 2 輪第 1 次・處置中・開始 2023/11/15 06:13")).toBeInTheDocument();
+    const attempts = Array.from(document.querySelectorAll<HTMLElement>(".recovery-attempt")).map(attemptSummary);
+    expect(attempts).toContain("第 1 輪第 3 次 失敗 開始 2023/11/15 06:13 結束 2023/11/15 06:16");
+    expect(attempts).toContain("第 2 輪第 1 次 處置中 開始 2023/11/15 06:13");
     expect(screen.queryByRole("button", { name: "重新嘗試恢復" })).not.toBeInTheDocument();
   });
 
@@ -209,6 +227,6 @@ describe("崩潰恢復面板", () => {
     });
 
     expect(client.recoveryStatus).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("觀察期滿：2023/11/15 06:23")).toBeInTheDocument();
+    expect(fact("觀察期滿")).toBe("觀察期滿：2023/11/15 06:23");
   });
 });

@@ -47,14 +47,14 @@ describe("探索", () => {
     ]);
   });
 
-  it("疑點依狀態分在各自的區塊，疑點絕不出現在已確認缺陷區，也不顯示「已確認」", async () => {
+  it("疑點依狀態分在各自的區塊（需要注意的在前、章程在最後），疑點絕不出現在已確認缺陷區，也不顯示「已確認」", async () => {
     renderPage(fakeClient());
 
     // 標題不等資料讀回就會出現：等分區出現再斷言
     const defects = await screen.findByRole("region", { name: "已確認缺陷" });
     const suspected = group("疑點（未經重現）");
     const risks = group("未驗風險");
-    const fixed = group("已修復・納入回歸");
+    const fixed = group("已修復，納入回歸");
     const excluded = group("已排除");
 
     const titles = (region: HTMLElement) =>
@@ -69,6 +69,17 @@ describe("探索", () => {
 
     expect(within(defects).queryByRole("region", { name: "優惠碼欄位接受負數" })).not.toBeInTheDocument();
     expect(suspected).not.toHaveTextContent("已確認");
+
+    // 區段順序：已確認缺陷 → 疑點 → 未驗風險 → 已修復 → 已排除 → 探索章程
+    const page = screen.getByRole("region", { name: "探索" });
+    expect(within(page).getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent)).toEqual([
+      "已確認缺陷",
+      "疑點（未經重現）",
+      "未驗風險",
+      "已修復，納入回歸",
+      "已排除",
+      "探索章程",
+    ]);
   });
 
   it("只有疑點時，已確認缺陷區是空的", async () => {
@@ -150,7 +161,9 @@ describe("探索", () => {
     expect(regressed).not.toHaveTextContent("功能");
     expect(regressed).toHaveTextContent("證據沒有附證據");
     // 狀態徽章與標題同列；確認的 Bundle 與疑點的欄位在同一個清單中，標籤欄對齊
-    expect(within(regressed).getByText("回歸失敗").parentElement).toBe(within(regressed).getByRole("heading", { level: 4 }).parentElement);
+    expect(within(regressed).getByText("回歸失敗", { selector: ".exploration-badge" }).parentElement).toBe(
+      within(regressed).getByRole("heading", { level: 4 }).parentElement,
+    );
     expect(within(regressed).getByText("確認的 Evidence Bundle").closest("dl")).toBe(within(regressed).getByText("Task").closest("dl"));
   });
 
@@ -194,10 +207,16 @@ describe("探索", () => {
     const suspected = await screen.findByRole("region", { name: "優惠碼欄位接受負數" });
     const attempts = within(suspected).getAllByRole("listitem", { name: /^驗證要求/ });
     expect(attempts.map((item) => item.getAttribute("aria-label"))).toEqual(["驗證要求 vreq_13", "驗證要求 vreq_12"]);
-    expect(attempts[0]).toHaveTextContent("確認重現・排隊中");
+    // 目的與結論分開：結論是徽章
+    const purpose = (item: HTMLElement) => item.querySelector(".exploration-attempt-purpose")?.textContent;
+    const outcome = (item: HTMLElement) => item.querySelector(".exploration-attempt-outcome");
+    expect(purpose(attempts[0])).toBe("確認重現");
+    expect(outcome(attempts[0])).toHaveTextContent(/^排隊中$/);
+    expect(outcome(attempts[0])).toHaveClass("badge");
     expect(attempts[0]).toHaveTextContent("Bundle 尚未產生");
     expect(attempts[0]).not.toHaveTextContent("案例判定");
-    expect(attempts[1]).toHaveTextContent("確認重現・證據不足（不是產品缺陷）");
+    expect(purpose(attempts[1])).toBe("確認重現");
+    expect(outcome(attempts[1])).toHaveTextContent(/^證據不足（不是產品缺陷）$/);
     expect(attempts[1]).toHaveTextContent("Bundle evb_12");
     expect(attempts[1]).toHaveTextContent("案例判定：環境阻礙（service_unreachable）");
     expect(attempts[1]).toHaveTextContent("對照判定：環境阻礙");
@@ -206,18 +225,23 @@ describe("探索", () => {
     const history = within(within(regressed).getByRole("list", { name: "運費重複計算 的重現紀錄" })).getAllByRole("listitem", {
       name: /^驗證要求/,
     });
-    expect(history.map((item) => item.querySelector(".exploration-attempt-outcome")?.textContent)).toEqual([
-      "回歸・回歸失敗",
-      "修復驗證・修復已驗證",
-      "確認重現・已重現",
+    expect(history.map((item) => `${purpose(item)}：${outcome(item)?.textContent}`)).toEqual([
+      "回歸：回歸失敗",
+      "修復驗證：修復已驗證",
+      "確認重現：已重現",
     ]);
+    // 缺陷仍在是紅色，修好了是綠色
+    expect(outcome(history[0])).toHaveClass("badge-danger");
+    expect(outcome(history[1])).toHaveClass("badge-success");
     expect(history[2]).toHaveTextContent("案例判定：產品缺陷（assertion_failed）");
     expect(history[2]).toHaveTextContent("對照判定：通過");
 
-    const fixed = screen.getByRole("region", { name: "稅額四捨五入錯誤" });
-    expect(fixed).toHaveTextContent("回歸・回歸通過");
-    expect(fixed).toHaveTextContent("修復驗證・仍然失敗");
-    expect(screen.getByRole("region", { name: "大量商品時結帳變慢" })).toHaveTextContent("確認重現・無法重現");
+    const outcomes = (name: string) =>
+      within(screen.getByRole("region", { name }))
+        .getAllByRole("listitem", { name: /^驗證要求/ })
+        .map((item) => `${purpose(item)}：${outcome(item)?.textContent}`);
+    expect(outcomes("稅額四捨五入錯誤")).toEqual(expect.arrayContaining(["回歸：回歸通過", "修復驗證：仍然失敗"]));
+    expect(outcomes("大量商品時結帳變慢")).toEqual(["確認重現：無法重現"]);
   });
 
   it("未驗風險顯示原因，已排除顯示排除原因、理由與預期設計的裁定請求", async () => {
@@ -256,7 +280,7 @@ describe("探索", () => {
     expect(group("已確認缺陷")).toHaveTextContent("沒有已確認缺陷。");
     expect(group("疑點（未經重現）")).toHaveTextContent("沒有待重現的疑點。");
     expect(group("未驗風險")).toHaveTextContent("沒有未驗風險。");
-    expect(group("已修復・納入回歸")).toHaveTextContent("沒有已修復的缺陷。");
+    expect(group("已修復，納入回歸")).toHaveTextContent("沒有已修復的缺陷。");
     expect(group("已排除")).toHaveTextContent("沒有已排除的疑點。");
   });
 

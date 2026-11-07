@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
 
 import type { ModelCatalogClient, ModelOption, ModelOverrides, Workspace, WorkspaceClient } from "./runtimeClient";
 import { truncateText } from "./textFormat";
@@ -18,10 +18,11 @@ interface Props {
   timeZone?: string;
 }
 
-const ROLES: { role: Role; label: string }[] = [
-  { role: "controller", label: "Controller" },
-  { role: "worker", label: "Worker" },
-  { role: "reviewer", label: "Reviewer" },
+/** 三個角色與一句話說明（依 GLOSSARY.md）。 */
+const ROLES: { role: Role; label: string; hint: string }[] = [
+  { role: "controller", label: "Controller", hint: "規劃工作、拆 Task、派工與評估成果" },
+  { role: "worker", label: "Worker", hint: "執行 Task" },
+  { role: "reviewer", label: "Reviewer", hint: "獨立審查成果" },
 ];
 
 const DEFAULT_LABEL = "預設（不指定）";
@@ -48,6 +49,7 @@ const valueOf = (text: string): string | null => (text.trim() === "" ? null : te
  * 每次開啟都向 Runtime 讀取最新值，避免沿用側欄清單裡過時的 Workspace。
  */
 export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
+  const idPrefix = useId();
   const [loaded, setLoaded] = useState<LoadState>({ state: "loading" });
   const [draft, setDraft] = useState<Draft>(draftFrom(workspace.model_overrides));
   const [catalog, setCatalog] = useState<Catalog>({ models: [], updatedAt: null, failure: null, loaded: false });
@@ -91,12 +93,20 @@ export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
     void loadCatalog();
   }, [load, loadCatalog]);
 
-  if (loaded.state === "loading") return <section aria-label="模型設定">載入中…</section>;
+  if (loaded.state === "loading") {
+    return (
+      <PageFrame>
+        <p className="empty-note">載入中…</p>
+      </PageFrame>
+    );
+  }
   if (loaded.state === "failed") {
     return (
-      <section aria-label="模型設定">
-        <p role="alert">無法取得模型設定：{loaded.reason}</p>
-      </section>
+      <PageFrame>
+        <p className="field-error" role="alert">
+          無法取得模型設定：{loaded.reason}
+        </p>
+      </PageFrame>
     );
   }
   const current = loaded.workspace;
@@ -143,64 +153,112 @@ export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
     }
   };
 
+  // 版面：三個角色的模型（一張精簡表單）→ 可用模型清單的來源與更新（偶爾才做）
   return (
-    <section className="model-overrides" aria-label="模型設定">
-      <header className="page-header">
-        <h2>模型設定</h2>
-      </header>
-      <p className="model-overrides-hint">{DEFAULT_HINT}。變更只影響之後派出的 Run，已派出的 Run 維持派工時的模型。</p>
-      {catalog.failure && (
-        <p className="model-overrides-hint">無法取得可用模型清單：{catalog.failure}。仍可選擇預設或保留目前的設定。</p>
-      )}
-      {archived && <p>這個 Workspace 已封存，不能變更模型設定。</p>}
-      <form onSubmit={(event) => void save(event)}>
-        <fieldset disabled={archived || busy}>
-          {ROLES.map(({ role, label }) => (
-            <label key={role}>
-              {label} 模型
-              <select value={draft[role]} onChange={(e) => setDraft({ ...draft, [role]: e.target.value })}>
-                <option value="">{DEFAULT_LABEL}</option>
-                {/* 已存的值不在清單裡時也列為選項，避免下拉選單把它靜默清掉 */}
-                {saved[role] !== "" && !catalog.models.some((m) => m.id === saved[role]) && (
-                  <option value={saved[role]} title={saved[role]}>
-                    {truncateText(saved[role], OPTION_MAX_CHARS - 16)}（目前的設定，不在可用清單中）
-                  </option>
-                )}
-                {catalog.models.map((model) => (
-                  <option key={model.id} value={model.id} title={`${model.label}（${model.id}）`}>
-                    {truncateText(`${model.label}（${model.id}）`, OPTION_MAX_CHARS)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ))}
-          <div className="form-actions">
-            <button type="submit">儲存模型設定</button>
+    <PageFrame>
+      <section className="section">
+        <div className="section-heading">
+          <h3>各角色使用的模型</h3>
+          <p>{DEFAULT_HINT}。</p>
+          <p>變更只影響之後派出的 Run，已派出的 Run 維持派工時的模型。</p>
+        </div>
+        {catalog.failure && (
+          <div className="callout callout-warning">
+            <p>無法取得可用模型清單：{catalog.failure}。仍可選擇預設或保留目前的設定。</p>
           </div>
-        </fieldset>
-      </form>
-      {notice && <p role="status">{notice}</p>}
-      {error && <p role="alert">{error}</p>}
-      <section className="model-catalog-refresh" aria-label="更新可用模型清單">
-        <h3>更新可用模型清單</h3>
-        {catalog.loaded && (
-          <p className="model-overrides-hint">
-            清單來源：{catalog.updatedAt === null ? "內建" : `更新於 ${formatTimestamp(catalog.updatedAt, timeZone)}`}
-          </p>
         )}
-        <form onSubmit={(event) => void refresh(event)}>
-          <label>
-            Anthropic API 金鑰
+        {archived && (
+          <div className="callout">
+            <p>這個 Workspace 已封存，不能變更模型設定。</p>
+          </div>
+        )}
+        <form className="panel model-overrides-form" onSubmit={(event) => void save(event)}>
+          <fieldset disabled={archived || busy}>
+            <legend className="visually-hidden">各角色使用的模型</legend>
+            {ROLES.map(({ role, label, hint }) => (
+              <div key={role} className="model-overrides-role">
+                <label htmlFor={`${idPrefix}-${role}`}>{label} 模型</label>
+                <p id={`${idPrefix}-${role}-hint`} className="field-hint">
+                  {hint}
+                </p>
+                <select
+                  id={`${idPrefix}-${role}`}
+                  aria-describedby={`${idPrefix}-${role}-hint`}
+                  value={draft[role]}
+                  onChange={(e) => setDraft({ ...draft, [role]: e.target.value })}
+                >
+                  <option value="">{DEFAULT_LABEL}</option>
+                  {/* 已存的值不在清單裡時也列為選項，避免下拉選單把它靜默清掉 */}
+                  {saved[role] !== "" && !catalog.models.some((m) => m.id === saved[role]) && (
+                    <option value={saved[role]} title={saved[role]}>
+                      {truncateText(saved[role], OPTION_MAX_CHARS - 16)}（目前的設定，不在可用清單中）
+                    </option>
+                  )}
+                  {catalog.models.map((model) => (
+                    <option key={model.id} value={model.id} title={`${model.label}（${model.id}）`}>
+                      {truncateText(`${model.label}（${model.id}）`, OPTION_MAX_CHARS)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+            <div className="form-actions">
+              <button type="submit">儲存模型設定</button>
+              {notice && (
+                <p className="model-overrides-saved" role="status">
+                  {notice}
+                </p>
+              )}
+            </div>
+          </fieldset>
+          {error && (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          )}
+        </form>
+      </section>
+
+      <section className="section model-catalog-refresh" aria-label="更新可用模型清單">
+        <div className="section-heading">
+          <h3>更新可用模型清單</h3>
+          {catalog.loaded && (
+            <p>清單來源：{catalog.updatedAt === null ? "內建" : `更新於 ${formatTimestamp(catalog.updatedAt, timeZone)}`}</p>
+          )}
+        </div>
+        <form className="model-catalog-form" onSubmit={(event) => void refresh(event)}>
+          <label className="field">
+            <span className="field-label">Anthropic API 金鑰</span>
             <input type="password" autoComplete="off" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
           </label>
           <button type="submit" disabled={refreshing || apiKey.trim() === ""}>
             更新清單
           </button>
         </form>
-        <p className="model-overrides-hint">金鑰只用於這一次查詢，不會保存；查到的模型清單會保存，之後重開 App 仍會使用。</p>
-        {refreshResult?.kind === "done" && <p role="status">已更新可用模型清單（{refreshResult.count} 個模型）</p>}
-        {refreshResult?.kind === "failed" && <p role="alert">{refreshResult.reason}</p>}
+        <p className="section-hint">金鑰只用於這一次查詢，不會保存；查到的模型清單會保存，之後重開 App 仍會使用。</p>
+        {refreshResult?.kind === "done" && (
+          <div className="callout callout-success" role="status">
+            <p>已更新可用模型清單（{refreshResult.count} 個模型）</p>
+          </div>
+        )}
+        {refreshResult?.kind === "failed" && (
+          <p className="field-error" role="alert">
+            {refreshResult.reason}
+          </p>
+        )}
       </section>
+    </PageFrame>
+  );
+}
+
+/** 頁面外框：載入中、讀取失敗與正常內容共用同一個頁面標題（h2 與跑道欄的頁名相同）。 */
+function PageFrame({ children }: { children: ReactNode }) {
+  return (
+    <section className="page model-overrides-page" aria-label="模型設定">
+      <header className="page-header">
+        <h2>模型設定</h2>
+      </header>
+      {children}
     </section>
   );
 }

@@ -1,5 +1,6 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 
+import { ShortValue } from "./LongText";
 import { optionLabel, shortId } from "./textFormat";
 import { formatTimestamp } from "./time";
 import type {
@@ -101,7 +102,7 @@ function TokensValue({ prefix, value }: { prefix: string; value: number | null }
   return <Value prefix={prefix} main={value.toLocaleString("en-US")} unit=" tokens" />;
 }
 
-/** 一項指標的主數值（20px、600、等寬數字）；前面的標籤與後面的單位小一級，其餘說明放在下一行的 dd。 */
+/** 一項指標的主數值（title 字級、粗體、等寬數字）；前面的標籤與後面的單位小一級，其餘說明放在下一行的 dd。 */
 function Value({ prefix, main, unit }: { prefix?: string; main: string; unit?: string }) {
   return (
     <dd className="timeline-metric-value">
@@ -185,20 +186,31 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
   const pageEvents = matched.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
 
   return (
-    <section className="timeline-page" aria-label="時間線">
+    <section className="page timeline-page" aria-label="時間線">
       <header className="page-header">
         <h2>時間線</h2>
       </header>
 
-      <section className="timeline-metrics" aria-labelledby="timeline-metrics-title">
-        <h3 id="timeline-metrics-title">觀測指標</h3>
-        {metrics.state === "loading" && <p>載入中…</p>}
-        {metrics.state === "failed" && <p role="alert">無法取得觀測指標：{metrics.reason}</p>}
+      {/* 指標摘要在上（精簡的一張數字表），事件清單在下 */}
+      <section className="section timeline-metrics" aria-labelledby="timeline-metrics-title">
+        <div className="section-heading">
+          <h3 id="timeline-metrics-title">觀測指標</h3>
+          {metrics.state === "ready" && <p>由 {metrics.value.metrics.events} 個時間線事件計算</p>}
+        </div>
+        {metrics.state === "loading" && <p className="empty-note">載入中…</p>}
+        {metrics.state === "failed" && (
+          <p className="callout callout-danger" role="alert">
+            無法取得觀測指標：{metrics.reason}
+          </p>
+        )}
         {metrics.state === "ready" && <MetricsView metrics={metrics.value.metrics} quotas={metrics.value.server_quota} />}
       </section>
 
-      <section className="timeline-events" aria-labelledby="timeline-events-title">
-        <h3 id="timeline-events-title">事件時間線</h3>
+      <section className="section timeline-events" aria-labelledby="timeline-events-title">
+        <div className="section-heading">
+          <h3 id="timeline-events-title">事件時間線</h3>
+          {timeline.state === "ready" && <span className="count">{matched.length} 筆</span>}
+        </div>
         <div className="timeline-filter">
           <label className="timeline-filter-task">
             依 Task 過濾
@@ -229,40 +241,50 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
             />
           </label>
         </div>
-        {timeline.state === "loading" && <p>載入中…</p>}
-        {timeline.state === "failed" && <p role="alert">無法取得時間線：{timeline.reason}</p>}
+        {timeline.state === "loading" && <p className="empty-note">載入中…</p>}
+        {timeline.state === "failed" && (
+          <p className="callout callout-danger" role="alert">
+            無法取得時間線：{timeline.reason}
+          </p>
+        )}
         {timeline.state === "ready" && timeline.value.length === 0 && (
-          <p>{taskId === null ? "這個 Workspace 還沒有事件" : "這個 Task 沒有事件"}</p>
+          <p className="empty-note">{taskId === null ? "這個 Workspace 還沒有事件" : "這個 Task 沒有事件"}</p>
         )}
         {timeline.state === "ready" && timeline.value.length > 0 && matched.length === 0 && (
-          <p>沒有符合「{keyword.trim()}」的事件</p>
+          <p className="empty-note">沒有符合「{keyword.trim()}」的事件</p>
         )}
         {matched.length > 0 && (
-          <ol className="timeline-list" aria-label="事件">
+          // 每列可快速掃讀：時間｜類別｜事件類型與摘要；對象、完整 Task 與事件內容收在「細節」
+          <ol className="row-list timeline-list" aria-label="事件">
             {pageEvents.map((event) => (
               <li key={event.seq} className={`timeline-event timeline-category-${event.category}`}>
-                <span className="timeline-time">{formatTimestamp(event.occurred_at, timeZone)}</span>
-                <span className="timeline-category">{CATEGORY_LABELS[event.category]}</span>
-                <code className="timeline-type mono" title={event.event_type}>
-                  {event.event_type}
-                </code>
-                <span className="timeline-facts">
-                  {event.task_ids.length > 0 && (
-                    <span className="clamp-1" title={event.task_ids.map(taskLabel).join("、")}>
-                      <span className="timeline-fact-label">Task：</span>
-                      {event.task_ids.map(taskLabel).join("、")}
-                    </span>
-                  )}
-                  {event.run_id !== null && (
-                    <span>
-                      <span className="timeline-fact-label">Run：</span>
-                      <code className="mono" title={event.run_id}>
-                        {shortId(event.run_id)}
-                      </code>
-                    </span>
-                  )}
-                  {event.category === "controller" && <ControllerEventFacts event={event} profileLabel={profileLabel} />}
+                <span className="timeline-time tabular">{formatTimestamp(event.occurred_at, timeZone)}</span>
+                <span className="timeline-category">
+                  <span className="badge badge-plain">{CATEGORY_LABELS[event.category]}</span>
                 </span>
+                <div className="timeline-event-main">
+                  <code className="timeline-type mono" title={event.event_type}>
+                    {event.event_type}
+                  </code>
+                  <p className="meta timeline-facts">
+                    {event.task_ids.length > 0 && (
+                      <span className="clamp-1" title={event.task_ids.map(taskLabel).join("、")}>
+                        <span className="timeline-fact-label">Task：</span>
+                        {event.task_ids.map(taskLabel).join("、")}
+                      </span>
+                    )}
+                    {event.run_id !== null && (
+                      <span>
+                        <span className="timeline-fact-label">Run：</span>
+                        <code className="mono" title={event.run_id}>
+                          {shortId(event.run_id)}
+                        </code>
+                      </span>
+                    )}
+                    {event.category === "controller" && <ControllerEventFacts event={event} profileLabel={profileLabel} />}
+                  </p>
+                  <EventDetails event={event} taskLabel={taskLabel} />
+                </div>
               </li>
             ))}
           </ol>
@@ -272,7 +294,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
             <button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>
               上一頁
             </button>
-            <span>
+            <span className="tabular">
               第 {currentPage + 1}／{pageCount} 頁
             </span>
             <button type="button" disabled={currentPage === pageCount - 1} onClick={() => setPage(currentPage + 1)}>
@@ -282,6 +304,39 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
         )}
       </section>
     </section>
+  );
+}
+
+/** 事件的細節（預設收合）：對象、完整的 Task 名稱與事件內容。 */
+function EventDetails({ event, taskLabel }: { event: TimelineEvent; taskLabel: (id: string) => string }) {
+  const { payload } = event;
+  const hasPayload =
+    payload !== null && payload !== undefined && (typeof payload !== "object" || Object.keys(payload).length > 0);
+  return (
+    <details className="timeline-event-more">
+      <summary>細節</summary>
+      <dl className="facts">
+        <dt>對象</dt>
+        <dd className="timeline-aggregate">
+          <span>{event.aggregate_type}</span>
+          <ShortValue value={event.aggregate_id} kind="id" />
+        </dd>
+        {event.task_ids.length > 0 && (
+          <>
+            <dt>Task</dt>
+            <dd>{event.task_ids.map(taskLabel).join("、")}</dd>
+          </>
+        )}
+        {hasPayload && (
+          <>
+            <dt>內容</dt>
+            <dd>
+              <pre>{JSON.stringify(payload, null, 2)}</pre>
+            </dd>
+          </>
+        )}
+      </dl>
+    </details>
   );
 }
 
@@ -351,7 +406,6 @@ function MetricsView({ metrics, quotas }: { metrics: Metrics; quotas: ServerQuot
     metrics;
   return (
     <>
-      <p className="timeline-metrics-source">由 {metrics.events} 個時間線事件計算</p>
       <dl className="timeline-metric-list">
         <Metric name="工作完成率">
           <RatioValue ratio={task_completion.completion} />
@@ -359,41 +413,47 @@ function MetricsView({ metrics, quotas }: { metrics: Metrics; quotas: ServerQuot
         </Metric>
         <Metric name="交接成功率">
           <RatioValue ratio={handoff.success} />
-          <dd>
-            已放棄 {handoff.abandoned}・已確認接手 {handoff.confirmed}・進行中 {handoff.in_flight}
+          <dd className="meta">
+            <span>已放棄 {handoff.abandoned}</span>
+            <span>已確認接手 {handoff.confirmed}</span>
+            <span>進行中 {handoff.in_flight}</span>
           </dd>
         </Metric>
         <Metric name="恢復耗時">
           <DurationValue stats={recovery} />
-          <dd>
-            已恢復 {recovery.count} 次・尚未恢復 {recovery.pending}
+          <dd className="meta">
+            <span>已恢復 {recovery.count} 次</span>
+            <span>尚未恢復 {recovery.pending}</span>
           </dd>
         </Metric>
         <Metric name="重複操作事件">
           <Value prefix="被擋下 " main={String(duplicate_operations.blocked)} unit=" 次" />
-          <dd>
-            已成功 {duplicate_operations.already_succeeded}・結果未知 {duplicate_operations.result_unknown}・他處進行中{" "}
-            {duplicate_operations.in_progress_elsewhere}
+          <dd className="meta">
+            <span>已成功 {duplicate_operations.already_succeeded}</span>
+            <span>結果未知 {duplicate_operations.result_unknown}</span>
+            <span>他處進行中 {duplicate_operations.in_progress_elsewhere}</span>
           </dd>
           <dd>變成結果未知 {duplicate_operations.unknown_outcomes} 次</dd>
         </Metric>
         <Metric name="裁定等待時間">
           <DurationValue stats={decision_wait} />
-          <dd>
-            已回答 {decision_wait.count}・等待中 {decision_wait.pending}
+          <dd className="meta">
+            <span>已回答 {decision_wait.count}</span>
+            <span>等待中 {decision_wait.pending}</span>
           </dd>
         </Metric>
         <Metric name="教訓重犯率">
           <RatioValue ratio={lesson_recurrence.rate} />
-          <dd>
-            重犯 {lesson_recurrence.recurrences} 次・Guard 擋下 {lesson_recurrence.prevented}・使用者回報{" "}
-            {lesson_recurrence.reported}
+          <dd className="meta">
+            <span>重犯 {lesson_recurrence.recurrences} 次</span>
+            <span>Guard 擋下 {lesson_recurrence.prevented}</span>
+            <span>使用者回報 {lesson_recurrence.reported}</span>
           </dd>
         </Metric>
         <Metric name="每階段用量">
           <TokensValue prefix="總計 " value={usage.total_tokens} />
           <dd>共 {usage.runs} 個 Run</dd>
-          {/* 階段多時在卡片內捲動，不把同列的卡片撐高 */}
+          {/* 階段多時在格子內捲動，不把同列的格子撐高 */}
           <dd className="timeline-metric-stages">
             {usage.by_stage.map((stage) => (
               <span key={stage.stage ?? ""} className="timeline-metric-stage">
@@ -405,8 +465,9 @@ function MetricsView({ metrics, quotas }: { metrics: Metrics; quotas: ServerQuot
         <Metric name="Context 使用量">
           <TokensValue prefix="平均 " value={context.average_tokens} />
           <dd>最長 {tokens(context.max_tokens)}</dd>
-          <dd>
-            已回報 {context.runs_known} 個 Run・未回報 {context.runs_unknown} 個 Run
+          <dd className="meta">
+            <span>已回報 {context.runs_known} 個 Run</span>
+            <span>未回報 {context.runs_unknown} 個 Run</span>
           </dd>
         </Metric>
       </dl>

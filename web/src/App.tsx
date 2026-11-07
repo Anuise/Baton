@@ -280,7 +280,6 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
     <div className="app">
       <Rail
         product={health?.product ?? ""}
-        position={`${shell.view}:${shell.workspaceId}:${shell.workspaceTab}`}
         status={statusBar}
         global={<GlobalNav current={shell.view === "workspace" ? null : shell.view} onSelect={selectGlobal} />}
       >
@@ -326,14 +325,11 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
  */
 function Rail({
   product,
-  position,
   status,
   global,
   children,
 }: {
   product: string;
-  /** 目前位置的鍵；改變時重新量接力棒的位置。 */
-  position: string;
   status: ReactNode;
   global: ReactNode;
   children: ReactNode;
@@ -365,12 +361,24 @@ function Rail({
       }
     };
     place();
-    if (typeof ResizeObserver === "undefined") return;
-    // Workspace 清單非同步載入、展開管理選單時，上方內容高度改變，棒子跟著移動
-    const observer = new ResizeObserver(place);
-    for (const child of Array.from(track.children)) observer.observe(child);
-    return () => observer.disconnect();
-  }, [position]);
+    if (typeof ResizeObserver === "undefined" || typeof MutationObserver === "undefined") return;
+    // Workspace 清單非同步載入、展開管理選單、換頁時，上方內容的高度或目前頁面改變，棒子跟著移動。
+    // 跑道上的子元素會在載入後才出現，所以每次內容變動都重新登記要觀察的元素；
+    // 不觀察棒子自己：它的高度由這裡設定，觀察它會形成 ResizeObserver 迴圈
+    const resize = new ResizeObserver(place);
+    const observeChildren = () => {
+      resize.disconnect();
+      for (const child of Array.from(track.children)) if (child !== baton) resize.observe(child);
+      place();
+    };
+    const mutation = new MutationObserver(observeChildren);
+    mutation.observe(track, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-current", "open"] });
+    observeChildren();
+    return () => {
+      mutation.disconnect();
+      resize.disconnect();
+    };
+  }, []);
 
   return (
     <div className="rail">
@@ -577,11 +585,16 @@ function GlobalView({
           <header className="page-header">
             <h2>設定</h2>
           </header>
-          <LoginStartupSettings client={client} />
-          <UpdateSettings client={client} />
+          {/* 短的區段兩兩並排（窄時上下排列）；備份內容較多，自成一列 */}
+          <div className="split">
+            <LoginStartupSettings client={client} />
+            <UpdateSettings client={client} />
+          </div>
           <BackupSettings client={client} />
-          <RecoveryPanel client={client} />
-          <PlatformPage client={client} />
+          <div className="split">
+            <RecoveryPanel client={client} />
+            <PlatformPage client={client} />
+          </div>
         </div>
       );
   }

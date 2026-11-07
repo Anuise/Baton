@@ -97,10 +97,29 @@ describe("首次啟動精靈", () => {
     });
     render(<SetupWizard client={fakeClient(setupStatus({ profiles: [profile(), loggedOut], ready: true }))} />);
 
-    const section = await screen.findByRole("region", { name: "帳號 Profile" });
+    const section = await screen.findByRole("region", { name: "帳號登入" });
     expect(within(section).getByText("主要帳號").closest("li")).toHaveTextContent("可派工");
     expect(within(section).getByText("尚未登入").closest("li")).toHaveTextContent("未登入");
-    expect(within(section).getByText(/在下方「帳號」/)).toBeInTheDocument();
+    expect(within(section).getByText("可派工 1 個")).toHaveClass("badge");
+    expect(within(section).getByText(/在下方「Account Profile」/)).toBeInTheDocument();
+  });
+
+  it("還沒有可派工的帳號時以歡迎畫面呈現（頁面主角，h2）；已有可派工的帳號時是帳號頁中的一般區段（h3）", async () => {
+    const { unmount } = render(
+      <SetupWizard client={fakeClient(setupStatus({ profiles: [profile({ dispatchable: false })], ready: false }))} />,
+    );
+
+    expect(await screen.findByRole("heading", { level: 2, name: "首次設定" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "首次設定" })).toHaveClass("setup-welcome");
+    expect(screen.getByRole("heading", { level: 3, name: "Claude Code" })).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "帳號登入" })).getByText("還沒有可派工的帳號")).toHaveClass("badge");
+    unmount();
+
+    render(<SetupWizard client={fakeClient(setupStatus())} />);
+
+    expect(await screen.findByRole("heading", { level: 3, name: "首次設定" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "首次設定" })).not.toHaveClass("setup-welcome");
+    expect(screen.getByRole("heading", { level: 4, name: "Claude Code" })).toBeInTheDocument();
   });
 
   it("沒有任何 Profile 時引導新增", async () => {

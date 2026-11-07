@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 
 import type {
-  AffectedRun,
   AttemptOutcome,
   RecoveryAttempt,
   RecoveryClient,
@@ -108,47 +107,83 @@ export function RecoveryPanel({ client, pollMs = 5000, timeZone }: Props) {
   };
 
   const time = (utcMillis: number) => formatTimestamp(utcMillis, timeZone);
+  const event = loaded.state === "ready" ? loaded.status.event : null;
 
   return (
-    <section className="recovery-panel" aria-labelledby="recovery-title">
-      <h2 id="recovery-title">崩潰恢復</h2>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得恢復狀態：{loaded.reason}</p>}
-      {loaded.state === "ready" && loaded.status.event === null && <p>沒有恢復事件</p>}
-      {loaded.state === "ready" && loaded.status.event !== null && (
-        <>
-          <p className={`recovery-status recovery-status-${loaded.status.event.status}`}>
-            <strong className={`badge ${RECOVERY_BADGE[loaded.status.event.status]}`}>
-              {recoveryStatusLabel(loaded.status.event)}
-            </strong>
-            <span>第 {loaded.status.event.round} 輪</span>
-            <span>
-              本輪嘗試：{loaded.status.event.attempts_used}/{loaded.status.max_attempts}
+    <section className="section recovery-panel" aria-labelledby="recovery-title">
+      <div className="section-heading">
+        <h3 id="recovery-title">崩潰恢復</h3>
+        {loaded.state === "ready" && event !== null && (
+          <span className={`recovery-status recovery-status-${event.status}`}>
+            <strong className={`badge ${RECOVERY_BADGE[event.status]}`}>{recoveryStatusLabel(event)}</strong>
+            <span>第 {event.round} 輪</span>
+            <span className="tabular">
+              本輪嘗試：{event.attempts_used}/{loaded.status.max_attempts}
             </span>
-          </p>
-          <p>偵測到崩潰：{time(loaded.status.event.detected_at)}</p>
-          {loaded.status.event.next_attempt_at !== null && (
-            <p>下一次嘗試最早：{time(loaded.status.event.next_attempt_at)}</p>
-          )}
-          {loaded.status.event.observe_until !== null && <p>觀察期滿：{time(loaded.status.event.observe_until)}</p>}
-          {loaded.status.event.closed_at !== null && <p>恢復完成：{time(loaded.status.event.closed_at)}</p>}
-          {loaded.status.event.last_failure !== null && <p>最後失敗原因：{loaded.status.event.last_failure}</p>}
+          </span>
+        )}
+        {loaded.state === "ready" && event !== null && loaded.status.can_retry && (
+          <div className="section-actions">
+            <button type="button" disabled={retrying} onClick={() => void retry()}>
+              重新嘗試恢復
+            </button>
+          </div>
+        )}
+      </div>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {loaded.state === "failed" && (
+        <p role="alert" className="callout callout-danger">
+          無法取得恢復狀態：{loaded.reason}
+        </p>
+      )}
+      {loaded.state === "ready" && event === null && <p className="empty-note">沒有恢復事件</p>}
+      {loaded.state === "ready" && event !== null && (
+        <>
           {loaded.status.blocking !== null && (
-            <p className="recovery-blocking" role="alert">
-              <strong>新派工已暫停</strong>：{loaded.status.blocking.message}
+            <p className="callout callout-danger recovery-blocking" role="alert">
+              <span>
+                <strong>新派工已暫停</strong>：{loaded.status.blocking.message}
+              </span>
             </p>
           )}
-          {loaded.status.can_retry && (
-            <div className="recovery-actions">
-              <button type="button" disabled={retrying} onClick={() => void retry()}>
-                重新嘗試恢復
-              </button>
-            </div>
+          {retryError !== null && (
+            <p role="alert" className="callout callout-danger">
+              無法重新嘗試恢復：{retryError}
+            </p>
           )}
-          {retryError !== null && <p role="alert">無法重新嘗試恢復：{retryError}</p>}
-          {loaded.status.event.attempts.length > 0 && (
-            <ul className="recovery-attempts" aria-label="恢復嘗試">
-              {loaded.status.event.attempts.map((attempt) => (
+          <div className="panel">
+            <dl className="facts">
+              <dt>偵測到崩潰</dt>
+              <dd className="tabular">{time(event.detected_at)}</dd>
+              {event.next_attempt_at !== null && (
+                <>
+                  <dt>下一次嘗試最早</dt>
+                  <dd className="tabular">{time(event.next_attempt_at)}</dd>
+                </>
+              )}
+              {event.observe_until !== null && (
+                <>
+                  <dt>觀察期滿</dt>
+                  <dd className="tabular">{time(event.observe_until)}</dd>
+                </>
+              )}
+              {event.closed_at !== null && (
+                <>
+                  <dt>恢復完成</dt>
+                  <dd className="tabular">{time(event.closed_at)}</dd>
+                </>
+              )}
+              {event.last_failure !== null && (
+                <>
+                  <dt>最後失敗原因</dt>
+                  <dd>{event.last_failure}</dd>
+                </>
+              )}
+            </dl>
+          </div>
+          {event.attempts.length > 0 && (
+            <ul className="row-list recovery-attempts" aria-label="恢復嘗試">
+              {event.attempts.map((attempt) => (
                 <Attempt key={attempt.id} attempt={attempt} time={time} />
               ))}
             </ul>
@@ -159,30 +194,46 @@ export function RecoveryPanel({ client, pollMs = 5000, timeZone }: Props) {
   );
 }
 
+/** 嘗試結果徽章的語意色。 */
+const OUTCOME_BADGES: Record<AttemptOutcome, string> = {
+  in_progress: "badge-warning",
+  observing: "badge-accent",
+  succeeded: "badge-success",
+  failed: "badge-danger",
+};
+
 function Attempt({ attempt, time }: { attempt: RecoveryAttempt; time: (utcMillis: number) => string }) {
-  const parts = [
-    `第 ${attempt.round} 輪第 ${attempt.seq} 次`,
-    OUTCOME_LABELS[attempt.outcome],
-    `開始 ${time(attempt.started_at)}`,
-  ];
-  if (attempt.finished_at !== null) parts.push(`結束 ${time(attempt.finished_at)}`);
   return (
     <li className={`recovery-attempt recovery-attempt-${attempt.outcome}`}>
-      <span>{parts.join("・")}</span>
-      {attempt.failure !== null && <span className="recovery-failure">失敗原因：{attempt.failure}</span>}
+      <div className="row-head">
+        <span>
+          第 {attempt.round} 輪第 {attempt.seq} 次
+        </span>
+        <span className={`badge ${OUTCOME_BADGES[attempt.outcome]}`}>{OUTCOME_LABELS[attempt.outcome]}</span>
+      </div>
+      <p className="meta">
+        <span className="tabular">開始 {time(attempt.started_at)}</span>
+        {attempt.finished_at !== null && <span className="tabular">結束 {time(attempt.finished_at)}</span>}
+      </p>
+      {attempt.failure !== null && <p className="recovery-failure">失敗原因：{attempt.failure}</p>}
       {attempt.affected.length > 0 && (
         <ul className="recovery-affected" aria-label={`第 ${attempt.round} 輪第 ${attempt.seq} 次的受影響工作`}>
           {attempt.affected.map((run) => (
-            <li key={run.run_id}>{describeAffected(run)}</li>
+            <li key={run.run_id} className="meta">
+              <span>
+                Run <code className="mono">{run.run_id}</code>
+              </span>
+              <span>
+                Task <code className="mono">{run.task_id}</code>
+              </span>
+              <span className="recovery-disposition">
+                {DISPOSITION_LABELS[run.disposition]}
+                {run.message !== null && `（${run.message}）`}
+              </span>
+            </li>
           ))}
         </ul>
       )}
     </li>
   );
-}
-
-/** 受影響工作的一行說明；沒有補充訊息時省略括號。 */
-function describeAffected(run: AffectedRun): string {
-  const text = `Run ${run.run_id}・Task ${run.task_id}・${DISPOSITION_LABELS[run.disposition]}`;
-  return run.message === null ? text : `${text}（${run.message}）`;
 }

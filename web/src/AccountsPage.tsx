@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 
 import { CopyButton } from "./LongText";
 import { shortPath } from "./textFormat";
@@ -102,6 +102,11 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reordering, setReordering] = useState(false);
+  // 新增表單平時收起；還沒有任何帳號時一直展開（首次設定的下一步就是新增）
+  const [adding, setAdding] = useState(false);
+  const addId = useId();
+  const nameId = useId();
+  const expectedId = useId();
 
   const loadOverview = useCallback(async () => {
     if (!client.schedulingOverview) return;
@@ -143,6 +148,8 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   const active = list.state === "ready" ? list.profiles.filter((p) => p.status === "active") : [];
   const limit = list.state === "ready" ? list.limit : 8;
   const full = list.state === "ready" && active.length >= limit;
+  const empty = list.state === "ready" && active.length === 0;
+  const showAdd = empty || adding;
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
@@ -159,6 +166,8 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       });
       setName("");
       setExpectedAccount("");
+      // 新帳號出現在清單上，下一步是在它的卡片上登入；表單收起
+      setAdding(false);
       await refresh();
       onChange?.();
     } catch (error) {
@@ -172,6 +181,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   /** 以既有目錄建立；失敗時把錯誤交給表單顯示。 */
   const createFromDir = async (request: CreateProfileFromDirRequest) => {
     await client.createProfileFromExistingDir(request);
+    setAdding(false);
     await refresh();
     onChange?.();
   };
@@ -215,126 +225,224 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   };
 
   return (
-    <section className="accounts-page" aria-labelledby="accounts-title">
-      <header className="section-header">
-        <h2 id="accounts-title">帳號</h2>
-        <span className="badge accounts-count" title="使用中的 Profile／上限">
+    <section className="section accounts-page" aria-labelledby="accounts-title">
+      <div className="section-heading">
+        <h3 id="accounts-title">Account Profile</h3>
+        <span className="count accounts-count" title="使用中的 Profile／上限">
           {active.length} / {limit}
         </span>
-      </header>
-      {list.state === "loading" && <p>載入中…</p>}
-      {list.state === "failed" && <p role="alert">無法取得帳號清單：{list.reason}</p>}
-      {list.state === "ready" && active.length === 0 && <p>還沒有帳號 Profile</p>}
-      {scheduling.state === "failed" && <p role="alert">無法取得排程總覽：{scheduling.reason}</p>}
-      {active.length > 0 && (
-        <ul className="profile-list">
-          {active.map((profile, index) => (
-            <li
-              key={profile.id}
-              className={`profile-card card ${profile.dispatchable ? "profile-ok" : `profile-blocked stripe-${profileTone(profile)}`}`}
+        {!empty && (
+          <div className="section-actions">
+            <button
+              type="button"
+              aria-expanded={adding}
+              aria-controls={addId}
+              // 已達上限時不能展開；已展開的仍可收起
+              disabled={full && !adding}
+              onClick={() => setAdding((open) => !open)}
             >
-              <header className="card-header">
-                <h3 className="profile-name clamp-2" title={profile.name}>
-                  {profile.name}
-                </h3>
-                <span className={`badge profile-state badge-${profileTone(profile)}`}>
-                  {profileStateLabel(profile)}
-                </span>
-              </header>
-              <ProfileFacts profile={profile} timeZone={timeZone} />
-              {scheduling.state === "ready" && (
-                <AccountLoad
-                  account={scheduling.overview.accounts.find((account) => account.profile_id === profile.id) ?? null}
-                  timeZone={timeZone}
-                  onSaveLimits={saveLimits}
-                />
-              )}
-              {profile.blockers.map((blocker) => (
-                <p key={blocker.code} role="alert" className="profile-blocker">
-                  {blocker.message}
-                </p>
-              ))}
-              <div className="profile-actions">
-                <button
-                  type="button"
-                  aria-label={`在終端機登入 ${profile.name}`}
-                  onClick={() =>
-                    void act(
-                      () => client.openLoginTerminal(profile.id),
-                      `已開啟終端機，請在其中完成 ${profile.name} 的登入，再按「重新核對」`,
-                    )
-                  }
-                >
-                  在終端機登入
-                </button>
-                <button
-                  type="button"
-                  aria-label={`重新核對 ${profile.name}`}
-                  onClick={() => void act(() => client.verifyProfile(profile.id))}
-                >
-                  重新核對
-                </button>
-                {/* 排序與封存是次要動作，靠右、低調 */}
-                <span className="profile-actions-spacer" />
-                <button
-                  type="button"
-                  className="btn-quiet"
-                  aria-label={`上移 ${profile.name}`}
-                  disabled={reordering || index === 0}
-                  onClick={() => void move(index, -1)}
-                >
-                  上移
-                </button>
-                <button
-                  type="button"
-                  className="btn-quiet"
-                  aria-label={`下移 ${profile.name}`}
-                  disabled={reordering || index === active.length - 1}
-                  onClick={() => void move(index, 1)}
-                >
-                  下移
-                </button>
-                <button
-                  type="button"
-                  className="btn-danger"
-                  aria-label={`封存 ${profile.name}`}
-                  onClick={() => void act(() => client.archiveProfile(profile.id))}
-                >
-                  封存
-                </button>
-              </div>
-            </li>
-          ))}
-        </ul>
+              新增帳號
+            </button>
+          </div>
+        )}
+        <p>每個 Profile 是一個 Claude Code 帳號，各自在終端機登入。排列順序只影響這個頁面，不影響派工。</p>
+      </div>
+
+      {list.state === "loading" && <p className="empty-note">載入中…</p>}
+      {list.state === "failed" && (
+        <p role="alert" className="callout callout-danger">
+          無法取得帳號清單：{list.reason}
+        </p>
       )}
-      {terminalNotice && <p role="status">{terminalNotice}</p>}
-      {actionError && <p role="alert">{actionError}</p>}
-      {full && <p className="accounts-full">已達上限：最多 {limit} 個帳號 Profile。請先封存用不到的 Profile，再新增。</p>}
-      <div className="profile-forms">
-        <form className="profile-form" aria-label="新增 Profile" onSubmit={(event) => void create(event)}>
-          <h3>新增帳號</h3>
-          <label className="field">
-            名稱
-            <input value={name} onChange={(e) => setName(e.target.value)} />
-          </label>
-          <label className="field">
-            預期帳號（選填）
+      {empty && <p className="empty-note">還沒有帳號 Profile</p>}
+      {full && <p className="empty-note accounts-full">已達上限：最多 {limit} 個帳號 Profile。請先封存用不到的 Profile，再新增。</p>}
+      {scheduling.state === "failed" && (
+        <p role="alert" className="callout callout-danger">
+          無法取得排程總覽：{scheduling.reason}
+        </p>
+      )}
+      {terminalNotice && (
+        <p role="status" className="callout callout-accent">
+          {terminalNotice}
+        </p>
+      )}
+      {actionError && (
+        <p role="alert" className="callout callout-danger">
+          {actionError}
+        </p>
+      )}
+
+      <div className="accounts-add" id={addId} hidden={!showAdd}>
+        <form className="panel accounts-add-form" aria-label="新增 Profile" onSubmit={(event) => void create(event)}>
+          <header>
+            <h4>建立新的 Profile</h4>
+            <p className="field-hint">建立後在它的卡片上按「在終端機登入」，完成原生登入。</p>
+          </header>
+          <div className="field">
+            <label htmlFor={nameId}>名稱</label>
+            <input id={nameId} value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="field">
+            <label htmlFor={expectedId}>預期帳號（選填）</label>
             <input
+              id={expectedId}
               value={expectedAccount}
               onChange={(e) => setExpectedAccount(e.target.value)}
               placeholder="name@example.com"
             />
-          </label>
+          </div>
+          {formError && (
+            <p role="alert" className="field-error">
+              {formError}
+            </p>
+          )}
           <div className="form-actions">
             <button type="submit" disabled={busy || full}>
               新增 Profile
             </button>
           </div>
-          {formError && <p role="alert">{formError}</p>}
         </form>
         <ProfileFromDirForm disabled={full} onCreate={createFromDir} />
       </div>
+
+      {active.length > 0 && (
+        <ul className="accounts-list">
+          {active.map((profile, index) => (
+            <li
+              key={profile.id}
+              className={`card account-card${profile.dispatchable ? "" : ` stripe-${profileTone(profile)}`}`}
+            >
+              <div className="account-head">
+                <div className="account-title">
+                  <h4 className="profile-name clamp-2" title={profile.name}>
+                    {profile.name}
+                  </h4>
+                  <span className={`badge profile-state badge-${profileTone(profile)}`}>{profileStateLabel(profile)}</span>
+                </div>
+                <div className="account-actions">
+                  <button
+                    type="button"
+                    // 還沒登入的帳號，登入就是下一步
+                    className={profile.verification === null || !profile.verification.logged_in ? "btn-primary" : undefined}
+                    aria-label={`在終端機登入 ${profile.name}`}
+                    onClick={() =>
+                      void act(
+                        () => client.openLoginTerminal(profile.id),
+                        `已開啟終端機，請在其中完成 ${profile.name} 的登入，再按「重新核對」`,
+                      )
+                    }
+                  >
+                    在終端機登入
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`重新核對 ${profile.name}`}
+                    onClick={() => void act(() => client.verifyProfile(profile.id))}
+                  >
+                    重新核對
+                  </button>
+                  {/* 排序與封存很少用，收在「更多」 */}
+                  <MoreMenu
+                    label={`更多（${profile.name}）`}
+                    items={[
+                      {
+                        label: "上移",
+                        name: `上移 ${profile.name}`,
+                        disabled: reordering || index === 0,
+                        onSelect: () => void move(index, -1),
+                      },
+                      {
+                        label: "下移",
+                        name: `下移 ${profile.name}`,
+                        disabled: reordering || index === active.length - 1,
+                        onSelect: () => void move(index, 1),
+                      },
+                      {
+                        label: "封存",
+                        name: `封存 ${profile.name}`,
+                        danger: true,
+                        onSelect: () => void act(() => client.archiveProfile(profile.id)),
+                      },
+                    ]}
+                  />
+                </div>
+              </div>
+              {profile.blockers.map((blocker) => (
+                <p key={blocker.code} role="alert" className="callout callout-danger profile-blocker">
+                  {blocker.message}
+                </p>
+              ))}
+              <div className="account-body">
+                <ProfileFacts profile={profile} timeZone={timeZone} />
+                {scheduling.state === "ready" && (
+                  <AccountLoad
+                    account={scheduling.overview.accounts.find((account) => account.profile_id === profile.id) ?? null}
+                    timeZone={timeZone}
+                    onSaveLimits={saveLimits}
+                  />
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
+  );
+}
+
+interface MenuItem {
+  /** 看得到的文字。 */
+  label: string;
+  /** 可存取名稱（帶帳號名稱，區分每張卡片）。 */
+  name: string;
+  disabled?: boolean;
+  danger?: boolean;
+  onSelect: () => void;
+}
+
+/** 「更多」選單：帳號卡片中第二順位以後的動作；選了之後收起。Esc 收起並把焦點移回「更多」，點選單外面也會收起。 */
+function MoreMenu({ label, items }: { label: string; items: MenuItem[] }) {
+  const ref = useRef<HTMLDetailsElement>(null);
+
+  // 直接讀 details.open 而不追蹤 toggle 事件：toggle 是排入佇列的 task，開啟後立刻點外面時會晚於 pointerdown
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      const menu = ref.current;
+      if (menu?.open && !menu.contains(event.target as Node)) menu.open = false;
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, []);
+
+  return (
+    <details
+      className="more-menu"
+      ref={ref}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !event.currentTarget.open) return;
+        event.currentTarget.open = false;
+        event.currentTarget.querySelector("summary")?.focus();
+      }}
+    >
+      <summary aria-label={label}>更多</summary>
+      <div className="more-menu-list">
+        {items.map((item) => (
+          <button
+            key={item.label}
+            type="button"
+            className={item.danger ? "btn-quiet more-menu-danger" : "btn-quiet"}
+            aria-label={item.name}
+            disabled={item.disabled}
+            onClick={() => {
+              if (ref.current) ref.current.open = false;
+              item.onSelect();
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -350,6 +458,8 @@ function ProfileFromDirForm({
   const [configDir, setConfigDir] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const nameId = useId();
+  const dirId = useId();
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -376,27 +486,36 @@ function ProfileFromDirForm({
   };
 
   return (
-    <form className="profile-form" aria-label="以既有目錄建立 Profile" onSubmit={(event) => void submit(event)}>
-      <h3>以既有目錄建立</h3>
-      <label className="field">
-        名稱
-        <input value={name} onChange={(e) => setName(e.target.value)} />
-      </label>
-      <label className="field">
-        設定目錄
+    <form className="panel accounts-add-form" aria-label="以既有目錄建立 Profile" onSubmit={(event) => void submit(event)}>
+      <header>
+        <h4>以既有目錄建立</h4>
+        <p className="field-hint">已經在別處登入過的 Claude Code 設定目錄，不必重新登入。</p>
+      </header>
+      <div className="field">
+        <label htmlFor={nameId}>名稱</label>
+        <input id={nameId} value={name} onChange={(e) => setName(e.target.value)} />
+      </div>
+      <div className="field">
+        <label htmlFor={dirId}>設定目錄</label>
         <input
+          id={dirId}
+          className="mono"
           value={configDir}
           onChange={(e) => setConfigDir(e.target.value)}
           placeholder="C:\Users\me\.claude-Work-3"
         />
-      </label>
+      </div>
+      {error && (
+        <p role="alert" className="field-error">
+          {error}
+        </p>
+      )}
       <div className="form-actions">
-        {/* 一頁只留一個主要動作（新增 Profile），其餘送出鈕用次要樣式（MASTER 5.1） */}
+        {/* 一頁只留一個主要動作（新增 Profile），其餘送出鈕用次要樣式（MASTER 第 7 節） */}
         <button type="submit" className="btn-secondary" disabled={busy || disabled}>
           以既有目錄建立
         </button>
       </div>
-      {error && <p role="alert">{error}</p>}
     </form>
   );
 }
@@ -413,19 +532,19 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
   const external = profile.config_dir_origin === "external";
   if (!verification && !showExpected && !external) return null;
   return (
-    <dl className="profile-facts">
+    <dl className="facts account-facts">
       {verification && (
         <>
-          <dt>認證來源</dt>
-          <dd className="profile-source">{sourceLabel(verification.source, verification.source_detail)}</dd>
           {verification.account && (
             <>
               <dt>帳號</dt>
               <dd>{verification.account}</dd>
             </>
           )}
+          <dt>認證來源</dt>
+          <dd className="profile-source">{sourceLabel(verification.source, verification.source_detail)}</dd>
           <dt>最近核對</dt>
-          <dd>{formatTimestamp(verification.checked_at, timeZone)}</dd>
+          <dd className="tabular">{formatTimestamp(verification.checked_at, timeZone)}</dd>
           {verification.cli_version && (
             <>
               <dt>Claude Code 版本</dt>
@@ -493,13 +612,13 @@ function AccountLoad({
 }) {
   if (account === null) return null;
   return (
-    <>
-      <div className="profile-load" role="group" aria-label={`${account.name} 的進行中 Run`}>
-        <span className="profile-running">
+    <div className="account-load">
+      <div className="account-runs" role="group" aria-label={`${account.name} 的進行中 Run`}>
+        <span className="account-running tabular">
           進行中 {account.running}/{account.limit}
         </span>
         {account.runs.length > 0 && (
-          <ul className="profile-runs">
+          <ul>
             {account.runs.map((run) => (
               <li key={run.run_id}>
                 {run.task_title}（第 {run.generation} 次）：{RUN_STATUS_LABELS[run.status]}
@@ -511,7 +630,7 @@ function AccountLoad({
       </div>
       <AccountGate name={account.name} gate={account.quota_gate} timeZone={timeZone} />
       <AccountQuota account={account} timeZone={timeZone} onSaveLimits={onSaveLimits} />
-    </>
+    </div>
   );
 }
 
@@ -527,8 +646,10 @@ const GATE_STATE_LABELS: Record<GateState, string> = {
  */
 function AccountGate({ name, gate, timeZone }: { name: string; gate: QuotaGate | null; timeZone?: string }) {
   const state = gate?.state ?? "open";
+  // 停止派工或交接中是要使用者知道的狀態，以提示呈現；可派工只是一行次要資訊
+  const tone = state === "open" ? "meta" : `callout ${state === "draining" ? "callout-danger" : "callout-warning"}`;
   return (
-    <div className={`profile-gate profile-gate-${state}`} role="group" aria-label={`${name} 的額度門檻`}>
+    <div className={`profile-gate profile-gate-${state} ${tone}`} role="group" aria-label={`${name} 的額度門檻`}>
       <span className="gate-state">
         額度門檻：<strong>{GATE_STATE_LABELS[state]}</strong>
       </span>
@@ -549,7 +670,21 @@ function AccountGate({ name, gate, timeZone }: { name: string; gate: QuotaGate |
   );
 }
 
-/** 一個帳號的額度：判斷用量（取較保守者）與來源、可信度、時間，以及各視窗已觀測與推估各自的數值（spec D-12）。 */
+/** 一個視窗的用量長條：以較保守的判斷為準；未知時是虛線外框的空槽，不畫成 0%。數字另外寫出。 */
+function WindowMeter({ observation }: { observation: QuotaObservation | null }) {
+  const exhausted = observation?.status === "exhausted";
+  const used = exhausted ? 1 : (observation?.used ?? null);
+  if (used === null) return <span className="meter account-meter-unknown" aria-hidden="true" />;
+  // 與額度門檻一致：60% 起是警告、75% 起停止派工
+  const tone = used >= 0.75 ? " meter-danger" : used >= 0.6 ? " meter-warning" : "";
+  return (
+    <span className={`meter${tone}`} aria-hidden="true">
+      <span style={{ width: `${Math.min(used, 1) * 100}%` }} />
+    </span>
+  );
+}
+
+/** 一個帳號的額度：各視窗已觀測與推估各自的數值（spec D-12），以及判斷用量（取較保守者）與來源、可信度、時間。 */
 function AccountQuota({
   account,
   timeZone,
@@ -561,26 +696,8 @@ function AccountQuota({
 }) {
   const { quota, plan_limits } = account;
   return (
-    <div className="profile-quota" role="group" aria-label={`${account.name} 的額度`}>
-      <span className="quota-used">
-        判斷用量：{quotaLabel(quota.used)}
-        {/* 有數字但可信度未知：CLI 只發警告沒給數字，Runtime 以停止派工門檻作為保守的下限 */}
-        {quota.used !== null && quota.confidence === "unknown" && "（CLI 警告，至少此值）"}
-      </span>
-      <span className="quota-source">來源：{quota.source === null ? "未知" : QUOTA_SOURCE_LABELS[quota.source]}</span>
-      <span className="quota-confidence">可信度：{CONFIDENCE_LABELS[quota.confidence]}</span>
-      <span className="quota-reset">
-        {quota.reset_at === null ? "重置時間未知" : `重置時間：${formatTimestamp(quota.reset_at, timeZone)}`}
-      </span>
-      <span className="quota-observed-at">
-        {quota.observed_at === null ? "尚未觀測" : `觀測時間：${formatTimestamp(quota.observed_at, timeZone)}`}
-      </span>
-      {!quota.complete && (
-        <p role="note" className="quota-incomplete">
-          {incompleteLabel(quota.incomplete_reason)}
-        </p>
-      )}
-      <ul className="quota-windows">
+    <div className="account-quota" role="group" aria-label={`${account.name} 的額度`}>
+      <ul className="account-windows">
         {quota.windows.map((w) => {
           // 有推估時用它計算時的上限（與顯示的比例一致），還沒有推估時用目前的設定
           const limit =
@@ -592,18 +709,44 @@ function AccountQuota({
           const tokens = w.estimated?.tokens ?? null;
           return (
             <li key={w.window}>
-              <span className="quota-window-label">{w.label}</span>
-              <span className="quota-observed">已觀測：{observationLabel(w.observed)}</span>
-              <span className="quota-estimated">
-                推估：{observationLabel(w.estimated)}（{tokens === null ? "" : `本機累計 ${tokenCount(tokens)}；`}
-                {limit === null ? "未設定方案上限" : `方案上限 ${tokenCount(limit)}`}）
+              <span className="account-window-label">{w.label}</span>
+              <WindowMeter observation={w.effective} />
+              <span className="account-window-values">
+                <span className="quota-observed">已觀測：{observationLabel(w.observed)}</span>
+                <span className="quota-estimated">
+                  推估：{observationLabel(w.estimated)}（{tokens === null ? "" : `本機累計 ${tokenCount(tokens)}；`}
+                  {limit === null ? "未設定方案上限" : `方案上限 ${tokenCount(limit)}`}）
+                </span>
               </span>
             </li>
           );
         })}
       </ul>
+      <p className="meta account-quota-summary">
+        <span className="quota-used">
+          判斷用量：{quotaLabel(quota.used)}
+          {/* 有數字但可信度未知：CLI 只發警告沒給數字，Runtime 以停止派工門檻作為保守的下限 */}
+          {quota.used !== null && quota.confidence === "unknown" && "（CLI 警告，至少此值）"}
+        </span>
+        <span className="quota-source">來源：{quota.source === null ? "未知" : QUOTA_SOURCE_LABELS[quota.source]}</span>
+        <span className="quota-confidence">可信度：{CONFIDENCE_LABELS[quota.confidence]}</span>
+        <span className="quota-reset">
+          {quota.reset_at === null ? "重置時間未知" : `重置時間：${formatTimestamp(quota.reset_at, timeZone)}`}
+        </span>
+        <span className="quota-observed-at">
+          {quota.observed_at === null ? "尚未觀測" : `觀測時間：${formatTimestamp(quota.observed_at, timeZone)}`}
+        </span>
+      </p>
+      {!quota.complete && (
+        <p role="note" className="callout callout-warning quota-incomplete">
+          {incompleteLabel(quota.incomplete_reason)}
+        </p>
+      )}
       {onSaveLimits && (
-        <PlanLimitsForm account={account} onSave={(limits) => onSaveLimits(account.profile_id, limits)} />
+        <details className="account-limits">
+          <summary>設定方案上限</summary>
+          <PlanLimitsForm account={account} onSave={(limits) => onSaveLimits(account.profile_id, limits)} />
+        </details>
       )}
     </div>
   );
@@ -626,6 +769,8 @@ function PlanLimitsForm({
   const [sevenDay, setSevenDay] = useState(String(account.plan_limits.seven_day_tokens ?? ""));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const fiveHourId = useId();
+  const sevenDayId = useId();
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -641,34 +786,42 @@ function PlanLimitsForm({
   };
 
   return (
-    <form className="quota-limits" onSubmit={(event) => void submit(event)}>
-      <label className="field-inline">
-        五小時方案上限
-        <input
-          type="number"
-          className="input-short"
-          min={1}
-          step={1}
-          value={fiveHour}
-          onChange={(e) => setFiveHour(e.target.value)}
-        />
-      </label>
-      <label className="field-inline">
-        七日方案上限
-        <input
-          type="number"
-          className="input-short"
-          min={1}
-          step={1}
-          value={sevenDay}
-          onChange={(e) => setSevenDay(e.target.value)}
-        />
-      </label>
-      <span className="quota-limits-hint">單位為 token；留空代表未設定</span>
-      <button type="submit" className="btn-secondary" disabled={busy} aria-label={`儲存 ${account.name} 的方案上限`}>
-        儲存方案上限
-      </button>
-      {error && <p role="alert">無法儲存方案上限：{error}</p>}
+    <form className="inset account-limits-form" onSubmit={(event) => void submit(event)}>
+      <div className="field-row">
+        <div className="field">
+          <label htmlFor={fiveHourId}>五小時方案上限</label>
+          <input
+            id={fiveHourId}
+            type="number"
+            min={1}
+            step={1}
+            value={fiveHour}
+            onChange={(e) => setFiveHour(e.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label htmlFor={sevenDayId}>七日方案上限</label>
+          <input
+            id={sevenDayId}
+            type="number"
+            min={1}
+            step={1}
+            value={sevenDay}
+            onChange={(e) => setSevenDay(e.target.value)}
+          />
+        </div>
+      </div>
+      {error && (
+        <p role="alert" className="field-error">
+          無法儲存方案上限：{error}
+        </p>
+      )}
+      <div className="form-actions">
+        <button type="submit" className="btn-secondary" disabled={busy} aria-label={`儲存 ${account.name} 的方案上限`}>
+          儲存方案上限
+        </button>
+        <span className="field-hint">單位為 token；留空代表未設定</span>
+      </div>
     </form>
   );
 }

@@ -86,7 +86,7 @@ describe("更新進度", () => {
     expect(client.lifecycleStatus).toHaveBeenCalledTimes(1);
     expect(dialog).toHaveTextContent("距期限剩餘 40 秒（上限 40 秒）");
     const runs = within(dialog).getByRole("list", { name: "Run 停止結果" });
-    expect(within(runs).getByText("筆記 · run_1").closest("li")).toHaveTextContent("等待中");
+    expect(within(runs).getByText("run_1").closest("li")).toHaveTextContent("筆記 run_1等待中");
     expect(dialog).toHaveTextContent("已停止新派工、交接與重試");
 
     await settle(500);
@@ -103,7 +103,7 @@ describe("更新進度", () => {
     const dialog = screen.getByRole("dialog", { name: "更新 Baton" });
     expect(dialog).toHaveTextContent("備份資料");
     expect(dialog).toHaveTextContent("工作已停止，正在備份資料…");
-    expect(within(dialog).getByText("筆記 · run_1").closest("li")).toHaveTextContent("已停止");
+    expect(within(dialog).getByText("run_1").closest("li")).toHaveTextContent("筆記 run_1已停止");
   });
 
   it("準備套用且沒有停止異常時自動安裝更新，之後不再輪詢", async () => {
@@ -143,7 +143,7 @@ describe("更新進度", () => {
 
     const anomalies = screen.getByRole("alert");
     expect(anomalies).toHaveTextContent("停止異常 1 個");
-    expect(anomalies).toHaveTextContent("筆記 · run_2：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
+    expect(anomalies).toHaveTextContent("筆記 run_2：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
     expect(client.installUpdate).not.toHaveBeenCalled();
 
     await act(async () => {

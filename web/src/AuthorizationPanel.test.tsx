@@ -156,13 +156,15 @@ function fakeClient(initial: AuthorizationRevision[] = [], initialLegacy: Legacy
 async function renderPanel(client: AuthorizationPanelClient) {
   const user = userEvent.setup();
   render(<AuthorizationPanel client={client} workspace={workspace} timeZone="UTC" />);
-  await screen.findByRole("heading", { name: "授權設定" });
+  // 頁面標題在載入中就已顯示（與跑道欄的頁名相同）；等編輯區出現才算載入完成
+  expect(screen.getByRole("heading", { level: 2, name: "授權" })).toBeInTheDocument();
+  await screen.findByRole("heading", { name: "能力與範圍" });
   return user;
 }
 
 const checkbox = (label: string) => screen.getByRole("checkbox", { name: new RegExp(`^${label}`) });
 
-describe("Workspace 授權設定", () => {
+describe("Workspace 授權", () => {
   it("新 Workspace 尚未確認：說明未確認前不准入，沒有任何能力被預先勾選", async () => {
     await renderPanel(fakeClient());
 
@@ -183,26 +185,25 @@ describe("Workspace 授權設定", () => {
     await user.click(checkbox("安裝專案依賴"));
     expect(checkbox("安裝專案依賴")).not.toBeChecked();
     expect(screen.getByRole("button", { name: "套用「研究／文件」" })).toBeInTheDocument();
+    // 兩個範本互斥：目前的編輯內容依據哪一個範本
+    const based = screen.getByText("目前依據").closest("li")!;
+    expect(based).toHaveTextContent("可信專案開發（P3）");
+    expect(screen.getAllByText("目前依據")).toHaveLength(1);
   });
 
-  it("高風險能力標示出來，不屬於任何範本", async () => {
+  it("能力依風險分組；高風險能力另成一組，以 danger 徽章標示，不屬於任何範本", async () => {
     const user = await renderPanel(fakeClient());
 
-    expect(screen.getByText("（高風險，需要明確授權）")).toBeInTheDocument();
+    const risky = screen.getByRole("group", { name: "高風險能力" });
+    expect(within(risky).getAllByRole("checkbox")).toEqual([checkbox("部署")]);
+    expect(within(screen.getByRole("group", { name: "一般能力" })).queryByRole("checkbox", { name: /^部署/ })).toBeNull();
+    // 危險色只用在徽章（標示），不整列上色
+    const badge = within(checkbox("部署").closest("label")!).getByText("高風險");
+    expect(badge).toHaveClass("badge", "badge-danger");
+    expect(within(screen.getByRole("group", { name: "一般能力" })).queryByText("高風險")).toBeNull();
+
     await user.click(screen.getByRole("button", { name: "套用「可信專案開發（P3）」" }));
     expect(checkbox("部署")).not.toBeChecked();
-  });
-
-  it("高風險警示帶有 authorization-high-risk，且這個 class 有 danger 色的樣式規則", async () => {
-    await renderPanel(fakeClient());
-
-    expect(screen.getByText("（高風險，需要明確授權）")).toHaveClass("authorization-high-risk");
-    // Vitest 會把 CSS 匯入換成空字串，專案也沒有 @types/node，所以以非字面的動態匯入讀檔（同 WorkspaceSidebar.test.tsx）
-    const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
-    const url: { fileURLToPath(url: string): string } = await import(/* @vite-ignore */ `node:${"url"}`);
-    const here = import.meta.url;
-    const css = fs.readFileSync(url.fileURLToPath(new URL("./styles/more.css", here).href), "utf8");
-    expect(css).toMatch(/\.authorization-high-risk\s*\{[^}]*color:\s*var\(--color-danger\)/);
   });
 
   it("P3 的確認摘要揭露以 Windows 使用者身分執行的風險，承認後才能確認並保存", async () => {
@@ -274,12 +275,15 @@ describe("Workspace 授權設定", () => {
     };
     await renderPanel(fakeClient([{ ...revision, revision: 1, source: { ...revision.source, kind: "template", base_revision: null } }, revision]));
 
-    expect(screen.getByText(/目前授權：revision 2.*範本「研究／文件」（已編輯）/)).toBeInTheDocument();
+    expect(screen.getByText("目前授權：revision 2")).toBeInTheDocument();
+    expect(screen.getByText("目前授權：revision 2").closest(".callout")).toHaveTextContent("來源：範本「研究／文件」（已編輯）");
     expect(checkbox("讀取檔案")).toBeChecked();
     expect(checkbox("編輯檔案")).not.toBeChecked();
     const history = screen.getByRole("region", { name: "授權歷史" });
     expect(within(history).getAllByRole("listitem")).toHaveLength(2);
     expect(within(history).getAllByRole("listitem")[0]).toHaveTextContent("revision 2");
+    expect(within(history).getAllByRole("listitem")[0]).toHaveTextContent("目前生效");
+    expect(within(history).getAllByRole("listitem")[1]).not.toHaveTextContent("目前生效");
   });
 
   it("修改既有授權而擴大範圍時，列出變更與影響，必須另外承認擴大授權才能確認", async () => {
@@ -491,7 +495,7 @@ describe("Workspace 授權設定", () => {
     });
   });
 
-  it("讀不到授權設定時顯示原因，不假裝是未確認", async () => {
+  it("讀不到授權時顯示原因，不假裝是未確認", async () => {
     const client = fakeClient();
     vi.mocked(client.getAuthorization).mockRejectedValueOnce(new Error("connection refused"));
 

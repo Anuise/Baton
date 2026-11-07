@@ -45,6 +45,20 @@ export const VERDICT_LABELS: Record<VerificationVerdict, string> = {
   automation_unsupported: "無法自動化",
 };
 
+/**
+ * 判定的色調：只有通過是綠色；產品缺陷紅色、環境阻礙橘色、授權阻礙洋紅、預算用盡琥珀色，
+ * 證據不足與無法自動化是中性（不是產品缺陷，也不能看起來像通過）。
+ */
+const VERDICT_TONES: Record<VerificationVerdict, "success" | "danger" | "orange" | "magenta" | "warning" | null> = {
+  passed: "success",
+  product_failure: "danger",
+  inconclusive: null,
+  environment_blocked: "orange",
+  auth_blocked: "magenta",
+  budget_exhausted: "warning",
+  automation_unsupported: null,
+};
+
 const PHASE_LABELS: Record<VerificationPhase, string> = {
   build: "建置識別",
   doctor: "環境檢查",
@@ -215,13 +229,19 @@ function titledKey(items: { key: string; title: string }[] | undefined, key: str
   return title === undefined ? key : `${title}（${key}）`;
 }
 
-function VerdictBadge({ verdict }: { verdict: VerificationVerdict }) {
-  return <span className={`badge verdict verdict-${verdict}`}>{VERDICT_LABELS[verdict]}</span>;
+/** 判定徽章（探索頁的重現紀錄共用）。 */
+export function VerdictBadge({ verdict }: { verdict: VerificationVerdict }) {
+  const tone = VERDICT_TONES[verdict];
+  return (
+    <span className={tone === null ? `badge verdict verdict-${verdict}` : `badge badge-${tone} verdict verdict-${verdict}`}>
+      {VERDICT_LABELS[verdict]}
+    </span>
+  );
 }
 
 /**
- * 驗證（票 45，spec D-29）：Workspace 的 Verification Profile、Feature Map 與未覆蓋範圍；使用者在這裡發布 Profile 新版本、
- * 要求執行 CLI／API 驗證，並檢視最近的 Evidence Bundle 與每個步驟的判定。
+ * 驗證（票 45，spec D-29）：最上面是現況（Profile 版本、是否可用、最近一次判定），接著是 Evidence Bundle（最新的展開）、
+ * 要求執行驗證；Feature Map 與未覆蓋範圍是參考區段；很少做的「發布新版本」放最後並預設收合。
  */
 export function VerificationPage({ client, workspace, timeZone }: Props) {
   const [loaded, setLoaded] = useState<Loaded>({ state: "loading" });
@@ -248,153 +268,111 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
   };
 
   return (
-    <section className="verification-page" aria-label="驗證">
-      <h2>驗證</h2>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得驗證資料：{loaded.reason}</p>}
+    <section className="page verification-page" aria-label="驗證">
+      <header className="page-header">
+        <h2>驗證</h2>
+        {loaded.state === "ready" && (
+          <div className="page-actions">
+            <button type="button" onClick={() => void reload()}>
+              重新整理
+            </button>
+          </div>
+        )}
+      </header>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {loaded.state === "failed" && (
+        <div className="callout callout-danger" role="alert">
+          <p>無法取得驗證資料：{loaded.reason}</p>
+        </div>
+      )}
       {loaded.state === "ready" && (
         <>
-          <button type="button" className="verification-reload" onClick={() => void reload()}>
-            重新整理
-          </button>
-          <ProfileStatus overview={loaded.overview} timeZone={timeZone} />
-          <PublishForm
-            profile={loaded.overview.profile}
-            onPublish={(definition) => client.publishVerificationProfile(workspace.id, definition)}
-            onPublished={reload}
-          />
+          <StatusSummary overview={loaded.overview} timeZone={timeZone} />
+          <section className="section" aria-labelledby="verification-bundles">
+            <div className="section-heading">
+              <h3 id="verification-bundles">最近的 Evidence Bundle</h3>
+              {loaded.overview.bundles.length > 0 && <span className="count">{loaded.overview.bundles.length}</span>}
+              {loaded.overview.bundles.length > 1 && <p>最新的一份完整展開；較舊的只列判定，需要時再展開詳細內容。</p>}
+            </div>
+            {loaded.overview.bundles.length === 0 && (
+              <p className="empty-note">還沒有 Evidence Bundle；要求執行驗證後，結果會在這裡顯示。</p>
+            )}
+            {loaded.overview.bundles.map((bundle, index) => (
+              <BundleCard
+                key={bundle.id}
+                bundle={bundle}
+                latest={index === 0}
+                profile={loaded.overview.profile}
+                timeZone={timeZone}
+                onLoadArtifact={(artifactIndex) => client.evidenceArtifact(workspace.id, bundle.id, artifactIndex)}
+              />
+            ))}
+          </section>
           <RunForm
             overview={loaded.overview}
             onRun={(request) => client.runVerification(workspace.id, request)}
             onQueued={reload}
           />
-          <section className="verification-section" aria-labelledby="verification-bundles">
-            <h3 id="verification-bundles">最近的 Evidence Bundle</h3>
-            {loaded.overview.bundles.length === 0 && <p>還沒有 Evidence Bundle；要求執行驗證後，結果會在這裡顯示。</p>}
-            {loaded.overview.bundles.map((bundle) => (
-              <BundleCard
-                key={bundle.id}
-                bundle={bundle}
-                profile={loaded.overview.profile}
-                timeZone={timeZone}
-                onLoadArtifact={(index) => client.evidenceArtifact(workspace.id, bundle.id, index)}
-              />
-            ))}
-          </section>
-        </>
-      )}
-    </section>
-  );
-}
-
-function ProfileStatus({ overview, timeZone }: { overview: VerificationOverview; timeZone?: string }) {
-  const profile = overview.profile;
-  return (
-    <section className="verification-section" aria-labelledby="verification-profile">
-      <h3 id="verification-profile">Verification Profile</h3>
-      {profile === null ? (
-        <p>還沒有 Verification Profile；在下方填入 Profile 內容並發布後，才能要求執行驗證。</p>
-      ) : (
-        <>
-          <dl className="verification-summary">
-            <dt>版本</dt>
-            <dd>第 {profile.version} 版</dd>
-            <dt>發布時間</dt>
-            <dd>{formatTimestamp(profile.created_at, timeZone)}</dd>
-            <dt>是否可用</dt>
-            {overview.proven_by !== null ? (
-              <dd>
-                <span className="badge badge-success">可用</span> 已實際跑過並通過代表旅程（由 Evidence Bundle{" "}
-                <ShortValue value={overview.proven_by} kind="id" /> 證明）
-              </dd>
-            ) : (
-              <dd>
-                <span className="badge badge-warning">未證明</span> {UNPROVEN_NOTICE}
-              </dd>
-            )}
-          </dl>
-          <h4>Feature Map</h4>
-          <ul className="verification-feature-map" aria-label="Feature Map">
-            {profile.definition.feature_map.map((feature) => (
-              <li key={feature.key} aria-label={feature.title}>
-                <h5>{feature.title}</h5>
-                <p>
-                  <span className="verification-label">驗收準則：</span>
-                  {feature.criterion}
-                </p>
-                {feature.journeys.length > 0 ? (
-                  <p>
-                    <span className="verification-label">旅程：</span>
-                    {feature.journeys.map((key) => journeyTitle(profile, key)).join("、")}
-                  </p>
-                ) : (
-                  <p className="verification-feature-uncovered">
-                    沒有旅程（未覆蓋）
-                  </p>
-                )}
-              </li>
-            ))}
-          </ul>
-          {overview.uncovered.length > 0 ? (
-            <UncoveredList items={overview.uncovered} label="未覆蓋範圍" />
-          ) : (
-            <p>每項功能都有旅程，也沒有宣告未覆蓋的範圍。</p>
+          {loaded.overview.profile !== null && <FeatureMapSection overview={loaded.overview} profile={loaded.overview.profile} />}
+          {loaded.overview.profile?.definition.interface === "web" && (
+            <IdentitySection definition={loaded.overview.profile.definition} />
           )}
-          {profile.definition.interface === "web" && <WebProfileDetails definition={profile.definition} />}
+          <PublishForm
+            profile={loaded.overview.profile}
+            onPublish={(definition) => client.publishVerificationProfile(workspace.id, definition)}
+            onPublished={reload}
+          />
         </>
       )}
     </section>
   );
 }
 
-/** web 介面的秘密參照、persona 與登入身分；秘密只顯示 key 與參照，前端拿不到值。 */
-function WebProfileDetails({ definition }: { definition: VerificationProfileVersion["definition"] }) {
-  const secrets = definition.secrets ?? [];
-  const personas = definition.personas ?? [];
-  const identities = definition.identities ?? [];
+/** 現況：Profile 版本與發布時間、是否已被證明可用、最近一次 Evidence Bundle 的判定與時間。 */
+function StatusSummary({ overview, timeZone }: { overview: VerificationOverview; timeZone?: string }) {
+  const { profile } = overview;
+  const latest = overview.bundles.at(0);
   return (
-    <>
-      <h4>秘密參照</h4>
-      {secrets.length === 0 ? (
-        <p>沒有秘密參照。</p>
+    <section className="section" aria-labelledby="verification-status">
+      <div className="section-heading">
+        <h3 id="verification-status">現況</h3>
+      </div>
+      {profile === null ? (
+        <div className="callout callout-warning">
+          <p className="callout-title">還沒有 Verification Profile</p>
+          <p>在最下方的「發布新版本」填入 Profile 內容並發布後，才能要求執行驗證。</p>
+        </div>
       ) : (
-        <>
-          <p>只記錄參照位置，秘密的值不會顯示，也不會寫入證據。</p>
-          <ul className="verification-features" aria-label="秘密參照">
-            {secrets.map((secret) => (
-              <li key={secret.key}>
-                <code>{secret.key}</code>：<code>{secret.reference}</code>
-              </li>
-            ))}
-          </ul>
-        </>
+        <dl className="facts verification-status">
+          <dt>Profile</dt>
+          <dd>
+            第 {profile.version} 版<span className="verification-subtle">（{formatTimestamp(profile.created_at, timeZone)} 發布）</span>
+          </dd>
+          <dt>是否可用</dt>
+          {overview.proven_by !== null ? (
+            <dd>
+              <span className="badge badge-success">可用</span> 已實際跑過並通過代表旅程（由 Evidence Bundle{" "}
+              <ShortValue value={overview.proven_by} kind="id" /> 證明）
+            </dd>
+          ) : (
+            <dd>
+              <span className="badge badge-warning">未證明</span> {UNPROVEN_NOTICE}
+            </dd>
+          )}
+          <dt>最近一次驗證</dt>
+          <dd>
+            {latest === undefined ? (
+              "還沒有執行過"
+            ) : (
+              <>
+                <VerdictBadge verdict={latest.verdict} />{" "}
+                <span className="verification-subtle">{formatTimestamp(latest.finished_at, timeZone)} 完成</span>
+              </>
+            )}
+          </dd>
+        </dl>
       )}
-      <h4>Persona</h4>
-      {personas.length === 0 ? (
-        <p>沒有 persona。</p>
-      ) : (
-        <ul className="verification-features" aria-label="Persona">
-          {personas.map((persona) => (
-            <li key={persona.key}>
-              {persona.title}（{persona.key}）{persona.description !== "" && `：${persona.description}`}
-            </li>
-          ))}
-        </ul>
-      )}
-      <h4>登入身分</h4>
-      {identities.length === 0 ? (
-        <p>沒有登入身分；旅程都不登入。</p>
-      ) : (
-        <ul className="verification-features" aria-label="登入身分">
-          {identities.map((identity) => (
-            <li key={identity.key}>
-              {identity.title}（{identity.key}）：登入 {identity.login.length} 個步驟，以「
-              {identity.check.title === "" ? identity.check.key : identity.check.title}」核對身分
-            </li>
-          ))}
-        </ul>
-      )}
-    </>
+    </section>
   );
 }
 
@@ -402,10 +380,123 @@ function journeyTitle(profile: VerificationProfileVersion | null, key: string): 
   return profile?.definition.journeys.find((j) => j.key === key)?.title ?? key;
 }
 
-function UncoveredList({ items, label }: { items: UncoveredItem[]; label: string }) {
+/** Feature Map（參考）：每項功能的驗收準則與旅程，以及 Profile 宣告的未覆蓋範圍。 */
+function FeatureMapSection({ overview, profile }: { overview: VerificationOverview; profile: VerificationProfileVersion }) {
+  const features = profile.definition.feature_map;
+  return (
+    <section className="section" aria-labelledby="verification-features">
+      <div className="section-heading">
+        <h3 id="verification-features">Feature Map</h3>
+        <span className="count">{features.length}</span>
+        <p>每項功能的驗收準則與驗證它的旅程；沒有旅程的功能不在自動驗證內。</p>
+      </div>
+      <div className="table-wrap">
+        <table className="data-table verification-feature-table" aria-label="Feature Map">
+          <thead>
+            <tr>
+              <th scope="col">功能</th>
+              <th scope="col">驗收準則</th>
+              <th scope="col">旅程</th>
+            </tr>
+          </thead>
+          <tbody>
+            {features.map((feature) => (
+              <tr key={feature.key}>
+                <th scope="row">{feature.title}</th>
+                <td>{feature.criterion}</td>
+                <td>
+                  {feature.journeys.length > 0 ? (
+                    feature.journeys.map((key) => journeyTitle(profile, key)).join("、")
+                  ) : (
+                    <span className="badge badge-warning">沒有旅程（未覆蓋）</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {overview.uncovered.length > 0 ? (
+        <UncoveredList items={overview.uncovered} label="未覆蓋範圍" level={4} />
+      ) : (
+        <p className="empty-note">每項功能都有旅程，也沒有宣告未覆蓋的範圍。</p>
+      )}
+    </section>
+  );
+}
+
+/** web 介面的秘密參照、persona 與登入身分；秘密只顯示 key 與參照，前端拿不到值。 */
+function IdentitySection({ definition }: { definition: VerificationProfileVersion["definition"] }) {
+  const secrets = definition.secrets ?? [];
+  const personas = definition.personas ?? [];
+  const identities = definition.identities ?? [];
+  return (
+    <section className="section" aria-labelledby="verification-identities">
+      <div className="section-heading">
+        <h3 id="verification-identities">身分與秘密</h3>
+        <p>web 驗證使用的 persona、登入身分與秘密參照。</p>
+      </div>
+      <div className="verification-identity-grid">
+        <div className="verification-block">
+          <h4>Persona</h4>
+          {personas.length === 0 ? (
+            <p className="empty-note">沒有 persona。</p>
+          ) : (
+            <ul className="verification-plain-list" aria-label="Persona">
+              {personas.map((persona) => (
+                <li key={persona.key}>
+                  {persona.title}（{persona.key}）{persona.description !== "" && `：${persona.description}`}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="verification-block">
+          <h4>登入身分</h4>
+          {identities.length === 0 ? (
+            <p className="empty-note">沒有登入身分；旅程都不登入。</p>
+          ) : (
+            <ul className="verification-plain-list" aria-label="登入身分">
+              {identities.map((identity) => (
+                <li key={identity.key}>
+                  {identity.title}（{identity.key}）：登入 {identity.login.length} 個步驟，以「
+                  {identity.check.title === "" ? identity.check.key : identity.check.title}」核對身分
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="verification-block">
+          <h4>秘密參照</h4>
+          {secrets.length === 0 ? (
+            <p className="empty-note">沒有秘密參照。</p>
+          ) : (
+            <>
+              <p className="field-hint">只記錄參照位置，秘密的值不會顯示，也不會寫入證據。</p>
+              <ul className="verification-plain-list" aria-label="秘密參照">
+                {secrets.map((secret) => (
+                  <li key={secret.key}>
+                    <code>{secret.key}</code>：<code>{secret.reference}</code>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** 未覆蓋的範圍：不在自動驗證內的部分不能被當成已驗證，以琥珀色左側色條標出。 */
+function UncoveredList({ items, label, level }: { items: UncoveredItem[]; label: string; level: 4 | 5 }) {
+  const Heading = level === 4 ? "h4" : "h5";
   return (
     <div className="verification-uncovered stripe-warning">
-      <h5>{label}（不在這次自動驗證內）</h5>
+      <Heading>
+        {label}
+        <span className="verification-subtle">（不在這次自動驗證內）</span>
+      </Heading>
       <ul aria-label={label}>
         {items.map((item, index) => (
           <li key={index}>
@@ -428,6 +519,8 @@ function PublishForm({
 }) {
   // 只在第一次顯示時預填，之後重新載入不覆蓋使用者的編輯
   const [draft, setDraft] = useState(() => JSON.stringify(profile?.definition ?? STARTER_DEFINITION, null, 2));
+  // 還沒有 Profile 時這是唯一能做的事，預設展開；之後重新載入不改變使用者的展開狀態
+  const [openInitially] = useState(profile === null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
@@ -460,20 +553,42 @@ function PublishForm({
   };
 
   return (
-    <section className="verification-section" aria-labelledby="verification-publish">
-      <h3 id="verification-publish">發布新版本</h3>
-      <p>Profile 決定怎麼驗收，只有你能發布；舊版本會保留，已有的證據仍綁定原本的版本。</p>
-      <form className="verification-publish" onSubmit={(event) => void submit(event)}>
-        <label className="field">
-          Profile 內容（JSON）
-          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={16} spellCheck={false} />
-        </label>
-        <button type="submit" disabled={busy}>
-          發布新版本
-        </button>
-      </form>
-      {error && <p role="alert">{error}</p>}
-      {result && <p role="status">{result}</p>}
+    <section className="section" aria-labelledby="verification-publish">
+      <div className="section-heading">
+        <h3 id="verification-publish">發布新版本</h3>
+        <p>Profile 決定怎麼驗收，只有你能發布；舊版本會保留，已有的證據仍綁定原本的版本。</p>
+      </div>
+      <details className="verification-publish" open={openInitially}>
+        <summary>編輯 Profile 內容</summary>
+        <form className="panel measure-form" onSubmit={(event) => void submit(event)}>
+          <div className="field">
+            <label htmlFor="verification-profile-json">Profile 內容（JSON）</label>
+            <textarea
+              id="verification-profile-json"
+              className="verification-json"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              rows={16}
+              spellCheck={false}
+            />
+          </div>
+          <div className="form-actions">
+            <button type="submit" disabled={busy}>
+              發布新版本
+            </button>
+          </div>
+        </form>
+      </details>
+      {error && (
+        <div className="callout callout-danger" role="alert">
+          <p>{error}</p>
+        </div>
+      )}
+      {result && (
+        <div className="callout callout-success" role="status">
+          <p>{result}</p>
+        </div>
+      )}
     </section>
   );
 }
@@ -521,25 +636,28 @@ function RunForm({
   };
 
   return (
-    <section className="verification-section" aria-labelledby="verification-run">
-      <h3 id="verification-run">要求執行驗證</h3>
+    <section className="section" aria-labelledby="verification-run">
+      <div className="section-heading">
+        <h3 id="verification-run">要求執行驗證</h3>
+      </div>
       {profile === null ? (
-        <p>發布 Profile 後才能要求執行驗證。</p>
+        <p className="empty-note">發布 Profile 後才能要求執行驗證。</p>
       ) : (
-        <form className="verification-run" onSubmit={(event) => void submit(event)}>
-          <label className="field">
-            Task 識別（選填）
+        <form className="panel measure-form verification-run" onSubmit={(event) => void submit(event)}>
+          <div className="field">
+            <label htmlFor="verification-task">Task 識別（選填）</label>
             <input
+              id="verification-task"
               className="select-fit"
               value={taskId}
               onChange={(e) => setTaskId(e.target.value)}
               placeholder="不填時在 Workspace 目錄中驗證"
             />
-          </label>
-          <fieldset>
+          </div>
+          <fieldset className="verification-journey-choices">
             <legend>旅程（都不勾選時執行全部）</legend>
             {profile.definition.journeys.map((journey) => (
-              <label key={journey.key} className="verification-check">
+              <label key={journey.key}>
                 <input
                   type="checkbox"
                   checked={selected.includes(journey.key)}
@@ -557,19 +675,83 @@ function RunForm({
             </label>
             <p className="field-hint">只執行不需模型的斷言與已驗證動作的重播，需要模型的步驟記為證據不足。</p>
           </div>
-          {overview.proven_by === null && <p>這個版本還沒被證明可用，代表旅程一定會一起執行。</p>}
-          <button type="submit" disabled={busy}>
-            要求執行
-          </button>
+          {overview.proven_by === null && (
+            <div className="callout callout-accent">
+              <p>這個版本還沒被證明可用，代表旅程一定會一起執行。</p>
+            </div>
+          )}
+          <div className="form-actions">
+            <button type="submit" disabled={busy}>
+              要求執行
+            </button>
+          </div>
         </form>
       )}
-      {error && <p role="alert">{error}</p>}
-      {queued && <p role="status">{queued}</p>}
+      {error && (
+        <div className="callout callout-danger" role="alert">
+          <p>{error}</p>
+        </div>
+      )}
+      {queued && (
+        <div className="callout callout-success" role="status">
+          <p>{queued}</p>
+        </div>
+      )}
     </section>
   );
 }
 
+/**
+ * 一份 Evidence Bundle：判定一直顯示；最新的一份直接展開內容，較舊的把內容收進「詳細內容」。
+ * 卡片左側色條跟著判定的色調。
+ */
 function BundleCard({
+  bundle,
+  latest,
+  profile,
+  timeZone,
+  onLoadArtifact,
+}: {
+  bundle: EvidenceBundle;
+  latest: boolean;
+  profile: VerificationProfileVersion | null;
+  timeZone?: string;
+  onLoadArtifact: (index: number) => Promise<EvidenceArtifactContent>;
+}) {
+  const headingId = `bundle-${bundle.id}`;
+  const tone = VERDICT_TONES[bundle.verdict];
+  const body = <BundleBody bundle={bundle} profile={profile} timeZone={timeZone} onLoadArtifact={onLoadArtifact} />;
+  return (
+    <section className={`card verification-bundle verification-tone-${tone ?? "neutral"}`} aria-labelledby={headingId}>
+      <header className="card-header">
+        <div className="verification-bundle-title">
+          {/* 標題顯示縮短的識別碼；可存取名稱保留完整識別碼 */}
+          <h4 id={headingId} aria-label={`Evidence Bundle ${bundle.id}`}>
+            Evidence Bundle{" "}
+            <code className="mono" title={bundle.id}>
+              {shortId(bundle.id)}
+            </code>
+          </h4>
+          {shortId(bundle.id) !== bundle.id && <CopyButton text={bundle.id} label="複製識別碼" field="Evidence Bundle" />}
+        </div>
+        <span className="verification-subtle nowrap">{formatTimestamp(bundle.finished_at, timeZone)}</span>
+      </header>
+      <p className="verification-bundle-verdict">
+        判定：<VerdictBadge verdict={bundle.verdict} /> <ReasonCode code={bundle.reason_code} />
+      </p>
+      {latest ? (
+        body
+      ) : (
+        <details className="verification-bundle-more">
+          <summary>詳細內容</summary>
+          {body}
+        </details>
+      )}
+    </section>
+  );
+}
+
+function BundleBody({
   bundle,
   profile,
   timeZone,
@@ -580,92 +762,85 @@ function BundleCard({
   timeZone?: string;
   onLoadArtifact: (index: number) => Promise<EvidenceArtifactContent>;
 }) {
-  const headingId = `bundle-${bundle.id}`;
   const featureTitle = (key: string) => profile?.definition.feature_map.find((f) => f.key === key)?.title ?? key;
   const { cleanup } = bundle;
   // 舊的 Bundle 沒有 attempts；只有一次嘗試且沒有承接時不顯示交接區塊
   const attempts = bundle.attempts ?? [];
   const handedOver = attempts.length > 1 || attempts.some((attempt) => attempt.takeover !== null);
   return (
-    <section className={`verification-bundle bundle-${bundle.verdict}`} aria-labelledby={headingId}>
-      <header className="verification-bundle-header">
-        {/* 標題顯示縮短的識別碼；可存取名稱保留完整識別碼 */}
-        <h4 id={headingId} aria-label={`Evidence Bundle ${bundle.id}`}>
-          Evidence Bundle{" "}
-          <code className="mono" title={bundle.id}>
-            {shortId(bundle.id)}
-          </code>
-        </h4>
-        {shortId(bundle.id) !== bundle.id && <CopyButton text={bundle.id} label="複製識別碼" field="Evidence Bundle" />}
-      </header>
-      <p className="verification-bundle-verdict">
-        判定：<VerdictBadge verdict={bundle.verdict} /> <ReasonCode code={bundle.reason_code} />
-      </p>
-      <dl className="verification-summary">
-        <dt>建置識別</dt>
-        <dd>{bundle.build ?? "無法取得"}</dd>
-        <dt>候選版本</dt>
-        <dd>
-          {bundle.candidate_revision === null ? "無（不是 Git repo）" : <ShortValue value={bundle.candidate_revision} kind="hash" field="候選版本" />}
-        </dd>
-        <dt>需求版本</dt>
-        <dd>
-          {bundle.task_id === null ? (
-            "沒有綁定 Task"
-          ) : (
-            <>
-              Task <ShortValue value={bundle.task_id} kind="id" field="Task" /> 契約第 {bundle.requirement_version ?? "?"} 版
-            </>
-          )}
-        </dd>
-        <dt>Profile 版本</dt>
-        <dd>第 {bundle.profile_version} 版</dd>
-        <dt>受驗目錄</dt>
-        <dd>
-          <ShortValue value={bundle.subject_dir} kind="path" field="受驗目錄" />
-        </dd>
-        <dt>時間</dt>
-        <dd>
-          {formatTimestamp(bundle.started_at, timeZone)} – {formatTimestamp(bundle.finished_at, timeZone)}
-        </dd>
-      </dl>
-      <ul className="verification-journeys" aria-label="旅程結果">
-        {bundle.journeys.map((journey) => (
-          <li key={journey.key} aria-label={journey.title}>
-            {journey.title}
-            {journey.representative && "（代表旅程）"}：<VerdictBadge verdict={journey.verdict} />{" "}
-            <ReasonCode code={journey.reason_code} />
-            {(journey.persona !== undefined || journey.identity !== undefined) && (
-              <>
-                {" "}
-                <span className="verification-journey-actor">
-                  persona：
-                  {journey.persona === undefined ? "未指定" : titledKey(profile?.definition.personas, journey.persona)}
-                </span>{" "}
-                <span className="verification-journey-actor">
-                  登入身分：
-                  {journey.identity === undefined ? "未登入" : titledKey(profile?.definition.identities, journey.identity)}
-                </span>
-              </>
-            )}
-          </li>
-        ))}
-      </ul>
-      <p>
-        覆蓋的功能：{bundle.covered_features.length === 0 ? "無" : bundle.covered_features.map(featureTitle).join("、")}
-      </p>
-      {bundle.uncovered.length > 0 && <UncoveredList items={bundle.uncovered} label="這次未覆蓋" />}
-      <div className="verification-cleanup" aria-label="清理結果">
-        清理：{cleanup.state_dir_removed ? "已移除本次驗證的狀態目錄" : "本次驗證的狀態目錄沒有移除"}
-        {cleanup.service_stopped !== undefined && (cleanup.service_stopped ? "；服務已停止" : "；服務沒有停止")}
-        ；證據已保留
-        {cleanup.problems.length > 0 && (
-          <ul aria-label="清理問題">
-            {cleanup.problems.map((problem, index) => (
-              <li key={index}>{problem}</li>
+    <div className="verification-bundle-body">
+      <div className="split">
+        <div className="verification-block">
+          <h5>旅程結果</h5>
+          <ul className="verification-journeys" aria-label="旅程結果">
+            {bundle.journeys.map((journey) => (
+              <li key={journey.key} aria-label={journey.title}>
+                <p>
+                  {journey.title}
+                  {journey.representative && "（代表旅程）"}：<VerdictBadge verdict={journey.verdict} />{" "}
+                  <ReasonCode code={journey.reason_code} />
+                </p>
+                {(journey.persona !== undefined || journey.identity !== undefined) && (
+                  <p className="meta">
+                    <span>
+                      persona：
+                      {journey.persona === undefined ? "未指定" : titledKey(profile?.definition.personas, journey.persona)}
+                    </span>
+                    <span>
+                      登入身分：
+                      {journey.identity === undefined ? "未登入" : titledKey(profile?.definition.identities, journey.identity)}
+                    </span>
+                  </p>
+                )}
+              </li>
             ))}
           </ul>
-        )}
+          <p className="verification-covered">
+            覆蓋的功能：{bundle.covered_features.length === 0 ? "無" : bundle.covered_features.map(featureTitle).join("、")}
+          </p>
+          {bundle.uncovered.length > 0 && <UncoveredList items={bundle.uncovered} label="這次未覆蓋" level={5} />}
+        </div>
+        <dl className="facts">
+          <dt>建置識別</dt>
+          <dd>{bundle.build ?? "無法取得"}</dd>
+          <dt>候選版本</dt>
+          <dd>
+            {bundle.candidate_revision === null ? "無（不是 Git repo）" : <ShortValue value={bundle.candidate_revision} kind="hash" field="候選版本" />}
+          </dd>
+          <dt>需求版本</dt>
+          <dd>
+            {bundle.task_id === null ? (
+              "沒有綁定 Task"
+            ) : (
+              <>
+                Task <ShortValue value={bundle.task_id} kind="id" field="Task" /> 契約第 {bundle.requirement_version ?? "?"} 版
+              </>
+            )}
+          </dd>
+          <dt>Profile 版本</dt>
+          <dd>第 {bundle.profile_version} 版</dd>
+          <dt>受驗目錄</dt>
+          <dd>
+            <ShortValue value={bundle.subject_dir} kind="path" field="受驗目錄" />
+          </dd>
+          <dt>時間</dt>
+          <dd>
+            {formatTimestamp(bundle.started_at, timeZone)} – {formatTimestamp(bundle.finished_at, timeZone)}
+          </dd>
+          <dt>清理</dt>
+          <dd>
+            {cleanup.state_dir_removed ? "已移除本次驗證的狀態目錄" : "本次驗證的狀態目錄沒有移除"}
+            {cleanup.service_stopped !== undefined && (cleanup.service_stopped ? "；服務已停止" : "；服務沒有停止")}
+            ；證據已保留
+            {cleanup.problems.length > 0 && (
+              <ul className="verification-problems" aria-label="清理問題">
+                {cleanup.problems.map((problem, index) => (
+                  <li key={index}>{problem}</li>
+                ))}
+              </ul>
+            )}
+          </dd>
+        </dl>
       </div>
       <UsageView bundle={bundle} />
       {bundle.actions !== undefined && bundle.actions.length > 0 && (
@@ -673,9 +848,9 @@ function BundleCard({
       )}
       {handedOver && <AttemptsView attempts={attempts} journeyTitle={(key) => journeyTitle(profile, key)} />}
       {bundle.artifacts.length > 0 && (
-        <div className="verification-artifacts">
+        <div className="verification-block">
           <h5>證據檔案</h5>
-          <ul aria-label="證據檔案">
+          <ul className="verification-files" aria-label="證據檔案">
             {bundle.artifacts.map((artifact, index) => (
               <ArtifactItem
                 key={index}
@@ -695,7 +870,7 @@ function BundleCard({
           ))}
         </ol>
       </details>
-    </section>
+    </div>
   );
 }
 
@@ -706,10 +881,14 @@ const NO_USAGE: VerificationUsage = { live_model_calls: 0, live_actions: 0, repl
 function UsageView({ bundle }: { bundle: EvidenceBundle }) {
   const usage = { ...NO_USAGE, ...bundle.usage };
   return (
-    <div className="verification-usage">
+    <div className="verification-block">
       <h5>用量</h5>
-      {bundle.no_live_model && <p className="verification-no-live-model">這次驗證禁止即時模型（no_live_model）</p>}
-      <ul aria-label="用量">
+      {bundle.no_live_model && (
+        <div className="callout callout-warning">
+          <p>這次驗證禁止即時模型（no_live_model）</p>
+        </div>
+      )}
+      <ul className="verification-usage" aria-label="用量">
         <li aria-label="即時">
           即時：模型呼叫 {usage.live_model_calls} 次、模型決定的動作 {usage.live_actions} 個
         </li>
@@ -731,41 +910,43 @@ function ActionsView({
   profile: VerificationProfileVersion | null;
 }) {
   return (
-    <div className="verification-actions">
+    <div className="verification-block">
       <h5>目標導向動作</h5>
-      <p>重播是重新執行真實動作並檢查後置條件；快取命中不是通過，判定看步驟結果。</p>
-      <table aria-label="目標導向動作">
-        <thead>
-          <tr>
-            <th>旅程／步驟</th>
-            <th>目標</th>
-            <th>來源</th>
-            <th>實際動作</th>
-            <th>執行前錄製狀態</th>
-            <th>這次標為 stale 的原因</th>
-            <th>錄製</th>
-          </tr>
-        </thead>
-        <tbody>
-          {actions.map((record) => (
-            <tr key={`${record.journey}/${record.step}`}>
-              <td>
-                {journeyTitle(profile, record.journey)}／{stepTitle(bundle, record.journey, record.step)}
-              </td>
-              <td>{record.goal}</td>
-              <td>{record.source === undefined ? "未執行" : SOURCE_LABELS[record.source]}</td>
-              <td>{record.action ?? "—"}</td>
-              <td>{CACHE_LABELS[record.cache]}</td>
-              <td>
-                {record.stale_reasons === undefined || record.stale_reasons.length === 0
-                  ? "—"
-                  : record.stale_reasons.map((reason) => STALE_REASON_LABELS[reason] ?? reason).join("、")}
-              </td>
-              <td>{record.recorded === undefined ? "未錄製" : "已錄製"}</td>
+      <p className="field-hint">重播是重新執行真實動作並檢查後置條件；快取命中不是通過，判定看步驟結果。</p>
+      <div className="table-wrap">
+        <table className="data-table verification-actions-table" aria-label="目標導向動作">
+          <thead>
+            <tr>
+              <th>旅程／步驟</th>
+              <th>目標</th>
+              <th>來源</th>
+              <th>實際動作</th>
+              <th>執行前錄製狀態</th>
+              <th>這次標為 stale 的原因</th>
+              <th>錄製</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {actions.map((record) => (
+              <tr key={`${record.journey}/${record.step}`}>
+                <td>
+                  {journeyTitle(profile, record.journey)}／{stepTitle(bundle, record.journey, record.step)}
+                </td>
+                <td>{record.goal}</td>
+                <td>{record.source === undefined ? "未執行" : SOURCE_LABELS[record.source]}</td>
+                <td>{record.action ?? "—"}</td>
+                <td>{CACHE_LABELS[record.cache]}</td>
+                <td>
+                  {record.stale_reasons === undefined || record.stale_reasons.length === 0
+                    ? "—"
+                    : record.stale_reasons.map((reason) => STALE_REASON_LABELS[reason] ?? reason).join("、")}
+                </td>
+                <td>{record.recorded === undefined ? "未錄製" : "已錄製"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -776,64 +957,92 @@ function stepTitle(bundle: EvidenceBundle, journey: string, key: string): string
   return step === undefined || step.title === "" ? key : step.title;
 }
 
+/** 步驟名稱：有旅程時是「旅程／步驟」。 */
+function stepName(journey: string | undefined, name: string, journeyTitleOf: (key: string) => string): string {
+  return journey === undefined ? name : `${journeyTitleOf(journey)}／${name}`;
+}
+
 /** 嘗試與交接（票 49）：每次嘗試的狀態、judge 帳號、採用的旅程與步驟，以及承接時停止的程序與不重送的外部操作。 */
 function AttemptsView({ attempts, journeyTitle }: { attempts: VerificationAttempt[]; journeyTitle: (key: string) => string }) {
   const titles = (keys: string[]) => (keys.length === 0 ? "無" : keys.map(journeyTitle).join("、"));
   const ids = (values: string[]) => (values.length === 0 ? "無" : values.join("、"));
   return (
-    <div className="verification-attempts" role="group" aria-label="嘗試與交接">
+    <div className="verification-block" role="group" aria-label="嘗試與交接">
       <h5>嘗試與交接</h5>
-      <ol>
+      <ol className="verification-attempts">
         {attempts.map((attempt) => {
           const { takeover } = attempt;
           return (
             <li key={attempt.attempt} aria-label={`第 ${attempt.attempt} 次嘗試`}>
-              <span>
-                第 {attempt.attempt} 次嘗試：{ATTEMPT_STATUS_LABELS[attempt.status]}
+              <p className="verification-attempt-head">
+                <strong>第 {attempt.attempt} 次嘗試</strong>：{ATTEMPT_STATUS_LABELS[attempt.status]}
+              </p>
+              <dl className="facts">
                 {attempt.end_reason !== null && (
                   <>
-                    ・結束原因：<code>{attempt.end_reason}</code>
-                    {END_REASON_LABELS[attempt.end_reason] !== undefined && `（${END_REASON_LABELS[attempt.end_reason]}）`}
+                    <dt>結束原因</dt>
+                    <dd>
+                      <code>{attempt.end_reason}</code>
+                      {END_REASON_LABELS[attempt.end_reason] !== undefined && `（${END_REASON_LABELS[attempt.end_reason]}）`}
+                    </dd>
                   </>
                 )}
-              </span>
-              <span>語意判斷帳號：{attempt.judge_profile_id ?? "沒有可用帳號（只執行不需模型的斷言）"}</span>
-              <span>結果採用自這次的旅程：{titles(attempt.journeys)}</span>
-              <span>完成的步驟：{attempt.steps.length} 個</span>
+                <dt>語意判斷帳號</dt>
+                <dd>{attempt.judge_profile_id ?? "沒有可用帳號（只執行不需模型的斷言）"}</dd>
+                <dt>結果採用自這次的旅程</dt>
+                <dd>{titles(attempt.journeys)}</dd>
+                <dt>完成的步驟</dt>
+                <dd>{attempt.steps.length} 個</dd>
+              </dl>
               {attempt.steps.length > 0 && (
-                <ul aria-label={`第 ${attempt.attempt} 次嘗試的步驟`}>
+                <ul className="verification-plain-list" aria-label={`第 ${attempt.attempt} 次嘗試的步驟`}>
                   {attempt.steps.map((step, index) => (
                     <li key={index}>
-                      {PHASE_LABELS[step.phase]}
-                      {step.journey !== undefined && `（${journeyTitle(step.journey)}）`}・{step.key}：
+                      <span className="badge badge-plain">{PHASE_LABELS[step.phase]}</span> {stepName(step.journey, step.key, journeyTitle)}：
                       <VerdictBadge verdict={step.verdict} /> <ReasonCode code={step.reason_code} />
                     </li>
                   ))}
                 </ul>
               )}
               {takeover !== null && (
-                <div className="verification-takeover" role="group" aria-label={`第 ${attempt.attempt} 次嘗試的承接`}>
-                  <span>承接第 {takeover.from_attempt} 次嘗試</span>
-                  <span>停止的服務：{ids(takeover.stopped_services)}</span>
-                  <span>關閉的瀏覽器 Session：{ids(takeover.closed_sessions)}</span>
-                  <span>沿用的旅程：{titles(takeover.reused_journeys)}</span>
-                  {takeover.problems.length > 0 && (
-                    <ul aria-label="無法確認已停止">
-                      {takeover.problems.map((problem, index) => (
-                        <li key={index}>{problem}</li>
-                      ))}
-                    </ul>
-                  )}
-                  {takeover.not_resent.length > 0 && (
-                    <ul aria-label="不重送的外部操作">
-                      {takeover.not_resent.map((item, index) => (
-                        <li key={index}>
-                          旅程：{journeyTitle(item.journey)}／步驟：{item.step}（第 {item.attempt} 次嘗試）：
-                          <ReasonCode code={item.reason} />
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+                <div className="inset" role="group" aria-label={`第 ${attempt.attempt} 次嘗試的承接`}>
+                  <dl className="facts">
+                    <dt>承接</dt>
+                    <dd>第 {takeover.from_attempt} 次嘗試</dd>
+                    <dt>停止的服務</dt>
+                    <dd>{ids(takeover.stopped_services)}</dd>
+                    <dt>關閉的瀏覽器 Session</dt>
+                    <dd>{ids(takeover.closed_sessions)}</dd>
+                    <dt>沿用的旅程</dt>
+                    <dd>{titles(takeover.reused_journeys)}</dd>
+                    {takeover.problems.length > 0 && (
+                      <>
+                        <dt>無法確認已停止</dt>
+                        <dd>
+                          <ul className="verification-problems" aria-label="無法確認已停止">
+                            {takeover.problems.map((problem, index) => (
+                              <li key={index}>{problem}</li>
+                            ))}
+                          </ul>
+                        </dd>
+                      </>
+                    )}
+                    {takeover.not_resent.length > 0 && (
+                      <>
+                        <dt>不重送的外部操作</dt>
+                        <dd>
+                          <ul className="verification-problems" aria-label="不重送的外部操作">
+                            {takeover.not_resent.map((item, index) => (
+                              <li key={index}>
+                                旅程：{journeyTitle(item.journey)}／步驟：{item.step}（第 {item.attempt} 次嘗試）：
+                                <ReasonCode code={item.reason} />
+                              </li>
+                            ))}
+                          </ul>
+                        </dd>
+                      </>
+                    )}
+                  </dl>
                 </div>
               )}
             </li>
@@ -881,27 +1090,35 @@ function ArtifactItem({
 
   const dataUrl = content && `data:${content.content_type};base64,${content.content_base64}`;
   return (
-    <li aria-label={`${kind}：${artifact.name}`} className="verification-artifact">
-      <span>
-        {kind}・{artifact.name}・{location}
-        {artifact.size_bytes !== undefined && `・${sizeLabel(artifact.size_bytes)}`}
-      </span>
-      {artifact.withheld !== undefined ? (
-        <span className="verification-artifact-withheld">
-          沒有保存：{WITHHELD_LABELS[artifact.withheld] ?? artifact.withheld}
-        </span>
-      ) : dataUrl === null ? (
-        <button type="button" disabled={busy} onClick={() => void load()}>
-          {screenshot ? "開啟截圖" : "準備下載"}
-        </button>
-      ) : screenshot ? (
-        <img src={dataUrl} alt={`截圖：${artifact.name}`} />
-      ) : (
-        <a href={dataUrl} download={artifact.name}>
-          下載 {artifact.name}
-        </a>
+    <li aria-label={`${kind}：${artifact.name}`} className="verification-file">
+      <div className="row-head">
+        <p>
+          <span className="badge badge-plain">{kind}</span> <span className="mono">{artifact.name}</span>
+        </p>
+        {artifact.withheld === undefined && dataUrl === null && (
+          <button type="button" className="btn-sm" disabled={busy} onClick={() => void load()}>
+            {screenshot ? "開啟截圖" : "準備下載"}
+          </button>
+        )}
+        {artifact.withheld === undefined && dataUrl !== null && !screenshot && (
+          <a href={dataUrl} download={artifact.name}>
+            下載 {artifact.name}
+          </a>
+        )}
+      </div>
+      <p className="meta">
+        <span>{location}</span>
+        {artifact.size_bytes !== undefined && <span className="nowrap">{sizeLabel(artifact.size_bytes)}</span>}
+      </p>
+      {artifact.withheld !== undefined && (
+        <p className="verification-withheld">沒有保存：{WITHHELD_LABELS[artifact.withheld] ?? artifact.withheld}</p>
       )}
-      {error && <span role="alert">{error}</span>}
+      {artifact.withheld === undefined && dataUrl !== null && screenshot && <img src={dataUrl} alt={`截圖：${artifact.name}`} />}
+      {error && (
+        <p className="verification-error" role="alert">
+          {error}
+        </p>
+      )}
     </li>
   );
 }
@@ -909,17 +1126,22 @@ function ArtifactItem({
 function StepView({ step, journeyTitle }: { step: VerificationStepRecord; journeyTitle: (key: string) => string }) {
   const name = step.title === "" ? step.key : step.title;
   return (
-    <li aria-label={`${PHASE_LABELS[step.phase]}：${name}`} className={`verification-step step-${step.verdict}`}>
-      <span>
-        {PHASE_LABELS[step.phase]}
-        {step.journey !== undefined && `（${journeyTitle(step.journey)}）`}・{name}：<VerdictBadge verdict={step.verdict} />{" "}
-        <ReasonCode code={step.reason_code} />
-        {step.engine_code !== undefined && <> 引擎代碼 <code>{step.engine_code}</code></>}
-        {step.attempts > 1 && `・嘗試 ${step.attempts} 次`}
-      </span>
-      <span className="verification-step-operation">{step.operation}</span>
+    <li aria-label={`${PHASE_LABELS[step.phase]}：${name}`} className="verification-step">
+      <p>
+        <span className="badge badge-plain">{PHASE_LABELS[step.phase]}</span> {stepName(step.journey, name, journeyTitle)}：
+        <VerdictBadge verdict={step.verdict} /> <ReasonCode code={step.reason_code} />
+      </p>
+      <p className="meta">
+        <span className="verification-operation">{step.operation}</span>
+        {step.engine_code !== undefined && (
+          <span>
+            引擎代碼 <code>{step.engine_code}</code>
+          </span>
+        )}
+        {step.attempts > 1 && <span>嘗試 {step.attempts} 次</span>}
+      </p>
       {step.assertions.length > 0 && (
-        <ul aria-label="斷言結果">
+        <ul className="verification-assertions" aria-label="斷言結果">
           {step.assertions.map((result, index) => {
             const judge = result.assertion.kind === "judge";
             // 語意判斷沒有做出判定（例如模型限流）時不能說成「不符合」
@@ -927,8 +1149,9 @@ function StepView({ step, journeyTitle }: { step: VerificationStepRecord; journe
             const outcome = result.passed ? "符合" : undecided ? "無法判定" : "不符合";
             const className = result.passed ? "assertion-passed" : undecided ? "assertion-undecided" : "assertion-failed";
             return (
-              <li key={index} className={className}>
-                {describeAssertion(result.assertion)}：{outcome}（{judge ? "理由" : "實際"}：{result.actual}）
+              <li key={index}>
+                {describeAssertion(result.assertion)}：<span className={className}>{outcome}</span>（{judge ? "理由" : "實際"}：
+                {result.actual}）
               </li>
             );
           })}

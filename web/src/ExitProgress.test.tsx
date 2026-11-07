@@ -58,6 +58,11 @@ function fakeClient(onExit: LifecycleStatus, ...polls: Array<LifecycleStatus | E
   return { client, emitFullExit: () => act(() => handler?.()) };
 }
 
+/** Run 停止結果清單中某個 Run 的那一列（以 Run ID 或「Controller CLI」找）。 */
+function runRow(list: HTMLElement, run: string): HTMLElement {
+  return within(list).getByText(run).closest("li")!;
+}
+
 /** 在假計時器下讓排隊中的 Promise 與 React 更新全部完成。 */
 async function settle(ms = 0) {
   await act(async () => {
@@ -99,14 +104,15 @@ describe("完全退出進度", () => {
     expect(dialog).toHaveTextContent("停止中");
     expect(dialog).toHaveTextContent("距期限剩餘 40 秒（上限 40 秒）");
     const runs = within(dialog).getByRole("list", { name: "Run 停止結果" });
-    expect(within(runs).getByText("筆記 · run_1").closest("li")).toHaveTextContent("等待中");
-    expect(within(runs).getByText("筆記 · run_2").closest("li")).toHaveTextContent("未啟動");
+    // 每列是 Workspace 名稱與 Run ID（不以「·」串接）以及停止結果
+    expect(runRow(runs, "run_1")).toHaveTextContent("筆記 run_1等待中");
+    expect(runRow(runs, "run_2")).toHaveTextContent("筆記 run_2未啟動");
     expect(client.lifecycleStatus).not.toHaveBeenCalled();
 
     await settle(500);
 
     expect(client.lifecycleStatus).toHaveBeenCalledTimes(1);
-    expect(within(runs).getByText("筆記 · run_1").closest("li")).toHaveTextContent("已停止");
+    expect(runRow(runs, "run_1")).toHaveTextContent("已停止");
     expect(dialog).toHaveTextContent("距期限剩餘 40 秒");
     expect(dialog).toHaveTextContent("已停止新派工、交接與重試");
 
@@ -129,7 +135,7 @@ describe("完全退出進度", () => {
     const dialog = screen.getByRole("dialog", { name: "完全退出" });
     expect(dialog).toHaveTextContent("已停止");
     expect(dialog).toHaveTextContent("耗時 5 秒");
-    expect(within(dialog).getByText("筆記 · run_1").closest("li")).toHaveTextContent("已強制終止");
+    expect(runRow(dialog, "run_1")).toHaveTextContent("筆記 run_1已強制終止");
     expect(dialog).toHaveTextContent("所有程序都已停止，正在關閉 Baton…");
     expect(client.quitApp).not.toHaveBeenCalled();
 
@@ -158,7 +164,7 @@ describe("完全退出進度", () => {
     const anomalies = screen.getByRole("alert");
     expect(anomalies).toHaveTextContent("停止異常 1 個");
     expect(anomalies).toHaveTextContent("這些程序無法確認停止，仍可能在背景執行");
-    expect(anomalies).toHaveTextContent("筆記 · run_2：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
+    expect(anomalies).toHaveTextContent("筆記 run_2：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
     expect(anomalies).not.toHaveTextContent("run_1");
     expect(client.quitApp).not.toHaveBeenCalled();
 
@@ -169,7 +175,7 @@ describe("完全退出進度", () => {
     expect(client.quitApp).toHaveBeenCalledTimes(1);
   });
 
-  it("Controller CLI 的項目以「Workspace · Controller CLI」標示，進度與停止異常清單都是", async () => {
+  it("Controller CLI 的項目以「Workspace Controller CLI」標示，進度與停止異常清單都是", async () => {
     const controller = { run_id: "ctl_1", task_id: "", controller_cli: true };
     const { client, emitFullExit } = fakeClient(
       stopping({ runs: [exitRun(), exitRun(controller)] }),
@@ -185,14 +191,14 @@ describe("完全退出進度", () => {
     await settle();
 
     const runs = screen.getByRole("list", { name: "Run 停止結果" });
-    expect(within(runs).getByText("筆記 · run_1")).toBeInTheDocument();
-    expect(within(runs).getByText("筆記 · Controller CLI").closest("li")).toHaveTextContent("等待中");
+    expect(runRow(runs, "run_1")).toHaveTextContent("筆記 run_1");
+    expect(runRow(runs, "Controller CLI")).toHaveTextContent("筆記 Controller CLI等待中");
     expect(runs).not.toHaveTextContent("ctl_1");
 
     await settle(500);
 
     const anomalies = screen.getByRole("alert");
-    expect(anomalies).toHaveTextContent("筆記 · Controller CLI：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
+    expect(anomalies).toHaveTextContent("筆記 Controller CLI：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
     expect(anomalies).not.toHaveTextContent("ctl_1");
   });
 
@@ -226,7 +232,7 @@ describe("完全退出進度", () => {
     await settle(500);
     await settle(3000);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("筆記 · run_1：停止異常（停止失敗：拒絕存取）");
+    expect(screen.getByRole("alert")).toHaveTextContent("筆記 run_1：停止異常（停止失敗：拒絕存取）");
     expect(client.quitApp).not.toHaveBeenCalled();
   });
 

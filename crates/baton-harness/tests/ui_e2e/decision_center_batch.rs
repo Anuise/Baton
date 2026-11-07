@@ -177,18 +177,19 @@ fn center() -> Value {
     role("region", "裁定中心")
 }
 
-/// Workspace 功能頁簽。
+/// 跑道欄上目前 Workspace 的頁面。
 fn tab(name: &str) -> [Value; 2] {
-    [role("tablist", "Workspace 功能"), role("tab", name)]
+    [role("navigation", "Workspace 頁面"), role("button", name)]
 }
 
-/// 在側欄選擇 Workspace（已選中時再點一次無害），切到「裁定」頁簽開啟裁定中心（從別的頁簽切過來時會重新讀取清單）。
+/// 在跑道欄選擇 Workspace（已選中時再點一次無害），切到「裁定」頁開啟裁定中心（從別的頁切過來時會重新讀取清單）。
 async fn open_center(browser: &Browser, workspace: &str) {
     browser.click(&[role("button", &format!("選擇 {workspace}"))]).await;
     browser.click(&tab("裁定")).await;
     browser.wait_visible(&[center(), role("heading", "裁定")]).await;
-    // 頁面標題只寫頁名，Workspace 名稱由頁簽列上方的情境列顯示
-    browser.wait_visible(&[label("目前的 Workspace"), exact_text(workspace)]).await;
+    // 頁面標題只寫頁名，Workspace 名稱由頁面上方的情境列顯示
+    // 名稱可能與路徑結尾同字（路徑也在情境列中），取第一個（名稱）
+    browser.wait_visible(&[label("目前的 Workspace"), exact_text(workspace), nth(0)]).await;
 }
 
 /// 批次面板中的一項：以問題（fieldset 的 legend）找到它；問題相同時以 `index` 區分。
@@ -248,7 +249,8 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     browser.goto(&e2e.server.url("/")).await;
     browser.wait_visible(&[text("Runtime 運作中")]).await;
     browser.wait_visible(&[text("待裁定：4")]).await;
-    browser.wait_visible(&[text("待裁定 4")]).await;
+    // 跑道欄的徽章只顯示數字，說明在可存取名稱
+    browser.wait_visible(&[label("待裁定 4 項")]).await;
     open_center(browser, &ws_name).await;
     browser.wait_visible(&[center(), role("heading", "可處理（4）")]).await;
 
@@ -290,7 +292,7 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     browser.wait_visible(&[center(), role("heading", "可處理（0）")]).await;
     browser.wait_visible(&[center(), role("heading", "已結束（4）")]).await;
     browser.wait_visible(&[text("待裁定：0")]).await;
-    browser.wait_hidden(&[text("待裁定 4")]).await;
+    browser.wait_hidden(&[label("待裁定 4 項")]).await;
     // 已結束的每一筆都顯示自己的裁定結果，並標示是批次中各自保存的一項
     for (question, index, chosen) in [
         (&push_question, 0, option_label(&view_a, "allow_once")),

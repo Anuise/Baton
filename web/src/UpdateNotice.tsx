@@ -90,30 +90,34 @@ export function UpdateNotice({ client, runtimeStartedAt, pollMs = 60_000 }: Prop
   return (
     <>
       {recent && outcomeMessage && (
-        <div className="update-notice" role="status">
-          <span>{outcomeMessage}</span>
-          <button type="button" onClick={() => setDismissedAt(recent.finished_at)}>
+        <div className="callout callout-success update-notice" role="status">
+          <span className="update-notice-text">{outcomeMessage}</span>
+          <button type="button" className="btn-sm" onClick={() => setDismissedAt(recent.finished_at)}>
             知道了
           </button>
         </div>
       )}
       {available && (
-        <div className="update-notice">
-          <strong>Baton {available.version} 可以更新</strong>
+        <div className="callout callout-accent update-notice">
+          <strong className="update-notice-text">Baton {available.version} 可以更新</strong>
           {available.notes && (
-            <details>
+            <details className="update-notice-notes">
               <summary>更新說明</summary>
-              <p className="update-notes">{available.notes}</p>
+              <p className="pre-wrap">{available.notes}</p>
             </details>
           )}
-          <button type="button" onClick={() => setApply({ state: "confirming", version: available.version })}>
+          <button
+            type="button"
+            className="btn-sm"
+            onClick={() => setApply({ state: "confirming", version: available.version })}
+          >
             更新並重新開啟…
           </button>
         </div>
       )}
       {apply.state !== "closed" && (
-        <div className="exit-overlay">
-          <section className="exit-progress" role="dialog" aria-modal="true" aria-labelledby="update-confirm-title">
+        <div className="overlay">
+          <section className="dialog-panel update-confirm" role="dialog" aria-modal="true" aria-labelledby="update-confirm-title">
             <h2 id="update-confirm-title">更新到 Baton {apply.version}</h2>
             <ol className="update-steps">
               <li>先下載並驗證安裝程式；失敗不會停止任何工作。</li>
@@ -122,16 +126,22 @@ export function UpdateNotice({ client, runtimeStartedAt, pollMs = 60_000 }: Prop
               <li>安裝並重新開啟 Baton。</li>
             </ol>
             <p>重新開啟後依各 Workspace 的「完全退出後自動續跑」設定續跑，其餘等「繼續工作」。</p>
-            <p>資料目錄不會被刪除。</p>
-            {apply.state === "applying" && <p>下載並驗證中…</p>}
+            <p className="field-hint">資料目錄不會被刪除。</p>
+            {apply.state === "applying" && <p className="dot dot-accent">下載並驗證中…</p>}
             {apply.state === "failed" && (
-              <div role="alert">
+              <div className="callout callout-danger" role="alert">
                 <p>更新沒有開始：{apply.reason}</p>
                 <p>工作沒有停止，照常進行。</p>
               </div>
             )}
-            <div className="exit-actions">
-              <button type="button" disabled={apply.state === "applying"} onClick={() => void confirm(apply.version)}>
+            <div className="dialog-actions">
+              {/* Windows 慣例：主要動作在左、取消在右 */}
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={apply.state === "applying"}
+                onClick={() => void confirm(apply.version)}
+              >
                 更新並重新開啟
               </button>
               <button type="button" disabled={apply.state === "applying"} onClick={() => setApply({ state: "closed" })}>

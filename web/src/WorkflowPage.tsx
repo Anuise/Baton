@@ -89,8 +89,8 @@ const STAGE_STATE_TONES: Record<StageState, string> = {
   invalidated: "badge badge-danger",
 };
 
-/** 已完成的 Stage：預設收合細節。 */
-const DONE_STATES: ReadonlySet<StageState> = new Set(["passed", "skipped"]);
+/** 已完成（通過、跳過）與還沒輪到的 Stage：預設收合細節；目前、受阻、需重驗的攤開。 */
+const COLLAPSED_STATES: ReadonlySet<StageState> = new Set(["passed", "skipped", "pending"]);
 
 const OUTCOME_TONES: Record<StageAttemptOutcome, string> = {
   passed: "badge badge-success",
@@ -99,6 +99,15 @@ const OUTCOME_TONES: Record<StageAttemptOutcome, string> = {
   failed: "badge badge-danger",
   skipped: "badge",
   invalidated: "badge badge-danger",
+};
+
+/** 證據查驗狀態的徽章：有效是完成，找不到是錯誤，其餘要注意或中性。 */
+const EVIDENCE_STATUS_TONES: Record<StageEvidence["status"], string> = {
+  valid: "badge badge-success",
+  not_found: "badge badge-danger",
+  pending: "badge badge-plain",
+  not_accepted: "badge badge-warning",
+  build_changed: "badge badge-warning",
 };
 
 /** 使用者看到的 Workflow 已過時時的提示；重新載入後讓使用者再決定。 */
@@ -111,6 +120,7 @@ function reasonOf(error: unknown): string {
 /**
  * 流程（票 43，spec D-21）：檢視 Workspace 的 Workflow，包括 Router 選擇的 Playbook 與版本、各 Stage 的條件與 Gate，
  * 以及 attempt 歷史。使用者可附原因跳過沒有 Gate 的目前 Stage；裁定與安全 Gate 不能跳過。
+ * 每個 Workflow 是一張卡：上方是 Playbook、狀態與 Router 的理由，下方是依序編號的 Stage 步驟線。
  */
 export function WorkflowPage({ client, workspace, timeZone }: Props) {
   const [loaded, setLoaded] = useState<Loaded>({ state: "loading" });
@@ -144,14 +154,18 @@ export function WorkflowPage({ client, workspace, timeZone }: Props) {
   };
 
   return (
-    <section className="workflow-page" aria-label="流程">
+    <section className="page workflow-page" aria-label="流程">
       <header className="page-header">
         <h2>流程</h2>
       </header>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得流程：{loaded.reason}</p>}
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {loaded.state === "failed" && (
+        <p className="callout callout-danger" role="alert">
+          無法取得流程：{loaded.reason}
+        </p>
+      )}
       {loaded.state === "ready" && loaded.list.workflows.length === 0 && (
-        <p>還沒有 Workflow；Controller 開始工作時會依情境選擇 Playbook，並在這裡顯示各 Stage 的進度。</p>
+        <p className="empty-note">還沒有 Workflow；Controller 開始工作時會依情境選擇 Playbook，並在這裡顯示各 Stage 的進度。</p>
       )}
       {loaded.state === "ready" &&
         loaded.list.workflows.map((workflow) => (
@@ -221,7 +235,10 @@ function WorkflowCard({
           已有第 {workflow.latest_playbook_version} 版；此 Workflow 維持第 {workflow.playbook_version} 版
         </p>
       )}
-      <dl className="workflow-summary">
+      {workflow.status === "blocked" && workflow.blocked_reason !== null && (
+        <BlockedReason reason={workflow.blocked_reason} />
+      )}
+      <dl className="facts workflow-summary">
         <dt>Task</dt>
         <dd>
           {workflow.task_id === null ? (
@@ -236,32 +253,29 @@ function WorkflowCard({
             </span>
           )}
         </dd>
-        {workflow.status === "blocked" && workflow.blocked_reason !== null && (
-          <>
-            <dt>阻擋原因</dt>
-            <dd className="workflow-status">
-              <BlockedReason reason={workflow.blocked_reason} />
-            </dd>
-          </>
-        )}
         <dt>Router 的理由</dt>
         <dd>
           <LongText text={workflow.route_reason} copyLabel="複製理由" className="workflow-route-reason" />
         </dd>
         <dt>建立於</dt>
-        <dd>{formatTimestamp(workflow.created_at, timeZone)}</dd>
+        <dd className="tabular">{formatTimestamp(workflow.created_at, timeZone)}</dd>
       </dl>
       {workflow.resume_stage !== null && (
-        <p className="workflow-resume">
+        <p className="callout callout-accent workflow-resume">
           Gate 失效後重驗中：重驗通過後，在「{stageTitle(workflow.resume_stage)}」之前仍有效的 Gate 會直接沿用
         </p>
       )}
       {notice && (
-        <p className="workflow-notice" role="status">
+        <p className="callout callout-accent workflow-notice" role="status">
           {notice}
         </p>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="callout callout-danger" role="alert">
+          {error}
+        </p>
+      )}
+      {/* Stage 是真的順序：編號＋步驟線；目前、完成、跳過、受阻以編號圓的樣式與狀態徽章區分 */}
       <ol className="workflow-stages" aria-label={`${workflow.playbook_title} 的 Stage`}>
         {workflow.stages.map((stage) => {
           // 只有未完成 Workflow 的目前 Stage 能操作；有 Gate 的不能跳過
@@ -276,16 +290,16 @@ function WorkflowCard({
                 </span>
                 {stage.gate !== "none" && <span className="workflow-gate badge badge-warning">{GATE_LABELS[stage.gate]}</span>}
               </div>
-              {/* 已完成（通過、跳過）的 Stage 只留標題列，事實與嘗試紀錄收合 */}
-              {DONE_STATES.has(stage.state) ? (
+              {/* 已完成（通過、跳過）與還沒輪到的 Stage 只留標題列，事實與嘗試紀錄收合；目前、受阻、需重驗的攤開 */}
+              {COLLAPSED_STATES.has(stage.state) ? (
                 <details className="workflow-stage-details">
                   <summary>
                     細節{stage.attempts.length > 0 && `與嘗試紀錄（${stage.attempts.length} 次）`}
                   </summary>
-                  {facts}
+                  <div className="workflow-stage-body">{facts}</div>
                 </details>
               ) : (
-                facts
+                <div className="workflow-stage-body">{facts}</div>
               )}
               {isCurrent && stage.gate !== "none" && <p className="workflow-gate-locked">此 Gate 不能跳過</p>}
               {isCurrent && stage.gate === "none" && (
@@ -319,7 +333,7 @@ function StageFacts({
 }) {
   return (
     <>
-      <dl className="workflow-stage-facts">
+      <dl className="facts workflow-stage-facts">
         {stage.method && (
           <>
             <dt>方法</dt>
@@ -352,9 +366,9 @@ function StageFacts({
         <div className="table-wrap">
           <table className="data-table workflow-attempts" aria-label={`${stage.title} 的嘗試紀錄`}>
             <colgroup>
-              <col style={{ width: "5.5em" }} />
-              <col style={{ width: "7em" }} />
-              <col style={{ width: "9.5em" }} />
+              <col className="workflow-attempts-count" />
+              <col className="workflow-attempts-outcome" />
+              <col className="workflow-attempts-time" />
               <col />
             </colgroup>
             <thead>
@@ -398,12 +412,15 @@ function TextList({ title, stage, items }: { title: string; stage: StageView; it
 function BlockedReason({ reason }: { reason: string }) {
   const { summary, rest } = splitFirstSentence(reason);
   return (
-    <div className="workflow-status-reason measure">
-      <p>{summary}</p>
+    <div className="callout callout-danger workflow-blocked-reason">
+      <p>
+        <span className="callout-title">阻擋原因</span>
+        {summary}
+      </p>
       {rest !== "" && (
         <details>
           <summary>技術細節</summary>
-          <p>{rest}</p>
+          <p className="pre-wrap">{rest}</p>
         </details>
       )}
     </div>
@@ -454,18 +471,20 @@ function AttemptView({ attempt, timeZone }: { attempt: StageAttempt; timeZone?: 
             <ul className="workflow-attempt-evidence" aria-label="證據">
               {attempt.evidence.map((evidence, index) => (
                 <li key={index}>
-                  {evidence.check}：{EVIDENCE_KIND_LABELS[evidence.kind]}
-                  {` ${evidence.artifact_id ?? evidence.decision_request_id ?? evidence.task_id ?? ""}`.trimEnd()}・
-                  {EVIDENCE_STATUS_LABELS[evidence.status]}
+                  <span>
+                    {evidence.check}：{EVIDENCE_KIND_LABELS[evidence.kind]}
+                    {` ${evidence.artifact_id ?? evidence.decision_request_id ?? evidence.task_id ?? ""}`.trimEnd()}
+                  </span>
+                  <span className={EVIDENCE_STATUS_TONES[evidence.status]}>{EVIDENCE_STATUS_LABELS[evidence.status]}</span>
                 </li>
               ))}
             </ul>
           )}
           {attempt.note !== "" && <p className="workflow-attempt-note">{attempt.note}</p>}
-          <span className="workflow-attempt-recorder">
-            記錄者：{recorder}
-            {attempt.profile_id !== null && `・帳號 ${attempt.profile_id}`}
-          </span>
+          <p className="meta workflow-attempt-recorder">
+            <span>記錄者：{recorder}</span>
+            {attempt.profile_id !== null && <span>帳號 {attempt.profile_id}</span>}
+          </p>
         </div>
       </td>
     </tr>

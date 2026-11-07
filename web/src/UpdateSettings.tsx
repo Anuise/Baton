@@ -46,24 +46,34 @@ export function UpdateSettings({ client, timeZone }: Props) {
   }, [client]);
 
   return (
-    <section className="update-settings" aria-labelledby="update-settings-title">
-      <h2 id="update-settings-title">更新</h2>
-      <p className="section-hint">啟動時與每天自動檢查；有新版本只會通知，不會自動更新。</p>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得更新狀態：{loaded.reason}</p>}
+    <section className="section update-settings" aria-labelledby="update-settings-title">
+      <div className="section-heading">
+        <h3 id="update-settings-title">更新</h3>
+        <p>啟動時與每天自動檢查；有新版本只會通知，不會自動更新。</p>
+      </div>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {loaded.state === "failed" && (
+        <p role="alert" className="callout callout-danger">
+          無法取得更新狀態：{loaded.reason}
+        </p>
+      )}
       {loaded.state === "ready" && (
-        <>
-          <dl className="settings-facts">
+        <div className="panel">
+          <dl className="facts">
             <dt>目前版本</dt>
             <dd className="mono">{loaded.view.current_version}</dd>
             <dt>狀態</dt>
-            <dd>{statusText(loaded.view)}</dd>
+            <dd className={`update-status update-status-${loaded.view.status}`}>{statusText(loaded.view)}</dd>
             <dt>上次檢查</dt>
-            <dd>{loaded.view.checked_at === null ? "尚未檢查" : formatTimestamp(loaded.view.checked_at, timeZone)}</dd>
+            <dd className="tabular">
+              {loaded.view.checked_at === null ? "尚未檢查" : formatTimestamp(loaded.view.checked_at, timeZone)}
+            </dd>
             <dt>下次檢查</dt>
-            <dd>{loaded.view.next_check_at === null ? "未排定" : formatTimestamp(loaded.view.next_check_at, timeZone)}</dd>
+            <dd className="tabular">
+              {loaded.view.next_check_at === null ? "未排定" : formatTimestamp(loaded.view.next_check_at, timeZone)}
+            </dd>
           </dl>
-        </>
+        </div>
       )}
     </section>
   );

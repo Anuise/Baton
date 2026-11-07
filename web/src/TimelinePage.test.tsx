@@ -103,24 +103,35 @@ describe("時間線", () => {
     expect(metric("工作完成率")).toHaveTextContent("33.3%（1／3）");
     expect(metric("工作完成率")).toHaveTextContent("已取消 1");
     expect(metric("交接成功率")).toHaveTextContent("50%（1／2）");
-    expect(metric("交接成功率")).toHaveTextContent("已放棄 1・已確認接手 1・進行中 0");
+    // 次要數字各自一段（不以「・」串接）
+    expect(within(metric("交接成功率")).getByText("已放棄 1")).toBeInTheDocument();
+    expect(within(metric("交接成功率")).getByText("已確認接手 1")).toBeInTheDocument();
+    expect(within(metric("交接成功率")).getByText("進行中 0")).toBeInTheDocument();
     expect(metric("恢復耗時")).toHaveTextContent("平均 40 秒");
     expect(metric("恢復耗時")).toHaveTextContent("最長 40 秒");
-    expect(metric("恢復耗時")).toHaveTextContent("已恢復 1 次・尚未恢復 0");
+    expect(within(metric("恢復耗時")).getByText("已恢復 1 次")).toBeInTheDocument();
+    expect(within(metric("恢復耗時")).getByText("尚未恢復 0")).toBeInTheDocument();
     expect(metric("重複操作事件")).toHaveTextContent("被擋下 3 次");
-    expect(metric("重複操作事件")).toHaveTextContent("已成功 2・結果未知 1・他處進行中 0");
+    expect(within(metric("重複操作事件")).getByText("已成功 2")).toBeInTheDocument();
+    expect(within(metric("重複操作事件")).getByText("結果未知 1")).toBeInTheDocument();
+    expect(within(metric("重複操作事件")).getByText("他處進行中 0")).toBeInTheDocument();
     expect(metric("重複操作事件")).toHaveTextContent("變成結果未知 1 次");
     expect(metric("裁定等待時間")).toHaveTextContent("平均 40 秒");
     expect(metric("裁定等待時間")).toHaveTextContent("最長 2 分 30 秒");
-    expect(metric("裁定等待時間")).toHaveTextContent("已回答 2・等待中 1");
+    expect(within(metric("裁定等待時間")).getByText("已回答 2")).toBeInTheDocument();
+    expect(within(metric("裁定等待時間")).getByText("等待中 1")).toBeInTheDocument();
     expect(metric("教訓重犯率")).toHaveTextContent("25%（1／4）");
-    expect(metric("教訓重犯率")).toHaveTextContent("重犯 2 次・Guard 擋下 1・使用者回報 1");
+    expect(within(metric("教訓重犯率")).getByText("重犯 2 次")).toBeInTheDocument();
+    expect(within(metric("教訓重犯率")).getByText("Guard 擋下 1")).toBeInTheDocument();
+    expect(within(metric("教訓重犯率")).getByText("使用者回報 1")).toBeInTheDocument();
     expect(metric("每階段用量")).toHaveTextContent("總計 2,000 tokens");
     expect(metric("每階段用量")).toHaveTextContent("共 3 個 Run");
     expect(metric("每階段用量")).toHaveTextContent("implement：2,000 tokens（3 個 Run）");
     expect(metric("Context 使用量")).toHaveTextContent("平均 45,000 tokens");
     expect(metric("Context 使用量")).toHaveTextContent("最長 60,000 tokens");
-    expect(metric("Context 使用量")).toHaveTextContent("已回報 2 個 Run・未回報 1 個 Run");
+    expect(within(metric("Context 使用量")).getByText("已回報 2 個 Run")).toBeInTheDocument();
+    expect(within(metric("Context 使用量")).getByText("未回報 1 個 Run")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "觀測指標" })).not.toHaveTextContent("・");
     expect(quotaCells("Work-1")).toEqual(["Work-1", "42%", "10%"]);
   });
 
@@ -192,6 +203,30 @@ describe("時間線", () => {
     expect(items[2]).toHaveTextContent("裁定");
     expect(items[2]).toHaveTextContent("Task：整理筆記、撰寫報告");
     expect(items[2]).not.toHaveTextContent("Run：");
+  });
+
+  it("每個事件的細節預設收合：對象、完整的 Task 名稱與事件內容", async () => {
+    const event = timelineEvent({
+      seq: 5,
+      category: "decision",
+      aggregate_type: "decision",
+      aggregate_id: "dec_1",
+      event_type: "decision_requested",
+      task_ids: ["task_1", "task_2"],
+      run_id: null,
+      payload: { question: "要保留舊的目錄結構嗎？" },
+    });
+    renderPage(fakeClient({ events: [event] }));
+
+    const list = await screen.findByRole("list", { name: "事件" });
+    const [item] = within(list).getAllByRole("listitem");
+    await waitFor(() => expect(item).toHaveTextContent("Task：整理筆記、撰寫報告"));
+    const details = item.querySelector("details")!;
+    expect(details.querySelector("summary")).toHaveTextContent(/^細節$/);
+    expect(details).not.toHaveAttribute("open");
+    expect(within(details).getByText("dec_1")).not.toBeVisible();
+    expect(details).toHaveTextContent("Task整理筆記、撰寫報告");
+    expect(details.querySelector("pre")).toHaveTextContent('"question": "要保留舊的目錄結構嗎？"');
   });
 
   it("Controller CLI 的開啟與結束以「Controller」類別列出", async () => {

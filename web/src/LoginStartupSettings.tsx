@@ -44,12 +44,18 @@ export function LoginStartupSettings({ client }: Props) {
   };
 
   return (
-    <section className="login-startup-settings" aria-labelledby="login-startup-title">
-      <h2 id="login-startup-title">登入時自動啟動</h2>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得登入時自動啟動設定：{loaded.reason}</p>}
+    <section className="section login-startup-settings" aria-labelledby="login-startup-title">
+      <div className="section-heading">
+        <h3 id="login-startup-title">登入時自動啟動</h3>
+      </div>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {loaded.state === "failed" && (
+        <p role="alert" className="callout callout-danger">
+          無法取得登入時自動啟動設定：{loaded.reason}
+        </p>
+      )}
       {loaded.state === "ready" && (
-        <>
+        <div className="panel">
           <label className="login-startup-toggle">
             <input
               type="checkbox"
@@ -59,13 +65,19 @@ export function LoginStartupSettings({ client }: Props) {
             />
             登入 Windows 時自動啟動 Baton
           </label>
-          <p className="login-startup-hint">只影響之後的 Windows 登入；完全退出後，登入時不會自動啟動，需手動開 App</p>
+          <p className="field-hint login-startup-hint">
+            只影響之後的 Windows 登入；完全退出後，登入時不會自動啟動，需手動開 App
+          </p>
           {loaded.view.enabled && loaded.view.registered === false && (
-            <p className="login-startup-warning">Windows 的登記遺失，下次啟動 Runtime 時會補回</p>
+            <p className="callout callout-warning">Windows 的登記遺失，下次啟動 Runtime 時會補回</p>
           )}
-        </>
+        </div>
       )}
-      {switchError && <p role="alert">無法變更登入時自動啟動：{switchError}</p>}
+      {switchError && (
+        <p role="alert" className="callout callout-danger">
+          無法變更登入時自動啟動：{switchError}
+        </p>
+      )}
     </section>
   );
 }

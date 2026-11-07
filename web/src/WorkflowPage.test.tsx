@@ -113,20 +113,35 @@ describe("流程", () => {
     expect(within(review).queryByRole("list", { name: "修正確認 的允許的動作" })).not.toBeInTheDocument();
   });
 
-  it("已通過、已跳過的 Stage 只顯示標題列，事實與嘗試紀錄收合；其他 Stage 攤開", async () => {
+  it("已通過、已跳過與還沒輪到的 Stage 只顯示標題列，事實與嘗試紀錄收合；目前、受阻、需重驗的攤開", async () => {
     const workflow = workflowView();
     workflow.stages[2] = { ...workflow.stages[2], state: "skipped" };
-    renderPage(fakeClient(workflowList({ workflows: [workflow] })));
+    const pending = workflowView({ id: "wf_2", playbook_title: "新功能" });
+    const blocked = workflowView({
+      id: "wf_3",
+      playbook_title: "遷移",
+      stages: [
+        stageView({ key: "a", title: "受阻的 Stage", state: "blocked" }),
+        stageView({ key: "b", title: "需重驗的 Stage", state: "invalidated" }),
+      ],
+    });
+    renderPage(fakeClient(workflowList({ workflows: [workflow, pending, blocked] })));
     await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
 
-    const collapsed = (name: string) => stage(name).querySelector(":scope > details.workflow-stage-details");
-    const passed = collapsed("建立重現");
+    const collapsed = (item: HTMLElement) => item.querySelector(":scope > details.workflow-stage-details");
+    const passed = collapsed(within(screen.getByRole("region", { name: "缺陷處理 第 1 版" })).getByRole("listitem", { name: "建立重現" }));
     expect(passed).not.toBeNull();
     expect(passed).not.toHaveAttribute("open");
     // 摘要說明裡面有什麼（嘗試次數）
     expect(passed?.querySelector("summary")).toHaveTextContent(`細節與嘗試紀錄（${workflow.stages[0].attempts.length} 次）`);
-    expect(collapsed("修正確認")).not.toBeNull();
-    expect(collapsed("縮小範圍")).toBeNull();
+    const first = screen.getByRole("region", { name: "缺陷處理 第 1 版" });
+    expect(collapsed(within(first).getByRole("listitem", { name: "修正確認" }))).not.toBeNull();
+    expect(collapsed(within(first).getByRole("listitem", { name: "縮小範圍" }))).toBeNull();
+    // 還沒輪到的「修正確認」（第二個 Workflow）也收合
+    const second = screen.getByRole("region", { name: "新功能 第 1 版" });
+    expect(collapsed(within(second).getByRole("listitem", { name: "修正確認" }))).not.toBeNull();
+    expect(collapsed(stage("受阻的 Stage"))).toBeNull();
+    expect(collapsed(stage("需重驗的 Stage"))).toBeNull();
   });
 
   it("安全 Gate 另外標示", async () => {
@@ -161,12 +176,18 @@ describe("流程", () => {
     );
     expect(attempts[0]).toHaveTextContent("還沒有重現");
     expect(cells(attempts[1])).toEqual(["第 2 次", "通過", "2023/11/15 06:14"]);
-    expect(within(attempts[1]).getByRole("list", { name: "證據" })).toHaveTextContent("reproduction：產出物 art_1・有效");
-    expect(attempts[1]).toHaveTextContent("記錄者：ctl_1・帳號 prof_1");
+    // 證據的查驗狀態是旁邊的徽章；記錄者與帳號是同一列的兩段次要資訊（不以「・」串接）
+    const evidence = within(attempts[1]).getByRole("list", { name: "證據" });
+    expect(evidence).toHaveTextContent("reproduction：產出物 art_1");
+    expect(within(evidence).getByText("有效")).toHaveClass("badge", "badge-success");
+    expect(within(attempts[1]).getByText("記錄者：ctl_1")).toBeInTheDocument();
+    expect(within(attempts[1]).getByText("帳號 prof_1")).toBeInTheDocument();
+    expect(attempts[1]).not.toHaveTextContent("・");
 
     const skipped = within(screen.getByRole("table", { name: "修正確認 的嘗試紀錄" })).getByRole("row", { name: "第 1 次" });
     expect(cells(skipped).slice(0, 2)).toEqual(["第 1 次", "已跳過"]);
-    expect(skipped).toHaveTextContent("approved：裁定 dec_1・尚未完成");
+    expect(skipped).toHaveTextContent("approved：裁定 dec_1");
+    expect(within(skipped).getByText("尚未完成")).toHaveClass("badge");
     expect(skipped).toHaveTextContent("記錄者：使用者");
     expect(skipped).not.toHaveTextContent("帳號");
     expect(skipped).not.toHaveTextContent("desktop");
@@ -211,7 +232,9 @@ describe("流程", () => {
     expect(within(attempts[1]).getByRole("list", { name: "失效原因" })).toHaveTextContent(
       "reproduction：build 已改變：通過時是 c1，目前是 c2",
     );
-    expect(within(attempts[1]).getByRole("list", { name: "證據" })).toHaveTextContent("reproduction：產出物 art_1・build 已改變");
+    const evidence = within(attempts[1]).getByRole("list", { name: "證據" });
+    expect(evidence).toHaveTextContent("reproduction：產出物 art_1");
+    expect(within(evidence).getByText("build 已改變")).toHaveClass("badge", "badge-warning");
     expect(attempts[1]).toHaveTextContent("記錄者：Runtime");
     expect(attempts[1]).not.toHaveTextContent("帳號");
   });

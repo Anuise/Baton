@@ -33,6 +33,7 @@ export const PREVIEW_PAGES: PreviewPage[] = [
   { id: "knowledge", label: "知識／知識", view: "workspace", workspacePage: "knowledge" },
   { id: "understanding", label: "知識／專案理解", view: "workspace", workspacePage: "understanding" },
   { id: "authorization", label: "規則／授權", view: "workspace", workspacePage: "authorization" },
+  { id: "authorization-confirm", label: "規則／授權（確認摘要）", view: "workspace", workspacePage: "authorization", click: ["檢視確認摘要"] },
   { id: "authority", label: "規則／決策權限", view: "workspace", workspacePage: "authority" },
   { id: "models", label: "規則／模型設定", view: "workspace", workspacePage: "models" },
   { id: "accounts", label: "平台／帳號", view: "accounts" },

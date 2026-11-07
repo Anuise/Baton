@@ -13,6 +13,30 @@ function fakeClient(status: BackupStatus = backupStatus()) {
 // CHECKED_AT 是 2023-11-14 22:13:20 UTC，以台北時間顯示為 2023/11/15 06:13
 const renderSettings = (client: BackupClient) => render(<BackupSettings client={client} timeZone="Asia/Taipei" />);
 
+/** 兩欄 dl 中的一項，組成畫面上的說法「名稱：值」以便比對。 */
+function fact(term: string): string {
+  const dt = screen.getByText(term, { selector: "dt" });
+  return `${term}：${dt.nextElementSibling?.textContent ?? ""}`;
+}
+
+/** 一個核對項目的三欄：名稱、結果徽章、摘要（沒有摘要時為 null）。 */
+function checkRow(item: HTMLElement): [string, string, string | null] {
+  return [
+    item.querySelector(".backup-check-name")!.textContent!,
+    item.querySelector(".badge")!.textContent!,
+    item.querySelector(".backup-check-detail")?.textContent ?? null,
+  ];
+}
+
+/** 備份清單表格的資料列，每列是各欄的文字。 */
+function backupRows(): string[][] {
+  const table = screen.getByRole("table", { name: "備份清單" });
+  return within(table)
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => within(row).getAllByRole("cell").map((cell) => cell.textContent ?? ""));
+}
+
 describe("備份與還原演練", () => {
   it("顯示備份政策說明", async () => {
     renderSettings(fakeClient());
@@ -26,17 +50,17 @@ describe("備份與還原演練", () => {
     renderSettings(fakeClient(backupStatus({ latest_drill: drillReport({ interrupted_runs: 2 }) })));
 
     expect(await screen.findByText("還原演練通過")).toBeInTheDocument();
-    expect(screen.getByText("演練時間：2023/11/15 07:13")).toBeInTheDocument();
-    expect(screen.getByText("被演練的備份：2023/11/15 06:13")).toBeInTheDocument();
+    expect(fact("演練時間")).toBe("演練時間：2023/11/15 07:13");
+    expect(fact("被演練的備份")).toBe("被演練的備份：2023/11/15 06:13");
     const checks = within(screen.getByRole("list", { name: "核對項目" })).getAllByRole("listitem");
-    expect(checks.map((item) => item.textContent)).toEqual([
-      "還原：通過（已還原到暫存目錄）",
-      "資料庫完整性：通過（integrity_check 回報 ok）",
-      "外鍵關聯：通過（沒有違反外鍵的資料）",
-      "成果檔案雜湊：通過（2 個成果檔案的 SHA-256 都相符）",
-      "成果與資料庫的對應：通過（成果版本都對得上檔案）",
+    expect(checks.map(checkRow)).toEqual([
+      ["還原", "通過", "已還原到暫存目錄"],
+      ["資料庫完整性", "通過", "integrity_check 回報 ok"],
+      ["外鍵關聯", "通過", "沒有違反外鍵的資料"],
+      ["成果檔案雜湊", "通過", "2 個成果檔案的 SHA-256 都相符"],
+      ["成果與資料庫的對應", "通過", "成果版本都對得上檔案"],
     ]);
-    expect(screen.getByText("還原時標為中斷的 Run：2 個（還原後不會自動重做）")).toBeInTheDocument();
+    expect(fact("還原時標為中斷的 Run")).toBe("還原時標為中斷的 Run：2 個（還原後不會自動重做）");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -52,7 +76,9 @@ describe("備份與還原演練", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("還原演練未通過");
     const checks = within(screen.getByRole("list", { name: "核對項目" })).getAllByRole("listitem");
-    expect(checks.map((item) => item.textContent)).toContain("成果檔案雜湊：未通過（1 個成果檔案的 SHA-256 不符）");
+    expect(checks.map(checkRow)).toContainEqual(["成果檔案雜湊", "未通過", "1 個成果檔案的 SHA-256 不符"]);
+    expect(checks[1]).toHaveClass("backup-check-failed");
+    expect(within(checks[1]).getByText("未通過")).toHaveClass("badge-danger");
   });
 
   it("核對說明很長時只顯示摘要（第一個子句），其餘收進預設收合的「技術細節」", async () => {
@@ -70,12 +96,12 @@ describe("備份與還原演練", () => {
 
     const checks = within(await screen.findByRole("list", { name: "核對項目" })).getAllByRole("listitem");
     // 短的說明照舊一行，不加「技術細節」
-    expect(checks[0].textContent).toBe("還原：通過（已還原到暫存目錄）");
+    expect(checkRow(checks[0])).toEqual(["還原", "通過", "已還原到暫存目錄"]);
     expect(within(checks[0]).queryByText("技術細節")).not.toBeInTheDocument();
 
     const failed = checks[1];
     expect(within(failed).getByText("未通過")).toBeInTheDocument();
-    expect(within(failed).getByText("（Runtime 拒絕連線（storage_unwritable））")).toBeInTheDocument();
+    expect(within(failed).getByText("Runtime 拒絕連線（storage_unwritable）")).toHaveClass("backup-check-detail");
     const details = within(failed).getByText("技術細節").closest("details")!;
     expect(details).not.toHaveAttribute("open");
     expect(details).toHaveTextContent("無法寫入控制資料庫 C:\\Users\\me\\AppData\\Local\\Baton\\data\\baton.sqlite3-wal");
@@ -104,7 +130,8 @@ describe("備份與還原演練", () => {
     });
     renderSettings(fakeClient(backupStatus({ backups: [], latest_drill: drill })));
 
-    expect(await screen.findByText("被演練的備份：沒有可演練的備份")).toBeInTheDocument();
+    await screen.findByText("還原演練未通過");
+    expect(fact("被演練的備份")).toBe("被演練的備份：沒有可演練的備份");
   });
 
   it("尚未演練過時說明每週會自動進行", async () => {
@@ -135,12 +162,14 @@ describe("備份與還原演練", () => {
     ];
     renderSettings(fakeClient(backupStatus({ backups })));
 
-    const list = await screen.findByRole("list", { name: "備份清單" });
-    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
-      "2023/11/15 09:13・更新前・成果檔案 1 個",
-      "2023/11/15 08:13・重要裁定／Stage 完成・成果檔案 5 個",
-      "2023/11/15 07:13・migration 前・成果檔案 0 個・保留原因：最新的 migration 前備份",
-      "2023/11/15 06:13・每日・成果檔案 2 個・保留原因：每日、每週",
+    await screen.findByRole("table", { name: "備份清單" });
+    const headers = within(screen.getByRole("table", { name: "備份清單" })).getAllByRole("columnheader");
+    expect(headers.map((th) => th.textContent)).toEqual(["建立時間", "觸發原因", "成果檔案", "保留原因"]);
+    expect(backupRows()).toEqual([
+      ["2023/11/15 09:13", "更新前", "1 個", ""],
+      ["2023/11/15 08:13", "重要裁定／Stage 完成", "5 個", ""],
+      ["2023/11/15 07:13", "migration 前", "0 個", "最新的 migration 前備份"],
+      ["2023/11/15 06:13", "每日", "2 個", "每日、每週"],
     ]);
   });
 
@@ -148,7 +177,7 @@ describe("備份與還原演練", () => {
     renderSettings(fakeClient(backupStatus({ backups: [], latest_drill: null })));
 
     expect(await screen.findByText("尚無備份")).toBeInTheDocument();
-    expect(screen.queryByRole("list", { name: "備份清單" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "備份清單" })).not.toBeInTheDocument();
   });
 
   it("只顯示狀態，沒有任何操作按鈕", async () => {
@@ -165,7 +194,7 @@ describe("備份與還原演練", () => {
     renderSettings(client);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("無法取得備份狀態：connection refused");
-    expect(screen.queryByRole("list", { name: "備份清單" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "備份清單" })).not.toBeInTheDocument();
   });
 
   it("載入中先顯示提示", () => {

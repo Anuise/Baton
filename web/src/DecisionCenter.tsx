@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { HelpTip } from "./HelpTip";
 import { CopyButton } from "./LongText";
@@ -95,6 +95,18 @@ const OVERVIEW_ITEMS: [keyof DecisionOverview, string][] = [
   ["superseded", "已過期"],
   ["merged", "已合併"],
 ];
+/** 大於 0 時要你注意的總覽數字（琥珀色）。 */
+const OVERVIEW_ATTENTION = new Set<keyof DecisionOverview>(["overdue", "high_urgency"]);
+/** 總覽中「已結束」這一組的第一項，前面加分隔。 */
+const OVERVIEW_CLOSED_START: keyof DecisionOverview = "answered";
+
+/** 狀態徽章：待處理要你處理（琥珀）、已回答是完成，其餘中性。 */
+const STATUS_TONES: Record<DecisionStatus, string> = {
+  pending: "badge badge-warning",
+  answered: "badge badge-success",
+  superseded: "badge badge-plain",
+  merged: "badge badge-plain",
+};
 
 const AUTHORITY_LABELS: Record<AuthorityLevel, string> = {
   autonomous: "Controller 可自主處理",
@@ -105,10 +117,15 @@ const AUTHORITY_LABELS: Record<AuthorityLevel, string> = {
 /** 由寬到嚴，用來標示 Workspace 設定是收窄還是放寬。 */
 const AUTHORITY_ORDER: AuthorityLevel[] = ["autonomous", "requires_decision", "human_only"];
 
-function overrideNote(builtin: AuthorityLevel, effective: AuthorityLevel): string {
+/** 和內建相比是收窄（更常送裁定）還是放寬（Controller 更能自行處理）；相同時為 null。 */
+function overrideKind(builtin: AuthorityLevel, effective: AuthorityLevel): "narrowed" | "widened" | null {
   const diff = AUTHORITY_ORDER.indexOf(effective) - AUTHORITY_ORDER.indexOf(builtin);
-  return diff > 0 ? "（已收窄）" : diff < 0 ? "（已放寬）" : "";
+  return diff > 0 ? "narrowed" : diff < 0 ? "widened" : null;
 }
+
+const OVERRIDE_LABELS = { narrowed: "已收窄", widened: "已放寬" } as const;
+/** 放寬代表 Controller 能自行處理更多事，用琥珀色提醒；收窄用中性標籤。 */
+const OVERRIDE_TONES = { narrowed: "badge badge-plain", widened: "badge badge-warning" } as const;
 
 /** 需要特別說明的錯誤代碼；其餘沿用 Runtime 的說明。 */
 const ERROR_MESSAGES: Record<string, string> = {
@@ -159,7 +176,7 @@ const isPathLike = (text: string) => /^\S+$/.test(text) && /[\\/]/.test(text);
 
 /** 緊急程度徽章：高用危險色，其餘中性。 */
 const urgencyBadge = (urgency: DecisionUrgency) =>
-  `badge decision-urgency decision-urgency-${urgency}${urgency === "high" ? " badge-danger" : ""}`;
+  `badge decision-urgency decision-urgency-${urgency}${urgency === "high" ? " badge-danger" : " badge-plain"}`;
 
 /** 一筆請求的處理草稿；詳情與批次面板各自保有一份。 */
 interface Draft {
@@ -187,6 +204,16 @@ function toAnswer(decision: DecisionRequestView, draft: Draft): AnswerRequest | 
   return request;
 }
 
+/** 批次中的一項還差什麼才能送出；已填妥時回傳 null。 */
+function missingOf(decision: DecisionRequestView, draft: Draft): string | null {
+  const { action } = draft;
+  if (toAnswer(decision, draft) !== null) return null;
+  if (action === null) return "還沒選處理方式";
+  if (OPTION_REQUIRED.has(action) && draft.optionId === null) return "還沒選選項";
+  if (action !== "defer" && NOTE_REQUIRED.has(action)) return `還沒填寫${NOTE_LABELS[action].replace("（必填）", "")}`;
+  return "還缺必填欄位";
+}
+
 /** 依後端順序分組：可處理的 pending、延後的 pending、已結束的。 */
 function partition(decisions: DecisionRequestView[]) {
   return {
@@ -200,8 +227,21 @@ interface BatchOutcome {
   results: { requestId: string; question: string; ok: boolean; message: string | null }[];
 }
 
+/** 頁面外框：載入中、失敗與正常畫面共用同一個 region 與頁面標題。 */
+function DecisionPage({ children }: { children: ReactNode }) {
+  return (
+    <section className="page decision-center" aria-label="裁定中心">
+      <header className="page-header">
+        <h2>裁定</h2>
+      </header>
+      {children}
+    </section>
+  );
+}
+
 /**
- * 裁定分頁：先看總覽，再逐項處理。左側分組列出請求，右側顯示選取那筆的詳情與處理方式；
+ * 裁定（收件匣）：上方一列總覽數字；左欄分組列出請求（可處理、已延後、已結束），
+ * 右欄是工作區：批次結果、批次處理與選取那筆的詳情（寬視窗停在視窗內、自己捲動）。
  * 可處理的請求能勾選後逐項批次處理。逾期與延後都只是標示，不代表任何決定。
  */
 export function DecisionCenter({ client, workspace, timeZone, onChange }: Props) {
@@ -211,6 +251,9 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
   // 勾選進批次的請求與各自的處理草稿
   const [batch, setBatch] = useState<Record<string, Draft>>({});
   const [batchOutcome, setBatchOutcome] = useState<BatchOutcome | null>(null);
+  // 「已結束」一組可以收起；預設展開
+  const [closedOpen, setClosedOpen] = useState(true);
+  const closedListId = useId();
 
   const load = useCallback(async () => {
     try {
@@ -230,12 +273,20 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
     void load();
   }, [load]);
 
-  if (loaded.state === "loading") return <section aria-label="裁定中心">載入中…</section>;
+  if (loaded.state === "loading") {
+    return (
+      <DecisionPage>
+        <p className="empty-note">載入中…</p>
+      </DecisionPage>
+    );
+  }
   if (loaded.state === "failed") {
     return (
-      <section aria-label="裁定中心">
-        <p role="alert">無法取得裁定清單：{loaded.reason}</p>
-      </section>
+      <DecisionPage>
+        <p className="callout callout-danger" role="alert">
+          無法取得裁定清單：{loaded.reason}
+        </p>
+      </DecisionPage>
     );
   }
 
@@ -253,59 +304,90 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
       return rest;
     });
 
-  const listItem = (decision: DecisionRequestView, selectable: boolean) => (
-    <li key={decision.id} className={decision.id === selected?.id ? "decision-selected" : undefined}>
-      {selectable && (
-        <input
-          type="checkbox"
-          className="decision-batch-check"
-          aria-label={`批次選取 ${decision.question}`}
-          checked={decision.id in batch}
-          onChange={() => toggleBatch(decision)}
-        />
-      )}
-      <button
-        type="button"
-        aria-label={`查看裁定 ${decision.question}`}
-        aria-current={decision.id === selected?.id}
-        onClick={() => setSelectedId(decision.id)}
-      >
-        {/* 清單只放摘要（問題 3 行、Task 1 行、一列徽章）；完整內容點開看詳情 */}
-        <span className="decision-question clamp-3" title={decision.question}>
-          {decision.question}
-        </span>
-        <span className="decision-task clamp-1" title={decision.task_title}>
-          {decision.task_title}
-        </span>
-        <span className="decision-meta badge-group">
-          <span className="badge decision-kind">{KIND_LABELS[decision.kind]}</span>
-          <span className={urgencyBadge(decision.urgency)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
-          {decision.status === "pending" && decision.overdue && (
-            <span className="badge badge-warning decision-overdue">已逾期，尚未裁定</span>
-          )}
-          {decision.status === "pending" && decision.deferred && decision.deferred_until !== null && (
-            <span className="decision-deferred">延後至 {formatTimestamp(decision.deferred_until, timeZone)}</span>
-          )}
-          {decision.status !== "pending" && (
-            <span className={`badge decision-status decision-status-${decision.status}`}>{STATUS_LABELS[decision.status]}</span>
-          )}
-        </span>
-      </button>
-    </li>
-  );
+  const listItem = (decision: DecisionRequestView, selectable: boolean) => {
+    const isSelected = decision.id === selected?.id;
+    return (
+      <li key={decision.id} className={isSelected ? "decision-item is-selected" : "decision-item"}>
+        {selectable && (
+          <input
+            type="checkbox"
+            className="decision-batch-check"
+            aria-label={`批次選取 ${decision.question}`}
+            checked={decision.id in batch}
+            onChange={() => toggleBatch(decision)}
+          />
+        )}
+        <button
+          type="button"
+          className="decision-item-button"
+          aria-label={`查看裁定 ${decision.question}`}
+          aria-current={isSelected}
+          onClick={() => setSelectedId(decision.id)}
+        >
+          {/* 清單只放摘要（問題 3 行、Task 1 行、一列徽章）；完整內容點開看詳情 */}
+          <span className="decision-question clamp-3" title={decision.question}>
+            {decision.question}
+          </span>
+          <span className="decision-task clamp-1" title={decision.task_title}>
+            {decision.task_title}
+          </span>
+          <span className="decision-badges badge-group">
+            <span className="badge badge-plain decision-kind">{KIND_LABELS[decision.kind]}</span>
+            <span className={urgencyBadge(decision.urgency)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
+            {decision.status === "pending" && decision.overdue && (
+              <span className="badge badge-warning decision-overdue">已逾期，尚未裁定</span>
+            )}
+            {decision.status === "pending" && decision.deferred && decision.deferred_until !== null && (
+              <span className="decision-deferred-until">延後至 {formatTimestamp(decision.deferred_until, timeZone)}</span>
+            )}
+            {decision.status !== "pending" && (
+              <span className={`${STATUS_TONES[decision.status]} decision-status`}>{STATUS_LABELS[decision.status]}</span>
+            )}
+          </span>
+        </button>
+      </li>
+    );
+  };
 
-  const group = (title: string, items: DecisionRequestView[], empty: string, selectable = false) => (
-    <div className="decision-group">
-      <h3>
-        {title}（{items.length}）
-      </h3>
-      {items.length === 0 ? (
-        <p className="decision-empty">{empty}</p>
-      ) : (
-        <ul className="decision-list">{items.map((d) => listItem(d, selectable))}</ul>
-      )}
-    </div>
-  );
+  /** 清單中的一組；`collapsible` 的一組可以收起（標題與計數仍在）。 */
+  const group = (
+    title: string,
+    items: DecisionRequestView[],
+    empty: string,
+    { selectable = false, collapsible = false }: { selectable?: boolean; collapsible?: boolean } = {},
+  ) => {
+    const open = !collapsible || closedOpen;
+    return (
+      <section className="section decision-group">
+        <div className="section-heading">
+          <h3>
+            {title}
+            <span className="count">（{items.length}）</span>
+          </h3>
+          {collapsible && items.length > 0 && (
+            <div className="section-actions">
+              <button
+                type="button"
+                className="btn-quiet btn-sm"
+                aria-expanded={open}
+                aria-controls={closedListId}
+                onClick={() => setClosedOpen((value) => !value)}
+              >
+                {open ? "收起" : "展開"}
+              </button>
+            </div>
+          )}
+        </div>
+        {items.length === 0 ? (
+          <p className="empty-note">{empty}</p>
+        ) : (
+          <ul className="row-list decision-list" id={collapsible ? closedListId : undefined} hidden={!open}>
+            {items.map((d) => listItem(d, selectable))}
+          </ul>
+        )}
+      </section>
+    );
+  };
 
   // 處理過的請求留在畫面上，讓使用者看到結果或錯誤說明
   const pinAndReload = (requestId: string) => async () => {
@@ -314,91 +396,101 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
   };
 
   return (
-    <section className="decision-center" aria-label="裁定中心">
-      <h2>裁定</h2>
+    <DecisionPage>
+      {/* 總覽精簡成一列：待處理的幾項在前，已結束的幾項在分隔後 */}
       <section className="decision-overview" aria-label="裁定總覽">
-        <dl>
-          {OVERVIEW_ITEMS.map(([key, label]) => (
-            <div key={key} className={`decision-overview-item decision-overview-${key}`}>
-              <dt>{label}</dt>
-              <dd>{overview[key]}</dd>
-            </div>
-          ))}
+        <dl className="decision-summary">
+          {OVERVIEW_ITEMS.map(([key, label]) => {
+            const classes = ["decision-summary-item"];
+            if (key === OVERVIEW_CLOSED_START) classes.push("is-group-start");
+            if (OVERVIEW_ATTENTION.has(key) && overview[key] > 0) classes.push("is-attention");
+            if (overview[key] === 0) classes.push("is-zero");
+            return (
+              <div key={key} className={classes.join(" ")}>
+                <dt>{label}</dt>
+                <dd>{overview[key]}</dd>
+              </div>
+            );
+          })}
         </dl>
       </section>
 
-      {batchDecisions.length > 0 && (
-        <BatchPanel
-          client={client}
-          decisions={batchDecisions}
-          drafts={batch}
-          onDraft={(id, draft) => setBatch((current) => ({ ...current, [id]: draft }))}
-          onCancel={() => setBatch({})}
-          onSubmitted={async (response) => {
-            const questions = new Map(batchDecisions.map((d) => [d.id, d.question]));
-            setBatchOutcome({
-              results: response.results.map((result) => ({
-                requestId: result.request_id,
-                question: questions.get(result.request_id) ?? result.request_id,
-                ok: result.ok,
-                message: result.ok ? null : (ERROR_MESSAGES[result.error] ?? result.message),
-              })),
-            });
-            setBatch({});
-            onChange?.();
-            await load();
-          }}
-          reload={load}
-        />
-      )}
-      {batchOutcome && (
-        <section className="decision-batch-results" aria-label="批次結果">
-          <h3>
-            批次結果 <HelpTip label="批次結果">每一項各自保存，不會形成概括授權。</HelpTip>
-          </h3>
-          <ul>
-            {batchOutcome.results.map((result) => (
-              <li key={result.requestId} className={result.ok ? "decision-batch-ok" : "decision-batch-failed"}>
-                {result.question}：{result.ok ? "已保存" : `失敗（${result.message}）`}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
       <div className="decision-layout">
         <div className="decision-lists">
-          {group("可處理", actionable, "沒有可處理的裁定", true)}
-          {group("已延後", deferred, "沒有延後的裁定")}
-          {group("已結束", closed, "還沒有已結束的裁定")}
+          {group("可處理", actionable, "沒有可處理的裁定", { selectable: true })}
+          {/* 沒有延後的請求時不佔位置；總覽仍顯示「已延後 0」 */}
+          {deferred.length > 0 && group("已延後", deferred, "沒有延後的裁定")}
+          {group("已結束", closed, "還沒有已結束的裁定", { collapsible: true })}
         </div>
-        {selected && (
-          <DecisionDetail
-            key={selected.id}
-            client={client}
-            workspace={workspace}
-            decision={selected}
-            all={decisions}
-            timeZone={timeZone}
-            resumedCount={resumed?.requestId === selected.id ? resumed.count : null}
-            onAnswered={async (count) => {
-              // 留在剛處理的這筆，讓使用者看到裁定結果與「已恢復」
-              setSelectedId(selected.id);
-              setResumed({ requestId: selected.id, count });
-              onChange?.();
-              await load();
-            }}
-            onMerged={async (targetId) => {
-              setSelectedId(targetId);
-              onChange?.();
-              await load();
-            }}
-            onSelect={setSelectedId}
-            reload={pinAndReload(selected.id)}
-          />
-        )}
+
+        {/* 右欄工作區：批次結果 → 批次處理 → 詳情；寬視窗停在視窗內並自己捲動 */}
+        <div className="decision-pane">
+          {batchOutcome && (
+            <section className="decision-batch-results" aria-label="批次結果">
+              <h3>
+                批次結果 <HelpTip label="批次結果">每一項各自保存，不會形成概括授權。</HelpTip>
+              </h3>
+              <ul>
+                {batchOutcome.results.map((result) => (
+                  <li key={result.requestId} className={result.ok ? "is-ok" : "is-failed"}>
+                    {result.question}：{result.ok ? "已保存" : `失敗（${result.message}）`}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {batchDecisions.length > 0 && (
+            <BatchPanel
+              client={client}
+              decisions={batchDecisions}
+              drafts={batch}
+              onDraft={(id, draft) => setBatch((current) => ({ ...current, [id]: draft }))}
+              onCancel={() => setBatch({})}
+              onSubmitted={async (response) => {
+                const questions = new Map(batchDecisions.map((d) => [d.id, d.question]));
+                setBatchOutcome({
+                  results: response.results.map((result) => ({
+                    requestId: result.request_id,
+                    question: questions.get(result.request_id) ?? result.request_id,
+                    ok: result.ok,
+                    message: result.ok ? null : (ERROR_MESSAGES[result.error] ?? result.message),
+                  })),
+                });
+                setBatch({});
+                onChange?.();
+                await load();
+              }}
+              reload={load}
+            />
+          )}
+          {selected && (
+            <DecisionDetail
+              key={selected.id}
+              client={client}
+              workspace={workspace}
+              decision={selected}
+              all={decisions}
+              timeZone={timeZone}
+              resumedCount={resumed?.requestId === selected.id ? resumed.count : null}
+              onAnswered={async (count) => {
+                // 留在剛處理的這筆，讓使用者看到裁定結果與「已恢復」
+                setSelectedId(selected.id);
+                setResumed({ requestId: selected.id, count });
+                onChange?.();
+                await load();
+              }}
+              onMerged={async (targetId) => {
+                setSelectedId(targetId);
+                onChange?.();
+                await load();
+              }}
+              onSelect={setSelectedId}
+              reload={pinAndReload(selected.id)}
+            />
+          )}
+        </div>
       </div>
-    </section>
+    </DecisionPage>
   );
 }
 
@@ -416,63 +508,66 @@ function ActionFields({ decision, draft, onChange, name }: ActionFieldsProps) {
   const { action } = draft;
   return (
     <>
+      {/* 處理方式：一排可換行的選項鈕，選到的那個以強調色標示 */}
       <fieldset className="decision-actions">
         <legend>處理方式</legend>
-        {decision.allowed_actions.map((item) => (
-          <label key={item} className="decision-action">
-            <input
-              type="radio"
-              name={`${name}-action`}
-              value={item}
-              checked={action === item}
-              onChange={() => set({ action: item })}
-            />
-            {ACTION_LABELS[item]}
-          </label>
-        ))}
+        <div className="decision-action-list">
+          {decision.allowed_actions.map((item) => (
+            <label key={item} className="decision-action">
+              <input
+                type="radio"
+                name={`${name}-action`}
+                value={item}
+                checked={action === item}
+                onChange={() => set({ action: item })}
+              />
+              {ACTION_LABELS[item]}
+            </label>
+          ))}
+        </div>
       </fieldset>
       {action !== null && OPTION_REQUIRED.has(action) && (
-        <fieldset>
+        <fieldset className="decision-option-choices">
           <legend>選項</legend>
-          {decision.options.map((option) => {
-            const recommended = option.id === decision.recommendation ? "（建議）" : "";
-            return (
-              <label key={option.id} className="decision-choice">
-                {/* 畫面上的雜湊會縮短，所以可存取名稱明寫完整的選項文字 */}
-                <input
-                  type="radio"
-                  name={`${name}-option`}
-                  value={option.id}
-                  aria-label={`${option.label}${recommended}`}
-                  checked={draft.optionId === option.id}
-                  onChange={() => set({ optionId: option.id })}
-                />
-                <span>
-                  <WithHashes text={option.label} copy={false} />
-                  {recommended}
-                </span>
-              </label>
-            );
-          })}
+          <div className="choice-list">
+            {decision.options.map((option) => {
+              const recommended = option.id === decision.recommendation;
+              return (
+                <label key={option.id} className="choice decision-choice">
+                  {/* 畫面上的雜湊會縮短、「建議」是徽章，所以可存取名稱明寫完整的選項文字 */}
+                  <input
+                    type="radio"
+                    name={`${name}-option`}
+                    value={option.id}
+                    aria-label={`${option.label}${recommended ? "（建議）" : ""}`}
+                    checked={draft.optionId === option.id}
+                    onChange={() => set({ optionId: option.id })}
+                  />
+                  <span className="decision-choice-label">
+                    <WithHashes text={option.label} copy={false} />
+                    {recommended && <span className="badge badge-success">建議</span>}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
         </fieldset>
       )}
       {action === "defer" && (
-        <>
-          <div className="decision-inline">
-            <label>
-              延後多久
-              <select value={draft.deferMinutes} onChange={(e) => set({ deferMinutes: Number(e.target.value) })}>
-                {DEFER_CHOICES.map((choice) => (
-                  <option key={choice.minutes} value={choice.minutes}>
-                    {choice.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {/* 帶有授權意涵，直接顯示，不收在「?」說明裡 */}
-            <span className="decision-note">延後不是同意，工作仍在等待。</span>
-          </div>
-        </>
+        <div className="decision-inline">
+          <label className="decision-inline-field">
+            延後多久
+            <select value={draft.deferMinutes} onChange={(e) => set({ deferMinutes: Number(e.target.value) })}>
+              {DEFER_CHOICES.map((choice) => (
+                <option key={choice.minutes} value={choice.minutes}>
+                  {choice.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* 帶有授權意涵，直接顯示，不收在「?」說明裡 */}
+          <span className="decision-note">延後不是同意，工作仍在等待。</span>
+        </div>
       )}
       {action !== null && action !== "defer" && (
         <label className="decision-note-field">
@@ -500,6 +595,7 @@ function BatchPanel({ client, decisions, drafts, onDraft, onCancel, onSubmitted,
   const [error, setError] = useState<string | null>(null);
   const requests = decisions.map((d) => toAnswer(d, drafts[d.id] ?? EMPTY_DRAFT));
   const complete = requests.every((request) => request !== null);
+  const ready = requests.filter((request) => request !== null).length;
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -521,27 +617,39 @@ function BatchPanel({ client, decisions, drafts, onDraft, onCancel, onSubmitted,
 
   return (
     <form className="decision-batch" aria-label="批次處理" onSubmit={(event) => void submit(event)}>
-      <h3>
-        批次處理（{decisions.length} 項）{" "}
-        <HelpTip label="批次處理">逐項選擇處理方式；每一項各自保存，不會形成概括授權。</HelpTip>
-      </h3>
-      {decisions.map((decision) => (
-        <fieldset key={decision.id} className="decision-batch-item">
-          {/* 問題可能很長：限 2 行，完整內容在 title 與詳情 */}
-          <legend>
-            <span className="clamp-2" title={decision.question}>
-              {decision.question}
-            </span>
-          </legend>
-          <ActionFields
-            decision={decision}
-            draft={drafts[decision.id] ?? EMPTY_DRAFT}
-            onChange={(draft) => onDraft(decision.id, draft)}
-            name={`batch-${decision.id}`}
-          />
-        </fieldset>
-      ))}
-      {!complete && <p className="decision-hint">每一項都選好處理方式、填妥必填欄位後才能送出</p>}
+      <div className="decision-batch-head">
+        <h3>
+          批次處理（{decisions.length} 項）{" "}
+          <HelpTip label="批次處理">逐項選擇處理方式；每一項各自保存，不會形成概括授權。</HelpTip>
+        </h3>
+        {/* 選了幾項、填妥幾項：還差的每一項在下面各自標出 */}
+        <p className="decision-batch-progress tabular">
+          已填妥 {ready}／{decisions.length} 項
+        </p>
+      </div>
+      {decisions.map((decision) => {
+        const draft = drafts[decision.id] ?? EMPTY_DRAFT;
+        const missing = missingOf(decision, draft);
+        return (
+          <fieldset key={decision.id} className="decision-batch-item">
+            {/* 問題可能很長：限 2 行，完整內容在 title 與詳情；legend 只放問題（它是這一組的名稱） */}
+            <legend>
+              <span className="clamp-2" title={decision.question}>
+                {decision.question}
+              </span>
+            </legend>
+            <p className={missing === null ? "dot dot-success decision-batch-state" : "dot dot-warning decision-batch-state"}>
+              {missing ?? "已填妥"}
+            </p>
+            <ActionFields
+              decision={decision}
+              draft={draft}
+              onChange={(next) => onDraft(decision.id, next)}
+              name={`batch-${decision.id}`}
+            />
+          </fieldset>
+        );
+      })}
       <div className="form-actions">
         <button type="submit" disabled={busy || !complete}>
           送出批次（{decisions.length} 項）
@@ -549,8 +657,13 @@ function BatchPanel({ client, decisions, drafts, onDraft, onCancel, onSubmitted,
         <button type="button" onClick={onCancel} disabled={busy}>
           取消批次
         </button>
+        {!complete && <p className="decision-hint">每一項都選好處理方式、填妥必填欄位後才能送出</p>}
       </div>
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="callout callout-danger" role="alert">
+          {error}
+        </p>
+      )}
     </form>
   );
 }
@@ -585,9 +698,18 @@ function DecisionDetail({
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const articleRef = useRef<HTMLElement>(null);
   const isPending = decision.status === "pending";
   const permission = decision.permission;
   const request = toAnswer(decision, draft);
+
+  // 換一筆時（詳情以 key 重新掛載）把右欄捲到這筆的開頭；上方有批次面板時捲過它
+  useLayoutEffect(() => {
+    const article = articleRef.current;
+    const pane = article?.parentElement;
+    if (!article || !pane) return;
+    pane.scrollTop += article.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+  }, []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -607,60 +729,67 @@ function DecisionDetail({
     }
   };
 
+  // 讀起來像一份簡報：問題 → 狀態提醒 → 為什麼需要你決定 → 要做的事 → 選項與取捨 → 證據 → 阻擋範圍
+  // → 允許本次操作／修改授權 → 相似問題 → 最下面是處理方式與送出（或裁定結果）
   return (
-    <article className="decision-detail" aria-label="裁定詳情">
+    <article ref={articleRef} className="decision-detail" aria-label="裁定詳情">
       <header className="decision-detail-header">
         <h3>{decision.question}</h3>
-        <div className="decision-detail-badges badge-group">
-          <span className="badge">{KIND_LABELS[decision.kind]}</span>
-          <span className={`badge decision-status-${decision.status}`}>{STATUS_LABELS[decision.status]}</span>
+        <div className="badge-group">
+          <span className="badge badge-plain">{KIND_LABELS[decision.kind]}</span>
+          <span className={STATUS_TONES[decision.status]}>{STATUS_LABELS[decision.status]}</span>
           <span className={urgencyBadge(decision.urgency)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
-          <span className="decision-detail-time">提出於 {formatTimestamp(decision.created_at, timeZone)}</span>
         </div>
-        <p className="decision-detail-task">Task：{decision.task_title}</p>
+        <p className="meta">
+          <span className="decision-detail-task">Task：{decision.task_title}</span>
+          <span className="tabular">提出於 {formatTimestamp(decision.created_at, timeZone)}</span>
+          {isPending && !decision.overdue && decision.deadline_at !== null && (
+            <span className="decision-deadline tabular">期限：{formatTimestamp(decision.deadline_at, timeZone)}</span>
+          )}
+        </p>
       </header>
+
       {isPending && decision.deferred && decision.deferred_until !== null && (
-        <p className="decision-deferred" role="status">
+        <p className="callout decision-deferred" role="status">
           延後至 {formatTimestamp(decision.deferred_until, timeZone)}{" "}
           <span className="decision-note">延後不是同意，工作仍在等待。</span>
         </p>
       )}
       {isPending && decision.overdue && (
-        <p className="decision-overdue" role="status">
+        <p className="callout callout-warning decision-overdue" role="status">
           已逾期，尚未裁定
           {decision.deadline_at !== null && `（期限 ${formatTimestamp(decision.deadline_at, timeZone)}）`}{" "}
           <HelpTip label="逾期">逾期只是提醒，工作仍在等你的裁定。</HelpTip>
         </p>
       )}
-      {isPending && !decision.overdue && decision.deadline_at !== null && (
-        <p className="decision-deadline">期限：{formatTimestamp(decision.deadline_at, timeZone)}</p>
-      )}
       {isPending && permission?.prior_use && (
-        <>
-          <p className="decision-prior-use decision-alert" role="alert">
+        <div className="decision-block">
+          <p className="callout callout-warning decision-prior-use" role="alert">
             這個操作先前已放行過一次（{formatTimestamp(permission.prior_use.used_at, timeZone)}），結果未知。請先確認是否已生效，再決定要不要再允許一次。
           </p>
           <details className="decision-more">
             <summary>技術細節</summary>
-            <dl>
+            <dl className="facts">
               <dt>先前放行的 Run</dt>
               <dd>
                 <code className="mono">{permission.prior_use.run_id}</code>
               </dd>
             </dl>
           </details>
-        </>
+        </div>
       )}
 
-      <h4>為什麼需要你決定</h4>
-      <p className="decision-reason">
-        <WithHashes text={decision.reason} />
-      </p>
+      <div className="decision-block">
+        <h4>為什麼需要你決定</h4>
+        <p className="decision-reason">
+          <WithHashes text={decision.reason} />
+        </p>
+      </div>
 
       {decision.permission && (
-        <section className="decision-permission" aria-label="權限提示">
+        <section className="decision-block decision-request" aria-label="權限提示">
           <h4>權限提示</h4>
-          <dl className="decision-dl">
+          <dl className="facts">
             <dt>工具</dt>
             <dd>
               <span className="mono">{decision.permission.tool_name}</span>
@@ -672,16 +801,87 @@ function DecisionDetail({
               <WithHashes text={decision.permission.summary} />
             </dd>
           </dl>
-          <details>
+          <details className="decision-more">
             <summary>工具輸入</summary>
             <pre>{JSON.stringify(decision.permission.input, null, 2)}</pre>
           </details>
         </section>
       )}
 
+      {decision.authority && (
+        <section className="decision-block decision-request" aria-label="權限表攔截">
+          <h4 className="decision-heading-tip">
+            權限表攔截 <HelpTip label="權限表攔截">Controller 想自行處理這件事，但決策權限表規定必須送裁定。</HelpTip>
+          </h4>
+          <dl className="facts">
+            <dt>事項</dt>
+            <dd>{decision.authority.matter_label}</dd>
+            <dt>摘要</dt>
+            <dd>
+              <WithHashes text={decision.authority.summary} />
+            </dd>
+          </dl>
+        </section>
+      )}
+
+      {decision.options.length > 0 && (
+        <div className="decision-block">
+          <h4>選項與取捨</h4>
+          <ul className="decision-options">
+            {decision.options.map((option) => {
+              const recommended = option.id === decision.recommendation;
+              return (
+                <li key={option.id} className={recommended ? "decision-option is-recommended" : "decision-option"}>
+                  <span className="decision-option-head">
+                    <span className="decision-option-label">
+                      <WithHashes text={option.label} />
+                    </span>
+                    {recommended && <span className="badge badge-success decision-recommended">建議</span>}
+                  </span>
+                  {option.tradeoff && (
+                    <span className="decision-tradeoff">
+                      取捨：
+                      <WithHashes text={option.tradeoff} />
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {decision.evidence.length > 0 && (
+        <div className="decision-block">
+          <h4>證據</h4>
+          <ul className="decision-evidence">
+            {decision.evidence.map((item, index) => (
+              <li key={index}>{isPathLike(item) ? <span className="mono">{item}</span> : <WithHashes text={item} />}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="decision-block">
+        <h4 className="decision-heading-tip">
+          阻擋範圍 <HelpTip label="阻擋範圍">只有這些工作受影響，其他工作不受阻擋。</HelpTip>
+        </h4>
+        {decision.blocking.length === 0 ? (
+          <p className="empty-note">沒有工作被這個裁定阻擋</p>
+        ) : (
+          <ul className="decision-blocking">
+            {decision.blocking.map((item) => (
+              <li key={item.task_id}>
+                {item.task_title}（{TASK_STATUS_LABELS.get(item.task_status) ?? item.task_status}）
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       {/* 「允許本次操作」與「修改 Workspace 授權」分開：一次性批准不會變成永久擴權 */}
       {permission && (
-        <section className="decision-approve-once" aria-label="允許本次操作">
+        <section className="decision-block decision-approve-once" aria-label="允許本次操作">
           <h4>允許本次操作</h4>
           {/* 帶有授權意涵，直接顯示，不收在「?」說明裡 */}
           <p className="decision-note">只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權。</p>
@@ -691,7 +891,7 @@ function DecisionDetail({
             <p>這個請求建立得較早，沒有綁定的操作；允許後也不會被沿用。</p>
           )}
           {permission.rejected_approval && (
-            <p className="decision-rejected-approval decision-alert">
+            <p className="callout callout-warning decision-rejected-approval">
               先前的單次批准不能沿用：
               {MISMATCH_LABELS[permission.rejected_approval.reason]}
             </p>
@@ -699,7 +899,7 @@ function DecisionDetail({
           {(permission.binding || permission.rejected_approval) && (
             <details className="decision-more">
               <summary>技術細節</summary>
-              <dl>
+              <dl className="facts">
                 {permission.binding && (
                   <>
                     <dt>要求雜湊</dt>
@@ -730,96 +930,30 @@ function DecisionDetail({
         <AuthorizationChange client={client} workspace={workspace} capability={permission.capability} />
       )}
 
-      {decision.authority && (
-        <section className="decision-permission" aria-label="權限表攔截">
-          <h4>
-            權限表攔截 <HelpTip label="權限表攔截">Controller 想自行處理這件事，但決策權限表規定必須送裁定。</HelpTip>
-          </h4>
-          <dl className="decision-dl">
-            <dt>事項</dt>
-            <dd>{decision.authority.matter_label}</dd>
-            <dt>摘要</dt>
-            <dd>
-              <WithHashes text={decision.authority.summary} />
-            </dd>
-          </dl>
-        </section>
-      )}
-
-      {decision.options.length > 0 && (
-        <>
-          <h4>選項與取捨</h4>
-          <ul className="decision-options">
-            {decision.options.map((option) => (
-              <li key={option.id} className="decision-option">
-                <span className="decision-option-head">
-                  <span className="decision-option-label">
-                    <WithHashes text={option.label} />
-                  </span>
-                  {option.id === decision.recommendation && (
-                    <span className="badge badge-success decision-recommended">建議</span>
-                  )}
-                </span>
-                {option.tradeoff && (
-                  <span className="decision-tradeoff">
-                    取捨：
-                    <WithHashes text={option.tradeoff} />
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
-
-      {decision.evidence.length > 0 && (
-        <>
-          <h4>證據</h4>
-          <ul className="decision-evidence">
-            {decision.evidence.map((item, index) => (
-              <li key={index}>{isPathLike(item) ? <span className="mono">{item}</span> : <WithHashes text={item} />}</li>
-            ))}
-          </ul>
-        </>
-      )}
-
-      <h4>
-        阻擋範圍 <HelpTip label="阻擋範圍">只有這些工作受影響，其他工作不受阻擋。</HelpTip>
-      </h4>
-      {decision.blocking.length === 0 ? (
-        <p>沒有工作被這個裁定阻擋</p>
-      ) : (
-        <ul className="decision-blocking">
-          {decision.blocking.map((item) => (
-            <li key={item.task_id}>
-              {item.task_title}（{TASK_STATUS_LABELS.get(item.task_status) ?? item.task_status}）
-            </li>
-          ))}
-        </ul>
-      )}
-
       <RelatedDecisions client={client} decision={decision} all={all} onSelect={onSelect} onMerged={onMerged} reload={reload} />
 
       {isPending ? (
         <form className="decision-form" onSubmit={(event) => void submit(event)}>
           <ActionFields decision={decision} draft={draft} onChange={setDraft} name={`decision-${decision.id}`} />
-          <button type="submit" disabled={busy || request === null}>
-            送出裁定
-          </button>
+          <div className="form-actions">
+            <button type="submit" disabled={busy || request === null}>
+              送出裁定
+            </button>
+          </div>
         </form>
       ) : (
         <DecisionOutcomeView decision={decision} all={all} timeZone={timeZone} resumedCount={resumedCount} onSelect={onSelect} />
       )}
       {error && (
-        <p className="decision-error" role="alert">
+        <p className="callout callout-danger decision-error" role="alert">
           {error}
         </p>
       )}
       <details className="decision-more">
         <summary>詳細資訊</summary>
-        <p className="decision-detail-meta">
-          目標版本：契約第 {decision.target.contract_version} 版
-          {decision.target.authorization_revision !== null && `・授權第 ${decision.target.authorization_revision} 版`}
+        <p className="meta">
+          <span>目標版本：契約第 {decision.target.contract_version} 版</span>
+          {decision.target.authorization_revision !== null && <span>授權第 {decision.target.authorization_revision} 版</span>}
         </p>
       </details>
     </article>
@@ -830,7 +964,7 @@ function DecisionDetail({
 function BindingView({ binding }: { binding: ApprovalBinding }) {
   const params = Object.entries(binding.params);
   return (
-    <dl className="decision-dl">
+    <dl className="facts decision-binding">
       <dt>操作</dt>
       <dd>
         <code className="mono">{binding.operation}</code>
@@ -926,8 +1060,8 @@ function AuthorizationChange({ client, workspace, capability }: ChangeProps) {
   };
 
   return (
-    <section className="decision-authorization-change" aria-label="修改 Workspace 授權">
-      <h4>
+    <section className="decision-block decision-authorization-change" aria-label="修改 Workspace 授權">
+      <h4 className="decision-heading-tip">
         修改 Workspace 授權{" "}
         <HelpTip label="修改 Workspace 授權">
           把這項能力加入 Workspace 授權後，這個 Workspace 的所有 Task 都能使用，不再逐次詢問。修改授權不會回答這個請求。
@@ -938,59 +1072,73 @@ function AuthorizationChange({ client, workspace, capability }: ChangeProps) {
           修改 Workspace 授權
         </button>
       )}
-      {state.step === "blocked" && <p>{state.message}</p>}
+      {state.step === "blocked" && <p className="callout">{state.message}</p>}
       {state.step === "review" && (
-        <>
-          <h5>新增的能力與目標</h5>
-          <ul>
-            {(state.summary.changes?.changes ?? [])
-              .filter((change) => change.expands)
-              .map((change) => (
-                <li key={change.capability}>
-                  {change.label}：{change.added_targets.join("、")}
-                </li>
-              ))}
-          </ul>
+        <div className="inset decision-authorization-review">
+          <div>
+            <h5>新增的能力與目標</h5>
+            <ul>
+              {(state.summary.changes?.changes ?? [])
+                .filter((change) => change.expands)
+                .map((change) => (
+                  <li key={change.capability}>
+                    {change.label}：{change.added_targets.join("、")}
+                  </li>
+                ))}
+            </ul>
+          </div>
           {state.summary.changes && state.summary.changes.impact.length > 0 && (
-            <>
+            <div>
               <h5>影響</h5>
               <ul>
                 {state.summary.changes.impact.map((line) => (
                   <li key={line}>{line}</li>
                 ))}
               </ul>
-            </>
+            </div>
           )}
           {state.summary.risks.map((risk) => (
-            <p key={risk} className="authorization-risk">
+            <p key={risk} className="callout callout-warning">
               {risk}
             </p>
           ))}
-          <label>
-            <input
-              type="checkbox"
-              checked={acknowledgedExpansion}
-              onChange={(e) => setAcknowledgedExpansion(e.target.checked)}
-            />
-            我了解這會擴大 Workspace 授權
-          </label>
-          {state.summary.requires_risk_acknowledgement && (
+          <div className="decision-acks">
             <label>
-              <input type="checkbox" checked={acknowledgedRisk} onChange={(e) => setAcknowledgedRisk(e.target.checked)} />
-              我了解並接受上述風險
+              <input
+                type="checkbox"
+                checked={acknowledgedExpansion}
+                onChange={(e) => setAcknowledgedExpansion(e.target.checked)}
+              />
+              我了解這會擴大 Workspace 授權
             </label>
-          )}
-          <button
-            type="button"
-            disabled={busy || !acknowledgedExpansion || (state.summary.requires_risk_acknowledgement && !acknowledgedRisk)}
-            onClick={() => void confirm(state.templateId, state.grants, state.summary.changes?.base_revision ?? null)}
-          >
-            確認修改授權
-          </button>
-        </>
+            {state.summary.requires_risk_acknowledgement && (
+              <label>
+                <input type="checkbox" checked={acknowledgedRisk} onChange={(e) => setAcknowledgedRisk(e.target.checked)} />
+                我了解並接受上述風險
+              </label>
+            )}
+          </div>
+          <div className="form-actions">
+            <button
+              type="button"
+              disabled={busy || !acknowledgedExpansion || (state.summary.requires_risk_acknowledgement && !acknowledgedRisk)}
+              onClick={() => void confirm(state.templateId, state.grants, state.summary.changes?.base_revision ?? null)}
+            >
+              確認修改授權
+            </button>
+          </div>
+        </div>
       )}
-      {state.step === "saved" && <p role="status">授權已更新為第 {state.revision} 版；這個裁定請求仍待回答</p>}
-      {error && <p role="alert">{error}</p>}
+      {state.step === "saved" && (
+        <p className="callout callout-success" role="status">
+          授權已更新為第 {state.revision} 版；這個裁定請求仍待回答
+        </p>
+      )}
+      {error && (
+        <p className="callout callout-danger" role="alert">
+          {error}
+        </p>
+      )}
     </section>
   );
 }
@@ -1045,9 +1193,10 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, onSelect }
               {OUTCOME_NOTE_LABELS[outcome.action]}：{outcome.note}
             </p>
           )}
-          <p className="decision-detail-meta">
-            {outcome.decided_by}・{formatTimestamp(outcome.decided_at, timeZone)}
-            {outcome.batch_id !== null && "・批次處理（此項各自保存）"}
+          <p className="meta decision-outcome-meta">
+            <span>{outcome.decided_by}</span>
+            <span className="tabular">{formatTimestamp(outcome.decided_at, timeZone)}</span>
+            {outcome.batch_id !== null && <span>批次處理（此項各自保存）</span>}
           </p>
         </>
       ) : (
@@ -1060,7 +1209,7 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, onSelect }
           </p>
           <details className="decision-more">
             <summary>技術細節</summary>
-            <dl>
+            <dl className="facts">
               <dt>使用批准的 Run</dt>
               <dd>
                 <code className="mono">{decision.permission.approval_use.run_id}</code>
@@ -1069,7 +1218,11 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, onSelect }
           </details>
         </>
       )}
-      {resumedCount !== null && <p role="status">已恢復：{resumedCount} 個工作</p>}
+      {resumedCount !== null && (
+        <p className="callout callout-success" role="status">
+          已恢復：{resumedCount} 個工作
+        </p>
+      )}
     </section>
   );
 }
@@ -1083,7 +1236,10 @@ interface RelatedProps {
   reload: () => Promise<void>;
 }
 
-/** 相似問題：顯示連結與合併來源；pending 的請求可以合併到同種類的連結請求，或手動連結另一個請求。 */
+/**
+ * 相似問題：顯示連結與合併來源；pending 的請求可以合併到同種類的連結請求，
+ * 或手動連結另一個請求（很少用，收在預設收合的「手動連結其他請求」）。
+ */
 function RelatedDecisions({ client, decision, all, onSelect, onMerged, reload }: RelatedProps) {
   const [mergeInto, setMergeInto] = useState("");
   const [linkTo, setLinkTo] = useState("");
@@ -1136,7 +1292,7 @@ function RelatedDecisions({ client, decision, all, onSelect, onMerged, reload }:
 
   const linkList = (title: string, items: DecisionRequestView["links"]) =>
     items.length > 0 && (
-      <>
+      <div>
         <h5>{title}</h5>
         <ul className="decision-links">
           {items.map((item) => (
@@ -1148,12 +1304,15 @@ function RelatedDecisions({ client, decision, all, onSelect, onMerged, reload }:
             </li>
           ))}
         </ul>
-      </>
+      </div>
     );
 
   return (
-    <section className="decision-related" aria-label="相似問題">
+    <section className="decision-block decision-related" aria-label="相似問題">
       <h4>相似問題</h4>
+      {decision.links.length === 0 && decision.merged_from.length === 0 && (
+        <p className="empty-note">還沒有連結的相似問題</p>
+      )}
       {linkList("已連結", decision.links)}
       {linkList("已合併進來", decision.merged_from)}
       {mergeTargets.length > 0 && (
@@ -1177,24 +1336,46 @@ function RelatedDecisions({ client, decision, all, onSelect, onMerged, reload }:
         </div>
       )}
       {linkCandidates.length > 0 && (
-        <div className="decision-related-action">
-          <label>
-            連結另一個請求
-            <select value={linkTo} onChange={(e) => setLinkTo(e.target.value)}>
-              <option value="">選擇要連結的請求</option>
-              {linkCandidates.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {optionLabel(d.question)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button type="button" disabled={busy || linkTo === ""} onClick={() => void link()}>
-            連結
-          </button>
-        </div>
+        <details className="decision-more">
+          <summary>手動連結其他請求</summary>
+          <div className="decision-related-action">
+            <label>
+              連結另一個請求
+              <select value={linkTo} onChange={(e) => setLinkTo(e.target.value)}>
+                <option value="">選擇要連結的請求</option>
+                {linkCandidates.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {optionLabel(d.question)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" disabled={busy || linkTo === ""} onClick={() => void link()}>
+              連結
+            </button>
+          </div>
+        </details>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="callout callout-danger" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
+/** 決策權限頁的外框：載入中、失敗與正常畫面共用同一個 region、頁面標題與一句用途說明。 */
+function AuthorityPage({ children }: { children: ReactNode }) {
+  return (
+    <section className="page decision-authority" aria-label="決策權限表">
+      <header className="page-header">
+        <h2>決策權限</h2>
+      </header>
+      <p className="page-lede">
+        決定 Controller 遇到這些事時可以自己處理、必須送裁定，還是只能由你發起。每一項都能改成任何層級，收窄或放寬都可以；「內建」是預設值，供參考。
+      </p>
+      {children}
     </section>
   );
 }
@@ -1231,22 +1412,23 @@ export function DecisionAuthorityPanel({ client, workspace }: { client: Decision
 
   if (loadError !== null) {
     return (
-      <section className="decision-authority" aria-label="決策權限表">
-        <h3>決策權限表</h3>
-        <p role="alert">無法取得決策權限表：{loadError}</p>
-      </section>
+      <AuthorityPage>
+        <p className="callout callout-danger" role="alert">
+          無法取得決策權限表：{loadError}
+        </p>
+      </AuthorityPage>
     );
   }
   if (table === null) {
     return (
-      <section className="decision-authority" aria-label="決策權限表">
-        <h3>決策權限表</h3>
-        <p>載入中…</p>
-      </section>
+      <AuthorityPage>
+        <p className="empty-note">載入中…</p>
+      </AuthorityPage>
     );
   }
 
-  const changed = table.entries.some((entry) => draft[entry.matter] !== entry.effective);
+  const changedCount = table.entries.filter((entry) => draft[entry.matter] !== entry.effective).length;
+  const changed = changedCount > 0;
 
   const save = async () => {
     setBusy(true);
@@ -1268,59 +1450,73 @@ export function DecisionAuthorityPanel({ client, workspace }: { client: Decision
   };
 
   return (
-    <section className="decision-authority" aria-label="決策權限表">
-      <h3>
-        決策權限表{" "}
-        <HelpTip label="決策權限表">列出哪些事情 Controller 可以自行處理、哪些一定會送裁定。每個事項都可以改成任何層級，收窄或放寬都可以；「內建」欄是預設值，供參考。</HelpTip>
-      </h3>
-      <div className="table-wrap">
-        <table className="data-table decision-authority-table">
-          <colgroup>
-            <col />
-            <col className="decision-authority-level" />
-            <col className="decision-authority-level" />
-            <col className="decision-authority-setting" />
-          </colgroup>
-          <thead>
-            <tr>
-              <th>事項</th>
-              <th>內建</th>
-              <th>目前生效</th>
-              <th>Workspace 設定</th>
-            </tr>
-          </thead>
-          <tbody>
-            {table.entries.map((entry) => (
-              <tr key={entry.matter}>
-                <td>{entry.label}</td>
-                <td>{AUTHORITY_LABELS[entry.builtin]}</td>
-                <td>
-                  {AUTHORITY_LABELS[entry.effective]}
-                  {overrideNote(entry.builtin, entry.effective)}
-                </td>
-                <td>
-                  <select
-                    aria-label={`Workspace 設定：${entry.label}`}
-                    value={draft[entry.matter]}
-                    onChange={(e) => setDraft({ ...draft, [entry.matter]: e.target.value as AuthorityLevel })}
-                  >
-                    {AUTHORITY_ORDER.map((level) => (
-                      <option key={level} value={level}>
-                        {`${AUTHORITY_LABELS[level]}${level === entry.builtin ? "（內建）" : ""}`}
-                      </option>
-                    ))}
-                  </select>
-                </td>
+    <AuthorityPage>
+      <div className="decision-authority-sheet">
+        <div className="table-wrap">
+          <table className="data-table decision-authority-table">
+            <colgroup>
+              <col />
+              <col className="decision-authority-level" />
+              <col className="decision-authority-level" />
+              <col className="decision-authority-setting" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>事項</th>
+                <th>內建</th>
+                <th>目前生效</th>
+                <th>Workspace 設定</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {table.entries.map((entry) => {
+                // 和內建不同的列以左側色條與徽章標出：放寬（琥珀）或收窄（中性）
+                const kind = overrideKind(entry.builtin, entry.effective);
+                const classes = [kind === null ? "" : `is-${kind}`, draft[entry.matter] !== entry.effective ? "is-dirty" : ""]
+                  .filter(Boolean)
+                  .join(" ");
+                return (
+                  <tr key={entry.matter} className={classes || undefined}>
+                    <td className="decision-authority-matter">{entry.label}</td>
+                    <td>{AUTHORITY_LABELS[entry.builtin]}</td>
+                    <td>
+                      <span className="decision-authority-effective">
+                        <span>{AUTHORITY_LABELS[entry.effective]}</span>
+                        {kind !== null && <span className={OVERRIDE_TONES[kind]}>{OVERRIDE_LABELS[kind]}</span>}
+                      </span>
+                    </td>
+                    <td>
+                      <select
+                        aria-label={`Workspace 設定：${entry.label}`}
+                        value={draft[entry.matter]}
+                        onChange={(e) => setDraft({ ...draft, [entry.matter]: e.target.value as AuthorityLevel })}
+                      >
+                        {AUTHORITY_ORDER.map((level) => (
+                          <option key={level} value={level}>
+                            {`${AUTHORITY_LABELS[level]}${level === entry.builtin ? "（內建）" : ""}`}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
-      <button type="button" disabled={busy || !changed} onClick={() => void save()}>
-        儲存權限表
-      </button>
-      {saved && <p className="decision-saved">已儲存（第 {table.revision} 版）</p>}
-      {error && <p role="alert">{error}</p>}
-    </section>
+      <div className="form-actions decision-authority-actions">
+        <button type="button" className="btn-primary" disabled={busy || !changed} onClick={() => void save()}>
+          儲存權限表
+        </button>
+        {changed && <span className="meta">已修改 {changedCount} 項，尚未儲存</span>}
+        {saved && !changed && <span className="decision-saved">已儲存（第 {table.revision} 版）</span>}
+      </div>
+      {error && (
+        <p className="callout callout-danger" role="alert">
+          {error}
+        </p>
+      )}
+    </AuthorityPage>
   );
 }

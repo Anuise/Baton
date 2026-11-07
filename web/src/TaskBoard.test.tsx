@@ -302,7 +302,9 @@ function fakeClient(
 async function renderBoard(client: TaskBoardClient) {
   const user = userEvent.setup();
   render(<TaskBoard client={client} workspace={workspace} timeZone="UTC" />);
-  await screen.findByRole("heading", { name: "工作" });
+  // 頁面標題在讀取中就會出現：等看板讀回（出現「建立 Task」）再開始操作
+  expect(screen.getByRole("heading", { name: "工作" })).toBeInTheDocument();
+  await screen.findByRole("button", { name: "建立 Task" });
   return user;
 }
 
@@ -1333,14 +1335,14 @@ describe("編輯契約", () => {
     expect(client.updateTaskContract).not.toHaveBeenCalled();
   });
 
-  it("建立 Task 的對話框：焦點在第一個欄位，Esc 關閉後焦點回到「建立 Task」", async () => {
+  it("建立 Task 的對話框：焦點在第一個欄位（Task 標題），Esc 關閉後焦點回到「建立 Task」", async () => {
     const client = fakeClient({ tasks: [] });
     const user = await renderBoard(client);
     const create = screen.getByRole("button", { name: "建立 Task" });
 
     await user.click(create);
     const dialog = screen.getByRole("dialog", { name: "建立 Task" });
-    expect(within(dialog).getByLabelText("Goal")).toHaveFocus();
+    expect(within(dialog).getByLabelText("Task 標題")).toHaveFocus();
 
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog", { name: "建立 Task" })).not.toBeInTheDocument();

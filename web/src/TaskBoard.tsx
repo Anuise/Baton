@@ -266,11 +266,20 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
     void load();
   }, [load]);
 
-  if (loaded.state === "loading") return <section aria-label="工作面板">載入中…</section>;
-  if (loaded.state === "failed") {
+  // 讀取中與讀取失敗也輸出同樣的頁面標題，標題不會在讀回後才跳出來
+  if (loaded.state !== "ready") {
     return (
-      <section aria-label="工作面板">
-        <p role="alert">無法取得工作面板：{loaded.reason}</p>
+      <section className="page task-board" aria-label="工作面板">
+        <header className="page-header">
+          <h2>工作</h2>
+        </header>
+        {loaded.state === "loading" ? (
+          <p className="empty-note">載入中…</p>
+        ) : (
+          <div role="alert" className="callout callout-danger">
+            <p>無法取得工作面板：{loaded.reason}</p>
+          </div>
+        )}
       </section>
     );
   }
@@ -305,16 +314,18 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
   };
 
   return (
-    <section className="task-board" aria-label="工作面板">
-      <header className="task-board-header">
+    <section className="page task-board" aria-label="工作面板">
+      <header className="page-header">
         <h2>工作</h2>
-        <button
-          type="button"
-          className="primary-action"
-          onClick={(e) => setPanel({ kind: "create", returnFocus: e.currentTarget })}
-        >
-          建立 Task
-        </button>
+        <div className="page-actions">
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={(e) => setPanel({ kind: "create", returnFocus: e.currentTarget })}
+          >
+            建立 Task
+          </button>
+        </div>
       </header>
 
       <IntegrationQueue entries={board.integrations} titleOf={titleOf} />
@@ -333,15 +344,20 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
         />
       )}
 
+      {/* 看板：每個狀態是一條跑道，依狀態流的順序由左到右；欄位多時在自己的容器內水平捲動 */}
       <div className="task-columns">
         {COLUMNS.map(([status, label]) => {
           const tasks = board.tasks.filter((t) => t.status === status);
           return (
-            <section key={status} className="task-column" aria-label={`${label}（${tasks.length}）`}>
-              <h3>
-                {label}
-                <span className="badge task-count">{tasks.length}</span>
-              </h3>
+            <section
+              key={status}
+              className={tasks.length === 0 ? "task-column task-column-empty" : "task-column"}
+              aria-label={`${label}（${tasks.length}）`}
+            >
+              <header className="task-column-head">
+                <h3>{label}</h3>
+                <span className="count">{tasks.length}</span>
+              </header>
               {tasks.map((task) => (
                 <TaskCard
                   key={task.id}
@@ -527,6 +543,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   const [history, setHistory] = useState<HistoryState>({ state: "loading" });
   const [moreOpen, setMoreOpen] = useState(false);
   const moreId = useId();
+  const dependencyId = useId();
   const moreToggle = useRef<HTMLButtonElement>(null);
 
   // 展開時載入歷史；契約有新版本時重新載入
@@ -578,12 +595,12 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
 
   return (
     <article className={stripe ? `card task-card stripe-${stripe}` : "card task-card"} aria-label={task.title}>
-      {/* 標題最多 2 行、Goal 1 行；展開「詳細資訊」時顯示完整文字 */}
+      {/* 標題最多 2 行、種類與 Goal 1 行；展開「詳細資訊」時顯示完整文字 */}
       <h4 className="task-title clamp-2" title={task.title}>
         {task.title}
       </h4>
-      <p className="task-meta">
-        <span className="badge task-kind">{kindLabel(task.kind)}</span>
+      <p className="meta task-meta">
+        <span className="badge badge-plain">{kindLabel(task.kind)}</span>
         <span className="task-goal truncate" title={`Goal：${goalTitle}`}>
           Goal：{goalTitle}
         </span>
@@ -702,12 +719,12 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       {(task.status === "ready" || task.status === "pending" || hasMore) && (
         <div className="task-actions">
           {task.status === "ready" && (
-            <button type="button" className="primary-action" onClick={onDispatch}>
+            <button type="button" className="btn-primary" onClick={onDispatch}>
               派工
             </button>
           )}
           {task.status === "pending" && (
-            <button type="button" className="primary-action" onClick={onReady}>
+            <button type="button" className="btn-primary" onClick={onReady}>
               標記為可派工
             </button>
           )}
@@ -752,11 +769,11 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       )}
 
       {addingDependency && (
-        <div className="task-dependency-form">
-          <label>
-            相依的 Task
+        <div className="inset task-dependency-form">
+          <div className="field">
+            <label htmlFor={dependencyId}>相依的 Task</label>
             {/* 從「更多」開啟時「更多」選單已收起，焦點直接移到這裡，不落到 body */}
-            <select autoFocus value={dependsOn} onChange={(e) => setDependsOn(e.target.value)}>
+            <select id={dependencyId} autoFocus value={dependsOn} onChange={(e) => setDependsOn(e.target.value)}>
               <option value="">選擇 Task…</option>
               {others.map((other) => (
                 <option key={other.id} value={other.id}>
@@ -764,7 +781,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
                 </option>
               ))}
             </select>
-          </label>
+          </div>
           <div className="form-actions">
             <button type="button" disabled={dependsOn === ""} onClick={() => void addDependency()}>
               確定新增
@@ -783,12 +800,18 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
 function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; titleOf: (taskId: string) => string }) {
   const pending = entries.filter((e) => isIntegrationActive(e.status)).sort((a, b) => a.seq - b.seq);
   return (
-    <section className="integration-queue" aria-label="整合佇列">
-      <h3>整合佇列</h3>
-      {pending.length === 0 ? (
-        <p>沒有等待整合的項目</p>
-      ) : (
-        <ol>
+    // 精簡的一個區段：沒有項目時只佔標題一行；有項目時一項一列
+    <section className="section integration-queue" aria-label="整合佇列">
+      <div className="section-heading">
+        <h3>整合佇列</h3>
+        {pending.length === 0 ? (
+          <span className="empty-note">沒有等待整合的項目</span>
+        ) : (
+          <span className="count">{pending.length}</span>
+        )}
+      </div>
+      {pending.length > 0 && (
+        <ol className="row-list integration-list">
           {pending.map((entry) => {
             const processing = isIntegrationProcessing(entry.status);
             return (
@@ -1466,7 +1489,7 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
   return (
     <dialog
       ref={dialog}
-      className="task-form task-dialog"
+      className="dialog-panel task-dialog"
       aria-label={heading}
       // 瀏覽器原生的 Esc（cancel 事件）也交給 React 狀態關閉，不讓 dialog 自己關掉
       onCancel={(event) => {
@@ -1475,11 +1498,16 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
       }}
       onKeyDown={closeOnEscape}
     >
-      {/* 標題列：動作名稱 + Task 標題（完整換行，不截斷） */}
+      {/* 標題列：動作名稱 + Task 標題（完整換行，不截斷）；標題列與動作列固定，中間的欄位自己捲動 */}
       <header className="task-dialog-header">
         <div className="task-dialog-title">
-          <h3>{task ? "編輯契約" : "建立 Task"}</h3>
-          {task && <p>{task.title}</p>}
+          <h2>{task ? "編輯契約" : "建立 Task"}</h2>
+          {/* 標題列固定不捲動：長標題最多 2 行，完整文字在 title 與看板的卡片上 */}
+          {task && (
+            <p className="clamp-2" title={task.title}>
+              {task.title}
+            </p>
+          )}
         </div>
         <button type="button" className="btn-quiet btn-icon" aria-label="關閉對話框" onClick={onClose}>
           ×
@@ -1488,43 +1516,46 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
       <form className="task-dialog-form" onSubmit={(event) => void submit(event)}>
         <div className="task-dialog-body">
           {!task && (
-            <>
-              <label>
-                Goal
-                <select className="task-form-select" value={goalChoice} onChange={(e) => setGoalChoice(e.target.value)}>
-                  {board.goals.map((goal) => (
-                    <option key={goal.id} value={goal.id}>
-                      {optionLabel(goal.title)}
-                    </option>
-                  ))}
-                  <option value={NEW_GOAL}>新增 Goal…</option>
-                </select>
+            // 先寫標題（開啟時焦點在這裡），再選所屬的 Goal 與種類
+            <div className="task-dialog-basics">
+              <label className="field">
+                Task 標題
+                <input value={title} onChange={(e) => setTitle(e.target.value)} />
               </label>
+              <div className="field-row">
+                <label className="field">
+                  Goal
+                  <select value={goalChoice} onChange={(e) => setGoalChoice(e.target.value)}>
+                    {board.goals.map((goal) => (
+                      <option key={goal.id} value={goal.id}>
+                        {optionLabel(goal.title)}
+                      </option>
+                    ))}
+                    <option value={NEW_GOAL}>新增 Goal…</option>
+                  </select>
+                </label>
+                <label className="field">
+                  種類
+                  <select value={kind} onChange={(e) => setKind(e.target.value as TaskKind)}>
+                    {TASK_KIND_LABELS.map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
               {goalChoice === NEW_GOAL && (
-                <label>
+                <label className="field">
                   新 Goal 名稱
                   <input value={goalTitle} onChange={(e) => setGoalTitle(e.target.value)} />
                 </label>
               )}
-              <label>
-                Task 標題
-                <input value={title} onChange={(e) => setTitle(e.target.value)} />
-              </label>
-              <label>
-                種類
-                <select className="contract-mode" value={kind} onChange={(e) => setKind(e.target.value as TaskKind)}>
-                  {TASK_KIND_LABELS.map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </>
+            </div>
           )}
           <ContractEditor draft={draft} onChange={setDraft} capabilities={board.capabilities} />
           {task && (
-            <label>
+            <label className="field task-dialog-note">
               變更說明（選填）
               <input value={note} onChange={(e) => setNote(e.target.value)} />
             </label>
@@ -1532,13 +1563,13 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
         </div>
         <footer className="task-dialog-footer">
           {messages.length > 0 && (
-            <div role="alert" className="task-dialog-errors">
+            <div role="alert" className="callout callout-danger task-dialog-errors">
               {messages.map((message) => (
                 <p key={message}>{message}</p>
               ))}
             </div>
           )}
-          <div className="form-actions">
+          <div className="dialog-actions">
             <button type="button" onClick={onClose}>
               關閉
             </button>
