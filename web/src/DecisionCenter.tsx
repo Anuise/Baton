@@ -398,8 +398,6 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
           />
         )}
       </div>
-
-      <DecisionAuthorityPanel client={client} workspace={workspace} />
     </section>
   );
 }
@@ -1202,7 +1200,7 @@ function RelatedDecisions({ client, decision, all, onSelect, onMerged, reload }:
 }
 
 /** 決策權限表（spec D-15）：每個事項都可以設為任何層級，收窄或放寬都由使用者決定。 */
-function DecisionAuthorityPanel({ client, workspace }: { client: DecisionClient; workspace: Workspace }) {
+export function DecisionAuthorityPanel({ client, workspace }: { client: DecisionClient; workspace: Workspace }) {
   const [table, setTable] = useState<AuthorityTable | null>(null);
   const [draft, setDraft] = useState<Record<string, AuthorityLevel>>({});
   const [loadError, setLoadError] = useState<string | null>(null);

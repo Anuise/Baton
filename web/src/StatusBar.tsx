@@ -36,7 +36,7 @@ interface Props {
 /** 監護不在、Runtime 又沒有附訊息時的降級提示。 */
 const GUARDIAN_UNAVAILABLE_FALLBACK = "工作繼續，自動重啟保護不可用";
 
-/** 頂部狀態列（spec D-21）：Runtime 狀態、平台支援狀態、可用帳號數、待裁定數、恢復事件、監護狀態與儲存故障。 */
+/** 狀態列（spec D-21，位於跑道欄底部）：Runtime 狀態、平台支援狀態、可用帳號數、待裁定數、恢復事件、監護狀態與儲存故障。 */
 export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshKey }: Props) {
   const [status, setStatus] = useState<RuntimeStatus>({ state: "checking" });
   // null：尚未取得或讀取失敗，顯示為「未知」，不影響 Runtime 狀態
@@ -122,8 +122,9 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
           {status.health.guardian.message ?? GUARDIAN_UNAVAILABLE_FALLBACK}
         </span>
       )}
+      {/* 儲存故障的完整說明由 App 以整寬警示顯示（StorageFault），這裡只留狀態 */}
       {status.state === "running" && status.health.storage?.dispatch_halted && (
-        <StorageFault fault={status.health.storage.fault ?? null} />
+        <span className="status status-storage-halted">新派工已停止</span>
       )}
     </header>
   );
@@ -131,12 +132,12 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
 
 type StorageFaultView = NonNullable<NonNullable<HealthResponse["storage"]>["fault"]>;
 
-/** 儲存故障：狀態詞做成徽章；原因的第一句與處理方式完整顯示，其餘與技術細節收進「技術細節」。 */
-function StorageFault({ fault }: { fault: StorageFaultView | null }) {
+/** 儲存故障的整寬警示：狀態詞在前；原因的第一句與處理方式完整顯示，其餘與技術細節收進「技術細節」。 */
+export function StorageFault({ fault }: { fault: StorageFaultView | null }) {
   const reason = fault && splitFirstSentence(fault.summary);
   return (
-    <div className="status-storage-fault" role="alert">
-      <strong className="badge badge-danger">新派工已停止</strong>
+    <div className="callout callout-danger status-storage-fault" role="alert">
+      <p className="callout-title">新派工已停止</p>
       {fault && reason && (
         <div className="status-storage-body">
           <p>{reason.summary}</p>

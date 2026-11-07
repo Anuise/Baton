@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { HelpTip } from "./HelpTip";
 import { CopyButton, PathText } from "./LongText";
@@ -21,6 +21,10 @@ interface Props {
   pendingDecisions?: Record<string, number>;
   /** 每次讀到清單後告知上層目前使用中的 Workspace（例如封存後選中的 Workspace 已不在清單）。 */
   onWorkspaces?: (workspaces: Workspace[]) => void;
+  /** 選中的 Workspace 展開時放在它下面的內容（App 放這個 Workspace 的頁面導覽）。 */
+  currentNav?: ReactNode;
+  /** 值改變（大於 0）時展開建立表單並聚焦目錄欄位（主區空狀態的「新增 Workspace」）。 */
+  createRequest?: number;
 }
 
 function reasonOf(error: unknown): string {
@@ -34,11 +38,24 @@ const PAUSE_LABELS: Record<PauseCause, string> = {
   login_unverified: "無法核對是否跨登入，暫停中",
 };
 
-/** 建立表單「目錄」欄位的 id；主區的空狀態以「建立 Workspace」把焦點移到這裡。 */
+/** 建立表單「目錄」欄位的 id。 */
 export const WORKSPACE_PATH_INPUT_ID = "workspace-path-input";
 
-/** 左側 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace，並提供各自的完全退出後與跨登入自動續跑設定。 */
-export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendingDecisions, onWorkspaces }: Props) {
+/**
+ * 跑道欄上的 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace，
+ * 選中的那一個展開 `currentNav`（它的頁面）；各自的完全退出後與跨登入自動續跑設定收在「管理」。
+ * 建立表單平時收起，按「新增」展開；還沒有任何 Workspace 時直接展開。
+ */
+export function WorkspaceSidebar({
+  client,
+  timeZone,
+  onSelect,
+  selectedId,
+  pendingDecisions,
+  onWorkspaces,
+  currentNav,
+  createRequest = 0,
+}: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
@@ -47,6 +64,11 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
   // 各 Workspace 的生命週期；讀不到時不顯示設定，不假裝是預設值
   const [lifecycles, setLifecycles] = useState<WorkspaceLifecycleView[]>([]);
   const pathId = WORKSPACE_PATH_INPUT_ID;
+  const formId = useId();
+  // null：使用者還沒動過，依清單是否為空決定；之後依使用者的選擇
+  const [formChoice, setFormChoice] = useState<boolean | null>(null);
+  const pathRef = useRef<HTMLInputElement>(null);
+  const [focusPath, setFocusPath] = useState(false);
   // 系統的資料夾選擇對話框只有在 Tauri 視窗中可用；瀏覽器開發模式只能手動輸入
   const canBrowse = "__TAURI_INTERNALS__" in window;
 
@@ -81,6 +103,7 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
       const created = await client.createWorkspace({ path, name: name.trim() === "" ? undefined : name });
       setPath("");
       setName("");
+      setFormChoice(false);
       await refresh();
       onSelect?.(created);
     } catch (error) {
@@ -208,68 +231,110 @@ export function WorkspaceSidebar({ client, timeZone, onSelect, selectedId, pendi
 
   const active = list.state === "ready" ? list.workspaces.filter((w) => w.status === "active") : [];
   const keeps = distinctKeeps(active.map((w) => w.path));
+  const formOpen = formChoice ?? (list.state === "ready" && active.length === 0);
+
+  // 主區空狀態要求建立：展開表單，等表單出現後再聚焦目錄欄位
+  useEffect(() => {
+    if (createRequest <= 0) return;
+    setFormChoice(true);
+    setFocusPath(true);
+  }, [createRequest]);
+
+  useEffect(() => {
+    if (!focusPath || !formOpen) return;
+    pathRef.current?.focus();
+    setFocusPath(false);
+  }, [focusPath, formOpen]);
 
   return (
-    <aside className="sidebar" aria-labelledby="workspaces-title">
-      <h2 id="workspaces-title">Workspace</h2>
-      {list.state === "loading" && <p>載入中…</p>}
-      {list.state === "failed" && <p role="alert">無法取得 Workspace 清單：{list.reason}</p>}
-      {list.state === "ready" && active.length === 0 && <p className="sidebar-empty">還沒有 Workspace</p>}
+    <aside className="rail-workspaces" aria-labelledby="workspaces-title">
+      <div className="rail-section-head">
+        <h2 id="workspaces-title">Workspace</h2>
+        <button
+          type="button"
+          className="rail-add"
+          aria-label="新增 Workspace"
+          aria-expanded={formOpen}
+          aria-controls={formId}
+          onClick={() => setFormChoice(!formOpen)}
+        >
+          新增
+        </button>
+      </div>
+      {list.state === "loading" && <p className="rail-note">載入中…</p>}
+      {list.state === "failed" && (
+        <p className="rail-note" role="alert">
+          無法取得 Workspace 清單：{list.reason}
+        </p>
+      )}
+      {list.state === "ready" && active.length === 0 && <p className="rail-note sidebar-empty">還沒有 Workspace</p>}
       {active.length > 0 && (
         <ul className="workspace-list">
-          {active.map((workspace, index) => (
-            <li key={workspace.id} className={`workspace-item${workspace.id === selectedId ? " workspace-item-current" : ""}`}>
-              <div className="workspace-heading">
-                {/* 名稱最多 2 行；整個項目都可點選（按鈕的 ::after 蓋滿項目），完整名稱與路徑在 title */}
-                <button
-                  type="button"
-                  className="workspace-select"
-                  aria-label={`選擇 ${workspace.name}`}
-                  aria-current={workspace.id === selectedId ? true : undefined}
-                  title={`${workspace.name}
+          {active.map((workspace, index) => {
+            const current = workspace.id === selectedId;
+            return (
+              <li key={workspace.id} className={`workspace-item${current ? " workspace-item-current" : ""}`}>
+                <div className="workspace-heading">
+                  {/* 名稱最多 2 行；整列都可點選（按鈕的 ::after 蓋滿標題列），完整名稱與路徑在 title */}
+                  <button
+                    type="button"
+                    className="workspace-select"
+                    aria-label={`選擇 ${workspace.name}`}
+                    aria-current={current ? true : undefined}
+                    title={`${workspace.name}
 ${workspace.path}`}
-                  onClick={() => onSelect?.(workspace)}
-                >
-                  <span className="workspace-name clamp-2">{workspace.name}</span>
-                </button>
-                {manageMenu(workspace)}
-              </div>
-              <div className="workspace-meta">
-                {pendingBadge(pendingDecisions?.[workspace.id] ?? 0)}
-                {/* 窄時只截斷中段，開頭與結尾一定顯示；完整路徑在 title 與「管理」選單 */}
-                <PathText path={workspace.path} keep={keeps[index]} className="workspace-path" />
-              </div>
-              {pausedRow(workspace)}
-            </li>
-          ))}
+                    onClick={() => onSelect?.(workspace)}
+                  >
+                    <span className="workspace-name clamp-2">{workspace.name}</span>
+                  </button>
+                  {pendingBadge(pendingDecisions?.[workspace.id] ?? 0)}
+                  {manageMenu(workspace)}
+                </div>
+                <div className="workspace-meta">
+                  {/* 窄時只截斷中段，開頭與結尾一定顯示；完整路徑在 title 與「管理」選單 */}
+                  <PathText path={workspace.path} keep={keeps[index]} className="workspace-path" />
+                </div>
+                {pausedRow(workspace)}
+                {current && currentNav}
+              </li>
+            );
+          })}
         </ul>
       )}
-      <form className="workspace-form" onSubmit={(event) => void create(event)}>
-        <div className="workspace-path-field">
-          <label htmlFor={pathId}>目錄</label>
-          <div className="workspace-path-row">
-            <input
-              id={pathId}
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-              placeholder="C:\work\my-folder"
-            />
-            {canBrowse && (
-              <button type="button" disabled={busy} onClick={() => void browse()}>
-                瀏覽…
-              </button>
-            )}
+      {formOpen && (
+        <form id={formId} className="workspace-form" aria-label="新增 Workspace" onSubmit={(event) => void create(event)}>
+          <div className="workspace-path-field">
+            <label htmlFor={pathId}>目錄</label>
+            <div className="workspace-path-row">
+              <input
+                id={pathId}
+                ref={pathRef}
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                placeholder="C:\work\my-folder"
+              />
+              {canBrowse && (
+                <button type="button" disabled={busy} onClick={() => void browse()}>
+                  瀏覽…
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-        <label>
-          名稱（選填）
-          <input value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <button type="submit" disabled={busy}>
-          建立 Workspace
-        </button>
-        {formError && <p role="alert">{formError}</p>}
-      </form>
+          <label>
+            名稱（選填）
+            <input value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <button type="submit" disabled={busy}>
+            建立 Workspace
+          </button>
+          {formError && <p role="alert">{formError}</p>}
+        </form>
+      )}
+      {!formOpen && formError && (
+        <p className="rail-note" role="alert">
+          {formError}
+        </p>
+      )}
     </aside>
   );
 }
@@ -298,8 +363,8 @@ function distinctKeeps(paths: string[]): number[] {
 function pendingBadge(count: number) {
   if (count <= 0) return null;
   return (
-    <span className="badge badge-warning workspace-badge" aria-label={`待裁定 ${formatNumber(count)} 項`} title={`待裁定 ${formatNumber(count)}`}>
-      待裁定 {formatCount(count)}
+    <span className="workspace-badge" aria-label={`待裁定 ${formatNumber(count)} 項`} title={`待裁定 ${formatNumber(count)}`}>
+      {formatCount(count)}
     </span>
   );
 }

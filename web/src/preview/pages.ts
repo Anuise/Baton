@@ -7,9 +7,9 @@ export interface PreviewPage {
   id: string;
   /** 給人看的名稱（index.html 的分組標題）。 */
   label: string;
-  /** 所在頂層頁簽；首次啟動精靈全畫面時沒有頁簽。 */
-  top: "workspace" | "accounts" | "settings";
-  /** Workspace 頁簽內的頁面；為 null 時不選 Workspace（顯示「請從左側選擇」）。 */
+  /** 所在檢視：Workspace 的頁面，或跑道欄底部的平台頁面。 */
+  view: "workspace" | "accounts" | "shared" | "settings";
+  /** Workspace 的頁面；為 null 時不選 Workspace（顯示空狀態）。 */
   workspacePage?: string | null;
   /** 以沒有可派工帳號的資料呈現，讓首次啟動精靈以全畫面顯示。 */
   setup?: boolean;
@@ -18,22 +18,26 @@ export interface PreviewPage {
 }
 
 export const PREVIEW_PAGES: PreviewPage[] = [
-  { id: "setup", label: "首次啟動精靈", top: "workspace", setup: true },
-  { id: "workspace", label: "Workspace（未選擇）", top: "workspace", workspacePage: null },
-  { id: "controller", label: "Workspace／主控台", top: "workspace", workspacePage: "controller" },
-  { id: "tasks", label: "Workspace／工作", top: "workspace", workspacePage: "tasks" },
-  { id: "tasks-contract", label: "Workspace／工作（編輯契約）", top: "workspace", workspacePage: "tasks", click: ["更多", "編輯契約"] },
-  { id: "decisions", label: "Workspace／裁定", top: "workspace", workspacePage: "decisions" },
-  { id: "artifacts", label: "成果與品質／成果", top: "workspace", workspacePage: "artifacts" },
-  { id: "reviews", label: "成果與品質／審查", top: "workspace", workspacePage: "reviews" },
-  { id: "verification", label: "成果與品質／驗證", top: "workspace", workspacePage: "verification" },
-  { id: "exploration", label: "成果與品質／探索", top: "workspace", workspacePage: "exploration" },
-  { id: "knowledge", label: "更多／知識", top: "workspace", workspacePage: "knowledge" },
-  { id: "workflows", label: "更多／流程", top: "workspace", workspacePage: "workflows" },
-  { id: "timeline", label: "更多／時間線", top: "workspace", workspacePage: "timeline" },
-  { id: "authorization", label: "更多／授權", top: "workspace", workspacePage: "authorization" },
-  { id: "accounts", label: "帳號", top: "accounts" },
-  { id: "settings", label: "設定", top: "settings" },
+  { id: "setup", label: "首次啟動精靈", view: "workspace", setup: true },
+  { id: "workspace", label: "Workspace（未選擇）", view: "workspace", workspacePage: null },
+  { id: "controller", label: "進行／主控台", view: "workspace", workspacePage: "controller" },
+  { id: "tasks", label: "進行／工作", view: "workspace", workspacePage: "tasks" },
+  { id: "tasks-contract", label: "進行／工作（編輯契約）", view: "workspace", workspacePage: "tasks", click: ["更多", "編輯契約"] },
+  { id: "workflows", label: "進行／流程", view: "workspace", workspacePage: "workflows" },
+  { id: "decisions", label: "進行／裁定", view: "workspace", workspacePage: "decisions" },
+  { id: "timeline", label: "進行／時間線", view: "workspace", workspacePage: "timeline" },
+  { id: "artifacts", label: "成果／成果", view: "workspace", workspacePage: "artifacts" },
+  { id: "reviews", label: "成果／審查", view: "workspace", workspacePage: "reviews" },
+  { id: "verification", label: "成果／驗證", view: "workspace", workspacePage: "verification" },
+  { id: "exploration", label: "成果／探索", view: "workspace", workspacePage: "exploration" },
+  { id: "knowledge", label: "知識／知識", view: "workspace", workspacePage: "knowledge" },
+  { id: "understanding", label: "知識／專案理解", view: "workspace", workspacePage: "understanding" },
+  { id: "authorization", label: "規則／授權", view: "workspace", workspacePage: "authorization" },
+  { id: "authority", label: "規則／決策權限", view: "workspace", workspacePage: "authority" },
+  { id: "models", label: "規則／模型設定", view: "workspace", workspacePage: "models" },
+  { id: "accounts", label: "平台／帳號", view: "accounts" },
+  { id: "shared", label: "平台／共同設定", view: "shared" },
+  { id: "settings", label: "平台／設定", view: "settings" },
 ];
 
 export const PREVIEW_DATASETS = ["normal", "long"] as const;

@@ -134,8 +134,11 @@ describe("左側 Workspace 清單", () => {
     // 名稱預設取目錄名，與路徑的結尾同字，以選擇按鈕確認
     expect(await screen.findByRole("button", { name: "選擇 docs" })).toBeInTheDocument();
     expect(client.createWorkspace).toHaveBeenCalledWith({ path: "C:\\work\\docs", name: undefined });
-    expect(screen.getByLabelText("目錄")).toHaveValue("");
     expect(screen.queryByText("還沒有 Workspace")).not.toBeInTheDocument();
+    // 建立完成後表單收起；再次展開時是清空的
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "新增 Workspace" }));
+    expect(screen.getByLabelText("目錄")).toHaveValue("");
   });
 
   it("可以指定名稱", async () => {
@@ -316,47 +319,53 @@ describe("左側 Workspace 清單", () => {
     expect(trigger).toHaveFocus();
   });
 
-  it("展開的「管理」選單不被暫停列與下一個項目蓋住：浮層以項目定位，中間沒有層級較低的堆疊脈絡", async () => {
-    // jsdom 不排版，只能檢查決定蓋疊的樣式；實際點擊命中以 Playwright 探針驗證
-    // Vitest 會把 CSS 匯入（含 ?raw）換成空字串，專案也沒有 @types/node，所以以非字面的動態匯入讀檔
-    const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
-    const url: { fileURLToPath(url: string): string } = await import(/* @vite-ignore */ `node:${"url"}`);
-    const style = document.createElement("style");
-    // 相對於本檔解析，不依賴 cwd（從 repo 根目錄以 --root web 執行也讀得到）。
-    // import.meta.url 先放進變數：Vite 會把字面的 new URL("…", import.meta.url) 改寫成開發伺服器網址；
-    // jsdom 環境的全域 URL 也不是 Node 的 URL，fs 不收，所以轉成路徑字串
-    const here = import.meta.url;
-    style.textContent = fs.readFileSync(url.fileURLToPath(new URL("./styles/shell.css", here).href), "utf8");
-    document.head.append(style);
-    try {
-      const user = userEvent.setup();
-      const paused = { workspace_id: "ws_1", name: "筆記", awaiting_resume: true, paused_by: "full_exit" as const };
-      render(<WorkspaceSidebar client={fakeClient([workspace(), workspace({ id: "ws_2", name: "專案" })], [paused])} />);
+  it("已有 Workspace 時建立表單收起，按「新增」展開、再按收起；沒有 Workspace 時直接展開", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+    await screen.findByRole("button", { name: "選擇 筆記" });
+    const toggle = screen.getByRole("button", { name: "新增 Workspace" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
 
-      const item = (await screen.findByRole("button", { name: "繼續工作 筆記" })).closest("li")!;
-      await user.click(within(item).getByLabelText("管理 筆記"));
-      const panel = item.querySelector(".workspace-menu-panel")!;
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("form", { name: "新增 Workspace" })).toHaveAttribute("id", toggle.getAttribute("aria-controls"));
 
-      // 浮層與項目之間的祖先都不定位、不設 z-index：浮層的定位基準是整個項目（寬度以項目為上限），
-      // 它的 --z-popover 也不會被困在 z-index: 1 的選單裡、輸給同一項目的暫停列或下一個項目
-      for (let el = panel.parentElement!; el !== item; el = el.parentElement!) {
-        expect(getComputedStyle(el).position).toBe("static");
-        expect(getComputedStyle(el).zIndex).toMatch(/^(auto|)$/);
-      }
-      expect(getComputedStyle(item).position).toBe("relative");
-      expect(getComputedStyle(item).zIndex).toMatch(/^(auto|)$/);
-      expect(getComputedStyle(panel).zIndex).toBe("var(--z-popover)");
-      expect(getComputedStyle(item.querySelector(".workspace-paused")!).zIndex).toBe("1");
-    } finally {
-      style.remove();
-    }
+    await user.click(toggle);
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+    unmount();
+
+    render(<WorkspaceSidebar client={fakeClient()} />);
+    await screen.findByText("還沒有 Workspace");
+    expect(screen.getByLabelText("目錄")).toBeInTheDocument();
+  });
+
+  it("createRequest 改變時展開表單並聚焦目錄欄位", async () => {
+    const client = fakeClient([workspace()]);
+    const { rerender } = render(<WorkspaceSidebar client={client} createRequest={0} />);
+    await screen.findByRole("button", { name: "選擇 筆記" });
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+
+    rerender(<WorkspaceSidebar client={client} createRequest={1} />);
+
+    await waitFor(() => expect(screen.getByLabelText("目錄")).toHaveFocus());
+  });
+
+  it("選中的 Workspace 在項目內展開 currentNav，其他項目沒有", async () => {
+    const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "專案", path: "D:\proj" })]);
+    render(<WorkspaceSidebar client={client} selectedId="ws_2" currentNav={<nav aria-label="頁面" />} />);
+
+    const item = (await screen.findByRole("button", { name: "選擇 專案" })).closest("li")!;
+    expect(within(item).getByRole("navigation", { name: "頁面" })).toBeInTheDocument();
+    expect(screen.getAllByRole("navigation")).toHaveLength(1);
   });
 
   it("待裁定數超過 999 時徽章顯示 999+，完整數字在可存取名稱", async () => {
     render(<WorkspaceSidebar client={fakeClient([workspace()])} pendingDecisions={{ ws_1: 1284 }} />);
 
-    const badge = await screen.findByText("待裁定 999+");
+    const badge = await screen.findByText("999+");
     expect(badge).toHaveAttribute("aria-label", "待裁定 1,284 項");
+    expect(badge).toHaveAttribute("title", "待裁定 1,284");
   });
 
   it("讀到清單後把使用中的 Workspace 告訴上層，封存後再告知一次", async () => {
@@ -583,7 +592,8 @@ describe("左側 Workspace 清單", () => {
 
     await screen.findByText("專案");
 
-    expect(screen.getAllByText(/待裁定/)).toHaveLength(1);
-    expect(screen.getByText("待裁定 3")).toBeInTheDocument();
+    // 徽章只顯示數字，說明在可存取名稱
+    expect(screen.getAllByLabelText(/^待裁定/)).toHaveLength(1);
+    expect(screen.getByLabelText("待裁定 3 項")).toHaveTextContent("3");
   });
 });
