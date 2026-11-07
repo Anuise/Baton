@@ -119,6 +119,11 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 重現的要求者：desktop 是使用者本人，其餘是 Controller 那一輪的 Run 識別（原始值放在 title）。 */
+function requesterLabel(requestedBy: string): string {
+  return requestedBy === "desktop" ? "你" : "Controller";
+}
+
 /**
  * 探索（票 47）：唯讀檢視 Workspace 的疑點——依狀態分成已確認缺陷、疑點（未經重現）、未驗風險、已修復與已排除——
  * 和它們的重現紀錄；最下方是各探索 Task 的章程。疑點只有經過 Runtime 的重現才會出現在已確認缺陷。
@@ -383,8 +388,9 @@ function AttemptList({ finding, timeZone }: { finding: ExplorationFinding; timeZ
 
 function AttemptItem({ attempt, timeZone }: { attempt: ReproductionAttempt; timeZone?: string }) {
   const outcome = attempt.outcome ?? "queued";
-  // reason_code 不緊貼在判定徽章旁：有中文說明時接在徽章後（代碼在 title），代碼本身放在次要資訊的最後（MASTER 7.1）
+  // 判定已有中文徽章：reason_code 有中文說明時接在徽章後，代碼本身只放在 title，不當主要文字（MASTER 7.1）
   const reason = attempt.reason_code === undefined ? undefined : reasonLabel(attempt.reason_code);
+  const requester = requesterLabel(attempt.requested_by);
   return (
     <li aria-label={`驗證要求 ${attempt.request_id}`} className="exploration-attempt">
       <p className="exploration-attempt-head">
@@ -402,7 +408,7 @@ function AttemptItem({ attempt, timeZone }: { attempt: ReproductionAttempt; time
         </span>
         {attempt.verdict !== undefined && (
           <span>
-            案例判定：<VerdictBadge verdict={attempt.verdict} />
+            案例判定：<VerdictBadge verdict={attempt.verdict} code={attempt.reason_code} />
             {reason !== undefined && (
               <>
                 {" "}
@@ -418,15 +424,11 @@ function AttemptItem({ attempt, timeZone }: { attempt: ReproductionAttempt; time
             對照判定：<VerdictBadge verdict={attempt.control_verdict} />
           </span>
         )}
-        {attempt.verdict !== undefined && attempt.reason_code !== undefined && (
-          <span>
-            案例判定代碼 <code className="mono">{attempt.reason_code}</code>
-          </span>
-        )}
       </p>
       <p className="meta">
         <span>
-          {attempt.requested_by} 要求於 {formatTimestamp(attempt.created_at, timeZone)}
+          <span title={attempt.requested_by}>{requester}</span>
+          {requester === "Controller" && " "}於 {formatTimestamp(attempt.created_at, timeZone)} 要求
         </span>
         {attempt.finished_at !== undefined && <span>完成於 {formatTimestamp(attempt.finished_at, timeZone)}</span>}
       </p>

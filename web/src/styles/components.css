@@ -939,6 +939,11 @@
   margin-left: 0;
 }
 
+/* 只有「複製」時（沒有展開鈕），按鈕的內距抵銷掉，文字與內文左緣對齊 */
+.long-text-disclosure .long-text-actions > :first-child:not([aria-expanded]) {
+  margin-left: calc(var(--space-3) * -1);
+}
+
 .long-text-disclosure .long-text-actions > [aria-expanded] {
   min-height: 0;
   padding: 0;

@@ -151,12 +151,12 @@ describe("驗證", () => {
     renderPage(fakeClient(verificationOverview({ profile: null, proven_by: null, uncovered: [], bundles: [] })));
 
     expect(await screen.findByRole("region", { name: "現況" })).toHaveTextContent("還沒有 Verification Profile");
-    expect(screen.getByText("編輯 Profile 內容").closest("details")).toHaveAttribute("open");
+    expect(screen.getByText("編輯 Verification Profile 內容").closest("details")).toHaveAttribute("open");
     expect(screen.queryByRole("region", { name: "Feature Map" })).not.toBeInTheDocument();
-    expect(String((screen.getByLabelText("Profile 內容（JSON）") as HTMLTextAreaElement).value)).toContain(
+    expect(String((screen.getByLabelText("Verification Profile 內容（JSON）") as HTMLTextAreaElement).value)).toContain(
       '"representative": true',
     );
-    expect(region("要求執行驗證")).toHaveTextContent("發布 Profile 後才能要求執行驗證");
+    expect(region("要求執行驗證")).toHaveTextContent("發布 Verification Profile 後才能要求執行驗證");
     expect(screen.queryByRole("button", { name: "要求執行" })).not.toBeInTheDocument();
   });
 
@@ -165,19 +165,20 @@ describe("驗證", () => {
     const user = userEvent.setup();
     renderPage(client);
 
-    const editor = (await screen.findByText("編輯 Profile 內容")).closest("details")!;
+    const editor = (await screen.findByText("編輯 Verification Profile 內容")).closest("details")!;
     expect(editor).not.toHaveAttribute("open");
-    await user.click(screen.getByText("編輯 Profile 內容"));
+    await user.click(screen.getByText("編輯 Verification Profile 內容"));
     expect(editor).toHaveAttribute("open");
-    const textarea = screen.getByLabelText("Profile 內容（JSON）") as HTMLTextAreaElement;
+    const textarea = screen.getByLabelText("Verification Profile 內容（JSON）") as HTMLTextAreaElement;
     expect(JSON.parse(textarea.value)).toEqual(verificationProfileVersion().definition);
 
     await user.click(screen.getByRole("button", { name: "發布新版本" }));
 
     expect(client.publishVerificationProfile).toHaveBeenCalledWith("ws_1", verificationProfileVersion().definition);
-    expect(await within(region("發布新版本")).findByRole("status")).toHaveTextContent(
-      "已發布第 3 版；實際跑過並通過代表旅程後才算可用",
-    );
+    const result = await within(region("發布新版本")).findByRole("status");
+    expect(result).toHaveTextContent("已發布第 3 版；實際跑過並通過代表旅程後才算可用");
+    // 送出時按鈕停用、焦點跟著消失：焦點移到結果，不落到 body
+    await waitFor(() => expect(result).toHaveFocus());
     await waitFor(() => expect(client.verificationOverview).toHaveBeenCalledTimes(2));
   });
 
@@ -187,7 +188,7 @@ describe("驗證", () => {
     const user = userEvent.setup();
     renderPage(client);
 
-    await user.click(await screen.findByText("編輯 Profile 內容"));
+    await user.click(await screen.findByText("編輯 Verification Profile 內容"));
     await user.click(screen.getByRole("button", { name: "發布新版本" }));
 
     expect(await within(region("發布新版本")).findByRole("status")).toHaveTextContent("內容與第 2 版相同，沒有新增版本");
@@ -203,8 +204,8 @@ describe("驗證", () => {
 
     // 以貼上取代逐字輸入：逐字輸入一長串 JSON 在高負載下會超過每個測試 5 秒的上限，
     // 逾時後沒打完的按鍵還會打進下一個測試的輸入欄（review-notes 第 11 項）
-    await user.click(await screen.findByText("編輯 Profile 內容"));
-    const textarea = screen.getByLabelText("Profile 內容（JSON）");
+    await user.click(await screen.findByText("編輯 Verification Profile 內容"));
+    const textarea = screen.getByLabelText("Verification Profile 內容（JSON）");
     await user.clear(textarea);
     await user.paste("{不是 JSON");
     await user.click(screen.getByRole("button", { name: "發布新版本" }));
@@ -214,9 +215,13 @@ describe("驗證", () => {
     await user.clear(textarea);
     await user.paste('{"interface": "cli_api"}');
     await user.click(screen.getByRole("button", { name: "發布新版本" }));
-    expect(await within(region("發布新版本")).findByRole("alert")).toHaveTextContent(
-      "發布失敗：Verification Profile 不正確：至少要有一條代表旅程（verification_profile_invalid）",
+    await waitFor(() =>
+      expect(within(region("發布新版本")).getByRole("alert")).toHaveTextContent(
+        "發布失敗：Verification Profile 不正確：至少要有一條代表旅程（verification_profile_invalid）",
+      ),
     );
+    // 送出時按鈕停用、焦點跟著消失：焦點移到錯誤
+    await waitFor(() => expect(within(region("發布新版本")).getByRole("alert")).toHaveFocus());
     expect(client.publishVerificationProfile).toHaveBeenCalledWith("ws_1", { interface: "cli_api" });
   });
 
@@ -243,9 +248,15 @@ describe("驗證", () => {
     await user.click(within(run).getByRole("button", { name: "要求執行" }));
 
     expect(client.runVerification).toHaveBeenCalledWith("ws_1", { task_id: "task_1", journeys: ["export_flow"] });
-    expect(await within(run).findByRole("status")).toHaveTextContent(
-      "已排入：要求 vreq_2（Profile 第 2 版，旅程：冒煙測試、匯出報表）",
+    // 已排入的訊息說結果會出現在哪裡；驗證要求的識別碼只放在 title
+    const queued = await within(run).findByRole("status");
+    expect(queued).toHaveTextContent(
+      "已排入，結果會出現在「最近的 Evidence Bundle」。旅程：冒煙測試、匯出報表（Verification Profile 第 2 版）",
     );
+    expect(queued).not.toHaveTextContent("vreq_2");
+    expect(within(queued).getByText(/^已排入/)).toHaveAttribute("title", "驗證要求 vreq_2");
+    // 送出時按鈕停用、焦點跟著消失：焦點移到已排入的訊息
+    await waitFor(() => expect(queued).toHaveFocus());
     await waitFor(() => expect(client.verificationOverview).toHaveBeenCalledTimes(2));
   });
 
@@ -260,9 +271,9 @@ describe("驗證", () => {
     await user.click(await screen.findByRole("button", { name: "要求執行" }));
 
     expect(client.runVerification).toHaveBeenCalledWith("ws_1", { journeys: [] });
-    expect(await within(region("要求執行驗證")).findByRole("alert")).toHaveTextContent(
-      "無法要求執行：找不到 Task task_9（task_not_found）",
-    );
+    const failure = await within(region("要求執行驗證")).findByRole("alert");
+    expect(failure).toHaveTextContent("無法要求執行：找不到 Task task_9（task_not_found）");
+    await waitFor(() => expect(failure).toHaveFocus());
   });
 
   it("要求執行：讀不到 Task 清單時退回輸入 Task 識別碼，其他區段照常顯示", async () => {
@@ -290,14 +301,17 @@ describe("驗證", () => {
 
     const run = await screen.findByRole("region", { name: "要求執行驗證" });
     expect(run).toHaveTextContent("只執行不需模型的斷言與已驗證動作的重播，需要模型的步驟記為證據不足");
-    const noLiveModel = within(run).getByRole("checkbox", { name: "不呼叫模型（no_live_model）" });
+    // 設定鍵只放在 title，畫面與可存取名稱都是中文
+    const noLiveModel = within(run).getByRole("checkbox", { name: "不呼叫模型" });
+    expect(noLiveModel.closest("label")).toHaveAttribute("title", "no_live_model");
+    expect(run).not.toHaveTextContent("no_live_model");
     expect(noLiveModel).not.toBeChecked();
     await user.click(noLiveModel);
     await user.click(within(run).getByRole("button", { name: "要求執行" }));
 
     expect(client.runVerification).toHaveBeenCalledWith("ws_1", { journeys: [], no_live_model: true });
     expect(await within(run).findByRole("status")).toHaveTextContent(
-      "已排入：要求 vreq_2（Profile 第 2 版，旅程：冒煙測試、匯出報表；不呼叫模型）",
+      "已排入，結果會出現在「最近的 Evidence Bundle」。旅程：冒煙測試、匯出報表（Verification Profile 第 2 版；不呼叫模型）",
     );
   });
 
@@ -305,16 +319,20 @@ describe("驗證", () => {
     renderPage(fakeClient());
 
     const bundle = await screen.findByRole("region", { name: "Evidence Bundle vbun_1" });
-    // 沒有中文說明的 reason_code 不緊貼在判定徽章旁，列在細節的「判定代碼」
+    // 判定已有中文徽章：reason_code 不當主要文字，只放在徽章的 title（MASTER 7.1）
     expect(verdictLine(bundle)).toHaveTextContent(/^判定：通過$/);
-    expect(bundle).toHaveTextContent("判定代碼all_journeys_passed");
+    expect(within(verdictLine(bundle)).getByText("通過")).toHaveAttribute("title", "all_journeys_passed");
+    expect(bundle).not.toHaveTextContent("all_journeys_passed");
     expect(bundle).toHaveTextContent("tool 1.2.3");
     expect(bundle).toHaveTextContent("abc1234");
-    expect(bundle).toHaveTextContent("Task task_1 契約第 3 版");
-    expect(bundle).toHaveTextContent("Profile 版本第 2 版");
+    // 需求版本顯示 Task 標題，識別碼在 title
+    await waitFor(() => expect(bundle).toHaveTextContent("需求版本「修正匯出錯誤」契約第 3 版"));
+    expect(within(bundle).getByText("「修正匯出錯誤」")).toHaveAttribute("title", "task_1");
+    expect(bundle).not.toHaveTextContent("Task task_1");
+    expect(bundle).toHaveTextContent("Verification Profile第 2 版");
     const smoke = within(within(bundle).getByRole("list", { name: "旅程結果" })).getByRole("listitem", { name: "冒煙測試" });
-    expect(smoke.querySelector("p")).toHaveTextContent(/^冒煙測試（代表旅程）：通過$/);
-    expect(within(smoke).getByText("all_steps_passed").closest(".meta")).toHaveTextContent("判定代碼 all_steps_passed");
+    expect(smoke).toHaveTextContent(/^冒煙測試（代表旅程）：通過$/);
+    expect(within(smoke).getByText("通過")).toHaveAttribute("title", "all_steps_passed");
     expect(bundle).toHaveTextContent("覆蓋的功能：命令列");
     expect(within(bundle).getByRole("list", { name: "這次未覆蓋" })).toHaveTextContent("匯出：這次驗證沒有執行對應的旅程");
     expect(bundle).toHaveTextContent("清理已移除本次驗證的狀態目錄；證據已保留");
@@ -377,7 +395,9 @@ describe("驗證", () => {
       const card = region(`Evidence Bundle vbun_${index}`);
       const badge = within(card).getByText(VERDICT_LABELS[verdict], { selector: ".verification-bundle-verdict .verdict" });
       expect(badge).toHaveClass(`verdict-${verdict}`);
-      expect(card).toHaveTextContent(`r_${verdict}`);
+      // 判定代碼只在徽章的 title
+      expect(badge).toHaveAttribute("title", `r_${verdict}`);
+      expect(card).not.toHaveTextContent(`r_${verdict}`);
     });
     expect(document.querySelectorAll(".verification-bundle-verdict .verdict-passed")).toHaveLength(1);
     // 最新的一份直接展開，較舊的內容收進預設收合的「詳細內容」
@@ -468,7 +488,8 @@ describe("驗證", () => {
     const journeys = within(card).getByRole("list", { name: "旅程結果" });
     const orders = within(journeys).getByRole("listitem", { name: "管理訂單" });
     expect(orders.querySelector("p")).toHaveTextContent(/^管理訂單（代表旅程）：證據不足 模型限流，無法判定，不是產品缺陷$/);
-    expect(orders).toHaveTextContent("判定代碼 judge_rate_limited");
+    expect(orders).not.toHaveTextContent("judge_rate_limited");
+    expect(within(orders).getByText("證據不足")).toHaveAttribute("title", "judge_rate_limited");
     expect(within(orders).getByText("persona：店家管理員（admin）")).toBeInTheDocument();
     expect(within(orders).getByText("登入身分：櫃台人員（clerk）")).toBeInTheDocument();
     const browse = within(journeys).getByRole("listitem", { name: "瀏覽商品" });
@@ -560,6 +581,8 @@ describe("驗證", () => {
     const link = await within(video).findByRole("link", { name: "下載 browse.webm" });
     expect(link).toHaveAttribute("href", "data:video/webm;base64,GkXf");
     expect(link).toHaveAttribute("download", "browse.webm");
+    // 按鈕換成下載連結：焦點移到連結
+    expect(link).toHaveFocus();
 
     const shot = within(files).getByRole("listitem", { name: "截圖：open_orders.png" });
     expect(shot).toHaveTextContent("截圖 open_orders.png");
@@ -568,10 +591,10 @@ describe("驗證", () => {
     expect(within(shot).queryByRole("img")).not.toBeInTheDocument();
     await user.click(within(shot).getByRole("button", { name: "開啟截圖" }));
     expect(client.evidenceArtifact).toHaveBeenLastCalledWith("ws_1", "vbun_web", 0);
-    expect(await within(shot).findByRole("img", { name: "截圖：open_orders.png" })).toHaveAttribute(
-      "src",
-      "data:image/png;base64,iVBORw==",
-    );
+    const image = await within(shot).findByRole("img", { name: "截圖：open_orders.png" });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,iVBORw==");
+    // 按鈕換成截圖：焦點移到截圖
+    expect(image).toHaveFocus();
     expect(client.evidenceArtifact).toHaveBeenCalledTimes(2);
   });
 
@@ -590,6 +613,8 @@ describe("驗證", () => {
       "無法讀取：找不到這個證據（evidence_artifact_not_found）",
     );
     expect(within(shot).queryByRole("img")).not.toBeInTheDocument();
+    // 讀取中按鈕停用；失敗後焦點回到按鈕
+    expect(within(shot).getByRole("button", { name: "開啟截圖" })).toHaveFocus();
 
     expect(within(region("Evidence Bundle vbun_1")).queryByRole("list", { name: "證據檔案" })).not.toBeInTheDocument();
   });
@@ -613,15 +638,15 @@ describe("驗證", () => {
       "重播：重播的動作 1 個（不呼叫模型）",
     );
     expect(within(usage).getByRole("listitem", { name: "擋下的模型呼叫" })).toHaveTextContent(
-      "no_live_model 擋下的模型呼叫 0 次",
+      "因不呼叫模型而擋下的模型呼叫 0 次",
     );
-    expect(card).not.toHaveTextContent("禁止即時模型");
+    expect(card).not.toHaveTextContent("這次驗證設定為不呼叫模型");
     unmount();
 
     renderPage(fakeClient());
     const old = await screen.findByRole("region", { name: "Evidence Bundle vbun_1" });
     expect(within(old).getByRole("list", { name: "用量" })).toHaveTextContent(
-      "即時：模型呼叫 0 次、模型決定的動作 0 個重播：重播的動作 0 個（不呼叫模型）no_live_model 擋下的模型呼叫 0 次",
+      "即時：模型呼叫 0 次、模型決定的動作 0 個重播：重播的動作 0 個（不呼叫模型）因不呼叫模型而擋下的模型呼叫 0 次",
     );
     expect(within(old).queryByRole("table", { name: "目標導向動作" })).not.toBeInTheDocument();
   });
@@ -695,12 +720,14 @@ describe("驗證", () => {
     renderPage(fakeClient(replayOverview(bundle)));
 
     const card = await screen.findByRole("region", { name: "Evidence Bundle vbun_replay" });
-    expect(card).toHaveTextContent("這次驗證禁止即時模型（no_live_model）");
+    // 設定鍵 no_live_model 只放在 title，畫面用中文
+    expect(within(card).getByText("這次驗證設定為不呼叫模型")).toHaveAttribute("title", "no_live_model");
     const usage = within(card).getByRole("list", { name: "用量" });
     expect(within(usage).getByRole("listitem", { name: "即時" })).toHaveTextContent("模型呼叫 0 次");
-    expect(within(usage).getByRole("listitem", { name: "擋下的模型呼叫" })).toHaveTextContent(
-      "no_live_model 擋下的模型呼叫 2 次",
-    );
+    const blocked = within(usage).getByRole("listitem", { name: "擋下的模型呼叫" });
+    expect(blocked).toHaveTextContent("因不呼叫模型而擋下的模型呼叫 2 次");
+    expect(blocked).toHaveAttribute("title", "no_live_model");
+    expect(usage).not.toHaveTextContent("no_live_model");
     const row = within(within(card).getByRole("table", { name: "目標導向動作" })).getAllByRole("row")[1];
     expect(row).toHaveTextContent("瀏覽商品／add_to_cart");
     expect(row).toHaveTextContent("未執行");
@@ -709,7 +736,7 @@ describe("驗證", () => {
 
     await openSteps(user, card, 1);
     const step = within(card).getByRole("listitem", { name: "旅程：開啟訂單頁" });
-    expect(step).toHaveTextContent("證據不足 這次驗證不呼叫模型（no_live_model），無法判定，不是產品缺陷");
+    expect(step).toHaveTextContent("證據不足 這次驗證不呼叫模型，無法判定，不是產品缺陷");
     expect(step).toHaveTextContent("判定代碼 live_model_disabled");
     expect(step).toHaveTextContent("引擎代碼 model:disabled");
     expect(within(step).getByRole("list", { name: "斷言結果" })).toHaveTextContent(
@@ -738,9 +765,10 @@ describe("驗證", () => {
     expect(first).toHaveTextContent("語意判斷帳號prof_a");
     expect(first).toHaveTextContent("結果採用自這次的旅程瀏覽商品");
     expect(first).toHaveTextContent("完成的步驟2 個");
-    expect(within(first).getByRole("list", { name: "第 1 次嘗試的步驟" })).toHaveTextContent(
-      "旅程 管理訂單／open_orders：通過 判定代碼 assertions_passed",
-    );
+    const firstSteps = within(first).getByRole("list", { name: "第 1 次嘗試的步驟" });
+    expect(firstSteps).toHaveTextContent("旅程 管理訂單／open_orders：通過");
+    expect(firstSteps).not.toHaveTextContent("assertions_passed");
+    expect(within(firstSteps).getAllByText("通過")[0]).toHaveAttribute("title", "assertions_passed");
     expect(within(first).queryByRole("group", { name: "第 1 次嘗試的承接" })).not.toBeInTheDocument();
 
     const second = within(attempts).getByRole("listitem", { name: "第 2 次嘗試" });

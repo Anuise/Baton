@@ -24,8 +24,9 @@ function fakeClient(list: ReviewList = reviewList()) {
 const renderPage = (client: ReturnType<typeof fakeClient>) =>
   render(<ReviewPage client={client} workspace={workspace} timeZone="Asia/Taipei" />);
 
-const PASSED = "修正匯出錯誤（candidate e4f5a6b）";
-const FAILING = "修正匯出錯誤（candidate 9c8d7e6）";
+// 標題第二行的候選版本與卡片內「版本」欄位同一個說法（不用 candidate）
+const PASSED = "修正匯出錯誤（候選版本 e4f5a6b）";
+const FAILING = "修正匯出錯誤（候選版本 9c8d7e6）";
 
 /** 「已過期的審查 N」的收合摘要（計數只放數字，不加括號）。 */
 async function staleSummary(count = 1) {
@@ -156,7 +157,8 @@ describe("審查", () => {
       ),
     );
 
-    const review = await screen.findByRole("region", { name: "修正匯出錯誤（candidate e3b0c44298fc…）" });
+    const review = await screen.findByRole("region", { name: "修正匯出錯誤（候選版本 e3b0c44298fc…）" });
+    expect(within(review).getByText("e3b0c44298fc…", { selector: "h4 code" })).toHaveClass("mono");
     expect(within(review).getByText("996fb92427ae…", { selector: "dd code" })).toHaveAttribute("title", base);
     expect(within(review).getByText("e3b0c44298fc…", { selector: "dd code" })).toHaveAttribute("title", candidate);
     // 兩個「複製雜湊」以欄位名區分

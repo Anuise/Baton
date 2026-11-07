@@ -145,9 +145,36 @@ describe("帳號頁", () => {
 
     const item = (await screen.findByText("被覆蓋的帳號")).closest("li")!;
     expect(within(item).getByText("已阻擋派工")).toBeInTheDocument();
-    expect(within(item).getByText(/API key（ANTHROPIC_API_KEY）/, { selector: ".profile-source" })).toBeInTheDocument();
+    expect(fact(item, "認證來源")).toHaveTextContent(/^API key（ANTHROPIC_API_KEY）$/);
+    // 短的認證來源不附複製
+    expect(within(fact(item, "認證來源")!).queryByRole("button")).not.toBeInTheDocument();
     expect(within(item).getByRole("alert")).toHaveTextContent("已阻擋派工");
     expect(within(item).queryByText("可派工")).not.toBeInTheDocument();
+  });
+
+  it("認證來源的說明帶長路徑時只佔一行：完整值在 title，另附「複製認證來源」", async () => {
+    const detail = "ANTHROPIC_API_KEY 由 C:\\Users\\me\\AppData\\Roaming\\deeply\\nested\\settings.json 設定";
+    const long = profile({
+      ...overridden,
+      verification: { ...overridden.verification!, source_detail: detail },
+    });
+    render(<AccountsPage client={fakeClient([long])} />);
+
+    const item = (await screen.findByText("被覆蓋的帳號")).closest("li")!;
+    const value = within(fact(item, "認證來源")!).getByTitle(`API key（${detail}）`);
+    expect(value).toHaveClass("truncate");
+    expect(within(fact(item, "認證來源")!).getByRole("button", { name: "複製認證來源" })).toBeInTheDocument();
+  });
+
+  it("「在終端機登入」是列內動作，未登入時也不是主要按鈕（下一步由狀態徽章表達）", async () => {
+    const unverified = profile({ id: "prof_9", name: "新帳號", verification: null, dispatchable: false, blockers: [] });
+    render(<AccountsPage client={fakeClient([unverified, overridden])} />);
+    await screen.findByText("新帳號");
+
+    for (const name of ["新帳號", "被覆蓋的帳號"]) {
+      expect(screen.getByRole("button", { name: `在終端機登入 ${name}` })).not.toHaveClass("btn-primary");
+    }
+    expect(within(screen.getByText("新帳號").closest("li")!).getByText("尚未核對")).toHaveClass("badge-warning");
   });
 
   it("核對結果顯示 Claude Code 版本；版本過舊時照常顯示後端的阻擋原因，取不到版本時不顯示版本", async () => {
@@ -340,6 +367,32 @@ describe("帳號頁", () => {
     await waitFor(() => expect(addToggle()).toBeEnabled());
     expect(submitButton(true)).toBeEnabled();
     expect(screen.getByText("7 / 8")).toBeInTheDocument();
+  });
+
+  it("封存後焦點不掉到 body：移到下一張卡片的「更多」，沒有下一張時移到上一張，全部封存後移到新增表單的名稱", async () => {
+    const client = fakeClient([
+      profile({ id: "prof_a", name: "甲" }),
+      profile({ id: "prof_b", name: "乙" }),
+      profile({ id: "prof_c", name: "丙" }),
+    ]);
+    const user = userEvent.setup();
+    render(<AccountsPage client={client} />);
+    await screen.findByText("甲");
+
+    const archive = async (name: string) => {
+      await user.click(screen.getByLabelText(`更多（${name}）`));
+      await user.click(screen.getByRole("button", { name: `封存 ${name}` }));
+      await waitFor(() => expect(screen.queryByText(name)).not.toBeInTheDocument());
+    };
+
+    await archive("乙");
+    expect(screen.getByLabelText("更多（丙）")).toHaveFocus();
+
+    await archive("丙");
+    expect(screen.getByLabelText("更多（甲）")).toHaveFocus();
+
+    await archive("甲");
+    expect(within(createForm()).getByLabelText("名稱")).toHaveFocus();
   });
 
   describe("以既有目錄建立帳號", () => {
@@ -1020,6 +1073,9 @@ describe("帳號頁", () => {
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-paused");
+      // 項目多、窄時會折成好幾行：長警示（只有色條與狀態詞上色），不是淡底提示
+      expect(gate).toHaveClass("notice", "notice-warning");
+      expect(gate).not.toHaveClass("callout");
       expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：停止派工");
       expect(within(gate).getByText(/^原因/)).toHaveTextContent("原因：達 75% 停止派工門檻（當時用量 78%）");
       expect(within(gate).getByText("回到 60% 以下或重置後才恢復派工")).toBeInTheDocument();
@@ -1045,6 +1101,7 @@ describe("帳號頁", () => {
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-draining");
+      expect(gate).toHaveClass("notice", "notice-danger");
       expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：交接中（draining）");
       expect(within(gate).getByText(/^原因/)).toHaveTextContent(/^原因：Claude Code 回報限流警告$/);
       expect(within(gate).getByText("回到 60% 以下或重置後才恢復派工")).toBeInTheDocument();
@@ -1076,6 +1133,7 @@ describe("帳號頁", () => {
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-open");
+      expect(gate).not.toHaveClass("notice");
       expect(gate).toHaveTextContent(/^額度門檻：可派工$/);
     });
 

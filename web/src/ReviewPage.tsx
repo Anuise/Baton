@@ -161,7 +161,7 @@ function ReviewCard({ review, timeZone }: { review: ReviewView; timeZone?: strin
             {subject}
           </span>
           <span className="review-candidate">
-            （candidate <code className="mono">{shortHash(review.candidate_revision)}</code>）
+            （候選版本 <code className="mono">{shortHash(review.candidate_revision)}</code>）
           </span>
         </h4>
         <span className={`badge badge-${overall.tone} review-overall`}>{overall.label}</span>

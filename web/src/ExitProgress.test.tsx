@@ -258,7 +258,8 @@ describe("完全退出進度", () => {
     await emitFullExit();
     await settle();
 
-    expect(screen.getByRole("alert")).toHaveTextContent("無法開始完全退出：Runtime 未回應");
+    expect(screen.getByRole("alert")).toHaveClass("notice", "notice-danger");
+    expect(screen.getByRole("alert")).toHaveTextContent(/^無法開始完全退出Runtime 未回應$/);
     await settle(2000);
     expect(client.quitApp).not.toHaveBeenCalled();
 
@@ -269,6 +270,22 @@ describe("完全退出進度", () => {
 
     expect(client.requestFullExit).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("dialog")).toHaveTextContent("停止中");
+  });
+
+  it("失敗原因很長時只完整顯示第一句，其餘收進預設收合的「詳細資訊」", async () => {
+    const { client, emitFullExit } = fakeClient(stopping());
+    client.requestFullExit.mockRejectedValueOnce(
+      new Error("Runtime 未回應。named pipe \\\\.\\pipe\\baton-runtime 在 5 秒內沒有回覆 request_full_exit。"),
+    );
+    render(<ExitProgress client={client} />);
+    await emitFullExit();
+    await settle();
+
+    const alert = screen.getByRole("alert");
+    expect(within(alert).getByText("Runtime 未回應。")).toBeVisible();
+    const details = within(alert).getByText("詳細資訊").closest("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(details).toHaveTextContent("named pipe");
   });
 
   it("Runtime 接手停止後取消殼的後備強制關閉，之後由畫面決定何時結束 App", async () => {

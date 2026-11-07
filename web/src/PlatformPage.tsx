@@ -56,18 +56,18 @@ export function PlatformPage({ client }: Props) {
         <p>Windows 版本與支援判定；非正式支援只會警告，不會阻擋使用、派工、交接或恢復。</p>
       </div>
       {page.state === "loading" && <p className="empty-note">平台檢查中…</p>}
-      {page.state === "failed" && <p className="callout callout-danger">無法取得平台狀態：{page.reason}</p>}
+      {page.state === "failed" && <PlatformNotice tone="danger" title="無法取得平台狀態" message={page.reason} />}
       {page.state === "ready" && <PlatformDetails platform={page.platform} />}
     </section>
   );
 }
 
-/** 一則平台警告：長警示（只有色條與狀態詞上色）；第一句完整顯示，其餘收進「詳細資訊」。 */
-function PlatformWarning({ message }: { message: string }) {
+/** 平台警告或讀取失敗：長警示（只有色條與狀態詞上色）；第一句完整顯示，其餘收進「詳細資訊」。 */
+function PlatformNotice({ tone, title, message }: { tone: "warning" | "danger"; title: string; message: string }) {
   const { summary, rest } = splitFirstSentence(message);
   return (
-    <div role="alert" className="notice notice-warning platform-warning">
-      <p className="notice-title">平台警告</p>
+    <div role="alert" className={`notice notice-${tone}`}>
+      <p className="notice-title">{title}</p>
       <p>{summary}</p>
       {rest !== "" && (
         <details>
@@ -84,7 +84,7 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
   return (
     <>
       {assessment.issues.map((issue) => (
-        <PlatformWarning key={issue.code} message={issue.message} />
+        <PlatformNotice key={issue.code} tone="warning" title="平台警告" message={issue.message} />
       ))}
       <div className="panel">
         <dl className="facts platform-facts">

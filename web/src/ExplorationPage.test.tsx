@@ -219,9 +219,10 @@ describe("探索", () => {
     expect(purpose(attempts[1])).toBe("確認重現");
     expect(outcome(attempts[1])).toHaveTextContent(/^證據不足（不是產品缺陷）$/);
     expect(attempts[1]).toHaveTextContent("Bundle evb_12");
-    // 沒有中文說明的 reason_code 不緊貼在判定徽章旁，放在次要資訊的最後
-    expect(attempts[1]).toHaveTextContent("案例判定：環境阻礙對照判定：環境阻礙案例判定代碼 service_unreachable");
-    expect(within(attempts[1]).getByText("service_unreachable")).toHaveClass("mono");
+    // 判定已有中文徽章：reason_code 不當主要文字，只放在案例判定徽章的 title（MASTER 7.1）
+    expect(attempts[1]).toHaveTextContent("案例判定：環境阻礙對照判定：環境阻礙");
+    expect(attempts[1]).not.toHaveTextContent("service_unreachable");
+    expect(within(attempts[1]).getAllByText("環境阻礙", { selector: ".verdict" })[0]).toHaveAttribute("title", "service_unreachable");
 
     const regressed = screen.getByRole("region", { name: "運費重複計算" });
     const history = within(within(regressed).getByRole("list", { name: "運費重複計算 的重現紀錄" })).getAllByRole("listitem", {
@@ -235,7 +236,8 @@ describe("探索", () => {
     // 缺陷仍在是紅色，修好了是綠色
     expect(outcome(history[0])).toHaveClass("badge-danger");
     expect(outcome(history[1])).toHaveClass("badge-success");
-    expect(history[2]).toHaveTextContent("案例判定：產品缺陷對照判定：通過案例判定代碼 assertion_failed");
+    expect(history[2]).toHaveTextContent("案例判定：產品缺陷對照判定：通過");
+    expect(history[2]).not.toHaveTextContent("assertion_failed");
 
     const outcomes = (name: string) =>
       within(screen.getByRole("region", { name }))
@@ -258,7 +260,7 @@ describe("探索", () => {
     expect(design).toHaveTextContent("排除理由產品規則是一次只能用一個折扣碼");
   });
 
-  it("有中文說明的 reason_code 接在案例判定後顯示說明，代碼在 title 與次要資訊", async () => {
+  it("有中文說明的 reason_code 接在案例判定後顯示說明，代碼只在 title", async () => {
     renderPage(
       fakeClient(
         explorationOverview({
@@ -276,7 +278,34 @@ describe("探索", () => {
     const attempt = await screen.findByRole("listitem", { name: "驗證要求 vreq_71" });
     expect(attempt).toHaveTextContent("案例判定：證據不足 模型限流，無法判定，不是產品缺陷");
     expect(within(attempt).getByText("模型限流，無法判定，不是產品缺陷")).toHaveAttribute("title", "judge_rate_limited");
-    expect(attempt).toHaveTextContent("案例判定代碼 judge_rate_limited");
+    expect(attempt).not.toHaveTextContent("judge_rate_limited");
+  });
+
+  it("重現的要求者用使用者語言：desktop 是「你」、Controller 的 Run 是「Controller」，原始值在 title", async () => {
+    renderPage(
+      fakeClient(
+        explorationOverview({
+          findings: [
+            explorationFinding({
+              id: "xf_7",
+              title: "結帳按鈕沒反應",
+              attempts: [
+                reproductionAttempt({ finding_id: "xf_7", request_id: "vreq_72", requested_by: "desktop" }),
+                reproductionAttempt({ finding_id: "xf_7", request_id: "vreq_71", requested_by: "crun_1" }),
+              ],
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const mine = await screen.findByRole("listitem", { name: "驗證要求 vreq_72" });
+    expect(mine).toHaveTextContent("你於 2023/11/15 06:13 要求");
+    expect(within(mine).getByText("你")).toHaveAttribute("title", "desktop");
+    const controller = screen.getByRole("listitem", { name: "驗證要求 vreq_71" });
+    expect(controller).toHaveTextContent("Controller 於 2023/11/15 06:13 要求");
+    expect(within(controller).getByText("Controller")).toHaveAttribute("title", "crun_1");
+    expect(controller).not.toHaveTextContent("crun_1");
   });
 
   it("seed data 與工具限制的排除原因各有標示", async () => {

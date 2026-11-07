@@ -98,6 +98,14 @@ function itemLabel(item: UnderstandingItemView): string | null {
   return BRIEF_KEY_LABELS[item.key.trim().toLowerCase().replace(/[\s-]+/g, "_")] ?? null;
 }
 
+/**
+ * 沒有中文名稱對照、寫成英文代碼的 Brief 鍵（只含 ASCII）：標題就是原始鍵，依 MASTER 7.1 機器代碼以等寬次要色顯示。
+ * 用中文寫的鍵本身就是名稱，照一般標題顯示。
+ */
+function isUnlabeledBriefCode(item: UnderstandingItemView): boolean {
+  return item.section === "brief" && itemLabel(item) === null && /^[\x20-\x7e]+$/.test(item.key);
+}
+
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -245,14 +253,16 @@ function ItemSection({ title, items, timeZone }: { title: string; items: Underst
       {items.length > 0 && (
         <ul className="row-list">
           {items.map((item) => {
-            // Brief 段落以中文名稱當標題，Controller 寫的原始鍵以等寬次要色附在旁邊（MASTER 7.1 機器代碼）
+            // Brief 段落以中文名稱當標題，Controller 寫的原始鍵以等寬次要色附在旁邊（MASTER 7.1 機器代碼）；
+            // 沒有對照的英文代碼鍵直接當標題，但同樣等寬、次要色、不加粗
             const label = itemLabel(item);
+            const keyClass = isUnlabeledBriefCode(item) ? "understanding-key understanding-key-code mono" : "understanding-key";
             const name = label === null ? item.key : `${label}（${item.key}）`;
             return (
               <li key={item.id} aria-label={name} className={`understanding-item understanding-${item.status}`}>
                 {/* 名稱在左、狀態徽章在右；需要重新查驗的另加一個徽章 */}
                 <div className="row-head">
-                  <span className="understanding-key">
+                  <span className={keyClass}>
                     {label ?? item.key}
                     {label !== null && <span className="understanding-raw-key mono">{item.key}</span>}
                   </span>

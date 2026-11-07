@@ -64,7 +64,7 @@ async fn a_controller_cli_opened_from_the_controller_tab_runs_and_ends() {
     browser.wait_visible(&[page.clone(), role("button", "結束中…")]).await;
     harness.supervise().await;
     browser.wait_visible(&[page.clone(), exact_text("已結束")]).await;
-    browser.wait_visible(&[page.clone(), text("結束原因：")]).await;
+    browser.wait_visible(&[page.clone(), exact_text("結束原因")]).await;
     browser.wait_visible(&[page.clone(), role("button", "開啟 Controller")]).await;
 
     // 5. 佐證：宿主已被停止、不再存活；Run 已結束；沒有開出第二個視窗

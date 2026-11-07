@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { platformStatusLabel } from "./PlatformPage";
-import { splitFirstSentence } from "./textFormat";
+import { formatNumber, splitFirstSentence } from "./textFormat";
 import type {
   AccountClient,
   DecisionClient,
@@ -100,11 +100,11 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
         </span>
       )}
       {status.state === "running" && usableAccounts !== null && (
-        <span className="status status-accounts">可用帳號：{usableAccounts}</span>
+        <span className="status status-accounts">可用帳號：{formatNumber(usableAccounts)}</span>
       )}
       {status.state === "running" && pending !== null && (
         <span className={`status status-decisions${pending.pending_count > 0 ? " status-decisions-pending" : ""}`}>
-          待裁定：{pending.pending_count}
+          待裁定：{formatNumber(pending.pending_count)}
         </span>
       )}
       {/* 恢復事件未結束時固定顯示（spec D-21）；已恢復就不再佔位 */}

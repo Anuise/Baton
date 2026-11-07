@@ -108,7 +108,7 @@ describe("專案理解", () => {
     expect(item("產品目標（purpose）")).not.toHaveTextContent("需重新查驗");
   });
 
-  it("Project Brief 的段落以中文名稱當標題、原始鍵以等寬字附在旁邊；不認得的鍵與其他文件的名稱照原樣顯示", async () => {
+  it("Project Brief 的段落以中文名稱當標題、原始鍵以等寬字附在旁邊；不認得的英文代碼鍵以等寬字當標題，中文鍵與其他文件的名稱照原樣顯示", async () => {
     const hypothesis = { status: "hypothesis" as const, sources: [] };
     renderPage(
       fakeClient(
@@ -117,6 +117,7 @@ describe("專案理解", () => {
             understandingItem(),
             understandingItem({ id: "und_6", key: "Success-Criteria", text: "每天都會用", ...hypothesis }),
             understandingItem({ id: "und_7", key: "產品定位", text: "個人工具", ...hypothesis }),
+            understandingItem({ id: "und_9", key: "deployment_notes", text: "只在本機執行", ...hypothesis }),
             understandingItem({ id: "und_8", section: "glossary", key: "users", text: "使用筆記的人", ...hypothesis }),
           ],
         }),
@@ -129,8 +130,13 @@ describe("專案理解", () => {
     expect(within(purpose).getByText("purpose")).toHaveClass("mono");
     // 大小寫與連字號不影響對照
     expect(item("成功條件（Success-Criteria）")).toBeInTheDocument();
-    // 不認得的鍵照原樣顯示，不附原始鍵
+    // 不認得的中文鍵本身就是名稱：照一般標題顯示，不附原始鍵
     expect(item("產品定位").querySelector(".understanding-key")).toHaveTextContent(/^產品定位$/);
+    expect(item("產品定位").querySelector(".understanding-key")).not.toHaveClass("mono");
+    // 不認得的英文代碼鍵：標題就是原始鍵，以等寬字標示是機器代碼（MASTER 7.1）
+    const code = item("deployment_notes").querySelector(".understanding-key");
+    expect(code).toHaveTextContent(/^deployment_notes$/);
+    expect(code).toHaveClass("mono", "understanding-key-code");
     // Glossary 的名詞不是段落名稱，不轉換
     expect(within(section("Glossary")).getByRole("listitem", { name: "users" })).toBeInTheDocument();
   });

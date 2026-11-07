@@ -25,12 +25,12 @@
 }
 
 /* 長警示（.notice）裡收合的「詳細資訊」：與正文同寬 */
-:is(.accounts-page, .platform-page) .notice details > p {
+:is(.accounts-page, .platform-page, .update-confirm, .exit-progress) .notice details > p {
   margin-top: var(--space-2);
   max-inline-size: var(--measure);
 }
 
-:is(.accounts-page, .platform-page) .notice details > summary {
+:is(.accounts-page, .platform-page, .update-confirm, .exit-progress) .notice details > summary {
   width: fit-content;
 }
 
@@ -280,7 +280,7 @@
   color: var(--color-text-muted);
 }
 
-/* 額度門檻：可派工是一行次要資訊（.meta）；停止派工或交接中是提示（.callout），項目同列、放不下時整項換行 */
+/* 額度門檻：可派工是一行次要資訊（.meta）；停止派工或交接中是長警示（.notice），項目同列、放不下時整項換行 */
 .profile-gate {
   display: flex;
   flex-wrap: wrap;
@@ -291,6 +291,11 @@
 
 .profile-gate strong {
   color: var(--color-text);
+}
+
+/* 長警示的狀態詞（「額度門檻：停止派工」）整段同一個語意色 */
+.profile-gate > .notice-title strong {
+  color: inherit;
 }
 
 .account-quota {
@@ -482,8 +487,17 @@
 /* ---------- 備份與還原演練 ---------- */
 
 .backup-settings .panel > h4,
-.backup-drill-head > h4 {
+.backup-drill-head > h4,
+.backup-list-head > h4 {
   font-size: var(--text-title-sm);
+}
+
+/* 備份清單的標題列：標題＋計數（計數在標題元素外，MASTER 7.1） */
+.backup-list-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  align-items: baseline;
 }
 
 .backup-drill-head {
@@ -626,6 +640,22 @@
 
 .update-confirm::backdrop {
   background: var(--color-overlay);
+}
+
+/* 下載並驗證中：外觀同 :disabled，但不設 disabled（焦點才不會落到 body），hover 也不變色 */
+.update-confirm .dialog-actions > button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.update-confirm .dialog-actions > button[aria-disabled="true"]:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+}
+
+.update-confirm .dialog-actions > .btn-primary[aria-disabled="true"]:hover {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
 }
 
 .update-steps {

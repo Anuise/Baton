@@ -46,8 +46,8 @@ describe("備份與還原演練", () => {
     ).toBeInTheDocument();
   });
 
-  it("最新一次演練通過時，顯示演練時間、被演練的備份時間、各項核對與中斷的 Run 數", async () => {
-    renderSettings(fakeClient(backupStatus({ latest_drill: drillReport({ interrupted_runs: 2 }) })));
+  it("最新一次演練通過時，顯示演練時間、被演練的備份時間、各項核對與中斷的 Run 數（千分位）", async () => {
+    renderSettings(fakeClient(backupStatus({ latest_drill: drillReport({ interrupted_runs: 1234 }) })));
 
     expect(await screen.findByText("還原演練通過")).toBeInTheDocument();
     expect(fact("演練時間")).toBe("演練時間：2023/11/15 07:13");
@@ -60,7 +60,7 @@ describe("備份與還原演練", () => {
       ["成果檔案雜湊", "通過", "2 個成果檔案的 SHA-256 都相符"],
       ["成果與資料庫的對應", "通過", "成果版本都對得上檔案"],
     ]);
-    expect(fact("還原時標為中斷的 Run")).toBe("還原時標為中斷的 Run：2 個（還原後不會自動重做）");
+    expect(fact("還原時標為中斷的 Run")).toBe("還原時標為中斷的 Run：1,234 個（還原後不會自動重做）");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -141,14 +141,14 @@ describe("備份與還原演練", () => {
     expect(screen.queryByRole("list", { name: "核對項目" })).not.toBeInTheDocument();
   });
 
-  it("依 Runtime 的順序列出備份的時間、觸發原因、成果檔案數與保留原因", async () => {
+  it("依 Runtime 的順序列出備份的時間、觸發原因、成果檔案數（千分位）與保留原因；計數在標題外", async () => {
     const backups = [
       backupSummary({ id: "b4", trigger: "pre_update", created_at: CHECKED_AT + 10_800_000, artifact_count: 1, retained_as: [] }),
       backupSummary({
         id: "b3",
         trigger: "milestone",
         created_at: CHECKED_AT + 7_200_000,
-        artifact_count: 5,
+        artifact_count: 12345,
         retained_as: [],
       }),
       backupSummary({
@@ -163,11 +163,14 @@ describe("備份與還原演練", () => {
     renderSettings(fakeClient(backupStatus({ backups })));
 
     await screen.findByRole("table", { name: "備份清單" });
+    // 計數不在標題裡（MASTER 7.1）：標題的名稱只有「備份清單」，旁邊的計數是 4
+    const heading = screen.getByRole("heading", { name: "備份清單" });
+    expect(heading.parentElement!.querySelector(".count")).toHaveTextContent(/^4$/);
     const headers = within(screen.getByRole("table", { name: "備份清單" })).getAllByRole("columnheader");
     expect(headers.map((th) => th.textContent)).toEqual(["建立時間", "觸發原因", "成果檔案", "保留原因"]);
     expect(backupRows()).toEqual([
       ["2023/11/15 09:13", "更新前", "1 個", ""],
-      ["2023/11/15 08:13", "重要裁定／Stage 完成", "5 個", ""],
+      ["2023/11/15 08:13", "重要裁定／Stage 完成", "12,345 個", ""],
       ["2023/11/15 07:13", "migration 前", "0 個", "最新的 migration 前備份"],
       ["2023/11/15 06:13", "每日", "2 個", "每日、每週"],
     ]);

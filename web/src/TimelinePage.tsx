@@ -112,6 +112,61 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   controller_cli_rebound: "Controller CLI 重新綁定",
 };
 
+/**
+ * 每階段用量的階段名稱（MASTER 7.1）：Runtime 回報的是 Stage key，這裡對照內建 Playbook 的 Stage 名稱
+ * （crates/baton-domain/src/workflow/builtin.rs）。同一個 key 在不同 Playbook 名稱不同時用共通的說法；
+ * 沒有對照的 key（自訂 Playbook）才顯示原始代碼。
+ */
+const STAGE_LABELS: Record<string, string> = {
+  // 需求仍模糊
+  read_current_state: "閱讀現況",
+  sharp_questions: "尖銳問題與情境",
+  research_prototype: "研究／原型",
+  decision: "裁定",
+  update_brief: "更新 Brief 與詞彙",
+  // 新功能
+  requirements_contract: "需求契約",
+  design: "設計",
+  slicing: "垂直切片與依賴",
+  tests_and_implementation: "行為測試及實作",
+  real_interface_verification: "真實介面驗證",
+  independent_review: "獨立審查",
+  integration: "整合",
+  // 缺陷處理（reproduction 也出現在探索測試，名稱是「重現確認」）
+  reproduction: "重現",
+  minimization: "最小化",
+  hypothesis: "可否證假說",
+  probe: "探測",
+  fix: "修復",
+  regression_verification: "原案例與回歸驗證",
+  // 遷移（current_state 在需求仍模糊時叫「閱讀現況」）
+  current_state: "現況",
+  alternatives: "替代設計",
+  impact: "影響範圍",
+  verifiable_units: "可驗證單位",
+  migrate: "遷移",
+  contract_check: "契約核對",
+  remove_old_path: "刪除舊路徑",
+  // 效能
+  metrics_and_load: "定義指標及代表負載",
+  baseline: "基線",
+  hypothesis_experiment: "假說與實驗",
+  comparison: "同條件比較",
+  explanation: "解釋變化",
+  repeatable_measurement: "保留可重跑量測",
+  // 調查與研究
+  question: "明確問題",
+  sources_experiments: "一手來源／實驗",
+  evidence_uncertainty: "證據與不確定性",
+  conclusion: "結論或裁定",
+  // 探索測試
+  charter: "劃分探索章程與角色",
+  isolated_execution: "隔離執行",
+  collect_suspicions: "收集疑點",
+  triage: "排除環境與預期行為",
+  fix_and_regression: "修復及回歸",
+};
+
 /** 事件類型的中文名稱；沒有對照時為 null。 */
 function eventTypeLabel(eventType: string): string | null {
   return Object.hasOwn(EVENT_TYPE_LABELS, eventType) ? EVENT_TYPE_LABELS[eventType] : null;
@@ -274,11 +329,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
           {metrics.state === "ready" && <p>由 {metrics.value.metrics.events} 個時間線事件計算</p>}
         </div>
         {metrics.state === "loading" && <p className="empty-note">載入中…</p>}
-        {metrics.state === "failed" && (
-          <p className="callout callout-danger" role="alert">
-            無法取得觀測指標：{metrics.reason}
-          </p>
-        )}
+        {metrics.state === "failed" && <ErrorNotice title="無法取得觀測指標" reason={metrics.reason} />}
         {metrics.state === "ready" && <MetricsView metrics={metrics.value.metrics} quotas={metrics.value.server_quota} />}
       </section>
 
@@ -318,11 +369,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
           </label>
         </div>
         {timeline.state === "loading" && <p className="empty-note">載入中…</p>}
-        {timeline.state === "failed" && (
-          <p className="callout callout-danger" role="alert">
-            無法取得時間線：{timeline.reason}
-          </p>
-        )}
+        {timeline.state === "failed" && <ErrorNotice title="無法取得時間線" reason={timeline.reason} />}
         {timeline.state === "ready" && timeline.value.length === 0 && (
           <p className="empty-note">{taskId === null ? "這個 Workspace 還沒有事件" : "這個 Task 沒有事件"}</p>
         )}
@@ -378,6 +425,16 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
         )}
       </section>
     </section>
+  );
+}
+
+/** 讀取失敗（Runtime 的說明可能超過兩行，MASTER 7：`.notice`）。 */
+function ErrorNotice({ title, reason }: { title: string; reason: string }) {
+  return (
+    <div className="notice notice-danger" role="alert">
+      <p className="notice-title">{title}</p>
+      <p>{reason}</p>
+    </div>
   );
 }
 
@@ -480,6 +537,13 @@ function ControllerEventFacts({ event, profileLabel }: { event: TimelineEvent; p
   );
 }
 
+/** 階段名稱：中文名稱為主要文字（key 在 title）；沒有對照時顯示 key（等寬、次要色）；null 是未分階段。 */
+function StageName({ stage }: { stage: string | null }) {
+  if (stage === null) return <>未分階段</>;
+  if (!Object.hasOwn(STAGE_LABELS, stage)) return <code className="mono timeline-stage-code">{stage}</code>;
+  return <span title={stage}>{STAGE_LABELS[stage]}</span>;
+}
+
 /** 一項指標：標題與數值，以 group 讓輔助技術與測試能依名稱找到。 */
 function Metric({ name, children }: { name: string; children: ReactNode }) {
   return (
@@ -547,7 +611,7 @@ function MetricsView({ metrics, quotas }: { metrics: Metrics; quotas: ServerQuot
           <dd className="timeline-metric-stages">
             {usage.by_stage.map((stage) => (
               <span key={stage.stage ?? ""} className="timeline-metric-stage">
-                {stage.stage ?? "未分階段"}：{tokens(stage.tokens)}（{stage.runs} 個 Run）
+                <StageName stage={stage.stage} />：{tokens(stage.tokens)}（{stage.runs} 個 Run）
               </span>
             ))}
           </dd>

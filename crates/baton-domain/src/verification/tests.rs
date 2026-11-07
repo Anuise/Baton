@@ -276,7 +276,7 @@ fn artifact_check_verifies_presence_manifest_integrity_and_declared_hash() {
     assert_eq!(judge(&any, observe(None, None)).status, CheckStatus::Failed);
     assert_eq!(judge(&any, observe(Some(entry.clone()), None)).status, CheckStatus::Failed);
     let tampered = judge(&any, observe(Some(entry.clone()), Some(b"abd")));
-    assert!(tampered.status == CheckStatus::Failed && tampered.detail.contains("manifest 不符"), "{}", tampered.detail);
+    assert!(tampered.status == CheckStatus::Failed && tampered.detail.contains("雜湊不符"), "{}", tampered.detail);
     let pinned = artifact_check("r.md", Some(&"0".repeat(64)));
     assert_eq!(judge(&pinned, observe(Some(entry), Some(b"abc"))).status, CheckStatus::Failed);
 }

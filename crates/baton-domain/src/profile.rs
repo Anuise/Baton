@@ -340,13 +340,13 @@ pub enum ProfileError {
     NameTaken(String),
     #[error("預期帳號必須是電子郵件（例如 name@example.com）：{0}")]
     ExpectedAccountInvalid(String),
-    #[error("最多只能有 {MAX_PROFILES} 個帳號 Profile（目前已有 {MAX_PROFILES} 個）。請先封存用不到的 Profile，再新增")]
+    #[error("最多只能有 {MAX_PROFILES} 個帳號（目前已有 {MAX_PROFILES} 個）。請先封存用不到的帳號，再新增")]
     LimitReached,
     #[error("設定目錄 {0} 與其他 Profile 的設定目錄相同或互相包含；每個 Profile 必須有獨立的設定目錄")]
     ConfigDirShared(String),
     #[error(r"設定目錄必須是完整的絕對路徑（例如 C:\Users\me\.claude-Work-3）：{0}")]
     ConfigDirInvalid(String),
-    #[error("設定目錄 {0} 與平台資料目錄的 profiles 重疊；平台建立的設定目錄請用「新增 Profile」")]
+    #[error("設定目錄 {0} 與平台資料目錄的 profiles 重疊；平台建立的設定目錄請用「新增帳號」")]
     ConfigDirManaged(String),
     #[error("找不到 Profile {0}")]
     NotFound(String),

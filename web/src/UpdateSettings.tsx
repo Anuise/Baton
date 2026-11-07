@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import type { UpdateClient, UpdateStatusView } from "./runtimeClient";
 import { formatTimestamp } from "./time";
@@ -15,15 +15,19 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 依檢查結果說明目前狀態。 */
-function statusText(view: UpdateStatusView): string {
+/** 依檢查結果說明目前狀態；版本號用等寬字（MASTER 7.1）。 */
+function statusText(view: UpdateStatusView): ReactNode {
   switch (view.status) {
     case "unconfigured":
       return "未設定更新來源（這個版本不會自動檢查）";
     case "up_to_date":
       return "已是最新版本";
     case "available":
-      return `有新版本 ${view.available?.version ?? ""}`;
+      return (
+        <>
+          有新版本 <span className="mono">{view.available?.version ?? ""}</span>
+        </>
+      );
     case "failed":
       return `檢查失敗：${view.error ?? "原因不明"}（明天再試）`;
     case "not_checked":

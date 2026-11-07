@@ -52,4 +52,40 @@ describe("更多選單", () => {
 
     expect(details).not.toHaveAttribute("open");
   });
+
+  it("用 Tab 把焦點移出浮層時收起，不搬動焦點", async () => {
+    const user = userEvent.setup();
+    render(
+      <div>
+        <MoreMenu ariaLabel="更多（條目甲）">
+          <button type="button" className="btn-quiet">修正</button>
+        </MoreMenu>
+        <button type="button">下一個</button>
+      </div>,
+    );
+    const summary = screen.getByLabelText("更多（條目甲）");
+    const details = summary.closest("details")!;
+
+    await user.click(summary);
+    await user.tab();
+    expect(screen.getByRole("button", { name: "修正" })).toHaveFocus();
+    await user.tab();
+
+    expect(screen.getByRole("button", { name: "下一個" })).toHaveFocus();
+    expect(details).not.toHaveAttribute("open");
+  });
+
+  it("焦點在頁面別處時按 Esc 不會把焦點搶回觸發鈕", async () => {
+    const user = userEvent.setup();
+    const { container } = renderMenu();
+    const details = container.querySelector("details")!;
+
+    await user.click(screen.getByLabelText("更多（條目甲）"));
+    // 程式把焦點移到別處（不經過 focusout 的 relatedTarget 判斷時選單仍開著）
+    details.open = true;
+    screen.getByRole("button", { name: "外面" }).focus();
+    await user.keyboard("{Escape}");
+
+    expect(screen.getByRole("button", { name: "外面" })).toHaveFocus();
+  });
 });

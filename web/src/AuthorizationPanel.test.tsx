@@ -435,7 +435,14 @@ describe("Workspace 授權", () => {
     it("列出沿用舊授權的 Run：Task 標題、revision、被撤銷的能力與准入時間", async () => {
       const client = fakeClient(revisions, [
         legacy(),
-        legacy({ run_id: "run_2", task_id: "task_2", task_title: "部署網站", status: "starting", revoked_capabilities: ["deploy"] }),
+        // production_data 不在這個 Workspace 的能力清單裡：找不到名稱
+        legacy({
+          run_id: "run_2",
+          task_id: "task_2",
+          task_title: "部署網站",
+          status: "starting",
+          revoked_capabilities: ["deploy", "production_data"],
+        }),
       ]);
       await renderPanel(client);
 
@@ -448,6 +455,9 @@ describe("Workspace 授權", () => {
       expect(items[0]).toHaveTextContent("編輯檔案、部署");
       expect(items[0]).toHaveTextContent("2023/11/14 22:13");
       expect(items[1]).toHaveTextContent("部署網站");
+      // 找不到能力名稱時才顯示原始代碼，並以等寬字標示（MASTER 7.1 機器代碼）
+      expect(items[1]).toHaveTextContent("已撤銷：部署、production_data");
+      expect(within(items[1]).getByText("production_data")).toHaveClass("mono");
     });
 
     it("按「暫停」停止這個 Run，完成後重新載入並顯示等待程序確認", async () => {
@@ -491,6 +501,10 @@ describe("Workspace 授權", () => {
       expect(within(item).getByRole("button", { name: "暫停" })).toBeDisabled();
       expect(within(item).getByRole("button", { name: "取消" })).toBeDisabled();
       expect(item).toHaveTextContent("已要求停止，等待程序確認");
+      // 系統自己在等：中性點，不用琥珀色（MASTER 7.1）
+      const waiting = within(item).getByText("已要求停止，等待程序確認");
+      expect(waiting).toHaveClass("dot");
+      expect(waiting).not.toHaveClass("dot-warning");
     });
 
     it("沒有沿用舊授權的 Run 時不顯示提示", async () => {

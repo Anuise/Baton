@@ -8,7 +8,7 @@ import type {
   DrillReport,
   RetentionReason,
 } from "./runtimeClient";
-import { splitFirstSentence } from "./textFormat";
+import { formatNumber, splitFirstSentence } from "./textFormat";
 import { formatTimestamp } from "./time";
 
 type StatusState = { state: "loading" } | { state: "ready"; status: BackupStatus } | { state: "failed"; reason: string };
@@ -81,9 +81,11 @@ export function BackupSettings({ client, timeZone }: Props) {
             </div>
           )}
           <div className="panel backup-list">
-            <h4>
-              備份清單 <span className="count">{loaded.status.backups.length}</span>
-            </h4>
+            {/* 計數放在標題外（MASTER 7.1），標題的可存取名稱只有「備份清單」 */}
+            <div className="backup-list-head">
+              <h4>備份清單</h4>
+              <span className="count">{formatNumber(loaded.status.backups.length)}</span>
+            </div>
             {loaded.status.backups.length === 0 ? (
               <p className="empty-note">尚無備份</p>
             ) : (
@@ -104,7 +106,7 @@ export function BackupSettings({ client, timeZone }: Props) {
                       <tr key={backup.id}>
                         <td className="tabular">{formatTimestamp(backup.created_at, timeZone)}</td>
                         <td>{TRIGGER_LABELS[backup.trigger]}</td>
-                        <td className="num">{backup.artifact_count} 個</td>
+                        <td className="num">{formatNumber(backup.artifact_count)} 個</td>
                         <td>{backup.retained_as.map((reason) => RETENTION_LABELS[reason]).join("、")}</td>
                       </tr>
                     ))}
@@ -140,7 +142,7 @@ function Drill({ drill, timeZone }: { drill: DrillReport; timeZone?: string }) {
           {drill.backup_created_at === null ? "沒有可演練的備份" : formatTimestamp(drill.backup_created_at, timeZone)}
         </dd>
         <dt>還原時標為中斷的 Run</dt>
-        <dd>{drill.interrupted_runs} 個（還原後不會自動重做）</dd>
+        <dd>{formatNumber(drill.interrupted_runs)} 個（還原後不會自動重做）</dd>
       </dl>
       <ul className="backup-checks" aria-label="核對項目">
         {/* 結果是徽章，說明維持一般文字。長說明只留摘要，其餘收進「技術細節」 */}

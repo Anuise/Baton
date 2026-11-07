@@ -135,6 +135,32 @@ describe("時間線", () => {
     expect(quotaCells("Work-1")).toEqual(["Work-1", "42%", "10%"]);
   });
 
+  it("每階段用量顯示 Stage 的中文名稱（key 在 title）；沒有對照的 key 才顯示代碼（等寬）", async () => {
+    renderPage(
+      fakeClient({
+        metricsValue: metricsResponse({
+          metrics: metrics({
+            usage: {
+              total_tokens: 3000,
+              runs: 4,
+              by_stage: [
+                { stage: "tests_and_implementation", tokens: 2000, runs: 3 },
+                { stage: "custom_stage", tokens: 1000, runs: 1 },
+              ],
+            },
+          }),
+        }),
+      }),
+    );
+
+    const usage = await screen.findByRole("group", { name: "每階段用量" });
+    expect(usage).toHaveTextContent("行為測試及實作：2,000 tokens（3 個 Run）");
+    expect(usage).not.toHaveTextContent("tests_and_implementation");
+    expect(within(usage).getByText("行為測試及實作")).toHaveAttribute("title", "tests_and_implementation");
+    expect(within(usage).getByText("custom_stage")).toHaveClass("mono");
+    expect(usage).toHaveTextContent("custom_stage：1,000 tokens（1 個 Run）");
+  });
+
   it("沒有資料的比率、耗時與 Context 顯示「無資料」而不是 0；沒有 Stage 顯示「未分階段」", async () => {
     const empty = { numerator: 0, denominator: 0, rate: null };
     const noDuration = { count: 0, pending: 0, average_ms: null, max_ms: null };
@@ -530,8 +556,16 @@ describe("時間線", () => {
     });
     renderPage(client);
 
-    expect(await screen.findByText("無法取得時間線：找不到 Workspace：ws_1")).toHaveAttribute("role", "alert");
-    expect(await screen.findByText("無法取得觀測指標：Runtime 拒絕連線")).toHaveAttribute("role", "alert");
+    // Runtime 的說明可能超過兩行：用長警示（.notice），狀態詞＋說明
+    const notice = async (title: string) => (await screen.findByText(title, { selector: ".notice-title" })).closest(".notice");
+    const timelineError = await notice("無法取得時間線");
+    expect(timelineError).toHaveAttribute("role", "alert");
+    expect(timelineError).toHaveClass("notice-danger");
+    expect(timelineError).toHaveTextContent("找不到 Workspace：ws_1");
+    const metricsError = await notice("無法取得觀測指標");
+    expect(metricsError).toHaveAttribute("role", "alert");
+    expect(metricsError).toHaveClass("notice-danger");
+    expect(metricsError).toHaveTextContent("Runtime 拒絕連線");
   });
 
   it("過濾的 Task 被 Runtime 拒絕時顯示它的說明", async () => {
@@ -542,6 +576,8 @@ describe("時間線", () => {
 
     await user.selectOptions(screen.getByLabelText("依 Task 過濾"), "整理筆記");
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得時間線：找不到 Task：task_1");
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("無法取得時間線")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("找不到 Task：task_1");
   });
 });

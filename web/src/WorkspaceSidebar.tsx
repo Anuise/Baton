@@ -22,7 +22,7 @@ interface Props {
   pendingDecisions?: Record<string, number>;
   /** 每次讀到清單後告知上層目前使用中的 Workspace（例如封存後選中的 Workspace 已不在清單）。 */
   onWorkspaces?: (workspaces: Workspace[]) => void;
-  /** 選中的 Workspace 展開時放在它下面的內容（App 放這個 Workspace 的頁面導覽）。 */
+  /** 選中的 Workspace 的頁面導覽；放在整份清單之後（App 提供）。 */
   currentNav?: ReactNode;
   /** 值改變（大於 0）時展開建立表單並聚焦目錄欄位（主區空狀態的「新增 Workspace」）。 */
   createRequest?: number;
@@ -44,7 +44,7 @@ export const WORKSPACE_PATH_INPUT_ID = "workspace-path-input";
 
 /**
  * 跑道欄上的 Workspace 清單與建立表單（spec D-21）。只列出使用中的 Workspace，
- * 選中的那一個展開 `currentNav`（它的頁面）；各自的完全退出後與跨登入自動續跑設定收在「管理」。
+ * 清單之後放選中的 Workspace 的頁面（`currentNav`）；各自的完全退出後與跨登入自動續跑設定收在「管理」。
  * 建立表單平時收起，按「新增」展開；還沒有任何 Workspace 時直接展開。
  */
 export function WorkspaceSidebar({
@@ -136,12 +136,18 @@ export function WorkspaceSidebar({
 
   const archive = async (workspace: Workspace) => {
     setFormError(null);
+    // 封存後這一項（連同聚焦中的按鈕）會消失：焦點移到相鄰的 Workspace（優先下一個），沒有其他項目時移到目錄欄位
+    const remaining = active.filter((item) => item.id !== workspace.id);
+    const index = active.findIndex((item) => item.id === workspace.id);
+    const neighbor = remaining[Math.min(index, remaining.length - 1)] ?? null;
     try {
       await client.archiveWorkspace(workspace.id);
       setConfirmArchive(null);
       // 回到「依清單決定」：封存最後一個 Workspace 後建立表單自動展開
       setFormChoice(null);
       await refresh();
+      if (neighbor) setFocusId(neighbor.id);
+      else setFocusPath(true);
     } catch (error) {
       setFormError(reasonOf(error));
     }
@@ -198,7 +204,7 @@ export function WorkspaceSidebar({
   const manageMenu = (workspace: Workspace) => {
     const lifecycle = lifecycles.find((view) => view.workspace_id === workspace.id);
     return (
-      <WorkspaceMenu label={`管理 ${workspace.name}`}>
+      <WorkspaceMenu label={`管理 ${workspace.name}`} onClose={() => setConfirmArchive((id) => (id === workspace.id ? null : id))}>
         <span className="workspace-created">建立於 {formatTimestamp(workspace.created_at, timeZone)}</span>
         {/* 完整路徑：清單只放縮短形式，這裡是不靠 title 的完整取得方式 */}
         <div className="workspace-menu-path">
@@ -236,7 +242,7 @@ export function WorkspaceSidebar({
         {/* 封存要再確認一次：封存後從清單移除、無法在 App 中復原 */}
         {confirmArchive === workspace.id ? (
           <div className="workspace-archive-confirm" role="group" aria-label={`確認封存 ${workspace.name}`}>
-            <p>封存後這個 Workspace 會從清單移除，資料與目錄保留。</p>
+            <p>封存後這個 Workspace 會從清單移除，無法在 App 中復原；資料與目錄保留。同一個目錄可以重新新增，但會是新的 Workspace。</p>
             <div className="workspace-archive-actions">
               <button
                 type="button"
@@ -296,7 +302,8 @@ export function WorkspaceSidebar({
           className="rail-add"
           aria-label="新增 Workspace"
           aria-expanded={formOpen}
-          aria-controls={formId}
+          // 表單收起時不在 DOM 中，只在展開時指向它
+          aria-controls={formOpen ? formId : undefined}
           onClick={() => setFormChoice(!formOpen)}
         >
           新增
@@ -329,15 +336,15 @@ ${workspace.path}`}
                   >
                     <span className="workspace-name clamp-2">{workspace.name}</span>
                   </button>
-                  {pendingBadge(pendingDecisions?.[workspace.id] ?? 0)}
                   {manageMenu(workspace)}
                 </div>
+                {/* 路徑與待裁定數同一行：名稱拿滿寬，不被徽章擠窄 */}
                 <div className="workspace-meta">
                   {/* 窄時只截斷中段，開頭與結尾一定顯示；完整路徑在 title 與「管理」選單 */}
                   <PathText path={workspace.path} keep={keeps[index]} className="workspace-path" />
+                  {pendingBadge(pendingDecisions?.[workspace.id] ?? 0)}
                 </div>
                 {pausedRow(workspace)}
-                {current && currentNav}
               </li>
             );
           })}
@@ -377,6 +384,8 @@ ${workspace.path}`}
           {formError}
         </p>
       )}
+      {/* 選中的 Workspace 的頁面放在整份清單之後：其他 Workspace 與它們的待裁定數永遠在上方看得到 */}
+      {selectedId !== null && active.some((workspace) => workspace.id === selectedId) && currentNav}
     </aside>
   );
 }
@@ -412,10 +421,19 @@ function pendingBadge(count: number) {
   );
 }
 
-/** 清單項目的「管理」選單（`<details>` 浮層）：Esc 或點選單外面時收起，Esc 後焦點回到觸發按鈕（useDetailsDismiss）。 */
-function WorkspaceMenu({ label, children }: { label: string; children: ReactNode }) {
+/**
+ * 清單項目的「管理」選單（`<details>` 浮層）：Esc、點選單外面或 Tab 離開時收起，Esc 後焦點回到觸發按鈕
+ * （useDetailsDismiss）。展開時若浮層落在跑道欄可視範圍外（例如最後一個 Workspace），把它捲進來。
+ */
+function WorkspaceMenu({ label, onClose, children }: { label: string; onClose?: () => void; children: ReactNode }) {
   const ref = useRef<HTMLDetailsElement>(null);
-  const onToggle = useDetailsDismiss(ref);
+  const dismiss = useDetailsDismiss(ref, onClose);
+  const onToggle = (event: React.SyntheticEvent<HTMLDetailsElement>) => {
+    dismiss(event);
+    if (event.currentTarget.open) {
+      event.currentTarget.querySelector(".workspace-menu-panel")?.scrollIntoView?.({ block: "nearest" });
+    }
+  };
   return (
     <details ref={ref} className="workspace-menu" onToggle={onToggle}>
       <summary className="workspace-menu-trigger" aria-label={label} title="管理">

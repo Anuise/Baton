@@ -116,17 +116,27 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   const addId = useId();
   const nameId = useId();
   const expectedId = useId();
-  // 新增成功、表單收起後要聚焦的帳號；焦點移到它卡片上的「在終端機登入」，不掉到 body（WCAG 2.4.3）
-  const [focusProfileId, setFocusProfileId] = useState<string | null>(null);
+  // 卡片增減後要聚焦的位置，不讓焦點掉到 body（WCAG 2.4.3）：
+  // 新增成功、表單收起後是新帳號的「在終端機登入」；封存後是相鄰帳號的「更多」；沒有帳號可聚焦時為 null（回到新增）
+  const [focusTarget, setFocusTarget] = useState<{ profileId: string | null; control: "login" | "more" } | null>(null);
   const loginButtons = useRef(new Map<string, HTMLButtonElement>());
+  const cards = useRef(new Map<string, HTMLLIElement>());
   const addToggleRef = useRef<HTMLButtonElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (focusProfileId === null) return;
-    // 新帳號不在清單上（例如重新讀取失敗）時，至少回到「新增帳號」
-    (loginButtons.current.get(focusProfileId) ?? addToggleRef.current)?.focus();
-    setFocusProfileId(null);
-  }, [focusProfileId, list]);
+    if (focusTarget === null) return;
+    const { profileId, control } = focusTarget;
+    const target =
+      profileId === null
+        ? null
+        : control === "login"
+          ? loginButtons.current.get(profileId)
+          : cards.current.get(profileId)?.querySelector<HTMLElement>(".more-menu > summary");
+    // 目標不在清單上（例如重新讀取失敗）時，至少回到「新增帳號」；沒有帳號時它不顯示，改到新增表單的名稱欄
+    (target ?? addToggleRef.current ?? nameRef.current)?.focus();
+    setFocusTarget(null);
+  }, [focusTarget, list]);
 
   const loadOverview = useCallback(async () => {
     if (!client.schedulingOverview) return;
@@ -189,7 +199,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       // 新帳號出現在清單上，下一步是在它的卡片上登入；表單收起，焦點移到它的「在終端機登入」
       setAdding(false);
       await refresh();
-      setFocusProfileId(created.id);
+      setFocusTarget({ profileId: created.id, control: "login" });
       onChange?.();
     } catch (error) {
       // 保留輸入，讓使用者修正後重送
@@ -204,7 +214,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
     const created = await client.createProfileFromExistingDir(request);
     setAdding(false);
     await refresh();
-    setFocusProfileId(created.id);
+    setFocusTarget({ profileId: created.id, control: "login" });
     onChange?.();
   };
 
@@ -232,7 +242,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
     }
   };
 
-  /** 執行一個針對單一 Profile 的動作；失敗時顯示 Runtime 的說明，清單維持原樣。 */
+  /** 執行一個針對單一 Profile 的動作；失敗時顯示 Runtime 的說明，清單維持原樣。回傳是否成功。 */
   const act = async (work: () => Promise<unknown>, notice: string | null = null) => {
     setActionError(null);
     setTerminalNotice(null);
@@ -241,8 +251,18 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       setTerminalNotice(notice);
       await refresh();
       onChange?.();
+      return true;
     } catch (error) {
       setActionError(reasonOf(error));
+      return false;
+    }
+  };
+
+  /** 封存第 `index` 個帳號；成功後卡片消失，焦點移到下一張（沒有就上一張）卡片的「更多」。 */
+  const archive = async (index: number) => {
+    const neighbor = active[index + 1] ?? active[index - 1] ?? null;
+    if (await act(() => client.archiveProfile(active[index].id))) {
+      setFocusTarget({ profileId: neighbor?.id ?? null, control: "more" });
     }
   };
 
@@ -307,7 +327,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
           </header>
           <div className="field">
             <label htmlFor={nameId}>名稱</label>
-            <input id={nameId} value={name} onChange={(e) => setName(e.target.value)} />
+            <input ref={nameRef} id={nameId} value={name} onChange={(e) => setName(e.target.value)} />
           </div>
           <div className="field">
             <label htmlFor={expectedId}>預期帳號（選填）</label>
@@ -337,6 +357,10 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
           {active.map((profile, index) => (
             <li
               key={profile.id}
+              ref={(node) => {
+                if (node) cards.current.set(profile.id, node);
+                else cards.current.delete(profile.id);
+              }}
               className={`card account-card${profile.dispatchable ? "" : ` stripe-${profileTone(profile)}`}`}
             >
               <div className="account-head">
@@ -353,8 +377,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                       else loginButtons.current.delete(profile.id);
                     }}
                     type="button"
-                    // 還沒登入的帳號，登入就是下一步
-                    className={profile.verification === null || !profile.verification.logged_in ? "btn-primary" : undefined}
+                    // 列內動作一律次要（MASTER 7.1）；「還沒登入、下一步是登入」由狀態徽章與色條表達
                     aria-label={`在終端機登入 ${profile.name}`}
                     onClick={() =>
                       void act(
@@ -404,7 +427,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                       aria-label={`封存 ${profile.name}`}
                       onClick={(event) => {
                         closeMenu(event);
-                        void act(() => client.archiveProfile(profile.id));
+                        void archive(index);
                       }}
                     >
                       封存
@@ -536,12 +559,15 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
             <>
               <dt>帳號</dt>
               <dd>
-                <AccountValue value={verification.account} />
+                <OneLineValue value={verification.account} />
               </dd>
             </>
           )}
           <dt>認證來源</dt>
-          <dd className="profile-source">{sourceLabel(verification.source, verification.source_detail)}</dd>
+          {/* 說明可能帶長路徑（例：環境變數由哪個設定檔設定）：只佔一行，完整在 title，長的可複製 */}
+          <dd className="profile-source">
+            <OneLineValue value={sourceLabel(verification.source, verification.source_detail)} copyLabel="複製認證來源" />
+          </dd>
           <dt>最近核對</dt>
           <dd className="tabular">{formatTimestamp(verification.checked_at, timeZone)}</dd>
           {verification.cli_version && (
@@ -556,7 +582,7 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
         <>
           <dt>預期帳號</dt>
           <dd className="profile-expected">
-            <AccountValue value={profile.expected_account} field="預期帳號" />
+            <OneLineValue value={profile.expected_account} field="預期帳號" />
           </dd>
         </>
       )}
@@ -575,17 +601,20 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
   );
 }
 
-/** 超過這個長度的帳號（email）另附複製：窄欄放不下時會被截斷。 */
-const LONG_ACCOUNT_CHARS = 32;
+/** 超過這個長度的值（帳號 email、認證來源說明）另附複製：窄欄放不下時會被截斷。 */
+const LONG_VALUE_CHARS = 32;
 
-/** 帳號（email）只佔一行，放不下時截斷（完整值在 title）；長的另附「複製帳號」，不在窄欄裡折成好幾段。 */
-function AccountValue({ value, field }: { value: string; field?: string }) {
+/**
+ * 事實欄的值只佔一行，放不下時截斷（完整值在 title）；長的另附複製按鈕，不在窄欄裡折成好幾段。
+ * 帳號（email）與認證來源共用。
+ */
+function OneLineValue({ value, field, copyLabel = "複製帳號" }: { value: string; field?: string; copyLabel?: string }) {
   return (
     <span className="copy-text">
       <span className="truncate" title={value}>
         {value}
       </span>
-      {value.length > LONG_ACCOUNT_CHARS && <CopyButton text={value} label="複製帳號" field={field} />}
+      {value.length > LONG_VALUE_CHARS && <CopyButton text={value} label={copyLabel} field={field} />}
     </span>
   );
 }
@@ -676,11 +705,12 @@ const GATE_STATE_LABELS: Record<GateState, string> = {
  */
 function AccountGate({ name, gate, timeZone }: { name: string; gate: QuotaGate | null; timeZone?: string }) {
   const state = gate?.state ?? "open";
-  // 停止派工或交接中是要使用者知道的狀態，以提示呈現；可派工只是一行次要資訊
-  const tone = state === "open" ? "meta" : `callout ${state === "draining" ? "callout-danger" : "callout-warning"}`;
+  // 停止派工或交接中是要使用者知道的狀態；項目多、窄時會折成好幾行，以長警示呈現（只有色條與狀態詞上色）。
+  // 可派工只是一行次要資訊
+  const tone = state === "open" ? "meta" : `notice ${state === "draining" ? "notice-danger" : "notice-warning"}`;
   return (
     <div className={`profile-gate profile-gate-${state} ${tone}`} role="group" aria-label={`${name} 的額度門檻`}>
-      <span className="gate-state">
+      <span className={state === "open" ? "gate-state" : "gate-state notice-title"}>
         額度門檻：<strong>{GATE_STATE_LABELS[state]}</strong>
       </span>
       {gate && (

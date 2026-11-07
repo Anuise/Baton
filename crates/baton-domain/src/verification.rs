@@ -209,7 +209,7 @@ pub fn judge(check: &VerificationCheck, observation: Observation) -> CheckResult
                     Ok(Some(bytes)) => {
                         let actual = artifact::sha256_hex(&bytes);
                         if actual != entry.sha256 {
-                            (CheckStatus::Failed, format!("{label} 的檔案與 manifest 不符（manifest {}，實際 {actual}）", entry.sha256))
+                            (CheckStatus::Failed, format!("{label} 的檔案與成果清單登記的雜湊不符（登記 {}，實際 {actual}）", entry.sha256))
                         } else {
                             let (status, detail) = compare_hash(sha256.as_deref(), &actual, bytes.len());
                             (status, format!("{label}：{detail}"))
@@ -490,7 +490,7 @@ pub enum AcceptanceError {
     RunStale { expected: String, current: Option<String> },
     #[error("契約已經變更：接受依據的是版本 {expected}，Run 依版本 {run} 執行，目前是版本 {current}")]
     ContractStale { expected: i64, run: i64, current: i64 },
-    #[error("成果 manifest 已經和檢視當時不同，請重新檢視後再接受")]
+    #[error("成果清單已經和檢視當時不同，請重新檢視後再接受")]
     ManifestStale,
     #[error("檢查結果與契約宣告的檢查不一致")]
     ResultsMismatch,

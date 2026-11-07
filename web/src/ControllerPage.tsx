@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 import { profileStateLabel } from "./AccountsPage";
-import { truncateText } from "./textFormat";
+import { splitFirstSentence, truncateText } from "./textFormat";
 import { formatTimestamp } from "./time";
 import type {
   AccountClient,
@@ -33,8 +33,8 @@ interface Props {
   timeZone?: string;
   /** 重新讀取的間隔（毫秒）；只有測試會指定。 */
   pollMs?: number;
-  /** 切到 Workspace 的其他頁面（授權未確認時的「前往授權」）；沒有傳入時不顯示按鈕。 */
-  onOpenPage?: (page: "authorization") => void;
+  /** 切到其他頁面（授權未確認時的「前往授權」、沒有可用帳號時的「前往帳號」）；沒有傳入時不顯示按鈕。 */
+  onOpenPage?: (page: "authorization" | "accounts") => void;
 }
 
 const STATUS_LABELS: Record<ControllerCliStatus, string> = {
@@ -129,7 +129,7 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const [overview, setOverview] = useState<SchedulingOverview | null>(null);
   const [overviewError, setOverviewError] = useState<string | null>(null);
   const [switchTo, setSwitchTo] = useState("");
-  // Workspace 授權尚未確認：Controller 派出的工作都不會開始。讀取失敗時維持 false，不提示
+  // Workspace 授權尚未確認：需要能力的工作都不會開始。讀取失敗時維持 false，不提示
   const [authorizationUnconfirmed, setAuthorizationUnconfirmed] = useState(false);
   // 只採用最後發出的讀取結果，避免較早的輪詢回應蓋掉剛開啟／結束的狀態
   const latest = useRef(0);
@@ -249,6 +249,15 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const switchTargets = available.filter((profile) => profile.id !== run?.profile_id);
   const switchTarget = switchTargets.some((profile) => profile.id === switchTo) ? switchTo : (switchTargets[0]?.id ?? "");
   const statusTone = run === null ? null : STATUS_TONES[run.status];
+  // 開啟區的說明：從沒開過時沒有「上次」可接續；沒有可用的帳號時，有「前往帳號」按鈕就不再寫頁名
+  const pickHint =
+    available.length === 0
+      ? onOpenPage
+        ? "沒有可用的帳號，請新增帳號或重新核對"
+        : "沒有可用的帳號，請到「帳號」新增或重新核對"
+      : run === null
+        ? "在外部終端機開啟互動式 Claude Code"
+        : "在外部終端機開啟互動式 Claude Code；選上次用過的帳號會接續上次的 Session";
   const stripe = stripeTone(run);
   const openSelectId = useId();
   const switchSelectId = useId();
@@ -262,22 +271,10 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
         <h2 id={headingId}>Controller</h2>
       </header>
       {view === null && loadError === null && <p className="empty-note">載入中…</p>}
-      {loadError && (
-        <div role="alert" className="callout callout-danger">
-          <p>無法取得 Controller 狀態：{loadError}</p>
-        </div>
-      )}
-      {actionError && (
-        <div role="alert" className="callout callout-danger">
-          <p>{actionError}</p>
-        </div>
-      )}
+      {loadError && <LongNotice alert tone="danger" title="無法取得 Controller 狀態" message={loadError} />}
+      {actionError && <LongNotice alert tone="danger" message={actionError} />}
       {/* 開著與未開啟都要提示：開著時「換帳號重開」需要帳號清單 */}
-      {view && profilesError && (
-        <div role="alert" className="callout callout-danger">
-          <p>無法取得帳號清單：{profilesError}</p>
-        </div>
-      )}
+      {view && profilesError && <LongNotice alert tone="danger" title="無法取得帳號清單" message={profilesError} />}
       {view && (
         <>
           {/* 駕駛艙：最上面一列是目前狀態的讀數，主要動作緊跟在右；提示、額度、開啟表單與技術細節依序在下 */}
@@ -334,7 +331,8 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
                   <p>Runtime 重新啟動過，這個視窗的平台工具已失效。請按「結束」，再用同一個帳號重新開啟（會接續 Session）。</p>
                 </div>
               ) : (
-                <p className="controller-hint">已在終端機開啟，請切到該視窗操作</p>
+                // 開啟中（starting）時終端機視窗還沒開好，等執行中再提示切過去
+                run?.status === "running" && <p className="controller-hint">已在終端機開啟，請切到該視窗操作</p>
               ))}
             {open && run !== null && run.switch_to_profile_id !== null && (
               <div className="callout callout-accent">
@@ -346,21 +344,13 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
                 <p>Controller 帳號的額度已接近上限，建議換帳號重開</p>
               </div>
             )}
+            {/* 結束原因可能是整段 Runtime 錯誤：長警示，色調與狀態點、色條一致（開啟失敗與中斷是 danger，一般結束中性） */}
             {run && !open && run.end_reason !== null && (
-              <div
-                className={
-                  launchFailed(run)
-                    ? "callout callout-danger"
-                    : run.status === "interrupted"
-                      ? "callout callout-warning"
-                      : "callout"
-                }
-              >
-                <p>
-                  {launchFailed(run) ? "開啟失敗：" : run.status === "interrupted" ? "中斷原因：" : "結束原因："}
-                  {run.end_reason}
-                </p>
-              </div>
+              <LongNotice
+                tone={launchFailed(run) || run.status === "interrupted" ? "danger" : null}
+                title={launchFailed(run) ? "開啟失敗" : run.status === "interrupted" ? "中斷原因" : "結束原因"}
+                message={run.end_reason}
+              />
             )}
 
             {open && controllerAccount && (
@@ -381,7 +371,7 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
             {/* 授權未確認時，開著或未開啟都提示：放在「開啟 Controller」區上方，開啟前就看得到 */}
             {authorizationUnconfirmed && (
               <div className="notice notice-warning controller-authorization">
-                <p>這個 Workspace 還沒有確認授權，Controller 派出的工作都不會開始。</p>
+                <p>這個 Workspace 還沒有確認授權，需要能力的工作都不會開始。</p>
                 {onOpenPage && (
                   <button type="button" onClick={() => onOpenPage("authorization")}>
                     前往授權
@@ -423,10 +413,13 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
                 </div>
                 {profiles !== null && (
                   <p id={pickHintId} className="field-hint">
-                    {available.length === 0
-                      ? "沒有可用的帳號，請到「帳號」新增或重新核對"
-                      : "在外部終端機開啟互動式 Claude Code；選上次用過的帳號會接續上次的 Session"}
+                    {pickHint}
                   </p>
+                )}
+                {profiles !== null && available.length === 0 && onOpenPage && (
+                  <button type="button" onClick={() => onOpenPage("accounts")}>
+                    前往帳號
+                  </button>
                 )}
                 {unavailable.length > 0 && (
                   <details className="controller-unavailable">
@@ -508,6 +501,36 @@ function QuotaGauge({ label, percent }: { label: string; percent: number | null 
           </div>
         )}
       </dd>
+    </div>
+  );
+}
+
+/**
+ * 可能很長的錯誤或原因（例如整段 Runtime 錯誤）：長警示（MASTER 7：.notice），第一句完整顯示，其餘收進「詳細資訊」。
+ * tone 為 null 時是中性（一般的結束原因）。
+ */
+function LongNotice({
+  tone,
+  title,
+  message,
+  alert = false,
+}: {
+  tone: "danger" | null;
+  title?: string;
+  message: string;
+  alert?: boolean;
+}) {
+  const { summary, rest } = splitFirstSentence(message);
+  return (
+    <div role={alert ? "alert" : undefined} className={tone === null ? "notice" : `notice notice-${tone}`}>
+      {title && <p className="notice-title">{title}</p>}
+      <p>{summary}</p>
+      {rest !== "" && (
+        <details>
+          <summary>詳細資訊</summary>
+          <p className="pre-wrap">{rest}</p>
+        </details>
+      )}
     </div>
   );
 }

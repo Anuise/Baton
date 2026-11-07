@@ -16,6 +16,8 @@ interface Props {
   workspace: Workspace;
   /** 顯示更新時間用；不指定時使用系統時區（只供測試指定）。 */
   timeZone?: string;
+  /** 切到 App 設定（更新可用模型清單的地方）；沒有傳入時不顯示「前往 App 設定」。 */
+  onOpenPage?: (page: "settings") => void;
 }
 
 /** 三個角色與一句話說明（依 GLOSSARY.md）。 */
@@ -54,7 +56,7 @@ const valueOf = (text: string): string | null => (text.trim() === "" ? null : te
  * 每次開啟都向 Runtime 讀取最新值，避免沿用側欄清單裡過時的 Workspace。
  * 可用模型清單的更新影響所有 Workspace，不在這裡，見 `ModelCatalogSettings`（App 設定）。
  */
-export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
+export function ModelOverridesPanel({ client, workspace, timeZone, onOpenPage }: Props) {
   const idPrefix = useId();
   const [loaded, setLoaded] = useState<LoadState>({ state: "loading" });
   const [draft, setDraft] = useState<Draft>(draftFrom(workspace.model_overrides));
@@ -131,7 +133,7 @@ export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
       });
       setLoaded({ state: "ready", workspace: updated });
       setDraft(draftFrom(updated.model_overrides));
-      setNotice("已保存模型設定");
+      setNotice("已儲存模型設定");
     } catch (e) {
       // 保留輸入，讓使用者修正後重送
       setError(reasonOf(e));
@@ -212,10 +214,17 @@ export function ModelOverridesPanel({ client, workspace, timeZone }: Props) {
             </p>
           )}
         </form>
-        <p className="section-hint">
-          {catalog.loaded && `可用模型清單：${catalogSource(catalog.updatedAt, timeZone)}。`}
-          要更新清單，請到「App 設定」。
-        </p>
+        <div className="form-actions">
+          <p className="section-hint">
+            {catalog.loaded && `可用模型清單：${catalogSource(catalog.updatedAt, timeZone)}。`}
+            要更新清單，請到「App 設定」。
+          </p>
+          {onOpenPage && (
+            <button type="button" onClick={() => onOpenPage("settings")}>
+              前往 App 設定
+            </button>
+          )}
+        </div>
       </section>
     </PageFrame>
   );

@@ -136,7 +136,8 @@ describe("模型設定", () => {
       worker: "claude-haiku-5-5",
       reviewer: "sonnet",
     });
-    expect(await screen.findByRole("status")).toHaveTextContent("已保存模型設定");
+    // 按鈕「儲存模型設定」→ 訊息「已儲存」（MASTER 8：同一動作同名）
+    expect(await screen.findByRole("status")).toHaveTextContent("已儲存模型設定");
     expect(screen.getByLabelText("Controller 模型")).toHaveValue("");
     expect(screen.getByLabelText("Worker 模型")).toHaveValue("claude-haiku-5-5");
     // 存完就沒有未儲存的變更
@@ -164,7 +165,7 @@ describe("模型設定", () => {
     await user.click(screen.getByRole("button", { name: "儲存模型設定" }));
 
     expect(client.setModelOverrides).toHaveBeenCalledWith("ws_1", { ...NONE, controller: "opus", worker: "claude-sonnet-4-5[1m]" });
-    expect(await screen.findByRole("status")).toHaveTextContent("已保存模型設定");
+    expect(await screen.findByRole("status")).toHaveTextContent("已儲存模型設定");
     expect(screen.getByLabelText("Worker 模型")).toHaveValue("claude-sonnet-4-5[1m]");
   });
 
@@ -187,7 +188,7 @@ describe("模型設定", () => {
     await user.click(screen.getByRole("button", { name: "儲存模型設定" }));
 
     expect(client.setModelOverrides).toHaveBeenCalledWith("ws_1", NONE);
-    expect(await screen.findByRole("status")).toHaveTextContent("已保存模型設定");
+    expect(await screen.findByRole("status")).toHaveTextContent("已儲存模型設定");
   });
 
   it("Runtime 拒絕時顯示它的說明並保留選擇", async () => {
@@ -235,6 +236,18 @@ describe("模型設定", () => {
     expect(screen.queryByLabelText("Anthropic API 金鑰")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "更新清單" })).not.toBeInTheDocument();
     expect(client.refreshModels).not.toHaveBeenCalled();
+    // 沒有接上換頁時不顯示「前往 App 設定」
+    expect(screen.queryByRole("button", { name: "前往 App 設定" })).not.toBeInTheDocument();
+  });
+
+  it("接上換頁時附「前往 App 設定」按鈕，按下切到 App 設定", async () => {
+    const user = userEvent.setup();
+    const onOpenPage = vi.fn();
+    render(<ModelOverridesPanel client={fakeClient(workspace())} workspace={workspace()} onOpenPage={onOpenPage} />);
+
+    await user.click(await screen.findByRole("button", { name: "前往 App 設定" }));
+
+    expect(onOpenPage).toHaveBeenCalledWith("settings");
   });
 
   it("清單更新過時顯示更新時間，下拉選單用更新後的清單；已存的值不在新清單中時仍列為選取的選項", async () => {

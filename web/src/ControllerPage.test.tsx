@@ -113,12 +113,19 @@ function fakeClient(
   };
 }
 
-const renderPage = (client: ReturnType<typeof fakeClient>, pollMs?: number, onOpenPage?: (page: "authorization") => void) =>
+const renderPage = (
+  client: ReturnType<typeof fakeClient>,
+  pollMs?: number,
+  onOpenPage?: (page: "authorization" | "accounts") => void,
+) =>
   render(
     <ControllerPage client={client} workspace={workspace} timeZone="Asia/Taipei" pollMs={pollMs} onOpenPage={onOpenPage} />,
   );
 
-const AUTHORIZATION_NOTICE = "這個 Workspace 還沒有確認授權，Controller 派出的工作都不會開始。";
+const AUTHORIZATION_NOTICE = "這個 Workspace 還沒有確認授權，需要能力的工作都不會開始。";
+
+/** 長警示（.notice）：狀態詞（.notice-title）與第一句分成兩段，以第一句找到整個警示。 */
+const findNotice = async (text: string) => (await screen.findByText(text)).closest<HTMLElement>(".notice")!;
 
 /** 在假計時器下讓排隊中的 Promise 與 React 更新全部完成。 */
 async function settle(ms = 0) {
@@ -160,6 +167,20 @@ describe("ControllerPage", () => {
     expect(screen.getByRole("button", { name: "開啟 Controller" })).toBeEnabled();
   });
 
+  it("從沒開過時，開啟區的說明不提接續上次的 Session", async () => {
+    renderPage(fakeClient(null));
+
+    expect(await screen.findByText("在外部終端機開啟互動式 Claude Code")).toBeInTheDocument();
+    expect(screen.queryByText(/接續上次的 Session/)).not.toBeInTheDocument();
+  });
+
+  it("開過之後，開啟區的說明提到選上次用過的帳號會接續 Session", async () => {
+    const ended = controllerCliRun({ status: "ended", ended_at: CHECKED_AT + 61_000, end_code: "user_ended", end_reason: "已從 App 結束 Controller CLI" });
+    renderPage(fakeClient(ended));
+
+    expect(await screen.findByText("在外部終端機開啟互動式 Claude Code；選上次用過的帳號會接續上次的 Session")).toBeInTheDocument();
+  });
+
   it("從未開啟過也顯示操作手冊版本，收在「詳細資訊」裡", async () => {
     renderPage(fakeClient(null));
 
@@ -195,9 +216,28 @@ describe("ControllerPage", () => {
 
     expect(await screen.findByText("沒有可用的帳號，請到「帳號」新增或重新核對")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "開啟 Controller" })).toBeDisabled();
+    // 沒有傳入 onOpenPage：不顯示「前往帳號」
+    expect(screen.queryByRole("button", { name: "前往帳號" })).not.toBeInTheDocument();
   });
 
-  it("按開啟以選中的帳號呼叫 open，顯示開啟中並改為提示切到終端機", async () => {
+  it("沒有可用的帳號時附「前往帳號」，按了切到帳號頁", async () => {
+    const user = userEvent.setup();
+    const onOpenPage = vi.fn();
+    renderPage(fakeClient(null, [notLoggedIn]), undefined, onOpenPage);
+
+    expect(await screen.findByText("沒有可用的帳號，請新增帳號或重新核對")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "前往帳號" }));
+    expect(onOpenPage).toHaveBeenCalledWith("accounts");
+  });
+
+  it("有可用的帳號時沒有「前往帳號」", async () => {
+    renderPage(fakeClient(), undefined, vi.fn());
+
+    await enabledOpenButton();
+    expect(screen.queryByRole("button", { name: "前往帳號" })).not.toBeInTheDocument();
+  });
+
+  it("按開啟以選中的帳號呼叫 open，顯示開啟中；終端機還沒開好，不提示切過去", async () => {
     const user = userEvent.setup();
     const client = fakeClient();
     renderPage(client);
@@ -207,7 +247,7 @@ describe("ControllerPage", () => {
     expect(client.openControllerCli).toHaveBeenCalledWith("ws_1", "prof_1");
     expect(fact("狀態")).toHaveTextContent("開啟中");
     expect(fact("Controller 帳號")).toHaveTextContent("主要帳號");
-    expect(screen.getByText("已在終端機開啟，請切到該視窗操作")).toBeInTheDocument();
+    expect(screen.queryByText("已在終端機開啟，請切到該視窗操作")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "開啟 Controller" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "結束" })).toBeEnabled();
   });
@@ -222,7 +262,23 @@ describe("ControllerPage", () => {
 
     await user.click(await enabledOpenButton());
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("這個 Workspace 已有開啟中的 Controller CLI");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("這個 Workspace 已有開啟中的 Controller CLI");
+    expect(alert).toHaveClass("notice", "notice-danger");
+  });
+
+  it("讀不到狀態時以長警示顯示：第一句完整顯示，其餘（整段 Runtime 錯誤）收進「詳細資訊」", async () => {
+    const client = fakeClient();
+    client.getControllerCli.mockRejectedValue(new Error("Runtime 沒有回應。\nstack: at runtime::controller (controller.rs:12)"));
+    renderPage(client);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("無法取得 Controller 狀態")).toHaveClass("notice-title");
+    expect(within(alert).getByText("Runtime 沒有回應。")).toBeInTheDocument();
+    const details = alert.querySelector("details")!;
+    expect(details).not.toHaveAttribute("open");
+    expect(details).toHaveTextContent("stack: at runtime::controller (controller.rs:12)");
   });
 
   it("執行中顯示帳號與開啟時間，按結束呼叫 end 並顯示結束中", async () => {
@@ -231,6 +287,8 @@ describe("ControllerPage", () => {
     renderPage(client);
 
     expect(await screen.findByText("執行中")).toBeInTheDocument();
+    // 執行中才提示切到終端機
+    expect(screen.getByText("已在終端機開啟，請切到該視窗操作")).toBeInTheDocument();
     // 帳號名稱要等帳號清單讀回（可能比狀態晚到）
     await waitFor(() => expect(fact("Controller 帳號")).toHaveTextContent("主要帳號"));
     expect(fact("開啟時間")).toHaveTextContent("2023/11/15 06:13");
@@ -252,7 +310,9 @@ describe("ControllerPage", () => {
     });
     renderPage(fakeClient(failed));
 
-    expect(await screen.findByText("開啟失敗：找不到 claude 指令，請確認 Claude Code 已安裝")).toBeInTheDocument();
+    const notice = await findNotice("找不到 claude 指令，請確認 Claude Code 已安裝");
+    expect(notice).toHaveClass("notice-danger");
+    expect(within(notice).getByText("開啟失敗")).toHaveClass("notice-title");
     expect(fact("狀態")).toHaveTextContent("已結束");
     expect(await enabledOpenButton()).toBeEnabled();
   });
@@ -267,7 +327,11 @@ describe("ControllerPage", () => {
     });
     renderPage(fakeClient(ended));
 
-    expect(await screen.findByText("結束原因：已從 App 結束 Controller CLI")).toBeInTheDocument();
+    const notice = await findNotice("已從 App 結束 Controller CLI");
+    expect(within(notice).getByText("結束原因")).toHaveClass("notice-title");
+    // 一般結束是中性
+    expect(notice).not.toHaveClass("notice-danger");
+    expect(notice).not.toHaveClass("notice-warning");
   });
 
   it("Runtime 重啟後宿主仍存活（rebound_at 有值）時警示平台工具已失效，仍可結束", async () => {
@@ -293,7 +357,11 @@ describe("ControllerPage", () => {
     });
     renderPage(fakeClient(interrupted));
 
-    expect(await screen.findByText("中斷原因：Runtime 重新啟動時 Controller CLI 已不在執行")).toBeInTheDocument();
+    const notice = await findNotice("Runtime 重新啟動時 Controller CLI 已不在執行");
+    expect(within(notice).getByText("中斷原因")).toHaveClass("notice-title");
+    // 與狀態點、色條同一個色調
+    expect(notice).toHaveClass("notice-danger");
+    expect(screen.getByRole("region", { name: "Controller 狀態" })).toHaveClass("stripe-danger");
     expect(fact("狀態")).toHaveTextContent("中斷");
   });
 
@@ -502,7 +570,9 @@ describe("ControllerPage", () => {
     renderPage(client);
 
     expect(await screen.findByText("執行中")).toBeInTheDocument();
-    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得帳號清單：Runtime 離線");
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("無法取得帳號清單")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("Runtime 離線");
     expect(screen.queryByLabelText("換成帳號")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "結束" })).toBeEnabled();
   });
@@ -547,11 +617,13 @@ describe("ControllerPage", () => {
     });
     renderPage(fakeClient(ended, [profile(), spare]));
 
-    expect(await screen.findByText("結束原因：已換帳號重開")).toBeInTheDocument();
+    const notice = await findNotice("已換帳號重開");
+    expect(within(notice).getByText("結束原因")).toBeInTheDocument();
+    expect(notice).not.toHaveClass("notice-danger");
     expect(screen.queryByText(/換帳號重開中/)).not.toBeInTheDocument();
   });
 
-  describe("Workspace 授權未確認時提示 Controller 派出的工作不會開始", () => {
+  describe("Workspace 授權未確認時提示需要能力的工作不會開始", () => {
     it("在「開啟 Controller」區上方顯示提示，「前往授權」切到授權頁", async () => {
       const user = userEvent.setup();
       const client = fakeClient();

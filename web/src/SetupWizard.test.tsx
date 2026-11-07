@@ -58,7 +58,10 @@ describe("首次啟動精靈", () => {
 
     const section = await screen.findByRole("region", { name: "Claude Code" });
     expect(within(section).getByText("版本過舊")).toBeInTheDocument();
-    expect(within(section).getByText("目前版本 2.0.9（最低 2.1.0）")).toBeInTheDocument();
+    expect(within(section).getByText(/^目前版本/)).toHaveTextContent(/^目前版本 2\.0\.9（最低 2\.1\.0）$/);
+    // 版本號用等寬字（MASTER 7.1，與帳號頁一致）
+    expect(within(section).getByText("2.0.9")).toHaveClass("mono");
+    expect(within(section).getByText("2.1.0")).toHaveClass("mono");
     expect(within(section).getByText("claude update")).toBeInTheDocument();
   });
 

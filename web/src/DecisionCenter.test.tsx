@@ -360,7 +360,7 @@ describe("裁定中心：總覽與清單", () => {
     ]);
   });
 
-  it("沒有延後的裁定時不顯示「已延後」一組；「已結束」一組可以收起再展開", async () => {
+  it("沒有延後的裁定時不顯示「已延後」一組；「已結束」一組可以收合再展開（收合摘要樣式）", async () => {
     const user = userEvent.setup();
     renderCenter(fakeClient([decisionView(), answeredDecision()]));
 
@@ -369,8 +369,11 @@ describe("裁定中心：總覽與清單", () => {
     // 總覽仍列出已延後的數字
     expect(within(screen.getByRole("region", { name: "裁定總覽" })).getByText("已延後")).toBeInTheDocument();
 
-    const toggle = screen.getByRole("button", { name: "收起" });
+    const toggle = screen.getByRole("button", { name: "收合" });
     expect(toggle).toHaveAttribute("aria-expanded", "true");
+    // 與 <details> 的 ▶ 一致的收合摘要樣式，不是低調按鈕
+    expect(toggle).toHaveClass("decision-group-toggle");
+    expect(toggle).not.toHaveClass("btn-quiet");
     await user.click(toggle);
     expect(screen.getByRole("region", { name: "已結束（1）" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "查看裁定 要不要升級相依套件？" })).not.toBeInTheDocument();
@@ -396,7 +399,10 @@ describe("裁定中心：總覽與清單", () => {
 
     renderCenter(client);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得裁定清單：Runtime 回應 503");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("無法取得裁定清單")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("Runtime 回應 503");
   });
 });
 
@@ -605,6 +611,38 @@ describe("裁定中心：處理單筆", () => {
     expect(screen.getByRole("region", { name: "已結束（1）" })).toBeInTheDocument();
   });
 
+  it("送出裁定後處理區換成裁定結果，焦點移到「裁定結果」標題（不落到 body）", async () => {
+    const user = userEvent.setup();
+    renderCenter(fakeClient([decisionView()]));
+
+    await user.click(await screen.findByRole("radio", { name: "駁回" }));
+    await user.click(screen.getByRole("button", { name: "送出裁定" }));
+
+    const outcome = await screen.findByRole("region", { name: "裁定結果" });
+    await waitFor(() => expect(within(outcome).getByRole("heading", { name: "裁定結果" })).toHaveFocus());
+  });
+
+  it("從詳情裡的連結（已合併到…、相似問題）換筆時，焦點移到新詳情的標題；從清單換筆時焦點留在清單", async () => {
+    const user = userEvent.setup();
+    renderCenter(
+      fakeClient([
+        decisionView({ id: "dec_target", question: "目標問題", links: [{ id: "dec_other", question: "另一個問法", status: "pending" }] }),
+        decisionView({ id: "dec_other", question: "另一個問法" }),
+        decisionView({ id: "dec_m", question: "被合併的問題", status: "merged", merged_into: "dec_target", allowed_actions: [] }),
+      ]),
+    );
+
+    const listButton = await screen.findByRole("button", { name: "查看裁定 被合併的問題" });
+    await user.click(listButton);
+    expect(listButton).toHaveFocus();
+
+    await user.click(within(within(detail()).getByRole("region", { name: "裁定結果" })).getByRole("button", { name: "目標問題" }));
+    expect(within(detail()).getByRole("heading", { level: 3, name: "目標問題" })).toHaveFocus();
+
+    await user.click(within(within(detail()).getByRole("region", { name: "相似問題" })).getByRole("button", { name: "另一個問法" }));
+    expect(within(detail()).getByRole("heading", { level: 3, name: "另一個問法" })).toHaveFocus();
+  });
+
   it("建議的選項在選擇時也標示「建議」", async () => {
     const user = userEvent.setup();
     renderCenter(fakeClient([decisionView()]));
@@ -627,7 +665,7 @@ describe("裁定中心：處理單筆", () => {
     expect(within(restructure).queryByRole("button", { name: "採用建議" })).not.toBeInTheDocument();
     await user.click(within(form()).getByRole("radio", { name: "回答" }));
     await user.type(within(form()).getByLabelText("回答內容（必填）"), "照建議");
-    // jsdom 沒有 scrollIntoView：暫時補上，檢查採用後會把「送出裁定」捲進視窗
+    // jsdom 沒有 scrollIntoView：暫時補上，檢查採用後會把處理區（連同「送出裁定」）捲進視窗
     const scrollIntoView = vi.fn();
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { value: scrollIntoView, configurable: true });
     try {
@@ -635,7 +673,7 @@ describe("裁定中心：處理單筆", () => {
     } finally {
       delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }
-    expect(scrollIntoView.mock.contexts).toEqual([submit]);
+    expect(scrollIntoView.mock.contexts).toEqual([form()]);
 
     expect(within(form()).getByRole("radio", { name: "接受方案" })).toBeChecked();
     expect(within(form()).getByRole("radio", { name: "保留（建議）" })).toBeChecked();
@@ -1275,6 +1313,62 @@ describe("裁定中心：批次處理", () => {
     });
   });
 
+  it("批次處理時詳情只讀：不顯示詳情的處理區與「採用建議」，畫面上只有批次的送出鈕；取消批次後焦點移到詳情標題", async () => {
+    const user = userEvent.setup();
+    renderCenter(fakeClient(twoPending()));
+    await screen.findByRole("article", { name: "裁定詳情" });
+    expect(within(detail()).getByRole("button", { name: "採用建議" })).toBeInTheDocument();
+
+    // 選取的第一筆不在批次裡
+    await user.click(screen.getByRole("checkbox", { name: "批次選取 第二個問題" }));
+    expect(within(detail()).queryByRole("radio")).not.toBeInTheDocument();
+    expect(within(detail()).queryByRole("button", { name: "送出裁定" })).not.toBeInTheDocument();
+    expect(within(detail()).queryByRole("button", { name: "採用建議" })).not.toBeInTheDocument();
+    expect(within(detail()).getByText(/^批次處理進行中，送出或取消批次後才能在這裡單筆處理；也可以在清單勾選/)).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /^送出/ }).map((button) => button.textContent)).toEqual(["送出批次（1 項）"]);
+
+    await user.click(screen.getByRole("checkbox", { name: "批次選取 要保留舊的目錄結構嗎？" }));
+    expect(within(detail()).getByText("這筆已加入批次，請在上方的「批次處理」選擇處理方式並送出。")).toBeInTheDocument();
+
+    // 取消鈕隨面板消失：焦點移到詳情標題，詳情的處理區回來
+    await user.click(screen.getByRole("button", { name: "取消批次" }));
+    expect(within(detail()).getByRole("button", { name: "送出裁定" })).toBeInTheDocument();
+    expect(within(detail()).getByRole("heading", { level: 3, name: "要保留舊的目錄結構嗎？" })).toHaveFocus();
+  });
+
+  it("勾進批次時沿用詳情已填的草稿；批次每一項各自有「採用建議」，只套用到那一項", async () => {
+    const user = userEvent.setup();
+    const client = fakeClient(twoPending());
+    renderCenter(client);
+    await screen.findByRole("article", { name: "裁定詳情" });
+
+    // 詳情先按「採用建議」並寫備註，再把這筆勾進批次
+    await user.click(within(detail()).getByRole("button", { name: "採用建議" }));
+    await user.type(within(form()).getByLabelText("備註（選填）"), "照建議");
+    await user.click(screen.getByRole("checkbox", { name: "批次選取 要保留舊的目錄結構嗎？" }));
+    const panel = screen.getByRole("form", { name: "批次處理" });
+    const first = within(panel).getByRole("group", { name: "要保留舊的目錄結構嗎？" });
+    expect(within(first).getByText("已填妥")).toBeInTheDocument();
+    expect(within(first).getByRole("radio", { name: "接受方案" })).toBeChecked();
+    expect(within(first).getByRole("radio", { name: "保留（建議）" })).toBeChecked();
+    expect(within(first).getByLabelText("備註（選填）")).toHaveValue("照建議");
+
+    // 沒在詳情填過的一筆從空白開始；它自己的「採用建議」不影響其他項
+    await user.click(screen.getByRole("checkbox", { name: "批次選取 第二個問題" }));
+    const second = within(panel).getByRole("group", { name: "第二個問題" });
+    expect(within(second).getByText("還沒選處理方式")).toBeInTheDocument();
+    await user.click(within(second).getByRole("button", { name: "採用建議" }));
+    expect(within(second).getByRole("radio", { name: "保留（建議）" })).toBeChecked();
+    expect(within(second).getByLabelText("備註（選填）")).toHaveValue("");
+    expect(within(panel).getByText("已填妥 2／2 項")).toBeInTheDocument();
+    await user.click(within(panel).getByRole("button", { name: "送出批次（2 項）" }));
+
+    expect(client.batchDecisions).toHaveBeenCalledWith([
+      { workspace_id: "ws_1", request_id: "dec_1", action: "accept", expected_revision: 3, option_id: "keep", note: "照建議" },
+      { workspace_id: "ws_1", request_id: "dec_2", action: "accept", expected_revision: 7, option_id: "keep" },
+    ]);
+  });
+
   it("取消勾選或取消批次會收起面板", async () => {
     const user = userEvent.setup();
     renderCenter(fakeClient(twoPending()));
@@ -1288,6 +1382,35 @@ describe("裁定中心：批次處理", () => {
     await user.click(screen.getByRole("button", { name: "取消批次" }));
     expect(screen.queryByRole("form", { name: "批次處理" })).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "批次選取 第三個問題" })).not.toBeChecked();
+  });
+});
+
+describe("裁定中心：前往其他頁", () => {
+  const authorityDecision = () =>
+    decisionView({
+      kind: "authority",
+      authority: { matter: "change_acceptance", matter_label: "修改完成條件或驗收標準", summary: "把覆蓋率門檻從 80% 降到 60%" },
+    });
+
+  it("詳情的 Task 是前往工作頁的連結；決策權限攔截可以前往決策權限頁調整", async () => {
+    const user = userEvent.setup();
+    const onOpenPage = vi.fn();
+    render(<DecisionCenter client={fakeClient([authorityDecision()])} workspace={workspace} timeZone="Asia/Taipei" onOpenPage={onOpenPage} />);
+
+    await user.click(await within(await screen.findByRole("article", { name: "裁定詳情" })).findByRole("button", { name: "整理文件" }));
+    expect(onOpenPage).toHaveBeenCalledWith("tasks");
+
+    await user.click(within(screen.getByRole("region", { name: "決策權限攔截" })).getByRole("button", { name: "調整決策權限" }));
+    expect(onOpenPage).toHaveBeenLastCalledWith("authority");
+  });
+
+  it("沒有傳入 onOpenPage 時 Task 是純文字，也沒有「調整決策權限」", async () => {
+    renderCenter(fakeClient([authorityDecision()]));
+
+    await screen.findByRole("article", { name: "裁定詳情" });
+    expect(within(detail()).getByText("Task：整理文件")).toBeInTheDocument();
+    expect(within(detail()).queryByRole("button", { name: "整理文件" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "調整決策權限" })).not.toBeInTheDocument();
   });
 });
 
@@ -1433,7 +1556,10 @@ describe("決策權限頁", () => {
     renderAuthority(client);
 
     const panel = await authorityPanel();
-    expect(await within(panel).findByRole("alert")).toHaveTextContent("無法取得決策權限：Runtime 回應 503");
+    const alert = await within(panel).findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("無法取得決策權限")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("Runtime 回應 503");
     expect(within(panel).getByRole("heading", { level: 2, name: "決策權限" })).toBeInTheDocument();
   });
 });
@@ -1608,15 +1734,23 @@ describe("裁定中心：版面樣式", () => {
     expect(css).toMatch(/\.decision-pane\s*\{[^}]*overflow-anchor:\s*none/);
   });
 
-  it("處理區停在右欄底部（sticky），送出列在處理區自己捲動時仍釘在底部；處理區與上方區塊同寬", async () => {
+  it("只有送出列停在右欄底部（sticky），處理區本身隨內容捲動、不蓋住上方內容；焦點捲到送出列上方；處理區與嵌入區都和其他區塊同寬", async () => {
     await withStyles(async () => {
-      renderCenter(fakeClient([decisionView()]));
+      renderCenter(fakeClient([permissionDecision()]));
       await screen.findByRole("article", { name: "裁定詳情" });
       const style = getComputedStyle(form());
-      expect(style.position).toBe("sticky");
+      // 整個處理區 sticky 時，Tab 走過詳情的焦點元素會被捲到它後面（1024×768 時最高佔 60% 的右欄）
+      expect(style.position).not.toBe("sticky");
       expect(style.boxSizing).toBe("border-box");
       expect(getComputedStyle(form().querySelector(".form-actions")!).position).toBe("sticky");
+      // 有 padding 的嵌入區（權限提示）用 border-box，不比其他區塊寬
+      expect(getComputedStyle(within(detail()).getByRole("region", { name: "權限提示" })).boxSizing).toBe("border-box");
     });
+    // 右欄保留送出列的高度當 scroll-padding：瀏覽器把焦點元素捲到送出列上方（jsdom 不解析 calc()，直接檢查規則文字）
+    const css = await decisionsCss();
+    expect(css).toMatch(/\.decision-pane\s*\{[^}]*scroll-padding-bottom:\s*calc\(var\(--control-height\)/);
+    // 處理區不再限高、不自己捲動
+    expect(css).not.toMatch(/\.decision-form\s*\{[^}]*(max-block-size|overflow-y)/);
   });
 
   it("1024 寬時清單與右欄仍並排，清單最多佔 34%", async () => {

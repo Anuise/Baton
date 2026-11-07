@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { CopyButton, ShortValue } from "./LongText";
 import { COLUMNS } from "./TaskBoard";
@@ -93,7 +93,7 @@ const REASON_LABELS: Record<string, string> = {
   blocked_by_login: "登入失敗，旅程沒有執行",
   blocked_by_identity: "無法確認登入身分，旅程沒有執行",
   // 票 48：目標導向動作與 no_live_model
-  live_model_disabled: "這次驗證不呼叫模型（no_live_model），無法判定，不是產品缺陷",
+  live_model_disabled: "這次驗證不呼叫模型，無法判定，不是產品缺陷",
   planner_unavailable: "無法使用模型決定動作，無法判定，不是產品缺陷",
   planner_rate_limited: "模型限流，無法決定動作，不是產品缺陷",
   act_not_achievable: "模型判斷在目前畫面無法達成目標，無法判定",
@@ -228,7 +228,7 @@ export function reasonLabel(code: string): string | undefined {
 
 /**
  * 判定徽章旁的 reason_code 中文說明，代碼放在 title；沒有中文說明時不顯示，
- * 代碼另外列在次要資訊或細節（ReasonCodeNote），不緊貼在徽章旁（MASTER 7.1）。
+ * 代碼只在徽章的 title 與收合的「步驟」（ReasonCodeNote）裡，不當主要文字（MASTER 7.1）。
  */
 function ReasonLabel({ code }: { code: string }) {
   const label = REASON_LABELS[code];
@@ -239,7 +239,7 @@ function ReasonLabel({ code }: { code: string }) {
   );
 }
 
-/** 次要資訊列中的判定代碼：等寬。 */
+/** 判定代碼：等寬。只用在預設收合的「步驟」裡；其他地方的判定已有中文徽章，代碼只放在徽章的 title（MASTER 7.1）。 */
 function ReasonCodeNote({ code }: { code: string }) {
   return (
     <span>
@@ -264,11 +264,14 @@ function titledKey(items: { key: string; title: string }[] | undefined, key: str
   return title === undefined ? key : `${title}（${key}）`;
 }
 
-/** 判定徽章（探索頁的重現紀錄共用）。 */
-export function VerdictBadge({ verdict }: { verdict: VerificationVerdict }) {
+/** 判定徽章（探索頁的重現紀錄共用）；`code` 是判定代碼（reason_code），放在 title，不當主要文字。 */
+export function VerdictBadge({ verdict, code }: { verdict: VerificationVerdict; code?: string }) {
   const tone = VERDICT_TONES[verdict];
   return (
-    <span className={tone === null ? `badge verdict verdict-${verdict}` : `badge badge-${tone} verdict verdict-${verdict}`}>
+    <span
+      className={tone === null ? `badge verdict verdict-${verdict}` : `badge badge-${tone} verdict verdict-${verdict}`}
+      title={code}
+    >
       {VERDICT_LABELS[verdict]}
     </span>
   );
@@ -306,6 +309,9 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
       cancelled = true;
     };
   }, [client, workspace.id]);
+
+  // Task 清單也用來把 Evidence Bundle 綁定的 Task 顯示成標題；讀不到時退回顯示識別碼
+  const taskTitles = new Map(taskChoices.state === "ready" ? taskChoices.tasks.map((task) => [task.id, task.title]) : []);
 
   // 重新載入時不切回「載入中」，保留使用者正在編輯的 Profile 內容
   const reload = async () => {
@@ -352,6 +358,7 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
                 bundle={bundle}
                 latest={index === 0}
                 profile={loaded.overview.profile}
+                taskTitle={bundle.task_id === null ? undefined : taskTitles.get(bundle.task_id)}
                 timeZone={timeZone}
                 onLoadArtifact={(artifactIndex) => client.evidenceArtifact(workspace.id, bundle.id, artifactIndex)}
               />
@@ -390,11 +397,11 @@ function StatusSummary({ overview, timeZone }: { overview: VerificationOverview;
       {profile === null ? (
         <div className="callout callout-warning">
           <p className="callout-title">還沒有 Verification Profile</p>
-          <p>在最下方的「發布新版本」填入 Profile 內容並發布後，才能要求執行驗證。</p>
+          <p>在最下方的「發布新版本」填入 Verification Profile 內容並發布後，才能要求執行驗證。</p>
         </div>
       ) : (
         <dl className="facts verification-status">
-          <dt>Profile</dt>
+          <dt>Verification Profile</dt>
           <dd>
             第 {profile.version} 版<span className="verification-subtle">（{formatTimestamp(profile.created_at, timeZone)} 發布）</span>
           </dd>
@@ -415,7 +422,7 @@ function StatusSummary({ overview, timeZone }: { overview: VerificationOverview;
               "還沒有執行過"
             ) : (
               <>
-                <VerdictBadge verdict={latest.verdict} />{" "}
+                <VerdictBadge verdict={latest.verdict} code={latest.reason_code} />{" "}
                 <span className="verification-subtle">{formatTimestamp(latest.finished_at, timeZone)} 完成</span>
               </>
             )}
@@ -574,6 +581,16 @@ function PublishForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
+  const resultRef = useRef<HTMLDivElement>(null);
+
+  // 送出時按鈕會停用、焦點跟著消失：結果或錯誤出現後把焦點移過去
+  useEffect(() => {
+    if (error !== null) errorRef.current?.focus();
+  }, [error]);
+  useEffect(() => {
+    if (result !== null) resultRef.current?.focus();
+  }, [result]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -606,13 +623,13 @@ function PublishForm({
     <section className="section" aria-labelledby="verification-publish">
       <div className="section-heading">
         <h3 id="verification-publish">發布新版本</h3>
-        <p>Profile 決定怎麼驗收，只有你能發布；舊版本會保留，已有的證據仍綁定原本的版本。</p>
+        <p>Verification Profile 決定怎麼驗收，只有你能發布；舊版本會保留，已有的證據仍綁定原本的版本。</p>
       </div>
       <details className="verification-publish" open={openInitially}>
-        <summary>編輯 Profile 內容</summary>
+        <summary>編輯 Verification Profile 內容</summary>
         <form className="panel measure-form" onSubmit={(event) => void submit(event)}>
           <div className="field">
-            <label htmlFor="verification-profile-json">Profile 內容（JSON）</label>
+            <label htmlFor="verification-profile-json">Verification Profile 內容（JSON）</label>
             <textarea
               id="verification-profile-json"
               className="verification-json"
@@ -630,12 +647,12 @@ function PublishForm({
         </form>
       </details>
       {error && (
-        <div className="notice notice-danger" role="alert">
+        <div ref={errorRef} className="notice notice-danger" role="alert" tabIndex={-1}>
           <p>{error}</p>
         </div>
       )}
       {result && (
-        <div className="callout callout-success" role="status">
+        <div ref={resultRef} className="callout callout-success" role="status" tabIndex={-1}>
           <p>{result}</p>
         </div>
       )}
@@ -659,8 +676,18 @@ function RunForm({
   const [noLiveModel, setNoLiveModel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [queued, setQueued] = useState<string | null>(null);
+  const [queued, setQueued] = useState<VerificationRequest | null>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
+  const queuedRef = useRef<HTMLDivElement>(null);
   const profile = overview.profile;
+
+  // 送出時按鈕會停用、焦點跟著消失：已排入的訊息或錯誤出現後把焦點移過去
+  useEffect(() => {
+    if (error !== null) errorRef.current?.focus();
+  }, [error]);
+  useEffect(() => {
+    if (queued !== null) queuedRef.current?.focus();
+  }, [queued]);
 
   const toggle = (key: string, checked: boolean) =>
     setSelected((current) => (checked ? [...current, key] : current.filter((k) => k !== key)));
@@ -675,10 +702,7 @@ function RunForm({
       const body: RunVerificationRequest = task === "" ? { journeys: selected } : { task_id: task, journeys: selected };
       // 沒勾選時不送 no_live_model，維持原本的要求內容
       if (noLiveModel) body.no_live_model = true;
-      const request = await onRun(body);
-      const titles = request.journeys.map((key) => journeyTitle(profile, key)).join("、");
-      const mode = request.no_live_model ? "；不呼叫模型" : "";
-      setQueued(`已排入：要求 ${request.id}（Profile 第 ${request.profile_version} 版，旅程：${titles}${mode}）`);
+      setQueued(await onRun(body));
       await onQueued();
     } catch (e) {
       setError(`無法要求執行：${describeError(e)}`);
@@ -693,7 +717,7 @@ function RunForm({
         <h3 id="verification-run">要求執行驗證</h3>
       </div>
       {profile === null ? (
-        <p className="empty-note">發布 Profile 後才能要求執行驗證。</p>
+        <p className="empty-note">發布 Verification Profile 後才能要求執行驗證。</p>
       ) : (
         <form className="panel measure-form verification-run" onSubmit={(event) => void submit(event)}>
           <div className="field">
@@ -739,9 +763,10 @@ function RunForm({
             ))}
           </fieldset>
           <div className="field">
-            <label className="verification-check">
+            {/* 設定鍵 no_live_model 只放在 title，畫面用中文（MASTER 7.1） */}
+            <label className="verification-check" title="no_live_model">
               <input type="checkbox" checked={noLiveModel} onChange={(e) => setNoLiveModel(e.target.checked)} />
-              不呼叫模型（no_live_model）
+              不呼叫模型
             </label>
             <p className="field-hint">只執行不需模型的斷言與已驗證動作的重播，需要模型的步驟記為證據不足。</p>
           </div>
@@ -758,13 +783,18 @@ function RunForm({
         </form>
       )}
       {error && (
-        <div className="notice notice-danger" role="alert">
+        <div ref={errorRef} className="notice notice-danger" role="alert" tabIndex={-1}>
           <p>{error}</p>
         </div>
       )}
       {queued && (
-        <div className="callout callout-success" role="status">
-          <p>{queued}</p>
+        <div ref={queuedRef} className="callout callout-success" role="status" tabIndex={-1}>
+          {/* 驗證要求的識別碼只放在 title：使用者接下來要看的是結果出現在哪裡 */}
+          <p title={`驗證要求 ${queued.id}`}>已排入，結果會出現在「最近的 Evidence Bundle」。</p>
+          <p>
+            旅程：{queued.journeys.map((key) => journeyTitle(profile, key)).join("、")}（Verification Profile 第{" "}
+            {queued.profile_version} 版{queued.no_live_model && "；不呼叫模型"}）
+          </p>
         </div>
       )}
     </section>
@@ -779,18 +809,23 @@ function BundleCard({
   bundle,
   latest,
   profile,
+  taskTitle,
   timeZone,
   onLoadArtifact,
 }: {
   bundle: EvidenceBundle;
   latest: boolean;
   profile: VerificationProfileVersion | null;
+  /** 綁定的 Task 的標題；沒有綁定或 Task 清單裡找不到時是 undefined。 */
+  taskTitle?: string;
   timeZone?: string;
   onLoadArtifact: (index: number) => Promise<EvidenceArtifactContent>;
 }) {
   const headingId = `bundle-${bundle.id}`;
   const tone = VERDICT_TONES[bundle.verdict];
-  const body = <BundleBody bundle={bundle} profile={profile} timeZone={timeZone} onLoadArtifact={onLoadArtifact} />;
+  const body = (
+    <BundleBody bundle={bundle} profile={profile} taskTitle={taskTitle} timeZone={timeZone} onLoadArtifact={onLoadArtifact} />
+  );
   return (
     <section className={`card verification-bundle verification-tone-${tone ?? "neutral"}`} aria-labelledby={headingId}>
       <header className="card-header">
@@ -807,7 +842,7 @@ function BundleCard({
         <span className="verification-subtle nowrap">{formatTimestamp(bundle.finished_at, timeZone)}</span>
       </header>
       <p className="verification-bundle-verdict">
-        判定：<VerdictBadge verdict={bundle.verdict} /> <ReasonLabel code={bundle.reason_code} />
+        判定：<VerdictBadge verdict={bundle.verdict} code={bundle.reason_code} /> <ReasonLabel code={bundle.reason_code} />
       </p>
       {latest ? (
         body
@@ -824,11 +859,13 @@ function BundleCard({
 function BundleBody({
   bundle,
   profile,
+  taskTitle,
   timeZone,
   onLoadArtifact,
 }: {
   bundle: EvidenceBundle;
   profile: VerificationProfileVersion | null;
+  taskTitle?: string;
   timeZone?: string;
   onLoadArtifact: (index: number) => Promise<EvidenceArtifactContent>;
 }) {
@@ -847,24 +884,21 @@ function BundleBody({
               <li key={journey.key} aria-label={journey.title}>
                 <p>
                   {journey.title}
-                  {journey.representative && "（代表旅程）"}：<VerdictBadge verdict={journey.verdict} />{" "}
+                  {journey.representative && "（代表旅程）"}：<VerdictBadge verdict={journey.verdict} code={journey.reason_code} />{" "}
                   <ReasonLabel code={journey.reason_code} />
                 </p>
-                <p className="meta">
-                  {(journey.persona !== undefined || journey.identity !== undefined) && (
-                    <>
-                      <span>
-                        persona：
-                        {journey.persona === undefined ? "未指定" : titledKey(profile?.definition.personas, journey.persona)}
-                      </span>
-                      <span>
-                        登入身分：
-                        {journey.identity === undefined ? "未登入" : titledKey(profile?.definition.identities, journey.identity)}
-                      </span>
-                    </>
-                  )}
-                  <ReasonCodeNote code={journey.reason_code} />
-                </p>
+                {(journey.persona !== undefined || journey.identity !== undefined) && (
+                  <p className="meta">
+                    <span>
+                      persona：
+                      {journey.persona === undefined ? "未指定" : titledKey(profile?.definition.personas, journey.persona)}
+                    </span>
+                    <span>
+                      登入身分：
+                      {journey.identity === undefined ? "未登入" : titledKey(profile?.definition.identities, journey.identity)}
+                    </span>
+                  </p>
+                )}
               </li>
             ))}
           </ul>
@@ -874,10 +908,6 @@ function BundleBody({
           {bundle.uncovered.length > 0 && <UncoveredList items={bundle.uncovered} label="這次未覆蓋" level={5} />}
         </div>
         <dl className="facts">
-          <dt>判定代碼</dt>
-          <dd>
-            <code className="mono">{bundle.reason_code}</code>
-          </dd>
           <dt>建置識別</dt>
           <dd>{bundle.build ?? "無法取得"}</dd>
           <dt>候選版本</dt>
@@ -890,11 +920,19 @@ function BundleBody({
               "沒有綁定 Task"
             ) : (
               <>
-                Task <ShortValue value={bundle.task_id} kind="id" field="Task" /> 契約第 {bundle.requirement_version ?? "?"} 版
+                {/* 顯示 Task 標題；Task 清單裡找不到時才顯示識別碼 */}
+                {taskTitle === undefined ? (
+                  <>
+                    Task <ShortValue value={bundle.task_id} kind="id" field="Task" />{" "}
+                  </>
+                ) : (
+                  <span title={bundle.task_id}>「{taskTitle}」</span>
+                )}
+                契約第 {bundle.requirement_version ?? "?"} 版
               </>
             )}
           </dd>
-          <dt>Profile 版本</dt>
+          <dt>Verification Profile</dt>
           <dd>第 {bundle.profile_version} 版</dd>
           <dt>受驗目錄</dt>
           <dd>
@@ -964,7 +1002,7 @@ function UsageView({ bundle }: { bundle: EvidenceBundle }) {
       <h5>用量</h5>
       {bundle.no_live_model && (
         <div className="callout callout-warning">
-          <p>這次驗證禁止即時模型（no_live_model）</p>
+          <p title="no_live_model">這次驗證設定為不呼叫模型</p>
         </div>
       )}
       <ul className="verification-usage" aria-label="用量">
@@ -972,7 +1010,9 @@ function UsageView({ bundle }: { bundle: EvidenceBundle }) {
           即時：模型呼叫 {usage.live_model_calls} 次、模型決定的動作 {usage.live_actions} 個
         </li>
         <li aria-label="重播">重播：重播的動作 {usage.replayed_actions} 個（不呼叫模型）</li>
-        <li aria-label="擋下的模型呼叫">no_live_model 擋下的模型呼叫 {usage.blocked_model_calls} 次</li>
+        <li aria-label="擋下的模型呼叫" title="no_live_model">
+          因不呼叫模型而擋下的模型呼叫 {usage.blocked_model_calls} 次
+        </li>
       </ul>
     </div>
   );
@@ -1078,10 +1118,7 @@ function AttemptsView({ attempts, journeyTitle }: { attempts: VerificationAttemp
                     <li key={index}>
                       <p>
                         <span className="badge badge-plain">{PHASE_LABELS[step.phase]}</span> {stepName(step.journey, step.key, journeyTitle)}：
-                        <VerdictBadge verdict={step.verdict} /> <ReasonLabel code={step.reason_code} />
-                      </p>
-                      <p className="meta">
-                        <ReasonCodeNote code={step.reason_code} />
+                        <VerdictBadge verdict={step.verdict} code={step.reason_code} /> <ReasonLabel code={step.reason_code} />
                       </p>
                     </li>
                   ))}
@@ -1158,6 +1195,16 @@ function ArtifactItem({
   const [error, setError] = useState<string | null>(null);
   const kind = ARTIFACT_KIND_LABELS[artifact.kind];
   const screenshot = artifact.kind === "screenshot";
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const linkRef = useRef<HTMLAnchorElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+
+  // 按下後按鈕先停用，成功時換成截圖或下載連結：焦點移到新出現的元素；失敗時回到按鈕
+  useEffect(() => {
+    if (busy) return;
+    if (content !== null) (screenshot ? imageRef.current : linkRef.current)?.focus();
+    else if (error !== null) buttonRef.current?.focus();
+  }, [busy, content, error, screenshot]);
 
   const load = async () => {
     setBusy(true);
@@ -1179,12 +1226,12 @@ function ArtifactItem({
           <span className="badge badge-plain">{kind}</span> <span className="mono">{artifact.name}</span>
         </p>
         {artifact.withheld === undefined && dataUrl === null && (
-          <button type="button" className="btn-sm" disabled={busy} onClick={() => void load()}>
+          <button ref={buttonRef} type="button" className="btn-sm" disabled={busy} onClick={() => void load()}>
             {screenshot ? "開啟截圖" : "準備下載"}
           </button>
         )}
         {artifact.withheld === undefined && dataUrl !== null && !screenshot && (
-          <a href={dataUrl} download={artifact.name}>
+          <a ref={linkRef} href={dataUrl} download={artifact.name}>
             下載 {artifact.name}
           </a>
         )}
@@ -1196,7 +1243,9 @@ function ArtifactItem({
       {artifact.withheld !== undefined && (
         <p className="verification-withheld">沒有保存：{WITHHELD_LABELS[artifact.withheld] ?? artifact.withheld}</p>
       )}
-      {artifact.withheld === undefined && dataUrl !== null && screenshot && <img src={dataUrl} alt={`截圖：${artifact.name}`} />}
+      {artifact.withheld === undefined && dataUrl !== null && screenshot && (
+        <img ref={imageRef} src={dataUrl} alt={`截圖：${artifact.name}`} tabIndex={-1} />
+      )}
       {error && (
         <p className="verification-error" role="alert">
           {error}

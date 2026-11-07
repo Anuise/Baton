@@ -86,38 +86,38 @@ Baton 是接力棒：多個帳號像分道的跑者，額度用完就交棒給�
 ```
 ┌──────────────┬───────────────────────────────────────────────┐
 │ Baton        │ （通知：儲存故障、可以更新）                    │
-│              │ 筆記  C:\work\notes  複製路徑     ← 情境列       │
-│ Workspace 新增│ 工作                         [建立 Task]  ← h2  │
-│ ┃筆記      2 │                                                │
-│ │C:\work\…   │ 區段 h3                                         │
-│ │ 進行       │ 內容……                                          │
-│ │ ▌主控台    │                                                │
-│ │  工作      │                                                │
-│ │  …         │                                                │
-│  文件        │                                                │
+│ Workspace 新增│ 筆記  C:\work\notes  複製路徑     ← 情境列       │
+│ ┃筆記        │ 工作                         [建立 Task]  ← h2  │
+│ ┃C:\…  待裁定2│                                                │
+│  文件        │ 區段 h3                                         │
+│  C:\…\docs  │ 內容……                                          │
 │ ──────────── │                                                │
-│  帳號        │                                                │
-│  共同設定    │                                                │
-│  設定        │                                                │
+│  進行        │                                                │
+│  ▌Controller │                                                │
+│   工作 …     │                                                │
+│  產出／脈絡／規則…                                              │
+│ ──────────── │                                                │
+│ 帳號 共同設定 App 設定                                          │
 │ ● Runtime…   │                                                │
 └──────────────┴───────────────────────────────────────────────┘
 ```
 
-- 跑道欄 248px（1100px 以下 216px），sticky、自己捲動；主區隨文件捲動，最寬 1600px，左右 32px（窄時 24px）。設計下限 1024×768。
+- 跑道欄 248px（1100px 以下 216px），sticky。由上到下：產品名稱 → Workspace 清單（每個 Workspace 一條「跑道」，名稱一行、路徑與待裁定數一行）→ 選中的 Workspace 的頁面（清單之後，讓其他 Workspace 與它們的待裁定數永遠在上方）→ 欄底固定的平台頁面與狀態。中段內容多時自己捲動，換頁時目前頁面會被捲進可視範圍。主區隨文件捲動，最寬 1600px，左右 32px（窄時 24px）。設計下限 1024×768。
 - 內容靠左對齊。數字欄靠右。不置中整頁內容（首次設定除外）。
 
 ### 頁面與名稱（跑道欄的按鈕文字＝頁面 h2，一字不差）
 
 | 群組 | 頁面 h2 | 元件 |
 |---|---|---|
-| 進行 | 主控台、工作、流程、裁定、時間線 | ControllerPage、TaskBoard、WorkflowPage、DecisionCenter、TimelinePage |
-| 產出 | 成果、審查、驗證、探索 | ArtifactsPage、ReviewPage、VerificationPage、ExplorationPage |
+| 進行 | Controller、工作、流程、裁定、時間線 | ControllerPage、TaskBoard、WorkflowPage、DecisionCenter、TimelinePage |
+| 產出 | 成果、審查、驗證、探索測試 | ArtifactsPage、ReviewPage、VerificationPage、ExplorationPage |
 | 脈絡 | 知識、專案理解 | KnowledgePage、ProjectUnderstandingPage |
 | 規則 | 授權、決策權限、模型設定 | AuthorizationPanel、DecisionAuthorityPanel、ModelOverridesPanel |
-| 平台 | 帳號、共同設定、設定 | App 組合（SetupWizard＋AccountsPage＋SchedulingSettings）、SharedSettingsPage、App 組合（LoginStartup／Update／Backup／Recovery／Platform） |
+| 平台 | 帳號、共同設定、App 設定 | App 組合（SetupWizard＋AccountsPage＋SchedulingSettings）、SharedSettingsPage、App 組合（LoginStartup／Update／Backup／Recovery／Platform／ModelCatalogSettings） |
 
 - 每個 Workspace 頁面元件自己輸出 `.page` 與 `.page-header`（h2 ＝ 上表名稱，主要動作在右）。
-- 「帳號」「設定」由 App 輸出 h2，裡面的元件各自是一個區段（h3）。
+- 「帳號」「App 設定」由 App 輸出 h2，裡面的元件各自是一個區段（h3）。
+- 頁面名稱的由來：「Controller」不叫「主控台」（GLOSSARY 把「主控」列為 Controller 的避免用語）；「App 設定」與「共同設定」（所有帳號共用的 Claude Code 設定）區分。
 - 頁面內的區塊用 h3；物件標題用 h4 或 `.row-head` 的第一個子元素。
 
 ## 7. 元件詞彙（components.css）
@@ -149,7 +149,7 @@ Baton 是接力棒：多個帳號像分道的跑者，額度用完就交棒給�
 
 ### 7.1 一致性規則（第一輪審查後補充）
 
-- **頁寬**：頁面根 `.page` 一律不設寬度上限，標題列與主要動作永遠對齊主區右緣；閱讀型內容（表單、說明、設定）在區段內自己限寬（`--measure`、`--measure-form`，或 `--content-narrow` 約 64 字寬）。
+- **頁寬**：頁面根 `.page` 一律不設寬度上限，標題列與主要動作永遠對齊主區右緣。區段內容依性質限寬：表單 `--measure-form`；以文字為主的清單與說明（知識條目、專案理解、授權能力、Controller 狀態、成果清單）`--content-narrow`；資料型的物件與表格（看板、裁定收件匣、審查、探索、流程、時間線、帳號、共同設定的版本、App 設定的面板）用滿主區寬度。
 - **計數**：`.count` 只放數字，不加括號或單位，放在標題元素外面；0 筆時一律顯示 0（整組隱藏只用在「本來就不常出現」的分組，例如已延後）。收合摘要的計數也用同樣寫法：「已過期的審查 1」。需要讓輔助技術讀到計數時，用外層 region 的 `aria-label`（例如「可處理（4）」）。
 - **琥珀色只給要你處理的事**（待裁定、缺項要你補、逾期、需要你接受的成果）。系統自己在等的狀態（排隊、等待相依、等待額度）用中性（`.badge-plain`、`.stripe-muted`）。同一個狀態在清單、詳情、總覽用同一個色調（共用同一個 tone 函式）。
 - **列內動作**：`.row-list` 與看板卡片裡的動作用次要或低調按鈕；主要按鈕留給頁首或區段裡唯一的動作。

@@ -268,7 +268,7 @@ async fn an_artifact_whose_stored_file_no_longer_matches_its_manifest_fails_the_
 
     assert_eq!(task_status(&harness, &ws, &tid).await, "ready");
     let record = &verification(&harness, &ws, &tid).await["records"][0];
-    assert!(record["checks"][0]["detail"].as_str().unwrap().contains("manifest 不符"), "{record}");
+    assert!(record["checks"][0]["detail"].as_str().unwrap().contains("雜湊不符"), "{record}");
 }
 
 #[tokio::test]

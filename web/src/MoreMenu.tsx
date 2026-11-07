@@ -1,34 +1,54 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 /**
- * `<details>` 浮層的收起行為：開著時點浮層外面收起；Esc 收起並把焦點還給觸發的 `<summary>`。
- * Esc 常駐監聽在 document：點浮層空白處後焦點落到 body，按鍵事件不會經過 details；
- * 也不等 toggle 事件更新狀態才掛上，開啟後立刻按 Esc 也收得起來。
- * 回傳 `onToggle`，交給 `<details onToggle>`，讓外點監聽只在開著時存在。
+ * `<details>` 浮層的收起行為：
+ * - 開著時點浮層外面，或用 Tab 把焦點移出浮層，就收起（不搬動焦點；WCAG 2.4.11 焦點不被遮蔽）。
+ * - Esc 收起並把焦點還給觸發的 `<summary>`。只在焦點位於浮層內、或落在 body（點過浮層空白處）時處理，
+ *   不會在頁面別處按 Esc 時把焦點搶回來。
+ * Esc 監聽在 document：點浮層空白處後焦點落到 body，按鍵事件不會經過 details。
+ * 回傳 `onToggle`，交給 `<details onToggle>`，讓外點與焦點監聽只在開著時存在；
+ * `onClose`（可選）在收起時呼叫，例如重設浮層裡的暫時狀態。
  */
-export function useDetailsDismiss(ref: RefObject<HTMLDetailsElement | null>) {
+export function useDetailsDismiss(ref: RefObject<HTMLDetailsElement | null>, onClose?: () => void) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    const close = (event: PointerEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) ref.current.open = false;
+    const details = ref.current;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (details && !details.contains(event.target as Node)) details.open = false;
     };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
+    const closeWhenFocusLeaves = (event: FocusEvent) => {
+      const next = event.relatedTarget as Node | null;
+      // relatedTarget 為 null 表示焦點落到 body（例如點了浮層空白處），這時保持開著
+      if (details && next !== null && !details.contains(next)) details.open = false;
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    details?.addEventListener("focusout", closeWhenFocusLeaves);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      details?.removeEventListener("focusout", closeWhenFocusLeaves);
+    };
   }, [open, ref]);
 
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || !ref.current?.open) return;
-      ref.current.open = false;
-      ref.current.querySelector("summary")?.focus();
+      const details = ref.current;
+      if (event.key !== "Escape" || !details?.open) return;
+      const active = document.activeElement;
+      if (active !== null && active !== document.body && !details.contains(active)) return;
+      details.open = false;
+      details.querySelector("summary")?.focus();
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [ref]);
 
-  return (event: React.SyntheticEvent<HTMLDetailsElement>) => setOpen(event.currentTarget.open);
+  return (event: React.SyntheticEvent<HTMLDetailsElement>) => {
+    const isOpen = event.currentTarget.open;
+    setOpen(isOpen);
+    if (!isOpen) onClose?.();
+  };
 }
 
 /**

@@ -66,5 +66,9 @@ describe("平台狀態頁", () => {
 
     expect(await screen.findByText(/connection refused/)).toBeInTheDocument();
     expect(screen.queryByText("正式支援")).not.toBeInTheDocument();
+    // 原因可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).toHaveTextContent(/^無法取得平台狀態connection refused$/);
   });
 });

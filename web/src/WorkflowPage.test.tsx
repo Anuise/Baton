@@ -58,6 +58,30 @@ describe("流程", () => {
     expect(workflow).toHaveTextContent("建立於2023/11/15 06:13");
   });
 
+  it("理由的標籤是使用者語言；Playbook 代碼不在理由文字裡，放在卡片標題的 title", async () => {
+    renderPage(fakeClient());
+
+    const workflow = await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
+    expect(workflow).toHaveTextContent("選擇這個流程的理由");
+    expect(workflow).not.toHaveTextContent("Router 的理由");
+    expect(workflow).toHaveTextContent("情境「缺陷處理」→ 缺陷處理第 1 版");
+    expect(workflow).not.toHaveTextContent("（defect）");
+    expect(within(workflow).getByRole("heading", { name: "缺陷處理 第 1 版" })).toHaveAttribute("title", "Playbook 代碼：defect");
+  });
+
+  it("Gate 平常是中性的分類標籤；輪到且要你裁定時才用琥珀色", async () => {
+    renderPage(fakeClient(workflowList({ workflows: [workflowView(), workflowView({ ...atDecisionGate, id: "wf_2", playbook_title: "新功能" })] })));
+    await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
+
+    const gate = (workflow: string) =>
+      within(within(screen.getByRole("region", { name: workflow })).getByRole("listitem", { name: "修正確認" })).getByText("裁定 Gate");
+    // 還沒輪到：中性
+    expect(gate("缺陷處理 第 1 版")).toHaveClass("badge", "badge-plain");
+    expect(gate("缺陷處理 第 1 版")).not.toHaveClass("badge-warning");
+    // 輪到且需要你裁定：琥珀
+    expect(gate("新功能 第 1 版")).toHaveClass("badge", "badge-warning");
+  });
+
   it("Playbook 沒有新版時不顯示新版提示；沒有 Task 時說明尚未綁定", async () => {
     renderPage(fakeClient(workflowList({ workflows: [workflowView({ latest_playbook_version: 1, task_id: null, task_title: null })] })));
 
@@ -132,8 +156,9 @@ describe("流程", () => {
     const passed = collapsed(within(screen.getByRole("region", { name: "缺陷處理 第 1 版" })).getByRole("listitem", { name: "建立重現" }));
     expect(passed).not.toBeNull();
     expect(passed).not.toHaveAttribute("open");
-    // 摘要說明裡面有什麼（嘗試次數）
-    expect(passed?.querySelector("summary")).toHaveTextContent(`細節與嘗試紀錄（${workflow.stages[0].attempts.length} 次）`);
+    // 摘要說明裡面有什麼（嘗試次數）；計數只放數字（MASTER 7.1）
+    expect(passed?.querySelector("summary")).toHaveTextContent(`細節與嘗試紀錄 ${workflow.stages[0].attempts.length}`);
+    expect(passed?.querySelector("summary .count")).toHaveTextContent(String(workflow.stages[0].attempts.length));
     const first = screen.getByRole("region", { name: "缺陷處理 第 1 版" });
     expect(collapsed(within(first).getByRole("listitem", { name: "修正確認" }))).not.toBeNull();
     expect(collapsed(within(first).getByRole("listitem", { name: "縮小範圍" }))).toBeNull();
@@ -373,6 +398,9 @@ describe("流程", () => {
     client.workflows.mockRejectedValueOnce(new Error("找不到 Workspace：ws_1"));
     renderPage(client);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得流程：找不到 Workspace：ws_1");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("無法取得流程")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("找不到 Workspace：ws_1");
   });
 });

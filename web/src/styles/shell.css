@@ -87,6 +87,8 @@
   overflow-y: auto;
   scrollbar-color: var(--rail-muted) transparent;
   scrollbar-width: thin;
+  /* Tab 到需要捲動才看得到的項目時，焦點外框不貼齊邊緣被裁掉 */
+  scroll-padding-block: var(--space-4);
 }
 
 /* 接力棒：目前頁面左緣的一根短棒；位置由 App 量測後以 transform 設定 */
@@ -177,11 +179,10 @@
   background: var(--rail-hover);
 }
 
-/* 目前的 Workspace：整條跑道微亮，左側一條分道線延伸到它的頁面 */
+/* 目前的 Workspace：整條跑道亮一階，左緣一條淡紫分道線（它的頁面列在清單之後） */
 .workspace-item-current {
-  padding-bottom: var(--space-4);
-  background: rgb(255 255 255 / 4%);
-  box-shadow: inset 0 0 0 1px var(--rail-line);
+  background: var(--rail-active);
+  box-shadow: inset 3px 0 0 var(--rail-baton);
 }
 
 .workspace-item:has(.workspace-select:focus-visible) {
@@ -235,23 +236,32 @@
 .workspace-badge {
   flex: none;
   min-width: 20px;
-  margin-top: 1px;
   padding: 0 var(--space-3);
   border-radius: var(--radius-full);
   background: var(--rail-badge-bg);
   color: var(--rail-badge-text);
   font-size: var(--text-caption);
   font-weight: var(--font-weight-strong);
-  line-height: 20px;
+  line-height: 18px;
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
 .workspace-meta {
   display: flex;
+  gap: var(--space-3);
+  align-items: center;
   min-width: 0;
   color: var(--rail-muted);
   font-size: var(--text-caption);
+}
+
+.workspace-meta > .workspace-path {
+  flex: 0 1 auto;
+}
+
+.workspace-meta > .workspace-badge {
+  margin-left: auto;
 }
 
 .workspace-path {
@@ -483,12 +493,15 @@
 }
 
 /* ---------- 頁面導覽：目前 Workspace 的頁面，依群組列出 ---------- */
+/* 頁面導覽在 Workspace 清單之後，以分道線隔開 */
 .workspace-nav {
   position: relative;
   z-index: 1;
   display: grid;
   gap: var(--space-4);
-  margin: var(--space-4) 0 0 calc(var(--space-5) * -1 + var(--space-3));
+  margin-top: var(--space-5);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rail-line);
 }
 
 .nav-group {
@@ -785,6 +798,7 @@
 
 .setup-finished > h2 {
   margin: 0;
+  outline: none;
   font-family: var(--font-display);
   font-size: var(--text-hero);
   font-weight: var(--font-weight-heavy);

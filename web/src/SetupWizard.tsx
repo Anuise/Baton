@@ -195,9 +195,14 @@ function ToolStep({ title, check, heading: Heading }: { title: string; check: To
       <p className="setup-tool-message">{check.message}</p>
       {check.version && (
         <p className="meta">
+          {/* 版本號用等寬字（MASTER 7.1，與帳號頁一致） */}
           <span>
-            目前版本 {check.version}
-            {check.minimum_version ? `（最低 ${check.minimum_version}）` : ""}
+            目前版本 <span className="mono">{check.version}</span>
+            {check.minimum_version && (
+              <>
+                （最低 <span className="mono">{check.minimum_version}</span>）
+              </>
+            )}
           </span>
         </p>
       )}

@@ -184,6 +184,8 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
   // 全畫面精靈中第一個帳號就緒時，不立刻切走：先顯示完成畫面與下一步，由使用者自己進入主畫面
   const [setupFinished, setSetupFinished] = useState(false);
   const wasNeedingSetup = useRef(false);
+  // 背景執行的說明是否還沒確認（完成畫面上只有這時才需要精靈）
+  const [backgroundUnacknowledged, setBackgroundUnacknowledged] = useState(false);
   const fullScreenSetup = (needsSetup || setupFinished) && !setupSkipped;
   const [shell, setShell] = useState<ShellState>(loadShell);
   // 跑道欄最近一次讀到的使用中 Workspace；選中的 Workspace 不在其中（例如已封存）時視為未選
@@ -212,10 +214,13 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
     let current = true;
     client.getSetup().then(
       (status) => {
-        if (current) setNeedsSetup(!status.profiles.some((profile) => profile.status === "active" && profile.dispatchable));
+        if (!current) return;
+        setNeedsSetup(!status.profiles.some((profile) => profile.status === "active" && profile.dispatchable));
+        setBackgroundUnacknowledged(status.background_notice.acknowledged_at === null);
       },
       () => {
-        if (current) setNeedsSetup(false);
+        // 讀不到時保留原本的判斷：全畫面精靈中讀取失敗不是「帳號已就緒」；一開始就讀不到時照常顯示主畫面
+        if (current && !wasNeedingSetup.current) setNeedsSetup(false);
       },
     );
     return () => {
@@ -237,6 +242,24 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
   };
 
   const selectGlobal = (view: GlobalPage) => setShell((current) => ({ ...current, view }));
+
+  // 換頁後要把焦點移到主區（頁面裡的「前往…」、離開全畫面首次設定）：原本聚焦的按鈕已隨頁面消失
+  const [focusMain, setFocusMain] = useState(0);
+  useEffect(() => {
+    if (focusMain > 0) document.getElementById("main-content")?.focus();
+  }, [focusMain]);
+
+  /** 頁面裡的「前往…」：平台頁面切過去，其餘是目前 Workspace 的頁面。 */
+  const openPage = (page: WorkspacePage | GlobalPage) => {
+    if (isOneOf(GLOBAL_NAV, page)) selectGlobal(page);
+    else selectWorkspacePage(page);
+    setFocusMain((n) => n + 1);
+  };
+
+  const leaveSetup = () => {
+    setSetupSkipped(true);
+    setFocusMain((n) => n + 1);
+  };
 
   const statusBar = client ? (
     <StatusBar client={client} onHealth={setHealth} onPending={setPending} refreshKey={pendingVersion} />
@@ -262,13 +285,13 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
           {notices}
           {client && !needsSetup && setupFinished && (
             <>
-              {/* 精靈自己判斷是否還有未完成的項目（例如背景執行的說明還沒確認） */}
-              <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
+              {/* 背景執行的說明還沒確認時，精靈留在完成畫面上方讓使用者確認 */}
+              {backgroundUnacknowledged && <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
               <SetupFinished
-                onEnter={() => setSetupSkipped(true)}
+                onEnter={leaveSetup}
                 onSharedSettings={() => {
                   selectGlobal("shared");
-                  setSetupSkipped(true);
+                  leaveSetup();
                 }}
               />
             </>
@@ -277,7 +300,7 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
             <>
               <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
               <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
-              <button type="button" className="setup-skip btn-quiet" onClick={() => setSetupSkipped(true)}>
+              <button type="button" className="setup-skip btn-quiet" onClick={leaveSetup}>
                 先進入主畫面
               </button>
             </>
@@ -331,7 +354,7 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
               workspace={selected}
               page={shell.workspaceTab}
               onDecisionsChange={() => setPendingVersion((version) => version + 1)}
-              onOpenPage={selectWorkspacePage}
+              onOpenPage={openPage}
             />
           </>
         )}
@@ -363,6 +386,7 @@ function Rail({
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
   const batonRef = useRef<HTMLSpanElement>(null);
+  const lastCurrent = useRef<HTMLElement | null>(null);
 
   useLayoutEffect(() => {
     const track = trackRef.current;
@@ -385,6 +409,12 @@ function Rail({
       if (appearing) {
         void baton.offsetHeight;
         baton.style.transition = "";
+      }
+      // 目前頁面換了（換頁、換 Workspace、重開 App 回到上次的頁面）而它在跑道可視範圍外時捲進來；
+      // 其他內容變動（例如待裁定數更新）不捲動，不干擾使用者自己捲到別處
+      if (current !== lastCurrent.current) {
+        lastCurrent.current = current;
+        if (box.top < trackBox.top || box.bottom > trackBox.bottom) current.scrollIntoView?.({ block: "nearest" });
       }
     };
     place();
@@ -508,22 +538,27 @@ function GlobalNav({ current, onSelect }: { current: GlobalPage | null; onSelect
 
 /** 首次設定完成畫面：帳號已就緒，列出開始派工前的下一步（真的有先後順序）。 */
 function SetupFinished({ onEnter, onSharedSettings }: { onEnter: () => void; onSharedSettings: () => void }) {
+  // 出現時把焦點移到標題：剛按的「重新檢查」已隨精靈消失，也讓螢幕報讀器唸出「帳號已就緒」
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => titleRef.current?.focus(), []);
   return (
     <section className="setup-finished" aria-labelledby="setup-finished-title">
-      <h2 id="setup-finished-title">帳號已就緒</h2>
-      <p>再完成這幾步就能開始派工：</p>
+      <h2 id="setup-finished-title" ref={titleRef} tabIndex={-1}>
+        帳號已就緒
+      </h2>
+      <p>接下來依序完成這幾步，就能開始派工：</p>
       <ol className="setup-next-steps">
         <li>
-          <strong>匯入共同設定</strong>
-          <span>讓所有帳號使用同一份 Claude Code 偏好、指示、hooks 與 MCP 伺服器。</span>
+          <strong>匯入共同設定（建議）</strong>
+          <span>讓所有帳號使用同一份 Claude Code 偏好、指示、hooks 與 MCP 伺服器；也可以稍後再做。</span>
         </li>
         <li>
           <strong>新增 Workspace</strong>
-          <span>在左欄的 Workspace 清單按「新增」，選一個要讓 Agent 工作的目錄。</span>
+          <span>進入主畫面後，在左欄的 Workspace 清單按「新增」，選一個要讓 Agent 工作的目錄。</span>
         </li>
         <li>
           <strong>確認授權</strong>
-          <span>在 Workspace 的「規則」›「授權」確認 Agent 可以做什麼；確認之前不會派出任何工作。</span>
+          <span>在 Workspace 的「規則」›「授權」確認 Agent 可以做什麼；確認之前，需要任何能力的工作都不會開始。</span>
         </li>
         <li>
           <strong>開啟 Controller</strong>
@@ -582,23 +617,25 @@ function WorkspaceView({
   workspace: Workspace;
   page: WorkspacePage;
   onDecisionsChange: () => void;
-  /** 頁面裡的「前往…」按鈕切到同一個 Workspace 的另一頁。 */
-  onOpenPage: (page: WorkspacePage) => void;
+  /** 頁面裡的「前往…」按鈕切到同一個 Workspace 的另一頁，或某個平台頁面。 */
+  onOpenPage: (page: WorkspacePage | GlobalPage) => void;
 }) {
   // 換 Workspace 時以 key 重新掛載，上一個 Workspace 較晚回來的讀取結果不會蓋掉目前畫面與草稿
   switch (page) {
     case "controller":
       return <ControllerPage key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
     case "tasks":
-      return <TaskBoard key={workspace.id} client={client} workspace={workspace} />;
+      return <TaskBoard key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
     case "workflows":
       return <WorkflowPage key={workspace.id} client={client} workspace={workspace} />;
     case "decisions":
-      return <DecisionCenter key={workspace.id} client={client} workspace={workspace} onChange={onDecisionsChange} />;
+      return (
+        <DecisionCenter key={workspace.id} client={client} workspace={workspace} onChange={onDecisionsChange} onOpenPage={onOpenPage} />
+      );
     case "timeline":
       return <TimelinePage key={workspace.id} client={client} workspace={workspace} />;
     case "artifacts":
-      return <ArtifactsPage key={workspace.id} client={client} workspace={workspace} />;
+      return <ArtifactsPage key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
     case "reviews":
       return <ReviewPage key={workspace.id} client={client} workspace={workspace} />;
     case "verification":
@@ -614,7 +651,7 @@ function WorkspaceView({
     case "authority":
       return <DecisionAuthorityPanel key={workspace.id} client={client} workspace={workspace} />;
     case "models":
-      return <ModelOverridesPanel key={workspace.id} client={client} workspace={workspace} />;
+      return <ModelOverridesPanel key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
   }
 }
 

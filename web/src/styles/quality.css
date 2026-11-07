@@ -38,10 +38,20 @@
   justify-self: start;
 }
 
-/* 分組標題（Task）：長標題最多兩行，計數接在後面；識別碼時複製按鈕緊跟在後 */
+/* 分組標題（Task）：不換行，長標題縮小並最多兩行，計數（與「在工作頁查看」）固定在標題最後一行的末端；
+   識別碼時複製按鈕緊跟在後 */
+.artifacts-page .artifacts-task-heading {
+  flex-wrap: nowrap;
+  align-items: last baseline;
+}
+
 .artifacts-page .artifacts-task-heading > h3 {
   flex: 0 1 auto;
   min-width: 0;
+}
+
+.artifacts-page .artifacts-task-heading > :not(h3) {
+  flex: none;
 }
 
 .artifacts-page .artifact {
@@ -323,11 +333,6 @@
   font-size: var(--text-meta);
 }
 
-/* 嘗試的步驟：判定一行，判定代碼在下一行的次要資訊（li 保持 list-item，才留得住項目符號） */
-.verification-page .verification-attempt-steps > li > .meta {
-  margin-top: var(--space-1);
-}
-
 /* 用量：一列三項，像次要資訊列 */
 .verification-page .verification-usage {
   display: flex;
@@ -498,10 +503,10 @@
   min-width: 0;
 }
 
-/* 疑點的說明清單：摘要與收合區的標籤欄至少同寬（值欄起點一致）；
-   較長的標籤（確認的 Evidence Bundle）把標籤欄撐寬，不被擠到折行 */
+/* 疑點的說明清單：標籤欄固定寬度，每張卡、摘要與收合區的值欄起點都一致；
+   較長的標籤（確認的 Evidence Bundle）在標籤欄內折成兩行（只在「確認的」後面換行） */
 .exploration-page .exploration-summary {
-  grid-template-columns: minmax(9em, max-content) minmax(0, 1fr);
+  grid-template-columns: 9em minmax(0, 1fr);
 }
 
 .exploration-page .exploration-summary > dd {

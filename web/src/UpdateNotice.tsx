@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import type { LifecycleClient, MaintenanceOutcome, UpdateClient, UpdateStatusView } from "./runtimeClient";
 import { UpdateProgress } from "./UpdateProgress";
 
@@ -99,7 +100,10 @@ export function UpdateNotice({ client, runtimeStartedAt, pollMs = 60_000 }: Prop
       )}
       {available && (
         <div className="callout callout-accent update-notice">
-          <strong className="update-notice-text">Baton {available.version} 可以更新</strong>
+          <strong className="update-notice-text">
+            {/* 版本號用等寬字（MASTER 7.1） */}
+            Baton <span className="mono">{available.version}</span> 可以更新
+          </strong>
           {available.notes && (
             <details className="update-notice-notes">
               <summary>更新說明</summary>
@@ -129,6 +133,8 @@ export function UpdateNotice({ client, runtimeStartedAt, pollMs = 60_000 }: Prop
 /**
  * 更新確認對話框（原生 `<dialog>` 的 modal）：開啟時焦點移到「取消」（不會停止任何工作的選項）；
  * Esc 等同「取消」，下載並驗證中不能取消；關閉後焦點回到開啟它的按鈕。
+ * 下載並驗證中兩顆按鈕只標 `aria-disabled`（點擊忽略），不設 `disabled`：焦點留在對話框裡，不落到 body；
+ * 失敗時焦點移到「取消」。
  */
 function UpdateConfirm({
   apply,
@@ -142,6 +148,11 @@ function UpdateConfirm({
   const dialog = useRef<HTMLDialogElement>(null);
   const cancelButton = useRef<HTMLButtonElement>(null);
   const applying = apply.state === "applying";
+  const failed = apply.state === "failed";
+
+  useEffect(() => {
+    if (failed) cancelButton.current?.focus();
+  }, [failed]);
 
   useEffect(() => {
     const element = dialog.current;
@@ -187,19 +198,29 @@ function UpdateConfirm({
       </ol>
       <p>重新開啟後依各 Workspace 的「完全退出後自動續跑」設定續跑，其餘等「繼續工作」。</p>
       <p className="field-hint">資料目錄不會被刪除。</p>
-      {applying && <p className="dot dot-accent">下載並驗證中…</p>}
+      {applying && (
+        <p role="status" className="dot dot-accent">
+          下載並驗證中…
+        </p>
+      )}
       {apply.state === "failed" && (
-        <div className="callout callout-danger" role="alert">
-          <p>更新沒有開始：{apply.reason}</p>
+        <FailureNotice title="更新沒有開始" reason={apply.reason}>
           <p>工作沒有停止，照常進行。</p>
-        </div>
+        </FailureNotice>
       )}
       <div className="dialog-actions">
         {/* Windows 慣例：主要動作在左、取消在右 */}
-        <button type="button" className="btn-primary" disabled={applying} onClick={onConfirm}>
+        <button
+          type="button"
+          className="btn-primary"
+          aria-disabled={applying}
+          onClick={() => {
+            if (!applying) onConfirm();
+          }}
+        >
           更新並重新開啟
         </button>
-        <button ref={cancelButton} type="button" disabled={applying} onClick={cancel}>
+        <button ref={cancelButton} type="button" aria-disabled={applying} onClick={cancel}>
           取消
         </button>
       </div>

@@ -152,6 +152,10 @@ async function selectWorkspace(user: ReturnType<typeof userEvent.setup>, name = 
 
 const EMPTY_TITLE = "選一個 Workspace 開始";
 
+/** 更新通知的文字（版本號是等寬的子元素，以整段文字比對）。 */
+const updateNotice = (_: string, element: Element | null) =>
+  element?.textContent === "Baton 0.2.0 可以更新" && !Array.from(element.children).some((child) => child.textContent === "Baton 0.2.0 可以更新");
+
 describe("App 外殼", () => {
   // App 第一次 render 會初次執行側欄與全部設定頁元件；全部前端測試平行執行時這段冷啟動實測可超過 1 秒，
   // 會吃掉第一個測試 findBy* 的預設等待時間。先在這裡暖機一次，各測試的等待只反映畫面本身的反應。
@@ -288,7 +292,7 @@ describe("App 外殼", () => {
   });
 
   describe("Workspace 頁面", () => {
-    it("選中 Workspace 後在它下面展開四組頁面，預設開在 Controller 頁，一次只顯示一頁", async () => {
+    it("選中 Workspace 後在清單之後列出它的四組頁面，預設開在 Controller 頁，一次只顯示一頁", async () => {
       const user = userEvent.setup();
       render(<App />);
 
@@ -303,8 +307,11 @@ describe("App 外殼", () => {
         ["知識", "專案理解"],
         ["授權", "決策權限", "模型設定"],
       ]);
-      // 頁面導覽在選中的 Workspace 項目之內
-      expect(screen.getByRole("button", { name: "選擇 筆記" }).closest("li")).toContainElement(nav);
+      // 頁面導覽在 Workspace 清單之後（不夾在項目之間，其他 Workspace 永遠在上方看得到）
+      const list = screen.getByRole("button", { name: "選擇 筆記" }).closest("ul")!;
+      expect(list).not.toContainElement(nav);
+      expect(list.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(screen.getByRole("complementary", { name: "Workspace" })).toContainElement(nav);
       expect(pageButton("Controller")).toHaveAttribute("aria-current", "page");
       expect(within(main()).getByRole("heading", { name: "Controller" })).toBeInTheDocument();
       expect(client.getControllerCli).toHaveBeenCalledWith("ws_1");
@@ -360,6 +367,8 @@ describe("App 外殼", () => {
 
       expect(pageButton("授權")).toHaveAttribute("aria-current", "page");
       expect(await within(main()).findByRole("heading", { level: 2, name: "授權" })).toBeInTheDocument();
+      // 原本聚焦的按鈕隨頁面消失，焦點移到主區
+      await waitFor(() => expect(main()).toHaveFocus());
     });
 
     it("裁定頁開啟裁定中心", async () => {
@@ -387,10 +396,9 @@ describe("App 外殼", () => {
       await waitFor(() => expect(client.timeline).toHaveBeenLastCalledWith("ws_2", undefined));
       expect(await screen.findByRole("heading", { name: "時間線" })).toBeInTheDocument();
       expect(pageButton("時間線")).toHaveAttribute("aria-current", "page");
-      // 頁面導覽移到新選中的 Workspace 下面
-      expect(screen.getByRole("button", { name: "選擇 文件" }).closest("li")).toContainElement(
-        screen.getByRole("navigation", { name: "Workspace 頁面" }),
-      );
+      // 跑道欄標示新選中的 Workspace
+      expect(screen.getByRole("button", { name: "選擇 文件" })).toHaveAttribute("aria-current", "true");
+      expect(screen.getByRole("button", { name: "選擇 筆記" })).not.toHaveAttribute("aria-current");
     });
 
     it("選中的 Workspace 被封存後回到空狀態", async () => {
@@ -580,7 +588,7 @@ describe("App 外殼", () => {
       expect(screen.queryByRole("complementary", { name: "Workspace" })).not.toBeInTheDocument();
       // 狀態列與更新通知不受影響
       expect(await screen.findByText("待裁定：1")).toBeInTheDocument();
-      expect(await screen.findByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+      expect(await screen.findByText(updateNotice)).toBeInTheDocument();
     });
 
     it("首次精靈中出現可用的 Profile 後回到主畫面", async () => {
@@ -597,13 +605,38 @@ describe("App 外殼", () => {
 
       await user.click(await screen.findByRole("button", { name: "重新檢查" }));
 
-      // 不立刻切走：先顯示完成畫面與下一步，使用者自己進入主畫面
-      expect(await screen.findByRole("heading", { name: "帳號已就緒" })).toBeInTheDocument();
+      // 不立刻切走：先顯示完成畫面與下一步，使用者自己進入主畫面；焦點移到完成畫面的標題
+      expect(await screen.findByRole("heading", { name: "帳號已就緒" })).toHaveFocus();
       expect(screen.getByText("確認授權")).toBeInTheDocument();
       expect(screen.queryByRole("navigation", { name: "平台" })).not.toBeInTheDocument();
       await user.click(screen.getByRole("button", { name: "進入主畫面" }));
 
       expect(await screen.findByRole("navigation", { name: "平台" })).toBeInTheDocument();
+      // 離開全畫面設定後焦點在主區，不落到 body
+      await waitFor(() => expect(main()).toHaveFocus());
+    });
+
+    it("全畫面精靈中重新讀取首次設定失敗時，不會誤顯示「帳號已就緒」", async () => {
+      // App 與精靈都會讀取首次設定：按「重新檢查」之前一律回「還沒有帳號」，之後一律讀取失敗
+      let failing = false;
+      vi.mocked(client.getSetup).mockImplementation(async () => {
+        if (failing) throw new Error("暫時無法連線");
+        return setupStatus({ profiles: [], ready: false });
+      });
+      vi.mocked(client.recheckSetup).mockImplementation(async () => {
+        throw new Error("暫時無法連線");
+      });
+      onlyInThisTest(client.getSetup, client.recheckSetup);
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByRole("region", { name: "首次設定" });
+
+      failing = true;
+      await user.click(await screen.findByRole("button", { name: "重新檢查" }));
+
+      expect((await screen.findAllByText(/暫時無法連線/)).length).toBeGreaterThan(0);
+      expect(screen.queryByRole("heading", { name: "帳號已就緒" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("navigation", { name: "平台" })).not.toBeInTheDocument();
     });
 
     it("首次設定完成畫面可以直接前往共同設定", async () => {
@@ -694,12 +727,12 @@ describe("App 外殼", () => {
       const user = userEvent.setup();
       render(<App />);
 
-      expect(await screen.findByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+      expect(await screen.findByText(updateNotice)).toBeInTheDocument();
       await user.click(globalButton("App 設定"));
       const updates = await screen.findByRole("region", { name: "更新" });
       expect(within(updates).getByText("狀態", { selector: "dt" }).nextElementSibling).toHaveTextContent("有新版本 0.2.0");
       // 切換頁面不影響更新通知
-      expect(screen.getByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+      expect(screen.getByText(updateNotice)).toBeInTheDocument();
       expect(client.applyUpdate).not.toHaveBeenCalled();
     });
   });

@@ -287,6 +287,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
                         <label className="field">
                           <span className="field-label">目標資源（每行一項）</span>
                           <textarea
+                            className="authorization-targets-input"
                             aria-label={`${label}：目標資源（每行一項）`}
                             value={entry.targets}
                             onChange={(e) => change(capability, "targets", e.target.value)}
@@ -454,7 +455,9 @@ function LegacyRunsNotice({
   onCancel: (run: LegacyRun) => void;
 }) {
   const headingId = useId();
-  const labelOf = (capability: Capability) => capabilities.find((c) => c.capability === capability)?.label ?? capability;
+  // 找不到能力名稱時才顯示原始代碼，以等寬字標示（MASTER 7.1 機器代碼；所在的 .meta 已是次要色）
+  const labelOf = (capability: Capability): ReactNode =>
+    capabilities.find((c) => c.capability === capability)?.label ?? <span className="mono">{capability}</span>;
   return (
     <section className="section authorization-legacy" role="status" aria-labelledby={headingId}>
       <div className="section-heading">
@@ -491,9 +494,20 @@ function LegacyRunsNotice({
             </div>
             <p className="meta">
               <span>沿用第 {run.authorization_revision} 版</span>
-              {run.revoked_capabilities.length > 0 && <span>已撤銷：{run.revoked_capabilities.map(labelOf).join("、")}</span>}
+              {run.revoked_capabilities.length > 0 && (
+                <span>
+                  已撤銷：
+                  {run.revoked_capabilities.map((capability, index) => (
+                    <Fragment key={capability}>
+                      {index > 0 && "、"}
+                      {labelOf(capability)}
+                    </Fragment>
+                  ))}
+                </span>
+              )}
               {run.admitted_at !== null && <span>准入於 {formatTimestamp(run.admitted_at, timeZone)}</span>}
-              {run.cancel_requested && <span className="dot dot-warning">已要求停止，等待程序確認</span>}
+              {/* 系統自己在等，不是要你處理的事：中性點，不用琥珀色（MASTER 7.1） */}
+              {run.cancel_requested && <span className="dot">已要求停止，等待程序確認</span>}
             </p>
           </li>
         ))}

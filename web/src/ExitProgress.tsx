@@ -9,6 +9,7 @@ import type {
   LifecycleStatus,
   StopAnomaly,
 } from "./runtimeClient";
+import { splitFirstSentence } from "./textFormat";
 
 type ExitState =
   | { state: "idle" }
@@ -59,6 +60,27 @@ export const seconds = (ms: number) => Math.max(0, Math.ceil(ms / 1000));
 export function outcomeText(run: ExitRunResult): string {
   const detail = [run.anomaly && ANOMALY_LABELS[run.anomaly], run.message].filter(Boolean).join("：");
   return detail === "" ? OUTCOME_LABELS[run.outcome] : `${OUTCOME_LABELS[run.outcome]}（${detail}）`;
+}
+
+/**
+ * 可能超過兩行的失敗說明（長警示 `.notice-danger`，MASTER 第 7 節；更新確認與更新進度共用）：
+ * 狀態詞在前，原因的第一句完整顯示，其餘收進「詳細資訊」；`children` 接在原因之後。
+ */
+export function FailureNotice({ title, reason, children }: { title: string; reason: string; children?: ReactNode }) {
+  const { summary, rest } = splitFirstSentence(reason);
+  return (
+    <div role="alert" className="notice notice-danger">
+      <p className="notice-title">{title}</p>
+      {summary !== "" && <p>{summary}</p>}
+      {rest !== "" && (
+        <details>
+          <summary>詳細資訊</summary>
+          <p className="pre-wrap">{rest}</p>
+        </details>
+      )}
+      {children}
+    </div>
+  );
 }
 
 /** Run 的標示：Workspace 名稱與 Run（識別碼或「Controller CLI」），兩者以間距分開（更新進度共用）。 */
@@ -230,9 +252,7 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
         {exit.state === "requesting" && <p className="dot dot-accent">正在要求 Runtime 停止…</p>}
         {exit.state === "request_failed" && (
           <>
-            <p role="alert" className="callout callout-danger">
-              無法開始完全退出：{exit.reason}
-            </p>
+            <FailureNotice title="無法開始完全退出" reason={exit.reason} />
             <div className="dialog-actions">
               <button type="button" className="btn-primary" onClick={() => void start()}>
                 重試

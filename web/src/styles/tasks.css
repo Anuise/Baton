@@ -113,8 +113,8 @@
   text-overflow: ellipsis;
 }
 
-/* 授權未確認的提示：「前往授權」依內容寬，不被 grid 拉滿 */
-.controller-page .controller-authorization > button {
+/* 授權未確認的提示「前往授權」、沒有可用帳號時的「前往帳號」：依內容寬，不被 grid 拉滿 */
+.controller-page :is(.controller-authorization, .controller-launch) > button {
   justify-self: start;
 }
 
@@ -191,10 +191,15 @@
   font-weight: var(--font-weight-strong);
 }
 
-/* 需要你處理的狀態（有 Task 時）：琥珀色＋狀態點；其餘中性 */
-.task-board .task-status-count-attention,
-.task-board .task-status-count-attention > .tabular {
+/* 狀態點與卡片同一個色調（TaskBoard.tsx 的 statusTone）：有要你處理的 Task 時琥珀色、有錯誤時紅色；其餘中性 */
+.task-board .task-status-count-warning,
+.task-board .task-status-count-warning > .tabular {
   color: var(--color-warning);
+}
+
+.task-board .task-status-count-danger,
+.task-board .task-status-count-danger > .tabular {
+  color: var(--color-danger);
 }
 
 /* 左右各留 4px（以負邊距抵銷、與頁面左緣對齊），最右一條跑道的框線與按鈕的焦點外框不被捲動容器裁掉。
@@ -442,7 +447,8 @@
   border-top: 0;
 }
 
-.task-board .task-missing {
+/* 缺項、預算用盡要你處理：與卡片的狀態徽章同一個色調（琥珀色） */
+.task-board :is(.task-missing, .task-budget-exhausted) {
   border-left-color: var(--color-warning);
 }
 
@@ -475,6 +481,18 @@
   color: var(--color-danger);
 }
 
+/* 要你處理的阻擋（Worker 回報受阻、預算用盡）：與卡片的狀態徽章同一個色調 */
+.task-board .task-card .task-attention {
+  color: var(--color-warning);
+}
+
+/* 載入紀錄：按鈕與「?」說明同一列 */
+.task-board .task-run-context-head {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
 /* 驗證中：狀態列（徽章＋檢視驗證），展開後是檢查清單、成果與接受成果 */
 .task-board .task-verification {
   display: grid;
@@ -487,7 +505,7 @@
   color: var(--color-text-muted);
 }
 
-/* 動作列：主要動作＋「更多」；放不下時整組換行 */
+/* 動作列：一個直接看得到的動作（次要或低調按鈕）＋「更多」；放不下時整組換行 */
 .task-board .task-actions {
   display: flex;
   flex-wrap: wrap;
@@ -499,8 +517,8 @@
   flex: none;
 }
 
-/* 沒有主要動作時「更多」是第一個按鈕：以負邊距抵銷內距，文字與卡片內容左緣對齊 */
-.task-board .task-actions > .task-more-toggle:first-child {
+/* 第一個按鈕是低調按鈕（「前往裁定」或「更多」）時：以負邊距抵銷內距，文字與卡片內容左緣對齊 */
+.task-board .task-actions > .btn-quiet:first-child {
   margin-inline-start: calc(-1 * var(--space-5));
 }
 

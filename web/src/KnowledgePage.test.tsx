@@ -248,6 +248,10 @@ describe("知識", () => {
     expect(fact(card, "解法")).toHaveTextContent("遷移前先執行備份");
     expect(within(card).getByRole("list", { name: "標籤" })).toHaveTextContent("部署資料庫");
     expect(fact(card, "證據")).toHaveTextContent("事故報告 #12");
+    // 收合細節的摘要：證據數量照計數寫法放在 .count，不加括號（MASTER 7.1）
+    const summary = card.querySelector(".knowledge-extra > summary")!;
+    expect(summary).toHaveTextContent(/^教訓欄位、來源、證據 1$/);
+    expect(summary.querySelector(".count")).toHaveTextContent(/^1$/);
     // 已驗證的條目不能再確認
     expect(within(card).queryByRole("button", { name: "確認為已驗證" })).not.toBeInTheDocument();
   });
@@ -490,6 +494,18 @@ describe("知識", () => {
       expect(menu.open).toBe(false);
     });
 
+    it.each(["撤銷", "淘汰"])("從「更多」開啟%s後按「取消」，焦點回到「更多」，不會掉到 body", async (action) => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { card, summary } = await openMenu(user);
+
+      await user.click(within(card).getByRole("button", { name: action }));
+      await user.click(within(within(card).getByRole("form", { name: action })).getByRole("button", { name: "取消" }));
+
+      expect(within(card).queryByRole("form", { name: action })).not.toBeInTheDocument();
+      expect(summary).toHaveFocus();
+    });
+
     it("選了撤銷後焦點移到原因欄，不會掉到 body", async () => {
       const user = userEvent.setup();
       renderPage(fakeClient([entry()]));
@@ -499,6 +515,57 @@ describe("知識", () => {
 
       expect(menu.open).toBe(false);
       expect(within(card).getByLabelText("撤銷原因")).toHaveFocus();
+    });
+  });
+
+  describe("收起表單或詳情時焦點回到開啟它的按鈕", () => {
+    it("候選的「撤銷」表單按「取消」，焦點回到「撤銷」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([candidate]));
+
+      const card = within(await region("待確認的候選教訓")).getByRole("article", { name: "測試前清空快取" });
+      const revoke = within(card).getByRole("button", { name: "撤銷" });
+      await user.click(revoke);
+      await user.click(within(within(card).getByRole("form", { name: "撤銷" })).getByRole("button", { name: "取消" }));
+
+      expect(revoke).toHaveFocus();
+    });
+
+    it("修正送出成功後表單收起，焦點回到「修正」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      await user.click(within(card).getByRole("button", { name: "修正" }));
+      await user.click(within(card).getByRole("button", { name: "送出修正" }));
+
+      await waitFor(() => expect(within(card).queryByRole("form", { name: "修正" })).not.toBeInTheDocument());
+      expect(within(card).getByRole("button", { name: "修正" })).toHaveFocus();
+    });
+
+    it("新增條目按「取消」，焦點回到標題列的「新增條目」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([]));
+
+      const form = await openCreateForm(user);
+      await user.click(within(form).getByRole("button", { name: "取消" }));
+
+      expect(screen.queryByRole("form", { name: "新增條目" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "新增條目" })).toHaveFocus();
+    });
+
+    it("關閉詳情後，焦點回到該條目的「詳情」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      const open = within(card).getByRole("button", { name: "詳情" });
+      await user.click(open);
+      const detail = await screen.findByRole("region", { name: "條目詳情" });
+      await user.click(within(detail).getByRole("button", { name: "關閉詳情" }));
+
+      expect(screen.queryByRole("region", { name: "條目詳情" })).not.toBeInTheDocument();
+      expect(open).toHaveFocus();
     });
   });
 
@@ -793,8 +860,12 @@ describe("知識", () => {
       expect(active).toHaveTextContent("未攔下的回報 1 次");
       expect(within(active).getByRole("button", { name: "停用" })).toBeInTheDocument();
 
+      // Guard 的物件標題與知識條目同一種（h4，MASTER 7.1）
+      expect(within(active).getByRole("heading", { level: 4, name: "啟動前檢查：契約的「範圍與限制」必須提到「備份」" })).toBeInTheDocument();
+
       const disabled = within(section).getByRole("listitem", { name: "工具限制：Task 不得要求「部署」" });
-      expect(within(disabled).getByText("不生效")).toBeInTheDocument();
+      // 不生效是中性狀態，與其他中性徽章一樣用 badge-plain
+      expect(within(disabled).getByText("不生效")).toHaveClass("badge", "badge-plain");
       expect(disabled).toHaveTextContent("原因：已停用");
       expect(disabled).toHaveTextContent("攔下 0 次");
       expect(disabled).toHaveTextContent("最近攔下：尚無");

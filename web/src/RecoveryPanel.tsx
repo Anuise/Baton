@@ -37,10 +37,13 @@ const DISPOSITION_LABELS: Record<RunDisposition, string> = {
   unconfirmed: "無法確認停止",
 };
 
-/** 恢復事件狀態徽章的語意色。 */
+/**
+ * 恢復事件狀態徽章的語意色。琥珀色只給要你處理的事（MASTER 7.1）：等待嘗試、退避中是系統自己在等，用中性；
+ * 嘗試中是進行中；只有恢復額度用盡（要你重新嘗試）用危險色。
+ */
 const RECOVERY_BADGE: Record<RecoveryEvent["status"], string> = {
-  waiting: "badge-warning",
-  attempting: "badge-warning",
+  waiting: "badge-plain",
+  attempting: "badge-accent",
   observing: "badge-accent",
   succeeded: "badge-success",
   exhausted: "badge-danger",
@@ -202,9 +205,9 @@ export function RecoveryPanel({ client, pollMs = 5000, timeZone }: Props) {
   );
 }
 
-/** 嘗試結果徽章的語意色。 */
+/** 嘗試結果徽章的語意色：處置中是系統進行中的工作，不用琥珀色（MASTER 7.1）。 */
 const OUTCOME_BADGES: Record<AttemptOutcome, string> = {
-  in_progress: "badge-warning",
+  in_progress: "badge-accent",
   observing: "badge-accent",
   succeeded: "badge-success",
   failed: "badge-danger",

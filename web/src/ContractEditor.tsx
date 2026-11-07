@@ -34,7 +34,16 @@ const MODE_LABELS: Record<Mode, string> = {
 /** 這兩項是派工的底線，不能標為不適用。 */
 const NOT_APPLICABLE_FORBIDDEN = new Set<ContractFieldName>(["objective", "done_criteria"]);
 
-const REFERENCE_KINDS = ["task_contract", "goal", "authorization", "decision"] as const;
+/** 引用的種類與說明；引用欄的「?」與格式錯誤的訊息共用。 */
+const REFERENCE_KINDS: [ContractReference["kind"], string][] = [
+  ["goal", "Goal"],
+  ["task_contract", "Task 契約"],
+  ["authorization", "授權"],
+  ["decision", "裁定"],
+];
+
+/** 「goal（Goal）、task_contract（Task 契約）、…」 */
+const REFERENCE_KINDS_TEXT = REFERENCE_KINDS.map(([kind, label]) => `${kind}（${label}）`).join("、");
 
 interface FieldDraft {
   mode: Mode;
@@ -144,12 +153,12 @@ export function buildContract(draft: ContractDraft): { contract: ContractInput; 
     const label = FIELD_LABELS[name];
     const field = draft.fields[name];
     if (field.mode === "filled") {
-      if (field.text.trim() === "") errors.push(`${label}：填寫模式需要內容`);
+      if (field.text.trim() === "") errors.push(`${label}：狀態是「填寫」時需要內容`);
       const references: ContractReference[] = [];
       for (const line of nonEmptyLines(field.references)) {
         const reference = parseReference(line);
         if (reference) references.push(reference);
-        else errors.push(`${label}：引用格式錯誤「${line}」，應為 kind:target@version（kind 為 ${REFERENCE_KINDS.join("／")}）`);
+        else errors.push(`${label}：引用格式錯誤「${line}」，應為「種類:識別碼@版本」，種類可用 ${REFERENCE_KINDS_TEXT}`);
       }
       contract[name] = { status: "filled", text: field.text.trim(), ...(references.length > 0 && { references }) };
     } else if (field.mode === "not_applicable") {
@@ -247,8 +256,8 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
                       <span className="contract-subfield-label">
                         <label htmlFor={`${idBase}-${name}-references`}>引用（選填）</label>
                         <HelpTip label={`${label}：引用`}>
-                          每行一個引用，格式是「種類:識別碼@版本」。種類可用 goal（Goal）、task_contract（Task 契約）、
-                          authorization（授權）、decision（裁定）；版本是引用當時對方的內容版本，從 1 起算。
+                          每行一個引用，格式是「種類:識別碼@版本」。種類可用 {REFERENCE_KINDS_TEXT}；
+                          版本是引用當時對方的內容版本，從 1 起算。
                         </HelpTip>
                       </span>
                       <textarea

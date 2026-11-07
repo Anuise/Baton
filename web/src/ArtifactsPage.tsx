@@ -27,6 +27,8 @@ interface Props {
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
+  /** 前往其他頁面（分組標題旁的「在工作頁查看」）；沒有傳入時不顯示。 */
+  onOpenPage?: (page: "tasks") => void;
 }
 
 /** 檔案現況不是 ok 時的警示；ok 不顯示。 */
@@ -59,7 +61,7 @@ function groupByTask(artifacts: ArtifactView[]): { taskId: string; artifacts: Ar
  * 成果（spec D-21）：列出 Workspace 的成果，依所屬 Task 分組，預覽與下載每個版本。
  * 沒有 manifest 的檔案不是成果，獨立列在最上方的「未登記的檔案」。
  */
-export function ArtifactsPage({ client, workspace, timeZone }: Props) {
+export function ArtifactsPage({ client, workspace, timeZone, onOpenPage }: Props) {
   const [loaded, setLoaded] = useState<ViewState>({ state: "loading" });
 
   const load = useCallback(async () => {
@@ -110,6 +112,7 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
                 taskTitle={loaded.taskTitles.get(group.taskId)}
                 artifacts={group.artifacts}
                 timeZone={timeZone}
+                onOpenPage={onOpenPage}
               />
             ))
           )}
@@ -126,7 +129,7 @@ function UnregisteredFiles({ files }: { files: UnregisteredFile[] }) {
       <div className="section-heading">
         <h3 id="artifacts-unregistered">未登記的檔案</h3>
         <span className="count">{files.length}</span>
-        <p>寫入中途中斷留下、沒有登記（沒有 manifest）的檔案，不是成果：未登記、不可使用。</p>
+        <p>寫入中途中斷留下、沒有登記到成果清單的檔案；它們不是成果，不可使用。</p>
       </div>
       <ul className="row-list artifacts-unregistered">
         {files.map((file) => (
@@ -151,10 +154,14 @@ interface GroupProps {
   taskTitle?: string;
   artifacts: ArtifactView[];
   timeZone?: string;
+  onOpenPage?: (page: "tasks") => void;
 }
 
-/** 一個 Task 的成果：區段標題是 Task 標題（長標題最多兩行，完整標題在 title），下面是成果清單。 */
-function TaskGroup({ client, workspaceId, taskId, taskTitle, artifacts, timeZone }: GroupProps) {
+/**
+ * 一個 Task 的成果：區段標題是 Task 標題（長標題最多兩行，完整標題在 title），計數與「在工作頁查看」接在標題同一行的末端；
+ * 下面是成果清單。
+ */
+function TaskGroup({ client, workspaceId, taskId, taskTitle, artifacts, timeZone, onOpenPage }: GroupProps) {
   const headingId = `artifacts-task-${taskId}`;
   const short = shortId(taskId);
   return (
@@ -175,6 +182,16 @@ function TaskGroup({ client, workspaceId, taskId, taskTitle, artifacts, timeZone
           </h3>
         )}
         <span className="count">{artifacts.length}</span>
+        {onOpenPage !== undefined && (
+          <button
+            type="button"
+            className="btn-quiet btn-sm"
+            aria-label={`在工作頁查看（${taskTitle ?? short}）`}
+            onClick={() => onOpenPage("tasks")}
+          >
+            在工作頁查看
+          </button>
+        )}
       </div>
       <ul className="row-list">
         {artifacts.map((artifact) => (

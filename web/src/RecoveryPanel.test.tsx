@@ -93,7 +93,8 @@ describe("崩潰恢復面板", () => {
     });
     renderPanel(fakeClient([status]));
 
-    expect(await screen.findByText("退避中")).toBeInTheDocument();
+    // 退避是系統自己在等：中性徽章，不用琥珀色（MASTER 7.1）
+    expect(await screen.findByText("退避中")).toHaveClass("badge", "badge-plain");
     expect(screen.getByText("第 1 輪")).toBeInTheDocument();
     expect(screen.getByText("本輪嘗試：1/3")).toBeInTheDocument();
     expect(fact("偵測到崩潰")).toBe("偵測到崩潰：2023/11/15 06:13");
@@ -111,7 +112,7 @@ describe("崩潰恢復面板", () => {
   it("第一次嘗試之前顯示等待嘗試", async () => {
     renderPanel(fakeClient([recoveryStatus({ event: recoveryEvent({ status: "waiting", attempts_used: 0, attempts: [] }) })]));
 
-    expect(await screen.findByText("等待嘗試")).toBeInTheDocument();
+    expect(await screen.findByText("等待嘗試")).toHaveClass("badge", "badge-plain");
     expect(screen.getByText("本輪嘗試：0/3")).toBeInTheDocument();
   });
 
@@ -162,7 +163,8 @@ describe("崩潰恢復面板", () => {
   it("恢復額度用盡時列出三次失敗與無法確認停止的工作，並提供重新嘗試恢復", async () => {
     renderPanel(fakeClient([exhausted]));
 
-    expect(await screen.findByText("恢復額度用盡")).toBeInTheDocument();
+    // 要你重新嘗試：危險色
+    expect(await screen.findByText("恢復額度用盡")).toHaveClass("badge", "badge-danger");
     expect(screen.getByText("本輪嘗試：3/3")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent(/^新派工已暫停崩潰恢復額度用盡，等待重新嘗試恢復$/);
     const attempts = Array.from(document.querySelectorAll<HTMLElement>(".recovery-attempt"));
@@ -191,7 +193,9 @@ describe("崩潰恢復面板", () => {
 
     expect(client.retryRecovery).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("第 2 輪")).toBeInTheDocument();
-    expect(screen.getByText("嘗試中")).toBeInTheDocument();
+    // 嘗試中、處置中是系統進行中的工作：accent，不用琥珀色
+    expect(screen.getByText("嘗試中")).toHaveClass("badge", "badge-accent");
+    expect(screen.getByText("處置中")).toHaveClass("badge", "badge-accent");
     expect(screen.getByText("本輪嘗試：1/3")).toBeInTheDocument();
     const attempts = Array.from(document.querySelectorAll<HTMLElement>(".recovery-attempt")).map(attemptSummary);
     expect(attempts).toContain("第 1 輪第 3 次 失敗 開始 2023/11/15 06:13 結束 2023/11/15 06:16");

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { FIELD_LABELS } from "./ContractEditor";
 import { LongText } from "./LongText";
@@ -164,6 +164,9 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
   const [creating, setCreating] = useState(false);
   // 操作後讓詳情重新讀取
   const [detailRefresh, setDetailRefresh] = useState(0);
+  // 收起表單或詳情時把焦點還給開啟它的按鈕，不讓焦點落到 body
+  const createToggleRef = useRef<HTMLButtonElement>(null);
+  const detailTriggerRef = useRef<HTMLElement | null>(null);
 
   // 有效條目與「含無效」分兩次查詢：候選與歷史再多也不會擠掉有效條目（每次最多 100 筆）
   const load = useCallback(async () => {
@@ -237,7 +240,10 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
             entry={entry}
             timeZone={timeZone}
             act={act}
-            onOpenDetail={(id) => setDetail({ id, list: listName })}
+            onOpenDetail={(id, trigger) => {
+              detailTriggerRef.current = trigger;
+              setDetail({ id, list: listName });
+            }}
           />
           {detail !== null && detail.id === entry.id && detail.list === listName && (
             <DetailPanel
@@ -247,7 +253,10 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
               refreshKey={detailRefresh}
               timeZone={timeZone}
               act={act}
-              onClose={() => setDetail(null)}
+              onClose={() => {
+                setDetail(null);
+                detailTriggerRef.current?.focus();
+              }}
             />
           )}
         </Fragment>
@@ -278,6 +287,7 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
             </button>
           </form>
           <button
+            ref={createToggleRef}
             type="button"
             className={creating ? undefined : "btn-primary"}
             aria-expanded={creating}
@@ -297,7 +307,17 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
           <p>{notice}</p>
         </div>
       )}
-      {creating && <CreateForm client={client} workspace={workspace} act={act} onCancel={() => setCreating(false)} />}
+      {creating && (
+        <CreateForm
+          client={client}
+          workspace={workspace}
+          act={act}
+          onCancel={() => {
+            setCreating(false);
+            createToggleRef.current?.focus();
+          }}
+        />
+      )}
       {list.state === "loading" && <p className="empty-note">載入中…</p>}
       {list.state === "failed" && (
         <p className="field-error" role="alert">
@@ -519,9 +539,10 @@ function TagList({ tags, full = false }: { tags: string[]; full?: boolean }) {
 
 /**
  * 「更多」選單（共用的 MoreMenu：Esc／點外面收起、焦點歸還）中的一個選項。
- * 共用元件選了選項不會自動收起：這裡選了就收起，焦點交給接著開啟的表單（autoFocus）。
+ * 共用元件選了選項不會自動收起：這裡選了就收起，焦點交給接著開啟的表單（autoFocus）；
+ * 回呼收到觸發的「更多」，表單收起時焦點還給它（選項本身已隨選單收起）。
  */
-function MenuItem({ label, danger = false, onSelect }: { label: string; danger?: boolean; onSelect: () => void }) {
+function MenuItem({ label, danger = false, onSelect }: { label: string; danger?: boolean; onSelect: (trigger: HTMLElement) => void }) {
   return (
     <button
       type="button"
@@ -529,7 +550,7 @@ function MenuItem({ label, danger = false, onSelect }: { label: string; danger?:
       onClick={(event) => {
         const menu = event.currentTarget.closest("details");
         if (menu) menu.open = false;
-        onSelect();
+        onSelect(menu?.querySelector("summary") ?? event.currentTarget);
       }}
     >
       {label}
@@ -544,7 +565,8 @@ interface CardProps {
   entry: KnowledgeEntryView;
   timeZone?: string;
   act: Act;
-  onOpenDetail: (id: string) => void;
+  /** 開啟詳情；trigger 是按下的「詳情」，關閉詳情時焦點還給它。 */
+  onOpenDetail: (id: string, trigger: HTMLElement) => void;
 }
 
 /**
@@ -554,23 +576,34 @@ interface CardProps {
 function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
   const [mode, setMode] = useState<CardMode>(null);
   const [error, setError] = useState<string | null>(null);
+  // 開啟表單的按鈕（從「更多」開啟時是「更多」本身）：表單收起時焦點還給它，不讓焦點落到 body
+  const triggerRef = useRef<HTMLElement | null>(null);
   const tone = entry.status === "candidate" ? "candidate" : entry.effective ? "effective" : "inactive";
   const fmt = (millis: number) => formatTimestamp(millis, timeZone);
+
+  const openForm = (next: Exclude<CardMode, null>, trigger: HTMLElement) => {
+    triggerRef.current = trigger;
+    setMode(next);
+  };
+
+  const closeForm = () => {
+    setMode(null);
+    const trigger = triggerRef.current;
+    triggerRef.current = null;
+    // 操作後條目可能已移到別的清單（這張卡片隨之卸載），觸發的按鈕不在畫面上時就不移動焦點
+    if (trigger?.isConnected) trigger.focus();
+  };
 
   const run = async (operation: () => Promise<unknown>) => {
     setError(null);
     const failure = await act(operation);
-    if (failure === null) setMode(null);
+    if (failure === null) closeForm();
     else setError(failure);
   };
 
   const { content } = entry;
-  // 收合的細節裡有什麼：教訓欄位、來源、證據
-  const extraLabel = [
-    content.lesson ? "教訓欄位" : null,
-    "來源",
-    content.evidence.length > 0 ? `證據（${content.evidence.length}）` : null,
-  ]
+  // 收合的細節裡有什麼：教訓欄位、來源、證據；證據的數量照計數寫法放在最後（「證據 2」，MASTER 7.1）
+  const extraLabel = [content.lesson ? "教訓欄位" : null, "來源", content.evidence.length > 0 ? "證據" : null]
     .filter((part) => part !== null)
     .join("、");
   const badgeTone = tone === "candidate" ? " badge-warning" : tone === "effective" ? " badge-success" : "";
@@ -613,7 +646,15 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
       {content.body !== "" && <LongText text={content.body} />}
       {content.tags.length > 0 && <TagList tags={content.tags} />}
       <details className="knowledge-extra">
-        <summary>{extraLabel}</summary>
+        <summary>
+          {extraLabel}
+          {content.evidence.length > 0 && (
+            <>
+              {" "}
+              <span className="count">{content.evidence.length}</span>
+            </>
+          )}
+        </summary>
         <FactList facts={[["來源", sourceLabel(entry)], ...lessonFacts(content)]} />
       </details>
       <div className="knowledge-actions">
@@ -623,45 +664,47 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
             <button type="button" onClick={() => void run(() => client.confirmKnowledge(entry.id, entry.revision))}>
               確認為已驗證
             </button>
-            <button type="button" className="btn-danger" onClick={() => setMode("revoke")}>
+            <button type="button" className="btn-danger" onClick={(event) => openForm("revoke", event.currentTarget)}>
               撤銷
             </button>
           </>
         )}
         {entry.status === "verified" && (
-          <button type="button" onClick={() => setMode("correct")}>
+          <button type="button" onClick={(event) => openForm("correct", event.currentTarget)}>
             修正
           </button>
         )}
-        <button type="button" className="btn-quiet" onClick={() => onOpenDetail(entry.id)}>
+        <button type="button" className="btn-quiet" onClick={(event) => onOpenDetail(entry.id, event.currentTarget)}>
           詳情
         </button>
         {/* 轉為 Guard、撤銷、淘汰是第二順位以後的動作，收進「更多」（MASTER 5.1）；只有有效的已驗證教訓能轉為 Guard */}
         {entry.status === "verified" && (
           <MoreMenu ariaLabel={`更多（${content.title}）`}>
-            {entry.kind === "lesson" && entry.effective && <MenuItem label="轉為 Guard" onSelect={() => setMode("guard")} />}
-            <MenuItem label="撤銷" danger onSelect={() => setMode("revoke")} />
-            <MenuItem label="淘汰" danger onSelect={() => setMode("retire")} />
+            {entry.kind === "lesson" && entry.effective && (
+              <MenuItem label="轉為 Guard" onSelect={(trigger) => openForm("guard", trigger)} />
+            )}
+            <MenuItem label="撤銷" danger onSelect={(trigger) => openForm("revoke", trigger)} />
+            <MenuItem label="淘汰" danger onSelect={(trigger) => openForm("retire", trigger)} />
           </MoreMenu>
         )}
       </div>
       {mode === "guard" && (
         <GuardForm
-          onCancel={() => setMode(null)}
+          onCancel={closeForm}
           onSubmit={(rule) => run(() => client.createGuard({ lesson_id: entry.id, rule }))}
         />
       )}
       {mode === "correct" && (
         <CorrectForm
           entry={entry}
-          onCancel={() => setMode(null)}
+          onCancel={closeForm}
           onSubmit={(request) => run(() => client.correctKnowledge(entry.id, request))}
         />
       )}
       {(mode === "revoke" || mode === "retire") && (
         <ReasonForm
           action={mode === "revoke" ? "撤銷" : "淘汰"}
-          onCancel={() => setMode(null)}
+          onCancel={closeForm}
           onSubmit={(reason) =>
             run(() =>
               (mode === "revoke" ? client.revokeKnowledge : client.retireKnowledge)(entry.id, {
@@ -981,10 +1024,11 @@ function GuardItem({ guard, client, timeZone, act }: { guard: GuardView; client:
   return (
     <li className={`knowledge-guard ${guard.active ? "knowledge-effective" : "knowledge-inactive"}`} aria-label={guard.description}>
       <div className="row-head">
-        <strong className="clamp-2" title={guard.description}>
+        {/* 物件標題與知識條目相同（h4，MASTER 7.1）；不生效是中性狀態（badge-plain），原因寫在下方 */}
+        <h4 className="clamp-2" title={guard.description}>
           {guard.description}
-        </strong>
-        <span className={guard.active ? "badge badge-success" : "badge"}>{guard.active ? "生效中" : "不生效"}</span>
+        </h4>
+        <span className={guard.active ? "badge badge-success" : "badge badge-plain"}>{guard.active ? "生效中" : "不生效"}</span>
         <button type="button" className="btn-sm" onClick={() => void toggle()}>
           {enabled ? "停用" : "啟用"}
         </button>

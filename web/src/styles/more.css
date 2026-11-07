@@ -219,9 +219,16 @@
   font-size: var(--text-meta);
 }
 
-/* 項目名稱：可能是沒有空白的長識別字，任何字元都可斷 */
+/* 項目名稱：可能是沒有空白的長識別字，任何字元都可斷；行高與其他頁的物件標題一致（MASTER 7.1） */
 .understanding-page .understanding-key {
+  line-height: var(--leading-title-sm);
   overflow-wrap: anywhere;
+}
+
+/* 沒有中文名稱的 Brief 英文代碼鍵當標題：機器代碼不當主要文字，等寬（.mono）、次要色、不加粗 */
+.understanding-page .understanding-key-code {
+  color: var(--color-text-muted);
+  font-weight: var(--font-weight-normal);
 }
 
 /* Brief 段落的原始鍵：附在中文名稱後面，等寬、次要色、小一號，不搶標題 */
@@ -310,6 +317,11 @@
 .authorization-page .authorization-capability-fields {
   align-items: start;
   padding-left: var(--space-7);
+}
+
+/* 目標資源多半是路徑或網址：輸入時就用等寬字（MASTER 7.1 路徑），與確認摘要的顯示一致 */
+.authorization-page .authorization-targets-input {
+  font-family: var(--font-mono);
 }
 
 /* 確認摘要：保存前的最後一步，用強調色的細框與其他區塊區分 */
@@ -455,14 +467,18 @@
   font-size: var(--text-meta);
 }
 
-/* 可用模型清單（ModelCatalogSettings，放在 App 設定頁）：以 API 金鑰更新清單；
-   欄位與按鈕同一列、按鈕對齊輸入框，整列不超過表單寬度 */
+/* 可用模型清單（ModelCatalogSettings，放在 App 設定頁）：以 API 金鑰更新清單。
+   面板是一張表單，在區段內限表單寬度（MASTER 7.1），不隨 App 設定頁撐滿主區 */
+.model-catalog-settings > .panel {
+  max-inline-size: var(--measure-form);
+}
+
+/* 欄位與按鈕同一列、按鈕對齊輸入框 */
 .model-catalog-settings .model-catalog-form {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-4);
   align-items: flex-end;
-  max-inline-size: var(--measure-form);
 }
 
 .model-catalog-settings .model-catalog-form > .field {

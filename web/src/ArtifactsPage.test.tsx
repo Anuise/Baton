@@ -201,6 +201,29 @@ describe("成果", () => {
     expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1");
   });
 
+  it("有 onOpenPage 時分組標題旁有「在工作頁查看」，按下前往工作頁；沒有傳入時不顯示", async () => {
+    const title = "整理文件目錄，讓新成員能找到各模組的說明";
+    const onOpenPage = vi.fn();
+    const user = userEvent.setup();
+    const client = fakeClient({ artifacts: [artifact()], unregistered_files: [] }, undefined, boardOf([taskOf("task_1", title, "completed")]));
+    const { unmount } = render(<ArtifactsPage client={client} workspace={workspace} timeZone="Asia/Taipei" onOpenPage={onOpenPage} />);
+
+    const group = await screen.findByRole("region", { name: title });
+    // 計數與連結接在標題之後（同一個不換行的標題列）
+    const heading = within(group).getByRole("heading", { level: 3, name: title });
+    const link = within(group).getByRole("button", { name: `在工作頁查看（${title}）` });
+    expect(link).toHaveTextContent(/^在工作頁查看$/);
+    expect(heading.parentElement).toContainElement(link);
+    expect(heading.nextElementSibling).toHaveClass("count");
+    await user.click(link);
+    expect(onOpenPage).toHaveBeenCalledWith("tasks");
+    unmount();
+
+    renderPage(fakeClient({ artifacts: [artifact()], unregistered_files: [] }));
+    await screen.findByRole("article", { name: "report.md" });
+    expect(screen.queryByRole("button", { name: /^在工作頁查看/ })).not.toBeInTheDocument();
+  });
+
   it("讀不到 Task 清單時，成果仍然列出，Task 退回顯示縮短的識別碼", async () => {
     const taskId = "task_7b5deb026d9841b0cced7314aa0f9e8d";
     renderPage(fakeClient({ artifacts: [artifact({ task_id: taskId })], unregistered_files: [] }, undefined, new Error("需要桌面憑證")));
@@ -395,7 +418,7 @@ describe("成果", () => {
     });
   });
 
-  it("未登記的檔案獨立一區，說明不是成果、不可使用", async () => {
+  it("未登記的檔案獨立一區，說明不是成果、不可使用（不出現 manifest 這個工程用語）", async () => {
     renderPage(
       fakeClient({
         artifacts: [artifact()],
@@ -407,7 +430,8 @@ describe("成果", () => {
     );
 
     const section = await screen.findByRole("region", { name: "未登記的檔案" });
-    expect(section).toHaveTextContent("未登記、不可使用");
+    expect(section).toHaveTextContent("沒有登記到成果清單的檔案；它們不是成果，不可使用。");
+    expect(section).not.toHaveTextContent("manifest");
     const items = within(section).getAllByRole("listitem");
     expect(items[0]).toHaveTextContent("ws/blob_a.partial");
     expect(items[0]).toHaveTextContent("暫存檔，內容不完整");

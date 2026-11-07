@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { outcomeText, RunLabel, StopPhase, StopRuns } from "./ExitProgress";
+import { FailureNotice, outcomeText, RunLabel, StopPhase, StopRuns } from "./ExitProgress";
 import type { ExitRunResult, LifecycleClient, LifecycleStatus, Maintenance, UpdateClient } from "./runtimeClient";
 
 type InstallState = { state: "idle" } | { state: "installing" } | { state: "failed"; reason: string };
@@ -185,9 +185,7 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
         )}
         {install.state === "failed" && (
           <>
-            <p role="alert" className="callout callout-danger">
-              無法安裝更新：{install.reason}
-            </p>
+            <FailureNotice title="無法安裝更新" reason={install.reason} />
             <div className="dialog-actions">
               <button type="button" className="btn-primary" onClick={() => void installNow()}>
                 重試
@@ -200,9 +198,7 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
         )}
         {phase === "failed" && (
           <>
-            <p role="alert" className="callout callout-danger">
-              更新沒有套用：{maintenance.message ?? "原因不明"}
-            </p>
+            <FailureNotice title="更新沒有套用" reason={maintenance.message ?? "原因不明"} />
             <p>Baton 已完全退出；重新開啟後會依各 Workspace 的設定繼續工作。</p>
             <div className="dialog-actions">
               <button type="button" className="btn-primary" onClick={() => void client.quitApp()}>

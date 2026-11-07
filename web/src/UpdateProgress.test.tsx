@@ -162,14 +162,18 @@ describe("更新進度", () => {
     render(<UpdateProgress client={client} maintenance={maintenance()} />);
     await settle(500);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("無法安裝更新：找不到安裝程式");
+    // 原因可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const failure = screen.getByRole("alert");
+    expect(failure).toHaveClass("notice", "notice-danger");
+    expect(within(failure).getByText("無法安裝更新")).toHaveClass("notice-title");
+    expect(failure).toHaveTextContent(/^無法安裝更新找不到安裝程式$/);
 
     await act(async () => {
       screen.getByRole("button", { name: "重試" }).click();
     });
 
     expect(client.installUpdate).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("alert")).toHaveTextContent("無法安裝更新：維護尚未準備好");
+    expect(screen.getByRole("alert")).toHaveTextContent(/^無法安裝更新維護尚未準備好$/);
     expect(client.quitApp).not.toHaveBeenCalled();
 
     await act(async () => {
@@ -185,7 +189,8 @@ describe("更新進度", () => {
     await settle(2000);
 
     const dialog = screen.getByRole("dialog", { name: "更新 Baton" });
-    expect(within(dialog).getByRole("alert")).toHaveTextContent("更新沒有套用：更新前備份失敗：磁碟已滿");
+    expect(within(dialog).getByRole("alert")).toHaveClass("notice", "notice-danger");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(/^更新沒有套用更新前備份失敗：磁碟已滿$/);
     expect(dialog).toHaveTextContent("Baton 已完全退出；重新開啟後會依各 Workspace 的設定繼續工作。");
     expect(client.installUpdate).not.toHaveBeenCalled();
     expect(client.updateStatus).toHaveBeenCalledTimes(1);
@@ -278,7 +283,7 @@ describe("更新進度", () => {
     });
 
     expect(client.installUpdate).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("alert")).toHaveTextContent("無法安裝更新：沒有準備好的安裝程式");
+    expect(screen.getByRole("alert")).toHaveTextContent(/^無法安裝更新沒有準備好的安裝程式$/);
     expect(screen.getByRole("button", { name: "重試" })).toBeInTheDocument();
   });
 

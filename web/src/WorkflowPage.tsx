@@ -120,7 +120,7 @@ function reasonOf(error: unknown): string {
 /**
  * 流程（票 43，spec D-21）：檢視 Workspace 的 Workflow，包括 Router 選擇的 Playbook 與版本、各 Stage 的條件與 Gate，
  * 以及 attempt 歷史。使用者可附原因跳過沒有 Gate 的目前 Stage；裁定與安全 Gate 不能跳過。
- * 每個 Workflow 是一張卡：上方是 Playbook、狀態與 Router 的理由，下方是依序編號的 Stage 步驟線。
+ * 每個 Workflow 是一張卡：上方是 Playbook、狀態與選擇這個流程的理由（Router 的判斷），下方是依序編號的 Stage 步驟線。
  */
 export function WorkflowPage({ client, workspace, timeZone }: Props) {
   const [loaded, setLoaded] = useState<Loaded>({ state: "loading" });
@@ -160,9 +160,10 @@ export function WorkflowPage({ client, workspace, timeZone }: Props) {
       </header>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
       {loaded.state === "failed" && (
-        <p className="callout callout-danger" role="alert">
-          無法取得流程：{loaded.reason}
-        </p>
+        <div className="notice notice-danger" role="alert">
+          <p className="notice-title">無法取得流程</p>
+          <p>{loaded.reason}</p>
+        </div>
       )}
       {loaded.state === "ready" && loaded.list.workflows.length === 0 && (
         <p className="empty-note">還沒有 Workflow；Controller 開始工作時會依情境選擇 Playbook，並在這裡顯示各 Stage 的進度。</p>
@@ -243,7 +244,8 @@ function WorkflowCard({
   return (
     <section className={`workflow card workflow-${workflow.status}`} aria-labelledby={headingId}>
       <header className="card-header">
-        <h3 id={headingId}>
+        {/* Playbook 的代碼（例如 defect）是機器代碼，放在 title（MASTER 7.1） */}
+        <h3 id={headingId} title={`Playbook 代碼：${workflow.playbook_key}`}>
           {workflow.playbook_title} 第 {workflow.playbook_version} 版
         </h3>
         <span className={WORKFLOW_STATUS_TONES[workflow.status]}>{WORKFLOW_STATUS_LABELS[workflow.status]}</span>
@@ -271,9 +273,9 @@ function WorkflowCard({
             </span>
           )}
         </dd>
-        <dt>Router 的理由</dt>
+        <dt>選擇這個流程的理由</dt>
         <dd>
-          <LongText text={workflow.route_reason} copyLabel="複製理由" className="workflow-route-reason" />
+          <LongText text={routeReasonText(workflow)} copyLabel="複製理由" className="workflow-route-reason" />
         </dd>
         <dt>建立於</dt>
         <dd className="tabular">{formatTimestamp(workflow.created_at, timeZone)}</dd>
@@ -289,9 +291,10 @@ function WorkflowCard({
         </p>
       )}
       {error && (
-        <p className="callout callout-danger" role="alert">
-          {error}
-        </p>
+        <div className="notice notice-danger" role="alert">
+          <p className="notice-title">跳過失敗</p>
+          <p>{error}</p>
+        </div>
       )}
       {/* Stage 是真的順序：編號＋步驟線；目前、完成、跳過、受阻以編號圓的樣式與狀態徽章區分 */}
       <ol className="workflow-stages" aria-label={`${workflow.playbook_title} 的 Stage`}>
@@ -306,13 +309,25 @@ function WorkflowCard({
                 <span className={`workflow-stage-state ${STAGE_STATE_TONES[stage.state]}`}>
                   {STAGE_STATE_LABELS[stage.state]}
                 </span>
-                {stage.gate !== "none" && <span className="workflow-gate badge badge-warning">{GATE_LABELS[stage.gate]}</span>}
+                {/* Gate 是中性的分類標籤；輪到且要你裁定時才用琥珀色（MASTER 7.1：琥珀色只給要你處理的事） */}
+                {stage.gate !== "none" && (
+                  <span className={`workflow-gate badge ${isCurrent && stage.gate === "decision" ? "badge-warning" : "badge-plain"}`}>
+                    {GATE_LABELS[stage.gate]}
+                  </span>
+                )}
               </div>
               {/* 已完成（通過、跳過）與還沒輪到的 Stage 只留標題列，事實與嘗試紀錄收合；目前、受阻、需重驗的攤開 */}
               {COLLAPSED_STATES.has(stage.state) ? (
                 <details className="workflow-stage-details">
+                  {/* 收合摘要的計數只放數字（MASTER 7.1）：「細節與嘗試紀錄 2」 */}
                   <summary>
-                    細節{stage.attempts.length > 0 && `與嘗試紀錄（${stage.attempts.length} 次）`}
+                    {stage.attempts.length > 0 ? (
+                      <>
+                        細節與嘗試紀錄 <span className="count">{stage.attempts.length}</span>
+                      </>
+                    ) : (
+                      "細節"
+                    )}
                   </summary>
                   <div className="workflow-stage-body">{facts}</div>
                 </details>
@@ -439,15 +454,13 @@ function TextList({ title, stage, items }: { title: string; stage: StageView; it
   );
 }
 
-/** 阻擋原因：第一句完整顯示，其餘（技術細節）收合（MASTER 6.1 錯誤與警告）。 */
+/** 阻擋原因：長警示（MASTER 7：`.notice`），第一句完整顯示，其餘（技術細節）收合。 */
 function BlockedReason({ reason }: { reason: string }) {
   const { summary, rest } = splitFirstSentence(reason);
   return (
-    <div className="callout callout-danger workflow-blocked-reason">
-      <p>
-        <span className="callout-title">阻擋原因</span>
-        {summary}
-      </p>
+    <div className="notice notice-danger workflow-blocked-reason">
+      <p className="notice-title">阻擋原因</p>
+      <p>{summary}</p>
       {rest !== "" && (
         <details>
           <summary>技術細節</summary>
@@ -456,6 +469,14 @@ function BlockedReason({ reason }: { reason: string }) {
       )}
     </div>
   );
+}
+
+/**
+ * 選擇這個流程的理由：Runtime 寫成「…→ 缺陷處理（defect）第 1 版…」，Playbook 代碼是機器代碼，
+ * 從文字中拿掉（代碼在卡片標題的 title，MASTER 7.1）。
+ */
+function routeReasonText(workflow: WorkflowView): string {
+  return workflow.route_reason.replace(`（${workflow.playbook_key}）`, "");
 }
 
 function failureRouteLabel(route: FailureRoute, stageTitle: (key: string) => string): string {

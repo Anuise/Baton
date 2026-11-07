@@ -158,7 +158,8 @@
 }
 
 /* ---------- 右欄工作區：批次結果 → 批次處理 → 詳情；停在視窗內、自己捲動 ---------- */
-/* 新加入的批次項目從上方推開內容，不讓捲動錨點把它藏到可視範圍外（overflow-anchor: none） */
+/* 新加入的批次項目從上方推開內容，不讓捲動錨點把它藏到可視範圍外（overflow-anchor: none）。
+   處理區的送出列會停在右欄底部：scroll-padding-bottom 讓 Tab 移動焦點時，瀏覽器把焦點元素捲到送出列上方，不被它蓋住 */
 .decision-center .decision-pane {
   position: sticky;
   top: var(--space-6);
@@ -172,6 +173,7 @@
   overflow-y: auto;
   overflow-anchor: none;
   overscroll-behavior: contain;
+  scroll-padding-bottom: calc(var(--control-height) + var(--space-4) + var(--space-6) + var(--space-4));
   scrollbar-width: thin;
 }
 
@@ -201,7 +203,32 @@
   margin-top: var(--space-3);
 }
 
-/* 文字連結樣式的按鈕（前往相似問題或合併目標） */
+/* 「已結束」一組的收合：收合摘要樣式（三角形＋次要文字、沒有按鈕外框），與 <details> 的 ▶ 一致（MASTER 7.1） */
+.decision-center .decision-group-toggle {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+.decision-center .decision-group-toggle::before {
+  content: counter(list-item, disclosure-closed) " ";
+}
+
+.decision-center .decision-group-toggle[aria-expanded="true"]::before {
+  content: counter(list-item, disclosure-open) " ";
+}
+
+.decision-center .decision-group-toggle:hover:not(:disabled) {
+  border-color: transparent;
+  background: none;
+  color: var(--color-text);
+}
+
+/* 文字連結樣式的按鈕（前往相似問題、合併目標或 Task 所在的工作頁） */
 .decision-center .decision-link-button {
   display: inline;
   min-height: 0;
@@ -307,11 +334,18 @@
   margin-top: var(--space-2);
 }
 
-/* 權限提示、決策權限攔截（Agent 想做的事）：下沉的嵌入區 */
+/* 權限提示、決策權限攔截（Agent 想做的事）：下沉的嵌入區。
+   border-box：padding 算在閱讀寬度內，與其他區塊同寬 */
 .decision-center .decision-request {
+  box-sizing: border-box;
   padding: var(--space-5) var(--space-6);
   border-radius: var(--radius-md);
   background: var(--color-surface-sunken);
+}
+
+/* 「調整決策權限」：依文字寬度，不撐滿嵌入區 */
+.decision-center .decision-request > button {
+  justify-self: start;
 }
 
 /* 嵌入區裡的程式碼區塊改用 surface，與下沉底色區分 */
@@ -421,27 +455,22 @@
   background: var(--color-surface-sunken);
 }
 
-/* 待裁定的處理區停在右欄底部（右欄是捲動容器），不必捲到最下面才看得到送出；
-   四周以 surface 色的外框蓋住從底下捲過的內容。選項很多時處理區自己捲動，送出列仍釘在底部 */
+/* 待裁定的處理區隨內容捲動，不整塊停在右欄底部（以免蓋住上方的內容與焦點）。
+   只有送出列停在右欄底部（右欄是捲動容器）：處理區只露出上半部時，「送出裁定」仍看得到。
+   送出列撐滿處理區寬度、以上緣細線和從底下捲過的欄位分開；處理區下方的留白由送出列自己的 padding 提供
+   （處理區沒有 padding-bottom，sticky 的範圍不會被 padding 內縮） */
 .decision-center .decision-form {
-  position: sticky;
-  bottom: var(--space-5);
-  z-index: 1;
-  max-block-size: 60vh;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
   padding-bottom: 0;
-  box-shadow: 0 0 0 var(--space-5) var(--color-surface);
-  scrollbar-width: thin;
 }
 
-/* 送出列黏在處理區自己的捲動範圍底部；處理區下方的留白由送出列自己的 padding 提供
-   （處理區沒有 padding-bottom，sticky 的範圍不會被 padding 內縮） */
 .decision-center .decision-form > .form-actions {
   position: sticky;
   bottom: 0;
-  padding-bottom: var(--space-6);
+  z-index: 1;
+  margin-inline: calc(var(--space-6) * -1);
+  padding: var(--space-4) var(--space-6) var(--space-6);
+  border-top: 1px solid var(--color-border);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
   background: var(--color-surface-sunken);
 }
 
@@ -626,6 +655,14 @@
   line-height: var(--leading-title-sm);
 }
 
+/* 每一項的狀態（還差什麼）與「採用建議」同一列，放不下時換行 */
+.decision-center .decision-batch-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  align-items: center;
+}
+
 .decision-center .decision-batch-state {
   color: var(--color-text-muted);
   font-size: var(--text-meta);
@@ -757,10 +794,6 @@
   margin-top: calc(var(--space-5) * -1);
   color: var(--color-text-muted);
   font-size: var(--text-meta);
-}
-
-.workflow-page .workflow-blocked-reason .callout-title {
-  display: block;
 }
 
 .workflow-page .workflow-blocked-reason details > p {
@@ -1045,6 +1078,14 @@
   overflow-wrap: anywhere;
 }
 
+/* 沒有中文名稱的階段 key：等寬、次要色，不加程式碼底色 */
+.timeline-page .timeline-stage-code {
+  padding: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: inherit;
+}
+
 .timeline-page .timeline-quota {
   display: grid;
   gap: var(--space-3);
@@ -1210,7 +1251,8 @@
   }
 
   .decision-center .decision-form > .form-actions {
-    padding-bottom: var(--space-5);
+    margin-inline: calc(var(--space-5) * -1);
+    padding: var(--space-4) var(--space-5) var(--space-5);
   }
 
   /* 決策權限表每列上下排列：事項佔整列，內建、目前生效、設定在下一列；設定欄寬不變，選單文字不裁切 */
