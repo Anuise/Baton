@@ -191,6 +191,9 @@ describe("左側 Workspace 清單", () => {
     const item = (await screen.findByText("筆記")).closest("li")!;
 
     await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    // 封存要再確認一次；確認前不呼叫 API
+    expect(client.archiveWorkspace).not.toHaveBeenCalled();
+    await user.click(within(item).getByRole("button", { name: "確認封存 筆記" }));
 
     await waitFor(() => expect(screen.queryByText("筆記")).not.toBeInTheDocument());
     expect(client.archiveWorkspace).toHaveBeenCalledWith("ws_1");
@@ -340,6 +343,49 @@ describe("左側 Workspace 清單", () => {
     expect(screen.getByLabelText("目錄")).toBeInTheDocument();
   });
 
+  it("建立完成、表單收起後，焦點移到新 Workspace 的選擇按鈕（不落到 body）", async () => {
+    const client = fakeClient();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    await screen.findByText("還沒有 Workspace");
+
+    await user.type(screen.getByLabelText("目錄"), "C:\\work\\docs");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "選擇 docs" })).toHaveFocus());
+  });
+
+  it("封存最後一個 Workspace 後，建立表單自動展開", async () => {
+    const client = fakeClient();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    await screen.findByText("還沒有 Workspace");
+    await user.type(screen.getByLabelText("目錄"), "C:\\work\\docs");
+    await user.click(screen.getByRole("button", { name: "建立 Workspace" }));
+    await screen.findByRole("button", { name: "選擇 docs" });
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "封存 docs" }));
+    await user.click(screen.getByRole("button", { name: "確認封存 docs" }));
+
+    expect(await screen.findByText("還沒有 Workspace")).toBeInTheDocument();
+    expect(screen.getByLabelText("目錄")).toBeInTheDocument();
+  });
+
+  it("封存要再確認一次，可以取消", async () => {
+    const client = fakeClient([workspace()]);
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+
+    await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    expect(within(item).getByRole("group", { name: "確認封存 筆記" })).toHaveTextContent("資料與目錄保留");
+    await user.click(within(item).getByRole("button", { name: "取消" }));
+
+    expect(within(item).queryByRole("button", { name: "確認封存 筆記" })).not.toBeInTheDocument();
+    expect(client.archiveWorkspace).not.toHaveBeenCalled();
+  });
+
   it("createRequest 改變時展開表單並聚焦目錄欄位", async () => {
     const client = fakeClient([workspace()]);
     const { rerender } = render(<WorkspaceSidebar client={client} createRequest={0} />);
@@ -360,11 +406,40 @@ describe("左側 Workspace 清單", () => {
     expect(screen.getAllByRole("navigation")).toHaveLength(1);
   });
 
-  it("待裁定數超過 999 時徽章顯示 999+，完整數字在可存取名稱", async () => {
+  it("展開的「管理」浮層不被暫停列與下一個項目蓋住：浮層與項目之間沒有設 z-index 的祖先", async () => {
+    // jsdom 不排版，只能檢查決定蓋疊的樣式；Vitest 會把 CSS 匯入換成空字串，所以以非字面的動態匯入讀檔
+    const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
+    const url: { fileURLToPath(url: string): string } = await import(/* @vite-ignore */ `node:${"url"}`);
+    const style = document.createElement("style");
+    const here = import.meta.url;
+    style.textContent = fs.readFileSync(url.fileURLToPath(new URL("./styles/shell.css", here).href), "utf8");
+    document.head.append(style);
+    try {
+      const user = userEvent.setup();
+      const paused = { workspace_id: "ws_1", name: "筆記", awaiting_resume: true, paused_by: "full_exit" as const };
+      render(<WorkspaceSidebar client={fakeClient([workspace(), workspace({ id: "ws_2", name: "專案" })], [paused])} />);
+
+      const item = (await screen.findByRole("button", { name: "繼續工作 筆記" })).closest("li")!;
+      await user.click(within(item).getByLabelText("管理 筆記"));
+      const panel = item.querySelector(".workspace-menu-panel")!;
+
+      // 浮層的 --z-popover 不會被困在某個 z-index 的祖先裡，輸給同一項的暫停列（z-index 1）或下一個項目
+      for (let el = panel.parentElement!; el !== item; el = el.parentElement!) {
+        expect(getComputedStyle(el).zIndex).toMatch(/^(auto|)$/);
+      }
+      expect(getComputedStyle(item).zIndex).toMatch(/^(auto|)$/);
+      expect(getComputedStyle(panel).position).toBe("absolute");
+      expect(getComputedStyle(panel).zIndex).toBe("var(--z-popover)");
+      expect(getComputedStyle(item.querySelector(".workspace-paused")!).zIndex).toBe("1");
+    } finally {
+      style.remove();
+    }
+  });
+
+  it("待裁定數超過 999 時徽章顯示 999+，完整數字在 title", async () => {
     render(<WorkspaceSidebar client={fakeClient([workspace()])} pendingDecisions={{ ws_1: 1284 }} />);
 
-    const badge = await screen.findByText("999+");
-    expect(badge).toHaveAttribute("aria-label", "待裁定 1,284 項");
+    const badge = await screen.findByText("待裁定 999+");
     expect(badge).toHaveAttribute("title", "待裁定 1,284");
   });
 
@@ -376,6 +451,7 @@ describe("左側 Workspace 清單", () => {
 
     await waitFor(() => expect(onWorkspaces).toHaveBeenLastCalledWith([workspace()]));
     await user.click(screen.getByRole("button", { name: "封存 筆記" }));
+    await user.click(screen.getByRole("button", { name: "確認封存 筆記" }));
 
     await waitFor(() => expect(onWorkspaces).toHaveBeenLastCalledWith([]));
   });
@@ -592,8 +668,7 @@ describe("左側 Workspace 清單", () => {
 
     await screen.findByText("專案");
 
-    // 徽章只顯示數字，說明在可存取名稱
-    expect(screen.getAllByLabelText(/^待裁定/)).toHaveLength(1);
-    expect(screen.getByLabelText("待裁定 3 項")).toHaveTextContent("3");
+    expect(screen.getAllByText(/^待裁定/)).toHaveLength(1);
+    expect(screen.getByText("待裁定 3")).toBeInTheDocument();
   });
 });

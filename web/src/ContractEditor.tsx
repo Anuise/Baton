@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useId } from "react";
 
 import { HelpTip } from "./HelpTip";
 
@@ -179,6 +179,7 @@ interface Props {
 
 /** 六項最小派工契約、確定性檢查與所需能力的編輯器；建立與編輯 Task 共用。 */
 export function ContractEditor({ draft, onChange, capabilities }: Props) {
+  const idBase = useId();
   const change = (name: ContractFieldName, patch: Partial<FieldDraft>) =>
     onChange({ ...draft, fields: { ...draft.fields, [name]: { ...draft.fields[name], ...patch } } });
 
@@ -210,18 +211,24 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
                 <span className="contract-field-name" aria-hidden="true">
                   {label}
                 </span>
-                <select
-                  className="contract-mode"
-                  aria-label={`${label}：模式`}
-                  value={field.mode}
-                  onChange={(e) => change(name, { mode: e.target.value as Mode })}
-                >
-                  {modes.map((mode) => (
-                    <option key={mode} value={mode}>
-                      {MODE_LABELS[mode]}
-                    </option>
-                  ))}
-                </select>
+                {/* 可見的小標「狀態」說明下拉在選什麼；螢幕報讀器用 aria-label 的「<項目>：模式」，小標不重複朗讀 */}
+                <div className="contract-mode-field">
+                  <span className="contract-mode-label" aria-hidden="true">
+                    狀態
+                  </span>
+                  <select
+                    className="contract-mode"
+                    aria-label={`${label}：模式`}
+                    value={field.mode}
+                    onChange={(e) => change(name, { mode: e.target.value as Mode })}
+                  >
+                    {modes.map((mode) => (
+                      <option key={mode} value={mode}>
+                        {MODE_LABELS[mode]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
               <div className="contract-field-value">
                 {field.mode === "missing" && <p className="contract-field-missing">未提供，會列為缺少項目</p>}
@@ -235,16 +242,24 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
                         onChange={(e) => change(name, { text: e.target.value })}
                       />
                     </label>
-                    <label>
-                      引用（選填）
+                    {/* 「?」是按鈕，不能放進 <label>：標籤與說明並排，再接輸入框 */}
+                    <div className="contract-subfield">
+                      <span className="contract-subfield-label">
+                        <label htmlFor={`${idBase}-${name}-references`}>引用（選填）</label>
+                        <HelpTip label={`${label}：引用`}>
+                          每行一個引用，格式是「種類:識別碼@版本」。種類可用 goal（Goal）、task_contract（Task 契約）、
+                          authorization（授權）、decision（裁定）；版本是引用當時對方的內容版本，從 1 起算。
+                        </HelpTip>
+                      </span>
                       <textarea
+                        id={`${idBase}-${name}-references`}
                         className="contract-references"
                         aria-label={`${label}：引用（選填）`}
                         value={field.references}
-                        placeholder="每行一個，格式 kind:target@version"
+                        placeholder="例：goal:goal_1@1"
                         onChange={(e) => change(name, { references: e.target.value })}
                       />
-                    </label>
+                    </div>
                   </>
                 )}
                 {field.mode === "not_applicable" && (

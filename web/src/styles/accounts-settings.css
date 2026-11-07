@@ -24,6 +24,16 @@
   margin: 0;
 }
 
+/* 長警示（.notice）裡收合的「詳細資訊」：與正文同寬 */
+:is(.accounts-page, .platform-page) .notice details > p {
+  margin-top: var(--space-2);
+  max-inline-size: var(--measure);
+}
+
+:is(.accounts-page, .platform-page) .notice details > summary {
+  width: fit-content;
+}
+
 
 /* ---------- 首次設定 ---------- */
 
@@ -149,7 +159,7 @@
   align-items: center;
 }
 
-/* ---------- Account Profile ---------- */
+/* ---------- 帳號清單 ---------- */
 
 /* 新增表單：兩種建立方式並排，窄時上下；平時收起（hidden） */
 .accounts-add {
@@ -206,11 +216,12 @@
   min-width: 0;
 }
 
+/* 物件標題字級（MASTER 7.1） */
 .account-title > .profile-name {
   flex: 0 1 auto;
   min-width: 0;
-  font-size: var(--text-title);
-  line-height: var(--leading-title);
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
 }
 
 .account-actions {
@@ -221,18 +232,12 @@
   justify-content: flex-end;
 }
 
-/* 選單在卡片右緣：往左展開，不超出視窗 */
-.account-actions .more-menu-list {
-  right: 0;
-  left: auto;
-}
-
 /* 卡片裡的提示與卡片內容同寬，邊緣對齊 */
 .account-card .callout {
   max-inline-size: none;
 }
 
-/* 身分事實較窄、用量較寬；放不下兩欄時上下排列 */
+/* 身分事實較窄、用量較寬；卡片放不下兩欄時（例如 1024 寬）上下排列，不在窄欄裡把長值折成好幾段 */
 .account-body {
   display: flex;
   flex-wrap: wrap;
@@ -245,11 +250,11 @@
 }
 
 .account-body > .account-facts {
-  flex: 1 1 18em;
+  flex: 1 1 26em;
 }
 
 .account-body > .account-load {
-  flex: 2 1 22em;
+  flex: 2 1 30em;
 }
 
 .account-load {
@@ -465,8 +470,8 @@
 
 /* ---------- 更新 ---------- */
 
+/* 有新版本：一般文字色加粗（群青只給可以按的東西） */
 .update-status-available {
-  color: var(--color-accent);
   font-weight: var(--font-weight-strong);
 }
 
@@ -542,6 +547,11 @@
 
 /* ---------- 崩潰恢復 ---------- */
 
+/* 與平台狀態並排：崩潰恢復的標題列有按鈕（控制項高），兩邊的標題列一樣高，說明與面板上緣才對齊 */
+:is(.recovery-panel, .platform-page) > .section-heading > h3 {
+  line-height: var(--control-height);
+}
+
 .recovery-status {
   display: inline-flex;
   flex-wrap: wrap;
@@ -549,10 +559,6 @@
   align-items: center;
   color: var(--color-text-muted);
   font-size: var(--text-meta);
-}
-
-.recovery-blocking strong {
-  color: var(--color-danger);
 }
 
 .recovery-failure {
@@ -576,10 +582,6 @@
 }
 
 /* ---------- 平台狀態 ---------- */
-
-.platform-warning {
-  max-inline-size: var(--measure);
-}
 
 .platform-source {
   max-inline-size: none;
@@ -616,6 +618,15 @@
 }
 
 /* ---------- 對話框：更新確認、完全退出與更新的停止進度 ---------- */
+
+/* 更新確認是原生 <dialog>（showModal）：瀏覽器預設的文字色與遮罩換成 token */
+.update-confirm {
+  color: var(--color-text);
+}
+
+.update-confirm::backdrop {
+  background: var(--color-overlay);
+}
 
 .update-steps {
   display: grid;

@@ -1,4 +1,4 @@
-//! UI E2E「開啟與結束 Controller CLI」（desktop-controller-cli 票 09）：使用者在跑道欄選 Workspace、切到 主控台頁、
+//! UI E2E「開啟與結束 Controller CLI」（desktop-controller-cli 票 09）：使用者在跑道欄選 Workspace、切到 Controller 頁、
 //! 選一個 Account Profile 按「開啟」；Supervisor 經 fake Claude 環境 Port 開出終端機後頁面顯示「執行中」；
 //! 使用者按「結束」，Supervisor 停止宿主後頁面顯示「已結束」。
 //!
@@ -29,20 +29,20 @@ async fn a_controller_cli_opened_from_the_controller_tab_runs_and_ends() {
     let (ws, ws_path) = new_workspace(harness, "beta").await;
     browser.goto(&e2e.server.url("/")).await;
 
-    // 1. 在跑道欄選 Workspace，切到「主控台」頁：尚未開啟
+    // 1. 在跑道欄選 Workspace，切到「Controller」頁：尚未開啟
     browser.click(&[role("button", "選擇 beta")]).await;
-    browser.click(&[role("navigation", "Workspace 頁面"), role("button", "主控台")]).await;
+    browser.click(&[role("navigation", "Workspace 頁面"), role("button", "Controller")]).await;
     let page = role("region", "Controller");
-    browser.wait_visible(&[page.clone(), role("heading", "主控台")]).await;
+    browser.wait_visible(&[page.clone(), role("heading", "Controller")]).await;
     // 頁面標題只寫頁名，Workspace 名稱由頁面上方的情境列顯示
     // 名稱可能與路徑結尾同字（路徑也在情境列中），取第一個（名稱）
     browser.wait_visible(&[label("目前的 Workspace"), exact_text("beta"), nth(0)]).await;
     browser.wait_visible(&[page.clone(), exact_text("未開啟")]).await;
 
     // 2. 選 Controller 帳號（兩個帳號都還沒有額度觀測、沒有執行中的 Worker）並開啟
-    let option = format!("{CONTROLLER_PROFILE}（5h 未知｜7d 未知｜執行中 Worker 0）");
+    let option = format!("{CONTROLLER_PROFILE}（五小時未知｜七日未知｜執行中 Worker 0）");
     browser.select(&[page.clone(), role("combobox", "Controller 帳號")], &option).await;
-    browser.click(&[page.clone(), role("button", "開啟")]).await;
+    browser.click(&[page.clone(), role("button", "開啟 Controller")]).await;
     browser.wait_visible(&[page.clone(), exact_text("開啟中")]).await;
 
     // 3. Supervisor 開出終端機：頁面在下一次重新讀取時顯示執行中、Controller 帳號是選的那個
@@ -65,7 +65,7 @@ async fn a_controller_cli_opened_from_the_controller_tab_runs_and_ends() {
     harness.supervise().await;
     browser.wait_visible(&[page.clone(), exact_text("已結束")]).await;
     browser.wait_visible(&[page.clone(), text("結束原因：")]).await;
-    browser.wait_visible(&[page.clone(), role("button", "開啟")]).await;
+    browser.wait_visible(&[page.clone(), role("button", "開啟 Controller")]).await;
 
     // 5. 佐證：宿主已被停止、不再存活；Run 已結束；沒有開出第二個視窗
     assert_eq!(harness.process_control.stop_calls(), vec![host.clone()]);

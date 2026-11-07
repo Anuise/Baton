@@ -14,10 +14,10 @@
    知識（KnowledgePage）
    ========================================================================== */
 
-/* 整頁不撐滿超寬視窗：一列的內文本來就有閱讀寬度，清單太寬時徽章與動作會離標題太遠；
-   標題列也在同一寬度內，右側的搜尋與「新增條目」與清單右緣對齊 */
-.knowledge-page {
-  max-inline-size: 72em;
+/* 頁寬（MASTER 7.1）：頁根不設上限，標題列的搜尋與「新增條目」對齊主區右緣；
+   標題列以下的內容在區段內限寬（一列的內文本來就有閱讀寬度，清單太寬時徽章與動作會離標題太遠） */
+.knowledge-page > :not(.page-header) {
+  max-inline-size: var(--content-narrow);
 }
 
 /* 標題列的搜尋：輸入框固定寬度，按鈕緊跟在後；放不下時整組換到下一列（.page-header 會換行） */
@@ -30,19 +30,6 @@
 .knowledge-page .knowledge-search input {
   width: 22em;
   min-width: 0;
-}
-
-/* 「搜尋」是送出鈕，但這一列的主要動作是「新增條目」：改回次要按鈕的樣子（每區最多一個主要按鈕） */
-.knowledge-page .knowledge-search > button {
-  border-color: var(--color-border-strong);
-  background: var(--color-surface);
-  color: var(--color-text);
-  font-weight: var(--font-weight-normal);
-}
-
-.knowledge-page .knowledge-search > button:hover:not(:disabled) {
-  border-color: var(--color-control-border);
-  background: var(--color-surface-hover);
 }
 
 /* 有效條目標題列右側的「顯示歷史」 */
@@ -222,9 +209,9 @@
    專案理解（ProjectUnderstandingPage）
    ========================================================================== */
 
-/* 與知識頁相同的寬度：標題列的「重新檢查」與清單右緣對齊 */
-.understanding-page {
-  max-inline-size: 72em;
+/* 頁寬（MASTER 7.1）：頁根不設上限，「重新檢查」對齊主區右緣；標題列以下的內容在區段內限寬 */
+.understanding-page > :not(.page-header) {
+  max-inline-size: var(--content-narrow);
 }
 
 .understanding-page .understanding-retired-toggle {
@@ -235,6 +222,14 @@
 /* 項目名稱：可能是沒有空白的長識別字，任何字元都可斷 */
 .understanding-page .understanding-key {
   overflow-wrap: anywhere;
+}
+
+/* Brief 段落的原始鍵：附在中文名稱後面，等寬、次要色、小一號，不搶標題 */
+.understanding-page .understanding-raw-key {
+  margin-left: var(--space-3);
+  color: var(--color-text-subtle);
+  font-size: var(--text-caption);
+  font-weight: var(--font-weight-normal);
 }
 
 .understanding-page .understanding-retired .understanding-key,
@@ -272,9 +267,9 @@
    授權（AuthorizationPanel）
    ========================================================================== */
 
-/* 設定頁：一欄、表單寬度略寬（兩個多行欄位並排） */
-.authorization-page {
-  max-inline-size: 60em;
+/* 頁寬（MASTER 7.1）：頁根不設上限；標題列以下的內容在區段內限寬（一欄，兩個多行欄位並排放得下） */
+.authorization-page > :not(.page-header) {
+  max-inline-size: var(--content-narrow);
 }
 
 .authorization-page .authorization-template-description {
@@ -416,7 +411,8 @@
    模型設定（ModelOverridesPanel）
    ========================================================================== */
 
-.model-overrides-page {
+/* 頁寬（MASTER 7.1）：頁根不設上限；標題列以下的內容限在表單寬度 */
+.model-overrides-page > :not(.page-header) {
   max-inline-size: var(--measure-form);
 }
 
@@ -430,7 +426,7 @@
   border: 0;
 }
 
-/* 一個角色一列：左欄角色名稱與一句說明，右欄下拉選單（頁面寬度固定在表單寬，1024 也放得下兩欄） */
+/* 一個角色一列：左欄角色名稱與一句說明，右欄下拉選單（區段寬度固定在表單寬，1024 也放得下兩欄） */
 .model-overrides-page .model-overrides-role {
   display: grid;
   grid-template-columns: minmax(12em, 17em) minmax(0, 1fr);
@@ -459,18 +455,20 @@
   font-size: var(--text-meta);
 }
 
-/* 以 API 金鑰更新清單：欄位與按鈕同一列，按鈕對齊輸入框 */
-.model-overrides-page .model-catalog-form {
+/* 可用模型清單（ModelCatalogSettings，放在 App 設定頁）：以 API 金鑰更新清單；
+   欄位與按鈕同一列、按鈕對齊輸入框，整列不超過表單寬度 */
+.model-catalog-settings .model-catalog-form {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-4);
   align-items: flex-end;
+  max-inline-size: var(--measure-form);
 }
 
-.model-overrides-page .model-catalog-form > .field {
+.model-catalog-settings .model-catalog-form > .field {
   flex: 1 1 16em;
 }
 
-.model-overrides-page .model-catalog-form > button {
+.model-catalog-settings .model-catalog-form > button {
   flex: none;
 }

@@ -172,7 +172,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
       setSummary(null);
       setAcknowledged(false);
       setAcknowledgedExpansion(false);
-      setNotice(`已保存為 revision ${revision.revision}`);
+      setNotice(`已保存為第 ${revision.revision} 版`);
     } catch (e) {
       setError(reasonOf(e));
     } finally {
@@ -208,7 +208,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
     <PageFrame>
       {effective ? (
         <div className="callout callout-success">
-          <p className="callout-title">目前授權：revision {effective.revision}</p>
+          <p className="callout-title">目前授權：第 {effective.revision} 版</p>
           <p className="meta">
             <span>確認於 {formatTimestamp(effective.confirmed_at, timeZone)}</span>
             <span>來源：{sourceLabel(effective, view)}</span>
@@ -245,10 +245,10 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
                 {template.id === templateId && <span className="badge badge-accent">目前依據</span>}
                 <button
                   type="button"
-                  aria-label={`套用「${template.name}」`}
+                  aria-label={`套用範本「${template.name}」`}
                   onClick={() => edit(draftFrom(template.grants), template.id)}
                 >
-                  套用
+                  套用範本
                 </button>
               </div>
               <p className="authorization-template-description">{template.description}</p>
@@ -336,7 +336,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
                     </dt>
                     <dd>
                       <span className="authorization-targets">
-                        {item.targets.length > 0 ? item.targets.join("、") : "未指定目標資源"}
+                        {item.targets.length > 0 ? <Targets targets={item.targets} /> : "未指定目標資源"}
                       </span>
                       {item.restrictions.length > 0 && (
                         <span className="authorization-restrictions">限制：{item.restrictions.join("、")}</span>
@@ -405,7 +405,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
               {[...view.revisions].reverse().map((revision) => (
                 <li key={revision.revision}>
                   <div className="row-head">
-                    <strong>revision {revision.revision}</strong>
+                    <strong>第 {revision.revision} 版</strong>
                     {revision.revision === effective?.revision && <span className="badge badge-success">目前生效</span>}
                   </div>
                   <p className="meta">
@@ -490,7 +490,7 @@ function LegacyRunsNotice({
               </div>
             </div>
             <p className="meta">
-              <span>沿用 revision {run.authorization_revision}</span>
+              <span>沿用第 {run.authorization_revision} 版</span>
               {run.revoked_capabilities.length > 0 && <span>已撤銷：{run.revoked_capabilities.map(labelOf).join("、")}</span>}
               {run.admitted_at !== null && <span>准入於 {formatTimestamp(run.admitted_at, timeZone)}</span>}
               {run.cancel_requested && <span className="dot dot-warning">已要求停止，等待程序確認</span>}
@@ -502,27 +502,37 @@ function LegacyRunsNotice({
   );
 }
 
+/** 目標資源多半是路徑或網址：等寬（MASTER 7.1 路徑）、確認前完整顯示不縮短，以「、」分隔。 */
+function Targets({ targets }: { targets: string[] }) {
+  return targets.map((target, index) => (
+    <Fragment key={index}>
+      {index > 0 && "、"}
+      <span className="mono">{target}</span>
+    </Fragment>
+  ));
+}
+
 /** 修改既有授權時，相對於目前 revision 新增／移除的能力、目標與限制，以及影響說明。 */
 function ChangesView({ changes }: { changes: AuthorizationChanges }) {
-  // 每一種變動各自一段（MASTER：次要資訊以間距分開，不以符號串接）
+  // 每一種變動各自一段（MASTER：次要資訊以間距分開，不以符號串接）；目標是路徑或網址，用等寬字
   const parts = (change: GrantChange) =>
     (
       [
-        ["新增目標", change.added_targets],
-        ["移除目標", change.removed_targets],
-        ["新增限制", change.added_restrictions],
-        ["移除限制", change.removed_restrictions],
+        ["新增目標", change.added_targets, true],
+        ["移除目標", change.removed_targets, true],
+        ["新增限制", change.added_restrictions, false],
+        ["移除限制", change.removed_restrictions, false],
       ] as const
     )
       .filter(([, items]) => items.length > 0)
-      .map(([label, items]) => (
+      .map(([label, items, isTarget]) => (
         <span key={label}>
-          {label}：{items.join("、")}
+          {label}：{isTarget ? <Targets targets={items} /> : items.join("、")}
         </span>
       ));
   return (
     <section className="authorization-changes" aria-label="授權變更">
-      <h5>相對於目前授權（revision {changes.base_revision}）的變更</h5>
+      <h5>相對於目前授權（第 {changes.base_revision} 版）的變更</h5>
       {changes.changes.length === 0 ? (
         <p>內容與目前授權相同。</p>
       ) : (

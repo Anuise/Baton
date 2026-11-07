@@ -47,6 +47,8 @@ export function LoginStartupSettings({ client }: Props) {
     <section className="section login-startup-settings" aria-labelledby="login-startup-title">
       <div className="section-heading">
         <h3 id="login-startup-title">登入時自動啟動</h3>
+        {/* 與並排的「更新」一樣有一行說明，兩個面板上緣對齊 */}
+        <p>預設關閉；與各 Workspace 的「完全退出後自動續跑」是分開的設定。</p>
       </div>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
       {loaded.state === "failed" && (

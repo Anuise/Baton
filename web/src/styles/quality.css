@@ -28,8 +28,13 @@
   border-left: 3px solid var(--color-warning);
 }
 
+/* 成果清單在區段內限寬：寬視窗時預覽、下載不會離成果名稱太遠（頁根不設上限，MASTER 7.1） */
+.artifacts-page .row-list {
+  max-inline-size: var(--content-narrow);
+}
+
 /* 版本的警示只佔文字寬，不拉成整列色塊 */
-.artifacts-page .artifact-version > .callout {
+.artifacts-page .artifact-version > .notice {
   justify-self: start;
 }
 
@@ -126,7 +131,7 @@
   font-weight: var(--font-weight-normal);
 }
 
-/* 雙軸：寬時並排、窄時上下；每一軸以左側色條與徽章標出自己的結論 */
+/* 雙軸：寬時並排、窄時上下；每一軸只以徽章標出自己的結論（審查卡已有色條，軸不再加色條） */
 .review-page .review-axes {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 20em), 1fr));
@@ -138,7 +143,6 @@
   gap: var(--space-3);
   align-content: start;
   min-width: 0;
-  padding-left: var(--space-5);
 }
 
 .review-page .review-axis-head {
@@ -319,6 +323,11 @@
   font-size: var(--text-meta);
 }
 
+/* 嘗試的步驟：判定一行，判定代碼在下一行的次要資訊（li 保持 list-item，才留得住項目符號） */
+.verification-page .verification-attempt-steps > li > .meta {
+  margin-top: var(--space-1);
+}
+
 /* 用量：一列三項，像次要資訊列 */
 .verification-page .verification-usage {
   display: flex;
@@ -442,11 +451,20 @@
   font-size: var(--text-meta);
 }
 
-/* 要求執行與發布：表單在面板裡 */
+/* 要求執行與發布：表單在面板裡。旅程的 fieldset 只當語意分組、不畫框（面板內不再有框，MASTER 7.1），
+   legend 與其他欄位的標籤同樣式 */
 .verification-page .verification-journey-choices {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2) var(--space-6);
+  padding: 0;
+  border: 0;
+}
+
+.verification-page .verification-journey-choices > legend {
+  margin-bottom: var(--space-2);
+  padding: 0;
+  color: var(--color-text);
 }
 
 .verification-page .verification-publish[open] > form {
@@ -480,9 +498,10 @@
   min-width: 0;
 }
 
-/* 疑點的說明清單：摘要與收合區的標籤欄同寬，值欄起點一致 */
+/* 疑點的說明清單：摘要與收合區的標籤欄至少同寬（值欄起點一致）；
+   較長的標籤（確認的 Evidence Bundle）把標籤欄撐寬，不被擠到折行 */
 .exploration-page .exploration-summary {
-  grid-template-columns: 9em minmax(0, 1fr);
+  grid-template-columns: minmax(9em, max-content) minmax(0, 1fr);
 }
 
 .exploration-page .exploration-summary > dd {

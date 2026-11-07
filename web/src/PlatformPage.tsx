@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { CopyButton } from "./LongText";
 import type { PlatformResponse, RuntimeClient } from "./runtimeClient";
-import { docsHost } from "./textFormat";
+import { docsHost, splitFirstSentence } from "./textFormat";
 
 type Assessment = PlatformResponse["assessment"];
 
@@ -52,6 +52,8 @@ export function PlatformPage({ client }: Props) {
             {platformStatusLabel(page.platform.assessment.status)}
           </span>
         )}
+        {/* 與並排的崩潰恢復一樣有一行說明，兩個面板上緣對齊 */}
+        <p>Windows 版本與支援判定；非正式支援只會警告，不會阻擋使用、派工、交接或恢復。</p>
       </div>
       {page.state === "loading" && <p className="empty-note">平台檢查中…</p>}
       {page.state === "failed" && <p className="callout callout-danger">無法取得平台狀態：{page.reason}</p>}
@@ -60,16 +62,30 @@ export function PlatformPage({ client }: Props) {
   );
 }
 
+/** 一則平台警告：長警示（只有色條與狀態詞上色）；第一句完整顯示，其餘收進「詳細資訊」。 */
+function PlatformWarning({ message }: { message: string }) {
+  const { summary, rest } = splitFirstSentence(message);
+  return (
+    <div role="alert" className="notice notice-warning platform-warning">
+      <p className="notice-title">平台警告</p>
+      <p>{summary}</p>
+      {rest !== "" && (
+        <details>
+          <summary>詳細資訊</summary>
+          <p>{rest}</p>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function PlatformDetails({ platform }: { platform: PlatformResponse }) {
   const { assessment } = platform;
   return (
     <>
       {assessment.issues.map((issue) => (
-        <p key={issue.code} role="alert" className="callout callout-warning platform-warning">
-          {issue.message}
-        </p>
+        <PlatformWarning key={issue.code} message={issue.message} />
       ))}
-      {assessment.status !== "supported" && <p className="field-hint">平台警告不會阻擋使用，也不會阻擋派工、交接或恢復。</p>}
       <div className="panel">
         <dl className="facts platform-facts">
           <dt>OS build</dt>
@@ -96,7 +112,8 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
         </dl>
         <p className="meta platform-source">
           <span className="copy-text">
-            支援期限資料來源：
+            {/* 標籤不縮小，寬度不夠時只截斷網址 */}
+            <span className="no-shrink">支援期限資料來源：</span>
             <span className="mono truncate" title={platform.support_table_source}>
               {docsHost(platform.support_table_source)}
             </span>

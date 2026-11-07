@@ -287,6 +287,19 @@ describe("知識", () => {
       expect(within(card).getByRole("button", { name: "撤銷" })).toHaveClass("btn-danger");
     });
 
+    it("候選連續好幾列時，列內的「確認為已驗證」是次要按鈕，不是一排主要按鈕（MASTER 7.1）", async () => {
+      renderPage(fakeClient([candidate, entry({ ...candidate, id: "kn_c2", content: { ...candidate.content, title: "建置前先更新依賴" } })]));
+
+      const section = await region("待確認的候選教訓");
+      const confirms = within(section).getAllByRole("button", { name: "確認為已驗證" });
+      expect(confirms).toHaveLength(2);
+      for (const button of confirms) {
+        expect(button).not.toHaveClass("btn-primary");
+        expect(button).not.toHaveAttribute("type", "submit");
+      }
+      expect(section.querySelector(".btn-primary, [type=submit]")).toBeNull();
+    });
+
     it("Controller 提交的候選教訓顯示 Controller 與來源 Task", async () => {
       const fromController = entry({
         ...candidate,
@@ -443,6 +456,28 @@ describe("知識", () => {
 
       expect(menu.open).toBe(false);
       expect(summary).toHaveFocus();
+    });
+
+    it("點過選單面板的空白處（焦點離開選單）後按 Esc 仍會關閉，焦點回到「更多」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { summary, menu } = await openMenu(user);
+
+      await user.click(menu.querySelector(".more-menu-list")!);
+      // 點在選單裡面不會收起，但焦點已落到 body，按鍵事件不會經過選單
+      expect(menu.open).toBe(true);
+      expect(document.activeElement).toBe(document.body);
+      await user.keyboard("{Escape}");
+
+      expect(menu.open).toBe(false);
+      expect(summary).toHaveFocus();
+    });
+
+    it("「更多」的可存取名稱帶條目標題，同一頁有多個時分得出來", async () => {
+      renderPage(fakeClient([entry()]));
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+
+      expect(within(card).getByText("更多")).toHaveAccessibleName("更多（部署前先備份資料庫）");
     });
 
     it("點選單外面時關閉選單", async () => {

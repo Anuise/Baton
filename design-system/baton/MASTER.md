@@ -132,6 +132,7 @@ Baton 是接力棒：多個帳號像分道的跑者，額度用完就交棒給�
 | 標籤：值 | `<dl className="facts">` | 自己排兩欄 |
 | 次要資訊一列 | `<p className="meta">` 內放 `<span>` | 「A · B · C」 |
 | 兩行內的狀態說明 | `.callout` + `.callout-{accent,success,warning,danger}`，開頭狀態詞用 `.callout-title` | 整段彩色粗體字 |
+| 可能超過兩行的警示（錯誤、阻擋原因、平台警告） | `.notice` + `.notice-{warning,danger,accent}`，狀態詞用 `.notice-title`；細節收進 `<details>` | 長文字放進淡底 `.callout` |
 | 狀態徽章 | `.badge` + `.badge-{success,warning,danger,accent,orange,magenta}`；中性分類標籤 `.badge-plain` | 用顏色當唯一訊號 |
 | 狀態點＋文字 | `.dot` + `.dot-{success,warning,danger,accent}` | 單獨的色點 |
 | 額度、進度 | `.meter > span[style=width]`，數字另外寫出 | 只有長條沒有數字 |
@@ -145,6 +146,20 @@ Baton 是接力棒：多個帳號像分道的跑者，額度用完就交棒給�
 | 解釋性小字 | `HelpTip`（「?」） | 每個欄位下一行灰字 |
 | 兩欄並排的小面板 | `.split` | |
 | 對話框 | `.overlay` + `.dialog-panel`（＋`.dialog-actions`）；舊名 `.exit-overlay`／`.exit-progress`／`.exit-actions` 同義 | |
+
+### 7.1 一致性規則（第一輪審查後補充）
+
+- **頁寬**：頁面根 `.page` 一律不設寬度上限，標題列與主要動作永遠對齊主區右緣；閱讀型內容（表單、說明、設定）在區段內自己限寬（`--measure`、`--measure-form`，或 `--content-narrow` 約 64 字寬）。
+- **計數**：`.count` 只放數字，不加括號或單位，放在標題元素外面；0 筆時一律顯示 0（整組隱藏只用在「本來就不常出現」的分組，例如已延後）。收合摘要的計數也用同樣寫法：「已過期的審查 1」。需要讓輔助技術讀到計數時，用外層 region 的 `aria-label`（例如「可處理（4）」）。
+- **琥珀色只給要你處理的事**（待裁定、缺項要你補、逾期、需要你接受的成果）。系統自己在等的狀態（排隊、等待相依、等待額度）用中性（`.badge-plain`、`.stripe-muted`）。同一個狀態在清單、詳情、總覽用同一個色調（共用同一個 tone 函式）。
+- **列內動作**：`.row-list` 與看板卡片裡的動作用次要或低調按鈕；主要按鈕留給頁首或區段裡唯一的動作。
+- **對話框按鈕**：依 Windows 慣例，動作列靠右，**主要動作在前（左）、取消／關閉在後（右）**。
+- **「更多」**：第二順位以後的動作一律用 `.more-menu`（`<summary>` 帶 ▾）；放在列尾時加 `.more-menu-end`。
+- **展開長文字**：LongText 一律用收合摘要樣式（`.long-text-disclosure`），與 `<details>` 的「▶ 詳細資訊」一致。
+- **機器代碼**（事件類型、reason code、設定鍵）不當主要文字：顯示中文名稱，代碼放在 `title` 或「細節」裡；沒有中文名稱時才顯示代碼，並用 `.mono` 與次要色。
+- **物件標題**一律 `--text-title-sm`；區段標題 `--text-title`。
+- **面板內的 fieldset** 不加框（用 legend 或區段標題分組）；物件卡裡不再放有框的子卡片，用細線或留白分隔。
+- **路徑**一律 `PathText`／`ShortValue`／`.mono`；版本號、雜湊、識別碼用 `.mono`。
 
 工具 class：`.mono`、`.tabular`、`.nowrap`、`.truncate`、`.clamp-1/2/3`、`.pre-wrap`、`.measure`、`.measure-form`、`.grow`、`.no-shrink`、`.visually-hidden`。
 

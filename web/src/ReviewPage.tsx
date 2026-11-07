@@ -95,7 +95,7 @@ export function ReviewPage({ client, workspace, timeZone }: Props) {
       </header>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
       {loaded.state === "failed" && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>無法取得審查：{loaded.reason}</p>
         </div>
       )}
@@ -117,7 +117,7 @@ function ReviewsSection({ reviews, timeZone }: { reviews: ReviewView[]; timeZone
     <section className="section" aria-labelledby="review-reviews">
       <div className="section-heading">
         <h3 id="review-reviews">雙軸審查</h3>
-        {current.length > 0 && <span className="count">{current.length}</span>}
+        <span className="count">{current.length}</span>
         <p>規範（Standards）與需求（Spec）兩軸各自判定，兩軸都通過，整份審查才通過。</p>
       </div>
       {reviews.length === 0 && <p className="empty-note">還沒有審查；reviewer 提交雙軸審查後會在這裡顯示。</p>}
@@ -127,7 +127,9 @@ function ReviewsSection({ reviews, timeZone }: { reviews: ReviewView[]; timeZone
       ))}
       {stale.length > 0 && (
         <details className="review-stale-group">
-          <summary>已過期的審查（{stale.length}）</summary>
+          <summary>
+            已過期的審查 <span className="count">{stale.length}</span>
+          </summary>
           <div className="review-stale-list">
             {stale.map((review) => (
               <ReviewCard key={review.id} review={review} timeZone={timeZone} />
@@ -197,8 +199,8 @@ function ReviewCard({ review, timeZone }: { review: ReviewView; timeZone?: strin
 function StaleReason({ reason }: { reason: string }) {
   const { summary, rest } = splitFirstSentence(reason);
   return (
-    <div className="callout review-stale-reason">
-      <p className="callout-title">過期原因</p>
+    <div className="notice review-stale-reason">
+      <p className="notice-title">過期原因</p>
       <p>{summary}</p>
       {rest !== "" && (
         <details>
@@ -212,8 +214,9 @@ function StaleReason({ reason }: { reason: string }) {
 
 function AxisSection({ title, axis }: { title: string; axis: ReviewAxisView }) {
   const findings = [...axis.findings].sort((a, b) => FINDING_ORDER[a.state] - FINDING_ORDER[b.state]);
+  // 審查卡本身已有色條：兩軸只用徽章表達各自的結論，不再各加一條色條（框中框）
   return (
-    <section className={axis.passed ? "review-axis stripe-success" : "review-axis stripe-danger"} aria-label={title}>
+    <section className="review-axis" aria-label={title}>
       <h5 className="review-axis-head">
         <span>{title}</span>
         <span className={axis.passed ? "badge badge-success" : "badge badge-danger"}>{axis.passed ? "通過" : "未通過"}</span>
@@ -275,7 +278,7 @@ function DeviationsSection({ deviations, timeZone }: { deviations: DeviationView
     <section className="section" aria-labelledby="review-deviations">
       <div className="section-heading">
         <h3 id="review-deviations">設計偏離</h3>
-        {deviations.length > 0 && <span className="count">{deviations.length}</span>}
+        <span className="count">{deviations.length}</span>
         <p>實作偏離 Design Package 時的回報與處理結果，待處理的排在前面。</p>
       </div>
       {deviations.length === 0 && <p className="empty-note">沒有設計偏離；實作偏離 Design Package 時會在這裡顯示。</p>}

@@ -1,15 +1,15 @@
 /* ==========================================================================
-   主控台與工作（MASTER.md 第 7 節：頁面專屬樣式）
-   主控台：駕駛艙卡片（狀態讀數、提示、額度量表、開啟表單）與換帳號重開。
-   工作：整合佇列、狀態跑道（看板）、Task 卡、建立 Task／編輯契約對話框。
+   Controller 與工作（MASTER.md 第 7 節：頁面專屬樣式）
+   Controller：駕駛艙卡片（狀態讀數、提示、額度量表、開啟表單）與換帳號重開。
+   工作：整合佇列、計數列與狀態跑道（看板）、Task 卡、建立 Task／編輯契約對話框。
    只寫共用元件（components.css）沒有的部分，一律以頁面根 class 開頭、只用 token。
    ========================================================================== */
 
-/* ---------- 主控台 ---------- */
+/* ---------- Controller ---------- */
 
-/* 內容不多：限制寬度，讀數與量表不被拉散到整個主區 */
-.controller-page {
-  max-width: 60em;
+/* 頁面根不限寬（MASTER 7.1：標題列對齊主區右緣）；內容不多，區段自己限寬，讀數與量表不被拉散到整個主區 */
+.controller-page > :not(.page-header) {
+  max-inline-size: var(--content-narrow);
 }
 
 .controller-page .controller-run {
@@ -113,6 +113,11 @@
   text-overflow: ellipsis;
 }
 
+/* 授權未確認的提示：「前往授權」依內容寬，不被 grid 拉滿 */
+.controller-page .controller-authorization > button {
+  justify-self: start;
+}
+
 .controller-page .controller-unavailable ul {
   margin-top: var(--space-3);
   color: var(--color-text-muted);
@@ -160,15 +165,102 @@
 
 /* ---------- 工作：狀態跑道（看板）。欄位多時在自己的容器內水平捲動，整頁不出現水平捲軸 ---------- */
 
-/* 左右各留 4px（以負邊距抵銷、與頁面左緣對齊），最右一條跑道的框線與按鈕的焦點外框不被捲動容器裁掉 */
+/* 計數列與看板是同一組：間距比頁面區段之間（32px）緊 */
+.task-board .task-lanes {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* 計數列：每個狀態一個低調按鈕（狀態名＋等寬數字），點了把看板捲到該欄；
+   以負邊距抵銷按鈕內距，第一個狀態名與頁面左緣對齊 */
+.task-board .task-status-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin-inline-start: calc(-1 * var(--space-3));
+}
+
+.task-board .task-status-count {
+  gap: var(--space-3);
+  font-size: var(--text-meta);
+}
+
+.task-board .task-status-count > .tabular {
+  color: var(--color-text);
+  font-weight: var(--font-weight-strong);
+}
+
+/* 需要你處理的狀態（有 Task 時）：琥珀色＋狀態點；其餘中性 */
+.task-board .task-status-count-attention,
+.task-board .task-status-count-attention > .tabular {
+  color: var(--color-warning);
+}
+
+/* 左右各留 4px（以負邊距抵銷、與頁面左緣對齊），最右一條跑道的框線與按鈕的焦點外框不被捲動容器裁掉。
+   scroll-padding：計數列跳到某欄時，欄的左緣停在邊緣淡出（32px）之外 */
 .task-board .task-columns {
   display: flex;
   gap: var(--space-4);
   margin-inline: calc(-1 * var(--space-2));
   padding: 0 var(--space-2) var(--space-4);
   overflow-x: auto;
+  scroll-padding-inline: var(--space-9);
   scrollbar-color: var(--color-border-strong) transparent;
   scrollbar-width: thin;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .task-board .task-columns {
+    scroll-behavior: smooth;
+  }
+}
+
+/* 捲動驅動的邊緣淡出：還能往左／右捲時，該側淡出 32px，提示畫面外還有欄位；沒有水平捲動時捲動時間軸無效，不套用遮罩 */
+@property --task-fade-start {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --task-fade-end {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@supports (animation-timeline: scroll()) {
+  .task-board .task-columns {
+    animation: task-columns-fade linear both;
+    animation-timeline: scroll(self inline);
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      #000 var(--task-fade-start),
+      #000 calc(100% - var(--task-fade-end)),
+      transparent 100%
+    );
+  }
+}
+
+@keyframes task-columns-fade {
+  0% {
+    --task-fade-start: 0px;
+    --task-fade-end: 32px;
+  }
+
+  5% {
+    --task-fade-start: 32px;
+  }
+
+  95% {
+    --task-fade-end: 32px;
+  }
+
+  100% {
+    --task-fade-start: 32px;
+    --task-fade-end: 0px;
+  }
 }
 
 /* 一條跑道：下沉底色，等高排列（看起來是並行的跑道），卡片由上往下排 */
@@ -195,6 +287,13 @@
   margin: 0;
   font-size: var(--text-meta);
   line-height: var(--leading-meta);
+}
+
+/* 用鍵盤從計數列跳過來時，欄標題的焦點外框與其他控制項一致 */
+.task-board .task-column-head > h3:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
 }
 
 /* 空的跑道收成一條窄的直排標籤（中文直排可直接閱讀），讓有 Task 的跑道多露出來；狀態流的順序不變 */
@@ -405,18 +504,32 @@
   margin-inline-start: calc(-1 * var(--space-5));
 }
 
+/* 「更多」與其他頁的 .more-menu 同一套外觀：低調文字＋▾，展開時底色同 hover */
+.task-board .task-more-toggle {
+  gap: var(--space-2);
+}
+
+.task-board .task-more-caret {
+  font-size: var(--text-caption);
+}
+
 .task-board .task-more-toggle[aria-expanded="true"] {
   background: var(--color-surface-hover);
   color: var(--color-text);
 }
 
-/* 「更多」展開的動作：直排、靠左；危險動作只用文字色 */
+/* 「更多」展開的動作：外觀同 .more-menu-list（框線、圓角、浮起的底色），但在卡片內原地展開——
+   看板是水平捲動容器，浮層放在最後一張卡片時會被裁掉或撐出直向捲軸。危險動作只用文字色 */
 .task-board .task-more {
   display: grid;
   gap: var(--space-1);
+  justify-self: start;
+  min-width: 9em;
   padding: var(--space-2);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-popover);
 }
 
 .task-board .task-more > button {
@@ -588,6 +701,19 @@
   line-height: var(--leading-title-sm);
 }
 
+/* 模式：可見的小標「狀態」＋下拉，與上方的項目名稱分開 */
+.task-board .contract-mode-field {
+  display: grid;
+  gap: var(--space-1);
+  justify-self: stretch;
+}
+
+.task-board .contract-mode-label {
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+  line-height: var(--leading-meta);
+}
+
 .task-board .contract-mode {
   width: 100%;
 }
@@ -598,10 +724,17 @@
   align-content: start;
 }
 
-.task-board .contract-field-value > label {
+.task-board .contract-field-value > :is(label, .contract-subfield) {
   display: grid;
   gap: var(--space-2);
   color: var(--color-text-muted);
+}
+
+/* 引用：標籤與「?」說明同一列 */
+.task-board .contract-subfield-label {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
 }
 
 .task-board .contract-field-value :is(input, textarea) {

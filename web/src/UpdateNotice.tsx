@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { LifecycleClient, MaintenanceOutcome, UpdateClient, UpdateStatusView } from "./runtimeClient";
 import { UpdateProgress } from "./UpdateProgress";
@@ -116,41 +116,93 @@ export function UpdateNotice({ client, runtimeStartedAt, pollMs = 60_000 }: Prop
         </div>
       )}
       {apply.state !== "closed" && (
-        <div className="overlay">
-          <section className="dialog-panel update-confirm" role="dialog" aria-modal="true" aria-labelledby="update-confirm-title">
-            <h2 id="update-confirm-title">更新到 Baton {apply.version}</h2>
-            <ol className="update-steps">
-              <li>先下載並驗證安裝程式；失敗不會停止任何工作。</li>
-              <li>執行與「完全退出」相同的停止流程（最多 40 秒）。</li>
-              <li>備份資料。</li>
-              <li>安裝並重新開啟 Baton。</li>
-            </ol>
-            <p>重新開啟後依各 Workspace 的「完全退出後自動續跑」設定續跑，其餘等「繼續工作」。</p>
-            <p className="field-hint">資料目錄不會被刪除。</p>
-            {apply.state === "applying" && <p className="dot dot-accent">下載並驗證中…</p>}
-            {apply.state === "failed" && (
-              <div className="callout callout-danger" role="alert">
-                <p>更新沒有開始：{apply.reason}</p>
-                <p>工作沒有停止，照常進行。</p>
-              </div>
-            )}
-            <div className="dialog-actions">
-              {/* Windows 慣例：主要動作在左、取消在右 */}
-              <button
-                type="button"
-                className="btn-primary"
-                disabled={apply.state === "applying"}
-                onClick={() => void confirm(apply.version)}
-              >
-                更新並重新開啟
-              </button>
-              <button type="button" disabled={apply.state === "applying"} onClick={() => setApply({ state: "closed" })}>
-                取消
-              </button>
-            </div>
-          </section>
-        </div>
+        <UpdateConfirm
+          apply={apply}
+          onConfirm={() => void confirm(apply.version)}
+          onCancel={() => setApply({ state: "closed" })}
+        />
       )}
     </>
+  );
+}
+
+/**
+ * 更新確認對話框（原生 `<dialog>` 的 modal）：開啟時焦點移到「取消」（不會停止任何工作的選項）；
+ * Esc 等同「取消」，下載並驗證中不能取消；關閉後焦點回到開啟它的按鈕。
+ */
+function UpdateConfirm({
+  apply,
+  onConfirm,
+  onCancel,
+}: {
+  apply: Exclude<ApplyState, { state: "closed" }>;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const applying = apply.state === "applying";
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (element === null) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // jsdom 沒有 showModal：退回以 open 屬性顯示（焦點與 Esc 由這裡自行處理，行為相同）
+    if (typeof element.showModal === "function") element.showModal();
+    else element.setAttribute("open", "");
+    cancelButton.current?.focus();
+    return () => {
+      if (typeof element.close === "function" && element.open) element.close();
+      if (previous?.isConnected) previous.focus();
+    };
+    // 只在開啟時執行一次
+  }, []);
+
+  const cancel = () => {
+    if (!applying) onCancel();
+  };
+
+  return (
+    <dialog
+      ref={dialog}
+      className="dialog-panel update-confirm"
+      aria-labelledby="update-confirm-title"
+      // 瀏覽器原生的 Esc（cancel 事件）也交給 React 狀態處理，不讓 dialog 自己關掉
+      onCancel={(event) => {
+        event.preventDefault();
+        cancel();
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        cancel();
+      }}
+    >
+      <h2 id="update-confirm-title">更新到 Baton {apply.version}</h2>
+      <ol className="update-steps">
+        <li>先下載並驗證安裝程式；失敗不會停止任何工作。</li>
+        <li>執行與「完全退出」相同的停止流程（最多 40 秒）。</li>
+        <li>備份資料。</li>
+        <li>安裝並重新開啟 Baton。</li>
+      </ol>
+      <p>重新開啟後依各 Workspace 的「完全退出後自動續跑」設定續跑，其餘等「繼續工作」。</p>
+      <p className="field-hint">資料目錄不會被刪除。</p>
+      {applying && <p className="dot dot-accent">下載並驗證中…</p>}
+      {apply.state === "failed" && (
+        <div className="callout callout-danger" role="alert">
+          <p>更新沒有開始：{apply.reason}</p>
+          <p>工作沒有停止，照常進行。</p>
+        </div>
+      )}
+      <div className="dialog-actions">
+        {/* Windows 慣例：主要動作在左、取消在右 */}
+        <button type="button" className="btn-primary" disabled={applying} onClick={onConfirm}>
+          更新並重新開啟
+        </button>
+        <button ref={cancelButton} type="button" disabled={applying} onClick={cancel}>
+          取消
+        </button>
+      </div>
+    </dialog>
   );
 }

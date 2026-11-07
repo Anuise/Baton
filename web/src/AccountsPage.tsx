@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type MouseEvent } from "react";
 
 import { CopyButton } from "./LongText";
-import { shortPath } from "./textFormat";
+import { MoreMenu } from "./MoreMenu";
+import { shortPath, splitFirstSentence } from "./textFormat";
 import { formatTimestamp } from "./time";
 import { GATE_REASON_LABELS, RUN_STATUS_LABELS } from "./TaskBoard";
 import type {
@@ -85,10 +86,18 @@ export function profileStateLabel(profile: AccountProfile): string {
   return "已阻擋派工";
 }
 
-/** 狀態徽章與色條的語意：可派工為成功、尚未核對為警告、其他阻擋為危險（精靈與帳號頁共用）。 */
+/** 狀態徽章、色條與阻擋提示的語意：可派工為成功、尚未核對為警告、其他阻擋為危險（精靈與帳號頁共用）。 */
 export function profileTone(profile: AccountProfile): "success" | "warning" | "danger" {
   if (profile.dispatchable) return "success";
   return profile.verification === null ? "warning" : "danger";
+}
+
+/** 選了「更多」裡的選項後收起選單，焦點回到「更多」（共用的 MoreMenu 不會自己收起）。 */
+function closeMenu(event: MouseEvent<HTMLButtonElement>) {
+  const menu = event.currentTarget.closest("details");
+  if (menu === null) return;
+  menu.open = false;
+  menu.querySelector("summary")?.focus();
 }
 
 /** 帳號頁：新增最多 8 個 Profile、在終端機完成原生登入、核對實際認證來源與帳號身分（spec D-32、D-20）。 */
@@ -107,6 +116,17 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   const addId = useId();
   const nameId = useId();
   const expectedId = useId();
+  // 新增成功、表單收起後要聚焦的帳號；焦點移到它卡片上的「在終端機登入」，不掉到 body（WCAG 2.4.3）
+  const [focusProfileId, setFocusProfileId] = useState<string | null>(null);
+  const loginButtons = useRef(new Map<string, HTMLButtonElement>());
+  const addToggleRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (focusProfileId === null) return;
+    // 新帳號不在清單上（例如重新讀取失敗）時，至少回到「新增帳號」
+    (loginButtons.current.get(focusProfileId) ?? addToggleRef.current)?.focus();
+    setFocusProfileId(null);
+  }, [focusProfileId, list]);
 
   const loadOverview = useCallback(async () => {
     if (!client.schedulingOverview) return;
@@ -160,15 +180,16 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
     setBusy(true);
     setFormError(null);
     try {
-      await client.createProfile({
+      const created = await client.createProfile({
         name,
         expectedAccount: expectedAccount.trim() === "" ? undefined : expectedAccount,
       });
       setName("");
       setExpectedAccount("");
-      // 新帳號出現在清單上，下一步是在它的卡片上登入；表單收起
+      // 新帳號出現在清單上，下一步是在它的卡片上登入；表單收起，焦點移到它的「在終端機登入」
       setAdding(false);
       await refresh();
+      setFocusProfileId(created.id);
       onChange?.();
     } catch (error) {
       // 保留輸入，讓使用者修正後重送
@@ -180,9 +201,10 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
 
   /** 以既有目錄建立；失敗時把錯誤交給表單顯示。 */
   const createFromDir = async (request: CreateProfileFromDirRequest) => {
-    await client.createProfileFromExistingDir(request);
+    const created = await client.createProfileFromExistingDir(request);
     setAdding(false);
     await refresh();
+    setFocusProfileId(created.id);
     onChange?.();
   };
 
@@ -227,13 +249,14 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   return (
     <section className="section accounts-page" aria-labelledby="accounts-title">
       <div className="section-heading">
-        <h3 id="accounts-title">Account Profile</h3>
-        <span className="count accounts-count" title="使用中的 Profile／上限">
+        <h3 id="accounts-title">帳號清單</h3>
+        <span className="count accounts-count" title="使用中的帳號／上限">
           {active.length} / {limit}
         </span>
         {!empty && (
           <div className="section-actions">
             <button
+              ref={addToggleRef}
               type="button"
               aria-expanded={adding}
               aria-controls={addId}
@@ -245,7 +268,11 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
             </button>
           </div>
         )}
-        <p>每個 Profile 是一個 Claude Code 帳號，各自在終端機登入。排列順序只影響這個頁面，不影響派工。</p>
+        <p>
+          每個帳號（Account Profile）各自在終端機登入 Claude Code。排列順序只影響帳號在畫面上的順序
+          {/* 括號內不拆開，避免「帳號選／單」 */}
+          <span className="nowrap">（包括 Controller 帳號選單）</span>，不影響派工。
+        </p>
       </div>
 
       {list.state === "loading" && <p className="empty-note">載入中…</p>}
@@ -254,8 +281,8 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
           無法取得帳號清單：{list.reason}
         </p>
       )}
-      {empty && <p className="empty-note">還沒有帳號 Profile</p>}
-      {full && <p className="empty-note accounts-full">已達上限：最多 {limit} 個帳號 Profile。請先封存用不到的 Profile，再新增。</p>}
+      {empty && <p className="empty-note">還沒有帳號</p>}
+      {full && <p className="empty-note accounts-full">已達上限：最多 {limit} 個帳號。請先封存用不到的帳號，再新增。</p>}
       {scheduling.state === "failed" && (
         <p role="alert" className="callout callout-danger">
           無法取得排程總覽：{scheduling.reason}
@@ -273,9 +300,9 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       )}
 
       <div className="accounts-add" id={addId} hidden={!showAdd}>
-        <form className="panel accounts-add-form" aria-label="新增 Profile" onSubmit={(event) => void create(event)}>
+        <form className="panel accounts-add-form" aria-label="新增帳號" onSubmit={(event) => void create(event)}>
           <header>
-            <h4>建立新的 Profile</h4>
+            <h4>新增帳號</h4>
             <p className="field-hint">建立後在它的卡片上按「在終端機登入」，完成原生登入。</p>
           </header>
           <div className="field">
@@ -298,7 +325,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
           )}
           <div className="form-actions">
             <button type="submit" disabled={busy || full}>
-              新增 Profile
+              新增帳號
             </button>
           </div>
         </form>
@@ -321,6 +348,10 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                 </div>
                 <div className="account-actions">
                   <button
+                    ref={(node) => {
+                      if (node) loginButtons.current.set(profile.id, node);
+                      else loginButtons.current.delete(profile.id);
+                    }}
                     type="button"
                     // 還沒登入的帳號，登入就是下一步
                     className={profile.verification === null || !profile.verification.logged_in ? "btn-primary" : undefined}
@@ -341,37 +372,59 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                   >
                     重新核對
                   </button>
-                  {/* 排序與封存很少用，收在「更多」 */}
-                  <MoreMenu
-                    label={`更多（${profile.name}）`}
-                    items={[
-                      {
-                        label: "上移",
-                        name: `上移 ${profile.name}`,
-                        disabled: reordering || index === 0,
-                        onSelect: () => void move(index, -1),
-                      },
-                      {
-                        label: "下移",
-                        name: `下移 ${profile.name}`,
-                        disabled: reordering || index === active.length - 1,
-                        onSelect: () => void move(index, 1),
-                      },
-                      {
-                        label: "封存",
-                        name: `封存 ${profile.name}`,
-                        danger: true,
-                        onSelect: () => void act(() => client.archiveProfile(profile.id)),
-                      },
-                    ]}
-                  />
+                  {/* 排序與封存很少用，收在「更多」；選了之後收起 */}
+                  <MoreMenu ariaLabel={`更多（${profile.name}）`} align="end">
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      aria-label={`上移 ${profile.name}`}
+                      disabled={reordering || index === 0}
+                      onClick={(event) => {
+                        closeMenu(event);
+                        void move(index, -1);
+                      }}
+                    >
+                      上移
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      aria-label={`下移 ${profile.name}`}
+                      disabled={reordering || index === active.length - 1}
+                      onClick={(event) => {
+                        closeMenu(event);
+                        void move(index, 1);
+                      }}
+                    >
+                      下移
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-quiet more-menu-danger"
+                      aria-label={`封存 ${profile.name}`}
+                      onClick={(event) => {
+                        closeMenu(event);
+                        void act(() => client.archiveProfile(profile.id));
+                      }}
+                    >
+                      封存
+                    </button>
+                  </MoreMenu>
                 </div>
               </div>
-              {profile.blockers.map((blocker) => (
-                <p key={blocker.code} role="alert" className="callout callout-danger profile-blocker">
-                  {blocker.message}
-                </p>
-              ))}
+              {/* 阻擋原因可能很長：長警示（只有色條上色），色調與卡片色條、狀態徽章同一個 tone */}
+              {profile.blockers.length > 0 && (
+                <div
+                  role="alert"
+                  className={`notice notice-${profileTone(profile) === "danger" ? "danger" : "warning"} profile-blockers`}
+                >
+                  {profile.blockers.map((blocker) => (
+                    <p key={blocker.code} className="profile-blocker">
+                      {blocker.message}
+                    </p>
+                  ))}
+                </div>
+              )}
               <div className="account-body">
                 <ProfileFacts profile={profile} timeZone={timeZone} />
                 {scheduling.state === "ready" && (
@@ -387,62 +440,6 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
         </ul>
       )}
     </section>
-  );
-}
-
-interface MenuItem {
-  /** 看得到的文字。 */
-  label: string;
-  /** 可存取名稱（帶帳號名稱，區分每張卡片）。 */
-  name: string;
-  disabled?: boolean;
-  danger?: boolean;
-  onSelect: () => void;
-}
-
-/** 「更多」選單：帳號卡片中第二順位以後的動作；選了之後收起。Esc 收起並把焦點移回「更多」，點選單外面也會收起。 */
-function MoreMenu({ label, items }: { label: string; items: MenuItem[] }) {
-  const ref = useRef<HTMLDetailsElement>(null);
-
-  // 直接讀 details.open 而不追蹤 toggle 事件：toggle 是排入佇列的 task，開啟後立刻點外面時會晚於 pointerdown
-  useEffect(() => {
-    const onPointerDown = (event: PointerEvent) => {
-      const menu = ref.current;
-      if (menu?.open && !menu.contains(event.target as Node)) menu.open = false;
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, []);
-
-  return (
-    <details
-      className="more-menu"
-      ref={ref}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape" || !event.currentTarget.open) return;
-        event.currentTarget.open = false;
-        event.currentTarget.querySelector("summary")?.focus();
-      }}
-    >
-      <summary aria-label={label}>更多</summary>
-      <div className="more-menu-list">
-        {items.map((item) => (
-          <button
-            key={item.label}
-            type="button"
-            className={item.danger ? "btn-quiet more-menu-danger" : "btn-quiet"}
-            aria-label={item.name}
-            disabled={item.disabled}
-            onClick={() => {
-              if (ref.current) ref.current.open = false;
-              item.onSelect();
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-    </details>
   );
 }
 
@@ -486,7 +483,7 @@ function ProfileFromDirForm({
   };
 
   return (
-    <form className="panel accounts-add-form" aria-label="以既有目錄建立 Profile" onSubmit={(event) => void submit(event)}>
+    <form className="panel accounts-add-form" aria-label="以既有目錄建立帳號" onSubmit={(event) => void submit(event)}>
       <header>
         <h4>以既有目錄建立</h4>
         <p className="field-hint">已經在別處登入過的 Claude Code 設定目錄，不必重新登入。</p>
@@ -511,7 +508,7 @@ function ProfileFromDirForm({
         </p>
       )}
       <div className="form-actions">
-        {/* 一頁只留一個主要動作（新增 Profile），其餘送出鈕用次要樣式（MASTER 第 7 節） */}
+        {/* 一頁只留一個主要動作（新增帳號），其餘送出鈕用次要樣式（MASTER 第 7 節） */}
         <button type="submit" className="btn-secondary" disabled={busy || disabled}>
           以既有目錄建立
         </button>
@@ -538,7 +535,9 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
           {verification.account && (
             <>
               <dt>帳號</dt>
-              <dd>{verification.account}</dd>
+              <dd>
+                <AccountValue value={verification.account} />
+              </dd>
             </>
           )}
           <dt>認證來源</dt>
@@ -553,10 +552,12 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
           )}
         </>
       )}
-      {showExpected && (
+      {showExpected && profile.expected_account !== null && (
         <>
           <dt>預期帳號</dt>
-          <dd className="profile-expected">{profile.expected_account}</dd>
+          <dd className="profile-expected">
+            <AccountValue value={profile.expected_account} field="預期帳號" />
+          </dd>
         </>
       )}
       {external && (
@@ -571,6 +572,21 @@ function ProfileFacts({ profile, timeZone }: { profile: AccountProfile; timeZone
         </>
       )}
     </dl>
+  );
+}
+
+/** 超過這個長度的帳號（email）另附複製：窄欄放不下時會被截斷。 */
+const LONG_ACCOUNT_CHARS = 32;
+
+/** 帳號（email）只佔一行，放不下時截斷（完整值在 title）；長的另附「複製帳號」，不在窄欄裡折成好幾段。 */
+function AccountValue({ value, field }: { value: string; field?: string }) {
+  return (
+    <span className="copy-text">
+      <span className="truncate" title={value}>
+        {value}
+      </span>
+      {value.length > LONG_ACCOUNT_CHARS && <CopyButton text={value} label="複製帳號" field={field} />}
+    </span>
   );
 }
 
@@ -594,10 +610,24 @@ function tokenCount(tokens: number): string {
   return `${tokens.toLocaleString("en-US")} token`;
 }
 
-/** 觀測不完整的說明；Runtime 的說明已帶「觀測不完整」開頭時不重複。 */
-function incompleteLabel(reason: string | null): string {
-  if (reason === null) return "觀測不完整";
-  return reason.startsWith("觀測不完整") ? reason : `觀測不完整：${reason}`;
+/**
+ * 觀測不完整的長警示：狀態詞在前（Runtime 的說明已帶「觀測不完整」開頭時不重複）；
+ * 原因的第一句完整顯示，其餘收進「詳細資訊」，不在卡片裡撐成一大塊。
+ */
+function IncompleteNotice({ reason }: { reason: string | null }) {
+  const { summary, rest } = splitFirstSentence((reason ?? "").replace(/^觀測不完整[：:]?/, ""));
+  return (
+    <div role="note" className="notice notice-warning quota-incomplete">
+      <p className="notice-title">觀測不完整</p>
+      {summary !== "" && <p>{summary}</p>}
+      {rest !== "" && (
+        <details>
+          <summary>詳細資訊</summary>
+          <p>{rest}</p>
+        </details>
+      )}
+    </div>
+  );
 }
 
 /** 一個帳號目前的並行使用：進行中 n/上限，以及進行中的 Run（Task、狀態、是否已要求取消）；額度另外分組顯示。 */
@@ -737,11 +767,7 @@ function AccountQuota({
           {quota.observed_at === null ? "尚未觀測" : `觀測時間：${formatTimestamp(quota.observed_at, timeZone)}`}
         </span>
       </p>
-      {!quota.complete && (
-        <p role="note" className="callout callout-warning quota-incomplete">
-          {incompleteLabel(quota.incomplete_reason)}
-        </p>
-      )}
+      {!quota.complete && <IncompleteNotice reason={quota.incomplete_reason} />}
       {onSaveLimits && (
         <details className="account-limits">
           <summary>設定方案上限</summary>

@@ -41,6 +41,82 @@ const CATEGORY_LABELS: Record<TimelineCategory, string> = {
   controller: "Controller",
 };
 
+/**
+ * 事件類型的中文名稱（MASTER 7.1：機器代碼不當主要文字）。種類以 Runtime 會放上時間線的事件為準
+ * （crates/baton-domain/src/timeline.rs 的 category_of）；沒有對照的才顯示原始代碼。
+ */
+const EVENT_TYPE_LABELS: Record<string, string> = {
+  // 派工（Run）
+  run_created: "建立 Run",
+  run_admission_denied: "Run 未通過准入",
+  run_launch_started: "開始啟動 Run",
+  run_started: "Run 已開始",
+  run_succeeded: "Run 成功",
+  run_failed: "Run 失敗",
+  run_interrupted: "Run 中斷",
+  run_cancel_requested: "要求取消 Run",
+  run_cancelled: "Run 已取消",
+  // 交接
+  run_handed_off: "Run 已交接",
+  handoff_requested: "要求交接",
+  handoff_stopping: "交接：停止舊寫入",
+  handoff_transferred: "交接：已轉移所有權",
+  handoff_confirmed: "交接：已確認接手",
+  handoff_abandoned: "交接已放棄",
+  handoff_waiting_resource: "交接等待額度",
+  handoff_wait_rescheduled: "交接重新排定等待",
+  // 裁定
+  decision_requested: "提出裁定",
+  decision_answered: "裁定已回答",
+  decision_deferred: "裁定已延後",
+  decision_superseded: "裁定已失效",
+  decision_merged: "裁定已合併",
+  decision_merge_received: "併入其他裁定",
+  decision_linked: "連結相似裁定",
+  // 恢復
+  runtime_crash_detected: "偵測到 Runtime 意外終止",
+  recovery_attempt_started: "開始恢復嘗試",
+  recovery_attempt_completed: "恢復嘗試完成",
+  recovery_attempt_failed: "恢復嘗試失敗",
+  recovery_succeeded: "恢復成功",
+  recovery_exhausted: "恢復次數用盡",
+  recovery_retry_requested: "要求重新恢復",
+  // 驗證與 Task 狀態
+  task_verification_recorded: "記錄驗證結果",
+  task_created: "建立 Task",
+  task_status_changed: "Task 狀態改變",
+  // 清理
+  worktree_cleanup_requested: "要求清理 Worktree",
+  worktree_cleanup_started: "開始清理 Worktree",
+  worktree_cleanup_retry_scheduled: "排定重試清理 Worktree",
+  worktree_cleaned: "Worktree 已清理",
+  worktree_cleanup_failed: "清理 Worktree 失敗",
+  // 外部操作
+  external_operation_begun: "開始外部操作",
+  external_operation_succeeded: "外部操作成功",
+  external_operation_failed: "外部操作失敗",
+  external_operation_result_unknown: "外部操作結果未知",
+  external_operation_verified: "外部操作已查證",
+  external_operation_duplicate_blocked: "擋下重複的外部操作",
+  // 教訓、用量
+  lesson_recurrence_recorded: "記錄教訓重犯",
+  run_usage_reported: "回報 Run 用量",
+  // Controller CLI
+  controller_cli_opened: "開啟 Controller CLI",
+  controller_cli_launch_started: "開始啟動 Controller CLI",
+  controller_cli_running: "Controller CLI 執行中",
+  controller_cli_end_requested: "要求結束 Controller CLI",
+  controller_cli_switch_requested: "要求換 Controller 帳號",
+  controller_cli_ended: "Controller CLI 已結束",
+  controller_cli_interrupted: "Controller CLI 中斷",
+  controller_cli_rebound: "Controller CLI 重新綁定",
+};
+
+/** 事件類型的中文名稱；沒有對照時為 null。 */
+function eventTypeLabel(eventType: string): string | null {
+  return Object.hasOwn(EVENT_TYPE_LABELS, eventType) ? EVENT_TYPE_LABELS[eventType] : null;
+}
+
 /** 時間線一頁顯示的事件數。 */
 const PAGE_SIZE = 10;
 
@@ -209,7 +285,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
       <section className="section timeline-events" aria-labelledby="timeline-events-title">
         <div className="section-heading">
           <h3 id="timeline-events-title">事件時間線</h3>
-          {timeline.state === "ready" && <span className="count">{matched.length} 筆</span>}
+          {timeline.state === "ready" && <span className="count">{matched.length}</span>}
         </div>
         <div className="timeline-filter">
           <label className="timeline-filter-task">
@@ -263,9 +339,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
                   <span className="badge badge-plain">{CATEGORY_LABELS[event.category]}</span>
                 </span>
                 <div className="timeline-event-main">
-                  <code className="timeline-type mono" title={event.event_type}>
-                    {event.event_type}
-                  </code>
+                  <EventType eventType={event.event_type} />
                   <p className="meta timeline-facts">
                     {event.task_ids.length > 0 && (
                       <span className="clamp-1" title={event.task_ids.map(taskLabel).join("、")}>
@@ -307,7 +381,18 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
   );
 }
 
-/** 事件的細節（預設收合）：對象、完整的 Task 名稱與事件內容。 */
+/** 事件類型：中文名稱為主要文字（原始代碼在 title 與「細節」）；沒有中文名稱時顯示代碼（等寬、次要色）。 */
+function EventType({ eventType }: { eventType: string }) {
+  const label = eventTypeLabel(eventType);
+  if (label === null) return <code className="timeline-type timeline-type-code mono">{eventType}</code>;
+  return (
+    <span className="timeline-type" title={eventType}>
+      {label}
+    </span>
+  );
+}
+
+/** 事件的細節（預設收合）：事件類型代碼、對象、完整的 Task 名稱與事件內容。 */
 function EventDetails({ event, taskLabel }: { event: TimelineEvent; taskLabel: (id: string) => string }) {
   const { payload } = event;
   const hasPayload =
@@ -316,6 +401,10 @@ function EventDetails({ event, taskLabel }: { event: TimelineEvent; taskLabel: (
     <details className="timeline-event-more">
       <summary>細節</summary>
       <dl className="facts">
+        <dt>事件類型</dt>
+        <dd>
+          <code className="mono">{event.event_type}</code>
+        </dd>
         <dt>對象</dt>
         <dd className="timeline-aggregate">
           <span>{event.aggregate_type}</span>
@@ -350,6 +439,7 @@ function searchText(event: TimelineEvent, taskLabel: (id: string) => string, pro
   const profileId = payloadString(event.payload, "profile_id");
   return [
     CATEGORY_LABELS[event.category],
+    eventTypeLabel(event.event_type) ?? "",
     event.event_type,
     event.aggregate_id,
     event.run_id ?? "",

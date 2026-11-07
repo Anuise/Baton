@@ -402,7 +402,7 @@
 /* 寬視窗並排兩欄，窄時上下排列（例：設定頁的小面板） */
 .split {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22em), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 28em), 1fr));
   gap: var(--space-7);
   align-items: start;
 }
@@ -526,34 +526,35 @@
 }
 
 /* 狀態色條：語意色只標示狀態，長內容不整塊上色。
-   寫在所有外框（.card、.panel、.row-list）之後，才不會被它們的 border 簡寫蓋掉 */
-.stripe-success,
-.stripe-warning,
-.stripe-danger,
-.stripe-accent,
-.stripe-muted {
-  border-left-width: 3px;
-  border-left-style: solid;
-}
-
+   寫在所有外框（.card、.panel、.row-list）之後，才不會被它們的 border 簡寫蓋掉。
+   顏色放在 --stripe，分隔清單的列改用內陰影畫色條，內容不會因 3px 左框而位移 */
 .stripe-success {
-  border-left-color: var(--color-success);
+  --stripe: var(--color-success);
 }
 
 .stripe-warning {
-  border-left-color: var(--color-warning);
+  --stripe: var(--color-warning);
 }
 
 .stripe-danger {
-  border-left-color: var(--color-danger);
+  --stripe: var(--color-danger);
 }
 
 .stripe-accent {
-  border-left-color: var(--color-accent);
+  --stripe: var(--color-accent);
 }
 
 .stripe-muted {
-  border-left-color: var(--color-border-strong);
+  --stripe: var(--color-border-strong);
+}
+
+:is(.stripe-success, .stripe-warning, .stripe-danger, .stripe-accent, .stripe-muted) {
+  border-left: 3px solid var(--stripe);
+}
+
+.row-list > :is(.stripe-success, .stripe-warning, .stripe-danger, .stripe-accent, .stripe-muted) {
+  border-left: 0;
+  box-shadow: inset 3px 0 0 var(--stripe);
 }
 
 /* ---------- 事實表（dl）：左欄標籤、右欄值；窄時上下排列 ---------- */
@@ -630,6 +631,58 @@
 }
 
 .callout-accent > .callout-title {
+  color: var(--color-accent);
+}
+
+/* ---------- 長警示（notice）：超過兩行的錯誤、阻擋原因、平台警告。
+   不整塊上色：語意色只在左側色條與開頭的狀態詞（.notice-title），正文是一般文字色 ---------- */
+.notice {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--color-surface);
+  font-size: var(--text-meta);
+}
+
+.notice > p {
+  max-inline-size: var(--measure);
+  margin: 0;
+}
+
+.notice-title {
+  margin: 0;
+  font-weight: var(--font-weight-strong);
+}
+
+.notice-warning {
+  border-color: var(--color-warning-border);
+  border-left-color: var(--color-warning);
+}
+
+.notice-warning > .notice-title {
+  color: var(--color-warning);
+}
+
+.notice-danger {
+  border-color: var(--color-danger-border);
+  border-left-color: var(--color-danger);
+}
+
+.notice-danger > .notice-title {
+  color: var(--color-danger);
+}
+
+.notice-accent {
+  border-color: var(--color-accent-border);
+  border-left-color: var(--color-accent);
+}
+
+.notice-accent > .notice-title {
   color: var(--color-accent);
 }
 
@@ -995,11 +1048,10 @@
 }
 
 /* ---------- 對話框：遮罩＋置中面板（完全退出、更新確認與進度共用） ---------- */
-.exit-overlay,
 .overlay {
   position: fixed;
   inset: 0;
-  z-index: var(--z-toast);
+  z-index: var(--z-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1007,7 +1059,6 @@
   background: var(--color-overlay);
 }
 
-.exit-progress,
 .dialog-panel {
   box-sizing: border-box;
   display: grid;
@@ -1027,7 +1078,6 @@ dialog.dialog-panel:not([open]) {
   display: none;
 }
 
-.exit-progress h2,
 .dialog-panel h2 {
   margin: 0;
   font-family: var(--font-display);
@@ -1036,12 +1086,10 @@ dialog.dialog-panel:not([open]) {
   line-height: var(--leading-title);
 }
 
-.exit-progress p,
 .dialog-panel p {
   margin: 0;
 }
 
-.exit-actions,
 .dialog-actions {
   display: flex;
   flex-wrap: wrap;

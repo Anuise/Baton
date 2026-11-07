@@ -1,7 +1,8 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 
 import { FIELD_LABELS } from "./ContractEditor";
 import { LongText } from "./LongText";
+import { MoreMenu } from "./MoreMenu";
 import { formatNumber, shortId } from "./textFormat";
 import { formatTimestamp } from "./time";
 import {
@@ -271,7 +272,10 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
               value={draftQuery}
               onChange={(e) => setDraftQuery(e.target.value)}
             />
-            <button type="submit">搜尋</button>
+            {/* 送出鈕預設是主要樣式；這一列的主要動作是「新增條目」，搜尋改回次要 */}
+            <button type="submit" className="btn-secondary">
+              搜尋
+            </button>
           </form>
           <button
             type="button"
@@ -513,47 +517,23 @@ function TagList({ tags, full = false }: { tags: string[]; full?: boolean }) {
   );
 }
 
-/** 「更多」選單：卡片中第二順位以後的動作；選了之後收起選單。Esc 收起並把焦點移回「更多」，點選單外面也會收起。 */
-function MoreMenu({ items }: { items: { label: string; onSelect: () => void; danger?: boolean }[] }) {
-  const ref = useRef<HTMLDetailsElement>(null);
-
-  // 直接讀 details.open 而不追蹤 toggle 事件：toggle 是排入佇列的 task，開啟後立刻點外面時會晚於 pointerdown
-  useEffect(() => {
-    const onPointerDown = (event: PointerEvent) => {
-      const menu = ref.current;
-      if (menu?.open && !menu.contains(event.target as Node)) menu.open = false;
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, []);
-
+/**
+ * 「更多」選單（共用的 MoreMenu：Esc／點外面收起、焦點歸還）中的一個選項。
+ * 共用元件選了選項不會自動收起：這裡選了就收起，焦點交給接著開啟的表單（autoFocus）。
+ */
+function MenuItem({ label, danger = false, onSelect }: { label: string; danger?: boolean; onSelect: () => void }) {
   return (
-    <details
-      className="more-menu"
-      ref={ref}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape" || !event.currentTarget.open) return;
-        event.currentTarget.open = false;
-        event.currentTarget.querySelector("summary")?.focus();
+    <button
+      type="button"
+      className={danger ? "btn-quiet more-menu-danger" : "btn-quiet"}
+      onClick={(event) => {
+        const menu = event.currentTarget.closest("details");
+        if (menu) menu.open = false;
+        onSelect();
       }}
     >
-      <summary>更多</summary>
-      <div className="more-menu-list">
-        {items.map((item) => (
-          <button
-            key={item.label}
-            type="button"
-            className={item.danger ? "btn-quiet more-menu-danger" : "btn-quiet"}
-            onClick={() => {
-              if (ref.current) ref.current.open = false;
-              item.onSelect();
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-    </details>
+      {label}
+    </button>
   );
 }
 
@@ -639,11 +619,8 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
       <div className="knowledge-actions">
         {entry.status === "candidate" && (
           <>
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => void run(() => client.confirmKnowledge(entry.id, entry.revision))}
-            >
+            {/* 列內動作用次要按鈕：候選可能連續好幾列，主要按鈕留給頁首的「新增條目」（MASTER 7.1） */}
+            <button type="button" onClick={() => void run(() => client.confirmKnowledge(entry.id, entry.revision))}>
               確認為已驗證
             </button>
             <button type="button" className="btn-danger" onClick={() => setMode("revoke")}>
@@ -661,13 +638,11 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
         </button>
         {/* 轉為 Guard、撤銷、淘汰是第二順位以後的動作，收進「更多」（MASTER 5.1）；只有有效的已驗證教訓能轉為 Guard */}
         {entry.status === "verified" && (
-          <MoreMenu
-            items={[
-              ...(entry.kind === "lesson" && entry.effective ? [{ label: "轉為 Guard", onSelect: () => setMode("guard") }] : []),
-              { label: "撤銷", onSelect: () => setMode("revoke"), danger: true },
-              { label: "淘汰", onSelect: () => setMode("retire"), danger: true },
-            ]}
-          />
+          <MoreMenu ariaLabel={`更多（${content.title}）`}>
+            {entry.kind === "lesson" && entry.effective && <MenuItem label="轉為 Guard" onSelect={() => setMode("guard")} />}
+            <MenuItem label="撤銷" danger onSelect={() => setMode("revoke")} />
+            <MenuItem label="淘汰" danger onSelect={() => setMode("retire")} />
+          </MoreMenu>
         )}
       </div>
       {mode === "guard" && (

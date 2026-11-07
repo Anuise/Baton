@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { LongText } from "./LongText";
 import { shortId, splitFirstSentence } from "./textFormat";
@@ -193,10 +193,27 @@ function WorkflowCard({
   onStale: () => Promise<void>;
 }) {
   const [reason, setReason] = useState("");
+  // 跳過不是常用動作：平常只顯示次要的「跳過此 Stage…」，按下才展開原因欄位
+  const [skipOpen, setSkipOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const skipToggleRef = useRef<HTMLButtonElement>(null);
+  // 取消後把焦點還給「跳過此 Stage…」（它在收起後才重新出現）
+  const focusSkipToggle = useRef(false);
   const headingId = `workflow-${workflow.id}`;
+
+  useEffect(() => {
+    if (skipOpen || !focusSkipToggle.current) return;
+    focusSkipToggle.current = false;
+    skipToggleRef.current?.focus();
+  }, [skipOpen]);
+
+  const cancelSkip = () => {
+    setSkipOpen(false);
+    setReason("");
+    focusSkipToggle.current = true;
+  };
 
   const skip = async (event: FormEvent, stage: StageView) => {
     event.preventDefault();
@@ -207,6 +224,7 @@ function WorkflowCard({
     try {
       await onSkip({ stage: stage.key, expected_revision: workflow.revision, reason });
       setReason("");
+      setSkipOpen(false);
     } catch (e) {
       if (errorCode(e) === "workflow_revision_mismatch") {
         // 送出的 revision 已過時：重新載入，下次送出時帶最新的 revision
@@ -302,17 +320,30 @@ function WorkflowCard({
                 <div className="workflow-stage-body">{facts}</div>
               )}
               {isCurrent && stage.gate !== "none" && <p className="workflow-gate-locked">此 Gate 不能跳過</p>}
-              {isCurrent && stage.gate === "none" && (
-                <form className="workflow-skip" onSubmit={(event) => void skip(event, stage)}>
-                  <label>
-                    跳過原因
-                    <input value={reason} onChange={(e) => setReason(e.target.value)} />
-                  </label>
-                  <button type="submit" disabled={busy || reason.trim() === ""}>
-                    跳過此 Stage
-                  </button>
-                </form>
-              )}
+              {isCurrent &&
+                stage.gate === "none" &&
+                (skipOpen ? (
+                  <form className="workflow-skip" onSubmit={(event) => void skip(event, stage)}>
+                    <label>
+                      跳過原因
+                      <input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} />
+                    </label>
+                    <div className="workflow-skip-actions">
+                      <button type="submit" className="btn-danger" disabled={busy || reason.trim() === ""}>
+                        確認跳過
+                      </button>
+                      <button type="button" disabled={busy} onClick={cancelSkip}>
+                        取消
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="workflow-skip-toggle">
+                    <button type="button" ref={skipToggleRef} onClick={() => setSkipOpen(true)}>
+                      跳過此 Stage…
+                    </button>
+                  </div>
+                ))}
             </li>
           );
         })}

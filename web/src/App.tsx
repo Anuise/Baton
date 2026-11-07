@@ -6,7 +6,7 @@ import { CopyButton, PathText } from "./LongText";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { BackupSettings } from "./BackupSettings";
 import { ControllerPage } from "./ControllerPage";
-import { ModelOverridesPanel } from "./ModelOverridesPanel";
+import { ModelCatalogSettings, ModelOverridesPanel } from "./ModelOverridesPanel";
 import { DecisionAuthorityPanel, DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
 import { ExplorationPage } from "./ExplorationPage";
@@ -72,7 +72,7 @@ export const WORKSPACE_NAV: NavGroup[] = [
   {
     label: "進行",
     pages: [
-      { id: "controller", label: "主控台" },
+      { id: "controller", label: "Controller" },
       { id: "tasks", label: "工作" },
       { id: "workflows", label: "流程" },
       { id: "decisions", label: "裁定" },
@@ -85,7 +85,7 @@ export const WORKSPACE_NAV: NavGroup[] = [
       { id: "artifacts", label: "成果" },
       { id: "reviews", label: "審查" },
       { id: "verification", label: "驗證" },
-      { id: "exploration", label: "探索" },
+      { id: "exploration", label: "探索測試" },
     ],
   },
   {
@@ -108,7 +108,7 @@ export const WORKSPACE_NAV: NavGroup[] = [
 export const GLOBAL_NAV: NavItem<GlobalPage>[] = [
   { id: "accounts", label: "帳號" },
   { id: "shared", label: "共同設定" },
-  { id: "settings", label: "設定" },
+  { id: "settings", label: "App 設定" },
 ];
 
 const WORKSPACE_PAGES = WORKSPACE_NAV.flatMap((group) => group.pages);
@@ -181,7 +181,10 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
   // 使用者可以先進入主畫面（只在這次開啟有效），避免登入失效時連 Workspace 都看不到
   const [needsSetup, setNeedsSetup] = useState(false);
   const [setupSkipped, setSetupSkipped] = useState(false);
-  const fullScreenSetup = needsSetup && !setupSkipped;
+  // 全畫面精靈中第一個帳號就緒時，不立刻切走：先顯示完成畫面與下一步，由使用者自己進入主畫面
+  const [setupFinished, setSetupFinished] = useState(false);
+  const wasNeedingSetup = useRef(false);
+  const fullScreenSetup = (needsSetup || setupFinished) && !setupSkipped;
   const [shell, setShell] = useState<ShellState>(loadShell);
   // 跑道欄最近一次讀到的使用中 Workspace；選中的 Workspace 不在其中（例如已封存）時視為未選
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -200,6 +203,11 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
   useEffect(() => saveShell(shell), [shell]);
 
   useEffect(() => {
+    if (wasNeedingSetup.current && !needsSetup && !setupSkipped) setSetupFinished(true);
+    wasNeedingSetup.current = needsSetup;
+  }, [needsSetup, setupSkipped]);
+
+  useEffect(() => {
     if (!client) return;
     let current = true;
     client.getSetup().then(
@@ -216,7 +224,7 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
   }, [client, accountsVersion]);
 
   const selectWorkspace = (workspace: Workspace) =>
-    // 在 Workspace 之間切換時停在同一頁面；從未選到選中時從主控台開始
+    // 在 Workspace 之間切換時停在同一頁面；從未選到選中時從 Controller 頁開始
     setShell((current) => ({
       view: "workspace",
       workspaceId: workspace.id,
@@ -252,7 +260,20 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
         </header>
         <main className="main setup-screen">
           {notices}
-          {client && (
+          {client && !needsSetup && setupFinished && (
+            <>
+              {/* 精靈自己判斷是否還有未完成的項目（例如背景執行的說明還沒確認） */}
+              <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
+              <SetupFinished
+                onEnter={() => setSetupSkipped(true)}
+                onSharedSettings={() => {
+                  selectGlobal("shared");
+                  setSetupSkipped(true);
+                }}
+              />
+            </>
+          )}
+          {client && needsSetup && (
             <>
               <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
               <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
@@ -278,6 +299,10 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
 
   return (
     <div className="app">
+      {/* 鍵盤使用者略過跑道欄（WCAG 2.4.1）：平時隱藏，聚焦時出現 */}
+      <a className="skip-link" href="#main-content">
+        跳到主要內容
+      </a>
       <Rail
         product={health?.product ?? ""}
         status={statusBar}
@@ -295,7 +320,7 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
           />
         )}
       </Rail>
-      <main className="main">
+      <main className="main" id="main-content" tabIndex={-1}>
         {notices}
         {client && shell.view === "workspace" && !selected && <WorkspaceEmpty onCreate={() => setCreateRequest((n) => n + 1)} />}
         {client && shell.view === "workspace" && selected && (
@@ -306,6 +331,7 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
               workspace={selected}
               page={shell.workspaceTab}
               onDecisionsChange={() => setPendingVersion((version) => version + 1)}
+              onOpenPage={selectWorkspacePage}
             />
           </>
         )}
@@ -320,8 +346,9 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
 }
 
 /**
- * 跑道欄：產品名稱 → Workspace 清單（目前的 Workspace 展開它的頁面）→ 平台頁面 → 狀態。
- * 目前頁面以「接力棒」標記；換頁時棒子沿著跑道移過去（減少動態時直接出現）。
+ * 跑道欄：產品名稱 → Workspace 清單（目前的 Workspace 展開它的頁面，內容多時這一段自己捲動）
+ * → 欄底固定的平台頁面與狀態。Workspace 的目前頁面以「接力棒」標記；換頁時棒子沿著跑道移過去
+ * （減少動態時直接出現）；平台頁面以靜態的同色短棒標記。
  */
 function Rail({
   product,
@@ -389,9 +416,12 @@ function Rail({
       <div className="rail-track" ref={trackRef}>
         <span className="rail-baton" ref={batonRef} aria-hidden="true" />
         {children}
-        {global}
       </div>
-      <div className="rail-foot">{status}</div>
+      {/* 平台頁面與狀態固定在欄底，不隨 Workspace 清單捲走 */}
+      <div className="rail-foot">
+        {global}
+        {status}
+      </div>
     </div>
   );
 }
@@ -476,6 +506,42 @@ function GlobalNav({ current, onSelect }: { current: GlobalPage | null; onSelect
   );
 }
 
+/** 首次設定完成畫面：帳號已就緒，列出開始派工前的下一步（真的有先後順序）。 */
+function SetupFinished({ onEnter, onSharedSettings }: { onEnter: () => void; onSharedSettings: () => void }) {
+  return (
+    <section className="setup-finished" aria-labelledby="setup-finished-title">
+      <h2 id="setup-finished-title">帳號已就緒</h2>
+      <p>再完成這幾步就能開始派工：</p>
+      <ol className="setup-next-steps">
+        <li>
+          <strong>匯入共同設定</strong>
+          <span>讓所有帳號使用同一份 Claude Code 偏好、指示、hooks 與 MCP 伺服器。</span>
+        </li>
+        <li>
+          <strong>新增 Workspace</strong>
+          <span>在左欄的 Workspace 清單按「新增」，選一個要讓 Agent 工作的目錄。</span>
+        </li>
+        <li>
+          <strong>確認授權</strong>
+          <span>在 Workspace 的「規則」›「授權」確認 Agent 可以做什麼；確認之前不會派出任何工作。</span>
+        </li>
+        <li>
+          <strong>開啟 Controller</strong>
+          <span>在「Controller」頁開啟，然後在終端機裡描述你的目標。</span>
+        </li>
+      </ol>
+      <div className="form-actions">
+        <button type="button" className="btn-primary" onClick={onEnter}>
+          進入主畫面
+        </button>
+        <button type="button" onClick={onSharedSettings}>
+          前往共同設定
+        </button>
+      </div>
+    </section>
+  );
+}
+
 /** 未選 Workspace 時的空狀態：「新增 Workspace」展開跑道欄的建立表單並聚焦目錄欄位。 */
 function WorkspaceEmpty({ onCreate }: { onCreate: () => void }) {
   return (
@@ -492,7 +558,7 @@ function WorkspaceEmpty({ onCreate }: { onCreate: () => void }) {
 /** 頁面上方的情境列：目前 Workspace 的名稱與縮短路徑；完整值在 title，路徑可複製。 */
 function WorkspaceContext({ workspace }: { workspace: Workspace }) {
   return (
-    <div className="workspace-context" aria-label="目前的 Workspace">
+    <div className="workspace-context" role="group" aria-label="目前的 Workspace">
       <span className="workspace-context-name truncate" title={workspace.name}>
         {workspace.name}
       </span>
@@ -510,16 +576,19 @@ function WorkspaceView({
   workspace,
   page,
   onDecisionsChange,
+  onOpenPage,
 }: {
   client: AppClient;
   workspace: Workspace;
   page: WorkspacePage;
   onDecisionsChange: () => void;
+  /** 頁面裡的「前往…」按鈕切到同一個 Workspace 的另一頁。 */
+  onOpenPage: (page: WorkspacePage) => void;
 }) {
   // 換 Workspace 時以 key 重新掛載，上一個 Workspace 較晚回來的讀取結果不會蓋掉目前畫面與草稿
   switch (page) {
     case "controller":
-      return <ControllerPage key={workspace.id} client={client} workspace={workspace} />;
+      return <ControllerPage key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
     case "tasks":
       return <TaskBoard key={workspace.id} client={client} workspace={workspace} />;
     case "workflows":
@@ -583,7 +652,7 @@ function GlobalView({
       return (
         <div className="page global-page">
           <header className="page-header">
-            <h2>設定</h2>
+            <h2>App 設定</h2>
           </header>
           {/* 短的區段兩兩並排（窄時上下排列）；備份內容較多，自成一列 */}
           <div className="split">
@@ -595,6 +664,8 @@ function GlobalView({
             <RecoveryPanel client={client} />
             <PlatformPage client={client} />
           </div>
+          {/* 可用模型清單影響所有 Workspace（各 Workspace 的「模型設定」從這份清單選） */}
+          <ModelCatalogSettings client={client} />
         </div>
       );
   }

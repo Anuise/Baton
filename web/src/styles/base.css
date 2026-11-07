@@ -16,6 +16,11 @@ body {
   background: var(--color-bg);
 }
 
+/* hidden 屬性一律隱藏：元件的 display 規則（例如 .row-list 的 grid）會蓋掉瀏覽器內建的 [hidden] */
+[hidden] {
+  display: none !important;
+}
+
 /* 長 token 不撐破版面：全站至少在單字邊界放不下時斷開；
    會進入 flex／grid 的文字元素用 anywhere，斷點才算進 min-content。
    不用 word-break: break-all（中文本來就逐字可斷，break-all 只會把英文單字從中間切開） */

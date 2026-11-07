@@ -140,7 +140,9 @@ describe("成果", () => {
     // 分組標題是 Task（取不到標題時是識別碼），成果在該組之內
     const group = screen.getByRole("region", { name: "task_1" });
     expect(group).toContainElement(card);
-    expect(group).toHaveTextContent("1 個成果");
+    // 計數只放數字，不加單位
+    expect(within(group).getByText("1", { selector: ".count" })).toBeInTheDocument();
+    expect(group).not.toHaveTextContent("個成果");
     const latest = within(card).getByRole("listitem", { name: "report.md v2" });
     expect(latest).toHaveTextContent("最新");
     expect(latest).toHaveTextContent("24 位元組");
@@ -154,11 +156,11 @@ describe("成果", () => {
     expect(latest).toHaveTextContent("第 2 版說明");
     expect(within(card).queryByRole("listitem", { name: "report.md v1" })).not.toBeInTheDocument();
 
-    await user.click(within(card).getByRole("button", { name: "全部版本（2）" }));
+    await user.click(within(card).getByRole("button", { name: "全部版本 2" }));
 
     const items = within(card).getAllByRole("listitem");
     expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["report.md v2", "report.md v1"]);
-    expect(within(card).getByRole("button", { name: "全部版本（2）" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(card).getByRole("button", { name: "全部版本 2" })).toHaveAttribute("aria-expanded", "true");
   });
 
   it("大檔案換算單位並附千分位位元組；長的 Task（分組標題）與 Run 識別碼縮短，完整值可複製", async () => {
@@ -269,7 +271,7 @@ describe("成果", () => {
     expect(within(within(card).getByRole("listitem", { name: "report.md v2" })).getByRole("alert")).toHaveTextContent(
       "檔案大小與登記不符，不可信",
     );
-    await user.click(within(card).getByRole("button", { name: "全部版本（2）" }));
+    await user.click(within(card).getByRole("button", { name: "全部版本 2" }));
     expect(within(within(card).getByRole("listitem", { name: "report.md v1" })).getByRole("alert")).toHaveTextContent(
       "檔案遺失，不可信",
     );

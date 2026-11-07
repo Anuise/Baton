@@ -59,7 +59,44 @@ const PROJECTION_TONES: Record<ProjectionStatus, string> = {
   detached: "badge",
 };
 
-const PROJECTION_CHANGED_NOTICE = "投影檔在檢視後又被修改，已重新檢查，請確認最新狀態後再協調";
+const PROJECTION_CHANGED_NOTICE = "檔案在檢視後又被修改，已重新檢查，請確認最新狀態後再協調";
+
+/**
+ * Project Brief 段落的中文名稱。key 是 Controller 寫的自由文字（MCP 工具只說明 Brief 有哪幾段：
+ * 目標、使用者、成功條件、排除範圍、現況、外部整合、風險與限制），這裡收常見的英文寫法；不認得的照原樣顯示。
+ */
+const BRIEF_KEY_LABELS: Record<string, string> = {
+  purpose: "產品目標",
+  goal: "產品目標",
+  goals: "產品目標",
+  product_goal: "產品目標",
+  product_goals: "產品目標",
+  objective: "產品目標",
+  objectives: "產品目標",
+  users: "使用者",
+  user: "使用者",
+  audience: "使用者",
+  target_users: "使用者",
+  success_criteria: "成功條件",
+  success: "成功條件",
+  non_goals: "排除範圍",
+  out_of_scope: "排除範圍",
+  exclusions: "排除範圍",
+  current_state: "系統現況",
+  status_quo: "系統現況",
+  integrations: "外部整合",
+  external_integrations: "外部整合",
+  risks: "風險與限制",
+  constraints: "風險與限制",
+  risks_and_constraints: "風險與限制",
+  limitations: "風險與限制",
+};
+
+/** Brief 段落的中文名稱；其他文件的 key 本身就是名詞或模組名稱，不轉換。 */
+function itemLabel(item: UnderstandingItemView): string | null {
+  if (item.section !== "brief") return null;
+  return BRIEF_KEY_LABELS[item.key.trim().toLowerCase().replace(/[\s-]+/g, "_")] ?? null;
+}
 
 function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -151,7 +188,7 @@ export function ProjectUnderstandingPage({ client, workspace, timeZone }: Props)
       </header>
       {conflicts > 0 && (
         <div className="callout callout-warning" role="status">
-          <p>{conflicts} 個投影檔被外部修改，Baton 沒有覆寫，請協調</p>
+          <p>{conflicts} 個寫入 repo 的檔案被外部修改，Baton 沒有覆寫，請在下方協調</p>
         </div>
       )}
       {notice && (
@@ -202,33 +239,43 @@ function ItemSection({ title, items, timeZone }: { title: string; items: Underst
         <h3 id={id}>{title}</h3>
         <span className="count">{items.length}</span>
       </div>
-      {items.length === 0 && <p className="empty-note">這個區塊還沒有項目</p>}
+      {items.length === 0 && (
+        <p className="empty-note">還沒有項目。Controller 接入專案時會建立，也可以在 Controller 中要求它補上。</p>
+      )}
       {items.length > 0 && (
         <ul className="row-list">
-          {items.map((item) => (
-            <li key={item.id} aria-label={item.key} className={`understanding-item understanding-${item.status}`}>
-              {/* 名稱在左、狀態徽章在右；需要重新查驗的另加一個徽章 */}
-              <div className="row-head">
-                <span className="understanding-key">{item.key}</span>
-                <span className={STATUS_TONES[item.status]}>{STATUS_LABELS[item.status]}</span>
-                {item.stale && (
-                  <span className="badge badge-warning" title="來源在查驗後改變">
-                    來源已變更，需重新查驗
+          {items.map((item) => {
+            // Brief 段落以中文名稱當標題，Controller 寫的原始鍵以等寬次要色附在旁邊（MASTER 7.1 機器代碼）
+            const label = itemLabel(item);
+            const name = label === null ? item.key : `${label}（${item.key}）`;
+            return (
+              <li key={item.id} aria-label={name} className={`understanding-item understanding-${item.status}`}>
+                {/* 名稱在左、狀態徽章在右；需要重新查驗的另加一個徽章 */}
+                <div className="row-head">
+                  <span className="understanding-key">
+                    {label ?? item.key}
+                    {label !== null && <span className="understanding-raw-key mono">{item.key}</span>}
                   </span>
+                  <span className={STATUS_TONES[item.status]}>{STATUS_LABELS[item.status]}</span>
+                  {item.stale && (
+                    <span className="badge badge-warning" title="來源在查驗後改變">
+                      來源已變更，需重新查驗
+                    </span>
+                  )}
+                </div>
+                <LongText text={item.text} className="understanding-text" />
+                {item.sources.length > 0 && (
+                  <ul className="understanding-sources" aria-label={`${name} 的來源`}>
+                    {item.sources.map((source, index) => (
+                      <li key={index} className="meta">
+                        <SourceView source={source} timeZone={timeZone} />
+                      </li>
+                    ))}
+                  </ul>
                 )}
-              </div>
-              <LongText text={item.text} className="understanding-text" />
-              {item.sources.length > 0 && (
-                <ul className="understanding-sources" aria-label={`${item.key} 的來源`}>
-                  {item.sources.map((source, index) => (
-                    <li key={index} className="meta">
-                      <SourceView source={source} timeZone={timeZone} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
       )}
     </section>
@@ -268,11 +315,16 @@ function ProjectionSection({
   return (
     <section className="section understanding-projections" aria-labelledby="understanding-projections-title">
       <div className="section-heading">
-        <h3 id="understanding-projections-title">repo 投影（GLOSSARY／ADR）</h3>
-        <p>Baton 把 Glossary 與決策寫進 repo 的 GLOSSARY.md 與 docs/adr/；檔案在外部被改動時不會覆寫，等你決定。</p>
+        <h3 id="understanding-projections-title">寫入 repo 的檔案（GLOSSARY.md、ADR）</h3>
+        <p>
+          Baton 把 Glossary 與決策寫進 repo 的 <span className="mono">GLOSSARY.md</span> 與{" "}
+          <span className="mono">docs/adr/</span>；檔案在外部被改動時不會覆寫，等你決定。
+        </p>
       </div>
-      {!view.projection_enabled && <p className="empty-note">這個 Workspace 不是 Git repo，不產生 GLOSSARY／ADR 投影</p>}
-      {view.projection_enabled && view.projections.length === 0 && <p className="empty-note">還沒有投影檔</p>}
+      {!view.projection_enabled && (
+        <p className="empty-note">這個 Workspace 不是 Git repo，Baton 不會寫入 GLOSSARY.md 與 ADR</p>
+      )}
+      {view.projection_enabled && view.projections.length === 0 && <p className="empty-note">Baton 還沒有寫入任何檔案</p>}
       {view.projection_enabled && view.projections.length > 0 && (
         <ul className="row-list">
           {view.projections.map((projection) => {

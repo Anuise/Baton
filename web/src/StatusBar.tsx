@@ -89,7 +89,9 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
       {status.state === "offline" && (
         <>
           <span className="status status-offline">Runtime 未連線</span>
-          <span className="status-reason">{status.reason}</span>
+          <span className="status-reason" title={status.reason}>
+            {status.reason}
+          </span>
         </>
       )}
       {status.state === "running" && (
@@ -118,7 +120,12 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
         <span className="status status-guardian-active">監護：運作中</span>
       )}
       {status.state === "running" && status.health.guardian?.state === "unavailable" && (
-        <span className="status status-guardian-unavailable" role="alert">
+        // 跑道欄窄，最多顯示三行；完整訊息在 title
+        <span
+          className="status status-guardian-unavailable"
+          role="alert"
+          title={status.health.guardian.message ?? GUARDIAN_UNAVAILABLE_FALLBACK}
+        >
           {status.health.guardian.message ?? GUARDIAN_UNAVAILABLE_FALLBACK}
         </span>
       )}
@@ -136,8 +143,8 @@ type StorageFaultView = NonNullable<NonNullable<HealthResponse["storage"]>["faul
 export function StorageFault({ fault }: { fault: StorageFaultView | null }) {
   const reason = fault && splitFirstSentence(fault.summary);
   return (
-    <div className="callout callout-danger status-storage-fault" role="alert">
-      <p className="callout-title">新派工已停止</p>
+    <div className="status-storage-fault" role="alert">
+      <p className="status-storage-title">新派工已停止</p>
       {fault && reason && (
         <div className="status-storage-body">
           <p>{reason.summary}</p>

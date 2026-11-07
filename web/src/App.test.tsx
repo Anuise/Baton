@@ -76,6 +76,8 @@ const client = {
   getAuthorization: vi.fn(async () => {
     throw new Error("授權讀取失敗");
   }),
+  // 模型設定頁與 App 設定頁的可用模型清單
+  listModels: vi.fn(async () => ({ models: [{ id: "opus", label: "Opus（最新版）" }], updated_at: null })),
   getTaskBoard: vi.fn(async () => ({ workspace_id: "ws_1", goals: [], tasks: [], runs: [], capabilities: [], verifications: [], workdirs: [], integrations: [], budgets: [] })),
   lifecycleStatus: vi.fn(async () => {
     throw new Error("離線");
@@ -173,7 +175,7 @@ describe("App 外殼", () => {
 
       expect(await screen.findByRole("complementary", { name: "Workspace" })).toBeInTheDocument();
       const global = within(screen.getByRole("navigation", { name: "平台" })).getAllByRole("button");
-      expect(global.map((button) => button.textContent)).toEqual(["帳號", "共同設定", "設定"]);
+      expect(global.map((button) => button.textContent)).toEqual(["帳號", "共同設定", "App 設定"]);
       expect(global.every((button) => !button.hasAttribute("aria-current"))).toBe(true);
       expect(within(main()).getByRole("heading", { name: EMPTY_TITLE })).toBeInTheDocument();
       // 沒有選 Workspace 時沒有它的頁面導覽，帳號與系統設定也不疊在主畫面
@@ -219,9 +221,9 @@ describe("App 外殼", () => {
       const user = userEvent.setup();
       render(<App />);
 
-      await user.click(await screen.findByRole("button", { name: "設定" }));
+      await user.click(await screen.findByRole("button", { name: "App 設定" }));
 
-      expect(within(main()).getByRole("heading", { level: 2, name: "設定" })).toBeInTheDocument();
+      expect(within(main()).getByRole("heading", { level: 2, name: "App 設定" })).toBeInTheDocument();
       for (const name of ["登入時自動啟動", "更新", "備份與還原演練", "崩潰恢復", "平台狀態"]) {
         expect(await within(main()).findByRole("heading", { name })).toBeInTheDocument();
       }
@@ -235,15 +237,27 @@ describe("App 外殼", () => {
       render(<App />);
       await selectWorkspace(user);
       await openPage(user, "工作");
-      await user.click(globalButton("設定"));
+      await user.click(globalButton("App 設定"));
       const nav = screen.getByRole("navigation", { name: "Workspace 頁面" });
       expect(within(nav).getAllByRole("button").some((button) => button.hasAttribute("aria-current"))).toBe(false);
 
       await openPage(user, "工作");
 
       expect(pageButton("工作")).toHaveAttribute("aria-current", "page");
-      expect(globalButton("設定")).not.toHaveAttribute("aria-current");
+      expect(globalButton("App 設定")).not.toHaveAttribute("aria-current");
       expect(await within(main()).findByRole("heading", { name: "工作" })).toBeInTheDocument();
+    });
+  });
+
+  describe("鍵盤", () => {
+    it("最前面有「跳到主要內容」，指向可聚焦的主區", async () => {
+      render(<App />);
+      await screen.findByRole("button", { name: "選擇 筆記" });
+
+      const skip = screen.getByRole("link", { name: "跳到主要內容" });
+      const target = document.querySelector(skip.getAttribute("href")!);
+      expect(target).toBe(main());
+      expect(main()).toHaveAttribute("tabindex", "-1");
     });
   });
 
@@ -274,7 +288,7 @@ describe("App 外殼", () => {
   });
 
   describe("Workspace 頁面", () => {
-    it("選中 Workspace 後在它下面展開四組頁面，預設開在主控台，一次只顯示一頁", async () => {
+    it("選中 Workspace 後在它下面展開四組頁面，預設開在 Controller 頁，一次只顯示一頁", async () => {
       const user = userEvent.setup();
       render(<App />);
 
@@ -284,21 +298,21 @@ describe("App 外殼", () => {
       const groups = within(nav).getAllByRole("group");
       expect(groups.map((group) => group.getAttribute("aria-label"))).toEqual(["進行", "產出", "脈絡", "規則"]);
       expect(groups.map((group) => within(group).getAllByRole("button").map((button) => button.querySelector(".nav-label")?.textContent))).toEqual([
-        ["主控台", "工作", "流程", "裁定", "時間線"],
-        ["成果", "審查", "驗證", "探索"],
+        ["Controller", "工作", "流程", "裁定", "時間線"],
+        ["成果", "審查", "驗證", "探索測試"],
         ["知識", "專案理解"],
         ["授權", "決策權限", "模型設定"],
       ]);
       // 頁面導覽在選中的 Workspace 項目之內
       expect(screen.getByRole("button", { name: "選擇 筆記" }).closest("li")).toContainElement(nav);
-      expect(pageButton("主控台")).toHaveAttribute("aria-current", "page");
-      expect(within(main()).getByRole("heading", { name: "主控台" })).toBeInTheDocument();
+      expect(pageButton("Controller")).toHaveAttribute("aria-current", "page");
+      expect(within(main()).getByRole("heading", { name: "Controller" })).toBeInTheDocument();
       expect(client.getControllerCli).toHaveBeenCalledWith("ws_1");
       expect(screen.queryByText(EMPTY_TITLE)).not.toBeInTheDocument();
       expect(screen.getByRole("button", { name: "選擇 筆記" })).toHaveAttribute("aria-current", "true");
-      // 其他頁面尚未開啟，不會讀取
+      // 其他頁面尚未開啟，不會讀取（Controller 頁本身會讀授權，用來提示尚未確認）
       expect(client.getTaskBoard).not.toHaveBeenCalled();
-      expect(client.getAuthorization).not.toHaveBeenCalled();
+      expect(client.listDecisions).not.toHaveBeenCalled();
     });
 
     // 每一頁都可直接到達，且只顯示這一頁
@@ -310,7 +324,7 @@ describe("App 外殼", () => {
       ["成果", () => expect(client.listArtifacts).toHaveBeenCalledWith("ws_1")],
       ["審查", () => expect(client.reviews).toHaveBeenCalledWith("ws_1")],
       ["驗證", () => expect(client.verificationOverview).toHaveBeenCalledWith("ws_1")],
-      ["探索", () => expect(client.explorationOverview).toHaveBeenCalledWith("ws_1")],
+      ["探索測試", () => expect(client.explorationOverview).toHaveBeenCalledWith("ws_1")],
       ["知識", () => expect(client.listKnowledge).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: "ws_1" }))],
       ["專案理解", () => expect(client.syncUnderstanding).toHaveBeenCalledWith("ws_1")],
       ["授權", () => expect(client.getAuthorization).toHaveBeenCalledWith("ws_1")],
@@ -327,7 +341,25 @@ describe("App 外殼", () => {
       expect(pageButton(page)).toHaveAttribute("aria-current", "page");
       expect(await within(main()).findByRole("heading", { level: 2, name: page })).toBeInTheDocument();
       called();
-      expect(within(main()).queryByRole("heading", { name: "主控台" })).not.toBeInTheDocument();
+      expect(within(main()).queryByRole("heading", { name: "Controller" })).not.toBeInTheDocument();
+    });
+
+    it("Controller 頁提示授權尚未確認時，「前往授權」切到同一個 Workspace 的授權頁", async () => {
+      vi.mocked(client.getAuthorization).mockImplementation(async () => ({
+        ...authorizationOf(workspace, "read_files"),
+        status: "unconfirmed",
+        effective: null,
+        revisions: [],
+      }));
+      onlyInThisTest(client.getAuthorization);
+      const user = userEvent.setup();
+      render(<App />);
+      await selectWorkspace(user);
+
+      await user.click(await within(main()).findByRole("button", { name: "前往授權" }));
+
+      expect(pageButton("授權")).toHaveAttribute("aria-current", "page");
+      expect(await within(main()).findByRole("heading", { level: 2, name: "授權" })).toBeInTheDocument();
     });
 
     it("裁定頁開啟裁定中心", async () => {
@@ -371,17 +403,21 @@ describe("App 外殼", () => {
       await selectWorkspace(user);
 
       await user.click(screen.getByRole("button", { name: "封存 筆記" }));
+      await user.click(screen.getByRole("button", { name: "確認封存 筆記" }));
 
       expect(await screen.findByText(EMPTY_TITLE)).toBeInTheDocument();
       expect(screen.queryByRole("navigation", { name: "Workspace 頁面" })).not.toBeInTheDocument();
     });
 
     it("切換 Workspace 後，上一個 Workspace 較晚回來的授權設定不會蓋掉目前的草稿", async () => {
-      let resolveFirst: (view: AuthorizationView) => void = () => {};
+      // 依 Workspace 回應（Controller 頁也會讀授權，不能依呼叫順序）：「筆記」的回應一直到最後才到
+      const pendingFirst: Array<(view: AuthorizationView) => void> = [];
       vi.mocked(client.listWorkspaces).mockImplementation(async () => ({ workspaces: [workspace, other] }));
-      vi.mocked(client.getAuthorization)
-        .mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)))
-        .mockImplementationOnce(async () => authorizationOf(other, "read_files"));
+      vi.mocked(client.getAuthorization).mockImplementation((id: string) =>
+        id === "ws_1"
+          ? new Promise((resolve) => pendingFirst.push(resolve))
+          : Promise.resolve(authorizationOf(other, "read_files")),
+      );
       onlyInThisTest(client.listWorkspaces, client.getAuthorization);
       const user = userEvent.setup();
       render(<App />);
@@ -392,7 +428,9 @@ describe("App 外殼", () => {
       expect(await screen.findByRole("heading", { level: 2, name: "授權" })).toBeInTheDocument();
       expect(client.getAuthorization).toHaveBeenLastCalledWith("ws_2");
       // 「筆記」的回應這時才到
-      await act(async () => resolveFirst(authorizationOf(workspace, "deploy")));
+      await act(async () => {
+        for (const resolve of pendingFirst) resolve(authorizationOf(workspace, "deploy"));
+      });
 
       expect(screen.getByRole("heading", { level: 2, name: "授權" })).toBeInTheDocument();
       expect(screen.getByRole("checkbox", { name: /^讀取檔案/ })).toBeChecked();
@@ -405,7 +443,7 @@ describe("App 外殼", () => {
       const user = userEvent.setup();
       render(<App />);
       expect(await screen.findByText("待裁定：1")).toBeInTheDocument();
-      expect(await screen.findByLabelText("待裁定 1 項")).toHaveTextContent("1");
+      expect(await screen.findByText("待裁定 1")).toBeInTheDocument();
       await selectWorkspace(user);
       // 徽章的數字以說明提供，按鈕名稱仍是頁名
       expect(pageButton("裁定")).toHaveAccessibleDescription("待裁定 1");
@@ -415,7 +453,7 @@ describe("App 外殼", () => {
       await user.click(screen.getByRole("button", { name: "送出裁定" }));
 
       expect(client.answerDecision).toHaveBeenCalledWith("ws_1", "dec_1", { action: "reject", expected_revision: 1 });
-      await waitFor(() => expect(screen.queryByLabelText("待裁定 1 項")).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.queryByText("待裁定 1")).not.toBeInTheDocument());
       expect(pageButton("裁定")).not.toHaveAccessibleDescription();
     });
   });
@@ -439,13 +477,13 @@ describe("App 外殼", () => {
     it("重新開啟 App 回到上次的平台頁面", async () => {
       const user = userEvent.setup();
       const first = render(<App />);
-      await user.click(await screen.findByRole("button", { name: "設定" }));
+      await user.click(await screen.findByRole("button", { name: "App 設定" }));
       first.unmount();
 
       render(<App />);
 
       expect(await screen.findByRole("heading", { name: "平台狀態" })).toBeInTheDocument();
-      expect(globalButton("設定")).toHaveAttribute("aria-current", "page");
+      expect(globalButton("App 設定")).toHaveAttribute("aria-current", "page");
     });
 
     it("舊版記住的頂層頁簽（top）照樣還原", async () => {
@@ -467,28 +505,28 @@ describe("App 外殼", () => {
       localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify({ view: "不存在", workspaceId: "ws_1", workspaceTab: "不存在" }));
       render(<App />);
 
-      expect(await within(main()).findByRole("heading", { name: "主控台" })).toBeInTheDocument();
-      expect(pageButton("主控台")).toHaveAttribute("aria-current", "page");
+      expect(await within(main()).findByRole("heading", { name: "Controller" })).toBeInTheDocument();
+      expect(pageButton("Controller")).toHaveAttribute("aria-current", "page");
     });
 
-    it("記住的是已移除的「對話」頁簽時開在主控台", async () => {
+    it("記住的是已移除的「對話」頁簽時開在 Controller 頁", async () => {
       localStorage.setItem(SHELL_STORAGE_KEY, JSON.stringify({ top: "workspace", workspaceId: "ws_1", workspaceTab: "conversation" }));
       render(<App />);
 
-      expect(await within(main()).findByRole("heading", { name: "主控台" })).toBeInTheDocument();
-      expect(pageButton("主控台")).toHaveAttribute("aria-current", "page");
+      expect(await within(main()).findByRole("heading", { name: "Controller" })).toBeInTheDocument();
+      expect(pageButton("Controller")).toHaveAttribute("aria-current", "page");
     });
 
     // 舊版記住的頁面 id 對應到現在的頁面，不會落到空白頁
     it.each([
-      ["controller", "主控台"],
+      ["controller", "Controller"],
       ["tasks", "工作"],
       ["decisions", "裁定"],
       ["artifacts", "成果"],
       ["quality", "審查"],
       ["reviews", "審查"],
       ["verification", "驗證"],
-      ["exploration", "探索"],
+      ["exploration", "探索測試"],
       ["knowledge", "知識"],
       ["workflows", "流程"],
       ["timeline", "時間線"],
@@ -518,7 +556,7 @@ describe("App 外殼", () => {
 
       expect(await screen.findByText(EMPTY_TITLE)).toBeInTheDocument();
       await selectWorkspace(user);
-      expect(pageButton("主控台")).toHaveAttribute("aria-current", "page");
+      expect(pageButton("Controller")).toHaveAttribute("aria-current", "page");
     });
 
     it("上次的 Workspace 已不在清單時顯示空狀態", async () => {
@@ -559,7 +597,32 @@ describe("App 外殼", () => {
 
       await user.click(await screen.findByRole("button", { name: "重新檢查" }));
 
+      // 不立刻切走：先顯示完成畫面與下一步，使用者自己進入主畫面
+      expect(await screen.findByRole("heading", { name: "帳號已就緒" })).toBeInTheDocument();
+      expect(screen.getByText("確認授權")).toBeInTheDocument();
+      expect(screen.queryByRole("navigation", { name: "平台" })).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "進入主畫面" }));
+
       expect(await screen.findByRole("navigation", { name: "平台" })).toBeInTheDocument();
+    });
+
+    it("首次設定完成畫面可以直接前往共同設定", async () => {
+      vi.mocked(client.getSetup)
+        .mockImplementationOnce(async () => setupStatus({ profiles: [], ready: false }))
+        .mockImplementation(async () => setupStatus({ background_notice: { text: "", acknowledged_at: 1 } }));
+      vi.mocked(client.recheckSetup).mockImplementation(async () =>
+        setupStatus({ background_notice: { text: "", acknowledged_at: 1 } }),
+      );
+      onlyInThisTest(client.getSetup, client.recheckSetup);
+      const user = userEvent.setup();
+      render(<App />);
+      await screen.findByRole("region", { name: "首次設定" });
+      await user.click(await screen.findByRole("button", { name: "重新檢查" }));
+
+      await user.click(await screen.findByRole("button", { name: "前往共同設定" }));
+
+      expect(await screen.findByRole("navigation", { name: "平台" })).toBeInTheDocument();
+      expect(globalButton("共同設定")).toHaveAttribute("aria-current", "page");
     });
 
     it("全畫面首次精靈可以先進入主畫面", async () => {
@@ -632,7 +695,7 @@ describe("App 外殼", () => {
       render(<App />);
 
       expect(await screen.findByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
-      await user.click(globalButton("設定"));
+      await user.click(globalButton("App 設定"));
       const updates = await screen.findByRole("region", { name: "更新" });
       expect(within(updates).getByText("狀態", { selector: "dt" }).nextElementSibling).toHaveTextContent("有新版本 0.2.0");
       // 切換頁面不影響更新通知

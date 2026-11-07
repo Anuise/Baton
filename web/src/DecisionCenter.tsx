@@ -42,9 +42,12 @@ interface Props {
   onChange?: () => void;
 }
 
-const KIND_LABELS: Record<DecisionKind, string> = { permission: "權限提示", agent: "Agent 請求", authority: "權限表攔截" };
+const KIND_LABELS: Record<DecisionKind, string> = { permission: "權限提示", agent: "Agent 請求", authority: "決策權限攔截" };
 const URGENCY_LABELS: Record<DecisionUrgency, string> = { low: "低", normal: "一般", high: "高" };
-const STATUS_LABELS: Record<DecisionStatus, string> = { pending: "待處理", answered: "已回答", superseded: "已過期", merged: "已合併" };
+/** superseded 稱「已失效」（不是「已過期」，避免和「已逾期」只差一字）。 */
+const STATUS_LABELS: Record<DecisionStatus, string> = { pending: "待裁定", answered: "已回答", superseded: "已失效", merged: "已合併" };
+/** 「已失效」的意思：清單徽章的 title 與詳情直接寫出。 */
+const SUPERSEDED_NOTE = "內容或目標版本已改變，這筆不能再回答。";
 const TASK_STATUS_LABELS = new Map(COLUMNS);
 const MISMATCH_LABELS: Record<ApprovalMismatchReason, string> = {
   operation_changed: "操作不同",
@@ -85,14 +88,15 @@ const DEFER_CHOICES = [
   { minutes: 4320, label: "3 天" },
 ];
 
+/** 「全部待裁定」＝可處理＋已延後（跑道欄的待裁定數也是這個總數）。 */
 const OVERVIEW_ITEMS: [keyof DecisionOverview, string][] = [
-  ["pending", "待處理"],
+  ["pending", "全部待裁定"],
   ["actionable", "可處理"],
   ["deferred", "已延後"],
   ["overdue", "已逾期"],
   ["high_urgency", "高緊急"],
   ["answered", "已回答"],
-  ["superseded", "已過期"],
+  ["superseded", "已失效"],
   ["merged", "已合併"],
 ];
 /** 大於 0 時要你注意的總覽數字（琥珀色）。 */
@@ -100,7 +104,7 @@ const OVERVIEW_ATTENTION = new Set<keyof DecisionOverview>(["overdue", "high_urg
 /** 總覽中「已結束」這一組的第一項，前面加分隔。 */
 const OVERVIEW_CLOSED_START: keyof DecisionOverview = "answered";
 
-/** 狀態徽章：待處理要你處理（琥珀）、已回答是完成，其餘中性。 */
+/** 狀態徽章：待裁定要你處理（琥珀）、已回答是完成，其餘中性。 */
 const STATUS_TONES: Record<DecisionStatus, string> = {
   pending: "badge badge-warning",
   answered: "badge badge-success",
@@ -129,9 +133,9 @@ const OVERRIDE_TONES = { narrowed: "badge badge-plain", widened: "badge badge-wa
 
 /** 需要特別說明的錯誤代碼；其餘沿用 Runtime 的說明。 */
 const ERROR_MESSAGES: Record<string, string> = {
-  decision_superseded: "目標版本已變更，這個請求已過期，不能套用。",
+  decision_superseded: "內容或目標版本已改變，這筆已失效，不能再回答。",
   decision_revision_mismatch: "這個請求的內容已變更，已重新整理，請確認後再送出。",
-  authority_revision_mismatch: "決策權限表已被修改，已重新載入，請重新確認。",
+  authority_revision_mismatch: "決策權限已被修改，已重新載入，請重新確認。",
 };
 
 function reasonOf(error: unknown): string {
@@ -174,9 +178,12 @@ function WithHashes({ text, copy = true }: { text: string; copy?: boolean }) {
 /** 沒有空白、含路徑分隔字元的一整段（路徑或 URL）用等寬字顯示。 */
 const isPathLike = (text: string) => /^\S+$/.test(text) && /[\\/]/.test(text);
 
-/** 緊急程度徽章：高用危險色，其餘中性。 */
-const urgencyBadge = (urgency: DecisionUrgency) =>
-  `badge decision-urgency decision-urgency-${urgency}${urgency === "high" ? " badge-danger" : " badge-plain"}`;
+/**
+ * 緊急程度徽章（清單與詳情共用）：待裁定且緊急程度高＝要你處理，用琥珀色（與總覽的「高緊急」同色）；
+ * 已結束的請求不再要你處理，一律中性。
+ */
+const urgencyBadge = ({ urgency, status }: DecisionRequestView) =>
+  `badge decision-urgency decision-urgency-${urgency} ${urgency === "high" && status === "pending" ? "badge-warning" : "badge-plain"}`;
 
 /** 一筆請求的處理草稿；詳情與批次面板各自保有一份。 */
 interface Draft {
@@ -229,10 +236,11 @@ interface BatchOutcome {
 
 /** 頁面外框：載入中、失敗與正常畫面共用同一個 region 與頁面標題。 */
 function DecisionPage({ children }: { children: ReactNode }) {
+  const headingId = useId();
   return (
-    <section className="page decision-center" aria-label="裁定中心">
+    <section className="page decision-center" aria-labelledby={headingId}>
       <header className="page-header">
-        <h2>裁定</h2>
+        <h2 id={headingId}>裁定</h2>
       </header>
       {children}
     </section>
@@ -254,6 +262,18 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
   // 「已結束」一組可以收起；預設展開
   const [closedOpen, setClosedOpen] = useState(true);
   const closedListId = useId();
+  const paneRef = useRef<HTMLDivElement>(null);
+  const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
+  // 使用者換到另一筆時，記下那筆的 id，由詳情掛載時取用一次並捲到詳情開頭；
+  // 程式自己換筆（例如批次送出後原本那筆已結束）不捲動，以免把上方的批次結果捲出可視範圍
+  const scrollRequest = useRef<string | null>(null);
+
+  // 批次送出後：右欄捲回頂端，焦點移到批次結果的標題
+  useLayoutEffect(() => {
+    if (batchOutcome === null) return;
+    if (paneRef.current) paneRef.current.scrollTop = 0;
+    resultsHeadingRef.current?.focus({ preventScroll: true });
+  }, [batchOutcome]);
 
   const load = useCallback(async () => {
     try {
@@ -296,6 +316,17 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
   // 重新載入後已不可處理的請求自動離開批次
   const batchDecisions = actionable.filter((d) => d.id in batch);
 
+  /** 使用者選另一筆（清單、相似問題、合併目標）：換筆後詳情捲到開頭。 */
+  const select = (requestId: string) => {
+    if (requestId !== selected?.id) scrollRequest.current = requestId;
+    setSelectedId(requestId);
+  };
+  const takeScrollRequest = (requestId: string) => {
+    if (scrollRequest.current !== requestId) return false;
+    scrollRequest.current = null;
+    return true;
+  };
+
   const toggleBatch = (decision: DecisionRequestView) =>
     setBatch((current) => {
       if (!(decision.id in current)) return { ...current, [decision.id]: EMPTY_DRAFT };
@@ -322,7 +353,7 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
           className="decision-item-button"
           aria-label={`查看裁定 ${decision.question}`}
           aria-current={isSelected}
-          onClick={() => setSelectedId(decision.id)}
+          onClick={() => select(decision.id)}
         >
           {/* 清單只放摘要（問題 3 行、Task 1 行、一列徽章）；完整內容點開看詳情 */}
           <span className="decision-question clamp-3" title={decision.question}>
@@ -333,7 +364,7 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
           </span>
           <span className="decision-badges badge-group">
             <span className="badge badge-plain decision-kind">{KIND_LABELS[decision.kind]}</span>
-            <span className={urgencyBadge(decision.urgency)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
+            <span className={urgencyBadge(decision)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
             {decision.status === "pending" && decision.overdue && (
               <span className="badge badge-warning decision-overdue">已逾期，尚未裁定</span>
             )}
@@ -341,7 +372,12 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
               <span className="decision-deferred-until">延後至 {formatTimestamp(decision.deferred_until, timeZone)}</span>
             )}
             {decision.status !== "pending" && (
-              <span className={`${STATUS_TONES[decision.status]} decision-status`}>{STATUS_LABELS[decision.status]}</span>
+              <span
+                className={`${STATUS_TONES[decision.status]} decision-status`}
+                title={decision.status === "superseded" ? SUPERSEDED_NOTE : undefined}
+              >
+                {STATUS_LABELS[decision.status]}
+              </span>
             )}
           </span>
         </button>
@@ -349,7 +385,10 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
     );
   };
 
-  /** 清單中的一組；`collapsible` 的一組可以收起（標題與計數仍在）。 */
+  /**
+   * 清單中的一組；`collapsible` 的一組可以收起（標題與計數仍在）。
+   * 計數只放數字、在標題外（MASTER 7.1）；輔助技術從 region 名稱「可處理（N）」讀到計數。
+   */
   const group = (
     title: string,
     items: DecisionRequestView[],
@@ -358,12 +397,10 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
   ) => {
     const open = !collapsible || closedOpen;
     return (
-      <section className="section decision-group">
+      <section className="section decision-group" aria-label={`${title}（${items.length}）`}>
         <div className="section-heading">
-          <h3>
-            {title}
-            <span className="count">（{items.length}）</span>
-          </h3>
+          <h3>{title}</h3>
+          <span className="count">{items.length}</span>
           {collapsible && items.length > 0 && (
             <div className="section-actions">
               <button
@@ -397,7 +434,7 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
 
   return (
     <DecisionPage>
-      {/* 總覽精簡成一列：待處理的幾項在前，已結束的幾項在分隔後 */}
+      {/* 總覽精簡成一列：待裁定的幾項在前，已結束的幾項在分隔後 */}
       <section className="decision-overview" aria-label="裁定總覽">
         <dl className="decision-summary">
           {OVERVIEW_ITEMS.map(([key, label]) => {
@@ -424,10 +461,11 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
         </div>
 
         {/* 右欄工作區：批次結果 → 批次處理 → 詳情；寬視窗停在視窗內並自己捲動 */}
-        <div className="decision-pane">
+        <div className="decision-pane" ref={paneRef}>
           {batchOutcome && (
             <section className="decision-batch-results" aria-label="批次結果">
-              <h3>
+              {/* 送出批次後焦點移到這裡（送出鈕已隨批次面板消失） */}
+              <h3 ref={resultsHeadingRef} tabIndex={-1}>
                 批次結果 <HelpTip label="批次結果">每一項各自保存，不會形成概括授權。</HelpTip>
               </h3>
               <ul>
@@ -472,6 +510,7 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
               all={decisions}
               timeZone={timeZone}
               resumedCount={resumed?.requestId === selected.id ? resumed.count : null}
+              takeScrollRequest={takeScrollRequest}
               onAnswered={async (count) => {
                 // 留在剛處理的這筆，讓使用者看到裁定結果與「已恢復」
                 setSelectedId(selected.id);
@@ -480,11 +519,11 @@ export function DecisionCenter({ client, workspace, timeZone, onChange }: Props)
                 await load();
               }}
               onMerged={async (targetId) => {
-                setSelectedId(targetId);
+                select(targetId);
                 onChange?.();
                 await load();
               }}
-              onSelect={setSelectedId}
+              onSelect={select}
               reload={pinAndReload(selected.id)}
             />
           )}
@@ -677,6 +716,8 @@ interface DetailProps {
   timeZone?: string;
   /** 剛回答完恢復了幾個工作；沒有剛回答時為 null。 */
   resumedCount: number | null;
+  /** 掛載時呼叫一次：使用者剛選了這筆時回傳 true（要捲到詳情開頭）。 */
+  takeScrollRequest: (requestId: string) => boolean;
   onAnswered: (resumedCount: number) => Promise<void>;
   onMerged: (targetId: string) => Promise<void>;
   onSelect: (requestId: string) => void;
@@ -690,6 +731,7 @@ function DecisionDetail({
   all,
   timeZone,
   resumedCount,
+  takeScrollRequest,
   onAnswered,
   onMerged,
   onSelect,
@@ -699,12 +741,33 @@ function DecisionDetail({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const articleRef = useRef<HTMLElement>(null);
+  const submitRef = useRef<HTMLButtonElement>(null);
+  // 按了「採用建議」：處理區依新的草稿展開後，確定「送出裁定」在視窗內
+  const revealSubmit = useRef(false);
   const isPending = decision.status === "pending";
   const permission = decision.permission;
   const request = toAnswer(decision, draft);
+  // 「採用建議」：一鍵設定處理方式＝接受方案＋建議的選項
+  const canAdopt =
+    isPending &&
+    decision.allowed_actions.includes("accept") &&
+    decision.options.some((option) => option.id === decision.recommendation);
+  const adopt = (optionId: string) => {
+    revealSubmit.current = true;
+    setDraft({ ...draft, action: "accept", optionId });
+  };
 
-  // 換一筆時（詳情以 key 重新掛載）把右欄捲到這筆的開頭；上方有批次面板時捲過它
   useLayoutEffect(() => {
+    if (!revealSubmit.current) return;
+    revealSubmit.current = false;
+    // jsdom 沒有 scrollIntoView
+    submitRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [draft]);
+
+  // 使用者換到這筆時（詳情以 key 重新掛載）把右欄捲到這筆的開頭；上方有批次面板時捲過它。
+  // 只在掛載時判斷一次，所以 takeScrollRequest 與 decision.id 不列為相依
+  useLayoutEffect(() => {
+    if (!takeScrollRequest(decision.id)) return;
     const article = articleRef.current;
     const pane = article?.parentElement;
     if (!article || !pane) return;
@@ -730,7 +793,7 @@ function DecisionDetail({
   };
 
   // 讀起來像一份簡報：問題 → 狀態提醒 → 為什麼需要你決定 → 要做的事 → 選項與取捨 → 證據 → 阻擋範圍
-  // → 允許本次操作／修改授權 → 相似問題 → 最下面是處理方式與送出（或裁定結果）
+  // → 允許本次操作／修改授權 → 處理方式與送出（或裁定結果）→ 相似問題
   return (
     <article ref={articleRef} className="decision-detail" aria-label="裁定詳情">
       <header className="decision-detail-header">
@@ -738,7 +801,7 @@ function DecisionDetail({
         <div className="badge-group">
           <span className="badge badge-plain">{KIND_LABELS[decision.kind]}</span>
           <span className={STATUS_TONES[decision.status]}>{STATUS_LABELS[decision.status]}</span>
-          <span className={urgencyBadge(decision.urgency)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
+          <span className={urgencyBadge(decision)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
         </div>
         <p className="meta">
           <span className="decision-detail-task">Task：{decision.task_title}</span>
@@ -809,9 +872,9 @@ function DecisionDetail({
       )}
 
       {decision.authority && (
-        <section className="decision-block decision-request" aria-label="權限表攔截">
+        <section className="decision-block decision-request" aria-label="決策權限攔截">
           <h4 className="decision-heading-tip">
-            權限表攔截 <HelpTip label="權限表攔截">Controller 想自行處理這件事，但決策權限表規定必須送裁定。</HelpTip>
+            決策權限攔截 <HelpTip label="決策權限攔截">Controller 想自行處理這件事，但決策權限規定必須送裁定。</HelpTip>
           </h4>
           <dl className="facts">
             <dt>事項</dt>
@@ -837,6 +900,15 @@ function DecisionDetail({
                       <WithHashes text={option.label} />
                     </span>
                     {recommended && <span className="badge badge-success decision-recommended">建議</span>}
+                    {recommended && canAdopt && (
+                      <button
+                        type="button"
+                        className="btn-sm decision-adopt"
+                        onClick={() => adopt(option.id)}
+                      >
+                        採用建議
+                      </button>
+                    )}
                   </span>
                   {option.tradeoff && (
                     <span className="decision-tradeoff">
@@ -930,25 +1002,35 @@ function DecisionDetail({
         <AuthorizationChange client={client} workspace={workspace} capability={permission.capability} />
       )}
 
-      <RelatedDecisions client={client} decision={decision} all={all} onSelect={onSelect} onMerged={onMerged} reload={reload} />
-
+      {/* 處理區停在右欄底部（sticky），不必捲到最下面才看得到送出；送出失敗的說明放在處理區裡一起看得到 */}
       {isPending ? (
         <form className="decision-form" onSubmit={(event) => void submit(event)}>
           <ActionFields decision={decision} draft={draft} onChange={setDraft} name={`decision-${decision.id}`} />
+          {error && (
+            <p className="callout callout-danger decision-error" role="alert">
+              {error}
+            </p>
+          )}
           <div className="form-actions">
-            <button type="submit" disabled={busy || request === null}>
+            <button type="submit" ref={submitRef} disabled={busy || request === null}>
               送出裁定
             </button>
           </div>
         </form>
       ) : (
-        <DecisionOutcomeView decision={decision} all={all} timeZone={timeZone} resumedCount={resumedCount} onSelect={onSelect} />
+        <>
+          <DecisionOutcomeView decision={decision} all={all} timeZone={timeZone} resumedCount={resumedCount} onSelect={onSelect} />
+          {error && (
+            <p className="callout callout-danger decision-error" role="alert">
+              {error}
+            </p>
+          )}
+        </>
       )}
-      {error && (
-        <p className="callout callout-danger decision-error" role="alert">
-          {error}
-        </p>
-      )}
+
+      {/* 相似問題與手動連結很少用，放在處理區之後 */}
+      <RelatedDecisions client={client} decision={decision} all={all} onSelect={onSelect} onMerged={onMerged} reload={reload} />
+
       <details className="decision-more">
         <summary>詳細資訊</summary>
         <p className="meta">
@@ -1151,13 +1233,13 @@ interface OutcomeProps {
   onSelect: (requestId: string) => void;
 }
 
-/** 已結束的請求：顯示裁定結果、已過期原因或合併目標，不提供任何處理。 */
+/** 已結束的請求：顯示裁定結果、已失效原因或合併目標，不提供任何處理。 */
 function DecisionOutcomeView({ decision, all, timeZone, resumedCount, onSelect }: OutcomeProps) {
   if (decision.status === "superseded") {
     return (
       <section className="decision-outcome decision-superseded" aria-label="裁定結果">
-        <h4>已過期</h4>
-        <p>目標版本已變更，這個請求不能再套用。</p>
+        <h4>{STATUS_LABELS.superseded}</h4>
+        <p>{SUPERSEDED_NOTE}</p>
         {decision.status_reason && <p>原因：{decision.status_reason}</p>}
       </section>
     );
@@ -1367,10 +1449,11 @@ function RelatedDecisions({ client, decision, all, onSelect, onMerged, reload }:
 
 /** 決策權限頁的外框：載入中、失敗與正常畫面共用同一個 region、頁面標題與一句用途說明。 */
 function AuthorityPage({ children }: { children: ReactNode }) {
+  const headingId = useId();
   return (
-    <section className="page decision-authority" aria-label="決策權限表">
+    <section className="page decision-authority" aria-labelledby={headingId}>
       <header className="page-header">
-        <h2>決策權限</h2>
+        <h2 id={headingId}>決策權限</h2>
       </header>
       <p className="page-lede">
         決定 Controller 遇到這些事時可以自己處理、必須送裁定，還是只能由你發起。每一項都能改成任何層級，收窄或放寬都可以；「內建」是預設值，供參考。
@@ -1414,7 +1497,7 @@ export function DecisionAuthorityPanel({ client, workspace }: { client: Decision
     return (
       <AuthorityPage>
         <p className="callout callout-danger" role="alert">
-          無法取得決策權限表：{loadError}
+          無法取得決策權限：{loadError}
         </p>
       </AuthorityPage>
     );
@@ -1507,7 +1590,7 @@ export function DecisionAuthorityPanel({ client, workspace }: { client: Decision
       </div>
       <div className="form-actions decision-authority-actions">
         <button type="button" className="btn-primary" disabled={busy || !changed} onClick={() => void save()}>
-          儲存權限表
+          儲存決策權限
         </button>
         {changed && <span className="meta">已修改 {changedCount} 項，尚未儲存</span>}
         {saved && !changed && <span className="decision-saved">已儲存（第 {table.revision} 版）</span>}

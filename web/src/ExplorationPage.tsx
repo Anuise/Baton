@@ -15,7 +15,7 @@ import type {
   ReproductionPurpose,
   Workspace,
 } from "./runtimeClient";
-import { VerdictBadge } from "./VerificationPage";
+import { reasonLabel, VerdictBadge } from "./VerificationPage";
 
 type Loaded = { state: "loading" } | { state: "ready"; overview: ExplorationOverview } | { state: "failed"; reason: string };
 
@@ -147,9 +147,9 @@ export function ExplorationPage({ client, workspace, timeZone }: Props) {
   };
 
   return (
-    <section className="page exploration-page" aria-label="探索">
+    <section className="page exploration-page" aria-label="探索測試">
       <header className="page-header">
-        <h2>探索</h2>
+        <h2>探索測試</h2>
         {loaded.state !== "loading" && (
           <div className="page-actions">
             <button type="button" onClick={() => void reload()}>
@@ -160,7 +160,7 @@ export function ExplorationPage({ client, workspace, timeZone }: Props) {
       </header>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
       {loaded.state === "failed" && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>無法取得探索資料：{loaded.reason}</p>
         </div>
       )}
@@ -173,7 +173,7 @@ export function ExplorationPage({ client, workspace, timeZone }: Props) {
               <section key={group.key} className="section" aria-labelledby={headingId}>
                 <div className="section-heading">
                   <h3 id={headingId}>{group.title}</h3>
-                  {findings.length > 0 && <span className="count">{findings.length}</span>}
+                  <span className="count">{findings.length}</span>
                   {findings.length > 0 && <p>{group.note}</p>}
                 </div>
                 {findings.length === 0 && <p className="empty-note">{group.empty}</p>}
@@ -186,7 +186,7 @@ export function ExplorationPage({ client, workspace, timeZone }: Props) {
           <section className="section" aria-labelledby="exploration-charters">
             <div className="section-heading">
               <h3 id="exploration-charters">探索章程</h3>
-              {loaded.overview.charters.length > 0 && <span className="count">{loaded.overview.charters.length}</span>}
+              <span className="count">{loaded.overview.charters.length}</span>
               {loaded.overview.charters.length > 0 && <p>Controller 為每個探索 Task 定下的範圍、角色與上限。</p>}
             </div>
             {loaded.overview.charters.length === 0 && (
@@ -298,7 +298,9 @@ function FindingCard({ finding, stripe, timeZone }: { finding: ExplorationFindin
           </dl>
           {/* 重現步驟與回報資訊預設收合，長清單時整頁不會被步驟撐長；dl 與摘要同欄寬，值欄起點一致 */}
           <details className="exploration-details">
-            <summary>重現步驟與詳細資訊（{finding.steps.length} 步）</summary>
+            <summary>
+              重現步驟 <span className="count">{finding.steps.length}</span> 與詳細資訊
+            </summary>
             <div className="exploration-details-body">
               <ol aria-label={`${finding.title} 的重現步驟`}>
                 {finding.steps.map((step, index) => (
@@ -381,6 +383,8 @@ function AttemptList({ finding, timeZone }: { finding: ExplorationFinding; timeZ
 
 function AttemptItem({ attempt, timeZone }: { attempt: ReproductionAttempt; timeZone?: string }) {
   const outcome = attempt.outcome ?? "queued";
+  // reason_code 不緊貼在判定徽章旁：有中文說明時接在徽章後（代碼在 title），代碼本身放在次要資訊的最後（MASTER 7.1）
+  const reason = attempt.reason_code === undefined ? undefined : reasonLabel(attempt.reason_code);
   return (
     <li aria-label={`驗證要求 ${attempt.request_id}`} className="exploration-attempt">
       <p className="exploration-attempt-head">
@@ -399,12 +403,24 @@ function AttemptItem({ attempt, timeZone }: { attempt: ReproductionAttempt; time
         {attempt.verdict !== undefined && (
           <span>
             案例判定：<VerdictBadge verdict={attempt.verdict} />
-            {attempt.reason_code !== undefined && <span className="exploration-reason">（{attempt.reason_code}）</span>}
+            {reason !== undefined && (
+              <>
+                {" "}
+                <span className="exploration-reason" title={attempt.reason_code}>
+                  {reason}
+                </span>
+              </>
+            )}
           </span>
         )}
         {attempt.control_verdict !== undefined && (
           <span>
             對照判定：<VerdictBadge verdict={attempt.control_verdict} />
+          </span>
+        )}
+        {attempt.verdict !== undefined && attempt.reason_code !== undefined && (
+          <span>
+            案例判定代碼 <code className="mono">{attempt.reason_code}</code>
           </span>
         )}
       </p>

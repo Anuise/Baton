@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 import { CopyButton, ShortValue } from "./LongText";
+import { COLUMNS } from "./TaskBoard";
 import { shortId, sizeLabel } from "./textFormat";
 import { formatTimestamp } from "./time";
 import {
@@ -11,6 +12,8 @@ import {
   type EvidenceBundle,
   type PublishProfileResponse,
   type RunVerificationRequest,
+  type TaskClient,
+  type TaskView,
   type UncoveredItem,
   type VerificationAssertion,
   type VerificationAttempt,
@@ -27,8 +30,14 @@ import {
 
 type Loaded = { state: "loading" } | { state: "ready"; overview: VerificationOverview } | { state: "failed"; reason: string };
 
+/** 要求執行時可選的 Task；讀取失敗時退回自由輸入 Task 識別碼。 */
+type TaskChoices = { state: "loading" } | { state: "ready"; tasks: TaskView[] } | { state: "failed" };
+
+const TASK_STATUS_LABELS = new Map(COLUMNS);
+
 interface Props {
-  client: VerificationProfileClient;
+  /** 要求執行的 Task 選單另外從 Task 清單取得。 */
+  client: VerificationProfileClient & Pick<TaskClient, "getTaskBoard">;
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
@@ -212,14 +221,40 @@ function describeAssertion(assertion: VerificationAssertion): string {
   }
 }
 
-/** reason_code 與（有的話）中文說明。 */
-function ReasonCode({ code }: { code: string }) {
+/** reason_code 的中文說明；沒有中文說明時是 undefined（探索頁的重現紀錄共用）。 */
+export function reasonLabel(code: string): string | undefined {
+  return REASON_LABELS[code];
+}
+
+/**
+ * 判定徽章旁的 reason_code 中文說明，代碼放在 title；沒有中文說明時不顯示，
+ * 代碼另外列在次要資訊或細節（ReasonCodeNote），不緊貼在徽章旁（MASTER 7.1）。
+ */
+function ReasonLabel({ code }: { code: string }) {
   const label = REASON_LABELS[code];
+  return label === undefined ? null : (
+    <span className="verification-reason" title={code}>
+      {label}
+    </span>
+  );
+}
+
+/** 次要資訊列中的判定代碼：等寬。 */
+function ReasonCodeNote({ code }: { code: string }) {
   return (
-    <>
-      <code>{code}</code>
-      {label !== undefined && <span className="verification-reason">（{label}）</span>}
-    </>
+    <span>
+      判定代碼 <code className="mono">{code}</code>
+    </span>
+  );
+}
+
+/** 沒有徽章的代碼（結束原因、不重送的原因）：有中文說明時顯示說明、代碼在 title；沒有時才顯示代碼。 */
+function CodeLabel({ code, labels }: { code: string; labels: Record<string, string> }) {
+  const label = labels[code];
+  return label === undefined ? (
+    <code className="mono verification-subtle">{code}</code>
+  ) : (
+    <span title={code}>{label}</span>
   );
 }
 
@@ -258,6 +293,20 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
     };
   }, [client, workspace.id]);
 
+  const [taskChoices, setTaskChoices] = useState<TaskChoices>({ state: "loading" });
+
+  useEffect(() => {
+    // Task 清單只用於要求執行的選單：讀取失敗時退回文字輸入，不影響其他區段
+    let cancelled = false;
+    client.getTaskBoard(workspace.id).then(
+      (board) => !cancelled && setTaskChoices({ state: "ready", tasks: board.tasks }),
+      () => !cancelled && setTaskChoices({ state: "failed" }),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspace.id]);
+
   // 重新載入時不切回「載入中」，保留使用者正在編輯的 Profile 內容
   const reload = async () => {
     try {
@@ -281,7 +330,7 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
       </header>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
       {loaded.state === "failed" && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>無法取得驗證資料：{loaded.reason}</p>
         </div>
       )}
@@ -291,7 +340,7 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
           <section className="section" aria-labelledby="verification-bundles">
             <div className="section-heading">
               <h3 id="verification-bundles">最近的 Evidence Bundle</h3>
-              {loaded.overview.bundles.length > 0 && <span className="count">{loaded.overview.bundles.length}</span>}
+              <span className="count">{loaded.overview.bundles.length}</span>
               {loaded.overview.bundles.length > 1 && <p>最新的一份完整展開；較舊的只列判定，需要時再展開詳細內容。</p>}
             </div>
             {loaded.overview.bundles.length === 0 && (
@@ -310,6 +359,7 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
           </section>
           <RunForm
             overview={loaded.overview}
+            taskChoices={taskChoices}
             onRun={(request) => client.runVerification(workspace.id, request)}
             onQueued={reload}
           />
@@ -580,7 +630,7 @@ function PublishForm({
         </form>
       </details>
       {error && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>{error}</p>
         </div>
       )}
@@ -595,10 +645,12 @@ function PublishForm({
 
 function RunForm({
   overview,
+  taskChoices,
   onRun,
   onQueued,
 }: {
   overview: VerificationOverview;
+  taskChoices: TaskChoices;
   onRun: (request: RunVerificationRequest) => Promise<VerificationRequest>;
   onQueued: () => Promise<void>;
 }) {
@@ -645,14 +697,32 @@ function RunForm({
       ) : (
         <form className="panel measure-form verification-run" onSubmit={(event) => void submit(event)}>
           <div className="field">
-            <label htmlFor="verification-task">Task 識別（選填）</label>
-            <input
-              id="verification-task"
-              className="select-fit"
-              value={taskId}
-              onChange={(e) => setTaskId(e.target.value)}
-              placeholder="不填時在 Workspace 目錄中驗證"
-            />
+            {taskChoices.state === "failed" ? (
+              <>
+                <label htmlFor="verification-task">Task 識別（選填）</label>
+                <input
+                  id="verification-task"
+                  className="select-fit"
+                  value={taskId}
+                  onChange={(e) => setTaskId(e.target.value)}
+                  placeholder="不填時在 Workspace 目錄中驗證"
+                />
+                <p className="field-hint">無法取得 Task 清單，請直接輸入 Task 識別碼。</p>
+              </>
+            ) : (
+              <>
+                <label htmlFor="verification-task">Task（選填）</label>
+                <select id="verification-task" className="select-fit" value={taskId} onChange={(e) => setTaskId(e.target.value)}>
+                  <option value="">不指定（在 Workspace 目錄中驗證）</option>
+                  {taskChoices.state === "ready" &&
+                    taskChoices.tasks.map((task) => (
+                      <option key={task.id} value={task.id}>
+                        {task.title}（{TASK_STATUS_LABELS.get(task.status) ?? task.status}）
+                      </option>
+                    ))}
+                </select>
+              </>
+            )}
           </div>
           <fieldset className="verification-journey-choices">
             <legend>旅程（都不勾選時執行全部）</legend>
@@ -688,7 +758,7 @@ function RunForm({
         </form>
       )}
       {error && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>{error}</p>
         </div>
       )}
@@ -737,7 +807,7 @@ function BundleCard({
         <span className="verification-subtle nowrap">{formatTimestamp(bundle.finished_at, timeZone)}</span>
       </header>
       <p className="verification-bundle-verdict">
-        判定：<VerdictBadge verdict={bundle.verdict} /> <ReasonCode code={bundle.reason_code} />
+        判定：<VerdictBadge verdict={bundle.verdict} /> <ReasonLabel code={bundle.reason_code} />
       </p>
       {latest ? (
         body
@@ -778,20 +848,23 @@ function BundleBody({
                 <p>
                   {journey.title}
                   {journey.representative && "（代表旅程）"}：<VerdictBadge verdict={journey.verdict} />{" "}
-                  <ReasonCode code={journey.reason_code} />
+                  <ReasonLabel code={journey.reason_code} />
                 </p>
-                {(journey.persona !== undefined || journey.identity !== undefined) && (
-                  <p className="meta">
-                    <span>
-                      persona：
-                      {journey.persona === undefined ? "未指定" : titledKey(profile?.definition.personas, journey.persona)}
-                    </span>
-                    <span>
-                      登入身分：
-                      {journey.identity === undefined ? "未登入" : titledKey(profile?.definition.identities, journey.identity)}
-                    </span>
-                  </p>
-                )}
+                <p className="meta">
+                  {(journey.persona !== undefined || journey.identity !== undefined) && (
+                    <>
+                      <span>
+                        persona：
+                        {journey.persona === undefined ? "未指定" : titledKey(profile?.definition.personas, journey.persona)}
+                      </span>
+                      <span>
+                        登入身分：
+                        {journey.identity === undefined ? "未登入" : titledKey(profile?.definition.identities, journey.identity)}
+                      </span>
+                    </>
+                  )}
+                  <ReasonCodeNote code={journey.reason_code} />
+                </p>
               </li>
             ))}
           </ul>
@@ -801,6 +874,10 @@ function BundleBody({
           {bundle.uncovered.length > 0 && <UncoveredList items={bundle.uncovered} label="這次未覆蓋" level={5} />}
         </div>
         <dl className="facts">
+          <dt>判定代碼</dt>
+          <dd>
+            <code className="mono">{bundle.reason_code}</code>
+          </dd>
           <dt>建置識別</dt>
           <dd>{bundle.build ?? "無法取得"}</dd>
           <dt>候選版本</dt>
@@ -863,7 +940,9 @@ function BundleBody({
         </div>
       )}
       <details className="verification-steps">
-        <summary>步驟（{bundle.steps.length}）</summary>
+        <summary>
+          步驟 <span className="count">{bundle.steps.length}</span>
+        </summary>
         <ol aria-label={`${bundle.id} 的步驟`}>
           {bundle.steps.map((step, index) => (
             <StepView key={index} step={step} journeyTitle={(key) => journeyTitle(profile, key)} />
@@ -982,8 +1061,7 @@ function AttemptsView({ attempts, journeyTitle }: { attempts: VerificationAttemp
                   <>
                     <dt>結束原因</dt>
                     <dd>
-                      <code>{attempt.end_reason}</code>
-                      {END_REASON_LABELS[attempt.end_reason] !== undefined && `（${END_REASON_LABELS[attempt.end_reason]}）`}
+                      <CodeLabel code={attempt.end_reason} labels={END_REASON_LABELS} />
                     </dd>
                   </>
                 )}
@@ -995,11 +1073,16 @@ function AttemptsView({ attempts, journeyTitle }: { attempts: VerificationAttemp
                 <dd>{attempt.steps.length} 個</dd>
               </dl>
               {attempt.steps.length > 0 && (
-                <ul className="verification-plain-list" aria-label={`第 ${attempt.attempt} 次嘗試的步驟`}>
+                <ul className="verification-plain-list verification-attempt-steps" aria-label={`第 ${attempt.attempt} 次嘗試的步驟`}>
                   {attempt.steps.map((step, index) => (
                     <li key={index}>
-                      <span className="badge badge-plain">{PHASE_LABELS[step.phase]}</span> {stepName(step.journey, step.key, journeyTitle)}：
-                      <VerdictBadge verdict={step.verdict} /> <ReasonCode code={step.reason_code} />
+                      <p>
+                        <span className="badge badge-plain">{PHASE_LABELS[step.phase]}</span> {stepName(step.journey, step.key, journeyTitle)}：
+                        <VerdictBadge verdict={step.verdict} /> <ReasonLabel code={step.reason_code} />
+                      </p>
+                      <p className="meta">
+                        <ReasonCodeNote code={step.reason_code} />
+                      </p>
                     </li>
                   ))}
                 </ul>
@@ -1035,7 +1118,7 @@ function AttemptsView({ attempts, journeyTitle }: { attempts: VerificationAttemp
                             {takeover.not_resent.map((item, index) => (
                               <li key={index}>
                                 旅程：{journeyTitle(item.journey)}／步驟：{item.step}（第 {item.attempt} 次嘗試）：
-                                <ReasonCode code={item.reason} />
+                                <CodeLabel code={item.reason} labels={REASON_LABELS} />
                               </li>
                             ))}
                           </ul>
@@ -1129,10 +1212,11 @@ function StepView({ step, journeyTitle }: { step: VerificationStepRecord; journe
     <li aria-label={`${PHASE_LABELS[step.phase]}：${name}`} className="verification-step">
       <p>
         <span className="badge badge-plain">{PHASE_LABELS[step.phase]}</span> {stepName(step.journey, name, journeyTitle)}：
-        <VerdictBadge verdict={step.verdict} /> <ReasonCode code={step.reason_code} />
+        <VerdictBadge verdict={step.verdict} /> <ReasonLabel code={step.reason_code} />
       </p>
       <p className="meta">
         <span className="verification-operation">{step.operation}</span>
+        <ReasonCodeNote code={step.reason_code} />
         {step.engine_code !== undefined && (
           <span>
             引擎代碼 <code>{step.engine_code}</code>

@@ -46,6 +46,8 @@
      段落約每行 44 個中文字，表單 46 字寬 */
   --measure: calc(var(--text-body) * 44);
   --measure-form: calc(var(--text-body) * 46);
+  /* 閱讀型區段（設定、說明較多的表單）的寬度上限 */
+  --content-narrow: calc(var(--text-body) * 64);
 
   /* 控制項高度 */
   --control-height: 30px;
@@ -73,11 +75,10 @@
   /* 陰影：物件不加陰影；只有浮在內容上的東西（浮層、對話框）才有 */
   --shadow-popover: 0 10px 28px rgb(28 26 51 / 16%), 0 1px 3px rgb(28 26 51 / 10%);
 
-  /* 層級：固定的跑道欄 → 浮層與選單 → 對話框與遮罩 → 全域覆蓋（完全退出、更新維護） */
+  /* 層級：固定的跑道欄 → 浮層與選單 → 對話框與遮罩（完全退出、更新確認與進度） */
   --z-sticky: 10;
   --z-popover: 20;
   --z-overlay: 30;
-  --z-toast: 40;
 
   /* 動態：只對色彩、透明度、transform 做短過渡；接力棒移動用 baton 時長 */
   --duration-fast: 120ms;
@@ -149,6 +150,10 @@
   --rail-badge-bg: #ffc24b;
   --rail-badge-text: #2b1d00;
   --rail-focus: #d7d1ff;
+  /* 跑道欄上的狀態色（兩種主題都在深色底上） */
+  --rail-success: #4ade80;
+  --rail-danger: #f87171;
+  --rail-danger-text: #fca5a5;
 }
 
 /* 深色模式：覆寫全部色彩 token 與陰影，其餘尺寸 token 共用 */

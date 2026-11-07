@@ -7,6 +7,7 @@ import type {
   AccountClient,
   AccountProfile,
   AccountScheduling,
+  AuthorizationClient,
   ControllerCliClient,
   ControllerCliRun,
   ControllerCliStatus,
@@ -22,7 +23,8 @@ export const CONTROLLER_REFRESH_INTERVAL_MS = 2000;
 
 export type ControllerPageClient = ControllerCliClient &
   Pick<AccountClient, "listProfiles"> &
-  Pick<SchedulingClient, "schedulingOverview">;
+  Pick<SchedulingClient, "schedulingOverview"> &
+  Pick<AuthorizationClient, "getAuthorization">;
 
 interface Props {
   client: ControllerPageClient;
@@ -31,6 +33,8 @@ interface Props {
   timeZone?: string;
   /** 重新讀取的間隔（毫秒）；只有測試會指定。 */
   pollMs?: number;
+  /** 切到 Workspace 的其他頁面（授權未確認時的「前往授權」）；沒有傳入時不顯示按鈕。 */
+  onOpenPage?: (page: "authorization") => void;
 }
 
 const STATUS_LABELS: Record<ControllerCliStatus, string> = {
@@ -64,10 +68,10 @@ function remainingPercent(account: AccountScheduling, window: QuotaWindow): numb
   return used === null ? null : Math.round(Math.max(0, 1 - used) * 100);
 }
 
-/** 一個視窗的剩餘額度文字：「5h 剩 60%」；未知顯示「5h 未知」。 */
+/** 一個視窗的剩餘額度文字：「五小時剩 60%」；未知顯示「五小時未知」。 */
 function remainingLabel(account: AccountScheduling, window: QuotaWindow, short: string): string {
   const percent = remainingPercent(account, window);
-  return percent === null ? `${short} 未知` : `${short} 剩 ${percent}%`;
+  return percent === null ? `${short}未知` : `${short}剩 ${percent}%`;
 }
 
 /** 額度量表上的百分比；未知顯示「未知」。 */
@@ -94,13 +98,13 @@ function stripeTone(run: ControllerCliRun | null): Tone | null {
 
 /**
  * 帳號名稱在選單選項中最多的字數：額度摘要另外接在後面，避免長名稱把選單撐寬（MASTER 6.1）。
- * 1440 寬時「換成帳號」選單只有半欄寬（約 425px），17 字的名稱加上 5h／7d 額度剛好放得下，收合時看得到名稱與主要額度。
+ * 1440 寬時「換成帳號」選單只有半欄寬（約 425px），17 字的名稱加上五小時／七日額度剛好放得下，收合時看得到名稱與主要額度。
  */
 const OPTION_NAME_MAX = 17;
 
-/** 帳號的 5h／7d 剩餘額度與執行中 Worker 數，例如「5h 剩 60%｜7d 剩 85%｜執行中 Worker 1」。 */
+/** 帳號的五小時／七日剩餘額度與執行中 Worker 數，例如「五小時剩 60%｜七日剩 85%｜執行中 Worker 1」（時間窗名稱與帳號頁、時間線一致）。 */
 function quotaSummary(account: AccountScheduling): string {
-  return `${remainingLabel(account, "five_hour", "5h")}｜${remainingLabel(account, "seven_day", "7d")}｜執行中 Worker ${account.running}`;
+  return `${remainingLabel(account, "five_hour", "五小時")}｜${remainingLabel(account, "seven_day", "七日")}｜執行中 Worker ${account.running}`;
 }
 
 /** Session 說明：接續同帳號的原生 Session、換帳號重開開的新 Session，或一般的新 Session。 */
@@ -113,7 +117,7 @@ function sessionLabel(run: ControllerCliRun): string {
  * Workspace 的「Controller」頁簽（desktop-controller-cli 票 03）：選一個 Account Profile 當 Controller 帳號，
  * 由平台在外部終端機開啟互動式 Claude Code（Controller CLI），並可從 App 結束它。
  */
-export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLER_REFRESH_INTERVAL_MS }: Props) {
+export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLER_REFRESH_INTERVAL_MS, onOpenPage }: Props) {
   const [view, setView] = useState<ControllerCliView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<AccountProfile[] | null>(null);
@@ -125,6 +129,8 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const [overview, setOverview] = useState<SchedulingOverview | null>(null);
   const [overviewError, setOverviewError] = useState<string | null>(null);
   const [switchTo, setSwitchTo] = useState("");
+  // Workspace 授權尚未確認：Controller 派出的工作都不會開始。讀取失敗時維持 false，不提示
+  const [authorizationUnconfirmed, setAuthorizationUnconfirmed] = useState(false);
   // 只採用最後發出的讀取結果，避免較早的輪詢回應蓋掉剛開啟／結束的狀態
   const latest = useRef(0);
 
@@ -157,6 +163,20 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   useEffect(() => {
     void loadOverview();
   }, [loadOverview]);
+
+  useEffect(() => {
+    let current = true;
+    client.getAuthorization(workspace.id).then(
+      (authorization) => {
+        if (current) setAuthorizationUnconfirmed(authorization.status !== "confirmed");
+      },
+      // 讀不到授權狀態時不顯示提示：無法確定，就不以警示誤導
+      () => {},
+    );
+    return () => {
+      current = false;
+    };
+  }, [client, workspace.id]);
 
   useEffect(() => {
     let current = true;
@@ -233,12 +253,13 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
   const openSelectId = useId();
   const switchSelectId = useId();
   const pickHintId = useId();
+  const headingId = useId();
 
   return (
-    <section className="page controller-page" aria-label="Controller">
+    <section className="page controller-page" aria-labelledby={headingId}>
       {/* 頁面標題只寫頁名；Workspace 名稱由外殼的情境列顯示 */}
       <header className="page-header">
-        <h2>主控台</h2>
+        <h2 id={headingId}>Controller</h2>
       </header>
       {view === null && loadError === null && <p className="empty-note">載入中…</p>}
       {loadError && (
@@ -345,8 +366,8 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
             {open && controllerAccount && (
               // 額度：數字在上、量表在下；未知時只寫「未知」，不畫空的量表
               <dl className="controller-gauges" role="group" aria-label="Controller 帳號額度">
-                <QuotaGauge label="5h 剩餘" percent={remainingPercent(controllerAccount, "five_hour")} />
-                <QuotaGauge label="7d 剩餘" percent={remainingPercent(controllerAccount, "seven_day")} />
+                <QuotaGauge label="五小時剩餘" percent={remainingPercent(controllerAccount, "five_hour")} />
+                <QuotaGauge label="七日剩餘" percent={remainingPercent(controllerAccount, "seven_day")} />
                 <div className="controller-gauge">
                   <dt>執行中 Worker</dt>
                   <dd>
@@ -356,6 +377,18 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
               </dl>
             )}
             {overviewError && <p className="controller-hint">無法取得額度：{overviewError}</p>}
+
+            {/* 授權未確認時，開著或未開啟都提示：放在「開啟 Controller」區上方，開啟前就看得到 */}
+            {authorizationUnconfirmed && (
+              <div className="notice notice-warning controller-authorization">
+                <p>這個 Workspace 還沒有確認授權，Controller 派出的工作都不會開始。</p>
+                {onOpenPage && (
+                  <button type="button" onClick={() => onOpenPage("authorization")}>
+                    前往授權
+                  </button>
+                )}
+              </div>
+            )}
 
             {!open && (
               <section className="inset controller-launch" aria-label="開啟 Controller">
@@ -385,7 +418,7 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
                     disabled={busy || !selectable}
                     onClick={() => void act(() => client.openControllerCli(workspace.id, profileId))}
                   >
-                    開啟
+                    開啟 Controller
                   </button>
                 </div>
                 {profiles !== null && (

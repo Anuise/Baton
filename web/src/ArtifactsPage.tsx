@@ -88,7 +88,7 @@ export function ArtifactsPage({ client, workspace, timeZone }: Props) {
       </header>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
       {loaded.state === "failed" && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>無法取得成果：{loaded.reason}</p>
         </div>
       )}
@@ -174,7 +174,7 @@ function TaskGroup({ client, workspaceId, taskId, taskTitle, artifacts, timeZone
             {taskTitle}
           </h3>
         )}
-        <span className="count">{artifacts.length} 個成果</span>
+        <span className="count">{artifacts.length}</span>
       </div>
       <ul className="row-list">
         {artifacts.map((artifact) => (
@@ -244,7 +244,7 @@ function ArtifactItem({ client, workspaceId, artifact, timeZone }: ItemProps) {
         <ArtifactName name={artifact.name} />
         {artifact.versions.length > 1 && (
           <button type="button" className="btn-quiet btn-sm" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
-            全部版本（{artifact.versions.length}）
+            全部版本 <span className="count">{artifact.versions.length}</span>
           </button>
         )}
       </header>
@@ -338,7 +338,7 @@ function VersionRow({ client, workspaceId, artifact, version, latest, timeZone }
         </div>
       </div>
       {version.file_status !== "ok" && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>{FILE_STATUS_WARNINGS[version.file_status]}</p>
         </div>
       )}
@@ -355,13 +355,13 @@ function VersionRow({ client, workspaceId, artifact, version, latest, timeZone }
       </p>
       {version.description !== "" && <LongText text={version.description} />}
       {downloadError && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>{downloadError}</p>
         </div>
       )}
       {preview?.state === "loading" && <p className="empty-note">載入預覽中…</p>}
       {preview?.state === "failed" && (
-        <div className="callout callout-danger" role="alert">
+        <div className="notice notice-danger" role="alert">
           <p>無法預覽：{preview.reason}</p>
         </div>
       )}

@@ -38,8 +38,8 @@ describe("共同設定頁", () => {
   it("明講只讀取平常的 Claude Code 設定、不修改、不複製登入資料", async () => {
     render(<SharedSettingsPage client={fakeClient()} />);
 
-    expect(screen.getByText(/只讀取你平常的 Claude Code 設定/)).toHaveTextContent(
-      "不會修改它們，也不會複製任何登入資料",
+    expect(screen.getByText(/從你平常的 Claude Code 設定匯入/)).toHaveTextContent(
+      "只讀取、不修改原檔，也不複製登入資料",
     );
     await screen.findByText("尚未採用任何版本");
   });

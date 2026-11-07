@@ -8,6 +8,7 @@ import type {
   RecoveryStatusView,
   RunDisposition,
 } from "./runtimeClient";
+import { LongText } from "./LongText";
 import { formatTimestamp } from "./time";
 
 type StatusState =
@@ -129,27 +130,31 @@ export function RecoveryPanel({ client, pollMs = 5000, timeZone }: Props) {
             </button>
           </div>
         )}
+        {/* 與並排的平台狀態一樣有一行說明，兩個面板上緣對齊 */}
+        <p>Runtime 意外結束時自動重新啟動並恢復工作；恢復額度用盡時可以重新嘗試。</p>
       </div>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {/* 原因可能很長：長警示（只有色條與狀態詞上色），不整塊上色 */}
       {loaded.state === "failed" && (
-        <p role="alert" className="callout callout-danger">
-          無法取得恢復狀態：{loaded.reason}
-        </p>
+        <div role="alert" className="notice notice-danger">
+          <p className="notice-title">無法取得恢復狀態</p>
+          <p>{loaded.reason}</p>
+        </div>
       )}
       {loaded.state === "ready" && event === null && <p className="empty-note">沒有恢復事件</p>}
       {loaded.state === "ready" && event !== null && (
         <>
           {loaded.status.blocking !== null && (
-            <p className="callout callout-danger recovery-blocking" role="alert">
-              <span>
-                <strong>新派工已暫停</strong>：{loaded.status.blocking.message}
-              </span>
-            </p>
+            <div className="notice notice-danger recovery-blocking" role="alert">
+              <p className="notice-title">新派工已暫停</p>
+              <p>{loaded.status.blocking.message}</p>
+            </div>
           )}
           {retryError !== null && (
-            <p role="alert" className="callout callout-danger">
-              無法重新嘗試恢復：{retryError}
-            </p>
+            <div role="alert" className="notice notice-danger">
+              <p className="notice-title">無法重新嘗試恢復</p>
+              <p>{retryError}</p>
+            </div>
           )}
           <div className="panel">
             <dl className="facts">
@@ -176,7 +181,10 @@ export function RecoveryPanel({ client, pollMs = 5000, timeZone }: Props) {
               {event.last_failure !== null && (
                 <>
                   <dt>最後失敗原因</dt>
-                  <dd>{event.last_failure}</dd>
+                  {/* 原因可能很長：限 2 行、可展開，不在窄欄裡撐成一大段 */}
+                  <dd>
+                    <LongText text={event.last_failure} lines={2} />
+                  </dd>
                 </>
               )}
             </dl>

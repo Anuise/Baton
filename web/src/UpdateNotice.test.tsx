@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -129,6 +129,44 @@ describe("更新通知", () => {
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(client.applyUpdate).not.toHaveBeenCalled();
+  });
+
+  it("確認對話框是 modal：開啟時焦點移到「取消」，Esc 關閉並把焦點還給「更新並重新開啟…」", async () => {
+    const client = fakeClient();
+    render(<UpdateNotice client={client} runtimeStartedAt={STARTED_AT} />);
+    await settle();
+    const opener = screen.getByRole("button", { name: "更新並重新開啟…" });
+    opener.focus();
+
+    await click(opener);
+
+    const dialog = screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" });
+    expect(dialog.tagName).toBe("DIALOG");
+    expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
+
+    await act(async () => {
+      fireEvent.keyDown(within(dialog).getByRole("button", { name: "取消" }), { key: "Escape" });
+    });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+    expect(client.applyUpdate).not.toHaveBeenCalled();
+  });
+
+  it("下載並驗證中按 Esc 不會關閉確認對話框", async () => {
+    const client = fakeClient();
+    client.applyUpdate.mockImplementationOnce(() => new Promise<UpdateStatusView>(() => {}));
+    render(<UpdateNotice client={client} runtimeStartedAt={STARTED_AT} />);
+    await settle();
+    await click(screen.getByRole("button", { name: "更新並重新開啟…" }));
+    await click(screen.getByRole("button", { name: "更新並重新開啟" }));
+
+    const dialog = screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" });
+    await act(async () => {
+      fireEvent.keyDown(dialog, { key: "Escape" });
+    });
+
+    expect(screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" })).toHaveTextContent("下載並驗證中…");
   });
 
   it("確認後以看到的版本同意更新，下載並驗證期間顯示進度，開始維護後改顯示更新進度", async () => {

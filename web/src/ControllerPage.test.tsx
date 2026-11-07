@@ -15,6 +15,7 @@ import {
 import type {
   AccountProfile,
   AccountScheduling,
+  AuthorizationView,
   ControllerCliRun,
   ControllerCliView,
   SchedulingOverview,
@@ -46,7 +47,19 @@ const spare = profile({ id: "prof_2", name: "第二帳號" });
 
 const viewOf = (run: ControllerCliRun | null): ControllerCliView => ({ workspace_id: "ws_1", run, playbook_version: "1" });
 
-/** 排程總覽裡的帳號：5h／7d 已用比例（null 是未知）與執行中 Worker 數。 */
+/** Workspace 授權：這一頁只看 status。 */
+const authorizationOf = (status: AuthorizationView["status"]): AuthorizationView => ({
+  workspace_id: "ws_1",
+  status,
+  effective: null,
+  revisions: [],
+  templates: [],
+  capabilities: [],
+  risk_disclosure: "",
+  legacy_runs: [],
+});
+
+/** 排程總覽裡的帳號：五小時／七日已用比例（null 是未知）與執行中 Worker 數。 */
 function accountWith(
   profileId: string,
   fiveHourUsed: number | null,
@@ -95,11 +108,17 @@ function fakeClient(
     ),
     listProfiles: vi.fn(async () => ({ profiles, limit: 8 })),
     schedulingOverview: vi.fn(async () => overview),
+    // 預設授權已確認：不顯示授權提示
+    getAuthorization: vi.fn(async () => authorizationOf("confirmed")),
   };
 }
 
-const renderPage = (client: ReturnType<typeof fakeClient>, pollMs?: number) =>
-  render(<ControllerPage client={client} workspace={workspace} timeZone="Asia/Taipei" pollMs={pollMs} />);
+const renderPage = (client: ReturnType<typeof fakeClient>, pollMs?: number, onOpenPage?: (page: "authorization") => void) =>
+  render(
+    <ControllerPage client={client} workspace={workspace} timeZone="Asia/Taipei" pollMs={pollMs} onOpenPage={onOpenPage} />,
+  );
+
+const AUTHORIZATION_NOTICE = "這個 Workspace 還沒有確認授權，Controller 派出的工作都不會開始。";
 
 /** 在假計時器下讓排隊中的 Promise 與 React 更新全部完成。 */
 async function settle(ms = 0) {
@@ -111,9 +130,9 @@ async function settle(ms = 0) {
 /** 狀態欄位的值。 */
 const fact = (term: string) => screen.getByText(term, { selector: "dt" }).nextElementSibling;
 
-/** 「開啟」按鈕：狀態與帳號清單的到達順序不定，等兩者都讀回、按鈕可以按了再回傳。 */
+/** 「開啟 Controller」按鈕：狀態與帳號清單的到達順序不定，等兩者都讀回、按鈕可以按了再回傳。 */
 async function enabledOpenButton() {
-  const button = await screen.findByRole("button", { name: "開啟" });
+  const button = await screen.findByRole("button", { name: "開啟 Controller" });
   await waitFor(() => expect(button).toBeEnabled());
   return button;
 }
@@ -127,7 +146,7 @@ describe("ControllerPage", () => {
     const archived = profile({ id: "prof_9", name: "舊帳號", status: "archived", dispatchable: false });
     renderPage(fakeClient(null, [notLoggedIn, profile(), archived]));
 
-    expect(await screen.findByRole("heading", { name: "主控台" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Controller" })).toBeInTheDocument();
     // 標題不等狀態讀回就會出現：等狀態區出現再斷言
     await waitFor(() => expect(fact("狀態")).toHaveTextContent("未開啟"));
     const select = await screen.findByLabelText("Controller 帳號");
@@ -138,7 +157,7 @@ describe("ControllerPage", () => {
     expect(screen.getByRole("list", { name: "不可用的帳號" })).toHaveTextContent(
       "備用帳號：尚未核對登入狀態；請完成原生登入後按「重新核對」",
     );
-    expect(screen.getByRole("button", { name: "開啟" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "開啟 Controller" })).toBeEnabled();
   });
 
   it("從未開啟過也顯示操作手冊版本，收在「詳細資訊」裡", async () => {
@@ -175,7 +194,7 @@ describe("ControllerPage", () => {
     renderPage(fakeClient(null, [notLoggedIn]));
 
     expect(await screen.findByText("沒有可用的帳號，請到「帳號」新增或重新核對")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "開啟" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "開啟 Controller" })).toBeDisabled();
   });
 
   it("按開啟以選中的帳號呼叫 open，顯示開啟中並改為提示切到終端機", async () => {
@@ -189,7 +208,7 @@ describe("ControllerPage", () => {
     expect(fact("狀態")).toHaveTextContent("開啟中");
     expect(fact("Controller 帳號")).toHaveTextContent("主要帳號");
     expect(screen.getByText("已在終端機開啟，請切到該視窗操作")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "開啟" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "開啟 Controller" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "結束" })).toBeEnabled();
   });
 
@@ -339,7 +358,7 @@ describe("ControllerPage", () => {
       // 例如開啟被拒後重新讀取，讀到另一個視窗以 prof_1 開過又結束的 Run
       client.getControllerCli.mockResolvedValue(viewOf({ ...lastRun, profile_id: "prof_1" }));
       client.openControllerCli.mockRejectedValueOnce(new Error("暫時無法開啟"));
-      await user.click(screen.getByRole("button", { name: "開啟" }));
+      await user.click(screen.getByRole("button", { name: "開啟 Controller" }));
       expect(await screen.findByRole("alert")).toHaveTextContent("暫時無法開啟");
 
       expect(screen.getByLabelText("Controller 帳號")).toHaveValue("prof_2");
@@ -379,24 +398,24 @@ describe("ControllerPage", () => {
     expect(within(screen.getByRole("region", { name: "Controller" })).queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("帳號選單顯示每個可用帳號的 5h／7d 剩餘額度與執行中 Worker 數，未知額度顯示未知", async () => {
+  it("帳號選單顯示每個可用帳號的五小時／七日剩餘額度與執行中 Worker 數，未知額度顯示未知", async () => {
     const overview = schedulingOverview({ accounts: [accountWith("prof_1", 0.4, 0.15, 1), accountWith("prof_2", null, 0.5, 0)] });
     const client = fakeClient(null, [notLoggedIn, profile(), spare], overview);
     renderPage(client);
 
-    expect(await screen.findByRole("option", { name: "主要帳號（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）" })).toBeEnabled();
-    expect(screen.getByRole("option", { name: "第二帳號（5h 未知｜7d 剩 50%｜執行中 Worker 0）" })).toBeEnabled();
+    expect(await screen.findByRole("option", { name: "主要帳號（五小時剩 60%｜七日剩 85%｜執行中 Worker 1）" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "第二帳號（五小時未知｜七日剩 50%｜執行中 Worker 0）" })).toBeEnabled();
     expect(screen.getByRole("option", { name: "備用帳號（尚未核對）" })).toBeDisabled();
     expect(client.schedulingOverview).toHaveBeenCalledTimes(1);
   });
 
-  it("帳號名稱很長時選項只取前段（17 字含…）再接額度：半寬的「換成帳號」選單收合時仍看得到名稱與 5h／7d 額度", async () => {
+  it("帳號名稱很長時選項只取前段（17 字含…）再接額度：半寬的「換成帳號」選單收合時仍看得到名稱與五小時／七日額度", async () => {
     const longName = "長文字壓力測試專用標記的帳號 0：研發部門共用的高額度訂閱（請勿用於個人專案）";
     const overview = schedulingOverview({ accounts: [accountWith("prof_1", 0.4, 0.15, 1)] });
     renderPage(fakeClient(null, [profile({ name: longName })], overview));
 
-    const option = await screen.findByRole("option", { name: /（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）$/ });
-    expect(option.textContent).toBe("長文字壓力測試專用標記的帳號 0…（5h 剩 60%｜7d 剩 85%｜執行中 Worker 1）");
+    const option = await screen.findByRole("option", { name: /（五小時剩 60%｜七日剩 85%｜執行中 Worker 1）$/ });
+    expect(option.textContent).toBe("長文字壓力測試專用標記的帳號 0…（五小時剩 60%｜七日剩 85%｜執行中 Worker 1）");
   });
 
   it("額度讀取失敗時仍可開啟，只提示無法取得額度", async () => {
@@ -407,7 +426,7 @@ describe("ControllerPage", () => {
     expect(await screen.findByText("無法取得額度：Runtime 離線")).toBeInTheDocument();
     // 額度的錯誤可能比狀態與帳號清單先到
     expect(await screen.findByRole("option", { name: "主要帳號" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "開啟" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "開啟 Controller" })).toBeEnabled();
   });
 
   it("開著時顯示 Controller 帳號的額度與執行中 Worker 數，輪詢時一起更新", async () => {
@@ -425,14 +444,14 @@ describe("ControllerPage", () => {
 
     // 額度是三個指標（dt 標籤、dd 數值）
     await screen.findByRole("group", { name: "Controller 帳號額度" });
-    expect(fact("5h 剩餘")).toHaveTextContent("70%");
-    expect(fact("7d 剩餘")).toHaveTextContent("80%");
+    expect(fact("五小時剩餘")).toHaveTextContent("70%");
+    expect(fact("七日剩餘")).toHaveTextContent("80%");
     expect(fact("執行中 Worker")).toHaveTextContent("0");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
 
     release();
-    await waitFor(() => expect(fact("5h 剩餘")).toHaveTextContent("45%"));
-    expect(fact("7d 剩餘")).toHaveTextContent("75%");
+    await waitFor(() => expect(fact("五小時剩餘")).toHaveTextContent("45%"));
+    expect(fact("七日剩餘")).toHaveTextContent("75%");
     expect(fact("執行中 Worker")).toHaveTextContent("2");
     expect(client.schedulingOverview.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
@@ -530,5 +549,73 @@ describe("ControllerPage", () => {
 
     expect(await screen.findByText("結束原因：已換帳號重開")).toBeInTheDocument();
     expect(screen.queryByText(/換帳號重開中/)).not.toBeInTheDocument();
+  });
+
+  describe("Workspace 授權未確認時提示 Controller 派出的工作不會開始", () => {
+    it("在「開啟 Controller」區上方顯示提示，「前往授權」切到授權頁", async () => {
+      const user = userEvent.setup();
+      const client = fakeClient();
+      client.getAuthorization.mockResolvedValue(authorizationOf("unconfirmed"));
+      const onOpenPage = vi.fn();
+      renderPage(client, undefined, onOpenPage);
+
+      const notice = (await screen.findByText(AUTHORIZATION_NOTICE)).closest(".notice")!;
+      expect(client.getAuthorization).toHaveBeenCalledWith("ws_1");
+      expect(notice).toHaveClass("notice-warning");
+      // 提示在開啟區之前（文件順序）
+      const launch = screen.getByRole("region", { name: "開啟 Controller" });
+      expect(notice.compareDocumentPosition(launch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      // 開啟仍可按：授權未確認不擋開啟，只是派出的工作不會開始
+      expect(await enabledOpenButton()).toBeEnabled();
+
+      await user.click(within(notice as HTMLElement).getByRole("button", { name: "前往授權" }));
+      expect(onOpenPage).toHaveBeenCalledWith("authorization");
+    });
+
+    it("開著時也提示", async () => {
+      const client = fakeClient(controllerCliRun());
+      client.getAuthorization.mockResolvedValue(authorizationOf("unconfirmed"));
+      renderPage(client);
+
+      expect(await screen.findByText(AUTHORIZATION_NOTICE)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "結束" })).toBeEnabled();
+    });
+
+    it("沒有傳入 onOpenPage 時只顯示提示，沒有「前往授權」", async () => {
+      const client = fakeClient();
+      client.getAuthorization.mockResolvedValue(authorizationOf("unconfirmed"));
+      renderPage(client);
+
+      expect(await screen.findByText(AUTHORIZATION_NOTICE)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "前往授權" })).not.toBeInTheDocument();
+    });
+
+    it("已確認或讀取失敗時不提示", async () => {
+      const confirmed = fakeClient();
+      const page = renderPage(confirmed, undefined, vi.fn());
+      await enabledOpenButton();
+      await waitFor(() => expect(confirmed.getAuthorization).toHaveBeenCalled());
+      expect(screen.queryByText(AUTHORIZATION_NOTICE)).not.toBeInTheDocument();
+      page.unmount();
+
+      const failing = fakeClient();
+      failing.getAuthorization.mockRejectedValue(new Error("Runtime 離線"));
+      renderPage(failing, undefined, vi.fn());
+      await enabledOpenButton();
+      await waitFor(() => expect(failing.getAuthorization).toHaveBeenCalled());
+      expect(screen.queryByText(AUTHORIZATION_NOTICE)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "前往授權" })).not.toBeInTheDocument();
+      // 讀取失敗不當成錯誤警示
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+  });
+
+  it("頁面區域以 h2 命名，主要按鈕寫出受詞「開啟 Controller」", async () => {
+    renderPage(fakeClient());
+
+    const region = screen.getByRole("region", { name: "Controller" });
+    const heading = within(region).getByRole("heading", { level: 2, name: "Controller" });
+    expect(region).toHaveAttribute("aria-labelledby", heading.id);
+    expect(await enabledOpenButton()).toHaveTextContent(/^開啟 Controller$/);
   });
 });

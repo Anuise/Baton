@@ -157,6 +157,19 @@ const isIntegrationActive = (status: IntegrationStatus) => status !== "integrate
 const isIntegrationProcessing = (status: IntegrationStatus) =>
   status === "merging" || status === "verifying" || status === "advancing";
 
+/** 開發 Task 的成果已通過驗證、排入整合：整合完成前仍停在 verifying，由系統處理，也不能再手動接受。 */
+const isAwaitingIntegration = (task: TaskView, integration: IntegrationEntry | null) =>
+  task.status === "verifying" && integration !== null && isIntegrationActive(integration.status);
+
+/**
+ * 需要使用者處理的 Task（MASTER 7.1：琥珀色只給要你處理的事）：等你裁定、受阻、等你檢視與接受成果。
+ * 驗證中但已排入整合的由系統處理；等待資源是系統在等額度或名額，都維持中性。
+ */
+function needsUser(task: TaskView, integrations: IntegrationEntry[]): boolean {
+  if (task.status === "waiting_decision" || task.status === "blocked") return true;
+  return task.status === "verifying" && !isAwaitingIntegration(task, latestIntegration(integrations, task.id));
+}
+
 /** Run 仍在進行（尚未結束）。 */
 const isRunActive = (status: RunStatus) => status === "queued" || status === "starting" || status === "running";
 
@@ -242,6 +255,9 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
   >(null);
   const [cardError, setCardError] = useState<{ taskId: string; message: string } | null>(null);
   const [queuedNotice, setQueuedNotice] = useState<QueuedNotice | null>(null);
+  const headingId = useId();
+  // 各欄的標題：計數列點擊後把看板捲到該欄並把焦點移過去
+  const columnHeadings = useRef<Partial<Record<TaskStatus, HTMLHeadingElement | null>>>({});
 
   const load = useCallback(async () => {
     try {
@@ -269,9 +285,9 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
   // 讀取中與讀取失敗也輸出同樣的頁面標題，標題不會在讀回後才跳出來
   if (loaded.state !== "ready") {
     return (
-      <section className="page task-board" aria-label="工作面板">
+      <section className="page task-board" aria-labelledby={headingId}>
         <header className="page-header">
-          <h2>工作</h2>
+          <h2 id={headingId}>工作</h2>
         </header>
         {loaded.state === "loading" ? (
           <p className="empty-note">載入中…</p>
@@ -313,10 +329,18 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
     await load();
   };
 
+  /** 計數列：把看板捲到該欄（左緣留出邊緣淡出的寬度，見 tasks.css 的 scroll-padding）並把焦點移到欄標題。 */
+  const jumpTo = (status: TaskStatus) => {
+    const heading = columnHeadings.current[status];
+    if (!heading) return;
+    heading.scrollIntoView({ block: "nearest", inline: "start" });
+    heading.focus({ preventScroll: true });
+  };
+
   return (
-    <section className="page task-board" aria-label="工作面板">
+    <section className="page task-board" aria-labelledby={headingId}>
       <header className="page-header">
-        <h2>工作</h2>
+        <h2 id={headingId}>工作</h2>
         <div className="page-actions">
           <button
             type="button"
@@ -344,59 +368,90 @@ export function TaskBoard({ client, workspace, timeZone }: Props) {
         />
       )}
 
-      {/* 看板：每個狀態是一條跑道，依狀態流的順序由左到右；欄位多時在自己的容器內水平捲動 */}
-      <div className="task-columns">
-        {COLUMNS.map(([status, label]) => {
-          const tasks = board.tasks.filter((t) => t.status === status);
-          return (
-            <section
-              key={status}
-              className={tasks.length === 0 ? "task-column task-column-empty" : "task-column"}
-              aria-label={`${label}（${tasks.length}）`}
-            >
-              <header className="task-column-head">
-                <h3>{label}</h3>
-                <span className="count">{tasks.length}</span>
-              </header>
-              {tasks.map((task) => (
-                <TaskCard
-                  key={task.id}
-                  client={client}
-                  workspaceId={workspace.id}
-                  task={task}
-                  goalTitle={board.goals.find((g) => g.id === task.goal_id)?.title ?? task.goal_id}
-                  titleOf={titleOf}
-                  others={board.tasks.filter((t) => t.id !== task.id)}
-                  run={latestRun(board.runs, task.id)}
-                  verification={latestVerification(board.verifications, task.id)}
-                  workdir={board.workdirs.filter((w) => w.task_id === task.id).at(-1) ?? null}
-                  runLabelOf={runLabelOf}
-                  integration={latestIntegration(board.integrations, task.id)}
-                  budget={board.budgets.find((b) => b.task_id === task.id) ?? null}
-                  handoff={(board.handoffs ?? []).filter((h) => h.task_id === task.id).at(-1) ?? null}
-                  profileNameOf={profileNameOf}
-                  accountName={accountNameOf(overview, board.runs, task.id)}
-                  authorizationRevision={board.authorization_revision}
-                  queued={queuedInfo(overview, queuedNotice, task)}
-                  timeZone={timeZone}
-                  error={cardError?.taskId === task.id ? cardError.message : null}
-                  onReady={() => void act(task, () => client.markTaskReady(workspace.id, task.id))}
-                  onCancel={() => void act(task, () => client.cancelTask(workspace.id, task.id))}
-                  onDispatch={() =>
-                    void act(task, async () => {
-                      const result = await client.dispatchTask(workspace.id, task.id);
-                      if (result.kind === "queued") setQueuedNotice({ taskId: task.id, reasons: result.reasons });
-                    })
-                  }
-                  onCancelRun={(runId) => void act(task, () => client.cancelRun(workspace.id, runId))}
-                  onEdit={(returnFocus) => setPanel({ kind: "edit", task, returnFocus })}
-                  onAddDependency={(dependsOn) => act(task, () => client.addTaskDependency(workspace.id, task.id, dependsOn))}
-                  onAccepted={() => void load()}
-                />
-              ))}
-            </section>
-          );
-        })}
+      <div className="task-lanes">
+        {/* 計數列：9 欄在窄的主區只看得到前幾欄，右邊需要你處理的欄位（裁定、受阻、驗證中）從這裡一眼看到、一鍵跳過去 */}
+        <nav className="task-status-counts" aria-label="跳到狀態欄">
+          {COLUMNS.map(([status, label]) => {
+            const tasks = board.tasks.filter((t) => t.status === status);
+            const attention = tasks.some((t) => needsUser(t, board.integrations));
+            return (
+              <button
+                key={status}
+                type="button"
+                className={`btn-quiet btn-sm task-status-count${attention ? " task-status-count-attention" : ""}`}
+                onClick={() => jumpTo(status)}
+              >
+                {/* 需要你處理的狀態除了琥珀色，還多一個狀態點，不只靠顏色區分 */}
+                <span className={attention ? "dot dot-warning" : undefined}>{label}</span>
+                <span className="tabular">{tasks.length}</span>
+                {attention && <span className="visually-hidden">，需要你處理</span>}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* 看板：每個狀態是一條跑道，依狀態流的順序由左到右；欄位多時在自己的容器內水平捲動 */}
+        <div className="task-columns">
+          {COLUMNS.map(([status, label]) => {
+            const tasks = board.tasks.filter((t) => t.status === status);
+            return (
+              <section
+                key={status}
+                className={tasks.length === 0 ? "task-column task-column-empty" : "task-column"}
+                aria-label={`${label}（${tasks.length}）`}
+              >
+                <header className="task-column-head">
+                  {/* tabIndex -1：計數列可以把焦點移到這裡，但不加進 Tab 順序 */}
+                  <h3
+                    tabIndex={-1}
+                    ref={(element) => {
+                      columnHeadings.current[status] = element;
+                    }}
+                  >
+                    {label}
+                  </h3>
+                  <span className="count">{tasks.length}</span>
+                </header>
+                {tasks.map((task) => (
+                  <TaskCard
+                    key={task.id}
+                    client={client}
+                    workspaceId={workspace.id}
+                    task={task}
+                    goalTitle={board.goals.find((g) => g.id === task.goal_id)?.title ?? task.goal_id}
+                    titleOf={titleOf}
+                    others={board.tasks.filter((t) => t.id !== task.id)}
+                    run={latestRun(board.runs, task.id)}
+                    verification={latestVerification(board.verifications, task.id)}
+                    workdir={board.workdirs.filter((w) => w.task_id === task.id).at(-1) ?? null}
+                    runLabelOf={runLabelOf}
+                    integration={latestIntegration(board.integrations, task.id)}
+                    budget={board.budgets.find((b) => b.task_id === task.id) ?? null}
+                    handoff={(board.handoffs ?? []).filter((h) => h.task_id === task.id).at(-1) ?? null}
+                    profileNameOf={profileNameOf}
+                    accountName={accountNameOf(overview, board.runs, task.id)}
+                    authorizationRevision={board.authorization_revision}
+                    queued={queuedInfo(overview, queuedNotice, task)}
+                    timeZone={timeZone}
+                    error={cardError?.taskId === task.id ? cardError.message : null}
+                    onReady={() => void act(task, () => client.markTaskReady(workspace.id, task.id))}
+                    onCancel={() => void act(task, () => client.cancelTask(workspace.id, task.id))}
+                    onDispatch={() =>
+                      void act(task, async () => {
+                        const result = await client.dispatchTask(workspace.id, task.id);
+                        if (result.kind === "queued") setQueuedNotice({ taskId: task.id, reasons: result.reasons });
+                      })
+                    }
+                    onCancelRun={(runId) => void act(task, () => client.cancelRun(workspace.id, runId))}
+                    onEdit={(returnFocus) => setPanel({ kind: "edit", task, returnFocus })}
+                    onAddDependency={(dependsOn) => act(task, () => client.addTaskDependency(workspace.id, task.id, dependsOn))}
+                    onAccepted={() => void load()}
+                  />
+                ))}
+              </section>
+            );
+          })}
+        </div>
       </div>
     </section>
   );
@@ -447,7 +502,12 @@ interface CardProps {
 
 type HistoryState = { state: "loading" } | { state: "ready"; contracts: TaskContract[] } | { state: "failed"; reason: string };
 
-type StatusTone = "success" | "warning" | "danger" | "accent";
+/** neutral：系統自己在等（排隊、等待相依），用中性的 badge-plain／stripe-muted（MASTER 7.1）。 */
+type StatusTone = "success" | "warning" | "danger" | "accent" | "neutral";
+
+/** 狀態色調對應的徽章與色條 class；中性改用 badge-plain、stripe-muted。 */
+const badgeClass = (tone: StatusTone) => (tone === "neutral" ? "badge badge-plain" : `badge badge-${tone}`);
+const stripeClass = (tone: StatusTone) => (tone === "neutral" ? "stripe-muted" : `stripe-${tone}`);
 
 /** 卡片上的一行狀態：徽章（最多 6 個字）＋ 一行說明；細節在「詳細資訊」裡。 */
 interface CardStatus {
@@ -492,7 +552,7 @@ function cardStatuses({
   if (queued) {
     const categories = WAIT_CATEGORY_LABELS.filter(([category]) => queued.reasons.some((r) => r.category === category));
     statuses.push({
-      tone: "warning",
+      tone: "neutral",
       label: queued.position === null ? "排隊中" : `排隊第 ${queued.position} 位`,
       text: categories.length === 0 ? "等待排程處理" : categories.map(([, label]) => label).join("、"),
     });
@@ -520,7 +580,7 @@ function cardStatuses({
     statuses.push({ tone: "success", label: RUN_STATUS_LABELS[run.status], text: accountName && `帳號 ${accountName}` });
   }
   if (task.unfinished_dependencies.length > 0) {
-    statuses.push({ tone: "warning", label: "等待相依", text: task.unfinished_dependencies.map(titleOf).join("、") });
+    statuses.push({ tone: "neutral", label: "等待相依", text: task.unfinished_dependencies.map(titleOf).join("、") });
   }
   if (workdir?.cleanup?.status === "failed") statuses.push({ tone: "danger", label: "清理失敗", text: workdir.cleanup.failure });
   return statuses;
@@ -561,14 +621,13 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   }, [client, workspaceId, task.id, task.contract_version, historyOpen]);
 
   const closed = isClosed(task.status);
-  // 開發 Task 的成果已通過驗證、排入整合：整合完成前仍停在 verifying，也不能再手動接受
-  const awaitingIntegration = task.status === "verifying" && integration !== null && isIntegrationActive(integration.status);
+  const awaitingIntegration = isAwaitingIntegration(task, integration);
   // 驗證中的卡片以「成果驗證」區塊當狀態列與主要動作
   const verifying = task.status === "verifying" && !awaitingIntegration;
   const status = verifying
     ? null
     : cardStatus({ task, run, queued, budget, workdir, handoff, integration, awaitingIntegration, verification, accountName, titleOf });
-  const stripe = verifying ? "accent" : status?.tone;
+  const stripe = verifying ? "stripe-accent" : status && stripeClass(status.tone);
   const canCancelRun = run !== null && isRunActive(run.status) && run.cancel_requested_at === null;
   const hasMore = canCancelRun || !closed;
 
@@ -594,7 +653,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   };
 
   return (
-    <article className={stripe ? `card task-card stripe-${stripe}` : "card task-card"} aria-label={task.title}>
+    <article className={stripe ? `card task-card ${stripe}` : "card task-card"} aria-label={task.title}>
       {/* 標題最多 2 行、種類與 Goal 1 行；展開「詳細資訊」時顯示完整文字 */}
       <h4 className="task-title clamp-2" title={task.title}>
         {task.title}
@@ -607,7 +666,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       </p>
       {status && (
         <p className="task-status">
-          <span className={`badge badge-${status.tone}`}>{status.label}</span>
+          <span className={badgeClass(status.tone)}>{status.label}</span>
           {status.others[0] && (
             <span className="badge badge-danger" title={status.others[0].text ?? undefined}>
               {status.others[0].label}
@@ -739,6 +798,10 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
               onKeyDown={closeMoreOnEscape}
             >
               更多
+              {/* ▾ 與其他頁的 .more-menu 一致；只是裝飾，不進可存取名稱 */}
+              <span className="task-more-caret" aria-hidden="true">
+                ▾
+              </span>
             </button>
           )}
         </div>
@@ -1569,13 +1632,14 @@ function TaskForm({ client, workspaceId, board, task, onDone, onClose, onGoalCre
               ))}
             </div>
           )}
+          {/* Windows 慣例（MASTER 7.1）：動作列靠右，主要動作在前、關閉在後 */}
           <div className="dialog-actions">
-            <button type="button" onClick={onClose}>
-              關閉
-            </button>
             {/* 不用 disabled：按鈕被停用時瀏覽器會把焦點移到 body，離開對話框 */}
             <button type="submit" aria-disabled={busy}>
               {task ? "儲存契約" : "建立"}
+            </button>
+            <button type="button" onClick={onClose}>
+              關閉
             </button>
           </div>
         </footer>

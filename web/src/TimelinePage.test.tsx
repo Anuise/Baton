@@ -205,6 +205,39 @@ describe("時間線", () => {
     expect(items[2]).not.toHaveTextContent("Run：");
   });
 
+  it("事件類型以中文名稱為主要文字，原始代碼放在 title 與「細節」；沒有中文名稱時才顯示代碼（等寬）", async () => {
+    const unknown = timelineEvent({ seq: 4, event_type: "some_future_event", task_ids: [], run_id: null });
+    renderPage(fakeClient({ events: [...allEvents, unknown] }));
+
+    const list = await screen.findByRole("list", { name: "事件" });
+    const items = within(list).getAllByRole("listitem");
+    const type = (item: HTMLElement) => item.querySelector(".timeline-event-main > .timeline-type")!;
+    expect(type(items[0])).toHaveTextContent(/^建立 Run$/);
+    expect(type(items[0])).toHaveAttribute("title", "run_created");
+    expect(type(items[0])).not.toHaveClass("mono");
+    expect(type(items[1])).toHaveTextContent(/^要求交接$/);
+    expect(type(items[2])).toHaveTextContent(/^提出裁定$/);
+    // 原始代碼在預設收合的「細節」
+    const code = within(items[0].querySelector("details")!).getByText("run_created");
+    expect(code).toHaveClass("mono");
+    expect(code).not.toBeVisible();
+    // 沒有對照的事件類型：顯示代碼本身
+    expect(type(items[3])).toHaveTextContent(/^some_future_event$/);
+    expect(type(items[3])).toHaveClass("mono", "timeline-type-code");
+  });
+
+  it("關鍵字也比對事件類型的中文名稱", async () => {
+    const user = userEvent.setup();
+    renderPage(fakeClient());
+    await screen.findByRole("list", { name: "事件" });
+
+    await user.type(screen.getByRole("searchbox", { name: "搜尋事件" }), "提出裁定");
+
+    const items = within(screen.getByRole("list", { name: "事件" })).getAllByRole("listitem");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toHaveTextContent("decision_requested");
+  });
+
   it("每個事件的細節預設收合：對象、完整的 Task 名稱與事件內容", async () => {
     const event = timelineEvent({
       seq: 5,

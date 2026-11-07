@@ -20,7 +20,7 @@
   margin-top: calc(var(--space-6) * -1);
 }
 
-/* 一列數字：「待處理 3」，待處理的幾項在前，已結束的幾項在分隔線之後 */
+/* 一列數字：「可處理 3」，待裁定的幾項在前，已結束的幾項在分隔線之後 */
 .decision-center .decision-summary {
   display: flex;
   flex-wrap: wrap;
@@ -307,7 +307,7 @@
   margin-top: var(--space-2);
 }
 
-/* 權限提示、權限表攔截（Agent 想做的事）：下沉的嵌入區 */
+/* 權限提示、決策權限攔截（Agent 想做的事）：下沉的嵌入區 */
 .decision-center .decision-request {
   padding: var(--space-5) var(--space-6);
   border-radius: var(--radius-md);
@@ -319,10 +319,10 @@
   background: var(--color-surface);
 }
 
-/* 選項與取捨：每個選項一列；建議的選項左側綠色色條＋「建議」徽章 */
+/* 選項與取捨：每個選項一列，列與列之間細線分隔（詳情卡裡不再放有框的子卡片）；
+   建議的選項以「建議」徽章標示，旁邊是「採用建議」 */
 .decision-center .decision-block .decision-options {
   display: grid;
-  gap: var(--space-3);
   padding: 0;
   list-style: none;
 }
@@ -331,13 +331,19 @@
   display: grid;
   gap: var(--space-1);
   margin: 0;
-  padding: var(--space-4) var(--space-5);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  padding: var(--space-4) 0;
 }
 
-.decision-center .decision-option.is-recommended {
-  border-left: 3px solid var(--color-success);
+.decision-center .decision-block .decision-option:first-child {
+  padding-top: 0;
+}
+
+.decision-center .decision-block .decision-option:last-child {
+  padding-bottom: 0;
+}
+
+.decision-center .decision-block .decision-option + .decision-option {
+  border-top: 1px solid var(--color-border);
 }
 
 .decision-center .decision-option-head {
@@ -403,22 +409,44 @@
   justify-items: start;
 }
 
-/* ---------- 最下面的處理區：處理方式 → 選項或文字 → 送出 ---------- */
+/* ---------- 處理區：處理方式 → 選項或文字 → 送出（已結束的請求是裁定結果） ---------- */
+/* border-box：padding 算在閱讀寬度內，與上方各區塊同寬 */
 .decision-center .decision-form,
 .decision-center .decision-outcome {
   display: grid;
   gap: var(--space-5);
+  box-sizing: border-box;
   padding: var(--space-6);
   border-radius: var(--radius-md);
   background: var(--color-surface-sunken);
 }
 
-.decision-center .decision-outcome > h4 {
-  font-size: var(--text-title-sm);
+/* 待裁定的處理區停在右欄底部（右欄是捲動容器），不必捲到最下面才看得到送出；
+   四周以 surface 色的外框蓋住從底下捲過的內容。選項很多時處理區自己捲動，送出列仍釘在底部 */
+.decision-center .decision-form {
+  position: sticky;
+  bottom: var(--space-5);
+  z-index: 1;
+  max-block-size: 60vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-bottom: 0;
+  box-shadow: 0 0 0 var(--space-5) var(--color-surface);
+  scrollbar-width: thin;
 }
 
-.decision-center .decision-superseded > h4 {
-  color: var(--color-warning);
+/* 送出列黏在處理區自己的捲動範圍底部；處理區下方的留白由送出列自己的 padding 提供
+   （處理區沒有 padding-bottom，sticky 的範圍不會被 padding 內縮） */
+.decision-center .decision-form > .form-actions {
+  position: sticky;
+  bottom: 0;
+  padding-bottom: var(--space-6);
+  background: var(--color-surface-sunken);
+}
+
+.decision-center .decision-outcome > h4 {
+  font-size: var(--text-title-sm);
 }
 
 /* 處理方式、選項的 fieldset 不另加框（避免框中有框），legend 是欄位標籤 */
@@ -719,9 +747,10 @@
   margin: 0;
 }
 
+/* Workflow 是一個物件：標題用物件標題字級（MASTER 7.1） */
 .workflow-page .workflow > .card-header > h3 {
-  font-size: var(--text-title);
-  line-height: var(--leading-title);
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
 }
 
 .workflow-page .workflow-newer-version {
@@ -861,10 +890,15 @@
   margin-top: var(--space-4);
 }
 
+/* 值欄左緣與其他值對齊：項目符號掛在左緣外（落在 dt 與 dd 之間的欄距）；只有一項時不加項目符號 */
 .workflow-page .workflow-stage-list {
   margin: 0;
-  padding-left: var(--space-6);
-  list-style: disc;
+  padding-left: 0;
+  list-style: disc outside;
+}
+
+.workflow-page .workflow-stage-list:has(> li:only-child) {
+  list-style: none;
 }
 
 .workflow-page .workflow-gate-locked {
@@ -915,7 +949,7 @@
   font-size: var(--text-caption);
 }
 
-/* 跳過目前的 Stage：原因欄＋按鈕同一列，放不下時換行 */
+/* 跳過目前的 Stage：平常只有次要的「跳過此 Stage…」；展開後原因欄＋確認、取消同一列，放不下時換行 */
 .workflow-page .workflow-skip {
   display: flex;
   flex-wrap: wrap;
@@ -935,6 +969,12 @@
 .workflow-page .workflow-skip input {
   width: 100%;
   font-weight: var(--font-weight-normal);
+}
+
+.workflow-page .workflow-skip-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
 }
 
 /* ==========================================================================
@@ -1072,13 +1112,20 @@
   min-width: 0;
 }
 
+/* 事件類型：中文名稱是每列的主要文字；沒有中文名稱時才顯示原始代碼（等寬、次要色、不加粗） */
 .timeline-page .timeline-type {
   min-width: 0;
   max-width: 100%;
-  padding: 0;
-  background: none;
   font-weight: var(--font-weight-strong);
   overflow-wrap: anywhere;
+}
+
+.timeline-page .timeline-type-code {
+  padding: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-normal);
 }
 
 .timeline-page .timeline-facts {
@@ -1156,6 +1203,14 @@
   .decision-center .decision-form,
   .decision-center .decision-outcome {
     padding: var(--space-5);
+  }
+
+  .decision-center .decision-form {
+    padding-bottom: 0;
+  }
+
+  .decision-center .decision-form > .form-actions {
+    padding-bottom: var(--space-5);
   }
 
   /* 決策權限表每列上下排列：事項佔整列，內建、目前生效、設定在下一列；設定欄寬不變，選單文字不裁切 */

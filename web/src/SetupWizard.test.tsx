@@ -101,7 +101,7 @@ describe("首次啟動精靈", () => {
     expect(within(section).getByText("主要帳號").closest("li")).toHaveTextContent("可派工");
     expect(within(section).getByText("尚未登入").closest("li")).toHaveTextContent("未登入");
     expect(within(section).getByText("可派工 1 個")).toHaveClass("badge");
-    expect(within(section).getByText(/在下方「Account Profile」/)).toBeInTheDocument();
+    expect(within(section).getByText(/在下方「帳號清單」/)).toBeInTheDocument();
   });
 
   it("還沒有可派工的帳號時以歡迎畫面呈現（頁面主角，h2）；已有可派工的帳號時是帳號頁中的一般區段（h3）", async () => {
@@ -125,7 +125,7 @@ describe("首次啟動精靈", () => {
   it("沒有任何 Profile 時引導新增", async () => {
     render(<SetupWizard client={fakeClient(setupStatus({ profiles: [], ready: false }))} />);
 
-    expect(await screen.findByText(/還沒有帳號 Profile/)).toBeInTheDocument();
+    expect(await screen.findByText(/還沒有帳號。請在下方「帳號清單」新增/)).toBeInTheDocument();
   });
 
   it("首次使用時顯示背景執行行為的告知，確認後不再顯示", async () => {

@@ -27,9 +27,16 @@ const renderPage = (client: ReturnType<typeof fakeClient>) =>
 const PASSED = "修正匯出錯誤（candidate e4f5a6b）";
 const FAILING = "修正匯出錯誤（candidate 9c8d7e6）";
 
+/** 「已過期的審查 N」的收合摘要（計數只放數字，不加括號）。 */
+async function staleSummary(count = 1) {
+  const summary = await screen.findByText("已過期的審查", { selector: "summary" });
+  expect(summary).toHaveTextContent(new RegExp(`^已過期的審查 ${count}$`));
+  return summary;
+}
+
 /** 已過期的審查收在預設收合的「已過期的審查」中：展開後才能操作。 */
 async function openStale(count = 1) {
-  await userEvent.setup().click(await screen.findByText(`已過期的審查（${count}）`));
+  await userEvent.setup().click(await staleSummary(count));
 }
 
 describe("審查", () => {
@@ -56,7 +63,9 @@ describe("審查", () => {
     const standards = within(review).getByRole("region", { name: "規範（Standards）" });
     const spec = within(review).getByRole("region", { name: "需求（Spec）" });
 
-    // 每一軸的結論是標題旁的徽章
+    // 每一軸的結論只用標題旁的徽章表達：審查卡已有色條，軸不再各加色條（框中框）
+    expect(standards.className).not.toMatch(/stripe-/);
+    expect(spec.className).not.toMatch(/stripe-/);
     const standardsHeading = within(standards).getByRole("heading");
     expect(standardsHeading).toHaveTextContent("規範（Standards）");
     expect(within(standardsHeading).getByText("未通過")).toHaveClass("badge", "badge-danger");
@@ -112,7 +121,7 @@ describe("審查", () => {
   it("已過期的審查收在預設收合的「已過期的審查」中，顯示原因，不顯示為通過或未通過", async () => {
     renderPage(fakeClient());
 
-    const group = (await screen.findByText("已過期的審查（1）")).closest("details")!;
+    const group = (await staleSummary(1)).closest("details")!;
     expect(group).not.toHaveAttribute("open");
     expect(group).not.toContainElement(screen.getByRole("region", { name: PASSED }));
     await openStale();
@@ -215,6 +224,9 @@ describe("審查", () => {
 
     expect(await screen.findByText(/還沒有審查/)).toBeInTheDocument();
     expect(screen.getByText(/沒有設計偏離/)).toBeInTheDocument();
+    // 0 筆時計數一律顯示 0
+    expect(within(screen.getByRole("region", { name: "雙軸審查" })).getByText("0", { selector: ".count" })).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "設計偏離" })).getByText("0", { selector: ".count" })).toBeInTheDocument();
   });
 
   it("讀不到審查時顯示 Runtime 的說明", async () => {

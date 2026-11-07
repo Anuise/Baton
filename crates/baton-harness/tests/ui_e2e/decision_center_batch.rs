@@ -174,7 +174,7 @@ fn option_label(view: &Value, option_id: &str) -> String {
 // --- UI 操作 ---
 
 fn center() -> Value {
-    role("region", "裁定中心")
+    role("region", "裁定")
 }
 
 /// 跑道欄上目前 Workspace 的頁面。
@@ -249,10 +249,9 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     browser.goto(&e2e.server.url("/")).await;
     browser.wait_visible(&[text("Runtime 運作中")]).await;
     browser.wait_visible(&[text("待裁定：4")]).await;
-    // 跑道欄的徽章只顯示數字，說明在可存取名稱
-    browser.wait_visible(&[label("待裁定 4 項")]).await;
+    browser.wait_visible(&[text("待裁定 4")]).await;
     open_center(browser, &ws_name).await;
-    browser.wait_visible(&[center(), role("heading", "可處理（4）")]).await;
+    browser.wait_visible(&[center(), role("region", "可處理（4）")]).await;
 
     // 逐項勾選進批次
     for index in [0, 1] {
@@ -289,10 +288,10 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     assert_eq!(results.matches("：已保存").count(), 4, "四筆各自一行結果：{results}");
     assert!(!results.contains("失敗"), "{results}");
     browser.wait_hidden(&[center(), role("form", "批次處理")]).await;
-    browser.wait_visible(&[center(), role("heading", "可處理（0）")]).await;
-    browser.wait_visible(&[center(), role("heading", "已結束（4）")]).await;
+    browser.wait_visible(&[center(), role("region", "可處理（0）")]).await;
+    browser.wait_visible(&[center(), role("region", "已結束（4）")]).await;
     browser.wait_visible(&[text("待裁定：0")]).await;
-    browser.wait_hidden(&[label("待裁定 4 項")]).await;
+    browser.wait_hidden(&[text("待裁定 4")]).await;
     // 已結束的每一筆都顯示自己的裁定結果，並標示是批次中各自保存的一項
     for (question, index, chosen) in [
         (&push_question, 0, option_label(&view_a, "allow_once")),
@@ -334,7 +333,7 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     let (_, token_b2) = running_run(harness, &ws, &b).await;
     let (_, token_c2) = running_run(harness, &ws, &c).await;
     browser.click(&tab("工作")).await;
-    let running = [role("region", "工作面板"), role("region", "執行中（3）")];
+    let running = [role("region", "工作"), role("region", "執行中（3）")];
     browser.wait_visible(&running).await;
     for title in titles {
         browser.wait_visible(&[running.to_vec(), vec![role("article", title)]].concat()).await;
@@ -365,7 +364,7 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
 
     // --- UI：裁定中心出現三筆新的待裁定請求；先前的批准已被各自的 Run 用掉 ---
     open_center(browser, &ws_name).await;
-    browser.wait_visible(&[center(), role("heading", "可處理（3）")]).await;
+    browser.wait_visible(&[center(), role("region", "可處理（3）")]).await;
     browser.wait_visible(&[text("待裁定：3")]).await;
     for rid in [&again_a, &other_b, &again_c] {
         let question = decision(harness, &ws, rid).await["question"].as_str().unwrap().to_string();

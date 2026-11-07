@@ -130,7 +130,7 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
             </span>
           </div>
           {status.profiles.length === 0 ? (
-            <p>還沒有帳號 Profile。請在下方「Account Profile」新增一個，並在終端機完成原生登入。</p>
+            <p>還沒有帳號。請在下方「帳號清單」新增，並在終端機完成原生登入。</p>
           ) : (
             <ul className="setup-profiles">
               {status.profiles.map((profile) => (
@@ -144,7 +144,7 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
             </ul>
           )}
           {status.profiles.length > 0 && needsAttention && (
-            <p className="field-hint">需要處理的 Profile 請在下方「Account Profile」處理。</p>
+            <p className="field-hint">需要處理的帳號請在下方「帳號清單」處理。</p>
           )}
         </section>
 
@@ -217,7 +217,8 @@ function ToolStep({ title, check, heading: Heading }: { title: string; check: To
       {check.status !== "ok" && (
         <p className="meta setup-docs">
           <span className="copy-text">
-            官方說明：
+            {/* 標籤不縮小，寬度不夠時只截斷網址 */}
+            <span className="no-shrink">官方說明：</span>
             <span className="mono truncate" title={check.docs_url}>
               {docsHost(check.docs_url)}
             </span>

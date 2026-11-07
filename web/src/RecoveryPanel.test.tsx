@@ -100,7 +100,11 @@ describe("崩潰恢復面板", () => {
     expect(fact("下一次嘗試最早")).toBe("下一次嘗試最早：2023/11/15 06:15");
     expect(fact("最後失敗原因")).toBe("最後失敗原因：Runtime 再次終止");
     expect(fact("觀察期滿")).toBeNull();
-    expect(screen.getByRole("alert")).toHaveTextContent("新派工已暫停：崩潰恢復進行中");
+    // 阻擋原因是長警示：狀態詞（只有它上色）＋原因
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("新派工已暫停")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("崩潰恢復進行中");
     expect(screen.queryByRole("button", { name: "重新嘗試恢復" })).not.toBeInTheDocument();
   });
 
@@ -160,7 +164,7 @@ describe("崩潰恢復面板", () => {
 
     expect(await screen.findByText("恢復額度用盡")).toBeInTheDocument();
     expect(screen.getByText("本輪嘗試：3/3")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("新派工已暫停：崩潰恢復額度用盡，等待重新嘗試恢復");
+    expect(screen.getByRole("alert")).toHaveTextContent(/^新派工已暫停崩潰恢復額度用盡，等待重新嘗試恢復$/);
     const attempts = Array.from(document.querySelectorAll<HTMLElement>(".recovery-attempt"));
     expect(attempts.map(attemptSummary).filter((text) => /^第 1 輪第 \d 次 失敗/.test(text))).toHaveLength(3);
     const [affected] = within(screen.getByRole("list", { name: "第 1 輪第 3 次的受影響工作" })).getAllByRole("listitem");
@@ -202,14 +206,15 @@ describe("崩潰恢復面板", () => {
 
     await user.click(await screen.findByRole("button", { name: "重新嘗試恢復" }));
 
-    expect(await screen.findByText("無法重新嘗試恢復：恢復額度尚未用盡")).toBeInTheDocument();
+    const title = await screen.findByText("無法重新嘗試恢復");
+    expect(title.closest("[role=alert]")).toHaveTextContent(/^無法重新嘗試恢復恢復額度尚未用盡$/);
     expect(screen.getByRole("button", { name: "重新嘗試恢復" })).toBeEnabled();
   });
 
   it("讀不到恢復狀態時顯示原因", async () => {
     renderPanel(fakeClient([new Error("connection refused")]));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得恢復狀態：connection refused");
+    expect(await screen.findByRole("alert")).toHaveTextContent(/^無法取得恢復狀態connection refused$/);
   });
 
   it("定期輪詢：Supervisor 推進後畫面跟著更新", async () => {

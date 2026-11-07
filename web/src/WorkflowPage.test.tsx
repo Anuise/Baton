@@ -80,7 +80,7 @@ describe("流程", () => {
     expect(await screen.findByRole("region", { name: "缺陷處理 第 1 版" })).toHaveTextContent("阻擋原因失敗次數用盡");
     const done = screen.getByRole("region", { name: "新功能 第 1 版" });
     expect(done).toHaveTextContent("已完成");
-    expect(within(done).queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
+    expect(within(done).queryByRole("button", { name: /^跳過此 Stage/ })).not.toBeInTheDocument();
     expect(within(done).queryByText("此 Gate 不能跳過")).not.toBeInTheDocument();
   });
 
@@ -252,10 +252,11 @@ describe("流程", () => {
 
     await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
     const current = stage("縮小範圍");
-    const submit = within(current).getByRole("button", { name: "跳過此 Stage" });
-    expect(submit).toBeDisabled();
     // 其他 Stage 沒有跳過操作
-    expect(within(stage("建立重現")).queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
+    expect(within(stage("建立重現")).queryByRole("button", { name: /^跳過此 Stage/ })).not.toBeInTheDocument();
+    await user.click(within(current).getByRole("button", { name: "跳過此 Stage…" }));
+    const submit = within(current).getByRole("button", { name: "確認跳過" });
+    expect(submit).toBeDisabled();
 
     await user.type(within(current).getByLabelText("跳過原因"), "   ");
     expect(submit).toBeDisabled();
@@ -270,8 +271,37 @@ describe("流程", () => {
       reason: "已有最小重現",
     });
     await waitFor(() => expect(stage("縮小範圍")).toHaveTextContent("已跳過"));
-    expect(within(stage("縮小範圍")).queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
+    expect(within(stage("縮小範圍")).queryByRole("button", { name: /跳過/ })).not.toBeInTheDocument();
     expect(within(stage("修正確認")).getByText("此 Gate 不能跳過")).toBeInTheDocument();
+  });
+
+  it("跳過平常只是次要按鈕「跳過此 Stage…」：按下才展開原因欄位，可以取消，取消後不送出並把焦點還給按鈕", async () => {
+    const client = fakeClient();
+    const user = userEvent.setup();
+    renderPage(client);
+
+    const current = await screen.findByRole("listitem", { name: "縮小範圍" });
+    const toggle = within(current).getByRole("button", { name: "跳過此 Stage…" });
+    // 不是送出鈕（主要按鈕），原因欄位還沒出現
+    expect(toggle).toHaveAttribute("type", "button");
+    expect(within(current).queryByLabelText("跳過原因")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    const input = within(current).getByLabelText("跳過原因");
+    expect(input).toHaveFocus();
+    // 確認鈕是破壞性的次要樣式，不是主要按鈕
+    expect(within(current).getByRole("button", { name: "確認跳過" })).toHaveClass("btn-danger");
+    expect(within(current).queryByRole("button", { name: "跳過此 Stage…" })).not.toBeInTheDocument();
+
+    await user.type(input, "先不做");
+    await user.click(within(current).getByRole("button", { name: "取消" }));
+
+    expect(within(current).queryByLabelText("跳過原因")).not.toBeInTheDocument();
+    expect(within(current).getByRole("button", { name: "跳過此 Stage…" })).toHaveFocus();
+    expect(client.skipStage).not.toHaveBeenCalled();
+    // 再展開時原因欄是空的
+    await user.click(within(current).getByRole("button", { name: "跳過此 Stage…" }));
+    expect(within(current).getByLabelText("跳過原因")).toHaveValue("");
   });
 
   it("目前 Stage 是裁定或安全 Gate 時不提供跳過，改說明不能跳過", async () => {
@@ -286,7 +316,7 @@ describe("流程", () => {
     await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
     expect(within(stage("修正確認")).getByText("此 Gate 不能跳過")).toBeInTheDocument();
     expect(within(stage("切換")).getByText("此 Gate 不能跳過")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^跳過此 Stage/ })).not.toBeInTheDocument();
   });
 
   it("跳過被拒時顯示 Runtime 的說明，保留目前內容與輸入", async () => {
@@ -295,8 +325,9 @@ describe("流程", () => {
     const user = userEvent.setup();
     renderPage(client);
 
-    await user.type(await screen.findByLabelText("跳過原因"), "不需要");
-    await user.click(screen.getByRole("button", { name: "跳過此 Stage" }));
+    await user.click(await screen.findByRole("button", { name: "跳過此 Stage…" }));
+    await user.type(screen.getByLabelText("跳過原因"), "不需要");
+    await user.click(screen.getByRole("button", { name: "確認跳過" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("只能跳過目前的 Stage");
     expect(stage("縮小範圍")).toHaveTextContent("目前");
@@ -314,14 +345,16 @@ describe("流程", () => {
     const user = userEvent.setup();
     renderPage(client);
 
-    await user.type(await screen.findByLabelText("跳過原因"), "不需要");
-    await user.click(screen.getByRole("button", { name: "跳過此 Stage" }));
+    await user.click(await screen.findByRole("button", { name: "跳過此 Stage…" }));
+    await user.type(screen.getByLabelText("跳過原因"), "不需要");
+    await user.click(screen.getByRole("button", { name: "確認跳過" }));
 
     expect(await screen.findByText(/Workflow 在檢視後已更新，已重新載入/)).toBeInTheDocument();
     expect(client.workflows).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "跳過此 Stage" }));
+    // 重新載入後原因欄仍展開、保留輸入
+    await user.click(screen.getByRole("button", { name: "確認跳過" }));
     expect(client.skipStage).toHaveBeenLastCalledWith("ws_1", "wf_1", {
       stage: "minimization",
       expected_revision: 5,

@@ -10,6 +10,31 @@
   min-height: 100vh;
 }
 
+/* 跳到主要內容：平時移出畫面，鍵盤聚焦時出現在左上角 */
+.skip-link {
+  position: absolute;
+  top: var(--space-4);
+  left: var(--space-4);
+  z-index: var(--z-overlay);
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--rail-baton);
+  color: var(--rail-badge-text);
+  font-weight: var(--font-weight-strong);
+  text-decoration: none;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus-visible {
+  outline: 2px solid var(--rail-text);
+  transform: none;
+}
+
+/* 主區被跳過連結聚焦時不顯示外框（它不是互動元素） */
+.main:focus {
+  outline: none;
+}
+
 /* ---------- 跑道欄 ---------- */
 .rail {
   position: sticky;
@@ -19,10 +44,17 @@
   flex-direction: column;
   height: 100vh;
   background: var(--rail-bg);
+  border-right: 1px solid var(--rail-line);
   color: var(--rail-text);
   font-size: var(--text-meta);
   line-height: var(--leading-meta);
   color-scheme: dark;
+}
+
+/* 跑道欄不在主區的 min-width 規則範圍內，長路徑、長訊息在這裡也要能斷開 */
+.rail :where(p, span, li, dd, label, div) {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .rail :where(button, input, select, summary, a):focus-visible {
@@ -53,7 +85,7 @@
   padding: 0 var(--space-4) var(--space-6);
   overflow-x: hidden;
   overflow-y: auto;
-  scrollbar-color: var(--rail-line) transparent;
+  scrollbar-color: var(--rail-muted) transparent;
   scrollbar-width: thin;
 }
 
@@ -75,9 +107,12 @@
     opacity var(--duration-fast) var(--ease-out);
 }
 
+/* 欄底固定：平台頁面＋狀態，不隨 Workspace 清單捲走 */
 .rail-foot {
   flex: none;
-  padding: var(--space-5) var(--space-6) var(--space-6);
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4) var(--space-5);
   border-top: 1px solid var(--rail-line);
 }
 
@@ -185,25 +220,19 @@
 }
 
 /* 點擊範圍蓋滿標題列與路徑（不含頁面導覽） */
+/* 點擊範圍蓋滿整個項目（與滑過時的反白一致）；項目裡可以操作的東西（管理、繼續工作、頁面導覽）以 z-index 浮在上面 */
 .workspace-select::after {
   position: absolute;
-  inset: 0 0 auto;
-  height: calc(var(--space-3) + 2 * 1.45em + var(--space-2));
+  inset: 0;
   content: "";
-}
-
-.workspace-item-current .workspace-select::after {
-  height: calc(var(--space-3) + 1.45em + 1.5em + var(--space-2));
 }
 
 .workspace-name {
   min-width: 0;
 }
 
-/* 待裁定數：琥珀色膠囊，只有數字（完整說明在可存取名稱與 title） */
+/* 待裁定數：琥珀色膠囊（不可點，點它等於選這個 Workspace） */
 .workspace-badge {
-  position: relative;
-  z-index: 1;
   flex: none;
   min-width: 20px;
   margin-top: 1px;
@@ -253,13 +282,10 @@
 }
 
 /* 「管理」：從標題列下方展開的浮層，寬度與項目相同（不超出跑道欄，不被裁切） */
-.workspace-heading {
-  position: relative;
-}
-
+/* 「管理」本身不設 z-index：設了會形成堆疊脈絡，把浮層的 --z-popover 困在裡面，
+   浮層就會被同一項的暫停列與下一項蓋住 */
 .workspace-menu {
-  position: static;
-  z-index: 1;
+  position: relative;
   flex: none;
 }
 
@@ -288,11 +314,12 @@
   color: var(--rail-text);
 }
 
+/* 浮層從「⋯」下方展開，右緣對齊項目右緣、寬度等於項目寬度（跑道欄寬扣掉左右內距與右框），不超出跑道欄 */
 .workspace-menu-panel {
   position: absolute;
   top: calc(100% + var(--space-2));
   right: calc(var(--space-3) * -1);
-  left: calc(var(--space-5) * -1);
+  width: calc(var(--rail-width) - var(--space-4) * 2 - 1px);
   z-index: var(--z-popover);
   box-sizing: border-box;
   display: grid;
@@ -304,6 +331,29 @@
   box-shadow: 0 12px 28px rgb(0 0 0 / 40%);
   color: var(--rail-text);
   font-size: var(--text-caption);
+}
+
+/* 封存前的確認 */
+.workspace-archive-confirm {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rail-line);
+}
+
+.workspace-archive-confirm > p {
+  margin: 0;
+}
+
+.workspace-archive-actions {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.rail .btn-danger.btn-solid {
+  border-color: var(--rail-danger);
+  background: var(--rail-danger);
+  color: var(--rail-badge-text);
 }
 
 .workspace-created {
@@ -340,14 +390,14 @@
 }
 
 .rail .btn-danger {
-  border-color: rgb(248 113 113 / 45%);
+  border-color: color-mix(in srgb, var(--rail-danger) 45%, transparent);
   background: none;
-  color: #fca5a5;
+  color: var(--rail-danger-text);
 }
 
 .rail .btn-danger:hover:not(:disabled) {
-  border-color: #fca5a5;
-  background: rgb(248 113 113 / 12%);
+  border-color: var(--rail-danger-text);
+  background: color-mix(in srgb, var(--rail-danger) 12%, transparent);
 }
 
 .rail .help-tip-trigger {
@@ -429,11 +479,13 @@
 
 .workspace-form [role="alert"] {
   margin: 0;
-  color: #fca5a5;
+  color: var(--rail-danger-text);
 }
 
 /* ---------- 頁面導覽：目前 Workspace 的頁面，依群組列出 ---------- */
 .workspace-nav {
+  position: relative;
+  z-index: 1;
   display: grid;
   gap: var(--space-4);
   margin: var(--space-4) 0 0 calc(var(--space-5) * -1 + var(--space-3));
@@ -498,29 +550,50 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 平台頁面：與 Workspace 清單以分道線隔開 */
+/* 平台頁面：欄底一排三個；目前頁面以靜態的同色短棒標記（接力棒只在 Workspace 的頁面之間移動） */
 .global-nav {
-  display: grid;
-  margin-top: var(--space-6);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--rail-line);
+  display: flex;
+  gap: var(--space-1);
 }
 
 .global-nav > .nav-item {
-  padding-left: var(--space-5);
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 var(--space-3);
+  text-align: center;
 }
 
-/* ---------- 狀態（跑道欄底部）：一行一項，異常項目自己加強 ---------- */
+.global-nav > .nav-item[aria-current="page"]::before {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 18px;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: var(--rail-baton);
+  content: "";
+  transform: translateX(-50%);
+}
+
+/* ---------- 狀態（跑道欄底部）：精簡的一段，項目並排折行；異常項目自己加強、佔整行 ---------- */
 .status-bar {
-  display: grid;
-  gap: var(--space-2);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  padding: 0 var(--space-2);
   color: var(--rail-muted);
   font-size: var(--text-caption);
   line-height: var(--leading-caption);
 }
 
+.status-bar > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .status {
-  display: flex;
+  display: inline-flex;
   gap: var(--space-3);
   align-items: baseline;
 }
@@ -538,12 +611,12 @@
 .status-running::before,
 .status-platform-supported::before,
 .status-guardian-active::before {
-  background: #4ade80;
+  background: var(--rail-success);
 }
 
 .status-offline::before,
 .status-storage-halted::before {
-  background: #f87171;
+  background: var(--rail-danger);
 }
 
 .status-platform-unsupported::before,
@@ -566,11 +639,12 @@
 
 .status-storage-halted,
 .status-recovery-exhausted {
-  color: #fca5a5;
+  color: var(--rail-danger-text);
   font-weight: var(--font-weight-strong);
 }
 
 .status-reason {
+  flex-basis: 100%;
   display: -webkit-box;
   overflow: hidden;
   padding-left: calc(7px + var(--space-3));
@@ -580,10 +654,20 @@
   line-clamp: 3;
 }
 
-/* 監護不可用：警示文字，兩行內 */
+/* 監護不可用：警示文字，最多三行（完整內容在 title） */
 .status-guardian-unavailable {
-  display: block;
-  padding: var(--space-3) var(--space-4);
+  flex-basis: 100%;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  box-sizing: border-box;
+  /* 用透明邊框代替內距：line-clamp 的裁切在內距邊界，第四行才不會從下內距露出半截 */
+  padding: 0;
+  border: var(--space-3) solid transparent;
+  border-right-width: var(--space-4);
+  border-left-width: var(--space-4);
   border-radius: var(--radius-md);
   background: rgb(255 194 75 / 14%);
   color: var(--rail-text);
@@ -632,18 +716,35 @@
   color: var(--color-text-subtle);
 }
 
-/* 平台頁面（帳號、共同設定、設定）：閱讀寬度的一欄 */
+/* 平台頁面（帳號、共同設定、App 設定）：與其他頁同寬，標題列的動作對齊主區右緣 */
 .global-page {
-  max-width: 64em;
+  min-width: 0;
 }
 
-/* 儲存故障的整寬警示 */
+/* 儲存故障的整寬警示：內容可能很長，不整塊上色——危險色只在左側色條與狀態詞 */
+.status-storage-fault {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-6);
+  border: 1px solid var(--color-danger-border);
+  border-left: 3px solid var(--color-danger);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--color-surface);
+  font-size: var(--text-meta);
+}
+
+.status-storage-title {
+  color: var(--color-danger);
+  font-weight: var(--font-weight-strong);
+}
+
 .status-storage-fault .status-storage-body {
   display: grid;
   gap: var(--space-2);
 }
 
 .status-storage-fault p {
+  max-inline-size: var(--measure);
   margin: 0;
 }
 
@@ -675,8 +776,56 @@
   margin: 0 auto;
 }
 
+/* 首次設定完成：主標用 hero 字級，下一步是有編號的清單（真的有先後順序） */
+.setup-finished {
+  display: grid;
+  gap: var(--space-5);
+  justify-items: start;
+}
+
+.setup-finished > h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-hero);
+  font-weight: var(--font-weight-heavy);
+  line-height: var(--leading-hero);
+}
+
+.setup-finished > p {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.setup-next-steps {
+  display: grid;
+  gap: var(--space-4);
+  max-width: var(--measure);
+  margin: 0;
+  padding-left: var(--space-7);
+}
+
+.setup-next-steps > li {
+  padding-left: var(--space-3);
+}
+
+.setup-next-steps > li::marker {
+  color: var(--color-accent);
+  font-weight: var(--font-weight-heavy);
+}
+
+.setup-next-steps strong {
+  display: block;
+}
+
+.setup-next-steps span {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 低調按鈕的文字對齊內容左緣 */
 .setup-skip {
   justify-self: start;
+  margin-inline-start: calc(var(--space-5) * -1);
 }
 
 /* ---------- 窄視窗（1024 以下）：跑道欄變窄 ---------- */

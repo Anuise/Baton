@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { HelpTip } from "./HelpTip";
+import { useDetailsDismiss } from "./MoreMenu";
 import { CopyButton, PathText } from "./LongText";
 import { formatCount, formatNumber } from "./textFormat";
 import { formatTimestamp } from "./time";
@@ -69,6 +70,11 @@ export function WorkspaceSidebar({
   const [formChoice, setFormChoice] = useState<boolean | null>(null);
   const pathRef = useRef<HTMLInputElement>(null);
   const [focusPath, setFocusPath] = useState(false);
+  // 正在確認封存的 Workspace id
+  const [confirmArchive, setConfirmArchive] = useState<string | null>(null);
+  // 建立完成後要聚焦的 Workspace id（等它出現在清單中）
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
   // 系統的資料夾選擇對話框只有在 Tauri 視窗中可用；瀏覽器開發模式只能手動輸入
   const canBrowse = "__TAURI_INTERNALS__" in window;
 
@@ -106,6 +112,8 @@ export function WorkspaceSidebar({
       setFormChoice(false);
       await refresh();
       onSelect?.(created);
+      // 表單收起後焦點不落到 body：移到新 Workspace 的選擇按鈕（WCAG 2.4.3）
+      setFocusId(created.id);
     } catch (error) {
       // 保留輸入，讓使用者修正後重送
       setFormError(reasonOf(error));
@@ -130,6 +138,9 @@ export function WorkspaceSidebar({
     setFormError(null);
     try {
       await client.archiveWorkspace(workspace.id);
+      setConfirmArchive(null);
+      // 回到「依清單決定」：封存最後一個 Workspace 後建立表單自動展開
+      setFormChoice(null);
       await refresh();
     } catch (error) {
       setFormError(reasonOf(error));
@@ -222,9 +233,29 @@ export function WorkspaceSidebar({
             </div>
           </>
         )}
-        <button type="button" className="btn-danger btn-sm" aria-label={`封存 ${workspace.name}`} onClick={() => void archive(workspace)}>
-          封存
-        </button>
+        {/* 封存要再確認一次：封存後從清單移除、無法在 App 中復原 */}
+        {confirmArchive === workspace.id ? (
+          <div className="workspace-archive-confirm" role="group" aria-label={`確認封存 ${workspace.name}`}>
+            <p>封存後這個 Workspace 會從清單移除，資料與目錄保留。</p>
+            <div className="workspace-archive-actions">
+              <button
+                type="button"
+                className="btn-danger btn-solid btn-sm"
+                aria-label={`確認封存 ${workspace.name}`}
+                onClick={() => void archive(workspace)}
+              >
+                確認封存
+              </button>
+              <button type="button" className="btn-quiet btn-sm" onClick={() => setConfirmArchive(null)}>
+                取消
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" className="btn-danger btn-sm" aria-label={`封存 ${workspace.name}`} onClick={() => setConfirmArchive(workspace.id)}>
+            封存…
+          </button>
+        )}
       </WorkspaceMenu>
     );
   };
@@ -245,6 +276,16 @@ export function WorkspaceSidebar({
     pathRef.current?.focus();
     setFocusPath(false);
   }, [focusPath, formOpen]);
+
+  useEffect(() => {
+    if (focusId === null) return;
+    const button = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>("[data-workspace-id]") ?? []).find(
+      (element) => element.dataset.workspaceId === focusId,
+    );
+    if (!button) return;
+    button.focus();
+    setFocusId(null);
+  });
 
   return (
     <aside className="rail-workspaces" aria-labelledby="workspaces-title">
@@ -269,7 +310,7 @@ export function WorkspaceSidebar({
       )}
       {list.state === "ready" && active.length === 0 && <p className="rail-note sidebar-empty">還沒有 Workspace</p>}
       {active.length > 0 && (
-        <ul className="workspace-list">
+        <ul className="workspace-list" ref={listRef}>
           {active.map((workspace, index) => {
             const current = workspace.id === selectedId;
             return (
@@ -279,6 +320,7 @@ export function WorkspaceSidebar({
                   <button
                     type="button"
                     className="workspace-select"
+                    data-workspace-id={workspace.id}
                     aria-label={`選擇 ${workspace.name}`}
                     aria-current={current ? true : undefined}
                     title={`${workspace.name}
@@ -359,44 +401,23 @@ function distinctKeeps(paths: string[]): number[] {
   });
 }
 
-/** 待裁定數徽章：超過 999 顯示 999+，完整數字在可存取名稱與 title。 */
+/** 待裁定數徽章：超過 999 顯示 999+，完整數字在 title。 */
 function pendingBadge(count: number) {
   if (count <= 0) return null;
   return (
-    <span className="workspace-badge" aria-label={`待裁定 ${formatNumber(count)} 項`} title={`待裁定 ${formatNumber(count)}`}>
-      {formatCount(count)}
+    // 看得到的文字就是說明（span 沒有角色，不能用 aria-label 命名）；超過 999 時完整數字在 title
+    <span className="workspace-badge" title={`待裁定 ${formatNumber(count)}`}>
+      待裁定 {formatCount(count)}
     </span>
   );
 }
 
-/** 清單項目的「管理」選單（`<details>` 浮層）：Esc 或點選單外面時收起，Esc 後焦點回到觸發按鈕。 */
+/** 清單項目的「管理」選單（`<details>` 浮層）：Esc 或點選單外面時收起，Esc 後焦點回到觸發按鈕（useDetailsDismiss）。 */
 function WorkspaceMenu({ label, children }: { label: string; children: ReactNode }) {
   const ref = useRef<HTMLDetailsElement>(null);
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: PointerEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) ref.current.open = false;
-    };
-    document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
-  }, [open]);
-
-  // Esc 常駐監聽在 document：點浮層空白處後焦點落到 body，按鍵事件不會經過 details；
-  // 不等 toggle 事件更新 open 後才掛上，開啟後立刻按 Esc 也收得起來
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || !ref.current?.open) return;
-      ref.current.open = false;
-      ref.current.querySelector("summary")?.focus();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, []);
-
+  const onToggle = useDetailsDismiss(ref);
   return (
-    <details ref={ref} className="workspace-menu" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <details ref={ref} className="workspace-menu" onToggle={onToggle}>
       <summary className="workspace-menu-trigger" aria-label={label} title="管理">
         <span aria-hidden="true">⋯</span>
       </summary>

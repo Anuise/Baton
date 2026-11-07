@@ -344,7 +344,7 @@ export function normalData(): PreviewData {
       events: [
         timelineEvent(),
         timelineEvent({ seq: 2, occurred_at: CHECKED_AT + 60_000, category: "decision", aggregate_type: "decision", aggregate_id: "dec_1", event_type: "decision_requested", run_id: null }),
-        timelineEvent({ seq: 3, occurred_at: CHECKED_AT + 120_000, category: "verification", aggregate_type: "task", aggregate_id: "task_2", event_type: "verification_passed", task_ids: ["task_2"], run_id: "run_2" }),
+        timelineEvent({ seq: 3, occurred_at: CHECKED_AT + 120_000, category: "verification", aggregate_type: "task", aggregate_id: "task_2", event_type: "task_verification_recorded", task_ids: ["task_2"], run_id: "run_2" }),
       ],
     },
     metrics: metricsResponse(),

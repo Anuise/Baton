@@ -51,14 +51,14 @@ async fn a_task_dispatched_from_the_ui_completes_after_the_worker_reports_and_ch
     // 名稱可能與路徑結尾同字（路徑也在情境列中），取第一個（名稱）
     browser.wait_visible(&[label("目前的 Workspace"), exact_text(WORKSPACE_NAME), nth(0)]).await;
     browser.wait_visible(&[authorization.clone(), text("尚未確認授權")]).await;
-    browser.click(&[authorization.clone(), role("button", "套用「研究／文件」")]).await;
+    browser.click(&[authorization.clone(), role("button", "套用範本「研究／文件」")]).await;
     browser.click(&[authorization.clone(), role("button", "檢視確認摘要")]).await;
     browser.click(&[authorization.clone(), role("region", "確認摘要"), role("button", "確認並保存授權")]).await;
-    browser.wait_visible(&[authorization.clone(), text("已保存為 revision 1")]).await;
+    browser.wait_visible(&[authorization.clone(), text("已保存為第 1 版")]).await;
 
     // 3. 建立 Task：新 Goal、六項契約全部填寫、宣告確定性檢查（成果 report.md）、所需能力在授權範圍內
     browser.click(&page("工作")).await;
-    let board = role("region", "工作面板");
+    let board = role("region", "工作");
     browser.click(&[board.clone(), role("button", "建立 Task")]).await;
     let form = role("dialog", "建立 Task");
     browser.fill(&[form.clone(), label("新 Goal 名稱")], "季度報告").await;

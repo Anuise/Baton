@@ -62,9 +62,9 @@ const CHANGE_BADGES: Record<SettingsDiffEntry["change"], string> = {
   changed: "badge-accent",
 };
 
-/** 頁面說明：先說這是什麼，再說它不會做什麼。 */
+/** 頁面說明：先說這是什麼，再說它不會做什麼；列舉的類別與 Runtime 實際匯入的一致（plugins 與市集計在同一類）。 */
 const SHARED_SETTINGS_LEDE =
-  "所有 Account Profile 共用的偏好、指示、hooks、MCP 與 plugins，從你平常的 Claude Code 設定匯入。這只讀取你平常的 Claude Code 設定，不會修改它們，也不會複製任何登入資料。";
+  "所有帳號共用的偏好、指示、hooks、MCP 伺服器、plugins 與市集，從你平常的 Claude Code 設定匯入；只讀取、不修改原檔，也不複製登入資料。";
 
 const SOURCE_CHANGED_MESSAGE = "來源在預覽後已改變，請重新預覽";
 
