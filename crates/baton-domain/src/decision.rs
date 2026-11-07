@@ -1313,7 +1313,7 @@ fn permission_prompt(
     }
     let (allow_label, deny_label) = match &prior_use {
         Some(_) => ("已查證，允許再執行一次", "拒絕（不要重送）"),
-        None => ("允許本次操作", "拒絕"),
+        None => ("允許這一次", "拒絕"),
     };
     let rejected_approval = match &check {
         Some(ApprovalCheck::Mismatch { request_id, reason }) => {
@@ -1570,7 +1570,7 @@ pub fn budget_exhausted_request(
         status: DecisionStatus::Pending,
         question: truncate(&format!("Task「{}」的{label}預算（{limit} 次）已用完，下一步怎麼做？", task.title), QUESTION_MAX_CHARS),
         reason: format!(
-            "Runtime 已停止自動重試並把 Task 設為阻擋。依決策權限表，「{}」必須由你裁定（spec D-16、D-15）。",
+            "Runtime 已停止自動重試並把 Task 設為阻擋；「{}」由你決定，選「再給一輪」Task 才會繼續（spec D-16）。",
             matter.label()
         ),
         options: vec![

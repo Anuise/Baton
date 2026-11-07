@@ -59,11 +59,12 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
   // 交接
   run_handed_off: "Run 已交接",
   handoff_requested: "要求交接",
-  handoff_stopping: "交接：停止舊寫入",
-  handoff_transferred: "交接：已轉移所有權",
-  handoff_confirmed: "交接：已確認接手",
+  // 與工作頁的交接階段同一套詞彙（TaskBoard.tsx 的 HANDOFF_PHASE_LABELS）
+  handoff_stopping: "交接中：停止舊程序",
+  handoff_transferred: "已交接，等待接手確認",
+  handoff_confirmed: "已交接並確認",
   handoff_abandoned: "交接已放棄",
-  handoff_waiting_resource: "交接等待額度",
+  handoff_waiting_resource: "交接等待資源",
   handoff_wait_rescheduled: "交接重新排定等待",
   // 裁定
   decision_requested: "提出裁定",
@@ -113,7 +114,7 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
 };
 
 /**
- * 每階段用量的階段名稱（MASTER 7.1）：Runtime 回報的是 Stage key，這裡對照內建 Playbook 的 Stage 名稱
+ * Token 用量各階段的名稱（MASTER 7.1）：Runtime 回報的是 Stage key，這裡對照內建 Playbook 的 Stage 名稱
  * （crates/baton-domain/src/workflow/builtin.rs）。同一個 key 在不同 Playbook 名稱不同時用共通的說法；
  * 沒有對照的 key（自訂 Playbook）才顯示原始代碼。
  */
@@ -377,7 +378,7 @@ export function TimelinePage({ client, workspace, timeZone }: Props) {
           <p className="empty-note">沒有符合「{keyword.trim()}」的事件</p>
         )}
         {matched.length > 0 && (
-          // 每列可快速掃讀：時間｜類別｜事件類型與摘要；對象、完整 Task 與事件內容收在「細節」
+          // 每列可快速掃讀：時間｜類別｜事件類型與摘要；對象、完整 Task 與事件內容收在「詳細資訊」
           <ol className="row-list timeline-list" aria-label="事件">
             {pageEvents.map((event) => (
               <li key={event.seq} className={`timeline-event timeline-category-${event.category}`}>
@@ -438,7 +439,7 @@ function ErrorNotice({ title, reason }: { title: string; reason: string }) {
   );
 }
 
-/** 事件類型：中文名稱為主要文字（原始代碼在 title 與「細節」）；沒有中文名稱時顯示代碼（等寬、次要色）。 */
+/** 事件類型：中文名稱為主要文字（原始代碼在 title 與「詳細資訊」）；沒有中文名稱時顯示代碼（等寬、次要色）。 */
 function EventType({ eventType }: { eventType: string }) {
   const label = eventTypeLabel(eventType);
   if (label === null) return <code className="timeline-type timeline-type-code mono">{eventType}</code>;
@@ -449,14 +450,14 @@ function EventType({ eventType }: { eventType: string }) {
   );
 }
 
-/** 事件的細節（預設收合）：事件類型代碼、對象、完整的 Task 名稱與事件內容。 */
+/** 事件的詳細資訊（預設收合）：事件類型代碼、對象、完整的 Task 名稱與事件內容。 */
 function EventDetails({ event, taskLabel }: { event: TimelineEvent; taskLabel: (id: string) => string }) {
   const { payload } = event;
   const hasPayload =
     payload !== null && payload !== undefined && (typeof payload !== "object" || Object.keys(payload).length > 0);
   return (
     <details className="timeline-event-more">
-      <summary>細節</summary>
+      <summary>詳細資訊</summary>
       <dl className="facts">
         <dt>事件類型</dt>
         <dd>
@@ -604,17 +605,20 @@ function MetricsView({ metrics, quotas }: { metrics: Metrics; quotas: ServerQuot
             <span>使用者回報 {lesson_recurrence.reported}</span>
           </dd>
         </Metric>
-        <Metric name="每階段用量">
+        <Metric name="Token 用量">
           <TokensValue prefix="總計 " value={usage.total_tokens} />
           <dd>共 {usage.runs} 個 Run</dd>
-          {/* 階段多時在格子內捲動，不把同列的格子撐高 */}
-          <dd className="timeline-metric-stages">
-            {usage.by_stage.map((stage) => (
-              <span key={stage.stage ?? ""} className="timeline-metric-stage">
-                <StageName stage={stage.stage} />：{tokens(stage.tokens)}（{stage.runs} 個 Run）
-              </span>
-            ))}
-          </dd>
+          {/* 目前 Runtime 回報用量時不帶 Stage，只會有一列「未分階段」，和總計重複：有 Stage 時才列出各階段。
+              階段多時在格子內捲動，不把同列的格子撐高 */}
+          {usage.by_stage.some((stage) => stage.stage !== null) && (
+            <dd className="timeline-metric-stages">
+              {usage.by_stage.map((stage) => (
+                <span key={stage.stage ?? ""} className="timeline-metric-stage">
+                  <StageName stage={stage.stage} />：{tokens(stage.tokens)}（{stage.runs} 個 Run）
+                </span>
+              ))}
+            </dd>
+          )}
         </Metric>
         <Metric name="Context 使用量">
           <TokensValue prefix="平均 " value={context.average_tokens} />

@@ -121,6 +121,10 @@ describe("更新通知", () => {
     await click(screen.getByRole("button", { name: "更新並重新開啟…" }));
 
     const dialog = screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" });
+    // 標題裡的版本號用等寬字（MASTER 7.1），可存取名稱不變
+    expect(within(within(dialog).getByRole("heading", { name: "更新到 Baton 0.2.0" })).getByText("0.2.0")).toHaveClass(
+      "mono",
+    );
     expect(dialog).toHaveTextContent("先下載並驗證安裝程式；失敗不會停止任何工作。");
     expect(dialog).toHaveTextContent("執行與「完全退出」相同的停止流程（最多 40 秒）。");
     expect(dialog).toHaveTextContent("備份資料。");
@@ -206,6 +210,8 @@ describe("更新通知", () => {
     expect(screen.queryByRole("dialog", { name: "更新到 Baton 0.2.0" })).not.toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "更新 Baton" })).toHaveTextContent("停止執行中的工作");
     expect(screen.queryByText(/可以更新/)).not.toBeInTheDocument();
+    // 確認對話框與通知都已消失：焦點移進更新進度對話框（標題），不落到 body
+    expect(screen.getByRole("heading", { name: "更新 Baton" })).toHaveFocus();
 
     // 維護中由更新進度輪詢；通知本身不再每 60 秒讀取
     const calls = client.updateStatus.mock.calls.length;
@@ -259,11 +265,14 @@ describe("更新通知", () => {
     );
     await settle();
 
-    expect(screen.getByText("已從 0.1.0 更新到 0.2.0")).toBeInTheDocument();
+    const outcome = noticeText("已從 0.1.0 更新到 0.2.0");
+    // 版本號用等寬字（MASTER 7.1）
+    expect(within(outcome).getByText("0.1.0")).toHaveClass("mono");
+    expect(within(outcome).getByText("0.2.0")).toHaveClass("mono");
 
     await click(screen.getByRole("button", { name: "知道了" }));
 
-    expect(screen.queryByText("已從 0.1.0 更新到 0.2.0")).not.toBeInTheDocument();
+    expect(screen.queryByText(/已從/)).not.toBeInTheDocument();
   });
 
   it("更新沒有套用時說明仍是原本的版本", async () => {
@@ -271,7 +280,7 @@ describe("更新通知", () => {
     render(<UpdateNotice client={fakeClient(updateStatus({ last_maintenance: outcome }))} runtimeStartedAt={STARTED_AT} />);
     await settle();
 
-    expect(screen.getByText("更新沒有套用，仍是 0.1.0")).toBeInTheDocument();
+    expect(within(noticeText("更新沒有套用，仍是 0.1.0")).getByText("0.1.0")).toHaveClass("mono");
   });
 
   it.each([

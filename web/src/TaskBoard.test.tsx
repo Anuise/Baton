@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -464,6 +464,8 @@ describe("工作面板", () => {
     const user = await renderBoard(fakeClient({ tasks: [task("task_1", "寫文件")] }));
     const toggle = within(card("寫文件")).getByRole("button", { name: "更多" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
+    // 收合時選單不在 DOM：aria-controls 不指向不存在的 id
+    expect(toggle).not.toHaveAttribute("aria-controls");
 
     toggle.focus();
     await user.keyboard("{Enter}");
@@ -477,6 +479,7 @@ describe("工作面板", () => {
 
     expect(within(card("寫文件")).queryByRole("group", { name: "更多動作" })).not.toBeInTheDocument();
     expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).not.toHaveAttribute("aria-controls");
     expect(toggle).toHaveFocus();
   });
 
@@ -834,25 +837,177 @@ describe("工作面板", () => {
   describe("等待裁定的卡片", () => {
     const waiting = () => task("task_1", "等裁定", { status: "waiting_decision", contract: filledContract("task_1") });
 
-    it("有低調的「前往裁定」，按了切到「裁定」；其他狀態的卡片沒有", async () => {
+    it("有「前往裁定」（次要按鈕），按了切到「裁定」並指定這個 Task；其他狀態的卡片沒有", async () => {
       const onOpenPage = vi.fn();
       const user = await renderBoard(
         fakeClient({ tasks: [waiting(), task("task_2", "部署", { status: "ready", contract: filledContract("task_2") })] }),
         onOpenPage,
       );
 
+      // 琥珀卡上唯一要你做的事：預設的次要按鈕，不是低調按鈕
       const goTo = within(card("等裁定")).getByRole("button", { name: "前往裁定" });
-      expect(goTo).toHaveClass("btn-quiet");
+      expect(goTo).not.toHaveClass("btn-quiet");
       expect(within(card("部署")).queryByRole("button", { name: "前往裁定" })).not.toBeInTheDocument();
 
       await user.click(goTo);
-      expect(onOpenPage).toHaveBeenCalledWith("decisions");
+      // 裁定頁依 taskId 選中這個 Task 的裁定，不是清單第一筆
+      expect(onOpenPage).toHaveBeenCalledWith("decisions", { taskId: "task_1" });
     });
 
     it("沒有傳入 onOpenPage 時不顯示「前往裁定」", async () => {
       await renderBoard(fakeClient({ tasks: [waiting()] }));
 
       expect(within(card("等裁定")).queryByRole("button", { name: "前往裁定" })).not.toBeInTheDocument();
+    });
+  });
+
+  describe("受阻的卡片", () => {
+    const blocked = (id: string, title: string) => task(id, title, { status: "blocked", contract: filledContract(id) });
+    /** 收在「詳細資訊」與「更多」以外、直接看得到的按鈕。 */
+    const visibleButtons = (title: string) =>
+      within(card(title))
+        .getAllByRole("button")
+        .filter((button) => button.closest("details") === null && button.closest(".task-more") === null)
+        .map(spokenText);
+
+    it("Worker 回報受阻：排除原因後按「標記為可派工」移到「可派工」，焦點跟到移過去的卡片標題", async () => {
+      const client = fakeClient({
+        tasks: [blocked("task_1", "缺金鑰")],
+        runs: [run("run_1", "task_1", "failed", { blocked: { reason: "缺少部署金鑰", reported_at: T0 } })],
+      });
+      const user = await renderBoard(client, vi.fn());
+
+      // 沒有預算用盡的裁定：唯一的動作是標回可派工
+      expect(visibleButtons("缺金鑰")).toEqual(["標記為可派工", "更多"]);
+      await user.click(within(card("缺金鑰")).getByRole("button", { name: "標記為可派工" }));
+
+      expect(client.markTaskReady).toHaveBeenCalledWith("ws_1", "task_1");
+      const moved = await within(column("可派工（1）")).findByRole("article", { name: "缺金鑰" });
+      // 剛按的按鈕隨卡片換欄而消失：焦點不落到 body
+      await waitFor(() => expect(within(moved).getByRole("heading", { level: 4, name: "缺金鑰" })).toHaveFocus());
+    });
+
+    it("標記為可派工被拒時卡片留在原地，焦點留在按鈕上並顯示 Runtime 的說明", async () => {
+      const client = fakeClient({ tasks: [blocked("task_1", "缺金鑰")] });
+      vi.mocked(client.markTaskReady).mockRejectedValueOnce(new Error("Task 尚未符合派工條件"));
+      const user = await renderBoard(client);
+
+      const button = within(card("缺金鑰")).getByRole("button", { name: "標記為可派工" });
+      await user.click(button);
+
+      expect(await within(card("缺金鑰")).findByRole("alert")).toHaveTextContent("Task 尚未符合派工條件");
+      expect(column("受阻（1）")).toBeInTheDocument();
+      expect(button).toHaveFocus();
+    });
+
+    it("預算用盡而建立了裁定：「前往裁定」指定這筆裁定與 Task，「標記為可派工」收在「更多」", async () => {
+      const onOpenPage = vi.fn();
+      const client = fakeClient({
+        tasks: [blocked("task_1", "部署")],
+        budgets: [budgetView({ exhausted: "implementation", decision_request_id: "dec_budget_1" })],
+      });
+      const user = await renderBoard(client, onOpenPage);
+
+      // 卡片上最多一個直接看得到的動作；琥珀卡上要你做的事用次要按鈕
+      expect(visibleButtons("部署")).toEqual(["前往裁定", "更多"]);
+      const goTo = within(card("部署")).getByRole("button", { name: "前往裁定" });
+      expect(goTo).not.toHaveClass("btn-quiet");
+      await user.click(goTo);
+      expect(onOpenPage).toHaveBeenCalledWith("decisions", { taskId: "task_1", decisionId: "dec_budget_1" });
+
+      await openMore(user, "部署");
+      const menu = within(card("部署")).getByRole("group", { name: "更多動作" });
+      expect(within(menu).getAllByRole("button").map((button) => button.textContent)).toEqual([
+        "標記為可派工",
+        "編輯契約",
+        "新增相依",
+        "取消",
+      ]);
+      await user.click(within(menu).getByRole("button", { name: "標記為可派工" }));
+      expect(client.markTaskReady).toHaveBeenCalledWith("ws_1", "task_1");
+      expect(await within(column("可派工（1）")).findByRole("article", { name: "部署" })).toBeInTheDocument();
+    });
+
+    it("預算用盡但不知道裁定的識別：「前往裁定」只指定這個 Task", async () => {
+      const onOpenPage = vi.fn();
+      const user = await renderBoard(
+        fakeClient({ tasks: [blocked("task_1", "部署")], budgets: [budgetView({ exhausted: "verification" })] }),
+        onOpenPage,
+      );
+
+      expect(visibleButtons("部署")).toEqual(["前往裁定", "更多"]);
+      await user.click(within(card("部署")).getByRole("button", { name: "前往裁定" }));
+      expect(onOpenPage).toHaveBeenCalledWith("decisions", { taskId: "task_1" });
+    });
+
+    it("沒有傳入 onOpenPage 時，預算用盡的受阻卡直接顯示「標記為可派工」", async () => {
+      await renderBoard(
+        fakeClient({
+          tasks: [blocked("task_1", "部署")],
+          budgets: [budgetView({ exhausted: "implementation", decision_request_id: "dec_budget_1" })],
+        }),
+      );
+
+      expect(visibleButtons("部署")).toEqual(["標記為可派工", "更多"]);
+    });
+  });
+
+  describe("從別頁定位到卡片（target）", () => {
+    // jsdom 沒有實作 scrollIntoView
+    const original = Element.prototype.scrollIntoView;
+    afterEach(() => {
+      Element.prototype.scrollIntoView = original;
+      vi.useRealTimers();
+    });
+
+    const tasks = () => [task("task_1", "寫文件"), task("task_2", "部署", { status: "blocked", contract: filledContract("task_2") })];
+
+    it("看板讀回後把指定的卡片捲到可視範圍中間、聚焦標題並標示 1.5 秒；nonce 改變時再定位一次", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const scrollIntoView = vi.fn();
+      Element.prototype.scrollIntoView = scrollIntoView;
+      const client = fakeClient({ tasks: tasks() });
+      const { rerender } = render(
+        <TaskBoard client={client} workspace={workspace} timeZone="UTC" target={{ taskId: "task_2", nonce: 1 }} />,
+      );
+
+      const title = await screen.findByRole("heading", { level: 4, name: "部署" });
+      await waitFor(() => expect(title).toHaveFocus());
+      // 標題可以被聚焦，但不在 Tab 順序裡
+      expect(title).toHaveAttribute("tabindex", "-1");
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView.mock.contexts[0]).toBe(card("部署"));
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "center" });
+      expect(card("部署")).toHaveClass("task-card-located");
+      expect(card("寫文件")).not.toHaveClass("task-card-located");
+
+      await act(async () => {
+        vi.advanceTimersByTime(1500);
+      });
+      expect(card("部署")).not.toHaveClass("task-card-located");
+
+      // 同一個 Task 再要求一次（nonce 改變）：焦點已移走也會再定位
+      screen.getByRole("button", { name: "建立 Task" }).focus();
+      rerender(<TaskBoard client={client} workspace={workspace} timeZone="UTC" target={{ taskId: "task_2", nonce: 2 }} />);
+
+      await waitFor(() => expect(title).toHaveFocus());
+      expect(scrollIntoView).toHaveBeenCalledTimes(2);
+      expect(card("部署")).toHaveClass("task-card-located");
+    });
+
+    it("沒有 target 或指定的 Task 不在看板上時不移動焦點", async () => {
+      const scrollIntoView = vi.fn();
+      Element.prototype.scrollIntoView = scrollIntoView;
+      const client = fakeClient({ tasks: tasks() });
+      const { rerender } = render(<TaskBoard client={client} workspace={workspace} timeZone="UTC" target={null} />);
+      await screen.findByRole("heading", { level: 4, name: "部署" });
+
+      rerender(<TaskBoard client={client} workspace={workspace} timeZone="UTC" target={{ taskId: "task_9", nonce: 1 }} />);
+      await waitFor(() => expect(client.getTaskBoard).toHaveBeenCalledTimes(1));
+
+      expect(document.body).toHaveFocus();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      expect(document.querySelector(".task-card-located")).toBeNull();
     });
   });
 
@@ -1214,7 +1369,7 @@ describe("派工與 Run", () => {
     expect(status).not.toHaveTextContent("最後心跳");
   });
 
-  it("Run 狀態列顯示最新進度、Checkpoint 與受阻原因（含當地時間）", async () => {
+  it("Run 狀態列顯示最新進度、檢查點與受阻原因（含當地時間）", async () => {
     await renderBoard(
       fakeClient({
         tasks: [task("task_1", "部署", { status: "blocked" })],
@@ -1230,21 +1385,21 @@ describe("派工與 Run", () => {
 
     const status = runStatus("部署");
     expect(status).toHaveTextContent("最新進度：已完成 3/5 個檔案（2023/11/14 23:13）");
-    expect(status).toHaveTextContent("Checkpoint：資料表遷移完成（2023/11/15 00:13）");
+    expect(status).toHaveTextContent("檢查點：資料表遷移完成（2023/11/15 00:13）");
     expect(within(status).getByRole("alert")).toHaveTextContent("受阻：缺少部署金鑰（2023/11/15 01:13）");
   });
 
-  it("沒有回報時不顯示進度、Checkpoint 與受阻", async () => {
+  it("沒有回報時不顯示進度、檢查點與受阻", async () => {
     await renderBoard(fakeClient({ tasks: [task("task_1", "部署", { status: "running" })], runs: [run("run_1", "task_1", "running")] }));
 
     const status = runStatus("部署");
     expect(status).not.toHaveTextContent("最新進度");
-    expect(status).not.toHaveTextContent("Checkpoint");
+    expect(status).not.toHaveTextContent("檢查點");
     expect(status).not.toHaveTextContent("受阻");
     expect(within(status).queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("Checkpoint 細節預設收合，點開後可看到", async () => {
+  it("檢查點的詳細資訊預設收合，點開後可看到", async () => {
     const user = await renderBoard(
       fakeClient({
         tasks: [task("task_1", "部署", { status: "running" })],
@@ -1258,12 +1413,12 @@ describe("派工與 Run", () => {
 
     const details = runStatus("部署").querySelector<HTMLElement>(".task-checkpoint details")!;
     expect(details).not.toHaveAttribute("open");
-    await user.click(within(details).getByText("細節"));
+    await user.click(within(details).getByText("詳細資訊"));
     expect(details).toHaveAttribute("open");
     expect(details).toHaveTextContent("遷移腳本 v3 已套用");
   });
 
-  it("Checkpoint 的細節為空時沒有可展開的區塊", async () => {
+  it("檢查點的細節為空時沒有可展開的區塊", async () => {
     await renderBoard(
       fakeClient({
         tasks: [task("task_1", "部署", { status: "running" })],
@@ -1271,7 +1426,7 @@ describe("派工與 Run", () => {
       }),
     );
 
-    expect(runStatus("部署")).toHaveTextContent("Checkpoint：資料表遷移完成");
+    expect(runStatus("部署")).toHaveTextContent("檢查點：資料表遷移完成");
     expect(runStatus("部署").querySelector(".task-checkpoint details")).toBeNull();
   });
 
@@ -1908,7 +2063,11 @@ describe("成果驗證", () => {
     expect(record).toHaveTextContent("上次驗證未通過（第 1 次 Run，2023/11/14 23:13）");
     const details = record.querySelector("details")!;
     expect(details).not.toHaveAttribute("open");
-    await user.click(within(details).getByText("未通過的檢查（1）"));
+    // 計數只放數字、接在摘要文字後面（MASTER 7.1）
+    const summary = within(details).getByText("未通過的檢查");
+    expect(summary).toHaveTextContent(/^未通過的檢查 1$/);
+    expect(within(summary).getByText("1")).toHaveClass("count");
+    await user.click(summary);
     expect(details).toHaveAttribute("open");
     expect(details).toHaveTextContent("指令 cargo test（預期結束碼 0）：結束碼 101：2 個測試失敗");
     expect(details).not.toHaveTextContent("out/report.md");
@@ -1942,7 +2101,7 @@ describe("成果驗證", () => {
     expect(record).not.toHaveTextContent("未通過");
     const details = record.querySelector("details")!;
     expect(details).not.toHaveAttribute("open");
-    await user.click(within(details).getByText("不完整的檢查（1）"));
+    await user.click(within(details).getByText("不完整的檢查"));
     expect(details).toHaveTextContent("指令 cargo test（預期結束碼 0）：無法啟動 cargo：找不到執行檔");
     expect(details).not.toHaveTextContent("out/report.md");
   });
@@ -2303,7 +2462,7 @@ describe("Task 種類、工作目錄與整合佇列", () => {
     );
 
     const group = integration("加登入頁");
-    expect(group).toHaveTextContent("不完整的整合檢查（1）");
+    expect(group).toHaveTextContent("不完整的整合檢查 1");
     expect(group).toHaveTextContent("指令 cargo test（預期結束碼 0）：磁碟空間不足，無法建置");
     expect(group).not.toHaveTextContent("未通過的整合檢查");
   });
@@ -2349,15 +2508,23 @@ describe("Task 種類、工作目錄與整合佇列", () => {
     expect(items[0]).toHaveAttribute("aria-current", "step");
     expect(items[1]).toHaveTextContent(/^修 bugbaton\/task_2 → main排隊等待整合/);
     expect(items[1]).not.toHaveAttribute("aria-current");
+    // 排隊是系統在等：與卡片上的「等待整合」同一種中性徽章；處理中的是 accent
+    expect(within(items[1]).getByText("排隊等待整合")).toHaveClass("badge", "badge-plain");
+    expect(within(items[0]).getByText(/^合併中/)).toHaveClass("badge", "badge-accent");
+    expect(within(queueRegion()).getByText("3")).toHaveClass("count");
     expect(items[1]).not.toHaveTextContent("處理中");
     expect(items[2]).toHaveTextContent("改樣式");
     expect(queueRegion()).not.toHaveTextContent("舊的");
   });
 
-  it("沒有等待整合的項目時說明", async () => {
+  it("沒有等待整合的項目時標題旁的計數是 0，另有一行說明", async () => {
     await renderBoard(fakeClient({ tasks: [devTask()], integrations: [integrationEntry({ status: "integrated" })] }));
 
-    expect(queueRegion()).toHaveTextContent("沒有等待整合的項目");
+    // 0 筆也顯示 0，不用一句話取代計數（MASTER 7.1）
+    const heading = within(queueRegion()).getByRole("heading", { level: 3, name: "整合佇列" });
+    expect(heading.nextElementSibling).toHaveTextContent(/^0$/);
+    expect(heading.nextElementSibling).toHaveClass("count");
+    expect(within(queueRegion()).getByText("沒有等待整合的項目")).toHaveClass("empty-note");
     expect(within(queueRegion()).queryByRole("listitem")).not.toBeInTheDocument();
   });
 
@@ -2612,7 +2779,7 @@ describe("交接狀態", () => {
     const region = handoffRegion();
     expect(region).toHaveTextContent("交接：已交接，等待接手確認");
     expect(region).toHaveTextContent("從 主要帳號 交接到 備用帳號（達 85% 交接門檻）");
-    expect(region).toHaveTextContent("交接 checkpoint：登入表單完成，剩驗證邏輯（2023/11/14 22:13）");
+    expect(region).toHaveTextContent("交接檢查點：登入表單完成，剩驗證邏輯（2023/11/14 22:13）");
     expect(region).not.toHaveTextContent("交接已放棄");
     expect(region).not.toHaveTextContent("已完成：");
   });

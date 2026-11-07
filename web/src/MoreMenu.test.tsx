@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -53,6 +53,29 @@ describe("更多選單", () => {
     expect(details).not.toHaveAttribute("open");
   });
 
+  it("點選單空白處時焦點落到主區（tabindex=-1 的容器），選單保持開著", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <main tabIndex={-1} id="main-content">
+        <MoreMenu ariaLabel="更多（條目甲）">
+          <button type="button" className="btn-quiet">修正</button>
+        </MoreMenu>
+      </main>,
+    );
+    const details = container.querySelector("details")!;
+    await user.click(screen.getByLabelText("更多（條目甲）"));
+
+    // 相當於在浮層內距按下滑鼠：焦點從觸發鈕移到可被點擊聚焦的主區
+    container.querySelector("main")!.focus();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(details).toHaveAttribute("open");
+    // 這時按 Esc 仍收起並把焦點還給觸發鈕
+    await user.keyboard("{Escape}");
+    expect(details).not.toHaveAttribute("open");
+    expect(screen.getByLabelText("更多（條目甲）")).toHaveFocus();
+  });
+
   it("用 Tab 把焦點移出浮層時收起，不搬動焦點", async () => {
     const user = userEvent.setup();
     render(
@@ -72,7 +95,8 @@ describe("更多選單", () => {
     await user.tab();
 
     expect(screen.getByRole("button", { name: "下一個" })).toHaveFocus();
-    expect(details).not.toHaveAttribute("open");
+    // 收起延後一個 tick（不在焦點切換途中改 open）
+    await waitFor(() => expect(details).not.toHaveAttribute("open"));
   });
 
   it("焦點在頁面別處時按 Esc 不會把焦點搶回觸發鈕", async () => {

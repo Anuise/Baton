@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import type { SchedulingClient, SchedulingMode, SchedulingOverview } from "./runtimeClient";
 
 type OverviewState =
@@ -58,11 +59,8 @@ export function SchedulingSettings({ client }: Props) {
         )}
       </div>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
-      {loaded.state === "failed" && (
-        <p role="alert" className="callout callout-danger">
-          無法取得並行容量設定：{loaded.reason}
-        </p>
-      )}
+      {/* Runtime 的錯誤可能很長：長警示，不用淡底提示（MASTER 7.1） */}
+      {loaded.state === "failed" && <FailureNotice title="無法取得並行容量設定" reason={loaded.reason} />}
       {loaded.state === "ready" && (
         <div role="radiogroup" aria-label="並行容量預設" className="choice-list">
           {loaded.overview.settings.modes.map((info) => (
@@ -81,11 +79,7 @@ export function SchedulingSettings({ client }: Props) {
           ))}
         </div>
       )}
-      {switchError && (
-        <p role="alert" className="callout callout-danger">
-          無法切換並行容量：{switchError}
-        </p>
-      )}
+      {switchError && <FailureNotice title="無法切換並行容量" reason={switchError} />}
     </section>
   );
 }

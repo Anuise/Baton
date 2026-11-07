@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type MouseEvent } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import { CopyButton } from "./LongText";
 import { MoreMenu } from "./MoreMenu";
 import { shortPath, splitFirstSentence } from "./textFormat";
@@ -107,7 +108,8 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   const [name, setName] = useState("");
   const [expectedAccount, setExpectedAccount] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  // 動作失敗：狀態詞（哪個動作沒有完成）＋ Runtime 的說明
+  const [actionError, setActionError] = useState<{ title: string; reason: string } | null>(null);
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reordering, setReordering] = useState(false);
@@ -235,15 +237,17 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       const { profiles, limit } = await client.reorderProfiles(order.map((p) => p.id));
       setList({ state: "ready", profiles, limit });
     } catch (error) {
-      setActionError(reasonOf(error));
+      setActionError({ title: "無法調整順序", reason: reasonOf(error) });
       await refresh();
     } finally {
       setReordering(false);
     }
   };
 
-  /** 執行一個針對單一 Profile 的動作；失敗時顯示 Runtime 的說明，清單維持原樣。回傳是否成功。 */
-  const act = async (work: () => Promise<unknown>, notice: string | null = null) => {
+  /**
+   * 執行一個針對單一 Profile 的動作；失敗時以 `failure` 為狀態詞顯示 Runtime 的說明，清單維持原樣。回傳是否成功。
+   */
+  const act = async (work: () => Promise<unknown>, failure: string, notice: string | null = null) => {
     setActionError(null);
     setTerminalNotice(null);
     try {
@@ -253,7 +257,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       onChange?.();
       return true;
     } catch (error) {
-      setActionError(reasonOf(error));
+      setActionError({ title: failure, reason: reasonOf(error) });
       return false;
     }
   };
@@ -261,7 +265,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
   /** 封存第 `index` 個帳號；成功後卡片消失，焦點移到下一張（沒有就上一張）卡片的「更多」。 */
   const archive = async (index: number) => {
     const neighbor = active[index + 1] ?? active[index - 1] ?? null;
-    if (await act(() => client.archiveProfile(active[index].id))) {
+    if (await act(() => client.archiveProfile(active[index].id), "無法封存")) {
       setFocusTarget({ profileId: neighbor?.id ?? null, control: "more" });
     }
   };
@@ -296,28 +300,17 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
       </div>
 
       {list.state === "loading" && <p className="empty-note">載入中…</p>}
-      {list.state === "failed" && (
-        <p role="alert" className="callout callout-danger">
-          無法取得帳號清單：{list.reason}
-        </p>
-      )}
+      {/* Runtime 的錯誤可能很長：長警示（狀態詞＋原因，其餘收進「詳細資訊」），不用淡底提示（MASTER 7.1） */}
+      {list.state === "failed" && <FailureNotice title="無法取得帳號清單" reason={list.reason} />}
       {empty && <p className="empty-note">還沒有帳號</p>}
-      {full && <p className="empty-note accounts-full">已達上限：最多 {limit} 個帳號。請先封存用不到的帳號，再新增。</p>}
-      {scheduling.state === "failed" && (
-        <p role="alert" className="callout callout-danger">
-          無法取得排程總覽：{scheduling.reason}
-        </p>
-      )}
+      {full && <p className="empty-note accounts-full">已達上限：最多 {limit} 個帳號，請先封存用不到的帳號再新增</p>}
+      {scheduling.state === "failed" && <FailureNotice title="無法取得排程總覽" reason={scheduling.reason} />}
       {terminalNotice && (
         <p role="status" className="callout callout-accent">
           {terminalNotice}
         </p>
       )}
-      {actionError && (
-        <p role="alert" className="callout callout-danger">
-          {actionError}
-        </p>
-      )}
+      {actionError && <FailureNotice title={actionError.title} reason={actionError.reason} />}
 
       <div className="accounts-add" id={addId} hidden={!showAdd}>
         <form className="panel accounts-add-form" aria-label="新增帳號" onSubmit={(event) => void create(event)}>
@@ -382,6 +375,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                     onClick={() =>
                       void act(
                         () => client.openLoginTerminal(profile.id),
+                        "無法開啟終端機",
                         `已開啟終端機，請在其中完成 ${profile.name} 的登入，再按「重新核對」`,
                       )
                     }
@@ -391,7 +385,7 @@ export function AccountsPage({ client, timeZone, onChange, refreshKey }: Props) 
                   <button
                     type="button"
                     aria-label={`重新核對 ${profile.name}`}
-                    onClick={() => void act(() => client.verifyProfile(profile.id))}
+                    onClick={() => void act(() => client.verifyProfile(profile.id), "無法重新核對")}
                   >
                     重新核對
                   </button>
@@ -640,14 +634,14 @@ function tokenCount(tokens: number): string {
 }
 
 /**
- * 觀測不完整的長警示：狀態詞在前（Runtime 的說明已帶「觀測不完整」開頭時不重複）；
- * 原因的第一句完整顯示，其餘收進「詳細資訊」，不在卡片裡撐成一大塊。
+ * 觀測不完整的提示：Runtime 依固定句型說明哪些視窗沒有已觀測用量，是一句話的狀態說明，用提示（callout，MASTER 7.1）。
+ * 狀態詞在前（Runtime 的說明已帶「觀測不完整」開頭時不重複）；萬一不只一句，第一句完整顯示，其餘收進「詳細資訊」。
  */
 function IncompleteNotice({ reason }: { reason: string | null }) {
   const { summary, rest } = splitFirstSentence((reason ?? "").replace(/^觀測不完整[：:]?/, ""));
   return (
-    <div role="note" className="notice notice-warning quota-incomplete">
-      <p className="notice-title">觀測不完整</p>
+    <div role="note" className="callout callout-warning quota-incomplete">
+      <p className="callout-title">觀測不完整</p>
       {summary !== "" && <p>{summary}</p>}
       {rest !== "" && (
         <details>
@@ -693,10 +687,14 @@ function AccountLoad({
   );
 }
 
+/**
+ * 門檻狀態描述額度本身，不說「可派工」：帳號能不能派工還取決於登入與核對（狀態徽章），
+ * 兩者並列時不能互相矛盾。代碼（open／paused／draining）只放在 title。
+ */
 const GATE_STATE_LABELS: Record<GateState, string> = {
-  open: "可派工",
-  paused: "停止派工",
-  draining: "交接中（draining）",
+  open: "未達門檻",
+  paused: "已達門檻，停止派工",
+  draining: "交接中",
 };
 
 /**
@@ -705,13 +703,13 @@ const GATE_STATE_LABELS: Record<GateState, string> = {
  */
 function AccountGate({ name, gate, timeZone }: { name: string; gate: QuotaGate | null; timeZone?: string }) {
   const state = gate?.state ?? "open";
-  // 停止派工或交接中是要使用者知道的狀態；項目多、窄時會折成好幾行，以長警示呈現（只有色條與狀態詞上色）。
-  // 可派工只是一行次要資訊
-  const tone = state === "open" ? "meta" : `notice ${state === "draining" ? "notice-danger" : "notice-warning"}`;
+  // 停止派工或交接中是要使用者知道的狀態，內容都是固定的短句與標籤：提示（callout），狀態詞上色（MASTER 7.1）。
+  // 未達門檻只是一行次要資訊
+  const tone = state === "open" ? "meta" : `callout ${state === "draining" ? "callout-danger" : "callout-warning"}`;
   return (
     <div className={`profile-gate profile-gate-${state} ${tone}`} role="group" aria-label={`${name} 的額度門檻`}>
-      <span className={state === "open" ? "gate-state" : "gate-state notice-title"}>
-        額度門檻：<strong>{GATE_STATE_LABELS[state]}</strong>
+      <span className={state === "open" ? "gate-state" : "gate-state callout-title"}>
+        額度：<strong title={state}>{GATE_STATE_LABELS[state]}</strong>
       </span>
       {gate && (
         <span className="gate-reason">

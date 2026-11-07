@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import type {
   BackupClient,
   BackupStatus,
@@ -65,11 +66,8 @@ export function BackupSettings({ client, timeZone }: Props) {
         <p>每日自動備份，保留 7 份每日與 4 份每週備份；每週自動進行一次還原演練。備份不含登入秘密。</p>
       </div>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
-      {loaded.state === "failed" && (
-        <p role="alert" className="callout callout-danger">
-          無法取得備份狀態：{loaded.reason}
-        </p>
-      )}
+      {/* Runtime 的錯誤可能很長：長警示，不用淡底提示（MASTER 7.1） */}
+      {loaded.state === "failed" && <FailureNotice title="無法取得備份狀態" reason={loaded.reason} />}
       {loaded.state === "ready" && (
         <>
           {loaded.status.latest_drill ? (

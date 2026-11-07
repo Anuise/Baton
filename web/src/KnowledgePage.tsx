@@ -167,6 +167,24 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
   // 收起表單或詳情時把焦點還給開啟它的按鈕，不讓焦點落到 body
   const createToggleRef = useRef<HTMLButtonElement>(null);
   const detailTriggerRef = useRef<HTMLElement | null>(null);
+  // 條目操作成功後要移動焦點的位置：條目可能移到別的清單（卡片在新位置重新掛載），等清單重新渲染後才找
+  const [settled, setSettled] = useState<Settled | null>(null);
+  const pageRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (settled === null) return;
+    const { id, list: from, trigger } = settled;
+    const page = pageRef.current;
+    // 卡片還在原位（修正、轉為 Guard、衝突後重新整理）：回到開啟表單的按鈕；
+    // 卡片已移走：依條目 id 聚焦新位置的卡片標題；條目不在畫面上（例如沒有顯示歷史）時聚焦原本區段的標題
+    const moved = [...(page?.querySelectorAll<HTMLElement>("[data-entry-id]") ?? [])].find((card) => card.dataset.entryId === id);
+    const target =
+      (trigger?.isConnected ? trigger : null) ??
+      moved?.querySelector<HTMLElement>(":scope > .row-head > h4") ??
+      page?.querySelector<HTMLElement>(`[data-list="${from}"] h3`);
+    target?.focus();
+    setSettled(null);
+  }, [settled, list]);
 
   // 有效條目與「含無效」分兩次查詢：候選與歷史再多也不會擠掉有效條目（每次最多 100 筆）
   const load = useCallback(async () => {
@@ -244,6 +262,7 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
               detailTriggerRef.current = trigger;
               setDetail({ id, list: listName });
             }}
+            onSettled={(trigger) => setSettled({ id: entry.id, list: listName, trigger })}
           />
           {detail !== null && detail.id === entry.id && detail.list === listName && (
             <DetailPanel
@@ -270,7 +289,7 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
   // 版面（依使用者的工作排序）：等你確認的候選 → 有效條目（含歷史開關）→ Guard。
   // 搜尋同時篩選候選、有效與歷史條目，所以放在頁面標題列，而不是某一個區段裡
   return (
-    <section className="page knowledge-page" aria-label="知識">
+    <section ref={pageRef} className="page knowledge-page" aria-label="知識">
       <header className="page-header">
         <h2>知識</h2>
         <div className="page-actions">
@@ -331,18 +350,18 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
               <p>{DEGRADED_NOTICE}</p>
             </div>
           )}
-          <section className="section knowledge-candidates" aria-label="待確認的候選教訓">
+          <section className="section knowledge-candidates" aria-label="待確認的候選教訓" data-list="candidates">
             <div className="section-heading">
-              <h3>待確認的候選教訓</h3>
+              <h3 tabIndex={-1}>待確認的候選教訓</h3>
               <span className="count">{candidates.length}</span>
               <p>Agent 提交的候選尚未驗證，確認後才會提供給後續的 Run 使用。</p>
             </div>
             {candidates.length === 0 && <p className="empty-note">沒有待確認的候選</p>}
             {candidates.length > 0 && cards("candidates", candidates)}
           </section>
-          <section className="section" aria-label="有效條目">
+          <section className="section" aria-label="有效條目" data-list="effective">
             <div className="section-heading">
-              <h3>有效條目</h3>
+              <h3 tabIndex={-1}>有效條目</h3>
               <span className="count">{list.effective.length}</span>
               <div className="section-actions">
                 <label className="knowledge-history-toggle">
@@ -357,9 +376,9 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
             {list.effective.length > 0 && cards("effective", list.effective)}
           </section>
           {showHistory && (
-            <section className="section" aria-label="歷史條目">
+            <section className="section" aria-label="歷史條目" data-list="history">
               <div className="section-heading">
-                <h3>歷史條目</h3>
+                <h3 tabIndex={-1}>歷史條目</h3>
                 <span className="count">{history.length}</span>
                 <p>已撤銷、已淘汰、已被取代或不在有效期間內的條目，不會提供給 Run 使用。</p>
               </div>
@@ -378,6 +397,11 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
 interface DetailTarget {
   id: string;
   list: "candidates" | "effective" | "history";
+}
+
+/** 操作成功的條目、它原本所在的清單，以及開啟表單或按下的按鈕。 */
+interface Settled extends DetailTarget {
+  trigger: HTMLElement | null;
 }
 
 /** 表單中編輯的內容；標籤與證據先以文字編輯，送出時才拆成清單。 */
@@ -567,13 +591,15 @@ interface CardProps {
   act: Act;
   /** 開啟詳情；trigger 是按下的「詳情」，關閉詳情時焦點還給它。 */
   onOpenDetail: (id: string, trigger: HTMLElement) => void;
+  /** 操作成功、表單收起後由頁面移動焦點（條目可能已移到別的清單）；trigger 是開啟表單或按下的按鈕。 */
+  onSettled: (trigger: HTMLElement | null) => void;
 }
 
 /**
  * 一個條目；可用的操作依狀態：候選可確認或撤銷，已驗證可修正、撤銷或淘汰（有效的教訓還可轉為 Guard），其他只能看詳情。
  * 直接看得到的動作最多 3 個（MASTER 5.1）：候選＝確認、撤銷、詳情；已驗證＝修正、詳情、更多。
  */
-function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
+function EntryCard({ client, entry, timeZone, act, onOpenDetail, onSettled }: CardProps) {
   const [mode, setMode] = useState<CardMode>(null);
   const [error, setError] = useState<string | null>(null);
   // 開啟表單的按鈕（從「更多」開啟時是「更多」本身）：表單收起時焦點還給它，不讓焦點落到 body
@@ -586,19 +612,26 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
     setMode(next);
   };
 
+  /** 取消表單：卡片還在，焦點直接還給開啟它的按鈕。 */
   const closeForm = () => {
     setMode(null);
     const trigger = triggerRef.current;
     triggerRef.current = null;
-    // 操作後條目可能已移到別的清單（這張卡片隨之卸載），觸發的按鈕不在畫面上時就不移動焦點
-    if (trigger?.isConnected) trigger.focus();
+    trigger?.focus();
   };
 
   const run = async (operation: () => Promise<unknown>) => {
     setError(null);
     const failure = await act(operation);
-    if (failure === null) closeForm();
-    else setError(failure);
+    if (failure !== null) {
+      setError(failure);
+      return;
+    }
+    setMode(null);
+    const trigger = triggerRef.current;
+    triggerRef.current = null;
+    // 操作後條目可能已移到別的清單（這張卡片隨之卸載）：交給頁面在清單重新渲染後移動焦點
+    onSettled(trigger);
   };
 
   const { content } = entry;
@@ -614,9 +647,11 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
     <article
       className={`row knowledge-entry knowledge-${tone}${tone === "candidate" ? " stripe-warning" : ""}`}
       aria-label={content.title}
+      data-entry-id={entry.id}
     >
       <div className="row-head">
-        <h4 className="clamp-2" title={content.title}>
+        {/* 條目移到別的清單後，焦點移到新位置的這個標題 */}
+        <h4 className="clamp-2" title={content.title} tabIndex={-1}>
           {content.title}
         </h4>
         <span className={`badge${badgeTone}`} title={tone === "candidate" ? CANDIDATE_TITLE : undefined}>
@@ -661,7 +696,13 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
         {entry.status === "candidate" && (
           <>
             {/* 列內動作用次要按鈕：候選可能連續好幾列，主要按鈕留給頁首的「新增條目」（MASTER 7.1） */}
-            <button type="button" onClick={() => void run(() => client.confirmKnowledge(entry.id, entry.revision))}>
+            <button
+              type="button"
+              onClick={(event) => {
+                triggerRef.current = event.currentTarget;
+                void run(() => client.confirmKnowledge(entry.id, entry.revision));
+              }}
+            >
               確認為已驗證
             </button>
             <button type="button" className="btn-danger" onClick={(event) => openForm("revoke", event.currentTarget)}>

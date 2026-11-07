@@ -358,7 +358,8 @@ describe("帳號頁", () => {
     expect(addToggle()).toBeDisabled();
     // 表單即使展開也不能送出
     expect(submitButton(true)).toBeDisabled();
-    expect(screen.getByText(/最多 8 個/)).toBeInTheDocument();
+    // 一行說明不加句號（MASTER 7.1）
+    expect(screen.getByText(/最多 8 個/)).toHaveTextContent(/^已達上限：最多 8 個帳號，請先封存用不到的帳號再新增$/);
 
     // 封存收在卡片的「更多」裡：先打開選單再選
     await user.click(screen.getByLabelText("更多（帳號 1）"));
@@ -516,7 +517,11 @@ describe("帳號頁", () => {
 
     await user.click(screen.getByRole("button", { name: "重新核對 主要帳號" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("claude 沒有回應");
+    // 長警示：狀態詞說明哪個動作沒有完成，接著是 Runtime 的說明
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("無法重新核對")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("claude 沒有回應");
     expect(screen.getByText("可派工")).toBeInTheDocument();
   });
 
@@ -526,7 +531,9 @@ describe("帳號頁", () => {
 
     render(<AccountsPage client={client} />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("connection refused");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).toHaveTextContent(/^無法取得帳號清單connection refused$/);
     expect(screen.queryByText("還沒有帳號")).not.toBeInTheDocument();
   });
 
@@ -637,7 +644,7 @@ describe("帳號頁", () => {
 
       await moveFromMenu("下移", "乙");
 
-      expect(await screen.findByRole("alert")).toHaveTextContent("帳號清單已經變動");
+      expect(await screen.findByRole("alert")).toHaveTextContent(/^無法調整順序帳號清單已經變動$/);
       await waitFor(() => expect(shownOrder()).toEqual(["甲", "乙", "丙"]));
     });
   });
@@ -735,7 +742,12 @@ describe("帳號頁", () => {
 
       render(<AccountsPage client={client} />);
 
-      expect(await screen.findByRole("alert")).toHaveTextContent("無法取得排程總覽：connection refused");
+      // Runtime 的錯誤可能很長：長警示（狀態詞＋原因），不是淡底提示
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveClass("notice", "notice-danger");
+      expect(alert).not.toHaveClass("callout");
+      expect(within(alert).getByText("無法取得排程總覽")).toHaveClass("notice-title");
+      expect(alert).toHaveTextContent(/^無法取得排程總覽connection refused$/);
       expect(screen.getByText("主要帳號")).toBeInTheDocument();
     });
 
@@ -910,9 +922,10 @@ describe("帳號頁", () => {
 
       const incomplete = await screen.findByRole("group", { name: "主要帳號 的額度" });
       const note = within(incomplete).getByRole("note");
-      // 長警示：狀態詞在前（Runtime 的說明已帶「觀測不完整」時不重複），原因完整顯示
-      expect(note).toHaveClass("notice", "notice-warning", "quota-incomplete");
-      expect(within(note).getByText("觀測不完整")).toHaveClass("notice-title");
+      // 一句話的固定句型：提示（callout），狀態詞在前（Runtime 的說明已帶「觀測不完整」時不重複），原因完整顯示
+      expect(note).toHaveClass("callout", "callout-warning", "quota-incomplete");
+      expect(note).not.toHaveClass("notice");
+      expect(within(note).getByText("觀測不完整")).toHaveClass("callout-title");
       expect(note).toHaveTextContent(/^觀測不完整五小時、七日視窗沒有來自 Claude Code 的已觀測用量/);
       const complete = screen.getByRole("group", { name: "備用帳號 的額度" });
       expect(within(complete).queryByRole("note")).not.toBeInTheDocument();
@@ -1073,10 +1086,14 @@ describe("帳號頁", () => {
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-paused");
-      // 項目多、窄時會折成好幾行：長警示（只有色條與狀態詞上色），不是淡底提示
-      expect(gate).toHaveClass("notice", "notice-warning");
-      expect(gate).not.toHaveClass("callout");
-      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：停止派工");
+      // 內容都是固定的短句與標籤：提示（callout），不是長警示（MASTER 7.1）
+      expect(gate).toHaveClass("callout", "callout-warning");
+      expect(gate).not.toHaveClass("notice");
+      // 狀態描述額度本身，代碼只在 title
+      const state = within(gate).getByText(/^額度：/);
+      expect(state).toHaveClass("callout-title");
+      expect(state).toHaveTextContent(/^額度：已達門檻，停止派工$/);
+      expect(within(state).getByText("已達門檻，停止派工")).toHaveAttribute("title", "paused");
       expect(within(gate).getByText(/^原因/)).toHaveTextContent("原因：達 75% 停止派工門檻（當時用量 78%）");
       expect(within(gate).getByText("回到 60% 以下或重置後才恢復派工")).toBeInTheDocument();
       expect(within(gate).getByText("重置時間：2023/11/15 01:13")).toBeInTheDocument();
@@ -1101,8 +1118,10 @@ describe("帳號頁", () => {
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-draining");
-      expect(gate).toHaveClass("notice", "notice-danger");
-      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：交接中（draining）");
+      expect(gate).toHaveClass("callout", "callout-danger");
+      // 不在主要文字裡露出英文代碼（draining），代碼只在 title
+      expect(within(gate).getByText(/^額度：/)).toHaveTextContent(/^額度：交接中$/);
+      expect(within(gate).getByText("交接中")).toHaveAttribute("title", "draining");
       expect(within(gate).getByText(/^原因/)).toHaveTextContent(/^原因：Claude Code 回報限流警告$/);
       expect(within(gate).getByText("回到 60% 以下或重置後才恢復派工")).toBeInTheDocument();
       expect(within(gate).queryByText(/重置時間/)).not.toBeInTheDocument();
@@ -1128,13 +1147,34 @@ describe("帳號頁", () => {
       expect(within(gate).getByText(/^原因/)).toHaveTextContent(/^原因：Claude Code 回報已達上限（突然限流）$/);
     });
 
-    it("沒有門檻紀錄（null）時是可派工，不顯示原因與恢復提示", async () => {
+    it("沒有門檻紀錄（null）時是未達門檻，不顯示原因與恢復提示", async () => {
       render(<AccountsPage client={withGate(null)} timeZone="UTC" />);
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-open");
+      expect(gate).not.toHaveClass("callout");
       expect(gate).not.toHaveClass("notice");
-      expect(gate).toHaveTextContent(/^額度門檻：可派工$/);
+      expect(gate).toHaveTextContent(/^額度：未達門檻$/);
+    });
+
+    it("帳號尚未核對時，額度門檻不說「可派工」，不與狀態徽章矛盾", async () => {
+      const client = {
+        ...fakeClient([
+          profile({
+            verification: null,
+            dispatchable: false,
+            blockers: [{ code: "profile_unverified", message: "尚未核對登入狀態；請完成原生登入後按「重新核對」" }],
+          }),
+        ]),
+        schedulingOverview: vi.fn(async () => schedulingOverview({ accounts: [accountScheduling({ quota_gate: null })] })),
+      };
+      render(<AccountsPage client={client} timeZone="UTC" />);
+
+      const gate = await gateGroup();
+      const card = gate.closest("li")!;
+      expect(within(card).getByText("尚未核對")).toHaveClass("badge");
+      expect(gate).toHaveTextContent("額度：未達門檻");
+      expect(within(card).queryByText(/可派工/)).not.toBeInTheDocument();
     });
 
     it("已恢復（open）時顯示恢復的原因與時間，不顯示恢復提示", async () => {
@@ -1154,7 +1194,7 @@ describe("帳號頁", () => {
       );
 
       const gate = await gateGroup();
-      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：可派工");
+      expect(within(gate).getByText(/^額度：/)).toHaveTextContent(/^額度：未達門檻$/);
       expect(within(gate).getByText(/^原因/)).toHaveTextContent("原因：用量回到 60% 以下（當時用量 55%）");
       expect(within(gate).getByText("自 2023/11/14 22:13 起")).toBeInTheDocument();
       expect(within(gate).queryByText("回到 60% 以下或重置後才恢復派工")).not.toBeInTheDocument();

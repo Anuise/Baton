@@ -139,7 +139,7 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
 
 type StorageFaultView = NonNullable<NonNullable<HealthResponse["storage"]>["fault"]>;
 
-/** 儲存故障的整寬警示：狀態詞在前；原因的第一句與處理方式完整顯示，其餘與技術細節收進「技術細節」。 */
+/** 儲存故障的整寬警示：狀態詞在前；原因的第一句與處理方式完整顯示，其餘與技術細節收進「詳細資訊」。 */
 export function StorageFault({ fault }: { fault: StorageFaultView | null }) {
   const reason = fault && splitFirstSentence(fault.summary);
   return (
@@ -150,7 +150,7 @@ export function StorageFault({ fault }: { fault: StorageFaultView | null }) {
           <p>{reason.summary}</p>
           <p>{fault.action}</p>
           <details className="status-storage-detail">
-            <summary>技術細節</summary>
+            <summary>詳細資訊</summary>
             {reason.rest && <p>{reason.rest}</p>}
             <p className="mono">{fault.detail}</p>
           </details>

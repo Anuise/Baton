@@ -63,7 +63,7 @@ function sourceLabel(revision: AuthorizationRevision, view: AuthorizationView): 
 
 /**
  * Workspace 授權（I2）：選取目錄不等於授權。
- * 使用者從建議範本或空白開始編輯，檢視確認摘要（含風險揭露）後確認並保存，授權才生效。
+ * 使用者從建議範本或空白開始編輯，檢視確認摘要（含風險揭露）後確認並儲存，授權才生效。
  */
 export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
   const [loaded, setLoaded] = useState<ViewState>({ state: "loading" });
@@ -172,7 +172,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
       setSummary(null);
       setAcknowledged(false);
       setAcknowledgedExpansion(false);
-      setNotice(`已保存為第 ${revision.revision} 版`);
+      setNotice(`已儲存為第 ${revision.revision} 版`);
     } catch (e) {
       setError(reasonOf(e));
     } finally {
@@ -203,7 +203,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
     { title: "高風險能力", risky: true, capabilities: view.capabilities.filter((c) => c.high_risk) },
   ].filter((group) => group.capabilities.length > 0);
 
-  // 版面：現況 → 沿用舊授權的 Run（要你處理時才出現）→ 從範本開始 → 能力與範圍 → 確認與保存 → 歷史（收起）
+  // 版面：現況 → 沿用舊授權的 Run（要你處理時才出現）→ 從範本開始 → 能力與範圍 → 確認與儲存 → 歷史（收起）
   return (
     <PageFrame>
       {effective ? (
@@ -217,7 +217,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
       ) : (
         <div className="callout callout-warning">
           <p className="callout-title">尚未確認授權</p>
-          <p>選取目錄不等於授權；確認之前，任何需要能力的 Agent 都不會被准入。</p>
+          <p>選取目錄不等於授權；確認之前，需要能力的工作都不會開始。</p>
         </div>
       )}
 
@@ -241,7 +241,8 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
           {view.templates.map((template) => (
             <li key={template.id}>
               <div className="row-head">
-                <strong>{template.name}</strong>
+                {/* 物件標題與其他頁一致（h4、--text-title-sm、--leading-title-sm，MASTER 7.1） */}
+                <h4>{template.name}</h4>
                 {template.id === templateId && <span className="badge badge-accent">目前依據</span>}
                 <button
                   type="button"
@@ -313,8 +314,8 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
 
       <section className="section">
         <div className="section-heading">
-          <h3>確認與保存</h3>
-          <p>保存前先檢視確認摘要；內容一改，摘要就要重新檢視。</p>
+          <h3>確認與儲存</h3>
+          <p>儲存前先檢視確認摘要；內容一改，摘要就要重新檢視。</p>
         </div>
         <div className="form-actions">
           <button type="button" disabled={busy} onClick={() => void review()}>
@@ -377,7 +378,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
                   disabled={busy || (summary.requires_risk_acknowledgement && !acknowledged) || (expands && !acknowledgedExpansion)}
                   onClick={() => void confirm()}
                 >
-                  確認並保存授權
+                  確認並儲存授權
                 </button>
               </div>
             </div>
@@ -406,7 +407,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
               {[...view.revisions].reverse().map((revision) => (
                 <li key={revision.revision}>
                   <div className="row-head">
-                    <strong>第 {revision.revision} 版</strong>
+                    <h4>第 {revision.revision} 版</h4>
                     {revision.revision === effective?.revision && <span className="badge badge-success">目前生效</span>}
                   </div>
                   <p className="meta">
@@ -469,9 +470,9 @@ function LegacyRunsNotice({
         {runs.map((run) => (
           <li key={run.run_id} className="authorization-legacy-run stripe-warning">
             <div className="row-head">
-              <strong className="clamp-2" title={run.task_title}>
+              <h4 className="clamp-2" title={run.task_title}>
                 {run.task_title}
-              </strong>
+              </h4>
               <div className="authorization-legacy-actions">
                 <button
                   type="button"

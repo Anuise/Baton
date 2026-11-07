@@ -96,7 +96,7 @@ Runtime 的設定環境變數：
 Web UI（`web/src/App.tsx`）的外殼是左側的導覽欄（設計上稱「跑道欄」，見 `design-system/baton/MASTER.md`）＋主區，主區任何時候只顯示一頁；更新通知、儲存故障警示在主區頂端，完全退出與更新進度是覆蓋層。
 
 - **導覽欄**由上到下：產品名稱（取自 Runtime）、Workspace 清單（`WorkspaceSidebar`，complementary「Workspace」）、平台頁面（navigation「平台」：`帳號`｜`共同設定`｜`設定`）、狀態列（`StatusBar`，role="status"）。目前頁面以 `aria-current="page"` 標示，左緣的「接力棒」標記換頁時移動。
-- **Workspace 清單**負責選擇（`選擇 {名稱}`）、封存、自動續跑設定（收在「管理」）與建立（按「新增」展開表單；還沒有任何 Workspace 時直接展開），名稱旁顯示待裁定數。選中的 Workspace 在項目內展開它的頁面（navigation「Workspace 頁面」），分四組（role="group"）：進行（主控台、工作、流程、裁定、時間線）、產出（成果、審查、驗證、探索）、脈絡（知識、專案理解）、規則（授權、決策權限、模型設定）。按鈕文字就是該頁的 h2。裁定的待裁定數以徽章顯示，按鈕名稱仍是「裁定」，數字在可存取描述。未選 Workspace 時主區顯示空狀態；從沒有選中到選中一個 Workspace（含建立後自動選中）時回到主控台，在 Workspace 之間切換時停在同一頁。
+- **Workspace 清單**負責選擇（`選擇 {名稱}`）、封存（需再確認一次）、自動續跑設定（收在「管理」）與建立（按「新增」展開表單；還沒有任何 Workspace 時直接展開）；每個項目一行名稱、一行路徑與待裁定數。清單之後是選中的 Workspace 的頁面（navigation「Workspace 頁面」），分四組（role="group"）：進行（Controller、工作、流程、裁定、時間線）、產出（成果、審查、驗證、探索測試）、脈絡（知識、專案理解）、規則（授權、決策權限、模型設定）。按鈕文字就是該頁的 h2。裁定的待裁定數以徽章顯示，按鈕名稱仍是「裁定」，數字在可存取描述。未選 Workspace 時主區顯示空狀態；從沒有選中到選中一個 Workspace（含建立後自動選中）時回到 Controller 頁，在 Workspace 之間切換時停在同一頁。頁面裡的「前往…」（例如工作頁的「前往裁定」）會切到目標頁並定位到對應的 Task 或裁定，焦點移到主區。
 - **帳號**：App 輸出頁面標題，依序放首次精靈（含「重新檢查」）、Account Profile、並行容量。**共同設定**自成一頁。**設定**：跨登入啟動、更新、備份、恢復、平台狀態。
 - 目前的檢視（Workspace 頁面或平台頁面）、選中的 Workspace 與頁面記在瀏覽器 localStorage（`baton.shell`），重新開啟 App 時回到上次的位置（讀不到時用預設值；舊版記住的頂層頁簽 `top` 與頁面 id 照樣對應）。
 - 沒有可派工的 Account Profile 時，首次精靈與帳號以全畫面顯示，沒有導覽欄；「先進入主畫面」可在這次開啟中改回一般外殼（例如登入暫時失效時仍要查看 Workspace）。
@@ -895,7 +895,7 @@ Web UI 的「知識」分頁（`web/src/KnowledgePage.tsx`，Workspace 的「知
 
 ### Context Builder 與 context receipt
 
-每個 Worker Run 的 Prompt 由 Context Builder 在**派工的同一個交易**中組裝，並保存 context receipt（spec D-07、D-27、使用者故事 61）。規則在 `baton_domain::context`（純邏輯），輸入的取得與 receipt 的保存在 `baton-store` 的 `context.rs`，端點在 `baton-api` 的 `runs.rs`，UI 在工作面板 Run 狀態列的「Context receipt」。四個派工點都經過它：`apply_run_command` 的 `Dispatch`、`Store::schedule`、交接轉移與資源恢復（後兩者帶入交接）。Controller 的輪次不是 Run，不產生 receipt。
+每個 Worker Run 的 Prompt 由 Context Builder 在**派工的同一個交易**中組裝，並保存 context receipt（spec D-07、D-27、使用者故事 61）。規則在 `baton_domain::context`（純邏輯），輸入的取得與 receipt 的保存在 `baton-store` 的 `context.rs`，端點在 `baton-api` 的 `runs.rs`，UI 在工作面板 Run 狀態列的「載入紀錄」（畫面上的名稱，對應 context receipt）。四個派工點都經過它：`apply_run_command` 的 `Dispatch`、`Store::schedule`、交接轉移與資源恢復（後兩者帶入交接）。Controller 的輪次不是 Run，不產生 receipt。
 
 **內容與優先序**（由前到後；Prompt 也依這個順序排列）：
 
@@ -1399,7 +1399,7 @@ node scripts/smoke-desktop.mjs
 
 ### UI E2E
 
-spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」與 desktop-controller-cli 票 09 的「開啟與結束 Controller CLI」（選 Workspace → 主控台 → 選 Profile → 開啟 → 執行中 → 結束，開窗由 fake Claude 環境 Port 記錄）以 Playwright 操作真實的 Web UI，連到以 fake Port 啟動的真實 Runtime：
+spec Testing Decisions 3 的「派工到完成」「裁定中心批次處理」與 desktop-controller-cli 票 09 的「開啟與結束 Controller CLI」（選 Workspace → Controller 頁 → 選帳號 → 開啟 Controller → 執行中 → 結束，開窗由 fake Claude 環境 Port 記錄）以 Playwright 操作真實的 Web UI，連到以 fake Port 啟動的真實 Runtime：
 
 ```powershell
 $env:BATON_PLAYWRIGHT_DIR = "$env:LOCALAPPDATA\Temp\baton-pw"   # 已安裝 playwright 與其瀏覽器的目錄
@@ -1410,7 +1410,7 @@ pnpm test:e2e                                                       # 即 node s
 - **不進入正式建置**：組態只是 `baton-harness`（測試專用 crate）的測試目標。`crates/baton-harness/tests/test_only_config.rs` 以 `cargo metadata` 與 Tauri 設定檔檢查：安裝程式打包的 `baton-runtime`、`baton-guardian`、`baton-mcp-shim` 與 `baton-desktop` 的一般與建置相依都到不了 `baton-harness`；`baton-harness` 沒有可執行檔、`ui_e2e` 只是測試目標；安裝程式只打包這三個 sidecar 與 `web/dist`，Web UI 原始碼不引用測試組態。
 - **略過**：測試都標為 `#[ignore]`，一般的 `cargo test` 顯示為 ignored。`scripts/test-e2e.mjs` 依序從 `BATON_PLAYWRIGHT_DIR`、repo 根目錄、`web/` 尋找 Playwright：找不到時印出「UI E2E 略過」並以結束碼 0 結束（`pnpm test` 的結果列為「略過」）；設定了 `BATON_PLAYWRIGHT_DIR` 卻找不到時失敗。直接以 `cargo test -p baton-harness --test ui_e2e -- --ignored` 執行而找不到 Playwright 時，測試失敗而不是通過。
 - **清理**：腳本先建置 `web/dist`，再以專用的 TEMP／TMP 執行測試，結束後確認裡面除了 harness 共用的空 `baton-harness` 目錄之外沒有任何遺留（harness 資料目錄、Playwright 的暫存設定檔等），再刪除這個目錄；每個測試結尾關閉瀏覽器，斷言 Chromium 的程序與 driver 都已結束。測試 panic 時 driver 讀到 stdin 結束也會自行關閉瀏覽器。
-- **新增旅程**：在 `tests/ui_e2e/` 新增模組並於 `main.rs` 宣告，以 `UiE2e::start()` 開始、`e2e.finish()` 結束，測試加上同樣的 `#[ignore]` 說明。工作面板沒有輪詢，要看到 Supervisor 推進後的狀態時切到其他頁再切回「工作」。Workspace 的頁面以 `role("navigation", "Workspace 頁面")` 下的 `role("button", …)` 點選；導覽欄的 Workspace 以 `選擇 {名稱}` 按鈕選擇。主控台開著時每 2 秒自行重新讀取，`supervise` 之後直接等畫面即可；狀態欄位這類可能是其他文字一部分的短字串以 `exact_text` 完全比對（例如「執行中」與「執行中 Worker 0」）。
+- **新增旅程**：在 `tests/ui_e2e/` 新增模組並於 `main.rs` 宣告，以 `UiE2e::start()` 開始、`e2e.finish()` 結束，測試加上同樣的 `#[ignore]` 說明。工作面板沒有輪詢，要看到 Supervisor 推進後的狀態時切到其他頁再切回「工作」。Workspace 的頁面以 `role("navigation", "Workspace 頁面")` 下的 `role("button", …)` 點選；導覽欄的 Workspace 以 `選擇 {名稱}` 按鈕選擇。Controller 頁開著時每 2 秒自行重新讀取，`supervise` 之後直接等畫面即可；狀態欄位這類可能是其他文字一部分的短字串以 `exact_text` 完全比對（例如「執行中」與「執行中 Worker 0」）。
 - **手動驗收**：真實的終端機視窗、原生 `claude` 互動、背景 `wait` 的通知、Controller 帳號排除、完全退出關窗與以既有目錄建立 Profile 無法以 fake Port 驗證，列在 [Windows 平台手動驗收清單](windows-acceptance.md)。
 
 ### 安裝程式冒煙測試

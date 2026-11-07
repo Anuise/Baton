@@ -28,7 +28,7 @@ interface Props {
 
 /**
  * 疑點依狀態分區，依需要注意的程度排列；疑點（suspected）只會出現在自己的區塊，絕不放進已確認缺陷。
- * `stripe` 是區內每張疑點卡的左側色條。
+ * `stripe` 是區內每張疑點卡的左側色條。疑點在等系統排隊重現，不需要你處理，用中性色（MASTER 7.1）。
  */
 const GROUPS: {
   key: string;
@@ -43,7 +43,7 @@ const GROUPS: {
     title: "已確認缺陷",
     note: "Runtime 在 Verification Profile 的環境中以重現案例證實：對照旅程通過，而且案例以產品行為斷言失敗。",
     statuses: ["confirmed", "regressed"],
-    empty: "沒有已確認缺陷。",
+    empty: "沒有已確認缺陷",
     stripe: "stripe-danger",
   },
   {
@@ -51,15 +51,15 @@ const GROUPS: {
     title: "疑點（未經重現）",
     note: "探索回報的疑點，還沒有經過重現，不能當作缺陷處理。",
     statuses: ["suspected"],
-    empty: "沒有待重現的疑點。",
-    stripe: "stripe-warning",
+    empty: "沒有待重現的疑點",
+    stripe: "stripe-muted",
   },
   {
     key: "risks",
     title: "未驗風險",
     note: "重現時沒有出現原症狀，或目前無法驗證；保留為風險，沒有被駁回。",
     statuses: ["unverified_risk"],
-    empty: "沒有未驗風險。",
+    empty: "沒有未驗風險",
     stripe: "stripe-muted",
   },
   {
@@ -67,7 +67,7 @@ const GROUPS: {
     title: "已修復，納入回歸",
     note: "同一個重現案例已經通過；之後每一次驗證都會執行它。",
     statuses: ["fixed"],
-    empty: "沒有已修復的缺陷。",
+    empty: "沒有已修復的缺陷",
     stripe: "stripe-success",
   },
   {
@@ -75,7 +75,7 @@ const GROUPS: {
     title: "已排除",
     note: "附原因排除的疑點仍然保留，可以重新開啟。",
     statuses: ["excluded"],
-    empty: "沒有已排除的疑點。",
+    empty: "沒有已排除的疑點",
     stripe: "stripe-muted",
   },
 ];
@@ -195,7 +195,7 @@ export function ExplorationPage({ client, workspace, timeZone }: Props) {
               {loaded.overview.charters.length > 0 && <p>Controller 為每個探索 Task 定下的範圍、角色與上限。</p>}
             </div>
             {loaded.overview.charters.length === 0 && (
-              <p className="empty-note">還沒有探索章程；Controller 為探索 Task 定下章程後會在這裡顯示。</p>
+              <p className="empty-note">還沒有探索章程；Controller 為探索 Task 定下章程後會在這裡顯示</p>
             )}
             {loaded.overview.charters.length > 0 && (
               <div className="exploration-charters">
@@ -236,7 +236,7 @@ function CharterCard({ charter, timeZone }: { charter: ExplorationCharter; timeZ
       <div className="exploration-block">
         <h5>禁止的副作用</h5>
         {charter.forbidden_side_effects.length === 0 ? (
-          <p className="empty-note">沒有列出禁止的副作用。</p>
+          <p className="empty-note">沒有列出禁止的副作用</p>
         ) : (
           <ul aria-label={`${task} 禁止的副作用`}>
             {charter.forbidden_side_effects.map((effect, index) => (
@@ -374,7 +374,7 @@ function AttemptList({ finding, timeZone }: { finding: ExplorationFinding; timeZ
     <div className="exploration-block">
       <h5>重現紀錄</h5>
       {finding.attempts.length === 0 ? (
-        <p className="empty-note">還沒有重現紀錄。</p>
+        <p className="empty-note">還沒有重現紀錄</p>
       ) : (
         <ol className="exploration-attempts" aria-label={label}>
           {finding.attempts.map((attempt) => (

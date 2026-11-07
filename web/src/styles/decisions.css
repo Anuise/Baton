@@ -159,7 +159,9 @@
 
 /* ---------- 右欄工作區：批次結果 → 批次處理 → 詳情；停在視窗內、自己捲動 ---------- */
 /* 新加入的批次項目從上方推開內容，不讓捲動錨點把它藏到可視範圍外（overflow-anchor: none）。
-   處理區的送出列會停在右欄底部：scroll-padding-bottom 讓 Tab 移動焦點時，瀏覽器把焦點元素捲到送出列上方，不被它蓋住 */
+   處理區的送出列會停在右欄底部：scroll-padding-bottom 讓 Tab 移動焦點時，瀏覽器把焦點元素捲到送出列上方，不被它蓋住。
+   右欄從頁首與總覽下方開始，頁面還沒捲動時右欄底部（連同送出列）在視窗外：
+   不設 overscroll-behavior，右欄捲到底後滾輪會交給文件，文件捲動後右欄停在視窗內、送出列看得到 */
 .decision-center .decision-pane {
   position: sticky;
   top: var(--space-6);
@@ -172,7 +174,6 @@
   overflow-x: hidden;
   overflow-y: auto;
   overflow-anchor: none;
-  overscroll-behavior: contain;
   scroll-padding-bottom: calc(var(--control-height) + var(--space-4) + var(--space-6) + var(--space-4));
   scrollbar-width: thin;
 }
@@ -606,8 +607,10 @@
   background: var(--color-surface);
 }
 
-/* 進行中的批次以群青框標出（目前所在的工作） */
+/* 進行中的批次以群青框標出（目前所在的工作）。
+   沒有 padding-bottom：下方留白由送出列自己的 padding 提供，sticky 的範圍不會被 padding 內縮（同單筆的處理區） */
 .decision-center .decision-batch {
+  padding-bottom: 0;
   border-color: var(--color-accent-border);
 }
 
@@ -668,9 +671,17 @@
   font-size: var(--text-meta);
 }
 
-.decision-center .decision-batch .form-actions {
-  padding-top: var(--space-5);
+/* 「送出批次」停在右欄底部（比照單筆的送出列）：批次很長時不必捲到最後才看得到；
+   撐滿批次面板寬度、以上緣細線和從底下捲過的項目分開 */
+.decision-center .decision-batch > .form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin-inline: calc(var(--space-7) * -1);
+  padding: var(--space-4) var(--space-7) var(--space-6);
   border-top: 1px solid var(--color-border);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background: var(--color-surface);
 }
 
 /* 批次結果：每一項一行，前面的點標示成功或失敗（旁邊一定有文字） */
@@ -1126,7 +1137,7 @@
   font-weight: var(--font-weight-normal);
 }
 
-/* 每列：時間｜類別｜事件類型與摘要（Task、Run、帳號），細節收合 */
+/* 每列：時間｜類別｜事件類型與摘要（Task、Run、帳號），詳細資訊收合 */
 .timeline-page .timeline-list > .timeline-event {
   grid-template-columns: 9.5em 6.5em minmax(0, 1fr);
   gap: var(--space-2) var(--space-5);
@@ -1144,7 +1155,7 @@
   min-width: 0;
 }
 
-/* 事件類型、摘要與「細節」排在同一行，放不下才換行；展開細節時細節佔滿整行 */
+/* 事件類型、摘要與「詳細資訊」排在同一行，放不下才換行；展開時詳細資訊佔滿整行 */
 .timeline-page .timeline-event-main {
   display: flex;
   flex-wrap: wrap;
@@ -1239,6 +1250,15 @@
 
   .decision-center :is(.decision-batch, .decision-batch-results) {
     padding: var(--space-5) var(--space-6);
+  }
+
+  .decision-center .decision-batch {
+    padding-bottom: 0;
+  }
+
+  .decision-center .decision-batch > .form-actions {
+    margin-inline: calc(var(--space-6) * -1);
+    padding: var(--space-4) var(--space-6) var(--space-5);
   }
 
   .decision-center .decision-form,

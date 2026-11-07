@@ -129,21 +129,26 @@ describe("審查", () => {
 
     const review = screen.getByRole("region", { name: FAILING });
     expect(group).toContainElement(review);
-    // 狀態詞是徽章，原因是一般文字（不整段上色）
-    expect(within(review).getByText("已過期")).toHaveClass("badge");
+    // 狀態詞是徽章，原因是一般文字（不整段上色）；已過期不需要你處理，徽章與色條都是中性（MASTER 7.1）
+    const staleBadge = within(review).getByText("已過期");
+    expect(staleBadge).toHaveClass("badge", "badge-plain");
+    expect(staleBadge).not.toHaveClass("badge-warning");
+    expect(review).toHaveClass("stripe-muted");
+    expect(review).not.toHaveClass("stripe-warning");
     expect(within(review).getByText("已有對較新 candidate 的審查")).not.toHaveClass("badge");
     expect(within(review).queryByText("未通過", { selector: ".review-overall" })).not.toBeInTheDocument();
     expect(within(review).queryByText("通過", { selector: ".review-overall" })).not.toBeInTheDocument();
   });
 
-  it("過期原因只完整顯示第一句，其餘收進技術細節", async () => {
+  it("過期原因只完整顯示第一句，其餘收進詳細資訊", async () => {
     const stale = String.raw`Runtime 拒絕連線。無法寫入 C:\data\baton.sqlite3-wal，SQLITE_IOERR_WRITE。`;
     renderPage(fakeClient(reviewList({ reviews: [failingReviewView({ stale_reason: stale })] })));
     await openStale();
 
     const review = await screen.findByRole("region", { name: FAILING });
     expect(within(review).getByText("Runtime 拒絕連線。")).toBeInTheDocument();
-    const details = within(review).getByText("技術細節").closest("details");
+    // 收合摘要一律叫「詳細資訊」（MASTER 7.1）
+    const details = within(review).getByText("詳細資訊", { selector: "summary" }).closest("details");
     expect(details).toHaveTextContent(String.raw`無法寫入 C:\data\baton.sqlite3-wal，SQLITE_IOERR_WRITE。`);
   });
 

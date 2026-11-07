@@ -89,7 +89,7 @@ const STAGE_STATE_TONES: Record<StageState, string> = {
   invalidated: "badge badge-danger",
 };
 
-/** 已完成（通過、跳過）與還沒輪到的 Stage：預設收合細節；目前、受阻、需重驗的攤開。 */
+/** 已完成（通過、跳過）與還沒輪到的 Stage：預設收合詳細資訊；目前、受阻、需重驗的攤開。 */
 const COLLAPSED_STATES: ReadonlySet<StageState> = new Set(["passed", "skipped", "pending"]);
 
 const OUTCOME_TONES: Record<StageAttemptOutcome, string> = {
@@ -166,7 +166,7 @@ export function WorkflowPage({ client, workspace, timeZone }: Props) {
         </div>
       )}
       {loaded.state === "ready" && loaded.list.workflows.length === 0 && (
-        <p className="empty-note">還沒有 Workflow；Controller 開始工作時會依情境選擇 Playbook，並在這裡顯示各 Stage 的進度。</p>
+        <p className="empty-note">還沒有 Workflow；Controller 開始工作時會依情境選擇 Playbook，並在這裡顯示各 Stage 的進度</p>
       )}
       {loaded.state === "ready" &&
         loaded.list.workflows.map((workflow) => (
@@ -319,14 +319,14 @@ function WorkflowCard({
               {/* 已完成（通過、跳過）與還沒輪到的 Stage 只留標題列，事實與嘗試紀錄收合；目前、受阻、需重驗的攤開 */}
               {COLLAPSED_STATES.has(stage.state) ? (
                 <details className="workflow-stage-details">
-                  {/* 收合摘要的計數只放數字（MASTER 7.1）：「細節與嘗試紀錄 2」 */}
+                  {/* 收合摘要一律「詳細資訊」，計數只放數字（MASTER 7.1）：「詳細資訊與嘗試紀錄 2」 */}
                   <summary>
                     {stage.attempts.length > 0 ? (
                       <>
-                        細節與嘗試紀錄 <span className="count">{stage.attempts.length}</span>
+                        詳細資訊與嘗試紀錄 <span className="count">{stage.attempts.length}</span>
                       </>
                     ) : (
-                      "細節"
+                      "詳細資訊"
                     )}
                   </summary>
                   <div className="workflow-stage-body">{facts}</div>

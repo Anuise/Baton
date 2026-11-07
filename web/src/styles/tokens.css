@@ -200,10 +200,11 @@
     --color-magenta-subtle: #3a1a30;
     --color-magenta-border: #8c2a62;
 
-    --rail-bg: #17152f;
-    --rail-bg-raised: #221f44;
-    --rail-muted: #a39fcb;
-    --rail-line: rgb(255 255 255 / 10%);
+    /* 比內容底色亮一階並帶靛色，深色模式下跑道欄仍是一塊看得出來的區域 */
+    --rail-bg: #1f1b45;
+    --rail-bg-raised: #2a2658;
+    --rail-muted: #a8a3d2;
+    --rail-line: rgb(255 255 255 / 16%);
   }
 }
 

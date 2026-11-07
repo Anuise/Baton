@@ -37,6 +37,12 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
   const autoInstalled = useRef(false);
   // 一開始就是準備套用時，之後讀到的停止結果都是最終的
   const readySeen = useRef(initial.phase === "ready");
+  const titleRef = useRef<HTMLHeadingElement>(null);
+
+  // 對話框出現時焦點移進對話框（標題），不留在背後已消失的「更新並重新開啟…」或 body
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
 
   const phase = maintenance.phase;
   const hasFinal = finalLifecycle !== null;
@@ -84,6 +90,12 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
     }
   }, [client]);
 
+  /** 使用者按下的安裝按鈕會隨安裝開始而消失：先把焦點移到對話框標題，不落到 body。 */
+  const installFromButton = () => {
+    titleRef.current?.focus();
+    void installNow();
+  };
+
   const report = lifecycle?.exit ?? null;
   const anomalies = finalLifecycle?.exit?.runs.filter((run) => run.outcome === "anomaly") ?? [];
   const canAutoInstall = phase === "ready" && hasFinal && anomalies.length === 0;
@@ -119,11 +131,17 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
   return (
     <div className="overlay">
       <section className="dialog-panel exit-progress" role="dialog" aria-modal="true" aria-labelledby="update-progress-title">
-        <h2 id="update-progress-title">更新 Baton</h2>
+        <h2 id="update-progress-title" ref={titleRef} tabIndex={-1}>
+          更新 Baton
+        </h2>
+        {/* 版本號用等寬字（MASTER 7.1） */}
         <p>
-          {maintenance.target_version === null
-            ? `從 ${maintenance.from_version} 更新`
-            : `從 ${maintenance.from_version} 更新到 ${maintenance.target_version}`}
+          從 <span className="mono">{maintenance.from_version}</span> 更新
+          {maintenance.target_version !== null && (
+            <>
+              到 <span className="mono">{maintenance.target_version}</span>
+            </>
+          )}
         </p>
         <StopPhase
           label={stage}
@@ -134,17 +152,19 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
         />
         <StopRuns report={report} label={runLabel} />
         {phase === "stopping" && stopped && <p className="dot dot-accent">工作已停止，正在備份資料…</p>}
+        {/* 系統暫時的狀態、會繼續輪詢：中性的長警示（原因來自 Runtime，可能很長），不用琥珀色（MASTER 7.1） */}
         {phase === "stopping" && pollError && !unreachable && (
-          <p role="alert" className="callout callout-warning">
-            暫時無法取得更新進度：{pollError}
-          </p>
+          <div role="alert" className="notice">
+            <p className="notice-title">暫時無法取得更新進度</p>
+            <p>{pollError}</p>
+          </div>
         )}
         {unreachable && install.state === "idle" && (
           <div className="exit-anomalies" role="alert">
             <p>Runtime 已無法連線：{pollError}</p>
             <p>若更新已準備好可以直接安裝；否則關閉 Baton 後重新開啟。</p>
             <div className="dialog-actions">
-              <button type="button" className="btn-primary" onClick={() => void installNow()}>
+              <button type="button" className="btn-primary" onClick={installFromButton}>
                 嘗試安裝更新
               </button>
               <button type="button" onClick={() => void client.quitApp()}>
@@ -167,7 +187,7 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
               ))}
             </ul>
             <div className="dialog-actions">
-              <button type="button" className="btn-primary" onClick={() => void installNow()}>
+              <button type="button" className="btn-primary" onClick={installFromButton}>
                 仍要安裝更新並重新開啟
               </button>
             </div>
@@ -177,7 +197,7 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
           <div className="exit-anomalies" role="alert">
             <p>無法確認工作是否都已停止：{pollError}</p>
             <div className="dialog-actions">
-              <button type="button" className="btn-primary" onClick={() => void installNow()}>
+              <button type="button" className="btn-primary" onClick={installFromButton}>
                 仍要安裝更新並重新開啟
               </button>
             </div>
@@ -187,7 +207,7 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
           <>
             <FailureNotice title="無法安裝更新" reason={install.reason} />
             <div className="dialog-actions">
-              <button type="button" className="btn-primary" onClick={() => void installNow()}>
+              <button type="button" className="btn-primary" onClick={installFromButton}>
                 重試
               </button>
               <button type="button" onClick={() => void client.quitApp()}>

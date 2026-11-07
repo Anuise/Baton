@@ -215,7 +215,10 @@ describe("共同設定頁", () => {
     await user.click(await screen.findByRole("button", { name: "預覽匯入" }));
     await user.click(await screen.findByRole("button", { name: "採用" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("拒絕存取");
+    // Runtime 的錯誤可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).toHaveTextContent(/^無法採用無法讀取使用者的設定檔：拒絕存取$/);
     expect(screen.getByRole("button", { name: "採用" })).toBeEnabled();
   });
 

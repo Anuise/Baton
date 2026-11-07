@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import type { LifecycleClient, LoginStartupView } from "./runtimeClient";
 
 type StartupState = { state: "loading" } | { state: "ready"; view: LoginStartupView } | { state: "failed"; reason: string };
@@ -51,11 +52,8 @@ export function LoginStartupSettings({ client }: Props) {
         <p>預設關閉；與各 Workspace 的「完全退出後自動續跑」是分開的設定。</p>
       </div>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
-      {loaded.state === "failed" && (
-        <p role="alert" className="callout callout-danger">
-          無法取得登入時自動啟動設定：{loaded.reason}
-        </p>
-      )}
+      {/* Runtime 的錯誤可能很長：長警示，不用淡底提示（MASTER 7.1） */}
+      {loaded.state === "failed" && <FailureNotice title="無法取得登入時自動啟動設定" reason={loaded.reason} />}
       {loaded.state === "ready" && (
         <div className="panel">
           <label className="login-startup-toggle">
@@ -75,11 +73,7 @@ export function LoginStartupSettings({ client }: Props) {
           )}
         </div>
       )}
-      {switchError && (
-        <p role="alert" className="callout callout-danger">
-          無法變更登入時自動啟動：{switchError}
-        </p>
-      )}
+      {switchError && <FailureNotice title="無法變更登入時自動啟動" reason={switchError} />}
     </section>
   );
 }

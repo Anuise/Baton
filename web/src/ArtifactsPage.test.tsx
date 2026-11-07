@@ -277,7 +277,7 @@ describe("成果", () => {
     expect(screen.queryByRole("button", { name: /全部版本/ })).not.toBeInTheDocument();
   });
 
-  it("檔案遺失或大小不符時以警示標示該版本不可信", async () => {
+  it("檔案遺失或大小不符時，版本列上有「不可信」徽章與一行原因", async () => {
     const user = userEvent.setup();
     renderPage(
       fakeClient({
@@ -291,13 +291,15 @@ describe("成果", () => {
     );
 
     const card = await screen.findByRole("article", { name: "report.md" });
-    expect(within(within(card).getByRole("listitem", { name: "report.md v2" })).getByRole("alert")).toHaveTextContent(
-      "檔案大小與登記不符，不可信",
-    );
+    // 狀態詞是版本號旁的紅色徽章，一眼看得出這一列不可用；原因是下一行的一般文字
+    const v2 = within(card).getByRole("listitem", { name: "report.md v2" });
+    expect(within(v2).getByText("不可信")).toHaveClass("badge", "badge-danger");
+    expect(within(v2).getByText("不可信").closest(".artifact-version-name")).toHaveTextContent(/^v2最新不可信$/);
+    expect(v2).toHaveTextContent("檔案大小與登記不符，這個版本不可使用");
     await user.click(within(card).getByRole("button", { name: "全部版本 2" }));
-    expect(within(within(card).getByRole("listitem", { name: "report.md v1" })).getByRole("alert")).toHaveTextContent(
-      "檔案遺失，不可信",
-    );
+    const v1 = within(card).getByRole("listitem", { name: "report.md v1" });
+    expect(within(v1).getByText("不可信")).toHaveClass("badge", "badge-danger");
+    expect(v1).toHaveTextContent("檔案遺失，這個版本不可使用");
   });
 
   it("狀態正常的版本沒有警示", async () => {
@@ -305,6 +307,7 @@ describe("成果", () => {
 
     await screen.findByRole("article", { name: "report.md" });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("不可信")).not.toBeInTheDocument();
   });
 
   it("預覽文字內容；再按一次收合", async () => {

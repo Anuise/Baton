@@ -24,13 +24,15 @@
   margin: 0;
 }
 
-/* 長警示（.notice）裡收合的「詳細資訊」：與正文同寬 */
-:is(.accounts-page, .platform-page, .update-confirm, .exit-progress) .notice details > p {
+/* 長警示（.notice、失敗說明）與觀測不完整提示裡收合的「詳細資訊」：與正文同寬 */
+:is(.accounts-page, .platform-page, .update-confirm, .exit-progress) .notice details > p,
+:is(.failure-notice, .quota-incomplete) details > p {
   margin-top: var(--space-2);
   max-inline-size: var(--measure);
 }
 
-:is(.accounts-page, .platform-page, .update-confirm, .exit-progress) .notice details > summary {
+:is(.accounts-page, .platform-page, .update-confirm, .exit-progress) .notice details > summary,
+:is(.failure-notice, .quota-incomplete) details > summary {
   width: fit-content;
 }
 
@@ -280,7 +282,7 @@
   color: var(--color-text-muted);
 }
 
-/* 額度門檻：可派工是一行次要資訊（.meta）；停止派工或交接中是長警示（.notice），項目同列、放不下時整項換行 */
+/* 額度門檻：未達門檻是一行次要資訊（.meta）；停止派工或交接中是提示（.callout），項目同列、放不下時整項換行 */
 .profile-gate {
   display: flex;
   flex-wrap: wrap;
@@ -293,8 +295,8 @@
   color: var(--color-text);
 }
 
-/* 長警示的狀態詞（「額度門檻：停止派工」）整段同一個語意色 */
-.profile-gate > .notice-title strong {
+/* 提示的狀態詞（「額度：已達門檻，停止派工」）整段同一個語意色 */
+.profile-gate > .callout-title strong {
   color: inherit;
 }
 

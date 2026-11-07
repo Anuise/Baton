@@ -145,7 +145,7 @@ describe("專案理解", () => {
     renderPage(fakeClient(understandingView({ items: [understandingItem()] })));
 
     const map = await screen.findByRole("region", { name: "Project Map" });
-    expect(within(map).getByText("還沒有項目。Controller 接入專案時會建立，也可以在 Controller 中要求它補上。")).toBeInTheDocument();
+    expect(within(map).getByText("還沒有項目；Controller 接入專案時會建立，也可以在 Controller 中要求它補上")).toBeInTheDocument();
   });
 
   it("已移除的項目預設隱藏，勾選「顯示已移除」後才顯示", async () => {

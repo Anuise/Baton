@@ -204,6 +204,11 @@ async fn accept_in_batch(browser: &Browser, question: &str, index: usize, option
     browser.check(&[item, vec![role("radio", option)]].concat()).await;
 }
 
+/// 在批次面板中替一筆權限提示選「允許這一次」（權限提示直接以處理方式表達允許／拒絕／延後）。
+async fn allow_once_in_batch(browser: &Browser, question: &str, index: usize) {
+    browser.check(&[batch_item(question, index), vec![role("radio", "允許這一次")]].concat()).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "UI E2E：需要 Playwright，以 node scripts/test-e2e.mjs 執行"]
 async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_without_blanket_authorization() {
@@ -272,9 +277,9 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     browser.click(&[center(), role("form", "批次處理"), text("每一項都選好處理方式、填妥必填欄位後才能送出")]).await;
     browser.wait_hidden(&tip).await;
 
-    // 每一項各自選擇處理方式：兩筆權限提示各允許本次操作、Agent 問題選「先出貨」、Controller 的動作核准這一次
-    accept_in_batch(browser, &push_question, 0, &option_label(&view_a, "allow_once")).await;
-    accept_in_batch(browser, &push_question, 1, &option_label(&view_b, "allow_once")).await;
+    // 每一項各自選擇處理方式：兩筆權限提示各「允許這一次」、Agent 問題選「先出貨」、Controller 的動作核准這一次
+    allow_once_in_batch(browser, &push_question, 0).await;
+    allow_once_in_batch(browser, &push_question, 1).await;
     accept_in_batch(browser, &q_question, 0, &option_label(&view_q, "ship")).await;
     accept_in_batch(browser, &c_question, 0, &option_label(&view_c, "approve")).await;
     browser.click(&[center(), role("button", "送出批次（4 項）")]).await;
@@ -293,18 +298,18 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     browser.wait_visible(&[text("待裁定：0")]).await;
     browser.wait_hidden(&[text("待裁定 4")]).await;
     // 已結束的每一筆都顯示自己的裁定結果，並標示是批次中各自保存的一項
-    for (question, index, chosen) in [
-        (&push_question, 0, option_label(&view_a, "allow_once")),
-        (&push_question, 1, option_label(&view_b, "allow_once")),
-        (&q_question, 0, option_label(&view_q, "ship")),
-        (&c_question, 0, option_label(&view_c, "approve")),
+    // 權限提示的結果寫處理方式（「允許這一次」），其他請求寫選了哪個選項
+    for (question, index, expected) in [
+        (&push_question, 0, "處理方式：允許這一次".to_string()),
+        (&push_question, 1, "處理方式：允許這一次".to_string()),
+        (&q_question, 0, format!("選擇：{}", option_label(&view_q, "ship").trim_end_matches("（建議）"))),
+        (&c_question, 0, format!("選擇：{}", option_label(&view_c, "approve").trim_end_matches("（建議）"))),
     ] {
         browser.click(&[center(), role("button", &format!("查看裁定 {question}")), nth(index)]).await;
         let outcome = [center(), role("article", "裁定詳情"), role("region", "裁定結果")];
         browser.wait_visible(&outcome).await;
         let shown = browser.text(&outcome).await;
-        let chosen = chosen.trim_end_matches("（建議）");
-        assert!(shown.contains(&format!("選擇：{chosen}")), "{shown}");
+        assert!(shown.contains(&expected), "{shown}");
         assert!(shown.contains("批次處理（此項各自保存）"), "{shown}");
     }
 

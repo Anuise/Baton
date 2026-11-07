@@ -33,9 +33,14 @@
   max-inline-size: var(--content-narrow);
 }
 
-/* 版本的警示只佔文字寬，不拉成整列色塊 */
+/* 版本的錯誤（下載、預覽失敗）只佔文字寬，不拉成整列色塊 */
 .artifacts-page .artifact-version > .notice {
   justify-self: start;
+}
+
+/* 不可信版本的說明：狀態詞在版本號旁的紅色徽章，說明是一般文字色的一行 */
+.artifacts-page .artifact-untrusted {
+  font-size: var(--text-meta);
 }
 
 /* 分組標題（Task）：不換行，長標題縮小並最多兩行，計數（與「在工作頁查看」）固定在標題最後一行的末端；
@@ -230,6 +235,11 @@
 }
 
 /* ---------- 驗證 ---------- */
+
+/* 等待結果的驗證：以文字為主的清單，在區段內限寬，排隊中的徽章不離 Task 標題太遠（MASTER 7.1） */
+.verification-page .verification-pending {
+  max-inline-size: var(--content-narrow);
+}
 
 .verification-page .verification-subtle,
 .verification-page .verification-reason {

@@ -122,7 +122,8 @@ const renderPage = (
     <ControllerPage client={client} workspace={workspace} timeZone="Asia/Taipei" pollMs={pollMs} onOpenPage={onOpenPage} />,
   );
 
-const AUTHORIZATION_NOTICE = "這個 Workspace 還沒有確認授權，需要能力的工作都不會開始。";
+/** 授權未確認提示（.callout-warning）的說明；狀態詞「尚未確認授權」是 .callout-title。 */
+const AUTHORIZATION_NOTICE = "需要能力的工作都不會開始";
 
 /** 長警示（.notice）：狀態詞（.notice-title）與第一句分成兩段，以第一句找到整個警示。 */
 const findNotice = async (text: string) => (await screen.findByText(text)).closest<HTMLElement>(".notice")!;
@@ -164,6 +165,10 @@ describe("ControllerPage", () => {
     expect(screen.getByRole("list", { name: "不可用的帳號" })).toHaveTextContent(
       "備用帳號：尚未核對登入狀態；請完成原生登入後按「重新核對」",
     );
+    // 收合摘要的計數只放數字、接在文字後面（MASTER 7.1）
+    const unavailableSummary = screen.getByText("不可用的帳號", { selector: "summary" });
+    expect(unavailableSummary).toHaveTextContent(/^不可用的帳號 1$/);
+    expect(within(unavailableSummary).getByText("1")).toHaveClass("count");
     expect(screen.getByRole("button", { name: "開啟 Controller" })).toBeEnabled();
   });
 
@@ -631,9 +636,12 @@ describe("ControllerPage", () => {
       const onOpenPage = vi.fn();
       renderPage(client, undefined, onOpenPage);
 
-      const notice = (await screen.findByText(AUTHORIZATION_NOTICE)).closest(".notice")!;
+      // 固定的短句：與授權頁同一種提示（.callout-warning＋.callout-title），不是長警示
+      const notice = (await screen.findByText(AUTHORIZATION_NOTICE)).closest(".callout")!;
       expect(client.getAuthorization).toHaveBeenCalledWith("ws_1");
-      expect(notice).toHaveClass("notice-warning");
+      expect(notice).toHaveClass("callout-warning");
+      expect(notice).not.toHaveClass("notice");
+      expect(within(notice as HTMLElement).getByText("尚未確認授權")).toHaveClass("callout-title");
       // 提示在開啟區之前（文件順序）
       const launch = screen.getByRole("region", { name: "開啟 Controller" });
       expect(notice.compareDocumentPosition(launch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -668,6 +676,7 @@ describe("ControllerPage", () => {
       await enabledOpenButton();
       await waitFor(() => expect(confirmed.getAuthorization).toHaveBeenCalled());
       expect(screen.queryByText(AUTHORIZATION_NOTICE)).not.toBeInTheDocument();
+      expect(screen.queryByText("尚未確認授權")).not.toBeInTheDocument();
       page.unmount();
 
       const failing = fakeClient();

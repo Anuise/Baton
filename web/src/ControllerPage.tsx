@@ -368,10 +368,12 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
             )}
             {overviewError && <p className="controller-hint">無法取得額度：{overviewError}</p>}
 
-            {/* 授權未確認時，開著或未開啟都提示：放在「開啟 Controller」區上方，開啟前就看得到 */}
+            {/* 授權未確認時，開著或未開啟都提示：放在「開啟 Controller」區上方，開啟前就看得到。
+                固定的短句：與授權頁同一種提示（MASTER 7.1：.callout-warning＋.callout-title） */}
             {authorizationUnconfirmed && (
-              <div className="notice notice-warning controller-authorization">
-                <p>這個 Workspace 還沒有確認授權，需要能力的工作都不會開始。</p>
+              <div className="callout callout-warning controller-authorization">
+                <p className="callout-title">尚未確認授權</p>
+                <p>需要能力的工作都不會開始</p>
                 {onOpenPage && (
                   <button type="button" onClick={() => onOpenPage("authorization")}>
                     前往授權
@@ -423,7 +425,9 @@ export function ControllerPage({ client, workspace, timeZone, pollMs = CONTROLLE
                 )}
                 {unavailable.length > 0 && (
                   <details className="controller-unavailable">
-                    <summary>不可用的帳號（{unavailable.length}）</summary>
+                    <summary>
+                      不可用的帳號 <span className="count">{unavailable.length}</span>
+                    </summary>
                     <ul aria-label="不可用的帳號">
                       {unavailable.map((profile) => (
                         <li key={profile.id}>

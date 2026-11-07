@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { profileStateLabel, profileTone } from "./AccountsPage";
+import { FailureNotice } from "./ExitProgress";
 import { CopyButton, LongText } from "./LongText";
 import { docsHost } from "./textFormat";
 import type { AccountClient, SetupStatus, ToolCheck } from "./runtimeClient";
@@ -85,9 +86,8 @@ export function SetupWizard({ client, onChange, refreshKey }: Props) {
   if (wizard.state === "failed") {
     return (
       <section className="setup-wizard setup-wizard-failed">
-        <p role="alert" className="callout callout-danger">
-          無法取得首次設定狀態：{wizard.reason}
-        </p>
+        {/* Runtime 的錯誤可能很長：長警示，不用淡底提示（MASTER 7.1） */}
+        <FailureNotice title="無法取得首次設定狀態" reason={wizard.reason} />
         <RecheckButton busy={busy} onClick={recheck} />
       </section>
     );

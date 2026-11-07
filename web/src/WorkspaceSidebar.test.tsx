@@ -398,6 +398,34 @@ describe("左側 Workspace 清單", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "選擇 專案" })).toHaveFocus());
   });
 
+  it("確認區出現時焦點在「確認封存」，取消後回到「封存…」；送出中再按不會重複封存", async () => {
+    const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "專案", path: "D:\proj" })]);
+    let release: () => void = () => {};
+    const original = client.archiveWorkspace.getMockImplementation()!;
+    client.archiveWorkspace.mockImplementation(async (id: string) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return original(id);
+    });
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+
+    await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    expect(within(item).getByRole("button", { name: "確認封存 筆記" })).toHaveFocus();
+    await user.click(within(item).getByRole("button", { name: "取消" }));
+    expect(within(item).getByRole("button", { name: "封存 筆記" })).toHaveFocus();
+
+    await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    const confirm = within(item).getByRole("button", { name: "確認封存 筆記" });
+    await user.click(confirm);
+    await user.click(confirm);
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    release();
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "選擇 筆記" })).not.toBeInTheDocument());
+    expect(client.archiveWorkspace).toHaveBeenCalledTimes(1);
+  });
+
   it("「管理」收起時取消進行到一半的封存確認", async () => {
     const user = userEvent.setup();
     render(<WorkspaceSidebar client={fakeClient([workspace()])} />);

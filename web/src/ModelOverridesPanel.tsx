@@ -308,7 +308,7 @@ export function ModelCatalogSettings({
             更新清單
           </button>
         </form>
-        <p className="section-hint">金鑰只用於這一次查詢，不會保存；查到的模型清單會保存，之後重開 App 仍會使用。</p>
+        <p className="section-hint">金鑰只用於這一次查詢，不會儲存；查到的模型清單會儲存，之後重開 App 仍會使用。</p>
         {result?.kind === "done" && (
           <div className="callout callout-success" role="status">
             <p>已更新可用模型清單（{result.count} 個模型）</p>

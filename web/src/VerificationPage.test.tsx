@@ -158,6 +158,10 @@ describe("驗證", () => {
     );
     expect(region("要求執行驗證")).toHaveTextContent("發布 Verification Profile 後才能要求執行驗證");
     expect(screen.queryByRole("button", { name: "要求執行" })).not.toBeInTheDocument();
+    // 空清單是一行說明，不加句號（MASTER 7.1）
+    for (const note of document.querySelectorAll(".empty-note")) {
+      expect(note.textContent).not.toMatch(/。$/);
+    }
   });
 
   it("發布：編輯區預設收合；預填目前的內容，送出解析後的 JSON，顯示新版本並重新載入", async () => {
@@ -315,6 +319,76 @@ describe("驗證", () => {
     );
   });
 
+  it("等待結果的驗證：在現況之後列出還沒有結果的要求（包括 Controller 排入的），已有結果的不列", async () => {
+    renderPage(
+      fakeClient(
+        verificationOverview({
+          requests: [
+            verificationRequest({ id: "vreq_4", task_id: null, journeys: ["smoke"], requested_by: "crun_1", no_live_model: true }),
+            verificationRequest({ id: "vreq_3", task_id: "task_1" }),
+            verificationRequest({ id: "vreq_1", task_id: "task_2", status: "completed", bundle_id: "vbun_1" }),
+          ],
+        }),
+      ),
+    );
+
+    const pending = await screen.findByRole("region", { name: "等待結果的驗證" });
+    expect(within(pending).getByText("2", { selector: ".count" })).toBeInTheDocument();
+    const page = screen.getByRole("region", { name: "驗證" });
+    expect(
+      within(page)
+        .getAllByRole("heading", { level: 3 })
+        .slice(0, 3)
+        .map((heading) => heading.textContent),
+    ).toEqual(["現況", "等待結果的驗證", "最近的 Evidence Bundle"]);
+
+    const rows = within(within(pending).getByRole("list", { name: "等待結果的驗證要求" })).getAllByRole("listitem");
+    expect(rows).toHaveLength(2);
+    // Controller 排入、不指定 Task；要求者的原始值只在 title
+    expect(rows[0]).toHaveTextContent("不指定 Task（在 Workspace 目錄中驗證）");
+    expect(rows[0]).toHaveTextContent("旅程：冒煙測試");
+    expect(rows[0]).toHaveTextContent("Verification Profile 第 2 版；不呼叫模型");
+    expect(rows[0]).toHaveTextContent("Controller 於 2023/11/15 06:13 要求");
+    expect(within(rows[0]).getByText("Controller")).toHaveAttribute("title", "crun_1");
+    expect(rows[0]).not.toHaveTextContent("crun_1");
+    // 你排入、綁定 Task：顯示 Task 標題；驗證要求的識別碼不當主要文字
+    await waitFor(() => expect(rows[1]).toHaveTextContent("修正匯出錯誤"));
+    expect(rows[1]).toHaveTextContent("旅程：冒煙測試、匯出報表");
+    expect(rows[1]).toHaveTextContent("你於 2023/11/15 06:13 要求");
+    expect(rows[1]).not.toHaveTextContent("vreq_3");
+    expect(within(rows[1]).getByText("修正匯出錯誤")).toHaveAttribute("title", "驗證要求 vreq_3");
+    // 排隊是系統自己在等的狀態：中性徽章，不用琥珀色（MASTER 7.1）
+    for (const row of rows) {
+      expect(within(row).getByText("排隊中")).toHaveClass("badge", "badge-plain");
+    }
+    // 已有結果的要求不列
+    expect(pending).not.toHaveTextContent("整理文件目錄");
+  });
+
+  it("等待結果的驗證：所有要求都已有結果時整區不顯示", async () => {
+    renderPage(fakeClient(verificationOverview({ requests: [verificationRequest({ status: "completed", bundle_id: "vbun_1" })] })));
+
+    await screen.findByRole("region", { name: "現況" });
+    expect(screen.queryByRole("region", { name: "等待結果的驗證" })).not.toBeInTheDocument();
+  });
+
+  it("要求執行後重新載入：排入的要求列在等待結果的驗證，不只靠送出後的暫時訊息", async () => {
+    const client = fakeClient();
+    client.verificationOverview
+      .mockResolvedValueOnce(verificationOverview())
+      .mockResolvedValueOnce(verificationOverview({ requests: [verificationRequest()] }));
+    const user = userEvent.setup();
+    renderPage(client);
+
+    await screen.findByRole("region", { name: "現況" });
+    expect(screen.queryByRole("region", { name: "等待結果的驗證" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "要求執行" }));
+
+    const pending = await screen.findByRole("region", { name: "等待結果的驗證" });
+    expect(pending).toHaveTextContent("不指定 Task（在 Workspace 目錄中驗證）");
+    expect(pending).toHaveTextContent("你於 2023/11/15 06:13 要求");
+  });
+
   it("Evidence Bundle 顯示判定、綁定的 build、revision、需求與 Profile 版本、覆蓋範圍與清理結果", async () => {
     renderPage(fakeClient());
 
@@ -400,9 +474,9 @@ describe("驗證", () => {
       expect(card).not.toHaveTextContent(`r_${verdict}`);
     });
     expect(document.querySelectorAll(".verification-bundle-verdict .verdict-passed")).toHaveLength(1);
-    // 最新的一份直接展開，較舊的內容收進預設收合的「詳細內容」
-    expect(within(region("Evidence Bundle vbun_0")).queryByText("詳細內容")).not.toBeInTheDocument();
-    expect(within(region("Evidence Bundle vbun_1")).getByText("詳細內容").closest("details")).not.toHaveAttribute("open");
+    // 最新的一份直接展開，較舊的內容收進預設收合的「詳細資訊」（收合摘要的名稱一律如此，MASTER 7.1）
+    expect(within(region("Evidence Bundle vbun_0")).queryByText("詳細資訊")).not.toBeInTheDocument();
+    expect(within(region("Evidence Bundle vbun_1")).getByText("詳細資訊").closest("details")).not.toHaveAttribute("open");
   });
 
   it("展開步驟可看到 phase、判定、reason_code、engine_code、斷言結果與輸出", async () => {

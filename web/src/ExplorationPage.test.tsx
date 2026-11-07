@@ -69,6 +69,11 @@ describe("探索", () => {
 
     expect(within(defects).queryByRole("region", { name: "優惠碼欄位接受負數" })).not.toBeInTheDocument();
     expect(suspected).not.toHaveTextContent("已確認");
+    // 疑點在等系統排隊重現、不需要你處理：中性色條，不用琥珀色（MASTER 7.1）
+    const suspectedCard = within(suspected).getByRole("region", { name: "優惠碼欄位接受負數" });
+    expect(suspectedCard).toHaveClass("stripe-muted");
+    expect(suspectedCard).not.toHaveClass("stripe-warning");
+    expect(within(defects).getByRole("region", { name: "折扣後總額少算" })).toHaveClass("stripe-danger");
 
     // 區段順序：已確認缺陷 → 疑點 → 未驗風險 → 已修復 → 已排除 → 探索章程
     const page = screen.getByRole("region", { name: "探索測試" });
@@ -87,7 +92,7 @@ describe("探索", () => {
 
     // 標題不等資料讀回就會出現：等分區出現再斷言
     await screen.findByRole("region", { name: "已確認缺陷" });
-    expect(group("已確認缺陷")).toHaveTextContent("沒有已確認缺陷。");
+    expect(group("已確認缺陷")).toHaveTextContent("沒有已確認缺陷");
     expect(within(group("已確認缺陷")).queryByRole("heading", { level: 4 })).not.toBeInTheDocument();
     const finding = within(group("疑點（未經重現）")).getByRole("region", { name: "優惠碼欄位接受負數" });
     expect(finding).not.toHaveTextContent("已確認");
@@ -327,12 +332,16 @@ describe("探索", () => {
   it("沒有章程與疑點時顯示空狀態", async () => {
     renderPage(fakeClient({ workspace_id: "ws_1", charters: [], findings: [] }));
 
-    expect(await screen.findByText("還沒有探索章程；Controller 為探索 Task 定下章程後會在這裡顯示。")).toBeInTheDocument();
-    expect(group("已確認缺陷")).toHaveTextContent("沒有已確認缺陷。");
-    expect(group("疑點（未經重現）")).toHaveTextContent("沒有待重現的疑點。");
-    expect(group("未驗風險")).toHaveTextContent("沒有未驗風險。");
-    expect(group("已修復，納入回歸")).toHaveTextContent("沒有已修復的缺陷。");
-    expect(group("已排除")).toHaveTextContent("沒有已排除的疑點。");
+    expect(await screen.findByText("還沒有探索章程；Controller 為探索 Task 定下章程後會在這裡顯示")).toBeInTheDocument();
+    expect(group("已確認缺陷")).toHaveTextContent("沒有已確認缺陷");
+    expect(group("疑點（未經重現）")).toHaveTextContent("沒有待重現的疑點");
+    expect(group("未驗風險")).toHaveTextContent("沒有未驗風險");
+    expect(group("已修復，納入回歸")).toHaveTextContent("沒有已修復的缺陷");
+    expect(group("已排除")).toHaveTextContent("沒有已排除的疑點");
+    // 空清單是一行說明，不加句號（MASTER 7.1）
+    for (const note of document.querySelectorAll(".empty-note")) {
+      expect(note.textContent).not.toMatch(/。$/);
+    }
     // 0 筆時計數一律顯示 0
     for (const title of ["已確認缺陷", "疑點（未經重現）", "未驗風險", "已修復，納入回歸", "已排除", "探索章程"]) {
       expect(within(group(title)).getByText("0", { selector: ".count" })).toBeInTheDocument();

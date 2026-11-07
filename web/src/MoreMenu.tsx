@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from "rea
 /**
  * `<details>` 浮層的收起行為：
  * - 開著時點浮層外面，或用 Tab 把焦點移出浮層，就收起（不搬動焦點；WCAG 2.4.11 焦點不被遮蔽）。
+ *   焦點離開時延後一個 tick 才收起，不在焦點切換途中改 `open`（見 closeWhenFocusLeaves）。
  * - Esc 收起並把焦點還給觸發的 `<summary>`。只在焦點位於浮層內、或落在 body（點過浮層空白處）時處理，
  *   不會在頁面別處按 Esc 時把焦點搶回來。
  * Esc 監聽在 document：點浮層空白處後焦點落到 body，按鍵事件不會經過 details。
@@ -19,9 +20,14 @@ export function useDetailsDismiss(ref: RefObject<HTMLDetailsElement | null>, onC
       if (details && !details.contains(event.target as Node)) details.open = false;
     };
     const closeWhenFocusLeaves = (event: FocusEvent) => {
-      const next = event.relatedTarget as Node | null;
-      // relatedTarget 為 null 表示焦點落到 body（例如點了浮層空白處），這時保持開著
-      if (details && next !== null && !details.contains(next)) details.open = false;
+      const next = event.relatedTarget as HTMLElement | null;
+      // 焦點落到 body（null），或落到主區這類只供程式聚焦的容器（tabindex="-1"），都是點了浮層空白處：保持開著
+      if (!details || next === null || details.contains(next) || next.getAttribute("tabindex") === "-1") return;
+      // 不在焦點切換途中同步關閉：mousedown 的焦點切換途中改 details.open 會讓 Chromium／WebView2 的畫面程序當掉。
+      // 切換完成後再確認焦點真的不在浮層裡才收起
+      setTimeout(() => {
+        if (details.open && !details.contains(document.activeElement)) details.open = false;
+      }, 0);
     };
     document.addEventListener("pointerdown", closeOnOutsidePointer);
     details?.addEventListener("focusout", closeWhenFocusLeaves);
@@ -36,7 +42,9 @@ export function useDetailsDismiss(ref: RefObject<HTMLDetailsElement | null>, onC
       const details = ref.current;
       if (event.key !== "Escape" || !details?.open) return;
       const active = document.activeElement;
-      if (active !== null && active !== document.body && !details.contains(active)) return;
+      // 焦點在浮層內、在 body，或在主區這類只供程式聚焦的容器（點過浮層空白處）時才處理
+      const blank = active === null || active === document.body || active.getAttribute("tabindex") === "-1";
+      if (!blank && !details.contains(active)) return;
       details.open = false;
       details.querySelector("summary")?.focus();
     };

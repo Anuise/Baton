@@ -53,12 +53,27 @@ interface Props {
   onChange?: () => void;
   /** 前往其他頁（詳情的 Task 連結、「調整決策權限」）；沒有傳入時不顯示這些入口。 */
   onOpenPage?: (page: DecisionLinkPage) => void;
+  /**
+   * 從別頁「前往裁定」帶來的定位要求：選中 `decisionId` 那一筆；只有 `taskId` 時選中這個 Task 的第一筆待裁定。
+   * `nonce` 改變時再定位一次（同一個對象再要求一次也會重新定位）。
+   */
+  target?: { taskId?: string; decisionId?: string; nonce: number } | null;
 }
 
 /** 裁定詳情可以前往的頁面。 */
 type DecisionLinkPage = "tasks" | "authority";
 
 const KIND_LABELS: Record<DecisionKind, string> = { permission: "權限提示", agent: "Agent 請求", authority: "決策權限攔截" };
+
+/**
+ * 預算用盡的裁定：後端以 authority 種類建立（origin 是 Worker），但不看決策權限表，
+ * 是 Runtime 停止自動重試後交給你決定下一步（crates/baton-domain/src/decision.rs 的 budget_exhausted_request）。
+ */
+const BUDGET_MATTER = "next_step_after_budget";
+const isBudgetExhausted = (decision: DecisionRequestView) => decision.authority?.matter === BUDGET_MATTER;
+
+/** 清單與詳情的種類標籤：預算用盡的請求不稱「決策權限攔截」。 */
+const kindLabel = (decision: DecisionRequestView) => (isBudgetExhausted(decision) ? "預算用盡" : KIND_LABELS[decision.kind]);
 const URGENCY_LABELS: Record<DecisionUrgency, string> = { low: "低", normal: "一般", high: "高" };
 /** superseded 稱「已失效」（不是「已過期」，避免和「已逾期」只差一字）。 */
 const STATUS_LABELS: Record<DecisionStatus, string> = { pending: "待裁定", answered: "已回答", superseded: "已失效", merged: "已合併" };
@@ -98,6 +113,50 @@ const OUTCOME_NOTE_LABELS: Record<Exclude<DecisionAction, "defer">, string> = {
 };
 const OPTION_REQUIRED = new Set<DecisionAction>(["accept", "modify"]);
 const NOTE_REQUIRED = new Set<DecisionAction>(["modify", "answer", "investigate"]);
+
+/**
+ * 權限提示的處理方式：後端只接受 accept、defer、reject，選項固定是「允許這一次」（allow_once）與「拒絕」（deny）
+ * （crates/baton-domain/src/decision.rs）。畫面上直接給三個處理方式，不經過「接受方案 › 選項」，也不另給「駁回」，
+ * 拒絕只有一條路：送 accept＋deny（與建議的選項一致，不算推翻建議）。
+ */
+type PermissionChoice = "allow" | "deny" | "defer";
+const PERMISSION_ALLOW = "allow_once";
+const PERMISSION_DENY = "deny";
+const PERMISSION_CHOICE_LABELS: Record<PermissionChoice, string> = { allow: "允許這一次", deny: "拒絕", defer: "延後" };
+const PERMISSION_NOTE_LABELS: Record<Exclude<PermissionChoice, "defer">, string> = {
+  allow: "備註（選填）",
+  deny: "拒絕理由（選填）",
+};
+const PERMISSION_OUTCOME_NOTE_LABELS: Record<Exclude<PermissionChoice, "defer">, string> = { allow: "備註", deny: "拒絕理由" };
+/** 每個處理方式對應的草稿（處理方式＋選項）。 */
+const PERMISSION_DRAFTS: Record<PermissionChoice, Pick<Draft, "action" | "optionId">> = {
+  allow: { action: "accept", optionId: PERMISSION_ALLOW },
+  deny: { action: "accept", optionId: PERMISSION_DENY },
+  defer: { action: "defer", optionId: null },
+};
+
+/** 權限提示（帶有固定的兩個選項）用三個處理方式；其他請求沿用一般的處理方式與選項。 */
+const isPermissionPrompt = (decision: DecisionRequestView) =>
+  decision.kind === "permission" && [PERMISSION_ALLOW, PERMISSION_DENY].every((id) => decision.options.some((o) => o.id === id));
+
+/** 草稿或已作答的處理方式對應到權限提示的哪一個；舊的「駁回」（reject）也是拒絕。 */
+function permissionChoiceOf(action: DecisionAction | null, optionId: string | null): PermissionChoice | null {
+  if (action === "defer") return "defer";
+  if (action === "reject") return "deny";
+  if (action === "accept" || action === "modify") {
+    if (optionId === PERMISSION_ALLOW) return "allow";
+    if (optionId === PERMISSION_DENY) return "deny";
+  }
+  return null;
+}
+
+/** 權限提示可用的處理方式：能接受時有「允許這一次」與「拒絕」，能延後時有「延後」。 */
+function permissionChoices(decision: DecisionRequestView): PermissionChoice[] {
+  const choices: PermissionChoice[] = [];
+  if (decision.allowed_actions.includes("accept")) choices.push("allow", "deny");
+  if (decision.allowed_actions.includes("defer")) choices.push("defer");
+  return choices;
+}
 const DEFER_CHOICES = [
   { minutes: 240, label: "4 小時" },
   { minutes: 1440, label: "1 天" },
@@ -243,7 +302,7 @@ const isPathLike = (text: string) => /^\S+$/.test(text) && /[\\/]/.test(text);
 const urgencyBadge = ({ urgency, status }: DecisionRequestView) =>
   `badge decision-urgency decision-urgency-${urgency} ${urgency === "high" && status === "pending" ? "badge-warning" : "badge-plain"}`;
 
-/** 一筆請求的處理草稿；詳情與批次面板各自保有一份。 */
+/** 一筆請求的處理草稿；詳情與批次面板共用同一份。 */
 interface Draft {
   action: DecisionAction | null;
   optionId: string | null;
@@ -252,6 +311,17 @@ interface Draft {
 }
 
 const EMPTY_DRAFT: Draft = { action: null, optionId: null, note: "", deferMinutes: 1440 };
+
+/**
+ * 各筆裁定的處理草稿，依裁定 id 保存在模組層級：換筆、換到別頁再回來都還在。
+ * 只在這次開啟 App 期間有效（不寫入 localStorage）；送出成功後清掉那一筆。
+ */
+const savedDrafts = new Map<string, Draft>();
+
+/** 清空所有草稿（測試之間重設用）。 */
+export function clearDecisionDrafts() {
+  savedDrafts.clear();
+}
 
 /** 把草稿轉成送出內容（一律帶 expected_revision）；缺必填欄位時回傳 null。 */
 function toAnswer(decision: DecisionRequestView, draft: Draft): AnswerRequest | null {
@@ -310,18 +380,19 @@ function DecisionPage({ children }: { children: ReactNode }) {
  * 右欄是工作區：批次結果、批次處理與選取那筆的詳情（寬視窗停在視窗內、自己捲動）。
  * 可處理的請求能勾選後逐項批次處理。逾期與延後都只是標示，不代表任何決定。
  */
-export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPage }: Props) {
+export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPage, target }: Props) {
   const [loaded, setLoaded] = useState<ViewState>({ state: "loading" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [resumed, setResumed] = useState<{ requestId: string; count: number } | null>(null);
-  // 詳情裡正在填的草稿（換筆時清空）；勾進批次時沿用這份
-  const [detailDraft, setDetailDraft] = useState<{ requestId: string; draft: Draft } | null>(null);
-  // 勾選進批次的請求與各自的處理草稿
-  const [batch, setBatch] = useState<Record<string, Draft>>({});
+  // 各筆的處理草稿（詳情與批次共用一份）：同步寫進模組層級的 savedDrafts，換筆、換頁再回來都還在
+  const [drafts, setDrafts] = useState<Record<string, Draft>>(() => Object.fromEntries(savedDrafts));
+  // 勾選進批次的請求（草稿在 drafts）
+  const [batchIds, setBatchIds] = useState<ReadonlySet<string>>(() => new Set());
   const [batchOutcome, setBatchOutcome] = useState<BatchOutcome | null>(null);
   // 「已結束」一組可以收合；預設展開
   const [closedOpen, setClosedOpen] = useState(true);
   const closedListId = useId();
+  const listsRef = useRef<HTMLDivElement>(null);
   const paneRef = useRef<HTMLDivElement>(null);
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -349,11 +420,37 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
     setLoaded({ state: "loading" });
     setSelectedId(null);
     setResumed(null);
-    setDetailDraft(null);
-    setBatch({});
+    setBatchIds(new Set());
     setBatchOutcome(null);
     void load();
   }, [load]);
+
+  // 「前往裁定」：清單載入後選中指定的那筆（或那個 Task 的第一筆待裁定），nonce 改變時再做一次。
+  // 焦點由 App 移到主區，這裡只選取並把清單項目捲進可視範圍
+  const handledNonce = useRef<number | null>(null);
+  const revealId = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (loaded.state !== "ready" || !target || handledNonce.current === target.nonce) return;
+    handledNonce.current = target.nonce;
+    const { decisions } = loaded.list;
+    const { actionable, deferred } = partition(decisions);
+    const { taskId, decisionId } = target;
+    const found =
+      decisions.find((d) => d.id === decisionId) ??
+      [...actionable, ...deferred].find((d) => d.task_id === taskId || d.blocking.some((item) => item.task_id === taskId));
+    if (found === undefined) return;
+    // 指定的是已結束的一筆：展開收合的「已結束」，清單項目才看得到
+    if (found.status !== "pending") setClosedOpen(true);
+    setSelectedId(found.id);
+    revealId.current = found.id;
+  }, [loaded, target]);
+
+  // 選取畫上之後才捲動（同一次 commit 裡選取可能還是舊的）；jsdom 沒有 scrollIntoView
+  useLayoutEffect(() => {
+    if (revealId.current === null || revealId.current !== selectedId) return;
+    revealId.current = null;
+    listsRef.current?.querySelector(".decision-item.is-selected")?.scrollIntoView?.({ block: "nearest" });
+  });
 
   if (loaded.state === "loading") {
     return (
@@ -374,18 +471,25 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
   const { actionable, deferred, closed } = partition(decisions);
   const selected = decisions.find((d) => d.id === selectedId) ?? actionable[0] ?? deferred[0] ?? closed[0] ?? null;
   // 重新載入後已不可處理的請求自動離開批次
-  const batchDecisions = actionable.filter((d) => d.id in batch);
-  const draftOf = (requestId: string) => (detailDraft?.requestId === requestId ? detailDraft.draft : EMPTY_DRAFT);
+  const batchDecisions = actionable.filter((d) => batchIds.has(d.id));
+  const draftOf = (requestId: string) => drafts[requestId] ?? EMPTY_DRAFT;
+  /** 更新一筆的草稿，同步寫進 savedDrafts。 */
+  const setDraft = (requestId: string, draft: Draft) => {
+    savedDrafts.set(requestId, draft);
+    setDrafts(Object.fromEntries(savedDrafts));
+  };
+  /** 送出成功的請求清掉草稿。 */
+  const clearDrafts = (requestIds: string[]) => {
+    for (const requestId of requestIds) savedDrafts.delete(requestId);
+    setDrafts(Object.fromEntries(savedDrafts));
+  };
 
   /**
-   * 使用者選另一筆：換筆後詳情捲到開頭、詳情的草稿清空。
+   * 使用者選另一筆：換筆後詳情捲到開頭（草稿依裁定保存，換回來還在）。
    * `focus`：從詳情裡的連結（相似問題、合併目標）換筆時，原本的連結隨舊詳情消失，焦點移到新詳情的標題。
    */
   const select = (requestId: string, focus = false) => {
-    if (requestId !== selected?.id) {
-      navRequest.current = { requestId, focus };
-      setDetailDraft(null);
-    }
+    if (requestId !== selected?.id) navRequest.current = { requestId, focus };
     setSelectedId(requestId);
   };
   const takeNavRequest = (requestId: string) => {
@@ -395,13 +499,12 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
     return { focus: request.focus };
   };
 
+  // 詳情與批次共用同一份草稿：詳情已填的內容勾進批次後沿用，不必重選
   const toggleBatch = (decision: DecisionRequestView) =>
-    setBatch((current) => {
-      // 詳情已填的草稿一併帶進批次，不必重選
-      if (!(decision.id in current)) return { ...current, [decision.id]: draftOf(decision.id) };
-      const rest = { ...current };
-      delete rest[decision.id];
-      return rest;
+    setBatchIds((current) => {
+      const next = new Set(current);
+      if (!next.delete(decision.id)) next.add(decision.id);
+      return next;
     });
 
   const listItem = (decision: DecisionRequestView, selectable: boolean) => {
@@ -413,7 +516,7 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
             type="checkbox"
             className="decision-batch-check"
             aria-label={`批次選取 ${decision.question}`}
-            checked={decision.id in batch}
+            checked={batchIds.has(decision.id)}
             onChange={() => toggleBatch(decision)}
           />
         )}
@@ -432,7 +535,7 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
             {decision.task_title}
           </span>
           <span className="decision-badges badge-group">
-            <span className="badge badge-plain decision-kind">{KIND_LABELS[decision.kind]}</span>
+            <span className="badge badge-plain decision-kind">{kindLabel(decision)}</span>
             <span className={urgencyBadge(decision)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
             {decision.status === "pending" && decision.overdue && (
               <span className="badge badge-warning decision-overdue">已逾期，尚未裁定</span>
@@ -522,7 +625,7 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
       </section>
 
       <div className="decision-layout">
-        <div className="decision-lists">
+        <div className="decision-lists" ref={listsRef}>
           {group("可處理", actionable, "沒有可處理的裁定", { selectable: true })}
           {/* 沒有延後的請求時不佔位置；總覽仍顯示「已延後 0」 */}
           {deferred.length > 0 && group("已延後", deferred, "沒有延後的裁定")}
@@ -550,12 +653,12 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
             <BatchPanel
               client={client}
               decisions={batchDecisions}
-              drafts={batch}
-              onDraft={(id, draft) => setBatch((current) => ({ ...current, [id]: draft }))}
+              drafts={drafts}
+              onDraft={setDraft}
               onCancel={() => {
                 // 批次面板（連同這顆按鈕）即將消失：焦點先移到詳情標題，詳情的處理區會在那下方重新出現
                 detailHeadingRef.current?.focus();
-                setBatch({});
+                setBatchIds(new Set());
               }}
               onSubmitted={async (response) => {
                 const questions = new Map(batchDecisions.map((d) => [d.id, d.question]));
@@ -567,7 +670,9 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
                     message: result.ok ? null : (ERROR_MESSAGES[result.error] ?? result.message),
                   })),
                 });
-                setBatch({});
+                // 保存成功的項目清掉草稿；失敗的保留，之後在詳情還能看到填過的內容
+                clearDrafts(response.results.filter((result) => result.ok).map((result) => result.request_id));
+                setBatchIds(new Set());
                 onChange?.();
                 await load();
               }}
@@ -584,14 +689,15 @@ export function DecisionCenter({ client, workspace, timeZone, onChange, onOpenPa
               timeZone={timeZone}
               resumedCount={resumed?.requestId === selected.id ? resumed.count : null}
               draft={draftOf(selected.id)}
-              onDraft={(draft) => setDetailDraft({ requestId: selected.id, draft })}
+              onDraft={(draft) => setDraft(selected.id, draft)}
               batchMode={batchDecisions.length > 0}
-              inBatch={selected.id in batch}
+              inBatch={batchIds.has(selected.id)}
               batchable={actionable.includes(selected)}
               headingRef={detailHeadingRef}
               takeNavRequest={takeNavRequest}
               onAnswered={async (count) => {
-                // 留在剛處理的這筆，讓使用者看到裁定結果與「已恢復」
+                // 送出成功：清掉這筆的草稿；留在剛處理的這筆，讓使用者看到裁定結果與「已恢復」
+                clearDrafts([selected.id]);
                 setSelectedId(selected.id);
                 setResumed({ requestId: selected.id, count });
                 onChange?.();
@@ -621,31 +727,51 @@ interface ActionFieldsProps {
   name: string;
 }
 
-/** 依 allowed_actions 提供處理方式，並依選到的方式顯示選項、文字或延後時數。 */
+/**
+ * 依 allowed_actions 提供處理方式，並依選到的方式顯示選項、文字或延後時數。
+ * 權限提示直接是「允許這一次／拒絕／延後」三個處理方式（不經過「接受方案 › 選項」）。
+ */
 function ActionFields({ decision, draft, onChange, name }: ActionFieldsProps) {
   const set = (patch: Partial<Draft>) => onChange({ ...draft, ...patch });
   const { action } = draft;
+  const permission = isPermissionPrompt(decision);
+  const choice = permission ? permissionChoiceOf(action, draft.optionId) : null;
+  const items: { value: string; label: string; checked: boolean; patch: Partial<Draft> }[] = permission
+    ? permissionChoices(decision).map((item) => ({
+        value: item,
+        label: PERMISSION_CHOICE_LABELS[item],
+        checked: choice === item,
+        patch: PERMISSION_DRAFTS[item],
+      }))
+    : decision.allowed_actions.map((item) => ({ value: item, label: ACTION_LABELS[item], checked: action === item, patch: { action: item } }));
+  // 文字欄位：權限提示依「允許這一次／拒絕」命名，其餘依處理方式；延後沒有文字欄位
+  const noteLabel =
+    choice === "allow" || choice === "deny"
+      ? PERMISSION_NOTE_LABELS[choice]
+      : !permission && action !== null && action !== "defer"
+        ? NOTE_LABELS[action]
+        : null;
   return (
     <>
       {/* 處理方式：一排可換行的選項鈕，選到的那個以強調色標示 */}
       <fieldset className="decision-actions">
         <legend>處理方式</legend>
         <div className="decision-action-list">
-          {decision.allowed_actions.map((item) => (
-            <label key={item} className="decision-action">
+          {items.map((item) => (
+            <label key={item.value} className="decision-action">
               <input
                 type="radio"
                 name={`${name}-action`}
-                value={item}
-                checked={action === item}
-                onChange={() => set({ action: item })}
+                value={item.value}
+                checked={item.checked}
+                onChange={() => set(item.patch)}
               />
-              {ACTION_LABELS[item]}
+              {item.label}
             </label>
           ))}
         </div>
       </fieldset>
-      {action !== null && OPTION_REQUIRED.has(action) && (
+      {!permission && action !== null && OPTION_REQUIRED.has(action) && (
         <fieldset className="decision-option-choices">
           <legend>選項</legend>
           <div className="choice-list">
@@ -688,9 +814,9 @@ function ActionFields({ decision, draft, onChange, name }: ActionFieldsProps) {
           <span className="decision-note">延後不是同意，工作仍在等待。</span>
         </div>
       )}
-      {action !== null && action !== "defer" && (
+      {noteLabel !== null && (
         <label className="decision-note-field">
-          {NOTE_LABELS[action]}
+          {noteLabel}
           <textarea value={draft.note} onChange={(e) => set({ note: e.target.value })} />
         </label>
       )}
@@ -789,6 +915,8 @@ function BatchPanel({ client, decisions, drafts, onDraft, onCancel, onSubmitted,
           </fieldset>
         );
       })}
+      {/* 送出列停在右欄底部（sticky）；送出失敗的說明放在它上方，和送出鈕一起看得到 */}
+      {error && <ErrorNotice title="批次沒有送出">{error}</ErrorNotice>}
       <div className="form-actions">
         <button type="submit" ref={submitRef} disabled={busy || !complete}>
           送出批次（{decisions.length} 項）
@@ -798,7 +926,6 @@ function BatchPanel({ client, decisions, drafts, onDraft, onCancel, onSubmitted,
         </button>
         {!complete && <p className="decision-hint">每一項都選好處理方式、填妥必填欄位後才能送出</p>}
       </div>
-      {error && <ErrorNotice title="批次沒有送出">{error}</ErrorNotice>}
     </form>
   );
 }
@@ -900,8 +1027,8 @@ function DecisionDetail({
     setBusy(true);
     setError(null);
     try {
+      // 成功後由外層清掉這筆的草稿
       const response = await client.answerDecision(decision.workspace_id, decision.id, request);
-      onDraft(EMPTY_DRAFT);
       await onAnswered(response.resumed_task_ids.length);
     } catch (e) {
       // 例如已被回答過、內容已變更或目標版本已變更（409）：顯示說明，並重新載入讓畫面反映最新狀態
@@ -921,7 +1048,7 @@ function DecisionDetail({
           {decision.question}
         </h3>
         <div className="badge-group">
-          <span className="badge badge-plain">{KIND_LABELS[decision.kind]}</span>
+          <span className="badge badge-plain">{kindLabel(decision)}</span>
           <span className={STATUS_TONES[decision.status]}>{STATUS_LABELS[decision.status]}</span>
           <span className={urgencyBadge(decision)}>緊急程度：{URGENCY_LABELS[decision.urgency]}</span>
         </div>
@@ -1004,9 +1131,15 @@ function DecisionDetail({
       )}
 
       {decision.authority && (
-        <section className="decision-block decision-request" aria-label="決策權限攔截">
+        // 預算用盡不看決策權限表（Runtime 停止自動重試後交給你），所以不稱「決策權限攔截」、也不提供「調整決策權限」
+        <section className="decision-block decision-request" aria-label={kindLabel(decision)}>
           <h4 className="decision-heading-tip">
-            決策權限攔截 <HelpTip label="決策權限攔截">Controller 想自行處理這件事，但決策權限規定必須送裁定。</HelpTip>
+            {kindLabel(decision)}{" "}
+            <HelpTip label={kindLabel(decision)}>
+              {isBudgetExhausted(decision)
+                ? "Runtime 已停止自動重試；只有選「再給一輪」Task 才會繼續。"
+                : "Controller 想自行處理這件事，但決策權限規定必須送裁定。"}
+            </HelpTip>
           </h4>
           <dl className="facts">
             <dt>事項</dt>
@@ -1016,7 +1149,7 @@ function DecisionDetail({
               <WithHashes text={decision.authority.summary} />
             </dd>
           </dl>
-          {onOpenPage && (
+          {onOpenPage && !isBudgetExhausted(decision) && (
             <button type="button" className="btn-sm" onClick={() => onOpenPage("authority")}>
               調整決策權限
             </button>
@@ -1088,11 +1221,11 @@ function DecisionDetail({
         )}
       </div>
 
-      {/* 「允許本次操作」與「修改 Workspace 授權」分開：一次性批准不會變成永久擴權 */}
+      {/* 「允許這一次」（處理方式）與「修改 Workspace 授權」分開：一次性批准不會變成永久擴權 */}
       {permission && (
-        <section className="decision-block decision-approve-once" aria-label="允許本次操作">
-          <h4>允許本次操作</h4>
-          {/* 帶有授權意涵，直接顯示，不收在「?」說明裡 */}
+        <section className="decision-block decision-approve-once" aria-label="允許這一次">
+          <h4>允許這一次</h4>
+          {/* 標題與處理方式「允許這一次」同名；帶有授權意涵，直接顯示，不收在「?」說明裡 */}
           <p className="decision-note">只允許這個 Task 的這一個操作，用過一次就失效，不會修改 Workspace 授權。</p>
           {permission.binding ? (
             <BindingView binding={permission.binding} />
@@ -1249,16 +1382,16 @@ function AuthorizationChange({ client, workspace, capability }: ChangeProps) {
     if (capability === null) {
       // 按鈕即將換成說明：焦點先移到區塊標題
       headingRef.current?.focus();
-      setState({ step: "blocked", message: "無法歸類的操作不能透過修改授權放行，請用允許本次操作或拒絕" });
+      setState({ step: "blocked", message: "無法歸類的操作不能透過修改授權放行，請在處理方式選「允許這一次」或「拒絕」" });
       return;
     }
     setBusy(true);
     try {
       const { effective } = await client.getAuthorization(workspace.id);
       if (effective === null) {
-        setState({ step: "blocked", message: "這個 Workspace 尚未確認授權，請先到授權設定頁確認授權" });
+        setState({ step: "blocked", message: "這個 Workspace 尚未確認授權，請先到授權頁確認授權" });
       } else if (effective.grants.some((grant) => grant.capability === capability)) {
-        setState({ step: "blocked", message: "這個能力已授權但目標或限制不涵蓋這次操作，請到授權設定頁調整" });
+        setState({ step: "blocked", message: "這個能力已授權但目標或限制不涵蓋這次操作，請到授權頁調整" });
       } else {
         const grants = [...effective.grants, { capability, targets: [workspace.path], restrictions: [] }];
         const summary = await client.summarizeAuthorization(workspace.id, grants);
@@ -1415,6 +1548,8 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, headingRef
     );
   }
   const outcome = decision.decision;
+  // 權限提示以作答時的處理方式名稱（允許這一次／拒絕）顯示，不寫成「接受方案 › 選項」
+  const choice = outcome && isPermissionPrompt(decision) ? permissionChoiceOf(outcome.action, outcome.option_id) : null;
   return (
     <section className="decision-outcome" aria-label="裁定結果">
       <h4 ref={headingRef} tabIndex={-1}>
@@ -1422,12 +1557,25 @@ function DecisionOutcomeView({ decision, all, timeZone, resumedCount, headingRef
       </h4>
       {outcome ? (
         <>
-          <p>處理方式：{ACTION_LABELS[outcome.action]}</p>
-          {outcome.option_label && <p>選擇：{outcome.option_label}</p>}
-          {outcome.note && (
-            <p>
-              {OUTCOME_NOTE_LABELS[outcome.action]}：{outcome.note}
-            </p>
+          {choice === "allow" || choice === "deny" ? (
+            <>
+              <p>處理方式：{PERMISSION_CHOICE_LABELS[choice]}</p>
+              {outcome.note && (
+                <p>
+                  {PERMISSION_OUTCOME_NOTE_LABELS[choice]}：{outcome.note}
+                </p>
+              )}
+            </>
+          ) : (
+            <>
+              <p>處理方式：{ACTION_LABELS[outcome.action]}</p>
+              {outcome.option_label && <p>選擇：{outcome.option_label}</p>}
+              {outcome.note && (
+                <p>
+                  {OUTCOME_NOTE_LABELS[outcome.action]}：{outcome.note}
+                </p>
+              )}
+            </>
           )}
           <p className="meta decision-outcome-meta">
             <span>{outcome.decided_by}</span>

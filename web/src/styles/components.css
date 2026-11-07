@@ -64,11 +64,6 @@
   max-inline-size: var(--measure-form);
 }
 
-.grow {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
 .no-shrink {
   flex: none;
 }
@@ -86,16 +81,14 @@
 }
 
 /* ---------- 按鈕（MASTER 5.1）：每個區域最多一個主要按鈕 ---------- */
-.btn-primary,
-.primary-action {
+.btn-primary {
   border-color: var(--color-accent);
   background: var(--color-accent);
   color: var(--color-on-accent);
   font-weight: var(--font-weight-strong);
 }
 
-.btn-primary:hover:not(:disabled),
-.primary-action:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled) {
   border-color: var(--color-accent-hover);
   background: var(--color-accent-hover);
 }
@@ -394,6 +387,16 @@
   line-height: var(--leading-page);
 }
 
+/* 頁面裡已經有頁面標題時，空狀態的標題降一級，不與頁名一樣大 */
+.page .empty-state > :is(h2, h3) {
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
+}
+
+.page .empty-state {
+  padding: var(--space-6) 0;
+}
+
 .empty-state > p {
   margin: 0;
   color: var(--color-text-muted);
@@ -686,6 +689,15 @@
   color: var(--color-accent);
 }
 
+/* 放在物件卡、分隔清單的列或面板裡時只留左側色條：完整外框會變成卡片裡的子卡片（MASTER 7.1） */
+:is(.card, .row-list > li, .panel) .notice {
+  padding-block: var(--space-2);
+  padding-right: 0;
+  border-width: 0 0 0 3px;
+  border-radius: 0;
+  background: none;
+}
+
 /* ---------- 量表：額度、進度；數字一定另外以文字顯示 ---------- */
 .meter {
   position: relative;
@@ -742,13 +754,6 @@
   align-items: start;
 }
 
-.field-inline {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: center;
-}
-
 .input-short {
   width: 12em;
 }
@@ -756,12 +761,6 @@
 .select-fit {
   width: 100%;
   max-width: 32em;
-}
-
-.select-shrink {
-  flex: 1 1 0;
-  width: 0;
-  min-width: 0;
 }
 
 /* 表單底部的動作列：按鈕依內容寬、整組換行 */

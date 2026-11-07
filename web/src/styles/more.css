@@ -324,7 +324,7 @@
   font-family: var(--font-mono);
 }
 
-/* 確認摘要：保存前的最後一步，用強調色的細框與其他區塊區分 */
+/* 確認摘要：儲存前的最後一步，用強調色的細框與其他區塊區分 */
 .authorization-page .authorization-summary {
   border-color: var(--color-accent-border);
 }
@@ -361,7 +361,7 @@
   justify-self: start;
 }
 
-/* 摘要內的三段（授予的能力 → 相對於目前授權的變更 → 風險、承認與保存）以細線分開 */
+/* 摘要內的三段（授予的能力 → 相對於目前授權的變更 → 風險、承認與儲存）以細線分開 */
 .authorization-page .authorization-changes,
 .authorization-page .authorization-confirm-area {
   display: grid;

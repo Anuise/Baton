@@ -90,8 +90,8 @@ pnpm build --bundle
 2. **新增帳號**（左欄底部的 `帳號`）：新增 Account Profile，按「在終端機登入」完成 Claude Code 原生登入，再按「重新核對」。已有登入好的設定目錄（例如 `~\.claude-Work-1`）時，可以用「以既有目錄建立 Profile」直接登記，不必重新登入；Baton 不會修改或刪除這個目錄。
 3. **匯入共同設定**（左欄底部的 `共同設定`）：Baton 讀取你平常的 Claude Code 設定（`~\.claude\settings.json`、`~\.claude\CLAUDE.md` 與 `~\.claude.json` 的 `mcpServers`）產生預覽。你看過來源、差異與排除項目後再採用，所有帳號的 Agent 都會使用這份設定。登入資料不會被匯入，看起來像秘密的值也會被排除（以啟發式規則判斷）；原始檔案只讀不寫。
 4. **建立 Workspace**：在左欄的 Workspace 清單按「新增」，選一個目錄（不一定要是 Git repo）後按「建立 Workspace」。
-5. **確認授權**（Workspace 的 `規則` → `授權`）：從「研究／文件」或「可信專案開發」範本開始編輯，檢視確認摘要後按「確認並保存授權」。選取目錄不等於授權，確認之前，需要任何能力的工作都不會被派出。部署、遠端寫入、對外發訊、付費、正式資料操作與系統管理員安裝不在任何範本內，只能由你明確加入。
-6. **開啟 Controller**（`主控台`）：選一個帳號當 Controller 帳號，按「開啟」。Baton 會在 Windows Terminal（沒有時用系統主控台）開一個標題含「Baton Controller」的視窗。
+5. **確認授權**（Workspace 的 `規則` → `授權`）：從「研究／文件」或「可信專案開發」範本開始編輯，檢視確認摘要後按「確認並儲存授權」。選取目錄不等於授權，確認之前，需要任何能力的工作都不會被派出。部署、遠端寫入、對外發訊、付費、正式資料操作與系統管理員安裝不在任何範本內，只能由你明確加入。
+6. **開啟 Controller**（Workspace 的 `Controller` 頁）：選一個帳號當 Controller 帳號，按「開啟 Controller」。Baton 會在 Windows Terminal（沒有時用系統主控台）開一個標題含「Baton Controller」的視窗。
 7. **在終端機描述目標**：Controller 會拆 Task、補齊契約並派工，派工後在背景等待事件。Worker 結束、Task 受阻、裁定被回答或收到訊息時，Claude Code 會原生通知它。
 
 App 左側是導覽欄：選中的 Workspace 會在清單中展開它的頁面，依用途分成四組：

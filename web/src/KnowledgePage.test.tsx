@@ -569,6 +569,61 @@ describe("知識", () => {
     });
   });
 
+  describe("條目操作後移到別的清單時，焦點跟著條目，不會掉到 body", () => {
+    it("確認為已驗證後，焦點移到有效條目中這張卡片的標題", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([candidate]));
+
+      const card = within(await region("待確認的候選教訓")).getByRole("article", { name: "測試前清空快取" });
+      await user.click(within(card).getByRole("button", { name: "確認為已驗證" }));
+
+      const moved = await within(await region("有效條目")).findByRole("article", { name: "測試前清空快取" });
+      await waitFor(() => expect(within(moved).getByRole("heading", { name: "測試前清空快取" })).toHaveFocus());
+    });
+
+    it("淘汰後（顯示歷史時），焦點移到歷史條目中這張卡片的標題", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      await user.click(await screen.findByLabelText("顯示歷史"));
+      const card = within(await region("有效條目")).getByRole("article", { name: "部署前先備份資料庫" });
+      await user.click(within(card).getByText("更多"));
+      await user.click(within(card).getByRole("button", { name: "淘汰" }));
+      await user.type(within(card).getByLabelText("淘汰原因"), "已改用自動備份");
+      await user.click(within(card).getByRole("button", { name: "確認淘汰" }));
+
+      const moved = await within(await region("歷史條目")).findByRole("article", { name: "部署前先備份資料庫" });
+      await waitFor(() => expect(within(moved).getByRole("heading", { name: "部署前先備份資料庫" })).toHaveFocus());
+    });
+
+    it("撤銷候選後條目不在畫面上（沒有顯示歷史），焦點移到「待確認的候選教訓」區段標題", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([candidate]));
+
+      const card = within(await region("待確認的候選教訓")).getByRole("article", { name: "測試前清空快取" });
+      await user.click(within(card).getByRole("button", { name: "撤銷" }));
+      await user.type(within(card).getByLabelText("撤銷原因"), "假說不成立");
+      await user.click(within(card).getByRole("button", { name: "確認撤銷" }));
+
+      await waitFor(() => expect(screen.queryByRole("article", { name: "測試前清空快取" })).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole("heading", { name: "待確認的候選教訓" })).toHaveFocus());
+    });
+
+    it("撤銷有效條目後（沒有顯示歷史），焦點移到「有效條目」區段標題", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      await user.click(within(card).getByText("更多"));
+      await user.click(within(card).getByRole("button", { name: "撤銷" }));
+      await user.type(within(card).getByLabelText("撤銷原因"), "已不適用");
+      await user.click(within(card).getByRole("button", { name: "確認撤銷" }));
+
+      expect(await screen.findByText("還沒有有效的條目")).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "有效條目" })).toHaveFocus());
+    });
+  });
+
   it("別人已改過（revision 衝突）時提示已重新整理並重新讀取", async () => {
     const user = userEvent.setup();
     const client = fakeClient([candidate]);

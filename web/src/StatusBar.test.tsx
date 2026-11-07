@@ -339,7 +339,7 @@ describe("頂部狀態列", () => {
       expect(within(screen.getByRole("status")).getByText("新派工已停止")).toBeInTheDocument();
     });
 
-    it("原因的第一句與處理方式直接顯示，其餘與技術細節收進「技術細節」", async () => {
+    it("原因的第一句與處理方式直接顯示，其餘與技術細節收進「詳細資訊」", async () => {
       const long = {
         dispatch_halted: true,
         fault: { ...diskFull!.fault!, summary: "控制資料庫無法寫入。SQLite 回報 SQLITE_FULL（extended code 13）" },
@@ -351,7 +351,7 @@ describe("頂部狀態列", () => {
       const alert = screen.getByRole("alert");
       expect(within(alert).getByText("控制資料庫無法寫入。")).toBeVisible();
       expect(within(alert).getByText("請釋放資料目錄所在磁碟的空間；空間足夠後 Baton 會自動恢復派工")).toBeVisible();
-      const details = within(alert).getByText("技術細節").closest("details")!;
+      const details = within(alert).getByText("詳細資訊").closest("details")!;
       expect(details).not.toHaveAttribute("open");
       expect(within(details).getByText("SQLite 回報 SQLITE_FULL（extended code 13）")).toBeInTheDocument();
       expect(within(details).getByText("database or disk is full")).toBeInTheDocument();

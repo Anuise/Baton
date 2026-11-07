@@ -77,6 +77,9 @@ describe("更新進度", () => {
 
     const dialog = screen.getByRole("dialog", { name: "更新 Baton" });
     expect(dialog).toHaveTextContent("從 0.1.0 更新到 0.2.0");
+    // 版本號用等寬字（MASTER 7.1）
+    expect(within(dialog).getByText("0.1.0")).toHaveClass("mono");
+    expect(within(dialog).getByText("0.2.0")).toHaveClass("mono");
     expect(dialog).toHaveTextContent("停止執行中的工作");
     expect(client.updateStatus).not.toHaveBeenCalled();
 
@@ -182,6 +185,52 @@ describe("更新進度", () => {
     expect(client.quitApp).toHaveBeenCalledTimes(1);
   });
 
+  it("開啟時焦點移到對話框標題；按「重試」後按鈕隨安裝開始消失，焦點仍在對話框標題，不落到 body", async () => {
+    const client = fakeClient([inMaintenance({ phase: "ready" }), stopped()]);
+    let failAgain: (error: Error) => void = () => {};
+    client.installUpdate
+      .mockRejectedValueOnce(new Error("找不到安裝程式"))
+      .mockImplementationOnce(() => new Promise<void>((_, reject) => (failAgain = reject)));
+    render(<UpdateProgress client={client} maintenance={maintenance()} />);
+    await settle();
+
+    const title = screen.getByRole("heading", { name: "更新 Baton" });
+    expect(title).toHaveFocus();
+
+    await settle(500);
+    // 與瀏覽器一樣，按下的按鈕先取得焦點
+    const retry = screen.getByRole("button", { name: "重試" });
+    retry.focus();
+    await act(async () => {
+      retry.click();
+    });
+
+    expect(screen.getByRole("dialog")).toHaveTextContent("正在安裝更新並重新開啟…");
+    expect(screen.queryByRole("button", { name: "重試" })).not.toBeInTheDocument();
+    expect(title).toHaveFocus();
+
+    await act(async () => failAgain(new Error("維護尚未準備好")));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("維護尚未準備好");
+    expect(title).toHaveFocus();
+  });
+
+  it("按「仍要安裝更新並重新開啟」後按鈕消失，焦點移到對話框標題", async () => {
+    const client = fakeClient(new Error("connection refused"));
+    client.installUpdate.mockImplementationOnce(() => new Promise<void>(() => {}));
+    render(<UpdateProgress client={client} maintenance={maintenance({ phase: "ready" })} />);
+    await settle(500);
+
+    const install = within(screen.getByRole("alert")).getByRole("button", { name: "仍要安裝更新並重新開啟" });
+    install.focus();
+    await act(async () => {
+      install.click();
+    });
+
+    expect(screen.queryByRole("button", { name: "仍要安裝更新並重新開啟" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "更新 Baton" })).toHaveFocus();
+  });
+
   it("維護失敗時說明更新沒有套用、Baton 已完全退出，按「關閉 Baton」結束 App，不安裝", async () => {
     const client = fakeClient([inMaintenance({ phase: "failed", message: "更新前備份失敗：磁碟已滿" }), stopped()]);
     render(<UpdateProgress client={client} maintenance={maintenance()} />);
@@ -207,7 +256,12 @@ describe("更新進度", () => {
     render(<UpdateProgress client={client} maintenance={maintenance()} />);
     await settle(500);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("暫時無法取得更新進度：connection refused");
+    // 系統暫時的狀態：中性的長警示（不是琥珀色的淡底提示），狀態詞＋原因
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveClass("notice");
+    expect(alert).not.toHaveClass("notice-warning", "notice-danger", "callout");
+    expect(within(alert).getByText("暫時無法取得更新進度")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent(/^暫時無法取得更新進度connection refused$/);
 
     await settle(500);
 

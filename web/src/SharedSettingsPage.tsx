@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import { shortHash } from "./textFormat";
 import { formatTimestamp } from "./time";
 import {
@@ -91,7 +92,8 @@ export function SharedSettingsPage({ client, timeZone }: Props) {
   const [list, setList] = useState<ListState>({ state: "loading" });
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // 預覽或採用失敗：狀態詞（哪個動作沒有完成）＋說明
+  const [error, setError] = useState<{ title: string; reason: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -115,7 +117,7 @@ export function SharedSettingsPage({ client, timeZone }: Props) {
       setPreview(await client.previewSharedSettings());
     } catch (failure) {
       setPreview(null);
-      setError(reasonOf(failure));
+      setError({ title: "無法預覽匯入", reason: reasonOf(failure) });
     } finally {
       setBusy(false);
     }
@@ -134,9 +136,9 @@ export function SharedSettingsPage({ client, timeZone }: Props) {
       if (errorCode(failure) === "settings_source_changed") {
         // 預覽已過期：不能再採用，必須重新預覽
         setPreview(null);
-        setError(SOURCE_CHANGED_MESSAGE);
+        setError({ title: "無法採用", reason: SOURCE_CHANGED_MESSAGE });
       } else {
-        setError(reasonOf(failure));
+        setError({ title: "無法採用", reason: reasonOf(failure) });
       }
     } finally {
       setBusy(false);
@@ -163,11 +165,8 @@ export function SharedSettingsPage({ client, timeZone }: Props) {
           {notice}
         </p>
       )}
-      {error && (
-        <p role="alert" className="callout callout-danger">
-          {error}
-        </p>
-      )}
+      {/* Runtime 的錯誤可能很長：長警示，不用淡底提示（MASTER 7.1） */}
+      {error && <FailureNotice title={error.title} reason={error.reason} />}
       {preview && <PreviewPanel preview={preview} busy={busy} onAdopt={() => void adopt(preview)} />}
 
       <section className="section shared-settings-versions" aria-labelledby="shared-settings-versions-title">
@@ -177,11 +176,7 @@ export function SharedSettingsPage({ client, timeZone }: Props) {
           <p>每次採用都會建立一個不會再變動的版本，新的在前。</p>
         </div>
         {list.state === "loading" && <p className="empty-note">載入中…</p>}
-        {list.state === "failed" && (
-          <p role="alert" className="callout callout-danger">
-            無法取得共同設定版本：{list.reason}
-          </p>
-        )}
+        {list.state === "failed" && <FailureNotice title="無法取得共同設定版本" reason={list.reason} />}
         {list.state === "ready" && versions.length === 0 && <p className="empty-note">尚未採用任何版本</p>}
         {versions.length > 0 && (
           <ul className="row-list">

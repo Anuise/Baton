@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import type { UpdateClient, UpdateStatusView } from "./runtimeClient";
 import { formatTimestamp } from "./time";
 
@@ -56,11 +57,8 @@ export function UpdateSettings({ client, timeZone }: Props) {
         <p>啟動時與每天自動檢查；有新版本只會通知，不會自動更新。</p>
       </div>
       {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
-      {loaded.state === "failed" && (
-        <p role="alert" className="callout callout-danger">
-          無法取得更新狀態：{loaded.reason}
-        </p>
-      )}
+      {/* Runtime 的錯誤可能很長：長警示，不用淡底提示（MASTER 7.1） */}
+      {loaded.state === "failed" && <FailureNotice title="無法取得更新狀態" reason={loaded.reason} />}
       {loaded.state === "ready" && (
         <div className="panel">
           <dl className="facts">

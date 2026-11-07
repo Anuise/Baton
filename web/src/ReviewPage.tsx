@@ -120,8 +120,8 @@ function ReviewsSection({ reviews, timeZone }: { reviews: ReviewView[]; timeZone
         <span className="count">{current.length}</span>
         <p>規範（Standards）與需求（Spec）兩軸各自判定，兩軸都通過，整份審查才通過。</p>
       </div>
-      {reviews.length === 0 && <p className="empty-note">還沒有審查；reviewer 提交雙軸審查後會在這裡顯示。</p>}
-      {reviews.length > 0 && current.length === 0 && <p className="empty-note">目前沒有仍有效的審查，只有已過期的審查。</p>}
+      {reviews.length === 0 && <p className="empty-note">還沒有審查；reviewer 提交雙軸審查後會在這裡顯示</p>}
+      {reviews.length > 0 && current.length === 0 && <p className="empty-note">目前沒有仍有效的審查，只有已過期的審查</p>}
       {current.map((review) => (
         <ReviewCard key={review.id} review={review} timeZone={timeZone} />
       ))}
@@ -141,11 +141,14 @@ function ReviewsSection({ reviews, timeZone }: { reviews: ReviewView[]; timeZone
   );
 }
 
-/** 整體結果：狀態詞做成徽章，卡片以左側色條標示（長的過期原因用一般文字，不整段上色）。 */
+/**
+ * 整體結果：狀態詞做成徽章，卡片以左側色條標示（長的過期原因用一般文字，不整段上色）。
+ * 已過期的審查不需要你處理，徽章與色條都用中性色（琥珀色只給要你處理的事，MASTER 7.1）。
+ */
 const OVERALL = {
-  passed: { label: "通過", tone: "success" },
-  failed: { label: "未通過", tone: "danger" },
-  stale: { label: "已過期", tone: "warning" },
+  passed: { label: "通過", stripe: "stripe-success", badge: "badge badge-success" },
+  failed: { label: "未通過", stripe: "stripe-danger", badge: "badge badge-danger" },
+  stale: { label: "已過期", stripe: "stripe-muted", badge: "badge badge-plain" },
 } as const;
 
 function ReviewCard({ review, timeZone }: { review: ReviewView; timeZone?: string }) {
@@ -154,7 +157,7 @@ function ReviewCard({ review, timeZone }: { review: ReviewView; timeZone?: strin
   const overall = OVERALL[review.stale_reason !== null ? "stale" : review.passed ? "passed" : "failed"];
   const subject = review.subject_task_title ?? review.subject_task_id;
   return (
-    <section className={`card stripe-${overall.tone} review-card`} aria-labelledby={headingId}>
+    <section className={`card ${overall.stripe} review-card`} aria-labelledby={headingId}>
       <header className="card-header">
         <h4 id={headingId}>
           <span className="clamp-2" title={subject}>
@@ -164,7 +167,7 @@ function ReviewCard({ review, timeZone }: { review: ReviewView; timeZone?: strin
             （候選版本 <code className="mono">{shortHash(review.candidate_revision)}</code>）
           </span>
         </h4>
-        <span className={`badge badge-${overall.tone} review-overall`}>{overall.label}</span>
+        <span className={`${overall.badge} review-overall`}>{overall.label}</span>
       </header>
       {review.stale_reason !== null && <StaleReason reason={review.stale_reason} />}
       <div className="review-axes">
@@ -195,7 +198,7 @@ function ReviewCard({ review, timeZone }: { review: ReviewView; timeZone?: strin
   );
 }
 
-/** 過期原因（錯誤訊息）：第一句完整顯示，其餘收進「技術細節」。 */
+/** 過期原因（錯誤訊息）：第一句完整顯示，其餘收進「詳細資訊」。 */
 function StaleReason({ reason }: { reason: string }) {
   const { summary, rest } = splitFirstSentence(reason);
   return (
@@ -204,7 +207,7 @@ function StaleReason({ reason }: { reason: string }) {
       <p>{summary}</p>
       {rest !== "" && (
         <details>
-          <summary>技術細節</summary>
+          <summary>詳細資訊</summary>
           <p className="pre-wrap">{rest}</p>
         </details>
       )}
@@ -281,7 +284,7 @@ function DeviationsSection({ deviations, timeZone }: { deviations: DeviationView
         <span className="count">{deviations.length}</span>
         <p>實作偏離 Design Package 時的回報與處理結果，待處理的排在前面。</p>
       </div>
-      {deviations.length === 0 && <p className="empty-note">沒有設計偏離；實作偏離 Design Package 時會在這裡顯示。</p>}
+      {deviations.length === 0 && <p className="empty-note">沒有設計偏離；實作偏離 Design Package 時會在這裡顯示</p>}
       {sorted.map((deviation) => (
         <DeviationCard key={deviation.id} deviation={deviation} timeZone={timeZone} />
       ))}

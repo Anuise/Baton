@@ -4,7 +4,7 @@
 //   1. App 啟動後自動啟動 Runtime，狀態列顯示「Runtime 運作中」
 //   2. App 程序結束後 Runtime 仍在執行（關閉視窗只會隱藏到系統匣，所以這裡直接結束 App 程序）
 //   3. 再次開啟 App 時連回同一個 Runtime（boot_count 不增加、pid 不變）
-//   4. 在 App 內建立 Workspace 後切到「授權」頁，套用 P3 範本、檢視摘要、承認風險並確認保存；
+//   4. 在 App 內建立 Workspace 後切到「授權」頁，套用 P3 範本、檢視摘要、承認風險並確認儲存；
 //      確認之前需要「建置與測試」的 Run 被准入檢查拒絕，確認之後通過
 //   5. 不帶憑證的請求被 Runtime 拒絕（桌面憑證由 App 自動讀取 DPAPI 保護檔，不需人工複製）
 //   6. 首次設定精靈以本機真實的 claude 與 git 檢查；帳號頁新增 Profile 並以真實的 claude auth status 核對，
@@ -316,8 +316,8 @@ try {
     (await evaluate(debug2, ui.text(".authorization-summary"))).includes("Windows 使用者的身分執行"),
   );
   await step("承認風險", ui.check("我了解並接受上述風險"));
-  await step("確認並保存授權", ui.click("確認並保存授權"));
-  await waitFor("保存為第 1 版", async () => (await evaluate(debug2, ui.text(".authorization-page"))).includes("已保存為第 1 版"));
+  await step("確認並儲存授權", ui.click("確認並儲存授權"));
+  await waitFor("儲存為第 1 版", async () => (await evaluate(debug2, ui.text(".authorization-page"))).includes("已儲存為第 1 版"));
   const after = await needsBuild();
   if (after.status !== 200 || (await after.json()).authorization_revision !== 1) {
     throw new Error("確認授權之後，需要建置與測試的 Run 應通過准入檢查");

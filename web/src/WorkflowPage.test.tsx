@@ -157,10 +157,12 @@ describe("流程", () => {
     expect(passed).not.toBeNull();
     expect(passed).not.toHaveAttribute("open");
     // 摘要說明裡面有什麼（嘗試次數）；計數只放數字（MASTER 7.1）
-    expect(passed?.querySelector("summary")).toHaveTextContent(`細節與嘗試紀錄 ${workflow.stages[0].attempts.length}`);
+    // 收合摘要一律「詳細資訊」（不用「細節」）
+    expect(passed?.querySelector("summary")).toHaveTextContent(`詳細資訊與嘗試紀錄 ${workflow.stages[0].attempts.length}`);
     expect(passed?.querySelector("summary .count")).toHaveTextContent(String(workflow.stages[0].attempts.length));
     const first = screen.getByRole("region", { name: "缺陷處理 第 1 版" });
     expect(collapsed(within(first).getByRole("listitem", { name: "修正確認" }))).not.toBeNull();
+    expect(collapsed(within(first).getByRole("listitem", { name: "修正確認" }))!.querySelector("summary")).toHaveTextContent(/^詳細資訊$/);
     expect(collapsed(within(first).getByRole("listitem", { name: "縮小範圍" }))).toBeNull();
     // 還沒輪到的「修正確認」（第二個 Workflow）也收合
     const second = screen.getByRole("region", { name: "新功能 第 1 版" });
@@ -390,7 +392,8 @@ describe("流程", () => {
   it("沒有 Workflow 時說明 Controller 會依情境選擇 Playbook", async () => {
     renderPage(fakeClient(workflowList({ workflows: [] })));
 
-    expect(await screen.findByText(/Controller 開始工作時會依情境選擇 Playbook/)).toBeInTheDocument();
+    // .empty-note 是一行說明，不加句號（MASTER 7.1）
+    expect(await screen.findByText(/Controller 開始工作時會依情境選擇 Playbook/)).toHaveTextContent(/進度$/);
   });
 
   it("讀不到流程時顯示 Runtime 的說明", async () => {

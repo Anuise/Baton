@@ -272,6 +272,52 @@ describe("完全退出進度", () => {
     expect(screen.getByRole("dialog")).toHaveTextContent("停止中");
   });
 
+  it("開啟時焦點移到對話框標題；按「重試」後按鈕消失，焦點仍在對話框標題，不落到 body", async () => {
+    const { client, emitFullExit } = fakeClient(stopping(), stopping());
+    client.requestFullExit.mockRejectedValueOnce(new Error("Runtime 未回應"));
+    render(<ExitProgress client={client} />);
+    await emitFullExit();
+    await settle();
+
+    const title = screen.getByRole("heading", { name: "完全退出" });
+    expect(title).toHaveFocus();
+
+    // 與瀏覽器一樣，按下的按鈕先取得焦點
+    const retry = screen.getByRole("button", { name: "重試" });
+    retry.focus();
+    await act(async () => {
+      retry.click();
+    });
+    await settle();
+
+    expect(screen.queryByRole("button", { name: "重試" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveTextContent("停止中");
+    expect(title).toHaveFocus();
+  });
+
+  it("按「返回」關閉後，焦點回到開啟前的位置", async () => {
+    const { client, emitFullExit } = fakeClient(stopping());
+    client.requestFullExit.mockRejectedValueOnce(new Error("Runtime 未回應"));
+    render(
+      <>
+        <button type="button">頁面上的按鈕</button>
+        <ExitProgress client={client} />
+      </>,
+    );
+    const before = screen.getByRole("button", { name: "頁面上的按鈕" });
+    before.focus();
+    await emitFullExit();
+    await settle();
+    expect(screen.getByRole("heading", { name: "完全退出" })).toHaveFocus();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "返回" }).click();
+    });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(before).toHaveFocus();
+  });
+
   it("失敗原因很長時只完整顯示第一句，其餘收進預設收合的「詳細資訊」", async () => {
     const { client, emitFullExit } = fakeClient(stopping());
     client.requestFullExit.mockRejectedValueOnce(

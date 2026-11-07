@@ -31,10 +31,10 @@ interface Props {
   onOpenPage?: (page: "tasks") => void;
 }
 
-/** 檔案現況不是 ok 時的警示；ok 不顯示。 */
+/** 檔案現況不是 ok 時，接在「不可信」徽章下的一行說明；ok 不顯示。 */
 const FILE_STATUS_WARNINGS: Record<Exclude<ArtifactFileStatus, "ok">, string> = {
-  missing: "檔案遺失，不可信",
-  size_mismatch: "檔案大小與登記不符，不可信",
+  missing: "檔案遺失，這個版本不可使用",
+  size_mismatch: "檔案大小與登記不符，這個版本不可使用",
 };
 
 const UNREGISTERED_KIND_LABELS: Record<UnregisteredFile["kind"], string> = {
@@ -338,6 +338,8 @@ function VersionRow({ client, workspaceId, artifact, version, latest, timeZone }
         <p className="artifact-version-name">
           <strong>v{version.version}</strong>
           {latest && <span className="badge badge-plain">最新</span>}
+          {/* 檔案與登記不符：狀態詞是版本號旁的紅色徽章，一眼看得出這一列不可用；原因在下一行 */}
+          {version.file_status !== "ok" && <span className="badge badge-danger">不可信</span>}
         </p>
         <div className="artifact-actions">
           <button
@@ -354,11 +356,7 @@ function VersionRow({ client, workspaceId, artifact, version, latest, timeZone }
           </button>
         </div>
       </div>
-      {version.file_status !== "ok" && (
-        <div className="notice notice-danger" role="alert">
-          <p>{FILE_STATUS_WARNINGS[version.file_status]}</p>
-        </div>
-      )}
+      {version.file_status !== "ok" && <p className="artifact-untrusted">{FILE_STATUS_WARNINGS[version.file_status]}</p>}
       <p className="meta">
         <span className="nowrap">{sizeLabel(version.size_bytes)}</span>
         <span className="nowrap">{formatTimestamp(version.created_at, timeZone)}</span>

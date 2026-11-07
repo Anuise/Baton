@@ -41,7 +41,7 @@ Baton 是接力棒：多個帳號像分道的跑者，額度用完就交棒給�
 | `--color-text-muted` | `#4F4C68` | `#ABA8C4` | 標籤、次要文字（sunken 上也可用） |
 | `--color-text-subtle` | `#686583` | `#908CAB` | 計數、時間戳、placeholder |
 | `--color-accent` | `#3F35BF` 群青 | `#AEA5FF` | 選取、連結、主要按鈕 |
-| `--rail-bg` | `#221E4A` 夜靛 | `#17152F` | 跑道欄 |
+| `--rail-bg` | `#221E4A` 夜靛 | `#1F1B45` | 跑道欄（深色模式比內容底色亮一階、帶靛色，並以分道線隔開） |
 | `--rail-baton` | `#B9AFFF` 淡紫 | 同左 | 接力棒、跑道欄上的主要按鈕 |
 | `--rail-badge-bg` | `#FFC24B` 琥珀 | 同左 | 跑道欄上的待裁定數 |
 
@@ -138,7 +138,7 @@ Baton 是接力棒：多個帳號像分道的跑者，額度用完就交棒給�
 | 額度、進度 | `.meter > span[style=width]`，數字另外寫出 | 只有長條沒有數字 |
 | 互斥選項（各有說明） | `.choice-list > label.choice` | 一排擠在一起的 radio |
 | 欄位 | `.field`（label → 控制項 → `.field-hint` → `.field-error`），並排用 `.field-row` | |
-| 按鈕 | 預設＝次要；`type="submit"`／`.btn-primary`／`.primary-action`＝主要（每區最多一個）；`.btn-quiet` 第三順位；`.btn-danger` 破壞性；`.btn-sm` 行內小按鈕 | 一區多個主要按鈕 |
+| 按鈕 | 預設＝次要；`type="submit"`／`.btn-primary`＝主要（每區最多一個）；`.btn-secondary` 把送出鈕改回次要；`.btn-quiet` 第三順位；`.btn-danger` 破壞性；`.btn-sm` 行內小按鈕 | 一區多個主要按鈕 |
 | 第二順位以後的動作 | `.more-menu`（`<details>` 浮層） | |
 | 空清單 | `.empty-note`（一行） | 加框的空白卡片 |
 | 整頁空狀態 | `.empty-state`（標題＋一句下一步＋一個動作） | |
@@ -156,12 +156,15 @@ Baton 是接力棒：多個帳號像分道的跑者，額度用完就交棒給�
 - **對話框按鈕**：依 Windows 慣例，動作列靠右，**主要動作在前（左）、取消／關閉在後（右）**。
 - **「更多」**：第二順位以後的動作一律用 `.more-menu`（`<summary>` 帶 ▾）；放在列尾時加 `.more-menu-end`。
 - **展開長文字**：LongText 一律用收合摘要樣式（`.long-text-disclosure`），與 `<details>` 的「▶ 詳細資訊」一致。
+- **提示與長警示的分工**：固定的短句（兩行內，例如「尚未確認授權」「額度已接近上限」）一律用 `.callout-*` 加 `.callout-title`；內容來自 Runtime、可能很長的錯誤與原因才用 `.notice-*`。同一個狀態在不同頁用同一種。`.notice` 放在物件卡、清單列或面板裡時自動只留左側色條。
+- **空清單**：`.empty-note` 是一行說明，不加句號；整頁或大區塊才用 `.empty-state`，有頁首的頁面裡它的標題自動降為區段標題字級。
+- **收合摘要的名稱**一律「詳細資訊」（不用「細節」）；計數放在摘要文字後面的 `.count`。
 - **機器代碼**（事件類型、reason code、設定鍵）不當主要文字：顯示中文名稱，代碼放在 `title` 或「細節」裡；沒有中文名稱時才顯示代碼，並用 `.mono` 與次要色。
 - **物件標題**一律 `--text-title-sm`；區段標題 `--text-title`。
 - **面板內的 fieldset** 不加框（用 legend 或區段標題分組）；物件卡裡不再放有框的子卡片，用細線或留白分隔。
 - **路徑**一律 `PathText`／`ShortValue`／`.mono`；版本號、雜湊、識別碼用 `.mono`。
 
-工具 class：`.mono`、`.tabular`、`.nowrap`、`.truncate`、`.clamp-1/2/3`、`.pre-wrap`、`.measure`、`.measure-form`、`.grow`、`.no-shrink`、`.visually-hidden`。
+工具 class：`.mono`、`.tabular`、`.nowrap`、`.truncate`、`.clamp-1/2/3`、`.pre-wrap`、`.measure`、`.measure-form`、`.no-shrink`、`.visually-hidden`。
 
 各頁專屬樣式放在該頁的 CSS 檔（`tasks.css`、`decisions.css`、`quality.css`、`more.css`、`accounts-settings.css`），以頁面根 class 開頭（例：`.task-board .task-column`），只寫共用元件沒有的部分。
 

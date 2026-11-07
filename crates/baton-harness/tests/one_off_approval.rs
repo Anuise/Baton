@@ -8,7 +8,7 @@
 //!   `changed_parameters_or_target_...`、`a_new_artifact_version_...`
 //! - 同一批准不能用於第二次操作；結果未知時先查證：`an_approval_is_used_once_...`
 //! - 單次批准不增加 Workspace 授權：`a_one_off_approval_never_changes_the_workspace_authorization`
-//! - 介面區分「允許本次操作」與「修改 Workspace 授權」，後者須顯示新增能力與影響並明確確認：
+//! - 介面區分「允許這一次」與「修改 Workspace 授權」，後者須顯示新增能力與影響並明確確認：
 //!   `the_request_shows_the_exact_operation_being_approved`、`modifying_the_workspace_authorization_...`
 
 use baton_domain::agent::TOOL_PERMISSION_PROMPT;
@@ -187,7 +187,7 @@ struct Approved {
     first_run: Value,
 }
 
-/// Task 的第一個 Run 提出 `git push origin main`（範本不含遠端寫入），結束後使用者「允許本次操作」。
+/// Task 的第一個 Run 提出 `git push origin main`（範本不含遠端寫入），結束後使用者「允許這一次」。
 /// 另有一個不相關的 Task 在執行。回傳時 Task 已回到 ready、等 Scheduler 派出新的 Run。
 async fn approved_push() -> Approved {
     let (harness, accounts) = harness_with_two_accounts().await;
@@ -333,7 +333,7 @@ async fn a_one_off_approval_never_changes_the_workspace_authorization() {
     assert!(other["approval_check"].is_null(), "別的 Task 的批准與它無關");
 }
 
-// --- 介面區分「允許本次操作」與「修改 Workspace 授權」 ---
+// --- 介面區分「允許這一次」與「修改 Workspace 授權」 ---
 
 #[tokio::test]
 async fn the_request_shows_the_exact_operation_being_approved() {
@@ -354,7 +354,7 @@ async fn the_request_shows_the_exact_operation_being_approved() {
     assert_eq!(binding["request_hash"].as_str().unwrap().len(), 64);
     assert_eq!(binding["artifact_version"], "");
     let allow = view["options"].as_array().unwrap().iter().find(|o| o["id"] == "allow_once").unwrap();
-    assert_eq!(allow["label"], "允許本次操作");
+    assert_eq!(allow["label"], "允許這一次");
     assert!(allow["tradeoff"].as_str().unwrap().contains("不會修改 Workspace 授權"), "{allow}");
 }
 

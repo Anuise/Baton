@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { FailureNotice } from "./ExitProgress";
 import type { LifecycleClient, MaintenanceOutcome, UpdateClient, UpdateStatusView } from "./runtimeClient";
@@ -23,12 +23,19 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 重新開啟後的更新結果；不是更新（例如解除安裝後重新安裝）時為 null。 */
-function outcomeText(outcome: MaintenanceOutcome): string | null {
+/** 重新開啟後的更新結果；不是更新（例如解除安裝後重新安裝）時為 null。版本號用等寬字（MASTER 7.1）。 */
+function outcomeText(outcome: MaintenanceOutcome): ReactNode {
   if (outcome.kind !== "update" || outcome.applied === null) return null;
-  return outcome.applied
-    ? `已從 ${outcome.from_version} 更新到 ${outcome.running_version}`
-    : `更新沒有套用，仍是 ${outcome.running_version}`;
+  return outcome.applied ? (
+    <>
+      已從 <span className="mono">{outcome.from_version}</span> 更新到{" "}
+      <span className="mono">{outcome.running_version}</span>
+    </>
+  ) : (
+    <>
+      更新沒有套用，仍是 <span className="mono">{outcome.running_version}</span>
+    </>
+  );
 }
 
 /**
@@ -189,7 +196,10 @@ function UpdateConfirm({
         cancel();
       }}
     >
-      <h2 id="update-confirm-title">更新到 Baton {apply.version}</h2>
+      {/* 版本號用等寬字（MASTER 7.1）；對話框的可存取名稱仍是「更新到 Baton x」 */}
+      <h2 id="update-confirm-title">
+        更新到 Baton <span className="mono">{apply.version}</span>
+      </h2>
       <ol className="update-steps">
         <li>先下載並驗證安裝程式；失敗不會停止任何工作。</li>
         <li>執行與「完全退出」相同的停止流程（最多 40 秒）。</li>

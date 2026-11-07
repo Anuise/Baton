@@ -164,7 +164,11 @@ describe("首次啟動精靈", () => {
 
     render(<SetupWizard client={client} />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("connection refused");
+    // Runtime 的錯誤可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).not.toHaveClass("callout");
+    expect(alert).toHaveTextContent(/^無法取得首次設定狀態connection refused$/);
   });
 
   it("探測失敗（狀態未知）時顯示原因並提示重新檢查", async () => {

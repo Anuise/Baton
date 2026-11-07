@@ -248,7 +248,7 @@ function ItemSection({ title, items, timeZone }: { title: string; items: Underst
         <span className="count">{items.length}</span>
       </div>
       {items.length === 0 && (
-        <p className="empty-note">還沒有項目。Controller 接入專案時會建立，也可以在 Controller 中要求它補上。</p>
+        <p className="empty-note">還沒有項目；Controller 接入專案時會建立，也可以在 Controller 中要求它補上</p>
       )}
       {items.length > 0 && (
         <ul className="row-list">

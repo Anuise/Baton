@@ -63,13 +63,13 @@ export function outcomeText(run: ExitRunResult): string {
 }
 
 /**
- * 可能超過兩行的失敗說明（長警示 `.notice-danger`，MASTER 第 7 節；更新確認與更新進度共用）：
+ * 可能超過兩行的失敗說明（長警示 `.notice-danger`，MASTER 第 7 節；平台各頁讀取或動作失敗、更新確認與更新進度共用）：
  * 狀態詞在前，原因的第一句完整顯示，其餘收進「詳細資訊」；`children` 接在原因之後。
  */
 export function FailureNotice({ title, reason, children }: { title: string; reason: string; children?: ReactNode }) {
   const { summary, rest } = splitFirstSentence(reason);
   return (
-    <div role="alert" className="notice notice-danger">
+    <div role="alert" className="notice notice-danger failure-notice">
       <p className="notice-title">{title}</p>
       {summary !== "" && <p>{summary}</p>}
       {rest !== "" && (
@@ -169,6 +169,18 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
   const [exit, setExit] = useState<ExitState>({ state: "idle" });
   // 退出進行中再收到事件時不重新開始
   const started = useRef(false);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const open = exit.state !== "idle";
+
+  // 對話框開啟時焦點移到標題；按「返回」關閉後還給開啟前的元素，不落到 body
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    titleRef.current?.focus();
+    return () => {
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [open]);
 
   // 由畫面決定何時結束 App 時，取消殼的 60 秒後備強制關閉；取消失敗不影響畫面
   const cancelFallback = useCallback(() => void client.cancelFullExitFallback().catch(() => {}), [client]);
@@ -248,13 +260,23 @@ export function ExitProgress({ client, pollMs = 500, quitDelayMs = 1000 }: Props
   return (
     <div className="overlay">
       <section className="dialog-panel exit-progress" role="dialog" aria-modal="true" aria-labelledby="exit-title">
-        <h2 id="exit-title">完全退出</h2>
+        <h2 id="exit-title" ref={titleRef} tabIndex={-1}>
+          完全退出
+        </h2>
         {exit.state === "requesting" && <p className="dot dot-accent">正在要求 Runtime 停止…</p>}
         {exit.state === "request_failed" && (
           <>
             <FailureNotice title="無法開始完全退出" reason={exit.reason} />
             <div className="dialog-actions">
-              <button type="button" className="btn-primary" onClick={() => void start()}>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  // 「重試」會隨重新要求而消失：先把焦點移到對話框標題
+                  titleRef.current?.focus();
+                  void start();
+                }}
+              >
                 重試
               </button>
               <button

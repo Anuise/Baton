@@ -72,6 +72,9 @@ export function WorkspaceSidebar({
   const [focusPath, setFocusPath] = useState(false);
   // 正在確認封存的 Workspace id
   const [confirmArchive, setConfirmArchive] = useState<string | null>(null);
+  // 正在送出封存的 Workspace id（擋重複送出）；取消確認後要把焦點還給「封存…」的 Workspace id
+  const [archiving, setArchiving] = useState<string | null>(null);
+  const [returnToArchive, setReturnToArchive] = useState<string | null>(null);
   // 建立完成後要聚焦的 Workspace id（等它出現在清單中）
   const [focusId, setFocusId] = useState<string | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
@@ -140,6 +143,7 @@ export function WorkspaceSidebar({
     const remaining = active.filter((item) => item.id !== workspace.id);
     const index = active.findIndex((item) => item.id === workspace.id);
     const neighbor = remaining[Math.min(index, remaining.length - 1)] ?? null;
+    setArchiving(workspace.id);
     try {
       await client.archiveWorkspace(workspace.id);
       setConfirmArchive(null);
@@ -150,6 +154,8 @@ export function WorkspaceSidebar({
       else setFocusPath(true);
     } catch (error) {
       setFormError(reasonOf(error));
+    } finally {
+      setArchiving(null);
     }
   };
 
@@ -244,21 +250,43 @@ export function WorkspaceSidebar({
           <div className="workspace-archive-confirm" role="group" aria-label={`確認封存 ${workspace.name}`}>
             <p>封存後這個 Workspace 會從清單移除，無法在 App 中復原；資料與目錄保留。同一個目錄可以重新新增，但會是新的 Workspace。</p>
             <div className="workspace-archive-actions">
+              {/* 確認區出現時焦點移到「確認封存」；封存中以 aria-disabled 擋重複送出（不用 disabled，焦點才不會落到 body） */}
               <button
                 type="button"
                 className="btn-danger btn-solid btn-sm"
                 aria-label={`確認封存 ${workspace.name}`}
-                onClick={() => void archive(workspace)}
+                aria-disabled={archiving === workspace.id ? true : undefined}
+                autoFocus
+                onClick={() => {
+                  if (archiving === null) void archive(workspace);
+                }}
               >
-                確認封存
+                {archiving === workspace.id ? "封存中…" : "確認封存"}
               </button>
-              <button type="button" className="btn-quiet btn-sm" onClick={() => setConfirmArchive(null)}>
+              <button
+                type="button"
+                className="btn-quiet btn-sm"
+                onClick={() => {
+                  setConfirmArchive(null);
+                  setReturnToArchive(workspace.id);
+                }}
+              >
                 取消
               </button>
             </div>
           </div>
         ) : (
-          <button type="button" className="btn-danger btn-sm" aria-label={`封存 ${workspace.name}`} onClick={() => setConfirmArchive(workspace.id)}>
+          <button
+            type="button"
+            className="btn-danger btn-sm"
+            aria-label={`封存 ${workspace.name}`}
+            // 取消確認後焦點回到這裡
+            autoFocus={returnToArchive === workspace.id}
+            onClick={() => {
+              setReturnToArchive(null);
+              setConfirmArchive(workspace.id);
+            }}
+          >
             封存…
           </button>
         )}

@@ -349,6 +349,38 @@
   line-height: var(--leading-title-sm);
 }
 
+/* 定位到這張卡時焦點在標題（tabIndex -1）：以鍵盤來的焦點外框與其他控制項一致 */
+.task-board .task-title:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* 從別頁「前往工作頁」定位到的卡片：強調外框標示 1.5 秒（TaskBoard.tsx 的 LOCATED_HIGHLIGHT_MS）；
+   外框在卡片外 2px，落在跑道的內距裡，不被捲動容器裁掉 */
+.task-board .task-card-located {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* 可以有動態時外框在後段淡出；prefers-reduced-motion 時只顯示、時間到直接移除 */
+@media (prefers-reduced-motion: no-preference) {
+  .task-board .task-card-located {
+    animation: task-card-located 1.5s var(--ease-out) forwards;
+  }
+}
+
+@keyframes task-card-located {
+  0%,
+  60% {
+    outline-color: var(--color-accent);
+  }
+
+  100% {
+    outline-color: transparent;
+  }
+}
+
 /* 種類與 Goal 一行：Goal 放不下時截斷，不換到第二行 */
 .task-board .task-meta {
   flex-wrap: nowrap;
@@ -517,7 +549,7 @@
   flex: none;
 }
 
-/* 第一個按鈕是低調按鈕（「前往裁定」或「更多」）時：以負邊距抵銷內距，文字與卡片內容左緣對齊 */
+/* 第一個按鈕是低調按鈕（只有「更多」）時：以負邊距抵銷內距，文字與卡片內容左緣對齊 */
 .task-board .task-actions > .btn-quiet:first-child {
   margin-inline-start: calc(-1 * var(--space-5));
 }

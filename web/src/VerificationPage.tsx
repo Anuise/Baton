@@ -343,14 +343,20 @@ export function VerificationPage({ client, workspace, timeZone }: Props) {
       {loaded.state === "ready" && (
         <>
           <StatusSummary overview={loaded.overview} timeZone={timeZone} />
+          <PendingRequests
+            requests={loaded.overview.requests}
+            profile={loaded.overview.profile}
+            taskTitles={taskTitles}
+            timeZone={timeZone}
+          />
           <section className="section" aria-labelledby="verification-bundles">
             <div className="section-heading">
               <h3 id="verification-bundles">最近的 Evidence Bundle</h3>
               <span className="count">{loaded.overview.bundles.length}</span>
-              {loaded.overview.bundles.length > 1 && <p>最新的一份完整展開；較舊的只列判定，需要時再展開詳細內容。</p>}
+              {loaded.overview.bundles.length > 1 && <p>最新的一份完整展開；較舊的只列判定，需要時再展開詳細資訊。</p>}
             </div>
             {loaded.overview.bundles.length === 0 && (
-              <p className="empty-note">還沒有 Evidence Bundle；要求執行驗證後，結果會在這裡顯示。</p>
+              <p className="empty-note">還沒有 Evidence Bundle；要求執行驗證後，結果會在這裡顯示</p>
             )}
             {loaded.overview.bundles.map((bundle, index) => (
               <BundleCard
@@ -433,6 +439,80 @@ function StatusSummary({ overview, timeZone }: { overview: VerificationOverview;
   );
 }
 
+/**
+ * 要求者的顯示名稱：desktop 是使用者本人；Runtime 自己排入的（例如閘門失效後重新驗證，`runtime:` 開頭）是 Runtime；
+ * 其餘是 Controller 那一輪的 Run。原始值放在 title。
+ */
+function requesterLabel(requestedBy: string): string {
+  if (requestedBy === "desktop") return "你";
+  return requestedBy.startsWith("runtime:") ? "Runtime" : "Controller";
+}
+
+/**
+ * 等待結果的驗證：已排入、還沒有 Evidence Bundle 的驗證要求（包括 Controller 與 Runtime 排入的），
+ * 資料來自驗證概況，換頁或重新整理後仍看得到。都有結果時整區不顯示（排隊中的要求本來就不常出現）。
+ * 排隊與執行中是系統自己在等的狀態，用中性徽章（MASTER 7.1）。
+ */
+function PendingRequests({
+  requests,
+  profile,
+  taskTitles,
+  timeZone,
+}: {
+  requests: VerificationRequest[];
+  profile: VerificationProfileVersion | null;
+  /** Task 識別碼 → 標題；Task 清單讀不到時是空的，退回顯示識別碼。 */
+  taskTitles: Map<string, string>;
+  timeZone?: string;
+}) {
+  const pending = requests.filter((request) => request.status === "queued");
+  if (pending.length === 0) return null;
+  return (
+    <section className="section" aria-labelledby="verification-pending">
+      <div className="section-heading">
+        <h3 id="verification-pending">等待結果的驗證</h3>
+        <span className="count">{pending.length}</span>
+        <p>已排入、還沒有結果的驗證要求；完成後結果會出現在「最近的 Evidence Bundle」。</p>
+      </div>
+      <ul className="row-list verification-pending" aria-label="等待結果的驗證要求">
+        {pending.map((request) => {
+          const requester = requesterLabel(request.requested_by);
+          const taskTitle = request.task_id === null ? undefined : taskTitles.get(request.task_id);
+          return (
+            <li key={request.id}>
+              <div className="row-head">
+                {/* 驗證要求的識別碼只放在 title，與送出後「已排入」的訊息一致 */}
+                <p title={`驗證要求 ${request.id}`}>
+                  {request.task_id === null ? (
+                    "不指定 Task（在 Workspace 目錄中驗證）"
+                  ) : taskTitle === undefined ? (
+                    <>
+                      Task <ShortValue value={request.task_id} kind="id" field="Task" />
+                    </>
+                  ) : (
+                    taskTitle
+                  )}
+                </p>
+                <span className="badge badge-plain">排隊中</span>
+              </div>
+              <p className="meta">
+                <span>旅程：{request.journeys.map((key) => journeyTitle(profile, key)).join("、")}</span>
+                <span>
+                  Verification Profile 第 {request.profile_version} 版{request.no_live_model && "；不呼叫模型"}
+                </span>
+                <span>
+                  <span title={request.requested_by}>{requester}</span>
+                  {requester !== "你" && " "}於 {formatTimestamp(request.created_at, timeZone)} 要求
+                </span>
+              </p>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 function journeyTitle(profile: VerificationProfileVersion | null, key: string): string {
   return profile?.definition.journeys.find((j) => j.key === key)?.title ?? key;
 }
@@ -476,7 +556,7 @@ function FeatureMapSection({ overview, profile }: { overview: VerificationOvervi
       {overview.uncovered.length > 0 ? (
         <UncoveredList items={overview.uncovered} label="未覆蓋範圍" level={4} />
       ) : (
-        <p className="empty-note">每項功能都有旅程，也沒有宣告未覆蓋的範圍。</p>
+        <p className="empty-note">每項功能都有旅程，也沒有宣告未覆蓋的範圍</p>
       )}
     </section>
   );
@@ -497,7 +577,7 @@ function IdentitySection({ definition }: { definition: VerificationProfileVersio
         <div className="verification-block">
           <h4>Persona</h4>
           {personas.length === 0 ? (
-            <p className="empty-note">沒有 persona。</p>
+            <p className="empty-note">沒有 persona</p>
           ) : (
             <ul className="verification-plain-list" aria-label="Persona">
               {personas.map((persona) => (
@@ -511,7 +591,7 @@ function IdentitySection({ definition }: { definition: VerificationProfileVersio
         <div className="verification-block">
           <h4>登入身分</h4>
           {identities.length === 0 ? (
-            <p className="empty-note">沒有登入身分；旅程都不登入。</p>
+            <p className="empty-note">沒有登入身分；旅程都不登入</p>
           ) : (
             <ul className="verification-plain-list" aria-label="登入身分">
               {identities.map((identity) => (
@@ -526,7 +606,7 @@ function IdentitySection({ definition }: { definition: VerificationProfileVersio
         <div className="verification-block">
           <h4>秘密參照</h4>
           {secrets.length === 0 ? (
-            <p className="empty-note">沒有秘密參照。</p>
+            <p className="empty-note">沒有秘密參照</p>
           ) : (
             <>
               <p className="field-hint">只記錄參照位置，秘密的值不會顯示，也不會寫入證據。</p>
@@ -717,7 +797,7 @@ function RunForm({
         <h3 id="verification-run">要求執行驗證</h3>
       </div>
       {profile === null ? (
-        <p className="empty-note">發布 Verification Profile 後才能要求執行驗證。</p>
+        <p className="empty-note">發布 Verification Profile 後才能要求執行驗證</p>
       ) : (
         <form className="panel measure-form verification-run" onSubmit={(event) => void submit(event)}>
           <div className="field">
@@ -802,7 +882,7 @@ function RunForm({
 }
 
 /**
- * 一份 Evidence Bundle：判定一直顯示；最新的一份直接展開內容，較舊的把內容收進「詳細內容」。
+ * 一份 Evidence Bundle：判定一直顯示；最新的一份直接展開內容，較舊的把內容收進「詳細資訊」。
  * 卡片左側色條跟著判定的色調。
  */
 function BundleCard({
@@ -848,7 +928,7 @@ function BundleCard({
         body
       ) : (
         <details className="verification-bundle-more">
-          <summary>詳細內容</summary>
+          <summary>詳細資訊</summary>
           {body}
         </details>
       )}

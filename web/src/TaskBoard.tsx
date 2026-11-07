@@ -58,9 +58,17 @@ interface Props {
   workspace: Workspace;
   /** 顯示用的時區；省略時使用系統時區（spec D-33），只有測試會指定。 */
   timeZone?: string;
-  /** 切到 Workspace 的其他頁面（等待裁定卡的「前往裁定」、空看板的「前往 Controller」）；沒有傳入時不顯示按鈕。 */
-  onOpenPage?: (page: "decisions" | "controller") => void;
+  /**
+   * 切到 Workspace 的其他頁面（卡片的「前往裁定」、空看板的「前往 Controller」）；focus 是目標頁要定位的 Task 或裁定。
+   * 沒有傳入時不顯示按鈕。
+   */
+  onOpenPage?: (page: "decisions" | "controller", focus?: { taskId?: string; decisionId?: string }) => void;
+  /** 從別頁「前往工作頁」來時要定位的 Task：看板讀回後捲到這張卡、聚焦標題並短暫標示；nonce 改變時再定位一次。 */
+  target?: { taskId?: string; nonce: number } | null;
 }
+
+/** 定位到的卡片短暫標示的時間（tasks.css 的 task-card-located 動畫同長）。 */
+const LOCATED_HIGHLIGHT_MS = 1500;
 
 export const COLUMNS: [TaskStatus, string][] = [
   ["pending", "待處理"],
@@ -271,7 +279,7 @@ function queuedInfo(
  * 工作面板：依狀態分欄顯示 Workspace 內的 Task，建立 Task、編輯六項最小派工契約、
  * 標記為可派工。缺少的項目直接列在 pending 的卡片上。
  */
-export function TaskBoard({ client, workspace, timeZone, onOpenPage }: Props) {
+export function TaskBoard({ client, workspace, timeZone, onOpenPage, target }: Props) {
   const [loaded, setLoaded] = useState<ViewState>({ state: "loading" });
   // returnFocus：對話框關閉後焦點回到開啟它的按鈕
   const [panel, setPanel] = useState<
@@ -282,6 +290,13 @@ export function TaskBoard({ client, workspace, timeZone, onOpenPage }: Props) {
   const headingId = useId();
   // 各欄的標題：計數列點擊後把看板捲到該欄並把焦點移過去
   const columnHeadings = useRef<Partial<Record<TaskStatus, HTMLHeadingElement | null>>>({});
+  // 各卡片的標題（依 Task）：定位時聚焦
+  const cardTitles = useRef<Record<string, HTMLHeadingElement | null>>({});
+  // 要定位的卡片：target 是從別頁指定（捲到可視範圍中間、短暫標示）；follow 是卡片上的操作讓焦點掉到 body 時
+  // （例如卡片換到別欄，剛按的按鈕跟著消失）把焦點跟到這張卡的標題
+  const [locate, setLocate] = useState<{ taskId: string; mode: "target" | "follow" } | null>(null);
+  // 短暫標示中的卡片；每次定位都是新物件，計時重新開始
+  const [highlighted, setHighlighted] = useState<{ taskId: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -305,6 +320,36 @@ export function TaskBoard({ client, workspace, timeZone, onOpenPage }: Props) {
     setQueuedNotice(null);
     void load();
   }, [load]);
+
+  // 從別頁指定的 Task：nonce 改變（同一個 Task 再要求一次）也重新定位；看板還在讀取時等讀回再定位
+  const targetTaskId = target?.taskId;
+  const targetNonce = target?.nonce;
+  useEffect(() => {
+    if (targetTaskId === undefined || targetNonce === undefined) return;
+    setLocate({ taskId: targetTaskId, mode: "target" });
+  }, [targetTaskId, targetNonce]);
+
+  useEffect(() => {
+    if (locate === null || loaded.state !== "ready") return;
+    setLocate(null);
+    // 跟隨只在焦點已掉到 body 時才移動：按鈕還在（例如操作失敗、卡片沒換欄）就留在原地
+    if (locate.mode === "follow" && document.activeElement !== null && document.activeElement !== document.body) return;
+    const title = cardTitles.current[locate.taskId];
+    if (!title) return;
+    const card = title.closest("article") ?? title;
+    // jsdom 沒有 scrollIntoView；看板在自己的容器內水平捲動，指定的卡片捲到中間、跟隨的只捲進最近的邊
+    if (typeof card.scrollIntoView === "function") {
+      card.scrollIntoView({ block: "nearest", inline: locate.mode === "target" ? "center" : "nearest" });
+    }
+    title.focus({ preventScroll: true });
+    if (locate.mode === "target") setHighlighted({ taskId: locate.taskId });
+  }, [locate, loaded]);
+
+  useEffect(() => {
+    if (highlighted === null) return;
+    const timer = setTimeout(() => setHighlighted(null), LOCATED_HIGHLIGHT_MS);
+    return () => clearTimeout(timer);
+  }, [highlighted]);
 
   // 讀取中與讀取失敗也輸出同樣的頁面標題，標題不會在讀回後才跳出來
   if (loaded.state !== "ready") {
@@ -351,6 +396,8 @@ export function TaskBoard({ client, workspace, timeZone, onOpenPage }: Props) {
       setCardError({ taskId: task.id, message: reasonOf(e) });
     }
     await load();
+    // 卡片換到別欄時剛按的按鈕跟著消失：焦點跟到這張卡的標題，不落到 body
+    setLocate({ taskId: task.id, mode: "follow" });
     return ok;
   };
 
@@ -482,7 +529,16 @@ export function TaskBoard({ client, workspace, timeZone, onOpenPage }: Props) {
                       authorizationRevision={board.authorization_revision}
                       timeZone={timeZone}
                       error={cardError?.taskId === task.id ? cardError.message : null}
-                      onOpenDecisions={onOpenPage && (() => onOpenPage("decisions"))}
+                      located={highlighted?.taskId === task.id}
+                      titleRef={(element) => {
+                        cardTitles.current[task.id] = element;
+                      }}
+                      onOpenDecisions={
+                        onOpenPage &&
+                        ((decisionId) =>
+                          // 裁定頁選中這個 Task 的裁定；知道是哪一筆（預算用盡建立的）時直接指定
+                          onOpenPage("decisions", decisionId === null ? { taskId: task.id } : { taskId: task.id, decisionId }))
+                      }
                       onReady={() => void act(task, () => client.markTaskReady(workspace.id, task.id))}
                       onCancel={() => void act(task, () => client.cancelTask(workspace.id, task.id))}
                       onDispatch={() =>
@@ -494,7 +550,7 @@ export function TaskBoard({ client, workspace, timeZone, onOpenPage }: Props) {
                       onCancelRun={(runId) => void act(task, () => client.cancelRun(workspace.id, runId))}
                       onEdit={(returnFocus) => setPanel({ kind: "edit", task, returnFocus })}
                       onAddDependency={(dependsOn) => act(task, () => client.addTaskDependency(workspace.id, task.id, dependsOn))}
-                      onAccepted={() => void load()}
+                      onAccepted={() => void load().then(() => setLocate({ taskId: task.id, mode: "follow" }))}
                     />
                   ))}
                 </section>
@@ -560,8 +616,12 @@ interface CardProps extends StatusContext {
   authorizationRevision: number | null;
   timeZone?: string;
   error: string | null;
-  /** 等待裁定卡的「前往裁定」；沒有傳入時不顯示。 */
-  onOpenDecisions?: () => void;
+  /** 從別頁定位到這張卡：短暫標示。 */
+  located: boolean;
+  /** 卡片標題的 ref：定位時聚焦。 */
+  titleRef: (element: HTMLHeadingElement | null) => void;
+  /** 「前往裁定」（等待裁定，或預算用盡而建立了裁定的受阻卡）；decisionId 是已知的裁定，沒有傳入時不顯示。 */
+  onOpenDecisions?: (decisionId: string | null) => void;
   onReady: () => void;
   onCancel: () => void;
   onDispatch: () => void;
@@ -676,7 +736,7 @@ function cardStatus(task: TaskView, context: StatusContext): (CardStatus & { oth
   return { ...first, others: attention ? rest.filter((status) => status.tone === "danger") : [] };
 }
 
-function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, handoff, profileNameOf, accountName, authorizationRevision, queued, timeZone, error, onOpenDecisions, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
+function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, verification, workdir, runLabelOf, integration, budget, handoff, profileNameOf, accountName, authorizationRevision, queued, timeZone, error, located, titleRef, onOpenDecisions, onReady, onCancel, onDispatch, onCancelRun, onEdit, onAddDependency, onAccepted }: CardProps) {
   const [addingDependency, setAddingDependency] = useState(false);
   const [dependsOn, setDependsOn] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -709,6 +769,18 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   const stripe = status && stripeClass(status.tone);
   const canCancelRun = run !== null && isRunActive(run.status) && run.cancel_requested_at === null;
   const hasMore = canCancelRun || !closed;
+  // 預算用盡時 Runtime 會建立裁定（AI-276）：受阻卡的下一步是到「裁定」決定；知道是哪一筆時直接指定
+  const budgetExhausted = budget !== null && budget.exhausted !== null;
+  const budgetDecisionId = budgetExhausted ? (budget?.decision_request_id ?? null) : null;
+  const openDecision =
+    onOpenDecisions && (task.status === "waiting_decision" || (task.status === "blocked" && budgetExhausted))
+      ? () => onOpenDecisions(budgetDecisionId)
+      : null;
+  // pending 補齊契約後、受阻的排除原因後（預算用盡時也可以不等裁定，AI-276）都能標回可派工
+  const canMarkReady = task.status === "pending" || task.status === "blocked";
+  // 卡片上最多一個直接看得到的動作：有「前往裁定」時「標記為可派工」收進「更多」
+  const markReadyInMore = canMarkReady && openDecision !== null;
+  const classes = ["card", "task-card", stripe, located && "task-card-located"].filter(Boolean).join(" ");
 
   const addDependency = async () => {
     if (await onAddDependency(dependsOn)) {
@@ -732,9 +804,10 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
   };
 
   return (
-    <article className={stripe ? `card task-card ${stripe}` : "card task-card"} aria-label={task.title}>
-      {/* 標題最多 2 行、種類與 Goal 1 行；展開「詳細資訊」時顯示完整文字 */}
-      <h4 className="task-title clamp-2" title={task.title}>
+    <article className={classes} aria-label={task.title}>
+      {/* 標題最多 2 行、種類與 Goal 1 行；展開「詳細資訊」時顯示完整文字。
+          tabIndex -1：定位到這張卡時把焦點移到標題，但不加進 Tab 順序 */}
+      <h4 ref={titleRef} className="task-title clamp-2" title={task.title} tabIndex={-1}>
         {task.title}
       </h4>
       <p className="meta task-meta">
@@ -857,8 +930,9 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
           每張卡片最多一個直接看得到的動作，其餘收進「更多」 */}
       {(task.status === "ready" || task.status === "pending" || hasMore) && (
         <div className="task-actions">
-          {task.status === "waiting_decision" && onOpenDecisions && (
-            <button type="button" className="btn-quiet" onClick={onOpenDecisions}>
+          {/* 琥珀卡上唯一要你做的事：次要按鈕（不是低調按鈕） */}
+          {openDecision && (
+            <button type="button" onClick={openDecision}>
               前往裁定
             </button>
           )}
@@ -867,7 +941,7 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
               派工
             </button>
           )}
-          {task.status === "pending" && (
+          {canMarkReady && !markReadyInMore && (
             <button type="button" onClick={onReady}>
               標記為可派工
             </button>
@@ -878,7 +952,8 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
               type="button"
               className="btn-quiet task-more-toggle"
               aria-expanded={moreOpen}
-              aria-controls={moreId}
+              // 收合時選單不在 DOM：只在展開時指向它
+              aria-controls={moreOpen ? moreId : undefined}
               onClick={() => setMoreOpen(!moreOpen)}
               onKeyDown={closeMoreOnEscape}
             >
@@ -893,6 +968,11 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
       )}
       {moreOpen && (
         <div id={moreId} className="task-more" role="group" aria-label="更多動作" onKeyDown={closeMoreOnEscape}>
+          {markReadyInMore && (
+            <button type="button" className="btn-quiet" onClick={pick(onReady)}>
+              標記為可派工
+            </button>
+          )}
           {!closed && (
             <>
               <button type="button" className="btn-quiet" onClick={pick(() => onEdit(moreToggle.current))}>
@@ -934,7 +1014,15 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
             <button type="button" disabled={dependsOn === ""} onClick={() => void addDependency()}>
               確定新增
             </button>
-            <button type="button" className="btn-quiet" onClick={() => setAddingDependency(false)}>
+            <button
+              type="button"
+              className="btn-quiet"
+              onClick={() => {
+                setAddingDependency(false);
+                // 表單是從「更多」開啟的：關閉後焦點回到「更多」，不落到 body
+                moreToggle.current?.focus();
+              }}
+            >
               關閉
             </button>
           </div>
@@ -948,17 +1036,15 @@ function TaskCard({ client, workspaceId, task, goalTitle, titleOf, others, run, 
 function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; titleOf: (taskId: string) => string }) {
   const pending = entries.filter((e) => isIntegrationActive(e.status)).sort((a, b) => a.seq - b.seq);
   return (
-    // 精簡的一個區段：沒有項目時只佔標題一行；有項目時一項一列
+    // 精簡的一個區段：標題旁一律有計數（0 筆也顯示 0，MASTER 7.1）；沒有項目時一行說明，有項目時一項一列
     <section className="section integration-queue" aria-label="整合佇列">
       <div className="section-heading">
         <h3>整合佇列</h3>
-        {pending.length === 0 ? (
-          <span className="empty-note">沒有等待整合的項目</span>
-        ) : (
-          <span className="count">{pending.length}</span>
-        )}
+        <span className="count">{pending.length}</span>
       </div>
-      {pending.length > 0 && (
+      {pending.length === 0 ? (
+        <p className="empty-note">沒有等待整合的項目</p>
+      ) : (
         <ol className="row-list integration-list">
           {pending.map((entry) => {
             const processing = isIntegrationProcessing(entry.status);
@@ -971,7 +1057,8 @@ function IntegrationQueue({ entries, titleOf }: { entries: IntegrationEntry[]; t
                 <code className="integration-branch truncate" title={`${entry.branch} → ${entry.target_branch}`}>
                   {entry.branch} → {entry.target_branch}
                 </code>
-                <span className={processing ? "badge badge-accent" : "badge"}>
+                {/* 排隊等待整合是系統在等：與卡片上的「等待整合」「排隊第 N 位」同一種中性徽章 */}
+                <span className={processing ? "badge badge-accent" : "badge badge-plain"}>
                   {INTEGRATION_STATUS_LABELS[entry.status]}
                   {processing && "（處理中）"}
                 </span>
@@ -1153,11 +1240,11 @@ function RunStatusLine({
       {run.latest_checkpoint && (
         <div className="task-checkpoint">
           <p>
-            Checkpoint：{run.latest_checkpoint.summary}（{formatTimestamp(run.latest_checkpoint.saved_at, timeZone)}）
+            檢查點：{run.latest_checkpoint.summary}（{formatTimestamp(run.latest_checkpoint.saved_at, timeZone)}）
           </p>
           {run.latest_checkpoint.details !== "" && (
             <details>
-              <summary>細節</summary>
+              <summary>詳細資訊</summary>
               {run.latest_checkpoint.details}
             </details>
           )}
@@ -1242,7 +1329,7 @@ function ContextReceiptPanel({ client, workspaceId, runId }: { client: TaskClien
             已用 {loaded.context.receipt.used_tokens} / {loaded.context.receipt.budget_tokens} tokens
           </p>
           <div role="group" aria-label="已載入項目">
-            <strong>已載入（{loadedItems.length}）</strong>
+            <strong>已載入</strong> <span className="count">{loadedItems.length}</span>
             <ul>
               {loadedItems.map((item, index) => (
                 <li key={index}>{describeContextItem(item)}</li>
@@ -1251,7 +1338,7 @@ function ContextReceiptPanel({ client, workspaceId, runId }: { client: TaskClien
           </div>
           {omittedItems.length > 0 && (
             <div role="group" aria-label="省略項目">
-              <strong>省略（{omittedItems.length}）</strong>
+              <strong>省略</strong> <span className="count">{omittedItems.length}</span>
               <ul>
                 {omittedItems.map((item, index) => (
                   <li key={index}>
@@ -1299,7 +1386,7 @@ function HandoffSummary({
       </p>
       {checkpoint && (
         <p>
-          交接 checkpoint：{checkpoint.summary}（{formatTimestamp(checkpoint.saved_at, timeZone)}）
+          交接檢查點：{checkpoint.summary}（{formatTimestamp(checkpoint.saved_at, timeZone)}）
         </p>
       )}
       {handoff.phase === "confirmed" && confirmation && (
@@ -1371,8 +1458,9 @@ function CheckResultList({ title, results }: { title: string; results: CheckResu
   if (results.length === 0) return null;
   return (
     <details>
+      {/* 計數只放數字、接在摘要文字後面（MASTER 7.1） */}
       <summary>
-        {title}（{results.length}）
+        {title} <span className="count">{results.length}</span>
       </summary>
       <ul>
         {results.map((result, index) => (

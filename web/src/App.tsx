@@ -53,6 +53,15 @@ export type GlobalPage = "accounts" | "shared" | "settings";
 /** 目前看的是 Workspace 的頁面，或某個平台頁面。 */
 type View = "workspace" | GlobalPage;
 
+/** 頁面裡「前往…」要定位的對象：工作頁捲到這個 Task、裁定頁選中這筆（或這個 Task 的）裁定。 */
+export interface PageFocus {
+  taskId?: string;
+  decisionId?: string;
+}
+
+/** 傳給頁面的定位要求；nonce 讓同一個對象再要求一次時也會重新定位。 */
+export type PageTarget = PageFocus & { nonce: number };
+
 interface NavItem<T extends string> {
   id: T;
   label: string;
@@ -209,6 +218,13 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
     wasNeedingSetup.current = needsSetup;
   }, [needsSetup, setupSkipped]);
 
+  // 完成畫面上確認了背景執行的說明後精靈會移除（焦點所在的按鈕跟著消失）：焦點回到「帳號已就緒」
+  const wasBackgroundPending = useRef(false);
+  useEffect(() => {
+    if (wasBackgroundPending.current && !backgroundUnacknowledged) document.getElementById("setup-finished-title")?.focus();
+    wasBackgroundPending.current = backgroundUnacknowledged;
+  }, [backgroundUnacknowledged]);
+
   useEffect(() => {
     if (!client) return;
     let current = true;
@@ -228,13 +244,21 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
     };
   }, [client, accountsVersion]);
 
-  const selectWorkspace = (workspace: Workspace) =>
+  const selectWorkspace = (workspace: Workspace) => {
+    setPageTarget(null);
     // 在 Workspace 之間切換時停在同一頁面；從未選到選中時從 Controller 頁開始
     setShell((current) => ({
       view: "workspace",
       workspaceId: workspace.id,
       workspaceTab: selected ? current.workspaceTab : "controller",
     }));
+  };
+
+  /** 從跑道欄換頁：不帶定位要求。 */
+  const navigateWorkspacePage = (page: WorkspacePage) => {
+    setPageTarget(null);
+    selectWorkspacePage(page);
+  };
 
   const selectWorkspacePage = (page: WorkspacePage) => {
     setShell((current) => ({ ...current, view: "workspace", workspaceTab: page }));
@@ -249,10 +273,18 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
     if (focusMain > 0) document.getElementById("main-content")?.focus();
   }, [focusMain]);
 
-  /** 頁面裡的「前往…」：平台頁面切過去，其餘是目前 Workspace 的頁面。 */
-  const openPage = (page: WorkspacePage | GlobalPage) => {
-    if (isOneOf(GLOBAL_NAV, page)) selectGlobal(page);
-    else selectWorkspacePage(page);
+  // 「前往…」帶來的定位要求；只交給它指名的頁面，從跑道欄換頁時清掉
+  const [pageTarget, setPageTarget] = useState<(PageTarget & { page: WorkspacePage }) | null>(null);
+
+  /** 頁面裡的「前往…」：平台頁面切過去，其餘是目前 Workspace 的頁面（可以帶要定位的 Task 或裁定）。 */
+  const openPage = (page: WorkspacePage | GlobalPage, focus?: PageFocus) => {
+    if (isOneOf(GLOBAL_NAV, page)) {
+      selectGlobal(page);
+      setPageTarget(null);
+    } else {
+      selectWorkspacePage(page);
+      setPageTarget(focus ? { ...focus, page, nonce: Date.now() } : null);
+    }
     setFocusMain((n) => n + 1);
   };
 
@@ -316,7 +348,7 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
     <WorkspaceNav
       current={shell.view === "workspace" ? shell.workspaceTab : null}
       decisionCount={decisionCount}
-      onSelect={selectWorkspacePage}
+      onSelect={navigateWorkspacePage}
     />
   );
 
@@ -355,6 +387,7 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
               page={shell.workspaceTab}
               onDecisionsChange={() => setPendingVersion((version) => version + 1)}
               onOpenPage={openPage}
+              target={pageTarget?.page === shell.workspaceTab ? pageTarget : null}
             />
           </>
         )}
@@ -558,7 +591,7 @@ function SetupFinished({ onEnter, onSharedSettings }: { onEnter: () => void; onS
         </li>
         <li>
           <strong>確認授權</strong>
-          <span>在 Workspace 的「規則」›「授權」確認 Agent 可以做什麼；確認之前，需要任何能力的工作都不會開始。</span>
+          <span>在 Workspace 的「規則」›「授權」確認 Agent 可以做什麼；確認之前，需要能力的工作都不會開始。</span>
         </li>
         <li>
           <strong>開啟 Controller</strong>
@@ -612,25 +645,35 @@ function WorkspaceView({
   page,
   onDecisionsChange,
   onOpenPage,
+  target,
 }: {
   client: AppClient;
   workspace: Workspace;
   page: WorkspacePage;
   onDecisionsChange: () => void;
-  /** 頁面裡的「前往…」按鈕切到同一個 Workspace 的另一頁，或某個平台頁面。 */
-  onOpenPage: (page: WorkspacePage | GlobalPage) => void;
+  /** 頁面裡的「前往…」按鈕切到同一個 Workspace 的另一頁（可帶要定位的 Task 或裁定），或某個平台頁面。 */
+  onOpenPage: (page: WorkspacePage | GlobalPage, focus?: PageFocus) => void;
+  /** 這一頁要定位的 Task 或裁定（從別頁的「前往…」來時才有）。 */
+  target: PageTarget | null;
 }) {
   // 換 Workspace 時以 key 重新掛載，上一個 Workspace 較晚回來的讀取結果不會蓋掉目前畫面與草稿
   switch (page) {
     case "controller":
       return <ControllerPage key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
     case "tasks":
-      return <TaskBoard key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
+      return <TaskBoard key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} target={target} />;
     case "workflows":
       return <WorkflowPage key={workspace.id} client={client} workspace={workspace} />;
     case "decisions":
       return (
-        <DecisionCenter key={workspace.id} client={client} workspace={workspace} onChange={onDecisionsChange} onOpenPage={onOpenPage} />
+        <DecisionCenter
+          key={workspace.id}
+          client={client}
+          workspace={workspace}
+          onChange={onDecisionsChange}
+          onOpenPage={onOpenPage}
+          target={target}
+        />
       );
     case "timeline":
       return <TimelinePage key={workspace.id} client={client} workspace={workspace} />;

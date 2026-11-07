@@ -274,7 +274,7 @@ describe("可用模型清單（App 設定）", () => {
     expect(input).toHaveAttribute("type", "password");
     expect(input).toHaveAttribute("autocomplete", "off");
     expect(within(section()).getByRole("button", { name: "更新清單" })).toBeDisabled();
-    expect(within(section()).getByText(/金鑰只用於這一次查詢，不會保存/)).toBeInTheDocument();
+    expect(within(section()).getByText(/金鑰只用於這一次查詢，不會儲存/)).toBeInTheDocument();
   });
 
   it("保存過的清單顯示更新時間", async () => {

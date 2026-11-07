@@ -216,7 +216,7 @@ pub(crate) async fn verify_profile(state: &ApiState, profile: &AccountProfile) -
     let report = state.claude_env.auth_status(Path::new(&profile.config_dir)).await.map_err(|error| ApiError {
         status: StatusCode::BAD_GATEWAY,
         code: "profile_check_failed",
-        message: format!("無法核對 Profile「{}」的登入狀態：{error}", profile.name),
+        message: format!("無法核對帳號「{}」的登入狀態：{error}", profile.name),
     })?;
     // 同時記下 Claude Code 的版本；取不到時記為未知，由 Domain 阻擋派工（票 14）
     let cli_version = match state.claude_env.probe_claude().await {

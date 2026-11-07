@@ -165,13 +165,13 @@ async function renderPanel(client: AuthorizationPanelClient) {
 const checkbox = (label: string) => screen.getByRole("checkbox", { name: new RegExp(`^${label}`) });
 
 describe("Workspace 授權", () => {
-  it("新 Workspace 尚未確認：說明未確認前不准入，沒有任何能力被預先勾選", async () => {
+  it("新 Workspace 尚未確認：說明確認前需要能力的工作不會開始，沒有任何能力被預先勾選", async () => {
     await renderPanel(fakeClient());
 
     expect(screen.getByText(/尚未確認授權/)).toBeInTheDocument();
-    expect(screen.getByText(/都不會被准入/)).toBeInTheDocument();
+    expect(screen.getByText(/確認之前，需要能力的工作都不會開始/)).toBeInTheDocument();
     for (const [, label] of ALL) expect(checkbox(label)).not.toBeChecked();
-    expect(screen.queryByRole("button", { name: "確認並保存授權" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "確認並儲存授權" })).not.toBeInTheDocument();
   });
 
   it("同時提供研究／文件與可信專案開發兩個範本，套用後可以編輯", async () => {
@@ -190,6 +190,8 @@ describe("Workspace 授權", () => {
     const based = screen.getByText("目前依據").closest("li")!;
     expect(based).toHaveTextContent("可信專案開發（P3）");
     expect(screen.getAllByText("目前依據")).toHaveLength(1);
+    // 範本名稱是物件標題（h4，與其他頁一致）
+    expect(within(based).getByRole("heading", { level: 4, name: "可信專案開發（P3）" })).toBeInTheDocument();
   });
 
   it("能力依風險分組；高風險能力另成一組，以 danger 徽章標示，不屬於任何範本", async () => {
@@ -207,7 +209,7 @@ describe("Workspace 授權", () => {
     expect(checkbox("部署")).not.toBeChecked();
   });
 
-  it("P3 的確認摘要揭露以 Windows 使用者身分執行的風險，承認後才能確認並保存", async () => {
+  it("P3 的確認摘要揭露以 Windows 使用者身分執行的風險，承認後才能確認並儲存", async () => {
     const client = fakeClient();
     const user = await renderPanel(client);
     await user.click(screen.getByRole("button", { name: "套用範本「可信專案開發（P3）」" }));
@@ -220,13 +222,13 @@ describe("Workspace 授權", () => {
     const targets = within(summary).getAllByText("C:\\work\\notes");
     expect(targets.length).toBeGreaterThan(0);
     for (const target of targets) expect(target).toHaveClass("mono");
-    const confirm = within(summary).getByRole("button", { name: "確認並保存授權" });
+    const confirm = within(summary).getByRole("button", { name: "確認並儲存授權" });
     expect(confirm).toBeDisabled();
 
     await user.click(within(summary).getByRole("checkbox", { name: "我了解並接受上述風險" }));
     await user.click(confirm);
 
-    expect(await screen.findByRole("status")).toHaveTextContent("已保存為第 1 版");
+    expect(await screen.findByRole("status")).toHaveTextContent("已儲存為第 1 版");
     expect(client.confirmAuthorization).toHaveBeenCalledWith("ws_1", {
       templateId: "trusted_dev_p3",
       grants: templates[1].grants,
@@ -236,7 +238,8 @@ describe("Workspace 授權", () => {
     });
     expect(screen.getByText(/目前授權：第 1 版/)).toBeInTheDocument();
     expect(screen.queryByText(/尚未確認授權/)).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "授權歷史" })).toBeInTheDocument();
+    // 歷史的每一版以物件標題（h4）列出
+    expect(within(screen.getByRole("region", { name: "授權歷史" })).getByRole("heading", { level: 4, name: "第 1 版" })).toBeInTheDocument();
   });
 
   it("研究／文件範本沒有執行風險，不必勾選承認就能確認", async () => {
@@ -249,7 +252,7 @@ describe("Workspace 授權", () => {
 
     expect(within(summary).queryByRole("checkbox")).not.toBeInTheDocument();
     expect(within(summary).queryByRole("region", { name: "授權變更" })).not.toBeInTheDocument();
-    await user.click(within(summary).getByRole("button", { name: "確認並保存授權" }));
+    await user.click(within(summary).getByRole("button", { name: "確認並儲存授權" }));
     await waitFor(() => expect(client.confirmAuthorization).toHaveBeenCalled());
     expect(vi.mocked(client.confirmAuthorization).mock.calls[0][1].grants.map((g) => g.capability)).toEqual([
       "read_files",
@@ -315,13 +318,13 @@ describe("Workspace 授權", () => {
     expect(within(item).getByText("https://example.com")).toHaveClass("mono");
     expect(item).toHaveTextContent("擴大授權");
     expect(within(changes).getByText("擴大：Agent 將可以「讀取公開網頁」")).toBeInTheDocument();
-    const confirm = within(summary).getByRole("button", { name: "確認並保存授權" });
+    const confirm = within(summary).getByRole("button", { name: "確認並儲存授權" });
     expect(confirm).toBeDisabled();
 
     await user.click(within(summary).getByRole("checkbox", { name: "我了解這會擴大 Workspace 授權" }));
     await user.click(confirm);
 
-    expect(await screen.findByRole("status")).toHaveTextContent("已保存為第 2 版");
+    expect(await screen.findByRole("status")).toHaveTextContent("已儲存為第 2 版");
     expect(vi.mocked(client.confirmAuthorization).mock.calls[0][1]).toMatchObject({
       acknowledgedRisk: false,
       acknowledgedExpansion: true,
@@ -351,7 +354,7 @@ describe("Workspace 授權", () => {
       expectedRevision: 1,
     });
 
-    await user.click(within(summary).getByRole("button", { name: "確認並保存授權" }));
+    await user.click(within(summary).getByRole("button", { name: "確認並儲存授權" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("授權已被更新（目前 revision 2，編輯時是 revision 1）");
     expect(vi.mocked(client.confirmAuthorization).mock.calls[1][1]).toMatchObject({ expectedRevision: 1 });
@@ -383,20 +386,20 @@ describe("Workspace 授權", () => {
     expect(within(changes).queryByText(/擴大授權/)).not.toBeInTheDocument();
     expect(within(summary).queryByRole("checkbox", { name: "我了解這會擴大 Workspace 授權" })).not.toBeInTheDocument();
 
-    await user.click(within(summary).getByRole("button", { name: "確認並保存授權" }));
+    await user.click(within(summary).getByRole("button", { name: "確認並儲存授權" }));
 
     await waitFor(() => expect(client.confirmAuthorization).toHaveBeenCalled());
     expect(vi.mocked(client.confirmAuthorization).mock.calls[0][1]).toMatchObject({ acknowledgedExpansion: false });
   });
 
-  it("Runtime 拒絕時顯示它的說明，不宣稱已保存", async () => {
+  it("Runtime 拒絕時顯示它的說明，不宣稱已儲存", async () => {
     const client = fakeClient();
     vi.mocked(client.confirmAuthorization).mockRejectedValueOnce(new Error("能力「讀取檔案」必須指定至少一個目標資源"));
     const user = await renderPanel(client);
     await user.click(checkbox("讀取檔案"));
     await user.click(screen.getByRole("button", { name: "檢視確認摘要" }));
 
-    await user.click(await screen.findByRole("button", { name: "確認並保存授權" }));
+    await user.click(await screen.findByRole("button", { name: "確認並儲存授權" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("必須指定至少一個目標資源");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
@@ -450,7 +453,7 @@ describe("Workspace 授權", () => {
       expect(within(notice).getByText(/沒有固定完成時間/)).toBeInTheDocument();
       const items = within(notice).getAllByRole("listitem");
       expect(items).toHaveLength(2);
-      expect(items[0]).toHaveTextContent("整理報告");
+      expect(within(items[0]).getByRole("heading", { level: 4, name: "整理報告" })).toBeInTheDocument();
       expect(items[0]).toHaveTextContent("沿用第 1 版");
       expect(items[0]).toHaveTextContent("編輯檔案、部署");
       expect(items[0]).toHaveTextContent("2023/11/14 22:13");
