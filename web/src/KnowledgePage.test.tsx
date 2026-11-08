@@ -188,6 +188,9 @@ const renderPage = (client: KnowledgeClient & GuardClient) => render(<KnowledgeP
 
 const region = (name: string) => screen.findByRole("region", { name });
 
+/** 條目「標籤：值」（dl.facts）中某個標籤的值：斷言值確實屬於那個標籤，而不只是出現在條目裡。 */
+const fact = (scope: HTMLElement, label: string) => within(scope).getByText(label, { selector: "dt" }).nextElementSibling;
+
 /** 卡片動作列上直接看得到的動作（「更多」本身算一個，選單裡的不算）。 */
 const visibleActions = (card: HTMLElement) =>
   [...card.querySelectorAll(".knowledge-actions > button, .knowledge-actions > details > summary")].map((e) => e.textContent);
@@ -238,13 +241,17 @@ describe("知識", () => {
     expect(card).toHaveTextContent("範圍：Workspace");
     expect(card).toHaveTextContent("v2");
     expect(card).toHaveTextContent("有效期間：2023/11/15 06:13 起，至 2023/12/15 06:13");
-    expect(card).toHaveTextContent("來源：使用者");
+    expect(fact(card, "來源")).toHaveTextContent("使用者");
     expect(card).toHaveTextContent("上線前一定要備份");
-    expect(card).toHaveTextContent("觸發條件執行資料庫遷移");
-    expect(card).toHaveTextContent("根因或待驗假說沒有備份可還原");
-    expect(card).toHaveTextContent("解法遷移前先執行備份");
+    expect(fact(card, "觸發條件")).toHaveTextContent("執行資料庫遷移");
+    expect(fact(card, "根因或待驗假說")).toHaveTextContent("沒有備份可還原");
+    expect(fact(card, "解法")).toHaveTextContent("遷移前先執行備份");
     expect(within(card).getByRole("list", { name: "標籤" })).toHaveTextContent("部署資料庫");
-    expect(card).toHaveTextContent("證據：事故報告 #12");
+    expect(fact(card, "證據")).toHaveTextContent("事故報告 #12");
+    // 收合細節的摘要：證據數量照計數寫法放在 .count，不加括號（MASTER 7.1）
+    const summary = card.querySelector(".knowledge-extra > summary")!;
+    expect(summary).toHaveTextContent(/^教訓欄位、來源、證據 1$/);
+    expect(summary.querySelector(".count")).toHaveTextContent(/^1$/);
     // 已驗證的條目不能再確認
     expect(within(card).queryByRole("button", { name: "確認為已驗證" })).not.toBeInTheDocument();
   });
@@ -264,10 +271,14 @@ describe("知識", () => {
       const section = await region("待確認的候選教訓");
       const card = within(section).getByRole("article", { name: "測試前清空快取" });
       expect(within(card).getByText("未驗證")).toHaveAttribute("title", expect.stringContaining("候選，尚未驗證"));
-      expect(card).toHaveTextContent("來源：Agent（Run run_7，第 2 次，Task task_3）");
-      expect(card).toHaveTextContent("疑似快取殘留（待驗）");
-      expect(card).toHaveTextContent("證據：run_7 的日誌第 40 行");
-      expect(within(section).getByRole("heading", { name: "待確認的候選教訓（1）" })).toBeInTheDocument();
+      expect(fact(card, "來源")).toHaveTextContent("Agent（Run run_7，第 2 次，Task task_3）");
+      expect(fact(card, "根因或待驗假說")).toHaveTextContent("疑似快取殘留（待驗）");
+      expect(fact(card, "證據")).toHaveTextContent("run_7 的日誌第 40 行");
+      // 計數在區段標題旁（.count），不放進標題文字
+      const heading = within(section).getByRole("heading", { name: "待確認的候選教訓" });
+      expect(heading.parentElement!.querySelector(".count")).toHaveTextContent("1");
+      // 候選以左側色條標示「等你確認」
+      expect(card).toHaveClass("stripe-warning");
       expect(within(await region("有效條目")).queryByRole("article", { name: "測試前清空快取" })).not.toBeInTheDocument();
     });
 
@@ -280,6 +291,19 @@ describe("知識", () => {
       expect(within(card).getByRole("button", { name: "撤銷" })).toHaveClass("btn-danger");
     });
 
+    it("候選連續好幾列時，列內的「確認為已驗證」是次要按鈕，不是一排主要按鈕（MASTER 7.1）", async () => {
+      renderPage(fakeClient([candidate, entry({ ...candidate, id: "kn_c2", content: { ...candidate.content, title: "建置前先更新依賴" } })]));
+
+      const section = await region("待確認的候選教訓");
+      const confirms = within(section).getAllByRole("button", { name: "確認為已驗證" });
+      expect(confirms).toHaveLength(2);
+      for (const button of confirms) {
+        expect(button).not.toHaveClass("btn-primary");
+        expect(button).not.toHaveAttribute("type", "submit");
+      }
+      expect(section.querySelector(".btn-primary, [type=submit]")).toBeNull();
+    });
+
     it("Controller 提交的候選教訓顯示 Controller 與來源 Task", async () => {
       const fromController = entry({
         ...candidate,
@@ -290,7 +314,7 @@ describe("知識", () => {
 
       const section = await region("待確認的候選教訓");
       const card = within(section).getByRole("article", { name: "測試前清空快取" });
-      expect(card).toHaveTextContent("來源：Controller（Run ctl_4，Task task_5）");
+      expect(fact(card, "來源")).toHaveTextContent("Controller（Run ctl_4，Task task_5）");
     });
 
     it("確認為已驗證：帶 revision 送出，重新讀取後移到有效條目", async () => {
@@ -438,6 +462,28 @@ describe("知識", () => {
       expect(summary).toHaveFocus();
     });
 
+    it("點過選單面板的空白處（焦點離開選單）後按 Esc 仍會關閉，焦點回到「更多」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { summary, menu } = await openMenu(user);
+
+      await user.click(menu.querySelector(".more-menu-list")!);
+      // 點在選單裡面不會收起，但焦點已落到 body，按鍵事件不會經過選單
+      expect(menu.open).toBe(true);
+      expect(document.activeElement).toBe(document.body);
+      await user.keyboard("{Escape}");
+
+      expect(menu.open).toBe(false);
+      expect(summary).toHaveFocus();
+    });
+
+    it("「更多」的可存取名稱帶條目標題，同一頁有多個時分得出來", async () => {
+      renderPage(fakeClient([entry()]));
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+
+      expect(within(card).getByText("更多")).toHaveAccessibleName("更多（部署前先備份資料庫）");
+    });
+
     it("點選單外面時關閉選單", async () => {
       const user = userEvent.setup();
       renderPage(fakeClient([entry()]));
@@ -446,6 +492,18 @@ describe("知識", () => {
       await user.click(screen.getByRole("heading", { name: "部署前先備份資料庫" }));
 
       expect(menu.open).toBe(false);
+    });
+
+    it.each(["撤銷", "淘汰"])("從「更多」開啟%s後按「取消」，焦點回到「更多」，不會掉到 body", async (action) => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+      const { card, summary } = await openMenu(user);
+
+      await user.click(within(card).getByRole("button", { name: action }));
+      await user.click(within(within(card).getByRole("form", { name: action })).getByRole("button", { name: "取消" }));
+
+      expect(within(card).queryByRole("form", { name: action })).not.toBeInTheDocument();
+      expect(summary).toHaveFocus();
     });
 
     it("選了撤銷後焦點移到原因欄，不會掉到 body", async () => {
@@ -457,6 +515,112 @@ describe("知識", () => {
 
       expect(menu.open).toBe(false);
       expect(within(card).getByLabelText("撤銷原因")).toHaveFocus();
+    });
+  });
+
+  describe("收起表單或詳情時焦點回到開啟它的按鈕", () => {
+    it("候選的「撤銷」表單按「取消」，焦點回到「撤銷」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([candidate]));
+
+      const card = within(await region("待確認的候選教訓")).getByRole("article", { name: "測試前清空快取" });
+      const revoke = within(card).getByRole("button", { name: "撤銷" });
+      await user.click(revoke);
+      await user.click(within(within(card).getByRole("form", { name: "撤銷" })).getByRole("button", { name: "取消" }));
+
+      expect(revoke).toHaveFocus();
+    });
+
+    it("修正送出成功後表單收起，焦點回到「修正」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      await user.click(within(card).getByRole("button", { name: "修正" }));
+      await user.click(within(card).getByRole("button", { name: "送出修正" }));
+
+      await waitFor(() => expect(within(card).queryByRole("form", { name: "修正" })).not.toBeInTheDocument());
+      expect(within(card).getByRole("button", { name: "修正" })).toHaveFocus();
+    });
+
+    it("新增條目按「取消」，焦點回到標題列的「新增條目」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([]));
+
+      const form = await openCreateForm(user);
+      await user.click(within(form).getByRole("button", { name: "取消" }));
+
+      expect(screen.queryByRole("form", { name: "新增條目" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "新增條目" })).toHaveFocus();
+    });
+
+    it("關閉詳情後，焦點回到該條目的「詳情」", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      const open = within(card).getByRole("button", { name: "詳情" });
+      await user.click(open);
+      const detail = await screen.findByRole("region", { name: "條目詳情" });
+      await user.click(within(detail).getByRole("button", { name: "關閉詳情" }));
+
+      expect(screen.queryByRole("region", { name: "條目詳情" })).not.toBeInTheDocument();
+      expect(open).toHaveFocus();
+    });
+  });
+
+  describe("條目操作後移到別的清單時，焦點跟著條目，不會掉到 body", () => {
+    it("確認為已驗證後，焦點移到有效條目中這張卡片的標題", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([candidate]));
+
+      const card = within(await region("待確認的候選教訓")).getByRole("article", { name: "測試前清空快取" });
+      await user.click(within(card).getByRole("button", { name: "確認為已驗證" }));
+
+      const moved = await within(await region("有效條目")).findByRole("article", { name: "測試前清空快取" });
+      await waitFor(() => expect(within(moved).getByRole("heading", { name: "測試前清空快取" })).toHaveFocus());
+    });
+
+    it("淘汰後（顯示歷史時），焦點移到歷史條目中這張卡片的標題", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      await user.click(await screen.findByLabelText("顯示歷史"));
+      const card = within(await region("有效條目")).getByRole("article", { name: "部署前先備份資料庫" });
+      await user.click(within(card).getByText("更多"));
+      await user.click(within(card).getByRole("button", { name: "淘汰" }));
+      await user.type(within(card).getByLabelText("淘汰原因"), "已改用自動備份");
+      await user.click(within(card).getByRole("button", { name: "確認淘汰" }));
+
+      const moved = await within(await region("歷史條目")).findByRole("article", { name: "部署前先備份資料庫" });
+      await waitFor(() => expect(within(moved).getByRole("heading", { name: "部署前先備份資料庫" })).toHaveFocus());
+    });
+
+    it("撤銷候選後條目不在畫面上（沒有顯示歷史），焦點移到「待確認的候選教訓」區段標題", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([candidate]));
+
+      const card = within(await region("待確認的候選教訓")).getByRole("article", { name: "測試前清空快取" });
+      await user.click(within(card).getByRole("button", { name: "撤銷" }));
+      await user.type(within(card).getByLabelText("撤銷原因"), "假說不成立");
+      await user.click(within(card).getByRole("button", { name: "確認撤銷" }));
+
+      await waitFor(() => expect(screen.queryByRole("article", { name: "測試前清空快取" })).not.toBeInTheDocument());
+      await waitFor(() => expect(screen.getByRole("heading", { name: "待確認的候選教訓" })).toHaveFocus());
+    });
+
+    it("撤銷有效條目後（沒有顯示歷史），焦點移到「有效條目」區段標題", async () => {
+      const user = userEvent.setup();
+      renderPage(fakeClient([entry()]));
+
+      const card = await screen.findByRole("article", { name: "部署前先備份資料庫" });
+      await user.click(within(card).getByText("更多"));
+      await user.click(within(card).getByRole("button", { name: "撤銷" }));
+      await user.type(within(card).getByLabelText("撤銷原因"), "已不適用");
+      await user.click(within(card).getByRole("button", { name: "確認撤銷" }));
+
+      expect(await screen.findByText("還沒有有效的條目")).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "有效條目" })).toHaveFocus());
     });
   });
 
@@ -746,13 +910,20 @@ describe("知識", () => {
       expect(client.listGuards).toHaveBeenCalledWith("ws_1");
       expect(active).toHaveTextContent("生效中");
       expect(active).toHaveTextContent("來源教訓：部署前先備份資料庫");
-      expect(active).toHaveTextContent("成效：攔下 3 次・最近攔下：2023/11/15 06:14・未攔下的回報 1 次");
+      expect(active).toHaveTextContent("攔下 3 次");
+      expect(active).toHaveTextContent("最近攔下：2023/11/15 06:14");
+      expect(active).toHaveTextContent("未攔下的回報 1 次");
       expect(within(active).getByRole("button", { name: "停用" })).toBeInTheDocument();
 
+      // Guard 的物件標題與知識條目同一種（h4，MASTER 7.1）
+      expect(within(active).getByRole("heading", { level: 4, name: "啟動前檢查：契約的「範圍與限制」必須提到「備份」" })).toBeInTheDocument();
+
       const disabled = within(section).getByRole("listitem", { name: "工具限制：Task 不得要求「部署」" });
-      expect(within(disabled).getByText("不生效")).toBeInTheDocument();
+      // 不生效是中性狀態，與其他中性徽章一樣用 badge-plain
+      expect(within(disabled).getByText("不生效")).toHaveClass("badge", "badge-plain");
       expect(disabled).toHaveTextContent("原因：已停用");
-      expect(disabled).toHaveTextContent("攔下 0 次・最近攔下：尚無");
+      expect(disabled).toHaveTextContent("攔下 0 次");
+      expect(disabled).toHaveTextContent("最近攔下：尚無");
       expect(within(disabled).getByRole("button", { name: "啟用" })).toBeInTheDocument();
     });
 
@@ -937,8 +1108,11 @@ describe("知識", () => {
 
       const items = await within(records).findAllByRole("listitem");
       expect(client.listRecurrences).toHaveBeenCalledWith("kn_1");
-      expect(items[0]).toHaveTextContent("回報・2023/11/15 06:15・Task：未指定・手動部署時又忘了備份");
-      expect(items[1]).toHaveTextContent("已攔下・2023/11/15 06:14・Task：task_9・派工前被 Guard 擋下：範圍沒有提到備份");
+      const parts = (li: HTMLElement) => [...li.querySelectorAll(".meta > span")].map((span) => span.textContent);
+      expect(parts(items[0])).toEqual(["回報", "2023/11/15 06:15", "Task：未指定"]);
+      expect(items[0]).toHaveTextContent("手動部署時又忘了備份");
+      expect(parts(items[1])).toEqual(["已攔下", "2023/11/15 06:14", "Task：task_9"]);
+      expect(items[1]).toHaveTextContent("派工前被 Guard 擋下：範圍沒有提到備份");
     });
 
     it("回報重犯：說明必填，帶目前 Workspace 與選填的 Task，送出後重新讀取紀錄與 Guard", async () => {
@@ -961,7 +1135,10 @@ describe("知識", () => {
         workspace_id: "ws_1",
         task_id: "task_5",
       });
-      expect(await within(records).findByText(/又在沒備份時遷移/)).toHaveTextContent("回報・2023/11/15 06:15・Task：task_5");
+      const reported = (await within(records).findByText("又在沒備份時遷移")).closest("li")!;
+      expect(reported).toHaveTextContent("回報");
+      expect(reported).toHaveTextContent("2023/11/15 06:15");
+      expect(reported).toHaveTextContent("Task：task_5");
       expect(within(form).getByLabelText("重犯說明")).toHaveValue("");
       expect(client.listGuards.mock.calls.length).toBeGreaterThan(guardLoads);
     });

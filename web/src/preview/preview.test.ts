@@ -2,15 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createPreviewClient, previewData, unsupportedMessage } from "./client";
 import { LONG_ACCOUNT, LONG_PATH, LONG_SHA256, LONG_URL } from "./longData";
+import { GLOBAL_NAV, WORKSPACE_NAV } from "../App";
 import { PREVIEW_PAGES } from "./pages";
 
-const TOP_TABS = ["workspace", "accounts", "settings"];
-const WORKSPACE_PAGES = ["controller", "tasks", "decisions", "artifacts", "reviews", "verification", "exploration", "knowledge", "workflows", "timeline", "authorization"];
-
 describe("預覽頁面清單", () => {
-  it("涵蓋每個頂層頁、每個 Workspace 頁面與首次啟動精靈", () => {
-    for (const top of TOP_TABS) expect(PREVIEW_PAGES.some((page) => page.top === top && !page.setup)).toBe(true);
-    for (const id of WORKSPACE_PAGES) expect(PREVIEW_PAGES.some((page) => page.workspacePage === id)).toBe(true);
+  it("涵蓋每個平台頁面、每個 Workspace 頁面與首次啟動精靈", () => {
+    for (const { id } of GLOBAL_NAV) expect(PREVIEW_PAGES.some((page) => page.view === id && !page.setup)).toBe(true);
+    for (const { id } of WORKSPACE_NAV.flatMap((group) => group.pages)) {
+      expect(PREVIEW_PAGES.some((page) => page.workspacePage === id)).toBe(true);
+    }
     expect(PREVIEW_PAGES.some((page) => page.setup)).toBe(true);
     expect(new Set(PREVIEW_PAGES.map((page) => page.id)).size).toBe(PREVIEW_PAGES.length);
   });

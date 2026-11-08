@@ -1,8 +1,9 @@
 import { act, render, screen, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { profile, recoveryEvent, recoveryStatus, supportedPlatform, unofficialPlatform } from "./fixtures";
-import { StatusBar } from "./StatusBar";
+import { StatusBar, StorageFault } from "./StatusBar";
 import type { HealthResponse, PlatformResponse, RuntimeClient } from "./runtimeClient";
 
 const health = { status: "ok", product: "Baton", version: "0.1.0", boot_count: 1, started_at: 0, pid: 1 };
@@ -300,6 +301,18 @@ describe("頂部狀態列", () => {
       },
     };
 
+    /** 與 App 相同的組合：狀態列只留狀態，完整說明以整寬警示（StorageFault）顯示。 */
+    function WithBanner({ client }: { client: RuntimeClient }) {
+      const [current, setCurrent] = useState<HealthResponse | null>(null);
+      const storage = current?.storage;
+      return (
+        <>
+          <StatusBar client={client} pollMs={5000} onHealth={setCurrent} />
+          {storage?.dispatch_halted && <StorageFault fault={storage.fault ?? null} />}
+        </>
+      );
+    }
+
     function clientWithStorage(...storages: Array<HealthResponse["storage"]>): RuntimeClient {
       const queue = [...storages];
       return {
@@ -312,7 +325,7 @@ describe("頂部狀態列", () => {
     }
 
     it("磁碟滿時顯示新派工已停止、原因與處理方式", async () => {
-      render(<StatusBar client={clientWithStorage(diskFull)} pollMs={5000} />);
+      render(<WithBanner client={clientWithStorage(diskFull)} />);
 
       await settle();
 
@@ -322,28 +335,30 @@ describe("頂部狀態列", () => {
       expect(alert).toHaveTextContent("請釋放資料目錄所在磁碟的空間；空間足夠後 Baton 會自動恢復派工");
       expect(alert).toHaveTextContent("database or disk is full");
       expect(screen.getByText("Runtime 運作中")).toBeInTheDocument();
+      // 狀態列本身也留下一行狀態
+      expect(within(screen.getByRole("status")).getByText("新派工已停止")).toBeInTheDocument();
     });
 
-    it("原因的第一句與處理方式直接顯示，其餘與技術細節收進「技術細節」", async () => {
+    it("原因的第一句與處理方式直接顯示，其餘與技術細節收進「詳細資訊」", async () => {
       const long = {
         dispatch_halted: true,
         fault: { ...diskFull!.fault!, summary: "控制資料庫無法寫入。SQLite 回報 SQLITE_FULL（extended code 13）" },
       };
-      render(<StatusBar client={clientWithStorage(long)} pollMs={5000} />);
+      render(<WithBanner client={clientWithStorage(long)} />);
 
       await settle();
 
       const alert = screen.getByRole("alert");
       expect(within(alert).getByText("控制資料庫無法寫入。")).toBeVisible();
       expect(within(alert).getByText("請釋放資料目錄所在磁碟的空間；空間足夠後 Baton 會自動恢復派工")).toBeVisible();
-      const details = within(alert).getByText("技術細節").closest("details")!;
+      const details = within(alert).getByText("詳細資訊").closest("details")!;
       expect(details).not.toHaveAttribute("open");
       expect(within(details).getByText("SQLite 回報 SQLITE_FULL（extended code 13）")).toBeInTheDocument();
       expect(within(details).getByText("database or disk is full")).toBeInTheDocument();
     });
 
     it("舊版 Runtime 沒有 storage 欄位時不顯示警示", async () => {
-      render(<StatusBar client={clientWithStorage(undefined)} pollMs={5000} />);
+      render(<WithBanner client={clientWithStorage(undefined)} />);
 
       await settle();
 
@@ -352,7 +367,7 @@ describe("頂部狀態列", () => {
     });
 
     it("沒有故障時不顯示警示", async () => {
-      render(<StatusBar client={clientWithStorage({ dispatch_halted: false, fault: null })} pollMs={5000} />);
+      render(<WithBanner client={clientWithStorage({ dispatch_halted: false, fault: null })} />);
 
       await settle();
 
@@ -360,7 +375,7 @@ describe("頂部狀態列", () => {
     });
 
     it("下一次輪詢恢復後警示消失", async () => {
-      render(<StatusBar client={clientWithStorage(diskFull, { dispatch_halted: false, fault: null })} pollMs={5000} />);
+      render(<WithBanner client={clientWithStorage(diskFull, { dispatch_halted: false, fault: null })} />);
       await settle();
       expect(screen.getByRole("alert")).toHaveTextContent("新派工已停止");
 

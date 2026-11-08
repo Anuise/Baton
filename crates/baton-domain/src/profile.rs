@@ -172,7 +172,7 @@ impl Blocker {
 
     pub fn message(&self) -> String {
         match self {
-            Blocker::Archived => "這個 Profile 已封存".to_string(),
+            Blocker::Archived => "這個帳號已封存".to_string(),
             Blocker::Unverified => "尚未核對登入狀態；請完成原生登入後按「重新核對」".to_string(),
             Blocker::NotLoggedIn => "尚未登入；請在終端機完成原生登入後按「重新核對」".to_string(),
             Blocker::AuthSourceOverridden { source, detail } => {
@@ -187,19 +187,19 @@ impl Blocker {
                     (_, None) => "未知的認證方式".to_string(),
                 };
                 format!(
-                    "實際使用的認證來源是 {origin}，不是這個 Profile 的原生登入；\
+                    "實際使用的認證來源是 {origin}，不是這個帳號的原生登入；\
                      環境變數或 credential helper 覆蓋了登入，已阻擋派工。請移除覆蓋來源後重新核對"
                 )
             }
             Blocker::ConfigDirMismatch => {
-                "Claude Code 實際使用的設定目錄不是這個 Profile 的目錄，已阻擋派工".to_string()
+                "Claude Code 實際使用的設定目錄不是這個帳號的目錄，已阻擋派工".to_string()
             }
             Blocker::IdentityUnconfirmed => "已登入，但無法取得帳號身分，無法確認是不是預期的帳號".to_string(),
             Blocker::IdentityMismatch { expected, actual } => {
-                format!("實際認證的帳號是 {actual}，與這個 Profile 預期的 {expected} 不符，已阻擋派工")
+                format!("實際認證的帳號是 {actual}，與這個帳號預期的 {expected} 不符，已阻擋派工")
             }
             Blocker::DuplicateIdentity { account, other_name } => {
-                format!("帳號 {account} 已經由 Profile「{other_name}」使用；同一個帳號不能同時綁定兩個 Profile")
+                format!("{account} 已經由帳號「{other_name}」使用；同一個 Claude 帳號不能同時登記成兩個帳號")
             }
             Blocker::CliVersionUnsupported { found } => format!(
                 "Claude Code 版本 {found} 低於支援的最低版本 {}，已阻擋派工；請更新 Claude Code 後重新核對",
@@ -332,25 +332,25 @@ pub struct Decision {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProfileError {
-    #[error("Profile 名稱不能是空的")]
+    #[error("帳號名稱不能是空的")]
     NameEmpty,
-    #[error("Profile 名稱不能超過 {MAX_NAME_CHARS} 個字元")]
+    #[error("帳號名稱不能超過 {MAX_NAME_CHARS} 個字元")]
     NameTooLong,
-    #[error("已經有名為「{0}」的 Profile")]
+    #[error("已經有名為「{0}」的帳號")]
     NameTaken(String),
     #[error("預期帳號必須是電子郵件（例如 name@example.com）：{0}")]
     ExpectedAccountInvalid(String),
-    #[error("最多只能有 {MAX_PROFILES} 個帳號 Profile（目前已有 {MAX_PROFILES} 個）。請先封存用不到的 Profile，再新增")]
+    #[error("最多只能有 {MAX_PROFILES} 個帳號（目前已有 {MAX_PROFILES} 個）。請先封存用不到的帳號，再新增")]
     LimitReached,
-    #[error("設定目錄 {0} 與其他 Profile 的設定目錄相同或互相包含；每個 Profile 必須有獨立的設定目錄")]
+    #[error("設定目錄 {0} 與其他帳號的設定目錄相同或互相包含；每個帳號必須有獨立的設定目錄")]
     ConfigDirShared(String),
     #[error(r"設定目錄必須是完整的絕對路徑（例如 C:\Users\me\.claude-Work-3）：{0}")]
     ConfigDirInvalid(String),
-    #[error("設定目錄 {0} 與平台資料目錄的 profiles 重疊；平台建立的設定目錄請用「新增 Profile」")]
+    #[error("設定目錄 {0} 與平台資料目錄的 profiles 重疊；平台建立的設定目錄請用「新增帳號」")]
     ConfigDirManaged(String),
-    #[error("找不到 Profile {0}")]
+    #[error("找不到帳號 {0}")]
     NotFound(String),
-    #[error("Profile {0} 已經封存")]
+    #[error("帳號 {0} 已經封存")]
     AlreadyArchived(String),
     #[error("帳號清單已經變動（有新增或封存），無法套用這個順序；請重新整理後再調整")]
     OrderMismatch,

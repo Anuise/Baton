@@ -174,21 +174,22 @@ fn option_label(view: &Value, option_id: &str) -> String {
 // --- UI 操作 ---
 
 fn center() -> Value {
-    role("region", "裁定中心")
+    role("region", "裁定")
 }
 
-/// Workspace 功能頁簽。
+/// 跑道欄上目前 Workspace 的頁面。
 fn tab(name: &str) -> [Value; 2] {
-    [role("tablist", "Workspace 功能"), role("tab", name)]
+    [role("navigation", "Workspace 頁面"), role("button", name)]
 }
 
-/// 在側欄選擇 Workspace（已選中時再點一次無害），切到「裁定」頁簽開啟裁定中心（從別的頁簽切過來時會重新讀取清單）。
+/// 在跑道欄選擇 Workspace（已選中時再點一次無害），切到「裁定」頁開啟裁定中心（從別的頁切過來時會重新讀取清單）。
 async fn open_center(browser: &Browser, workspace: &str) {
     browser.click(&[role("button", &format!("選擇 {workspace}"))]).await;
     browser.click(&tab("裁定")).await;
     browser.wait_visible(&[center(), role("heading", "裁定")]).await;
-    // 頁面標題只寫頁名，Workspace 名稱由頁簽列上方的情境列顯示
-    browser.wait_visible(&[label("目前的 Workspace"), exact_text(workspace)]).await;
+    // 頁面標題只寫頁名，Workspace 名稱由頁面上方的情境列顯示
+    // 名稱可能與路徑結尾同字（路徑也在情境列中），取第一個（名稱）
+    browser.wait_visible(&[label("目前的 Workspace"), exact_text(workspace), nth(0)]).await;
 }
 
 /// 批次面板中的一項：以問題（fieldset 的 legend）找到它；問題相同時以 `index` 區分。
@@ -201,6 +202,11 @@ async fn accept_in_batch(browser: &Browser, question: &str, index: usize, option
     let item = batch_item(question, index);
     browser.check(&[item.clone(), vec![role("radio", "接受方案")]].concat()).await;
     browser.check(&[item, vec![role("radio", option)]].concat()).await;
+}
+
+/// 在批次面板中替一筆權限提示選「允許這一次」（權限提示直接以處理方式表達允許／拒絕／延後）。
+async fn allow_once_in_batch(browser: &Browser, question: &str, index: usize) {
+    browser.check(&[batch_item(question, index), vec![role("radio", "允許這一次")]].concat()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -250,7 +256,7 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     browser.wait_visible(&[text("待裁定：4")]).await;
     browser.wait_visible(&[text("待裁定 4")]).await;
     open_center(browser, &ws_name).await;
-    browser.wait_visible(&[center(), role("heading", "可處理（4）")]).await;
+    browser.wait_visible(&[center(), role("region", "可處理（4）")]).await;
 
     // 逐項勾選進批次
     for index in [0, 1] {
@@ -271,9 +277,9 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     browser.click(&[center(), role("form", "批次處理"), text("每一項都選好處理方式、填妥必填欄位後才能送出")]).await;
     browser.wait_hidden(&tip).await;
 
-    // 每一項各自選擇處理方式：兩筆權限提示各允許本次操作、Agent 問題選「先出貨」、Controller 的動作核准這一次
-    accept_in_batch(browser, &push_question, 0, &option_label(&view_a, "allow_once")).await;
-    accept_in_batch(browser, &push_question, 1, &option_label(&view_b, "allow_once")).await;
+    // 每一項各自選擇處理方式：兩筆權限提示各「允許這一次」、Agent 問題選「先出貨」、Controller 的動作核准這一次
+    allow_once_in_batch(browser, &push_question, 0).await;
+    allow_once_in_batch(browser, &push_question, 1).await;
     accept_in_batch(browser, &q_question, 0, &option_label(&view_q, "ship")).await;
     accept_in_batch(browser, &c_question, 0, &option_label(&view_c, "approve")).await;
     browser.click(&[center(), role("button", "送出批次（4 項）")]).await;
@@ -287,23 +293,23 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     assert_eq!(results.matches("：已保存").count(), 4, "四筆各自一行結果：{results}");
     assert!(!results.contains("失敗"), "{results}");
     browser.wait_hidden(&[center(), role("form", "批次處理")]).await;
-    browser.wait_visible(&[center(), role("heading", "可處理（0）")]).await;
-    browser.wait_visible(&[center(), role("heading", "已結束（4）")]).await;
+    browser.wait_visible(&[center(), role("region", "可處理（0）")]).await;
+    browser.wait_visible(&[center(), role("region", "已結束（4）")]).await;
     browser.wait_visible(&[text("待裁定：0")]).await;
     browser.wait_hidden(&[text("待裁定 4")]).await;
     // 已結束的每一筆都顯示自己的裁定結果，並標示是批次中各自保存的一項
-    for (question, index, chosen) in [
-        (&push_question, 0, option_label(&view_a, "allow_once")),
-        (&push_question, 1, option_label(&view_b, "allow_once")),
-        (&q_question, 0, option_label(&view_q, "ship")),
-        (&c_question, 0, option_label(&view_c, "approve")),
+    // 權限提示的結果寫處理方式（「允許這一次」），其他請求寫選了哪個選項
+    for (question, index, expected) in [
+        (&push_question, 0, "處理方式：允許這一次".to_string()),
+        (&push_question, 1, "處理方式：允許這一次".to_string()),
+        (&q_question, 0, format!("選擇：{}", option_label(&view_q, "ship").trim_end_matches("（建議）"))),
+        (&c_question, 0, format!("選擇：{}", option_label(&view_c, "approve").trim_end_matches("（建議）"))),
     ] {
         browser.click(&[center(), role("button", &format!("查看裁定 {question}")), nth(index)]).await;
         let outcome = [center(), role("article", "裁定詳情"), role("region", "裁定結果")];
         browser.wait_visible(&outcome).await;
         let shown = browser.text(&outcome).await;
-        let chosen = chosen.trim_end_matches("（建議）");
-        assert!(shown.contains(&format!("選擇：{chosen}")), "{shown}");
+        assert!(shown.contains(&expected), "{shown}");
         assert!(shown.contains("批次處理（此項各自保存）"), "{shown}");
     }
 
@@ -332,7 +338,7 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
     let (_, token_b2) = running_run(harness, &ws, &b).await;
     let (_, token_c2) = running_run(harness, &ws, &c).await;
     browser.click(&tab("工作")).await;
-    let running = [role("region", "工作面板"), role("region", "執行中（3）")];
+    let running = [role("region", "工作"), role("region", "執行中（3）")];
     browser.wait_visible(&running).await;
     for title in titles {
         browser.wait_visible(&[running.to_vec(), vec![role("article", title)]].concat()).await;
@@ -363,7 +369,7 @@ async fn a_batch_in_the_decision_center_saves_each_item_and_resumes_the_tasks_wi
 
     // --- UI：裁定中心出現三筆新的待裁定請求；先前的批准已被各自的 Run 用掉 ---
     open_center(browser, &ws_name).await;
-    browser.wait_visible(&[center(), role("heading", "可處理（3）")]).await;
+    browser.wait_visible(&[center(), role("region", "可處理（3）")]).await;
     browser.wait_visible(&[text("待裁定：3")]).await;
     for rid in [&again_a, &other_b, &again_c] {
         let question = decision(harness, &ws, rid).await["question"].as_str().unwrap().to_string();

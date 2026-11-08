@@ -202,7 +202,7 @@
 
 ### Context Receipt
 - **定義**：每個 Run 啟動時保存的紀錄，說明載入了哪些決策、教訓與其版本，以及因預算而省略了什麼。
-- **關係**：由 Context Builder 產生、屬於 Run；用來事後追查 Worker 當時知道什麼。
+- **關係**：由 Context Builder 產生、屬於 Run；用來事後追查 Worker 當時知道什麼。桌面 App 的畫面上稱為「載入紀錄」。
 - **避免使用**：prompt log、context dump。
 
 ---

@@ -50,7 +50,8 @@ export function LongText({
 
   const showToggle = expanded || overflowing;
   return (
-    <div className={className === undefined ? "long-text" : `long-text ${className}`}>
+    // 「展開／收合」一律是收合摘要樣式（與 <details> 的「▶ 詳細資訊」一致，MASTER 7.1）
+    <div className={className === undefined ? "long-text long-text-disclosure" : `long-text long-text-disclosure ${className}`}>
       <p ref={bodyRef} id={id} className={expanded ? "long-text-body" : `long-text-body clamp-${lines}`}>
         {text}
       </p>

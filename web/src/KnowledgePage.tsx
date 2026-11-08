@@ -1,8 +1,9 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 
 import { FIELD_LABELS } from "./ContractEditor";
 import { LongText } from "./LongText";
-import { shortId } from "./textFormat";
+import { MoreMenu } from "./MoreMenu";
+import { formatNumber, shortId } from "./textFormat";
 import { formatTimestamp } from "./time";
 import {
   CONTRACT_FIELDS,
@@ -163,6 +164,27 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
   const [creating, setCreating] = useState(false);
   // 操作後讓詳情重新讀取
   const [detailRefresh, setDetailRefresh] = useState(0);
+  // 收起表單或詳情時把焦點還給開啟它的按鈕，不讓焦點落到 body
+  const createToggleRef = useRef<HTMLButtonElement>(null);
+  const detailTriggerRef = useRef<HTMLElement | null>(null);
+  // 條目操作成功後要移動焦點的位置：條目可能移到別的清單（卡片在新位置重新掛載），等清單重新渲染後才找
+  const [settled, setSettled] = useState<Settled | null>(null);
+  const pageRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (settled === null) return;
+    const { id, list: from, trigger } = settled;
+    const page = pageRef.current;
+    // 卡片還在原位（修正、轉為 Guard、衝突後重新整理）：回到開啟表單的按鈕；
+    // 卡片已移走：依條目 id 聚焦新位置的卡片標題；條目不在畫面上（例如沒有顯示歷史）時聚焦原本區段的標題
+    const moved = [...(page?.querySelectorAll<HTMLElement>("[data-entry-id]") ?? [])].find((card) => card.dataset.entryId === id);
+    const target =
+      (trigger?.isConnected ? trigger : null) ??
+      moved?.querySelector<HTMLElement>(":scope > .row-head > h4") ??
+      page?.querySelector<HTMLElement>(`[data-list="${from}"] h3`);
+    target?.focus();
+    setSettled(null);
+  }, [settled, list]);
 
   // 有效條目與「含無效」分兩次查詢：候選與歷史再多也不會擠掉有效條目（每次最多 100 筆）
   const load = useCallback(async () => {
@@ -226,9 +248,9 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
     setQuery(draftQuery.trim());
   };
 
-  /** 一組卡片；詳情展開在開啟它的那張卡片後面（同一條目可能同時出現在兩個清單，所以連清單一起記）。 */
+  /** 一組條目（分隔清單）；詳情展開在開啟它的那一列後面（同一條目可能同時出現在兩個清單，所以連清單一起記）。 */
   const cards = (listName: DetailTarget["list"], entries: KnowledgeEntryView[]) => (
-    <div className="knowledge-cards">
+    <div className="row-list knowledge-entries">
       {entries.map((entry) => (
         <Fragment key={entry.id}>
           <EntryCard
@@ -236,7 +258,11 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
             entry={entry}
             timeZone={timeZone}
             act={act}
-            onOpenDetail={(id) => setDetail({ id, list: listName })}
+            onOpenDetail={(id, trigger) => {
+              detailTriggerRef.current = trigger;
+              setDetail({ id, list: listName });
+            }}
+            onSettled={(trigger) => setSettled({ id: entry.id, list: listName, trigger })}
           />
           {detail !== null && detail.id === entry.id && detail.list === listName && (
             <DetailPanel
@@ -246,7 +272,10 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
               refreshKey={detailRefresh}
               timeZone={timeZone}
               act={act}
-              onClose={() => setDetail(null)}
+              onClose={() => {
+                setDetail(null);
+                detailTriggerRef.current?.focus();
+              }}
             />
           )}
         </Fragment>
@@ -257,76 +286,107 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
   const candidates = list.state === "ready" ? list.all.filter((e) => e.status === "candidate") : [];
   const history = list.state === "ready" ? list.all.filter((e) => !e.effective && e.status !== "candidate") : [];
 
+  // 版面（依使用者的工作排序）：等你確認的候選 → 有效條目（含歷史開關）→ Guard。
+  // 搜尋同時篩選候選、有效與歷史條目，所以放在頁面標題列，而不是某一個區段裡
   return (
-    <section className="knowledge-page" aria-label="知識">
+    <section ref={pageRef} className="page knowledge-page" aria-label="知識">
       <header className="page-header">
         <h2>知識</h2>
-        <button
-          type="button"
-          className={creating ? undefined : "btn-primary"}
-          aria-expanded={creating}
-          onClick={() => setCreating((value) => !value)}
-        >
-          {creating ? "收起新增條目" : "新增條目"}
-        </button>
+        <div className="page-actions">
+          <form className="knowledge-search" role="search" onSubmit={search}>
+            <input
+              aria-label="搜尋關鍵字"
+              placeholder="以空白分隔多個關鍵字，每個至少 2 個字"
+              value={draftQuery}
+              onChange={(e) => setDraftQuery(e.target.value)}
+            />
+            {/* 送出鈕預設是主要樣式；這一列的主要動作是「新增條目」，搜尋改回次要 */}
+            <button type="submit" className="btn-secondary">
+              搜尋
+            </button>
+          </form>
+          <button
+            ref={createToggleRef}
+            type="button"
+            className={creating ? undefined : "btn-primary"}
+            aria-expanded={creating}
+            onClick={() => setCreating((value) => !value)}
+          >
+            {creating ? "收起新增條目" : "新增條目"}
+          </button>
+        </div>
       </header>
-      {creating && <CreateForm client={client} workspace={workspace} act={act} onCancel={() => setCreating(false)} />}
-      <form className="knowledge-search" role="search" onSubmit={search}>
-        <input
-          aria-label="搜尋關鍵字"
-          placeholder="以空白分隔多個關鍵字，每個至少 2 個字"
-          value={draftQuery}
-          onChange={(e) => setDraftQuery(e.target.value)}
-        />
-        <button type="submit">搜尋</button>
-      </form>
-      {queryError && <p role="alert">{queryError}</p>}
-      {notice && (
-        <p className="knowledge-notice" role="status">
-          {notice}
+      {queryError && (
+        <p className="field-error" role="alert">
+          {queryError}
         </p>
       )}
-      {list.state === "loading" && <p>載入中…</p>}
-      {list.state === "failed" && <p role="alert">無法取得知識：{list.reason}</p>}
+      {notice && (
+        <div className="callout callout-warning" role="status">
+          <p>{notice}</p>
+        </div>
+      )}
+      {creating && (
+        <CreateForm
+          client={client}
+          workspace={workspace}
+          act={act}
+          onCancel={() => {
+            setCreating(false);
+            createToggleRef.current?.focus();
+          }}
+        />
+      )}
+      {list.state === "loading" && <p className="empty-note">載入中…</p>}
+      {list.state === "failed" && (
+        <p className="field-error" role="alert">
+          無法取得知識：{list.reason}
+        </p>
+      )}
       {list.state === "ready" && (
         <>
           {list.degraded && (
-            <p className="knowledge-degraded" role="status">
-              {DEGRADED_NOTICE}
-            </p>
+            <div className="callout callout-warning" role="status">
+              <p>{DEGRADED_NOTICE}</p>
+            </div>
           )}
-          <section className="knowledge-section knowledge-candidates" aria-label="待確認的候選教訓">
+          <section className="section knowledge-candidates" aria-label="待確認的候選教訓" data-list="candidates">
             <div className="section-heading">
-              <h3>待確認的候選教訓（{candidates.length}）</h3>
+              <h3 tabIndex={-1}>待確認的候選教訓</h3>
+              <span className="count">{candidates.length}</span>
               <p>Agent 提交的候選尚未驗證，確認後才會提供給後續的 Run 使用。</p>
             </div>
             {candidates.length === 0 && <p className="empty-note">沒有待確認的候選</p>}
             {candidates.length > 0 && cards("candidates", candidates)}
           </section>
-          <section className="knowledge-section" aria-label="有效條目">
+          <section className="section" aria-label="有效條目" data-list="effective">
             <div className="section-heading">
-              <h3>有效條目（{list.effective.length}）</h3>
+              <h3 tabIndex={-1}>有效條目</h3>
+              <span className="count">{list.effective.length}</span>
+              <div className="section-actions">
+                <label className="knowledge-history-toggle">
+                  <input type="checkbox" checked={showHistory} onChange={(e) => setShowHistory(e.target.checked)} />
+                  顯示歷史
+                </label>
+              </div>
             </div>
             {list.effective.length === 0 && (
               <p className="empty-note">{query === "" ? "還沒有有效的條目" : "沒有符合搜尋的有效條目"}</p>
             )}
             {list.effective.length > 0 && cards("effective", list.effective)}
           </section>
-          <GuardSection guards={guards} client={client} timeZone={timeZone} act={act} />
-          <label className="knowledge-history-toggle">
-            <input type="checkbox" checked={showHistory} onChange={(e) => setShowHistory(e.target.checked)} />
-            顯示歷史
-          </label>
           {showHistory && (
-            <section className="knowledge-section" aria-label="歷史條目">
+            <section className="section" aria-label="歷史條目" data-list="history">
               <div className="section-heading">
-                <h3>歷史條目（{history.length}）</h3>
+                <h3 tabIndex={-1}>歷史條目</h3>
+                <span className="count">{history.length}</span>
                 <p>已撤銷、已淘汰、已被取代或不在有效期間內的條目，不會提供給 Run 使用。</p>
               </div>
               {history.length === 0 && <p className="empty-note">沒有歷史條目</p>}
               {history.length > 0 && cards("history", history)}
             </section>
           )}
+          <GuardSection guards={guards} client={client} timeZone={timeZone} act={act} />
         </>
       )}
     </section>
@@ -337,6 +397,11 @@ export function KnowledgePage({ client, workspace, timeZone }: Props) {
 interface DetailTarget {
   id: string;
   list: "candidates" | "effective" | "history";
+}
+
+/** 操作成功的條目、它原本所在的清單，以及開啟表單或按下的按鈕。 */
+interface Settled extends DetailTarget {
+  trigger: HTMLElement | null;
 }
 
 /** 表單中編輯的內容；標籤與證據先以文字編輯，送出時才拆成清單。 */
@@ -391,80 +456,95 @@ function ContentFields({ draft, onChange, lesson }: { draft: ContentDraft; onCha
   });
   return (
     <>
-      <label>
-        標題
+      <Field label="標題">
         <input {...field("title")} />
-      </label>
-      <label>
-        內文
+      </Field>
+      <Field label="內文">
         <textarea {...field("body")} />
-      </label>
+      </Field>
       {lesson && (
         <>
-          <label>
-            觸發條件
+          <Field label="觸發條件">
             <textarea {...field("trigger")} />
-          </label>
-          <label>
-            根因或待驗假說
+          </Field>
+          <Field label="根因或待驗假說">
             <textarea {...field("rootCause")} />
-          </label>
-          <label>
-            解法
+          </Field>
+          <Field label="解法">
             <textarea {...field("resolution")} />
-          </label>
+          </Field>
         </>
       )}
-      <label>
-        標籤（以逗號或換行分隔）
+      <Field label="標籤（以逗號或換行分隔）">
         <input {...field("tags")} />
-      </label>
-      <label>
-        證據（每行一項）
+      </Field>
+      <Field label="證據（每行一項）">
         <textarea {...field("evidence")} />
-      </label>
+      </Field>
     </>
+  );
+}
+
+/** 一個表單欄位（MASTER 第 7 節的 .field）：label 包住控制項，可存取名稱就是欄位名稱。 */
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="field">
+      <span className="field-label">{label}</span>
+      {children}
+    </label>
   );
 }
 
 /** 詳情中的完整內容：內文、教訓欄位、標籤與證據都完整顯示。 */
 function ContentView({ content }: { content: KnowledgeContent }) {
+  const facts = lessonFacts(content);
   return (
     <>
-      {content.body !== "" && <p className="knowledge-body">{content.body}</p>}
-      <LessonAndEvidence content={content} />
+      {content.body !== "" && <p className="knowledge-body pre-wrap">{content.body}</p>}
+      {facts.length > 0 && <FactList facts={facts} />}
       {content.tags.length > 0 && <TagList tags={content.tags} full />}
     </>
   );
 }
 
+type Fact = [label: string, value: ReactNode];
+
 /** 教訓的觸發條件、根因與解法，以及證據（每項是路徑或網址，等寬、可在任何字元斷開）。 */
-function LessonAndEvidence({ content }: { content: KnowledgeContent }) {
+function lessonFacts(content: KnowledgeContent): Fact[] {
+  const facts: Fact[] = [];
+  if (content.lesson) {
+    facts.push(
+      ["觸發條件", content.lesson.trigger || "（未填）"],
+      ["根因或待驗假說", content.lesson.root_cause || "（未填）"],
+      ["解法", content.lesson.resolution || "（未填）"],
+    );
+  }
+  if (content.evidence.length > 0) {
+    facts.push([
+      "證據",
+      <ul className="knowledge-evidence">
+        {content.evidence.map((item) => (
+          <li key={item} className="mono">
+            {item}
+          </li>
+        ))}
+      </ul>,
+    ]);
+  }
+  return facts;
+}
+
+/** 標籤：值（MASTER 第 7 節的 .facts）。長段落保留換行。 */
+function FactList({ facts }: { facts: Fact[] }) {
   return (
-    <>
-      {content.lesson && (
-        <dl className="knowledge-lesson">
-          <dt>觸發條件</dt>
-          <dd>{content.lesson.trigger || "（未填）"}</dd>
-          <dt>根因或待驗假說</dt>
-          <dd>{content.lesson.root_cause || "（未填）"}</dd>
-          <dt>解法</dt>
-          <dd>{content.lesson.resolution || "（未填）"}</dd>
-        </dl>
-      )}
-      {content.evidence.length > 0 && (
-        <div className="knowledge-evidence knowledge-meta">
-          證據：
-          <ul>
-            {content.evidence.map((item) => (
-              <li key={item} className="mono">
-                {item}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </>
+    <dl className="facts knowledge-facts">
+      {facts.map(([label, value]) => (
+        <Fragment key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </Fragment>
+      ))}
+    </dl>
   );
 }
 
@@ -481,47 +561,24 @@ function TagList({ tags, full = false }: { tags: string[]; full?: boolean }) {
   );
 }
 
-/** 「更多」選單：卡片中第二順位以後的動作；選了之後收起選單。Esc 收起並把焦點移回「更多」，點選單外面也會收起。 */
-function MoreMenu({ items }: { items: { label: string; onSelect: () => void; danger?: boolean }[] }) {
-  const ref = useRef<HTMLDetailsElement>(null);
-
-  // 直接讀 details.open 而不追蹤 toggle 事件：toggle 是排入佇列的 task，開啟後立刻點外面時會晚於 pointerdown
-  useEffect(() => {
-    const onPointerDown = (event: PointerEvent) => {
-      const menu = ref.current;
-      if (menu?.open && !menu.contains(event.target as Node)) menu.open = false;
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, []);
-
+/**
+ * 「更多」選單（共用的 MoreMenu：Esc／點外面收起、焦點歸還）中的一個選項。
+ * 共用元件選了選項不會自動收起：這裡選了就收起，焦點交給接著開啟的表單（autoFocus）；
+ * 回呼收到觸發的「更多」，表單收起時焦點還給它（選項本身已隨選單收起）。
+ */
+function MenuItem({ label, danger = false, onSelect }: { label: string; danger?: boolean; onSelect: (trigger: HTMLElement) => void }) {
   return (
-    <details
-      className="more-menu"
-      ref={ref}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape" || !event.currentTarget.open) return;
-        event.currentTarget.open = false;
-        event.currentTarget.querySelector("summary")?.focus();
+    <button
+      type="button"
+      className={danger ? "btn-quiet more-menu-danger" : "btn-quiet"}
+      onClick={(event) => {
+        const menu = event.currentTarget.closest("details");
+        if (menu) menu.open = false;
+        onSelect(menu?.querySelector("summary") ?? event.currentTarget);
       }}
     >
-      <summary>更多</summary>
-      <div className="more-menu-list">
-        {items.map((item) => (
-          <button
-            key={item.label}
-            type="button"
-            className={item.danger ? "btn-quiet more-menu-danger" : "btn-quiet"}
-            onClick={() => {
-              if (ref.current) ref.current.open = false;
-              item.onSelect();
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-    </details>
+      {label}
+    </button>
   );
 }
 
@@ -532,125 +589,163 @@ interface CardProps {
   entry: KnowledgeEntryView;
   timeZone?: string;
   act: Act;
-  onOpenDetail: (id: string) => void;
+  /** 開啟詳情；trigger 是按下的「詳情」，關閉詳情時焦點還給它。 */
+  onOpenDetail: (id: string, trigger: HTMLElement) => void;
+  /** 操作成功、表單收起後由頁面移動焦點（條目可能已移到別的清單）；trigger 是開啟表單或按下的按鈕。 */
+  onSettled: (trigger: HTMLElement | null) => void;
 }
 
 /**
  * 一個條目；可用的操作依狀態：候選可確認或撤銷，已驗證可修正、撤銷或淘汰（有效的教訓還可轉為 Guard），其他只能看詳情。
  * 直接看得到的動作最多 3 個（MASTER 5.1）：候選＝確認、撤銷、詳情；已驗證＝修正、詳情、更多。
  */
-function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
+function EntryCard({ client, entry, timeZone, act, onOpenDetail, onSettled }: CardProps) {
   const [mode, setMode] = useState<CardMode>(null);
   const [error, setError] = useState<string | null>(null);
+  // 開啟表單的按鈕（從「更多」開啟時是「更多」本身）：表單收起時焦點還給它，不讓焦點落到 body
+  const triggerRef = useRef<HTMLElement | null>(null);
   const tone = entry.status === "candidate" ? "candidate" : entry.effective ? "effective" : "inactive";
   const fmt = (millis: number) => formatTimestamp(millis, timeZone);
+
+  const openForm = (next: Exclude<CardMode, null>, trigger: HTMLElement) => {
+    triggerRef.current = trigger;
+    setMode(next);
+  };
+
+  /** 取消表單：卡片還在，焦點直接還給開啟它的按鈕。 */
+  const closeForm = () => {
+    setMode(null);
+    const trigger = triggerRef.current;
+    triggerRef.current = null;
+    trigger?.focus();
+  };
 
   const run = async (operation: () => Promise<unknown>) => {
     setError(null);
     const failure = await act(operation);
-    if (failure === null) setMode(null);
-    else setError(failure);
+    if (failure !== null) {
+      setError(failure);
+      return;
+    }
+    setMode(null);
+    const trigger = triggerRef.current;
+    triggerRef.current = null;
+    // 操作後條目可能已移到別的清單（這張卡片隨之卸載）：交給頁面在清單重新渲染後移動焦點
+    onSettled(trigger);
   };
 
   const { content } = entry;
-  // 收合的細節裡有什麼：教訓欄位、來源、證據
-  const extraLabel = [
-    content.lesson ? "教訓欄位" : null,
-    "來源",
-    content.evidence.length > 0 ? `證據（${content.evidence.length}）` : null,
-  ]
+  // 收合的細節裡有什麼：教訓欄位、來源、證據；證據的數量照計數寫法放在最後（「證據 2」，MASTER 7.1）
+  const extraLabel = [content.lesson ? "教訓欄位" : null, "來源", content.evidence.length > 0 ? "證據" : null]
     .filter((part) => part !== null)
     .join("、");
   const badgeTone = tone === "candidate" ? " badge-warning" : tone === "effective" ? " badge-success" : "";
 
-  // 卡片＝標題列（標題 2 行＋狀態徽章）→ 一行事實 → 內文 3 行＋展開 → 收合的細節 → 動作（MASTER 5.2）
+  // 一列＝標題列（標題 2 行＋狀態徽章）→ 次要資訊 → 內文 3 行＋展開 → 標籤 → 收合的細節 → 動作；
+  // 候選以左側琥珀色條標示「等你確認」（MASTER 第 3 節：語意色只標示狀態）
   return (
     <article
-      className={`knowledge-card card knowledge-${tone}${tone === "candidate" ? " stripe-warning" : ""}`}
+      className={`row knowledge-entry knowledge-${tone}${tone === "candidate" ? " stripe-warning" : ""}`}
       aria-label={content.title}
+      data-entry-id={entry.id}
     >
-      <header className="card-header">
-        <h4 className="clamp-2" title={content.title}>
+      <div className="row-head">
+        {/* 條目移到別的清單後，焦點移到新位置的這個標題 */}
+        <h4 className="clamp-2" title={content.title} tabIndex={-1}>
           {content.title}
         </h4>
         <span className={`badge${badgeTone}`} title={tone === "candidate" ? CANDIDATE_TITLE : undefined}>
           {statusLabel(entry)}
         </span>
-      </header>
-      <p className="knowledge-meta">
-        {KIND_LABELS[entry.kind]}・範圍：{scopeLabel(entry)}・v{entry.version}・有效期間：{fmt(entry.valid_from)} 起，
-        {entry.valid_until === null ? "無期限" : `至 ${fmt(entry.valid_until)}`}
+      </div>
+      <p className="meta">
+        <span>{KIND_LABELS[entry.kind]}</span>
+        <span>範圍：{scopeLabel(entry)}</span>
+        <span>v{entry.version}</span>
+        <span>
+          有效期間：{fmt(entry.valid_from)} 起，{entry.valid_until === null ? "無期限" : `至 ${fmt(entry.valid_until)}`}
+        </span>
       </p>
       {entry.status_reason && <LongText text={`原因：${entry.status_reason}`} lines={2} className="knowledge-reason" />}
       {entry.superseded_by && (
-        <p className="knowledge-meta">
-          已被{" "}
-          <code className="mono" title={entry.superseded_by}>
-            {shortId(entry.superseded_by)}
-          </code>{" "}
-          取代
+        <p className="meta">
+          <span>
+            已被{" "}
+            <code className="mono" title={entry.superseded_by}>
+              {shortId(entry.superseded_by)}
+            </code>{" "}
+            取代
+          </span>
         </p>
       )}
       {content.body !== "" && <LongText text={content.body} />}
       {content.tags.length > 0 && <TagList tags={content.tags} />}
       <details className="knowledge-extra">
-        <summary>{extraLabel}</summary>
-        <div className="knowledge-extra-body">
-          <p className="knowledge-meta">來源：{sourceLabel(entry)}</p>
-          <LessonAndEvidence content={content} />
-        </div>
+        <summary>
+          {extraLabel}
+          {content.evidence.length > 0 && (
+            <>
+              {" "}
+              <span className="count">{content.evidence.length}</span>
+            </>
+          )}
+        </summary>
+        <FactList facts={[["來源", sourceLabel(entry)], ...lessonFacts(content)]} />
       </details>
       <div className="knowledge-actions">
         {entry.status === "candidate" && (
           <>
+            {/* 列內動作用次要按鈕：候選可能連續好幾列，主要按鈕留給頁首的「新增條目」（MASTER 7.1） */}
             <button
               type="button"
-              className="btn-primary"
-              onClick={() => void run(() => client.confirmKnowledge(entry.id, entry.revision))}
+              onClick={(event) => {
+                triggerRef.current = event.currentTarget;
+                void run(() => client.confirmKnowledge(entry.id, entry.revision));
+              }}
             >
               確認為已驗證
             </button>
-            <button type="button" className="btn-danger" onClick={() => setMode("revoke")}>
+            <button type="button" className="btn-danger" onClick={(event) => openForm("revoke", event.currentTarget)}>
               撤銷
             </button>
           </>
         )}
         {entry.status === "verified" && (
-          <button type="button" onClick={() => setMode("correct")}>
+          <button type="button" onClick={(event) => openForm("correct", event.currentTarget)}>
             修正
           </button>
         )}
-        <button type="button" className="btn-quiet" onClick={() => onOpenDetail(entry.id)}>
+        <button type="button" className="btn-quiet" onClick={(event) => onOpenDetail(entry.id, event.currentTarget)}>
           詳情
         </button>
         {/* 轉為 Guard、撤銷、淘汰是第二順位以後的動作，收進「更多」（MASTER 5.1）；只有有效的已驗證教訓能轉為 Guard */}
         {entry.status === "verified" && (
-          <MoreMenu
-            items={[
-              ...(entry.kind === "lesson" && entry.effective ? [{ label: "轉為 Guard", onSelect: () => setMode("guard") }] : []),
-              { label: "撤銷", onSelect: () => setMode("revoke"), danger: true },
-              { label: "淘汰", onSelect: () => setMode("retire"), danger: true },
-            ]}
-          />
+          <MoreMenu ariaLabel={`更多（${content.title}）`}>
+            {entry.kind === "lesson" && entry.effective && (
+              <MenuItem label="轉為 Guard" onSelect={(trigger) => openForm("guard", trigger)} />
+            )}
+            <MenuItem label="撤銷" danger onSelect={(trigger) => openForm("revoke", trigger)} />
+            <MenuItem label="淘汰" danger onSelect={(trigger) => openForm("retire", trigger)} />
+          </MoreMenu>
         )}
       </div>
       {mode === "guard" && (
         <GuardForm
-          onCancel={() => setMode(null)}
+          onCancel={closeForm}
           onSubmit={(rule) => run(() => client.createGuard({ lesson_id: entry.id, rule }))}
         />
       )}
       {mode === "correct" && (
         <CorrectForm
           entry={entry}
-          onCancel={() => setMode(null)}
+          onCancel={closeForm}
           onSubmit={(request) => run(() => client.correctKnowledge(entry.id, request))}
         />
       )}
       {(mode === "revoke" || mode === "retire") && (
         <ReasonForm
           action={mode === "revoke" ? "撤銷" : "淘汰"}
-          onCancel={() => setMode(null)}
+          onCancel={closeForm}
           onSubmit={(reason) =>
             run(() =>
               (mode === "revoke" ? client.revokeKnowledge : client.retireKnowledge)(entry.id, {
@@ -661,7 +756,11 @@ function EntryCard({ client, entry, timeZone, act, onOpenDetail }: CardProps) {
           }
         />
       )}
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
     </article>
   );
 }
@@ -678,19 +777,22 @@ function ReasonForm({ action, onSubmit, onCancel }: { action: string; onSubmit: 
     void onSubmit(reason.trim());
   };
   return (
-    <form className="knowledge-form" aria-label={action} onSubmit={submit}>
-      <label>
-        {action}原因
+    <form className="inset knowledge-form" aria-label={action} onSubmit={submit}>
+      <Field label={`${action}原因`}>
         {/* 從「更多」選單或撤銷按鈕開啟時，焦點直接到原因欄，不會掉到 body */}
         <textarea value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
-      </label>
+      </Field>
       <div className="form-actions">
         <button type="submit">確認{action}</button>
         <button type="button" onClick={onCancel}>
           取消
         </button>
       </div>
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
     </form>
   );
 }
@@ -720,19 +822,22 @@ function CorrectForm({ entry, onSubmit, onCancel }: CorrectFormProps) {
     });
   };
   return (
-    <form className="knowledge-form" aria-label="修正" onSubmit={submit}>
+    <form className="inset knowledge-form" aria-label="修正" onSubmit={submit}>
       <ContentFields draft={draft} onChange={setDraft} lesson={entry.kind === "lesson"} />
-      <label>
-        修正說明（選填）
+      <Field label="修正說明（選填）">
         <input value={note} onChange={(e) => setNote(e.target.value)} />
-      </label>
+      </Field>
       <div className="form-actions">
         <button type="submit">送出修正</button>
         <button type="button" onClick={onCancel}>
           取消
         </button>
       </div>
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
     </form>
   );
 }
@@ -774,24 +879,23 @@ function CreateForm({ client, workspace, act, onCancel }: CreateFormProps) {
   };
 
   return (
-    <form className="knowledge-form knowledge-create card" aria-label="新增條目" onSubmit={(e) => void submit(e)}>
+    <form className="panel knowledge-form knowledge-create" aria-label="新增條目" onSubmit={(e) => void submit(e)}>
       <h3>新增條目</h3>
-      <div className="knowledge-form-row">
-        <label>
-          種類
+      <p className="section-hint">你建立的條目直接是已驗證，之後的 Run 就會使用。</p>
+      <div className="field-row">
+        <Field label="種類">
           <select value={kind} onChange={(e) => setKind(e.target.value as KnowledgeKind)}>
             <option value="lesson">教訓</option>
             <option value="decision">決策</option>
             <option value="fact">知識</option>
           </select>
-        </label>
-        <label>
-          範圍
+        </Field>
+        <Field label="範圍">
           <select value={scope} onChange={(e) => setScope(e.target.value as "workspace" | "global")}>
             <option value="workspace">此 Workspace</option>
             <option value="global">全域</option>
           </select>
-        </label>
+        </Field>
       </div>
       <ContentFields draft={draft} onChange={setDraft} lesson={kind === "lesson"} />
       <div className="form-actions">
@@ -802,7 +906,11 @@ function CreateForm({ client, workspace, act, onCancel }: CreateFormProps) {
           取消
         </button>
       </div>
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
     </form>
   );
 }
@@ -835,48 +943,60 @@ function DetailPanel({ client, id, workspace, refreshKey, timeZone, act, onClose
     };
   }, [client, id, refreshKey]);
 
+  // 詳情是清單中的一列，接在開啟它的條目後面；左側群青色條表示「這是上一列展開的內容」
   return (
-    <section className="knowledge-detail card" aria-label="條目詳情">
-      <header className="card-header">
-        {loaded.state === "ready" ? <h3>詳情：{loaded.detail.entry.content.title}</h3> : <span />}
-        <button type="button" onClick={onClose}>
+    <section className="row knowledge-detail stripe-accent" aria-label="條目詳情">
+      <div className="row-head">
+        {loaded.state === "ready" ? <h4>詳情：{loaded.detail.entry.content.title}</h4> : <span />}
+        <button type="button" className="btn-sm" onClick={onClose}>
           關閉詳情
         </button>
-      </header>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得詳情：{loaded.reason}</p>}
+      </div>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {loaded.state === "failed" && (
+        <p className="field-error" role="alert">
+          無法取得詳情：{loaded.reason}
+        </p>
+      )}
       {loaded.state === "ready" && (
         <>
-          <h4>版本（由舊到新）</h4>
-          <ol className="knowledge-versions">
-            {[...loaded.detail.versions]
-              .sort((a, b) => a.version - b.version)
-              .map((version) => (
-                <li key={version.version} aria-label={`v${version.version}`}>
-                  <p>
-                    <strong>v{version.version}</strong>，{fmt(version.created_at)}
-                    {version.note && `，修正說明：${version.note}`}
-                  </p>
-                  <p>
-                    <strong>{version.content.title}</strong>
-                  </p>
-                  <ContentView content={version.content} />
-                </li>
-              ))}
-          </ol>
-          <h4>變更歷史</h4>
-          <ol className="knowledge-history">
-            {loaded.detail.history.map((event) => {
-              const payload = (event.payload ?? {}) as { reason?: unknown; superseded_by?: unknown };
-              return (
-                <li key={event.revision}>
-                  {fmt(event.occurred_at)} {EVENT_LABELS[event.event_type] ?? event.event_type}
-                  {typeof payload.reason === "string" && `：${payload.reason}`}
-                  {typeof payload.superseded_by === "string" && `（由 ${shortId(payload.superseded_by)} 取代）`}
-                </li>
-              );
-            })}
-          </ol>
+          <section className="knowledge-detail-part">
+            <h5>版本（由舊到新）</h5>
+            <ol className="knowledge-versions">
+              {[...loaded.detail.versions]
+                .sort((a, b) => a.version - b.version)
+                .map((version) => (
+                  <li key={version.version} aria-label={`v${version.version}`}>
+                    <p className="meta">
+                      <span>
+                        <strong>v{version.version}</strong>
+                      </span>
+                      <span className="tabular">{fmt(version.created_at)}</span>
+                      {version.note && <span>修正說明：{version.note}</span>}
+                    </p>
+                    <p className="knowledge-version-title">{version.content.title}</p>
+                    <ContentView content={version.content} />
+                  </li>
+                ))}
+            </ol>
+          </section>
+          <section className="knowledge-detail-part">
+            <h5>變更歷史</h5>
+            {loaded.detail.history.length === 0 && <p className="empty-note">沒有變更紀錄</p>}
+            <ol className="knowledge-history">
+              {loaded.detail.history.map((event) => {
+                const payload = (event.payload ?? {}) as { reason?: unknown; superseded_by?: unknown };
+                return (
+                  <li key={event.revision}>
+                    <span className="knowledge-history-time">{fmt(event.occurred_at)}</span>{" "}
+                    {EVENT_LABELS[event.event_type] ?? event.event_type}
+                    {typeof payload.reason === "string" && `：${payload.reason}`}
+                    {typeof payload.superseded_by === "string" && `（由 ${shortId(payload.superseded_by)} 取代）`}
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
           {loaded.detail.entry.kind === "lesson" && (
             <RecurrencePanel
               client={client}
@@ -903,18 +1023,23 @@ interface GuardSectionProps {
 /** 此 Workspace 可見的 Guard：規則說明、來源教訓、生效狀態、成效，以及停用／啟用。 */
 function GuardSection({ guards, client, timeZone, act }: GuardSectionProps) {
   return (
-    <section className="knowledge-section knowledge-guards" aria-label="Guard">
+    <section className="section knowledge-guards" aria-label="Guard">
       <div className="section-heading">
-        <h3>Guard{guards.state === "ready" && `（${guards.guards.length}）`}</h3>
+        <h3>Guard</h3>
+        {guards.state === "ready" && <span className="count">{guards.guards.length}</span>}
         <p>派工前會檢查生效中的 Guard，違反就擋下並顯示來源教訓。</p>
       </div>
       {guards.state === "loading" && <p className="empty-note">載入中…</p>}
-      {guards.state === "failed" && <p role="alert">無法取得 Guard：{guards.reason}</p>}
+      {guards.state === "failed" && (
+        <p className="field-error" role="alert">
+          無法取得 Guard：{guards.reason}
+        </p>
+      )}
       {guards.state === "ready" && guards.guards.length === 0 && (
-        <p className="empty-note">還沒有 Guard；可在有效的教訓上「轉為 Guard」</p>
+        <p className="empty-note">還沒有 Guard；可在有效教訓的「更多」選單中「轉為 Guard」</p>
       )}
       {guards.state === "ready" && guards.guards.length > 0 && (
-        <ul className="knowledge-cards">
+        <ul className="row-list">
           {guards.guards.map((guard) => (
             <GuardItem key={guard.id} guard={guard} client={client} timeZone={timeZone} act={act} />
           ))}
@@ -936,35 +1061,45 @@ function GuardItem({ guard, client, timeZone, act }: { guard: GuardView; client:
     if (failure !== null) setError(failure);
   };
 
+  // 一列＝規則說明＋狀態＋停用／啟用 → 不生效的原因 → 規則種類與來源教訓 → 成效
   return (
-    <li
-      className={`knowledge-guard card ${guard.active ? "knowledge-effective" : "knowledge-inactive"}`}
-      aria-label={guard.description}
-    >
-      <header className="card-header">
-        <strong className="clamp-2" title={guard.description}>
+    <li className={`knowledge-guard ${guard.active ? "knowledge-effective" : "knowledge-inactive"}`} aria-label={guard.description}>
+      <div className="row-head">
+        {/* 物件標題與知識條目相同（h4，MASTER 7.1）；不生效是中性狀態（badge-plain），原因寫在下方 */}
+        <h4 className="clamp-2" title={guard.description}>
           {guard.description}
-        </strong>
-        <span className={guard.active ? "badge badge-success" : "badge"}>{guard.active ? "生效中" : "不生效"}</span>
-      </header>
+        </h4>
+        <span className={guard.active ? "badge badge-success" : "badge badge-plain"}>{guard.active ? "生效中" : "不生效"}</span>
+        <button type="button" className="btn-sm" onClick={() => void toggle()}>
+          {enabled ? "停用" : "啟用"}
+        </button>
+      </div>
       {/* 不生效的原因可能是整段錯誤訊息：2 行＋展開 */}
       {!guard.active && (
         <LongText text={`原因：${guard.inactive_reason ?? "原因不明"}`} lines={2} className="knowledge-reason" />
       )}
-      <p className="knowledge-meta clamp-1" title={guard.lesson.title}>
-        {RULE_KIND_LABELS[guard.rule.kind]}・來源教訓：{guard.lesson.title}
+      <p className="meta">
+        <span>{RULE_KIND_LABELS[guard.rule.kind]}</span>
+        <span className="knowledge-guard-lesson clamp-1" title={guard.lesson.title}>
+          來源教訓：{guard.lesson.title}
+        </span>
       </p>
-      <div className="knowledge-guard-footer">
-        <p className="knowledge-meta">
-          成效：攔下 {guard.prevented_count} 次・最近攔下：
-          {guard.last_prevented_at === null ? "尚無" : formatTimestamp(guard.last_prevented_at, timeZone)}・未攔下的回報{" "}
-          {guard.reported_count} 次
+      <p className="meta knowledge-guard-effect">
+        <span>
+          攔下 <strong className="tabular">{formatNumber(guard.prevented_count)}</strong> 次
+        </span>
+        <span>
+          最近攔下：{guard.last_prevented_at === null ? "尚無" : formatTimestamp(guard.last_prevented_at, timeZone)}
+        </span>
+        <span>
+          未攔下的回報 <span className="tabular">{formatNumber(guard.reported_count)}</span> 次
+        </span>
+      </p>
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
         </p>
-        <button type="button" onClick={() => void toggle()}>
-          {enabled ? "停用" : "啟用"}
-        </button>
-      </div>
-      {error && <p role="alert">{error}</p>}
+      )}
     </li>
   );
 }
@@ -1006,22 +1141,20 @@ function GuardForm({ onSubmit, onCancel }: { onSubmit: (rule: GuardRule) => Prom
   };
 
   return (
-    <form className="knowledge-form" aria-label="轉為 Guard" onSubmit={submit}>
-      <label>
-        規則種類
-        {/* 從「更多」選單開啟時，焦點直接到第一個欄位，不會掉到 body */}
-        <select value={kind} onChange={(e) => setKind(e.target.value as GuardRule["kind"])} autoFocus>
-          {(Object.keys(RULE_KIND_LABELS) as GuardRule["kind"][]).map((k) => (
-            <option key={k} value={k}>
-              {RULE_KIND_LABELS[k]}
-            </option>
-          ))}
-        </select>
-      </label>
-      {kind === "preflight" && (
-        <>
-          <label>
-            契約欄位
+    <form className="inset knowledge-form" aria-label="轉為 Guard" onSubmit={submit}>
+      <div className="field-row">
+        <Field label="規則種類">
+          {/* 從「更多」選單開啟時，焦點直接到第一個欄位，不會掉到 body */}
+          <select value={kind} onChange={(e) => setKind(e.target.value as GuardRule["kind"])} autoFocus>
+            {(Object.keys(RULE_KIND_LABELS) as GuardRule["kind"][]).map((k) => (
+              <option key={k} value={k}>
+                {RULE_KIND_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {kind === "preflight" && (
+          <Field label="契約欄位">
             <select value={field} onChange={(e) => setField(e.target.value as ContractFieldName)}>
               {CONTRACT_FIELDS.map((name) => (
                 <option key={name} value={name}>
@@ -1029,31 +1162,30 @@ function GuardForm({ onSubmit, onCancel }: { onSubmit: (rule: GuardRule) => Prom
                 </option>
               ))}
             </select>
-          </label>
-          <label>
-            必須提到的文字（不分大小寫）
-            <input value={mention} onChange={(e) => setMention(e.target.value)} />
-          </label>
-        </>
-      )}
-      {kind === "tool_restriction" && (
-        <label>
-          禁止要求的能力
-          <select value={capability} onChange={(e) => setCapability(e.target.value as Capability)}>
-            {(Object.keys(CAPABILITY_LABELS) as Capability[]).map((c) => (
-              <option key={c} value={c}>
-                {CAPABILITY_LABELS[c]}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {kind === "retry_policy" && (
-        <label>
-          同一份契約失敗幾次後不再派工
-          {/* 範圍由送出時檢查並以既有的錯誤訊息呈現，不用瀏覽器內建的 min/max 驗證 */}
-          <input type="number" value={maxFailed} onChange={(e) => setMaxFailed(e.target.value)} />
-        </label>
+          </Field>
+        )}
+        {kind === "tool_restriction" && (
+          <Field label="禁止要求的能力">
+            <select value={capability} onChange={(e) => setCapability(e.target.value as Capability)}>
+              {(Object.keys(CAPABILITY_LABELS) as Capability[]).map((c) => (
+                <option key={c} value={c}>
+                  {CAPABILITY_LABELS[c]}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        {kind === "retry_policy" && (
+          <Field label="同一份契約失敗幾次後不再派工">
+            {/* 範圍由送出時檢查並以既有的錯誤訊息呈現，不用瀏覽器內建的 min/max 驗證 */}
+            <input type="number" className="input-short" value={maxFailed} onChange={(e) => setMaxFailed(e.target.value)} />
+          </Field>
+        )}
+      </div>
+      {kind === "preflight" && (
+        <Field label="必須提到的文字（不分大小寫）">
+          <input value={mention} onChange={(e) => setMention(e.target.value)} />
+        </Field>
       )}
       <div className="form-actions">
         <button type="submit">建立 Guard</button>
@@ -1061,7 +1193,11 @@ function GuardForm({ onSubmit, onCancel }: { onSubmit: (rule: GuardRule) => Prom
           取消
         </button>
       </div>
-      {error && <p role="alert">{error}</p>}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
     </form>
   );
 }
@@ -1118,35 +1254,45 @@ function RecurrencePanel({ client, lesson, workspace, refreshKey, timeZone, act 
   };
 
   return (
-    <section className="knowledge-recurrences" aria-label="重犯紀錄">
-      <h4>重犯紀錄</h4>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得重犯紀錄：{loaded.reason}</p>}
-      {loaded.state === "ready" && loaded.recurrences.length === 0 && <p>沒有重犯紀錄</p>}
+    <section className="knowledge-detail-part knowledge-recurrences" aria-label="重犯紀錄">
+      <h5>重犯紀錄</h5>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {loaded.state === "failed" && (
+        <p className="field-error" role="alert">
+          無法取得重犯紀錄：{loaded.reason}
+        </p>
+      )}
+      {loaded.state === "ready" && loaded.recurrences.length === 0 && <p className="empty-note">沒有重犯紀錄</p>}
       {loaded.state === "ready" && loaded.recurrences.length > 0 && (
-        <ol>
+        <ol className="knowledge-recurrence-list">
           {loaded.recurrences.map((recurrence) => (
             <li key={recurrence.id}>
-              <strong>{RECURRENCE_KIND_LABELS[recurrence.kind]}</strong>・{formatTimestamp(recurrence.occurred_at, timeZone)}
-              ・Task：{recurrence.task_id === null ? "未指定" : shortId(recurrence.task_id)}・{recurrence.message}
+              <p className="meta">
+                <span className="knowledge-recurrence-kind">{RECURRENCE_KIND_LABELS[recurrence.kind]}</span>
+                <span className="tabular">{formatTimestamp(recurrence.occurred_at, timeZone)}</span>
+                <span>Task：{recurrence.task_id === null ? "未指定" : shortId(recurrence.task_id)}</span>
+              </p>
+              <p className="knowledge-recurrence-message">{recurrence.message}</p>
             </li>
           ))}
         </ol>
       )}
       {lesson.effective && (
-        <form className="knowledge-form" aria-label="回報重犯" onSubmit={(e) => void submit(e)}>
-          <label>
-            重犯說明
+        <form className="inset knowledge-form" aria-label="回報重犯" onSubmit={(e) => void submit(e)}>
+          <Field label="重犯說明">
             <textarea value={note} onChange={(e) => setNote(e.target.value)} />
-          </label>
-          <label>
-            Task 識別（選填）
+          </Field>
+          <Field label="Task 識別（選填）">
             <input value={taskId} onChange={(e) => setTaskId(e.target.value)} />
-          </label>
+          </Field>
           <div className="form-actions">
             <button type="submit">回報重犯</button>
           </div>
-          {error && <p role="alert">{error}</p>}
+          {error && (
+            <p className="field-error" role="alert">
+              {error}
+            </p>
+          )}
         </form>
       )}
     </section>

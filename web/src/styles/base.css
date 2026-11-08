@@ -13,10 +13,16 @@
 
 body {
   margin: 0;
+  background: var(--color-bg);
 }
 
-/* 長 token 不撐破版面（MASTER 6.2）：全站至少在單字邊界放不下時斷開；
-   會進入 flex／grid 的文字元素用 anywhere，斷點才會算進 min-content、欄位才真的能縮小。
+/* hidden 屬性一律隱藏：元件的 display 規則（例如 .row-list 的 grid）會蓋掉瀏覽器內建的 [hidden] */
+[hidden] {
+  display: none !important;
+}
+
+/* 長 token 不撐破版面：全站至少在單字邊界放不下時斷開；
+   會進入 flex／grid 的文字元素用 anywhere，斷點才算進 min-content。
    不用 word-break: break-all（中文本來就逐字可斷，break-all 只會把英文單字從中間切開） */
 :where(body) {
   overflow-wrap: break-word;
@@ -26,14 +32,19 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* 標題：頁面標題（h2）在 components.css 的 .page-header 放大成 page 字級；
+   這裡是一般情況下的層次 */
 :where(h1, h2, h3, h4, h5) {
   margin: 0 0 var(--space-4);
   font-weight: var(--font-weight-strong);
+  text-wrap: balance;
 }
 
 :where(h1) {
-  font-size: var(--text-title-lg);
-  line-height: var(--leading-title-lg);
+  font-family: var(--font-display);
+  font-size: var(--text-page);
+  font-weight: var(--font-weight-heavy);
+  line-height: var(--leading-page);
 }
 
 :where(h2) {
@@ -51,7 +62,7 @@ body {
   line-height: var(--leading-title-sm);
 }
 
-/* 段落：閱讀寬度上限約每行 46 個中文字，減少段尾孤字 */
+/* 段落：閱讀寬度上限，減少段尾孤字 */
 :where(p) {
   max-inline-size: var(--measure);
   margin: 0 0 var(--space-4);
@@ -64,11 +75,13 @@ body {
 
 :where(a) {
   color: var(--color-accent);
-  text-decoration: none;
+  text-decoration: underline;
+  text-decoration-color: var(--color-accent-border);
+  text-underline-offset: 3px;
 }
 
 :where(a:hover) {
-  text-decoration: underline;
+  text-decoration-color: currentColor;
 }
 
 /* 等寬內容（識別碼、路徑、雜湊、URL）：可在任何字元斷開 */
@@ -92,17 +105,17 @@ body {
   box-sizing: border-box;
   max-width: 100%;
   max-height: 24lh;
+  margin: 0;
   padding: var(--space-4) var(--space-5);
   overflow: auto;
-  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface-sunken);
   line-height: var(--leading-code);
 }
 
-/* 按鈕：預設為次要按鈕（中性細框、不加陰影）；送出鈕（type="submit"）是表單的主要動作，用強調色。
-   其他變體（.btn-primary、.btn-quiet、.btn-danger）在 components.css。
-   在 grid 容器中不被拉滿整列（justify-self 對 flex 與一般區塊沒有作用） */
+/* 按鈕：預設是次要按鈕（中性細框、不加陰影）；送出鈕（type="submit"）是表單的主要動作，用強調色。
+   其他變體（.btn-primary、.btn-quiet、.btn-danger、.btn-sm）在 components.css。
+   在 grid 容器中不被拉滿整列 */
 :where(button) {
   display: inline-flex;
   gap: var(--space-3);
@@ -120,6 +133,7 @@ body {
   font-size: var(--text-meta);
   font-weight: var(--font-weight-normal);
   line-height: var(--leading-meta);
+  white-space: nowrap;
   cursor: pointer;
   transition:
     background-color var(--duration-fast) var(--ease-out),
@@ -128,6 +142,7 @@ body {
 }
 
 :where(button:hover:not(:disabled)) {
+  border-color: var(--color-control-border);
   background: var(--color-surface-hover);
 }
 
@@ -165,8 +180,11 @@ body {
   line-height: var(--leading-meta);
 }
 
-/* 多行輸入依內容長高：最少 3 行、最多 16 行，再多就在框內捲動；
-   不支援 field-sizing 的環境維持 rows 屬性的高度 */
+:where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"]), select, textarea):hover:not(:disabled) {
+  border-color: var(--color-text-muted);
+}
+
+/* 多行輸入依內容長高：最少 3 行、最多 16 行，再多就在框內捲動 */
 :where(textarea) {
   min-height: 3lh;
   max-height: 16lh;
@@ -181,7 +199,23 @@ body {
 }
 
 :where(input[type="checkbox"], input[type="radio"]) {
+  width: 15px;
+  height: 15px;
+  margin: 0;
   accent-color: var(--color-accent);
+}
+
+/* label 包著核取方塊／選項時：控制項與文字同一列、對齊第一行 */
+:where(label:has(> input[type="checkbox"], > input[type="radio"])) {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  cursor: pointer;
+}
+
+:where(label > input[type="checkbox"], label > input[type="radio"]) {
+  flex: none;
+  align-self: center;
 }
 
 :where(button, input, select, textarea, summary, a):focus-visible {
@@ -209,6 +243,15 @@ body {
   cursor: pointer;
 }
 
+:where(details > summary) {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+:where(details > summary:hover) {
+  color: var(--color-text);
+}
+
 /* 表格：只留橫向細線，表頭用次要文字色；資料表的欄寬規則見 components.css 的 .data-table */
 :where(table) {
   border-collapse: collapse;
@@ -228,11 +271,25 @@ body {
 }
 
 :where(hr) {
+  margin: var(--space-6) 0;
   border: 0;
   border-top: 1px solid var(--color-border);
 }
 
-/* flex／grid 子元素可以縮小（MASTER 6.4）：min-width 預設 auto＝內容的 min-content，
+:where(dl) {
+  margin: 0;
+}
+
+:where(dd) {
+  margin: 0;
+}
+
+:where(ul, ol) {
+  margin: 0;
+  padding-left: var(--space-7);
+}
+
+/* flex／grid 子元素可以縮小：min-width 預設 auto＝內容的 min-content，
    一個不能斷的長 token、<pre> 或 <select> 就會把整欄、進而整頁撐寬。
    只套用在主區的區塊容器；權重為 0，需要最小寬度的元件以自己的 class 覆寫 */
 :where(.main) :where(section, article, aside, header, footer, nav, form, fieldset, label, div, details, dl, dt, dd, ul, ol, li, p, figure, table) {

@@ -132,12 +132,17 @@ describe("成果", () => {
     expect(screen.queryByRole("region", { name: "未登記的檔案" })).not.toBeInTheDocument();
   });
 
-  it("每個成果顯示名稱、所屬 Task 與最新版本；舊版本預設收合，展開後由新到舊列出", async () => {
+  it("成果依所屬 Task 分組；每個成果顯示名稱與最新版本，舊版本預設收合，展開後由新到舊列出", async () => {
     const user = userEvent.setup();
     renderPage(fakeClient({ artifacts: [artifact()], unregistered_files: [] }));
 
     const card = await screen.findByRole("article", { name: "report.md" });
-    expect(card).toHaveTextContent("Task：task_1");
+    // 分組標題是 Task（取不到標題時是識別碼），成果在該組之內
+    const group = screen.getByRole("region", { name: "task_1" });
+    expect(group).toContainElement(card);
+    // 計數只放數字，不加單位
+    expect(within(group).getByText("1", { selector: ".count" })).toBeInTheDocument();
+    expect(group).not.toHaveTextContent("個成果");
     const latest = within(card).getByRole("listitem", { name: "report.md v2" });
     expect(latest).toHaveTextContent("最新");
     expect(latest).toHaveTextContent("24 位元組");
@@ -146,19 +151,19 @@ describe("成果", () => {
     expect(sha).toHaveClass("mono");
     expect(sha).toHaveAttribute("title", SHA);
     expect(within(latest).getByRole("button", { name: "複製雜湊（v2）" })).toBeInTheDocument();
-    expect(latest).toHaveTextContent("產生者 Run（第 2 次）：run_2");
+    expect(latest).toHaveTextContent("產生者 Run（第 2 次） run_2");
     expect(latest).toHaveTextContent("2023/11/15 06:15");
     expect(latest).toHaveTextContent("第 2 版說明");
     expect(within(card).queryByRole("listitem", { name: "report.md v1" })).not.toBeInTheDocument();
 
-    await user.click(within(card).getByRole("button", { name: "全部版本（2）" }));
+    await user.click(within(card).getByRole("button", { name: "全部版本 2" }));
 
     const items = within(card).getAllByRole("listitem");
     expect(items.map((item) => item.getAttribute("aria-label"))).toEqual(["report.md v2", "report.md v1"]);
-    expect(within(card).getByRole("button", { name: "全部版本（2）" })).toHaveAttribute("aria-expanded", "true");
+    expect(within(card).getByRole("button", { name: "全部版本 2" })).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("大檔案換算單位並附千分位位元組；長的 Task 與 Run 識別碼縮短，完整值可複製", async () => {
+  it("大檔案換算單位並附千分位位元組；長的 Task（分組標題）與 Run 識別碼縮短，完整值可複製", async () => {
     const taskId = "task_7b5deb026d9841b0cced7314aa0f9e8d";
     const runId = "run_0_e3b0c44298fc1c149afbf4c8996fb924";
     renderPage(
@@ -169,27 +174,54 @@ describe("成果", () => {
     );
 
     const card = await screen.findByRole("article", { name: "report.md" });
+    const group = screen.getByRole("region", { name: "task_7b5deb…9e8d" });
     const latest = within(card).getByRole("listitem", { name: "report.md v1" });
     expect(latest).toHaveTextContent("1.15 GB（1,234,567,892 位元組）");
-    expect(within(card).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
+    expect(within(group).getByRole("heading", { level: 3 })).toHaveTextContent("task_7b5deb…9e8d");
+    expect(within(group).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
     expect(within(latest).getByText("run_0_e3b0…b924")).toHaveAttribute("title", runId);
-    // 同一張卡的兩個「複製識別碼」以欄位名區分（可存取名稱包含看得到的按鈕文字）
-    expect(within(card).getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
+    // 同一區的兩個「複製識別碼」以欄位名區分（可存取名稱包含看得到的按鈕文字）
+    expect(within(group).getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
     expect(within(latest).getByRole("button", { name: "複製識別碼（v1 產生者 Run）" })).toBeInTheDocument();
   });
 
-  it("成果卡顯示所屬 Task 的標題（完整標題在 title），不顯示識別碼", async () => {
+  it("分組標題是所屬 Task 的標題（最多兩行，完整標題在 title），不顯示識別碼", async () => {
     const title = "整理文件目錄，讓新成員能找到各模組的說明";
     const client = fakeClient({ artifacts: [artifact()], unregistered_files: [] }, undefined, boardOf([taskOf("task_1", title, "completed")]));
     renderPage(client);
 
     const card = await screen.findByRole("article", { name: "report.md" });
-    const task = within(card).getByText(title);
-    expect(task).toHaveAttribute("title", title);
-    expect(card).toHaveTextContent(`Task：${title}`);
-    expect(card).not.toHaveTextContent("task_1");
-    expect(within(card).queryByRole("button", { name: "複製識別碼（Task）" })).not.toBeInTheDocument();
+    const group = screen.getByRole("region", { name: title });
+    expect(group).toContainElement(card);
+    const heading = within(group).getByRole("heading", { level: 3, name: title });
+    expect(heading).toHaveAttribute("title", title);
+    expect(heading).toHaveClass("clamp-2");
+    expect(group).not.toHaveTextContent("task_1");
+    expect(within(group).queryByRole("button", { name: "複製識別碼（Task）" })).not.toBeInTheDocument();
     expect(client.getTaskBoard).toHaveBeenCalledWith("ws_1");
+  });
+
+  it("有 onOpenPage 時分組標題旁有「在工作頁查看」，按下前往工作頁；沒有傳入時不顯示", async () => {
+    const title = "整理文件目錄，讓新成員能找到各模組的說明";
+    const onOpenPage = vi.fn();
+    const user = userEvent.setup();
+    const client = fakeClient({ artifacts: [artifact()], unregistered_files: [] }, undefined, boardOf([taskOf("task_1", title, "completed")]));
+    const { unmount } = render(<ArtifactsPage client={client} workspace={workspace} timeZone="Asia/Taipei" onOpenPage={onOpenPage} />);
+
+    const group = await screen.findByRole("region", { name: title });
+    // 計數與連結接在標題之後（同一個不換行的標題列）
+    const heading = within(group).getByRole("heading", { level: 3, name: title });
+    const link = within(group).getByRole("button", { name: `在工作頁查看（${title}）` });
+    expect(link).toHaveTextContent(/^在工作頁查看$/);
+    expect(heading.parentElement).toContainElement(link);
+    expect(heading.nextElementSibling).toHaveClass("count");
+    await user.click(link);
+    expect(onOpenPage).toHaveBeenCalledWith("tasks");
+    unmount();
+
+    renderPage(fakeClient({ artifacts: [artifact()], unregistered_files: [] }));
+    await screen.findByRole("article", { name: "report.md" });
+    expect(screen.queryByRole("button", { name: /^在工作頁查看/ })).not.toBeInTheDocument();
   });
 
   it("讀不到 Task 清單時，成果仍然列出，Task 退回顯示縮短的識別碼", async () => {
@@ -197,8 +229,10 @@ describe("成果", () => {
     renderPage(fakeClient({ artifacts: [artifact({ task_id: taskId })], unregistered_files: [] }, undefined, new Error("需要桌面憑證")));
 
     const card = await screen.findByRole("article", { name: "report.md" });
-    expect(within(card).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
-    expect(within(card).getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
+    const group = screen.getByRole("region", { name: "task_7b5deb…9e8d" });
+    expect(group).toContainElement(card);
+    expect(within(group).getByText("task_7b5deb…9e8d")).toHaveAttribute("title", taskId);
+    expect(within(group).getByRole("button", { name: "複製識別碼（Task）" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -206,8 +240,8 @@ describe("成果", () => {
     renderPage(fakeClient({ artifacts: [artifact()], unregistered_files: [] }, undefined, boardOf([taskOf("task_9", "別的 Task", "running")])));
 
     const card = await screen.findByRole("article", { name: "report.md" });
-    expect(card).toHaveTextContent("Task：task_1");
-    expect(card).not.toHaveTextContent("別的 Task");
+    expect(screen.getByRole("region", { name: "task_1" })).toContainElement(card);
+    expect(screen.queryByText("別的 Task")).not.toBeInTheDocument();
   });
 
   it("成果名稱最多顯示兩行，完整名稱在 title", async () => {
@@ -215,7 +249,7 @@ describe("成果", () => {
     renderPage(fakeClient({ artifacts: [artifact({ name })], unregistered_files: [] }));
 
     const card = await screen.findByRole("article", { name });
-    const heading = within(card).getByRole("heading", { level: 3, name });
+    const heading = within(card).getByRole("heading", { level: 4, name });
     expect(heading).toHaveClass("clamp-2");
     expect(heading).toHaveAttribute("title", name);
   });
@@ -230,7 +264,7 @@ describe("成果", () => {
     renderPage(fakeClient({ artifacts: [artifact({ name })], unregistered_files: [] }));
 
     const card = await screen.findByRole("article", { name });
-    const heading = within(card).getByRole("heading", { level: 3, name });
+    const heading = within(card).getByRole("heading", { level: 4, name });
     expect(heading).toHaveAttribute("title", name);
     expect(heading.querySelector(".clamp-2")).toHaveTextContent(`fixtures/${"very_long_artifact_file_name_".repeat(6)}`);
     expect(heading.querySelector(".artifact-name-ext")).toHaveTextContent(/^\.json$/);
@@ -243,7 +277,7 @@ describe("成果", () => {
     expect(screen.queryByRole("button", { name: /全部版本/ })).not.toBeInTheDocument();
   });
 
-  it("檔案遺失或大小不符時以警示標示該版本不可信", async () => {
+  it("檔案遺失或大小不符時，版本列上有「不可信」徽章與一行原因", async () => {
     const user = userEvent.setup();
     renderPage(
       fakeClient({
@@ -257,13 +291,15 @@ describe("成果", () => {
     );
 
     const card = await screen.findByRole("article", { name: "report.md" });
-    expect(within(within(card).getByRole("listitem", { name: "report.md v2" })).getByRole("alert")).toHaveTextContent(
-      "檔案大小與登記不符，不可信",
-    );
-    await user.click(within(card).getByRole("button", { name: "全部版本（2）" }));
-    expect(within(within(card).getByRole("listitem", { name: "report.md v1" })).getByRole("alert")).toHaveTextContent(
-      "檔案遺失，不可信",
-    );
+    // 狀態詞是版本號旁的紅色徽章，一眼看得出這一列不可用；原因是下一行的一般文字
+    const v2 = within(card).getByRole("listitem", { name: "report.md v2" });
+    expect(within(v2).getByText("不可信")).toHaveClass("badge", "badge-danger");
+    expect(within(v2).getByText("不可信").closest(".artifact-version-name")).toHaveTextContent(/^v2最新不可信$/);
+    expect(v2).toHaveTextContent("檔案大小與登記不符，這個版本不可使用");
+    await user.click(within(card).getByRole("button", { name: "全部版本 2" }));
+    const v1 = within(card).getByRole("listitem", { name: "report.md v1" });
+    expect(within(v1).getByText("不可信")).toHaveClass("badge", "badge-danger");
+    expect(v1).toHaveTextContent("檔案遺失，這個版本不可使用");
   });
 
   it("狀態正常的版本沒有警示", async () => {
@@ -271,6 +307,7 @@ describe("成果", () => {
 
     await screen.findByRole("article", { name: "report.md" });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("不可信")).not.toBeInTheDocument();
   });
 
   it("預覽文字內容；再按一次收合", async () => {
@@ -384,7 +421,7 @@ describe("成果", () => {
     });
   });
 
-  it("未登記的檔案獨立一區，說明不是成果、不可使用", async () => {
+  it("未登記的檔案獨立一區，說明不是成果、不可使用（不出現 manifest 這個工程用語）", async () => {
     renderPage(
       fakeClient({
         artifacts: [artifact()],
@@ -396,7 +433,8 @@ describe("成果", () => {
     );
 
     const section = await screen.findByRole("region", { name: "未登記的檔案" });
-    expect(section).toHaveTextContent("未登記、不可使用");
+    expect(section).toHaveTextContent("沒有登記到成果清單的檔案；它們不是成果，不可使用。");
+    expect(section).not.toHaveTextContent("manifest");
     const items = within(section).getAllByRole("listitem");
     expect(items[0]).toHaveTextContent("ws/blob_a.partial");
     expect(items[0]).toHaveTextContent("暫存檔，內容不完整");

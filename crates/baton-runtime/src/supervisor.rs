@@ -1054,12 +1054,12 @@ impl Supervisor {
 
     /// 帳號 Profile 的 `CLAUDE_CONFIG_DIR`。
     async fn config_dir_of(&self, profile_id: &str) -> Result<String, String> {
-        let profiles = self.store.list_profiles().await.map_err(|e| format!("無法讀取帳號 Profile：{e}"))?;
+        let profiles = self.store.list_profiles().await.map_err(|e| format!("無法讀取帳號：{e}"))?;
         profiles
             .into_iter()
             .find(|p| p.id == profile_id)
             .map(|p| p.config_dir)
-            .ok_or_else(|| format!("找不到 Run 的帳號 Profile {profile_id}"))
+            .ok_or_else(|| format!("找不到 Run 的帳號 {profile_id}"))
     }
 
     /// 寫入 launch intent 之前，對可以沿用的 Session 查驗原生接續能力（票 15）。沒有候選時不需要查驗；

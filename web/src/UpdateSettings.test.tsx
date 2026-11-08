@@ -41,6 +41,12 @@ describe("更新設定", () => {
     expect(await fact("狀態")).toBe(text);
   });
 
+  it("有新版本時版本號用等寬字（MASTER 7.1）", async () => {
+    renderSettings(fakeClient(availableUpdateStatus()));
+
+    expect(await screen.findByText("0.2.0")).toHaveClass("mono");
+  });
+
   it("還沒檢查過時，上次與下次檢查顯示為尚未檢查與未排定", async () => {
     renderSettings(fakeClient(updateStatus({ status: "not_checked", checked_at: null, next_check_at: null })));
 
@@ -61,7 +67,11 @@ describe("更新設定", () => {
 
     renderSettings(client);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得更新狀態：connection refused");
+    // Runtime 的錯誤可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).not.toHaveClass("callout");
+    expect(alert).toHaveTextContent(/^無法取得更新狀態connection refused$/);
   });
 
   it("載入中先顯示提示", () => {

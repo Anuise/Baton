@@ -1,6 +1,6 @@
 //! 驅動 `driver.mjs`（Playwright + Chromium）的用戶端：一個要求一行 JSON、一個回應一行 JSON。
 //!
-//! 目標元素以「定位鏈」描述，例如 `&[role("region", "工作面板"), role("button", "派工")]`：
+//! 目標元素以「定位鏈」描述，例如 `&[role("region", "工作"), role("button", "派工")]`：
 //! 每一節在前一節找到的範圍內再找（Playwright 的 `getByRole`／`getByLabel`／`getByText`）。
 //! 多個元素符合時 Playwright 會報錯，不會任意挑一個；需要時以 `nth` 指定。
 //!

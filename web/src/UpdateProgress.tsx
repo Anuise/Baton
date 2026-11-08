@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { outcomeText, seconds } from "./ExitProgress";
-import type { LifecycleClient, LifecycleStatus, Maintenance, UpdateClient } from "./runtimeClient";
+import { FailureNotice, outcomeText, RunLabel, StopPhase, StopRuns } from "./ExitProgress";
+import type { ExitRunResult, LifecycleClient, LifecycleStatus, Maintenance, UpdateClient } from "./runtimeClient";
 
 type InstallState = { state: "idle" } | { state: "installing" } | { state: "failed"; reason: string };
 
@@ -37,6 +37,12 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
   const autoInstalled = useRef(false);
   // 一開始就是準備套用時，之後讀到的停止結果都是最終的
   const readySeen = useRef(initial.phase === "ready");
+  const titleRef = useRef<HTMLHeadingElement>(null);
+
+  // 對話框出現時焦點移進對話框（標題），不留在背後已消失的「更新並重新開啟…」或 body
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
 
   const phase = maintenance.phase;
   const hasFinal = finalLifecycle !== null;
@@ -84,6 +90,12 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
     }
   }, [client]);
 
+  /** 使用者按下的安裝按鈕會隨安裝開始而消失：先把焦點移到對話框標題，不落到 body。 */
+  const installFromButton = () => {
+    titleRef.current?.focus();
+    void installNow();
+  };
+
   const report = lifecycle?.exit ?? null;
   const anomalies = finalLifecycle?.exit?.runs.filter((run) => run.outcome === "anomaly") ?? [];
   const canAutoInstall = phase === "ready" && hasFinal && anomalies.length === 0;
@@ -109,52 +121,50 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
   // 準備套用卻讀不到最終的停止結果：無法確認工作都已停止，交給使用者決定
   const unconfirmed = phase === "ready" && !hasFinal && pollError !== null && !unreachable;
 
+  const stageTone = phase === "failed" ? "danger" : phase === "ready" || stopped ? "accent" : "warning";
+  const runLabel = (run: ExitRunResult) => (
+    <RunLabel workspace={workspaceName(run.workspace_id)}>
+      <code className="mono">{run.run_id}</code>
+    </RunLabel>
+  );
+
   return (
-    <div className="exit-overlay">
-      <section className="exit-progress" role="dialog" aria-modal="true" aria-labelledby="update-progress-title">
-        <h2 id="update-progress-title">更新 Baton</h2>
+    <div className="overlay">
+      <section className="dialog-panel exit-progress" role="dialog" aria-modal="true" aria-labelledby="update-progress-title">
+        <h2 id="update-progress-title" ref={titleRef} tabIndex={-1}>
+          更新 Baton
+        </h2>
+        {/* 版本號用等寬字（MASTER 7.1） */}
         <p>
-          {maintenance.target_version === null
-            ? `從 ${maintenance.from_version} 更新`
-            : `從 ${maintenance.from_version} 更新到 ${maintenance.target_version}`}
-        </p>
-        <p className="exit-phase">
-          <strong>{stage}</strong>
-          {report && phase === "stopping" && !stopped && (
-            <span>
-              距期限剩餘 {seconds(report.deadline_at - Date.now())} 秒（上限 {seconds(report.deadline_at - report.requested_at)}{" "}
-              秒）
-            </span>
+          從 <span className="mono">{maintenance.from_version}</span> 更新
+          {maintenance.target_version !== null && (
+            <>
+              到 <span className="mono">{maintenance.target_version}</span>
+            </>
           )}
-          {report?.completed_at != null && <span>停止耗時 {seconds(report.completed_at - report.requested_at)} 秒</span>}
         </p>
-        {report && report.runs.length > 0 && (
-          <ul className="exit-runs" aria-label="Run 停止結果">
-            {report.runs.map((run) => (
-              <li key={run.run_id} className={`exit-run exit-run-${run.outcome}`}>
-                <span>
-                  {workspaceName(run.workspace_id)} · {run.run_id}
-                </span>
-                <strong>{outcomeText(run)}</strong>
-              </li>
-            ))}
-          </ul>
+        <StopPhase
+          label={stage}
+          tone={stageTone}
+          report={report}
+          deadline={phase === "stopping" && !stopped}
+          elapsedLabel="停止耗時"
+        />
+        <StopRuns report={report} label={runLabel} />
+        {phase === "stopping" && stopped && <p className="dot dot-accent">工作已停止，正在備份資料…</p>}
+        {/* 系統暫時的狀態、會繼續輪詢：中性的長警示（原因來自 Runtime，可能很長），不用琥珀色（MASTER 7.1） */}
+        {phase === "stopping" && pollError && !unreachable && (
+          <div role="alert" className="notice">
+            <p className="notice-title">暫時無法取得更新進度</p>
+            <p>{pollError}</p>
+          </div>
         )}
-        {report && report.notes.length > 0 && (
-          <ul className="exit-notes">
-            {report.notes.map((note, index) => (
-              <li key={index}>{note}</li>
-            ))}
-          </ul>
-        )}
-        {phase === "stopping" && stopped && <p>工作已停止，正在備份資料…</p>}
-        {phase === "stopping" && pollError && !unreachable && <p role="alert">暫時無法取得更新進度：{pollError}</p>}
         {unreachable && install.state === "idle" && (
           <div className="exit-anomalies" role="alert">
             <p>Runtime 已無法連線：{pollError}</p>
             <p>若更新已準備好可以直接安裝；否則關閉 Baton 後重新開啟。</p>
-            <div className="exit-actions">
-              <button type="button" onClick={() => void installNow()}>
+            <div className="dialog-actions">
+              <button type="button" className="btn-primary" onClick={installFromButton}>
                 嘗試安裝更新
               </button>
               <button type="button" onClick={() => void client.quitApp()}>
@@ -163,7 +173,7 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
             </div>
           </div>
         )}
-        {install.state === "installing" && <p>正在安裝更新並重新開啟…</p>}
+        {install.state === "installing" && <p className="dot dot-accent">正在安裝更新並重新開啟…</p>}
         {phase === "ready" && install.state === "idle" && anomalies.length > 0 && (
           <div className="exit-anomalies" role="alert">
             <p>
@@ -172,28 +182,32 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
             <ul>
               {anomalies.map((run) => (
                 <li key={run.run_id}>
-                  {workspaceName(run.workspace_id)} · {run.run_id}：{outcomeText(run)}
+                  {runLabel(run)}：{outcomeText(run)}
                 </li>
               ))}
             </ul>
-            <button type="button" onClick={() => void installNow()}>
-              仍要安裝更新並重新開啟
-            </button>
+            <div className="dialog-actions">
+              <button type="button" className="btn-primary" onClick={installFromButton}>
+                仍要安裝更新並重新開啟
+              </button>
+            </div>
           </div>
         )}
         {unconfirmed && install.state === "idle" && (
           <div className="exit-anomalies" role="alert">
             <p>無法確認工作是否都已停止：{pollError}</p>
-            <button type="button" onClick={() => void installNow()}>
-              仍要安裝更新並重新開啟
-            </button>
+            <div className="dialog-actions">
+              <button type="button" className="btn-primary" onClick={installFromButton}>
+                仍要安裝更新並重新開啟
+              </button>
+            </div>
           </div>
         )}
         {install.state === "failed" && (
           <>
-            <p role="alert">無法安裝更新：{install.reason}</p>
-            <div className="exit-actions">
-              <button type="button" onClick={() => void installNow()}>
+            <FailureNotice title="無法安裝更新" reason={install.reason} />
+            <div className="dialog-actions">
+              <button type="button" className="btn-primary" onClick={installFromButton}>
                 重試
               </button>
               <button type="button" onClick={() => void client.quitApp()}>
@@ -204,10 +218,10 @@ export function UpdateProgress({ client, maintenance: initial, pollMs = 500 }: P
         )}
         {phase === "failed" && (
           <>
-            <p role="alert">更新沒有套用：{maintenance.message ?? "原因不明"}</p>
+            <FailureNotice title="更新沒有套用" reason={maintenance.message ?? "原因不明"} />
             <p>Baton 已完全退出；重新開啟後會依各 Workspace 的設定繼續工作。</p>
-            <div className="exit-actions">
-              <button type="button" onClick={() => void client.quitApp()}>
+            <div className="dialog-actions">
+              <button type="button" className="btn-primary" onClick={() => void client.quitApp()}>
                 關閉 Baton
               </button>
             </div>

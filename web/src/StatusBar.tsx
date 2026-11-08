@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { platformStatusLabel } from "./PlatformPage";
-import { splitFirstSentence } from "./textFormat";
+import { formatNumber, splitFirstSentence } from "./textFormat";
 import type {
   AccountClient,
   DecisionClient,
@@ -36,7 +36,7 @@ interface Props {
 /** 監護不在、Runtime 又沒有附訊息時的降級提示。 */
 const GUARDIAN_UNAVAILABLE_FALLBACK = "工作繼續，自動重啟保護不可用";
 
-/** 頂部狀態列（spec D-21）：Runtime 狀態、平台支援狀態、可用帳號數、待裁定數、恢復事件、監護狀態與儲存故障。 */
+/** 狀態列（spec D-21，位於跑道欄底部）：Runtime 狀態、平台支援狀態、可用帳號數、待裁定數、恢復事件、監護狀態與儲存故障。 */
 export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshKey }: Props) {
   const [status, setStatus] = useState<RuntimeStatus>({ state: "checking" });
   // null：尚未取得或讀取失敗，顯示為「未知」，不影響 Runtime 狀態
@@ -89,7 +89,9 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
       {status.state === "offline" && (
         <>
           <span className="status status-offline">Runtime 未連線</span>
-          <span className="status-reason">{status.reason}</span>
+          <span className="status-reason" title={status.reason}>
+            {status.reason}
+          </span>
         </>
       )}
       {status.state === "running" && (
@@ -98,11 +100,11 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
         </span>
       )}
       {status.state === "running" && usableAccounts !== null && (
-        <span className="status status-accounts">可用帳號：{usableAccounts}</span>
+        <span className="status status-accounts">可用帳號：{formatNumber(usableAccounts)}</span>
       )}
       {status.state === "running" && pending !== null && (
         <span className={`status status-decisions${pending.pending_count > 0 ? " status-decisions-pending" : ""}`}>
-          待裁定：{pending.pending_count}
+          待裁定：{formatNumber(pending.pending_count)}
         </span>
       )}
       {/* 恢復事件未結束時固定顯示（spec D-21）；已恢復就不再佔位 */}
@@ -118,12 +120,18 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
         <span className="status status-guardian-active">監護：運作中</span>
       )}
       {status.state === "running" && status.health.guardian?.state === "unavailable" && (
-        <span className="status status-guardian-unavailable" role="alert">
+        // 跑道欄窄，最多顯示三行；完整訊息在 title
+        <span
+          className="status status-guardian-unavailable"
+          role="alert"
+          title={status.health.guardian.message ?? GUARDIAN_UNAVAILABLE_FALLBACK}
+        >
           {status.health.guardian.message ?? GUARDIAN_UNAVAILABLE_FALLBACK}
         </span>
       )}
+      {/* 儲存故障的完整說明由 App 以整寬警示顯示（StorageFault），這裡只留狀態 */}
       {status.state === "running" && status.health.storage?.dispatch_halted && (
-        <StorageFault fault={status.health.storage.fault ?? null} />
+        <span className="status status-storage-halted">新派工已停止</span>
       )}
     </header>
   );
@@ -131,18 +139,18 @@ export function StatusBar({ client, pollMs = 5000, onHealth, onPending, refreshK
 
 type StorageFaultView = NonNullable<NonNullable<HealthResponse["storage"]>["fault"]>;
 
-/** 儲存故障：狀態詞做成徽章；原因的第一句與處理方式完整顯示，其餘與技術細節收進「技術細節」。 */
-function StorageFault({ fault }: { fault: StorageFaultView | null }) {
+/** 儲存故障的整寬警示：狀態詞在前；原因的第一句與處理方式完整顯示，其餘與技術細節收進「詳細資訊」。 */
+export function StorageFault({ fault }: { fault: StorageFaultView | null }) {
   const reason = fault && splitFirstSentence(fault.summary);
   return (
     <div className="status-storage-fault" role="alert">
-      <strong className="badge badge-danger">新派工已停止</strong>
+      <p className="status-storage-title">新派工已停止</p>
       {fault && reason && (
         <div className="status-storage-body">
           <p>{reason.summary}</p>
           <p>{fault.action}</p>
           <details className="status-storage-detail">
-            <summary>技術細節</summary>
+            <summary>詳細資訊</summary>
             {reason.rest && <p>{reason.rest}</p>}
             <p className="mono">{fault.detail}</p>
           </details>

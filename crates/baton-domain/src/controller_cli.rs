@@ -161,9 +161,9 @@ pub enum ControllerCliError {
     WorkspaceNotFound(String),
     #[error("Workspace 已封存，不能開啟 Controller CLI")]
     WorkspaceArchived,
-    #[error("找不到帳號 Profile {0}")]
+    #[error("找不到帳號 {0}")]
     ProfileNotFound(String),
-    #[error("這個 Profile 目前不能當 Controller 帳號：{0}")]
+    #[error("這個帳號目前不能當 Controller 帳號：{0}")]
     ProfileUnavailable(String),
     #[error("這個 Workspace 已有開啟中的 Controller CLI（{0}）；請切到已開啟的視窗，或先結束它")]
     AlreadyOpen(String),
@@ -378,7 +378,7 @@ pub fn begin_launch(
         };
     }
     let unavailable = match profiles.iter().find(|p| p.id == run.profile_id) {
-        None => Some("找不到這個帳號 Profile".to_string()),
+        None => Some("找不到這個帳號".to_string()),
         Some(profile) => profile_unavailable_reason(profile, profiles),
     };
     if let Some(reason) = unavailable {

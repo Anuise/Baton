@@ -344,14 +344,36 @@ export function normalData(): PreviewData {
       events: [
         timelineEvent(),
         timelineEvent({ seq: 2, occurred_at: CHECKED_AT + 60_000, category: "decision", aggregate_type: "decision", aggregate_id: "dec_1", event_type: "decision_requested", run_id: null }),
-        timelineEvent({ seq: 3, occurred_at: CHECKED_AT + 120_000, category: "verification", aggregate_type: "task", aggregate_id: "task_2", event_type: "verification_passed", task_ids: ["task_2"], run_id: "run_2" }),
+        timelineEvent({ seq: 3, occurred_at: CHECKED_AT + 120_000, category: "verification", aggregate_type: "task", aggregate_id: "task_2", event_type: "task_verification_recorded", task_ids: ["task_2"], run_id: "run_2" }),
       ],
     },
     metrics: metricsResponse(),
     understanding: understandingView(),
     workflows: workflowList(),
     reviews: reviewList(),
-    verification: verificationOverview(),
+    // 一筆還在排隊的驗證要求（Controller 排入），讓「等待結果的驗證」區段在預覽中看得到
+    verification: (() => {
+      const overview = verificationOverview();
+      return {
+        ...overview,
+        requests: [
+          {
+            id: "vreq_queued",
+            workspace_id: overview.workspace_id,
+            task_id: "task_2",
+            profile_version_id: overview.profile?.id ?? "vprof_2",
+            profile_version: overview.profile?.version ?? 2,
+            journeys: ["smoke"],
+            requested_by: "crun_1",
+            status: "queued" as const,
+            bundle_id: null,
+            created_at: CHECKED_AT + 600_000,
+            no_live_model: false,
+          },
+          ...overview.requests,
+        ],
+      };
+    })(),
     exploration: explorationOverview(),
   };
 }

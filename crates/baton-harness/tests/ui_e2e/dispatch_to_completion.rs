@@ -11,7 +11,7 @@ use baton_ports::AdapterEvent;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 
-use crate::browser::{exact_text, has_text, label, role, text};
+use crate::browser::{exact_text, has_text, label, nth, role, text};
 use crate::UiE2e;
 
 const WORKSPACE_NAME: &str = "報告專案";
@@ -33,33 +33,32 @@ async fn a_task_dispatched_from_the_ui_completes_after_the_worker_reports_and_ch
     let e2e = UiE2e::start().await;
     let (harness, browser) = (&e2e.harness, &e2e.browser);
     let sidebar = role("complementary", "Workspace");
-    let tab = |name: &str| [role("tablist", "Workspace 功能"), role("tab", name)];
-    // 收在「更多」入口內的頁面：先切到「更多」，再點第二層頁簽
-    let more_page = |name: &str| [role("tablist", "更多"), role("tab", name)];
+    // 跑道欄上目前 Workspace 的頁面（所有頁面都直接列出，沒有第二層頁簽）
+    let page = |name: &str| [role("navigation", "Workspace 頁面"), role("button", name)];
 
-    // 1. 建立 Workspace：在側欄填入目錄與名稱
+    // 1. 建立 Workspace：還沒有任何 Workspace 時跑道欄的建立表單直接展開，填入目錄與名稱
     let dir = harness.data_dir().join("projects").join("report");
     std::fs::create_dir_all(&dir).unwrap();
     browser.fill(&[sidebar.clone(), label("目錄")], &dir.to_string_lossy()).await;
     browser.fill(&[sidebar.clone(), label("名稱（選填）")], WORKSPACE_NAME).await;
     browser.click(&[sidebar.clone(), role("button", "建立 Workspace")]).await;
 
-    // 2. 確認授權：建立後自動選中該 Workspace，切到「更多」的「授權」頁簽；套用「研究／文件」範本、檢視摘要後確認
-    browser.click(&tab("更多")).await;
-    browser.click(&more_page("授權")).await;
-    let authorization = role("region", "授權設定");
-    browser.wait_visible(&[authorization.clone(), role("heading", "授權設定")]).await;
-    // 頁面標題只寫頁名，Workspace 名稱由頁簽列上方的情境列顯示
-    browser.wait_visible(&[label("目前的 Workspace"), exact_text(WORKSPACE_NAME)]).await;
+    // 2. 確認授權：建立後自動選中該 Workspace，切到「授權」頁；套用「研究／文件」範本、檢視摘要後確認
+    browser.click(&page("授權")).await;
+    let authorization = role("region", "授權");
+    browser.wait_visible(&[authorization.clone(), role("heading", "授權")]).await;
+    // 頁面標題只寫頁名，Workspace 名稱由頁面上方的情境列顯示
+    // 名稱可能與路徑結尾同字（路徑也在情境列中），取第一個（名稱）
+    browser.wait_visible(&[label("目前的 Workspace"), exact_text(WORKSPACE_NAME), nth(0)]).await;
     browser.wait_visible(&[authorization.clone(), text("尚未確認授權")]).await;
-    browser.click(&[authorization.clone(), role("button", "套用「研究／文件」")]).await;
+    browser.click(&[authorization.clone(), role("button", "套用範本「研究／文件」")]).await;
     browser.click(&[authorization.clone(), role("button", "檢視確認摘要")]).await;
-    browser.click(&[authorization.clone(), role("region", "確認摘要"), role("button", "確認並保存授權")]).await;
-    browser.wait_visible(&[authorization.clone(), text("已保存為 revision 1")]).await;
+    browser.click(&[authorization.clone(), role("region", "確認摘要"), role("button", "確認並儲存授權")]).await;
+    browser.wait_visible(&[authorization.clone(), text("已儲存為第 1 版")]).await;
 
     // 3. 建立 Task：新 Goal、六項契約全部填寫、宣告確定性檢查（成果 report.md）、所需能力在授權範圍內
-    browser.click(&tab("工作")).await;
-    let board = role("region", "工作面板");
+    browser.click(&page("工作")).await;
+    let board = role("region", "工作");
     browser.click(&[board.clone(), role("button", "建立 Task")]).await;
     let form = role("dialog", "建立 Task");
     browser.fill(&[form.clone(), label("新 Goal 名稱")], "季度報告").await;
@@ -94,12 +93,11 @@ async fn a_task_dispatched_from_the_ui_completes_after_the_worker_reports_and_ch
     harness.agent_adapter.emit(&rid, AdapterEvent::Exited { success: true });
     harness.supervise().await;
 
-    // 6. 工作面板沒有輪詢：切到別的頁簽（「更多」的「時間線」）再切回「工作」讓它重新載入；
+    // 6. 工作面板沒有輪詢：切到別的頁（「時間線」）再切回「工作」讓它重新載入；
     //    Task 在「已完成」欄，展開卡片的「詳細資訊」後顯示經自動檢查通過驗證
-    browser.click(&tab("更多")).await;
-    browser.click(&more_page("時間線")).await;
+    browser.click(&page("時間線")).await;
     browser.wait_hidden(std::slice::from_ref(&board)).await;
-    browser.click(&tab("工作")).await;
+    browser.click(&page("工作")).await;
     let completed = card("已完成（1）");
     browser.wait_visible(&completed).await;
     browser.click(&[&completed[..], &[exact_text("詳細資訊")]].concat()).await;

@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useId } from "react";
 
 import { HelpTip } from "./HelpTip";
 
@@ -34,7 +34,16 @@ const MODE_LABELS: Record<Mode, string> = {
 /** 這兩項是派工的底線，不能標為不適用。 */
 const NOT_APPLICABLE_FORBIDDEN = new Set<ContractFieldName>(["objective", "done_criteria"]);
 
-const REFERENCE_KINDS = ["task_contract", "goal", "authorization", "decision"] as const;
+/** 引用的種類與說明；引用欄的「?」與格式錯誤的訊息共用。 */
+const REFERENCE_KINDS: [ContractReference["kind"], string][] = [
+  ["goal", "Goal"],
+  ["task_contract", "Task 契約"],
+  ["authorization", "授權"],
+  ["decision", "裁定"],
+];
+
+/** 「goal（Goal）、task_contract（Task 契約）、…」 */
+const REFERENCE_KINDS_TEXT = REFERENCE_KINDS.map(([kind, label]) => `${kind}（${label}）`).join("、");
 
 interface FieldDraft {
   mode: Mode;
@@ -144,12 +153,12 @@ export function buildContract(draft: ContractDraft): { contract: ContractInput; 
     const label = FIELD_LABELS[name];
     const field = draft.fields[name];
     if (field.mode === "filled") {
-      if (field.text.trim() === "") errors.push(`${label}：填寫模式需要內容`);
+      if (field.text.trim() === "") errors.push(`${label}：狀態是「填寫」時需要內容`);
       const references: ContractReference[] = [];
       for (const line of nonEmptyLines(field.references)) {
         const reference = parseReference(line);
         if (reference) references.push(reference);
-        else errors.push(`${label}：引用格式錯誤「${line}」，應為 kind:target@version（kind 為 ${REFERENCE_KINDS.join("／")}）`);
+        else errors.push(`${label}：引用格式錯誤「${line}」，應為「種類:識別碼@版本」，種類可用 ${REFERENCE_KINDS_TEXT}`);
       }
       contract[name] = { status: "filled", text: field.text.trim(), ...(references.length > 0 && { references }) };
     } else if (field.mode === "not_applicable") {
@@ -179,6 +188,7 @@ interface Props {
 
 /** 六項最小派工契約、確定性檢查與所需能力的編輯器；建立與編輯 Task 共用。 */
 export function ContractEditor({ draft, onChange, capabilities }: Props) {
+  const idBase = useId();
   const change = (name: ContractFieldName, patch: Partial<FieldDraft>) =>
     onChange({ ...draft, fields: { ...draft.fields, [name]: { ...draft.fields[name], ...patch } } });
 
@@ -188,8 +198,14 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
       capabilities: enabled ? [...draft.capabilities, capability] : draft.capabilities.filter((c) => c !== capability),
     });
 
+  // 每一項一列：左欄是項目名稱與模式（往下掃就看得出哪些還沒提供），右欄是該模式要填的內容。
+  // legend 給螢幕報讀器當群組名稱（視覺上隱藏），畫面上的項目名稱在左欄，控制項的完整名稱在 aria-label
   return (
     <div className="contract-editor">
+      <div className="contract-heading">
+        <h3>派工契約</h3>
+        <p>六項都要填寫或標為不適用；未提供與未知的項目會列為缺少，補齊前不能標記為可派工</p>
+      </div>
       {CONTRACT_FIELDS.map((name) => {
         const label = FIELD_LABELS[name];
         const field = draft.fields[name];
@@ -198,100 +214,133 @@ export function ContractEditor({ draft, onChange, capabilities }: Props) {
         );
         return (
           <Fragment key={name}>
-            {/* legend 已說明是哪一項：label 只寫「模式」「內容」，完整名稱留在控制項的 aria-label */}
             <fieldset className="contract-field">
-              <legend>{label}</legend>
-              <label>
-                模式
-                <select
-                  className="contract-mode"
-                  aria-label={`${label}：模式`}
-                  value={field.mode}
-                  onChange={(e) => change(name, { mode: e.target.value as Mode })}
-                >
-                  {modes.map((mode) => (
-                    <option key={mode} value={mode}>
-                      {MODE_LABELS[mode]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {field.mode === "filled" && (
-                <>
+              <legend className="visually-hidden">{label}</legend>
+              <div className="contract-field-key">
+                <span className="contract-field-name" aria-hidden="true">
+                  {label}
+                </span>
+                {/* 可見的小標「狀態」說明下拉在選什麼；螢幕報讀器用 aria-label 的「<項目>：模式」，小標不重複朗讀 */}
+                <div className="contract-mode-field">
+                  <span className="contract-mode-label" aria-hidden="true">
+                    狀態
+                  </span>
+                  <select
+                    className="contract-mode"
+                    aria-label={`${label}：模式`}
+                    value={field.mode}
+                    onChange={(e) => change(name, { mode: e.target.value as Mode })}
+                  >
+                    {modes.map((mode) => (
+                      <option key={mode} value={mode}>
+                        {MODE_LABELS[mode]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="contract-field-value">
+                {field.mode === "missing" && <p className="contract-field-missing">未提供，會列為缺少項目</p>}
+                {field.mode === "filled" && (
+                  <>
+                    <label>
+                      內容
+                      <textarea
+                        aria-label={`${label}：內容`}
+                        value={field.text}
+                        onChange={(e) => change(name, { text: e.target.value })}
+                      />
+                    </label>
+                    {/* 「?」是按鈕，不能放進 <label>：標籤與說明並排，再接輸入框 */}
+                    <div className="contract-subfield">
+                      <span className="contract-subfield-label">
+                        <label htmlFor={`${idBase}-${name}-references`}>引用（選填）</label>
+                        <HelpTip label={`${label}：引用`}>
+                          每行一個引用，格式是「種類:識別碼@版本」。種類可用 {REFERENCE_KINDS_TEXT}；
+                          版本是引用當時對方的內容版本，從 1 起算。
+                        </HelpTip>
+                      </span>
+                      <textarea
+                        id={`${idBase}-${name}-references`}
+                        className="contract-references"
+                        aria-label={`${label}：引用（選填）`}
+                        value={field.references}
+                        placeholder="例：goal:goal_1@1"
+                        onChange={(e) => change(name, { references: e.target.value })}
+                      />
+                    </div>
+                  </>
+                )}
+                {field.mode === "not_applicable" && (
                   <label>
-                    內容
-                    <textarea
-                      aria-label={`${label}：內容`}
-                      value={field.text}
-                      onChange={(e) => change(name, { text: e.target.value })}
+                    不適用的理由
+                    <input
+                      aria-label={`${label}：不適用的理由`}
+                      value={field.reason}
+                      onChange={(e) => change(name, { reason: e.target.value })}
                     />
                   </label>
+                )}
+                {field.mode === "unknown" && (
                   <label>
-                    引用（選填）
-                    <textarea
-                      aria-label={`${label}：引用（選填）`}
-                      value={field.references}
-                      placeholder="每行一個，格式 kind:target@version"
-                      onChange={(e) => change(name, { references: e.target.value })}
+                    未知的說明（選填）
+                    <input
+                      aria-label={`${label}：未知的說明（選填）`}
+                      value={field.note}
+                      onChange={(e) => change(name, { note: e.target.value })}
                     />
                   </label>
-                </>
-              )}
-              {field.mode === "not_applicable" && (
-                <label>
-                  不適用的理由
-                  <input
-                    aria-label={`${label}：不適用的理由`}
-                    value={field.reason}
-                    onChange={(e) => change(name, { reason: e.target.value })}
-                  />
-                </label>
-              )}
-              {field.mode === "unknown" && (
-                <label>
-                  未知的說明（選填）
-                  <input
-                    aria-label={`${label}：未知的說明（選填）`}
-                    value={field.note}
-                    onChange={(e) => change(name, { note: e.target.value })}
-                  />
-                </label>
-              )}
+                )}
+              </div>
             </fieldset>
             {name === "done_criteria" && (
               <fieldset className="contract-field">
-                <legend>
-                  確定性檢查{" "}
-                  <HelpTip label="確定性檢查">
-                    Worker 成功結束後會自動執行這些檢查，全部通過才自動完成；也可以在驗證中手動接受成果。每行一項：
-                    {CHECK_FORMATS}（以空白分隔，不支援引號）。
-                  </HelpTip>
-                </legend>
-                <label>
-                  每行一項
-                  <textarea
-                    aria-label="確定性檢查（每行一項）"
-                    value={draft.checks}
-                    onChange={(e) => onChange({ ...draft, checks: e.target.value })}
-                  />
-                </label>
+                <legend className="visually-hidden">確定性檢查</legend>
+                <div className="contract-field-key">
+                  <span className="contract-field-name">
+                    <span aria-hidden="true">確定性檢查</span>{" "}
+                    <HelpTip label="確定性檢查">
+                      Worker 成功結束後會自動執行這些檢查，全部通過才自動完成；也可以在驗證中手動接受成果。每行一項：
+                      {CHECK_FORMATS}（以空白分隔，不支援引號）。
+                    </HelpTip>
+                  </span>
+                </div>
+                <div className="contract-field-value">
+                  <label>
+                    每行一項
+                    <textarea
+                      className="mono"
+                      aria-label="確定性檢查（每行一項）"
+                      value={draft.checks}
+                      placeholder={"command: cargo test\nartifact: report.md"}
+                      onChange={(e) => onChange({ ...draft, checks: e.target.value })}
+                    />
+                  </label>
+                </div>
               </fieldset>
             )}
           </Fragment>
         );
       })}
       <fieldset className="contract-field contract-capabilities">
-        <legend>所需能力</legend>
-        {capabilities.map(({ capability, label }) => (
-          <label key={capability}>
-            <input
-              type="checkbox"
-              checked={draft.capabilities.includes(capability)}
-              onChange={(e) => toggle(capability, e.target.checked)}
-            />
-            {label}
-          </label>
-        ))}
+        <legend className="visually-hidden">所需能力</legend>
+        <div className="contract-field-key">
+          <span className="contract-field-name" aria-hidden="true">
+            所需能力
+          </span>
+        </div>
+        <div className="contract-field-value">
+          {capabilities.map(({ capability, label }) => (
+            <label key={capability}>
+              <input
+                type="checkbox"
+                checked={draft.capabilities.includes(capability)}
+                onChange={(e) => toggle(capability, e.target.checked)}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
       </fieldset>
     </div>
   );

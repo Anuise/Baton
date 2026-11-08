@@ -1,49 +1,59 @@
 /* ==========================================================================
-   設計 token
+   設計 token（design-system/baton/MASTER.md「夜間跑道」）
    全站樣式只透過這裡的變數取色與尺寸；淺色值寫在 :root，
    深色值寫在下方 prefers-color-scheme: dark，跟隨系統自動切換。
-   依 design-system/baton/MASTER.md 第 2～4 節：Data-Dense Dashboard，
-   中性 slate 灰階、單一深藍強調色、細框不加陰影、緊湊但行高充足。
+   方向：深靛色的跑道導覽欄是唯一大膽的地方，內容區冷灰紙底、白色物件、
+   群青強調色；不用漸層，物件不加陰影，以圓角層次與留白分層。
    ========================================================================== */
 :root {
   color-scheme: light dark;
 
-  /* 字型：拉丁字在前、CJK 在後；不載入網路字型（MASTER 3.1） */
+  /* 字型：拉丁字在前、CJK 在後；桌面 App 必須離線可用，不載入網路字型。
+     display 給頁面標題與空狀態主標（Segoe UI Variable 的 Display 光學尺寸），
+     sans 給其餘一切；mono 只給真正的程式碼、路徑、識別碼與雜湊 */
   --font-sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei",
+    "PingFang TC", "Noto Sans TC", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", "Microsoft JhengHei UI", "Microsoft JhengHei",
     "PingFang TC", "Noto Sans TC", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, "Microsoft JhengHei UI", monospace;
 
-  /* 字級與行高（MASTER 3.2）：
-     caption 只用於徽章、計數、時間戳、狀態列，不可用於段落；
-     meta 控制項、表格、卡片次要資訊、標籤；body 一切段落與長內容（全站基準）；
-     title-sm 區塊與卡片標題；title 頁面標題；title-lg 全畫面精靈與空狀態主標 */
+  /* 字級（MASTER 3.2）：caption 只用於徽章、計數、時間戳；meta 控制項、表格、次要資訊；
+     body 一切段落（全站基準）；title-sm 物件與區塊標題；title 區段標題；
+     page 頁面標題；hero 首次設定與空狀態主標 */
   --text-caption: 12px;
   --text-meta: 13px;
   --text-body: 14px;
   --text-title-sm: 14px;
   --text-title: 16px;
-  --text-title-lg: 20px;
+  --text-page: 24px;
+  --text-hero: 32px;
   --leading-caption: 1.4;
   --leading-meta: 1.5;
-  --leading-body: 1.65;
-  --leading-title-sm: 1.4;
-  --leading-title: 1.35;
-  --leading-title-lg: 1.3;
-  --leading-code: 1.5;
+  --leading-body: 1.7;
+  --leading-title-sm: 1.45;
+  --leading-title: 1.4;
+  --leading-page: 1.25;
+  --leading-hero: 1.2;
+  --leading-code: 1.55;
 
-  /* 字重只用 400／600：微軟正黑體沒有 500，會被合成或退回 */
+  /* 字重：微軟正黑體只有 400 與 700，600 在中文會落到 700；
+     UI 強調用 strong（600，拉丁字略輕），頁面標題用 heavy（700） */
   --font-weight-normal: 400;
   --font-weight-strong: 600;
+  --font-weight-heavy: 700;
 
-  /* 閱讀寬度（MASTER 6.3）：段落與長內容約每行 46 個中文字；表單 48em */
-  --measure: 46em;
-  --measure-form: 48em;
+  /* 閱讀寬度：以內文字級計算（不用 em），13px 的欄位與提示和 14px 的段落在同一欄時右緣對齊；
+     段落約每行 44 個中文字，表單 46 字寬 */
+  --measure: calc(var(--text-body) * 44);
+  --measure-form: calc(var(--text-body) * 46);
+  /* 閱讀型區段（設定、說明較多的表單）的寬度上限 */
+  --content-narrow: calc(var(--text-body) * 64);
 
-  /* 控制項高度：按鈕、輸入框、選單（MASTER 5.1、5.5） */
-  --control-height: 28px;
+  /* 控制項高度 */
+  --control-height: 30px;
+  --control-height-sm: 24px;
 
-  /* 間距：以 4px 為基準的級距（另有 2px 與 6px），padding／margin／gap 一律取用這組；
-     標題與它的內容 8px（space-4），與上一個區塊 24px（space-7） */
+  /* 間距：以 4px 為基準；標題與內容 8px，區塊之間 32px */
   --space-1: 2px;
   --space-2: 4px;
   --space-3: 6px;
@@ -52,123 +62,149 @@
   --space-6: 16px;
   --space-7: 24px;
   --space-8: 32px;
+  --space-9: 48px;
 
-  /* 圓角：sm 行內 code 與核取方塊、md 按鈕／輸入框／卡片、lg 對話框與浮層、full 徽章與膠囊頁簽 */
+  /* 圓角有層次，不是一個值套全部：
+     sm 行內 code 與核取方塊、md 控制項、lg 物件（Task、裁定、帳號）、xl 對話框與浮層、full 徽章 */
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
   --radius-full: 999px;
 
-  /* 陰影：卡片與按鈕不加陰影、只用邊框分層；
-     sm 只給浮在內容上的小元件，md 給對話框、下拉浮層、HelpTip */
-  --shadow-sm: 0 1px 2px rgb(15 23 42 / 6%);
-  --shadow-md: 0 8px 24px rgb(15 23 42 / 14%), 0 1px 3px rgb(15 23 42 / 8%);
+  /* 陰影：物件不加陰影；只有浮在內容上的東西（浮層、對話框）才有 */
+  --shadow-popover: 0 10px 28px rgb(28 26 51 / 16%), 0 1px 3px rgb(28 26 51 / 10%);
 
-  /* 層級（MASTER 4.4）：固定的標題列 → 浮層與選單 → 對話框與遮罩 → 全域通知與完全退出進度 */
+  /* 層級：固定的跑道欄 → 浮層與選單 → 對話框與遮罩（完全退出、更新確認與進度） */
   --z-sticky: 10;
   --z-popover: 20;
   --z-overlay: 30;
-  --z-toast: 40;
 
-  /* 動態（MASTER 4.5）：只對色彩、透明度、transform 做短過渡 */
+  /* 動態：只對色彩、透明度、transform 做短過渡；接力棒移動用 baton 時長 */
   --duration-fast: 120ms;
-  --ease-out: ease-out;
+  --duration-baton: 220ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
 
-  /* 底色層次：bg 視窗底、surface 卡片與面板、surface-raised 對話框、
-     surface-sunken 嵌在卡片裡的區塊（程式碼、看板欄、次要資訊框）、
-     surface-hover 可點元素的滑過底色、overlay 對話框背後的遮罩 */
-  --color-bg: #f8fafc;
+  /* 版面 */
+  --rail-width: 248px;
+  --page-gutter: var(--space-8);
+
+  /* 底色層次：bg 紙底、surface 物件與面板、surface-raised 浮層與對話框、
+     surface-sunken 嵌入區（程式碼、表單區、看板欄）、surface-hover 可點元素滑過、overlay 遮罩 */
+  --color-bg: #f5f5f8;
   --color-surface: #ffffff;
   --color-surface-raised: #ffffff;
-  --color-surface-sunken: #f1f5f9;
-  --color-surface-hover: #f1f5f9;
-  --color-overlay: rgb(15 23 42 / 45%);
+  --color-surface-sunken: #ececf2;
+  --color-surface-hover: #eeedf4;
+  --color-overlay: rgb(28 26 51 / 45%);
 
-  /* 邊框：border 分隔線與卡片框、border-strong 次要按鈕與看板欄框、
-     control-border 輸入框／選單／核取方塊的邊界（對底色 ≥ 3:1，WCAG 1.4.11） */
-  --color-border: #e2e8f0;
-  --color-border-strong: #cbd5e1;
-  --color-control-border: #7d8ca3;
+  /* 邊框：border 分隔線與物件框、border-strong 次要按鈕與強分隔、
+     control-border 輸入框／選單／核取方塊（對底色 ≥ 3:1，WCAG 1.4.11） */
+  --color-border: #e2e1ea;
+  --color-border-strong: #c9c7d8;
+  --color-control-border: #83809c;
 
-  /* 文字：text 主要內容、muted 次要文字與標籤、subtle 最淡的計數／placeholder／時間戳
-     （subtle 不可放在 surface-sunken 上，那裡改用 muted） */
-  --color-text: #0f172a;
-  --color-text-muted: #475569;
-  --color-text-subtle: #64748b;
+  /* 文字：text 主要內容、muted 次要文字與標籤、subtle 計數／placeholder／時間戳 */
+  --color-text: #1c1a33;
+  --color-text-muted: #4f4c68;
+  --color-text-subtle: #686583;
 
-  /* 強調色：唯一的品牌色，用於選取、連結、主要按鈕與資訊提示；
-     on-accent 是放在強調色底上的文字色；focus 是鍵盤焦點外框 */
-  --color-accent: #1e40af;
-  --color-accent-hover: #1e3a8a;
-  --color-accent-subtle: #eff6ff;
-  --color-accent-border: #bfdbfe;
+  /* 強調色：群青。選取、連結、主要按鈕與資訊提示；focus 是鍵盤焦點外框 */
+  --color-accent: #3f35bf;
+  --color-accent-hover: #332aa3;
+  --color-accent-subtle: #eeecfc;
+  --color-accent-border: #cbc6f5;
   --color-on-accent: #ffffff;
-  --color-focus: #3b82f6;
+  --color-focus: #6153e8;
 
-  /* 語意色：文字、狀態點與左側色條用實色，徽章與 2 行以內的提示框用 subtle 淡底配 border 邊框 */
-  --color-success: #15803d;
-  --color-success-subtle: #f0fdf4;
-  --color-success-border: #bbf7d0;
-  --color-warning: #b45309;
-  --color-warning-subtle: #fffbeb;
-  --color-warning-border: #fde68a;
-  --color-danger: #b91c1c;
-  --color-danger-subtle: #fef2f2;
-  --color-danger-border: #fecaca;
+  /* 語意色：實色用於文字、狀態點與左側色條；subtle 淡底配 border 只給徽章與兩行內的提示 */
+  --color-success: #18794a;
+  --color-success-subtle: #ecf8f0;
+  --color-success-border: #b5e2c6;
+  --color-warning: #a5550a;
+  --color-warning-subtle: #fdf5e6;
+  --color-warning-border: #f2d39a;
+  --color-danger: #b42318;
+  --color-danger-subtle: #fdeeec;
+  --color-danger-border: #f5c2bc;
 
-  /* 輔助色：只用在驗證判定標籤與色條（環境受阻、授權受阻） */
+  /* 輔助色：只用在驗證判定（環境受阻 orange、授權受阻 magenta）；
+     magenta 取代舊的紫色，避免與群青強調色混淆 */
   --color-orange: #c2410c;
-  --color-orange-subtle: #fff7ed;
-  --color-orange-border: #fed7aa;
-  --color-purple: #6d28d9;
-  --color-purple-subtle: #f5f3ff;
-  --color-purple-border: #ddd6fe;
+  --color-orange-subtle: #fff3ea;
+  --color-orange-border: #fbcfae;
+  --color-magenta: #b0246f;
+  --color-magenta-subtle: #fcedf5;
+  --color-magenta-border: #f2bfd9;
+
+  /* 跑道欄：兩種主題都是深色，是全站唯一的大面積色塊。
+     baton 是目前頁面與目前 Workspace 的接力棒標記；line 是跑道分道線 */
+  --rail-bg: #221e4a;
+  --rail-bg-raised: #2c2860;
+  --rail-text: #eeecfb;
+  --rail-muted: #aaa5d4;
+  --rail-hover: rgb(255 255 255 / 7%);
+  --rail-active: rgb(255 255 255 / 11%);
+  --rail-line: rgb(255 255 255 / 12%);
+  --rail-baton: #b9afff;
+  --rail-badge-bg: #ffc24b;
+  --rail-badge-text: #2b1d00;
+  --rail-focus: #d7d1ff;
+  /* 跑道欄上的狀態色（兩種主題都在深色底上） */
+  --rail-success: #4ade80;
+  --rail-danger: #f87171;
+  --rail-danger-text: #fca5a5;
 }
 
 /* 深色模式：覆寫全部色彩 token 與陰影，其餘尺寸 token 共用 */
 @media (prefers-color-scheme: dark) {
   :root {
-    --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
-    --shadow-md: 0 8px 24px rgb(0 0 0 / 45%), 0 1px 3px rgb(0 0 0 / 30%);
+    --shadow-popover: 0 10px 28px rgb(0 0 0 / 45%), 0 1px 3px rgb(0 0 0 / 35%);
 
-    --color-bg: #0f172a;
-    --color-surface: #1b2336;
-    --color-surface-raised: #222b40;
-    --color-surface-sunken: #141c2f;
-    --color-surface-hover: #272f42;
+    --color-bg: #121120;
+    --color-surface: #1b1a2d;
+    --color-surface-raised: #24233a;
+    --color-surface-sunken: #151425;
+    --color-surface-hover: #26253b;
     --color-overlay: rgb(0 0 0 / 60%);
 
-    --color-border: #334155;
-    --color-border-strong: #475569;
-    --color-control-border: #64748b;
+    --color-border: #2e2c46;
+    --color-border-strong: #45425f;
+    --color-control-border: #6f6b8e;
 
-    --color-text: #f8fafc;
-    --color-text-muted: #94a3b8;
-    --color-text-subtle: #8391a7;
+    --color-text: #f1f0fa;
+    --color-text-muted: #aba8c4;
+    --color-text-subtle: #908cab;
 
-    --color-accent: #60a5fa;
-    --color-accent-hover: #93c5fd;
-    --color-accent-subtle: #1e2a4a;
-    --color-accent-border: #2b4c8c;
-    --color-on-accent: #0f172a;
-    --color-focus: #60a5fa;
+    --color-accent: #aea5ff;
+    --color-accent-hover: #c6c0ff;
+    --color-accent-subtle: #272452;
+    --color-accent-border: #4a4396;
+    --color-on-accent: #16142e;
+    --color-focus: #aea5ff;
 
     --color-success: #4ade80;
-    --color-success-subtle: #14301f;
-    --color-success-border: #166534;
+    --color-success-subtle: #142b20;
+    --color-success-border: #1f6b41;
     --color-warning: #fbbf24;
-    --color-warning-subtle: #3a2a12;
-    --color-warning-border: #854d0e;
+    --color-warning-subtle: #33270f;
+    --color-warning-border: #7a5510;
     --color-danger: #f87171;
-    --color-danger-subtle: #3b1d24;
-    --color-danger-border: #991b1b;
+    --color-danger-subtle: #3a1d24;
+    --color-danger-border: #8f2a2a;
 
     --color-orange: #fb923c;
-    --color-orange-subtle: #3a2216;
-    --color-orange-border: #9a3412;
-    --color-purple: #c4b5fd;
-    --color-purple-subtle: #2a2346;
-    --color-purple-border: #5b21b6;
+    --color-orange-subtle: #36210f;
+    --color-orange-border: #8a3a12;
+    --color-magenta: #f472b6;
+    --color-magenta-subtle: #3a1a30;
+    --color-magenta-border: #8c2a62;
+
+    /* 比內容底色亮一階並帶靛色，深色模式下跑道欄仍是一塊看得出來的區域 */
+    --rail-bg: #1f1b45;
+    --rail-bg-raised: #2a2658;
+    --rail-muted: #a8a3d2;
+    --rail-line: rgb(255 255 255 / 16%);
   }
 }
 
@@ -176,5 +212,6 @@
 @media (prefers-reduced-motion: reduce) {
   :root {
     --duration-fast: 0ms;
+    --duration-baton: 0ms;
   }
 }

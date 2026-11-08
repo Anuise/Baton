@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import type { LifecycleClient, MaintenanceOutcome, UpdateClient, UpdateStatusView } from "./runtimeClient";
 import { UpdateProgress } from "./UpdateProgress";
 
@@ -22,12 +23,19 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 重新開啟後的更新結果；不是更新（例如解除安裝後重新安裝）時為 null。 */
-function outcomeText(outcome: MaintenanceOutcome): string | null {
+/** 重新開啟後的更新結果；不是更新（例如解除安裝後重新安裝）時為 null。版本號用等寬字（MASTER 7.1）。 */
+function outcomeText(outcome: MaintenanceOutcome): ReactNode {
   if (outcome.kind !== "update" || outcome.applied === null) return null;
-  return outcome.applied
-    ? `已從 ${outcome.from_version} 更新到 ${outcome.running_version}`
-    : `更新沒有套用，仍是 ${outcome.running_version}`;
+  return outcome.applied ? (
+    <>
+      已從 <span className="mono">{outcome.from_version}</span> 更新到{" "}
+      <span className="mono">{outcome.running_version}</span>
+    </>
+  ) : (
+    <>
+      更新沒有套用，仍是 <span className="mono">{outcome.running_version}</span>
+    </>
+  );
 }
 
 /**
@@ -90,57 +98,142 @@ export function UpdateNotice({ client, runtimeStartedAt, pollMs = 60_000 }: Prop
   return (
     <>
       {recent && outcomeMessage && (
-        <div className="update-notice" role="status">
-          <span>{outcomeMessage}</span>
-          <button type="button" onClick={() => setDismissedAt(recent.finished_at)}>
+        <div className="callout callout-success update-notice" role="status">
+          <span className="update-notice-text">{outcomeMessage}</span>
+          <button type="button" className="btn-sm" onClick={() => setDismissedAt(recent.finished_at)}>
             知道了
           </button>
         </div>
       )}
       {available && (
-        <div className="update-notice">
-          <strong>Baton {available.version} 可以更新</strong>
+        <div className="callout callout-accent update-notice">
+          <strong className="update-notice-text">
+            {/* 版本號用等寬字（MASTER 7.1） */}
+            Baton <span className="mono">{available.version}</span> 可以更新
+          </strong>
           {available.notes && (
-            <details>
+            <details className="update-notice-notes">
               <summary>更新說明</summary>
-              <p className="update-notes">{available.notes}</p>
+              <p className="pre-wrap">{available.notes}</p>
             </details>
           )}
-          <button type="button" onClick={() => setApply({ state: "confirming", version: available.version })}>
+          <button
+            type="button"
+            className="btn-sm"
+            onClick={() => setApply({ state: "confirming", version: available.version })}
+          >
             更新並重新開啟…
           </button>
         </div>
       )}
       {apply.state !== "closed" && (
-        <div className="exit-overlay">
-          <section className="exit-progress" role="dialog" aria-modal="true" aria-labelledby="update-confirm-title">
-            <h2 id="update-confirm-title">更新到 Baton {apply.version}</h2>
-            <ol className="update-steps">
-              <li>先下載並驗證安裝程式；失敗不會停止任何工作。</li>
-              <li>執行與「完全退出」相同的停止流程（最多 40 秒）。</li>
-              <li>備份資料。</li>
-              <li>安裝並重新開啟 Baton。</li>
-            </ol>
-            <p>重新開啟後依各 Workspace 的「完全退出後自動續跑」設定續跑，其餘等「繼續工作」。</p>
-            <p>資料目錄不會被刪除。</p>
-            {apply.state === "applying" && <p>下載並驗證中…</p>}
-            {apply.state === "failed" && (
-              <div role="alert">
-                <p>更新沒有開始：{apply.reason}</p>
-                <p>工作沒有停止，照常進行。</p>
-              </div>
-            )}
-            <div className="exit-actions">
-              <button type="button" disabled={apply.state === "applying"} onClick={() => void confirm(apply.version)}>
-                更新並重新開啟
-              </button>
-              <button type="button" disabled={apply.state === "applying"} onClick={() => setApply({ state: "closed" })}>
-                取消
-              </button>
-            </div>
-          </section>
-        </div>
+        <UpdateConfirm
+          apply={apply}
+          onConfirm={() => void confirm(apply.version)}
+          onCancel={() => setApply({ state: "closed" })}
+        />
       )}
     </>
+  );
+}
+
+/**
+ * 更新確認對話框（原生 `<dialog>` 的 modal）：開啟時焦點移到「取消」（不會停止任何工作的選項）；
+ * Esc 等同「取消」，下載並驗證中不能取消；關閉後焦點回到開啟它的按鈕。
+ * 下載並驗證中兩顆按鈕只標 `aria-disabled`（點擊忽略），不設 `disabled`：焦點留在對話框裡，不落到 body；
+ * 失敗時焦點移到「取消」。
+ */
+function UpdateConfirm({
+  apply,
+  onConfirm,
+  onCancel,
+}: {
+  apply: Exclude<ApplyState, { state: "closed" }>;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const applying = apply.state === "applying";
+  const failed = apply.state === "failed";
+
+  useEffect(() => {
+    if (failed) cancelButton.current?.focus();
+  }, [failed]);
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (element === null) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // jsdom 沒有 showModal：退回以 open 屬性顯示（焦點與 Esc 由這裡自行處理，行為相同）
+    if (typeof element.showModal === "function") element.showModal();
+    else element.setAttribute("open", "");
+    cancelButton.current?.focus();
+    return () => {
+      if (typeof element.close === "function" && element.open) element.close();
+      if (previous?.isConnected) previous.focus();
+    };
+    // 只在開啟時執行一次
+  }, []);
+
+  const cancel = () => {
+    if (!applying) onCancel();
+  };
+
+  return (
+    <dialog
+      ref={dialog}
+      className="dialog-panel update-confirm"
+      aria-labelledby="update-confirm-title"
+      // 瀏覽器原生的 Esc（cancel 事件）也交給 React 狀態處理，不讓 dialog 自己關掉
+      onCancel={(event) => {
+        event.preventDefault();
+        cancel();
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        cancel();
+      }}
+    >
+      {/* 版本號用等寬字（MASTER 7.1）；對話框的可存取名稱仍是「更新到 Baton x」 */}
+      <h2 id="update-confirm-title">
+        更新到 Baton <span className="mono">{apply.version}</span>
+      </h2>
+      <ol className="update-steps">
+        <li>先下載並驗證安裝程式；失敗不會停止任何工作。</li>
+        <li>執行與「完全退出」相同的停止流程（最多 40 秒）。</li>
+        <li>備份資料。</li>
+        <li>安裝並重新開啟 Baton。</li>
+      </ol>
+      <p>重新開啟後依各 Workspace 的「完全退出後自動續跑」設定續跑，其餘等「繼續工作」。</p>
+      <p className="field-hint">資料目錄不會被刪除。</p>
+      {applying && (
+        <p role="status" className="dot dot-accent">
+          下載並驗證中…
+        </p>
+      )}
+      {apply.state === "failed" && (
+        <FailureNotice title="更新沒有開始" reason={apply.reason}>
+          <p>工作沒有停止，照常進行。</p>
+        </FailureNotice>
+      )}
+      <div className="dialog-actions">
+        {/* Windows 慣例：主要動作在左、取消在右 */}
+        <button
+          type="button"
+          className="btn-primary"
+          aria-disabled={applying}
+          onClick={() => {
+            if (!applying) onConfirm();
+          }}
+        >
+          更新並重新開啟
+        </button>
+        <button ref={cancelButton} type="button" aria-disabled={applying} onClick={cancel}>
+          取消
+        </button>
+      </div>
+    </dialog>
   );
 }

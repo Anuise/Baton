@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import type { LifecycleClient, LoginStartupView } from "./runtimeClient";
 
 type StartupState = { state: "loading" } | { state: "ready"; view: LoginStartupView } | { state: "failed"; reason: string };
@@ -44,12 +45,17 @@ export function LoginStartupSettings({ client }: Props) {
   };
 
   return (
-    <section className="login-startup-settings" aria-labelledby="login-startup-title">
-      <h2 id="login-startup-title">登入時自動啟動</h2>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得登入時自動啟動設定：{loaded.reason}</p>}
+    <section className="section login-startup-settings" aria-labelledby="login-startup-title">
+      <div className="section-heading">
+        <h3 id="login-startup-title">登入時自動啟動</h3>
+        {/* 與並排的「更新」一樣有一行說明，兩個面板上緣對齊 */}
+        <p>預設關閉；與各 Workspace 的「完全退出後自動續跑」是分開的設定。</p>
+      </div>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {/* Runtime 的錯誤可能很長：長警示，不用淡底提示（MASTER 7.1） */}
+      {loaded.state === "failed" && <FailureNotice title="無法取得登入時自動啟動設定" reason={loaded.reason} />}
       {loaded.state === "ready" && (
-        <>
+        <div className="panel">
           <label className="login-startup-toggle">
             <input
               type="checkbox"
@@ -59,13 +65,15 @@ export function LoginStartupSettings({ client }: Props) {
             />
             登入 Windows 時自動啟動 Baton
           </label>
-          <p className="login-startup-hint">只影響之後的 Windows 登入；完全退出後，登入時不會自動啟動，需手動開 App</p>
+          <p className="field-hint login-startup-hint">
+            只影響之後的 Windows 登入；完全退出後，登入時不會自動啟動，需手動開 App
+          </p>
           {loaded.view.enabled && loaded.view.registered === false && (
-            <p className="login-startup-warning">Windows 的登記遺失，下次啟動 Runtime 時會補回</p>
+            <p className="callout callout-warning">Windows 的登記遺失，下次啟動 Runtime 時會補回</p>
           )}
-        </>
+        </div>
       )}
-      {switchError && <p role="alert">無法變更登入時自動啟動：{switchError}</p>}
+      {switchError && <FailureNotice title="無法變更登入時自動啟動" reason={switchError} />}
     </section>
   );
 }

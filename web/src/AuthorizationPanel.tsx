@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useState, type ReactNode } from "react";
 
 import { formatTimestamp } from "./time";
 import type {
@@ -9,12 +9,13 @@ import type {
   Capability,
   ConfirmationSummary,
   Grant,
+  GrantChange,
   LegacyRun,
   TaskClient,
   Workspace,
 } from "./runtimeClient";
 
-/** 授權設定畫面另外需要暫停／取消沿用舊授權的 Run。 */
+/** 授權頁另外需要暫停／取消沿用舊授權的 Run。 */
 export type AuthorizationPanelClient = AuthorizationClient & Pick<TaskClient, "cancelRun" | "cancelTask">;
 
 type ViewState = { state: "loading" } | { state: "ready"; view: AuthorizationView } | { state: "failed"; reason: string };
@@ -61,8 +62,8 @@ function sourceLabel(revision: AuthorizationRevision, view: AuthorizationView): 
 }
 
 /**
- * Workspace 授權設定（I2）：選取目錄不等於授權。
- * 使用者從建議範本或空白開始編輯，檢視確認摘要（含風險揭露）後確認並保存，授權才生效。
+ * Workspace 授權（I2）：選取目錄不等於授權。
+ * 使用者從建議範本或空白開始編輯，檢視確認摘要（含風險揭露）後確認並儲存，授權才生效。
  */
 export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
   const [loaded, setLoaded] = useState<ViewState>({ state: "loading" });
@@ -96,12 +97,20 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
     void load();
   }, [load]);
 
-  if (loaded.state === "loading") return <section aria-label="授權設定">載入中…</section>;
+  if (loaded.state === "loading") {
+    return (
+      <PageFrame>
+        <p className="empty-note">載入中…</p>
+      </PageFrame>
+    );
+  }
   if (loaded.state === "failed") {
     return (
-      <section aria-label="授權設定">
-        <p role="alert">無法取得授權設定：{loaded.reason}</p>
-      </section>
+      <PageFrame>
+        <p className="field-error" role="alert">
+          無法取得授權：{loaded.reason}
+        </p>
+      </PageFrame>
     );
   }
   const view = loaded.view;
@@ -163,7 +172,7 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
       setSummary(null);
       setAcknowledged(false);
       setAcknowledgedExpansion(false);
-      setNotice(`已保存為 revision ${revision.revision}`);
+      setNotice(`已儲存為第 ${revision.revision} 版`);
     } catch (e) {
       setError(reasonOf(e));
     } finally {
@@ -188,20 +197,28 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
   const effective = view.effective;
   // 修改既有授權而擴大範圍時，另外要承認擴大授權；第一次確認沒有 changes，不需要
   const expands = summary?.changes?.expands ?? false;
+  // 能力依風險分組：一般能力在上，高風險能力（範本不會包含）在下
+  const groups = [
+    { title: "一般能力", risky: false, capabilities: view.capabilities.filter((c) => !c.high_risk) },
+    { title: "高風險能力", risky: true, capabilities: view.capabilities.filter((c) => c.high_risk) },
+  ].filter((group) => group.capabilities.length > 0);
+
+  // 版面：現況 → 沿用舊授權的 Run（要你處理時才出現）→ 從範本開始 → 能力與範圍 → 確認與儲存 → 歷史（收起）
   return (
-    <section className="authorization" aria-label="授權設定">
-      <header className="page-header">
-        <h2>授權設定</h2>
-      </header>
+    <PageFrame>
       {effective ? (
-        <p className="authorization-current">
-          目前授權：revision {effective.revision}，確認於 {formatTimestamp(effective.confirmed_at, timeZone)}，來源：
-          {sourceLabel(effective, view)}
-        </p>
+        <div className="callout callout-success">
+          <p className="callout-title">目前授權：第 {effective.revision} 版</p>
+          <p className="meta">
+            <span>確認於 {formatTimestamp(effective.confirmed_at, timeZone)}</span>
+            <span>來源：{sourceLabel(effective, view)}</span>
+          </p>
+        </div>
       ) : (
-        <p className="authorization-unconfirmed">
-          尚未確認授權：選取目錄不等於授權，確認之前任何需要能力的 Agent 都不會被准入。
-        </p>
+        <div className="callout callout-warning">
+          <p className="callout-title">尚未確認授權</p>
+          <p>選取目錄不等於授權；確認之前，需要能力的工作都不會開始。</p>
+        </div>
       )}
 
       {view.legacy_runs.length > 0 && (
@@ -215,129 +232,206 @@ export function AuthorizationPanel({ client, workspace, timeZone }: Props) {
         />
       )}
 
-      <div className="authorization-templates">
-        <h3>建議範本（可編輯）</h3>
-        {view.templates.map((template) => (
-          <div key={template.id} className="authorization-template">
-            <button type="button" onClick={() => edit(draftFrom(template.grants), template.id)}>
-              套用「{template.name}」
-            </button>
-            <span className="authorization-template-description">{template.description}</span>
-          </div>
-        ))}
-      </div>
-
-      <fieldset>
-        <legend>能力、目標資源與限制</legend>
-        {view.capabilities.map(({ capability, label, high_risk }) => {
-          const entry = draft[capability];
-          return (
-            <div key={capability} className="authorization-capability">
-              <label className="authorization-capability-toggle">
-                <input type="checkbox" checked={entry !== undefined} onChange={(e) => toggle(capability, e.target.checked)} />
-                {label}
-                {high_risk && <span className="authorization-high-risk">（高風險，需要明確授權）</span>}
-              </label>
-              {/* 欄位就在能力下方，畫面上不重複能力名稱；可存取名稱仍帶能力名稱（MASTER 5.5） */}
-              {entry && (
-                <div className="authorization-capability-fields">
-                  <label>
-                    目標資源（每行一項）
-                    <textarea
-                      aria-label={`${label}：目標資源（每行一項）`}
-                      value={entry.targets}
-                      onChange={(e) => change(capability, "targets", e.target.value)}
-                    />
-                  </label>
-                  <label>
-                    限制（每行一項）
-                    <textarea
-                      aria-label={`${label}：限制（每行一項）`}
-                      value={entry.restrictions}
-                      onChange={(e) => change(capability, "restrictions", e.target.value)}
-                    />
-                  </label>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </fieldset>
-
-      <div className="form-actions">
-        <button type="button" disabled={busy} onClick={() => void review()}>
-          檢視確認摘要
-        </button>
-      </div>
-
-      {summary && (
-        <section className="authorization-summary" aria-label="確認摘要">
-          <h3>確認摘要</h3>
-          {summary.items.length === 0 ? (
-            <p>沒有授予任何能力。</p>
-          ) : (
-            <ul>
-              {summary.items.map((item) => (
-                <li key={item.capability}>
-                  <strong>{item.label}</strong>
-                  {item.high_risk && <span className="authorization-high-risk">（高風險）</span>}
-                  ：{item.targets.join("、")}
-                  {item.restrictions.length > 0 && <>；限制：{item.restrictions.join("、")}</>}
-                </li>
-              ))}
-            </ul>
-          )}
-          {summary.changes && <ChangesView changes={summary.changes} />}
-          {summary.risks.map((risk) => (
-            <p key={risk} className="authorization-risk">
-              {risk}
-            </p>
+      <section className="section">
+        <div className="section-heading">
+          <h3>從範本開始</h3>
+          <p>套用範本會以範本的內容取代下方的編輯內容，套用後仍可逐項調整。</p>
+        </div>
+        <ul className="row-list authorization-templates">
+          {view.templates.map((template) => (
+            <li key={template.id}>
+              <div className="row-head">
+                {/* 物件標題與其他頁一致（h4、--text-title-sm、--leading-title-sm，MASTER 7.1） */}
+                <h4>{template.name}</h4>
+                {template.id === templateId && <span className="badge badge-accent">目前依據</span>}
+                <button
+                  type="button"
+                  aria-label={`套用範本「${template.name}」`}
+                  onClick={() => edit(draftFrom(template.grants), template.id)}
+                >
+                  套用範本
+                </button>
+              </div>
+              <p className="authorization-template-description">{template.description}</p>
+            </li>
           ))}
-          {summary.requires_risk_acknowledgement && (
-            <label className="authorization-ack">
-              <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
-              我了解並接受上述風險
-            </label>
-          )}
-          {expands && (
-            <label className="authorization-ack">
-              <input
-                type="checkbox"
-                checked={acknowledgedExpansion}
-                onChange={(e) => setAcknowledgedExpansion(e.target.checked)}
-              />
-              我了解這會擴大 Workspace 授權
-            </label>
-          )}
-          <div className="form-actions">
-            <button
-              type="button"
-              className="btn-primary"
-              disabled={busy || (summary.requires_risk_acknowledgement && !acknowledged) || (expands && !acknowledgedExpansion)}
-              onClick={() => void confirm()}
-            >
-              確認並保存授權
-            </button>
-          </div>
-        </section>
-      )}
+        </ul>
+      </section>
 
-      {notice && <p role="status">{notice}</p>}
-      {error && <p role="alert">{error}</p>}
+      <section className="section">
+        <div className="section-heading">
+          <h3>能力與範圍</h3>
+          <p>勾選要授予的能力，再寫出目標資源與限制，每行一項。</p>
+        </div>
+        {groups.map((group) => (
+          <fieldset key={group.title} className="authorization-group">
+            <legend>{group.title}</legend>
+            {group.risky && <p className="section-hint">範本不會包含這些能力；需要時逐項勾選，並寫明目標資源。</p>}
+            <div className="row-list">
+              {group.capabilities.map(({ capability, label, high_risk }) => {
+                const entry = draft[capability];
+                return (
+                  <div key={capability} className="row authorization-capability">
+                    {/* 可存取名稱以能力名稱開頭（「部署 高風險」），高風險只以徽章標示，不整列上色 */}
+                    <label className="authorization-capability-toggle">
+                      <input
+                        type="checkbox"
+                        checked={entry !== undefined}
+                        onChange={(e) => toggle(capability, e.target.checked)}
+                      />
+                      <span>{label}</span>
+                      {high_risk && <span className="badge badge-danger">高風險</span>}
+                    </label>
+                    {/* 欄位就在能力下方，畫面上不重複能力名稱；可存取名稱仍帶能力名稱 */}
+                    {entry && (
+                      <div className="field-row authorization-capability-fields">
+                        <label className="field">
+                          <span className="field-label">目標資源（每行一項）</span>
+                          <textarea
+                            className="authorization-targets-input"
+                            aria-label={`${label}：目標資源（每行一項）`}
+                            value={entry.targets}
+                            onChange={(e) => change(capability, "targets", e.target.value)}
+                          />
+                        </label>
+                        <label className="field">
+                          <span className="field-label">限制（每行一項）</span>
+                          <textarea
+                            aria-label={`${label}：限制（每行一項）`}
+                            value={entry.restrictions}
+                            onChange={(e) => change(capability, "restrictions", e.target.value)}
+                          />
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </fieldset>
+        ))}
+      </section>
+
+      <section className="section">
+        <div className="section-heading">
+          <h3>確認與儲存</h3>
+          <p>儲存前先檢視確認摘要；內容一改，摘要就要重新檢視。</p>
+        </div>
+        <div className="form-actions">
+          <button type="button" disabled={busy} onClick={() => void review()}>
+            檢視確認摘要
+          </button>
+        </div>
+
+        {summary && (
+          <section className="panel authorization-summary" aria-label="確認摘要">
+            <h4>確認摘要</h4>
+            {summary.items.length === 0 ? (
+              <p>沒有授予任何能力。</p>
+            ) : (
+              <dl className="facts authorization-summary-items">
+                {summary.items.map((item) => (
+                  <Fragment key={item.capability}>
+                    <dt>
+                      {item.label}
+                      {item.high_risk && <span className="badge badge-danger">高風險</span>}
+                    </dt>
+                    <dd>
+                      <span className="authorization-targets">
+                        {item.targets.length > 0 ? <Targets targets={item.targets} /> : "未指定目標資源"}
+                      </span>
+                      {item.restrictions.length > 0 && (
+                        <span className="authorization-restrictions">限制：{item.restrictions.join("、")}</span>
+                      )}
+                    </dd>
+                  </Fragment>
+                ))}
+              </dl>
+            )}
+            {summary.changes && <ChangesView changes={summary.changes} />}
+            <div className="authorization-confirm-area">
+              {summary.risks.map((risk) => (
+                <p key={risk} className="authorization-risk">
+                  {risk}
+                </p>
+              ))}
+              {summary.requires_risk_acknowledgement && (
+                <label className="authorization-ack">
+                  <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />
+                  我了解並接受上述風險
+                </label>
+              )}
+              {expands && (
+                <label className="authorization-ack">
+                  <input
+                    type="checkbox"
+                    checked={acknowledgedExpansion}
+                    onChange={(e) => setAcknowledgedExpansion(e.target.checked)}
+                  />
+                  我了解這會擴大 Workspace 授權
+                </label>
+              )}
+              <div className="form-actions">
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={busy || (summary.requires_risk_acknowledgement && !acknowledged) || (expands && !acknowledgedExpansion)}
+                  onClick={() => void confirm()}
+                >
+                  確認並儲存授權
+                </button>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {notice && (
+          <div className="callout callout-success" role="status">
+            <p>{notice}</p>
+          </div>
+        )}
+        {error && (
+          <p className="field-error" role="alert">
+            {error}
+          </p>
+        )}
+      </section>
 
       {view.revisions.length > 0 && (
-        <section className="authorization-history" aria-label="授權歷史">
-          <h3>授權歷史</h3>
-          <ol>
-            {[...view.revisions].reverse().map((revision) => (
-              <li key={revision.revision}>
-                revision {revision.revision}：{formatTimestamp(revision.confirmed_at, timeZone)}，
-                {sourceLabel(revision, view)}
-              </li>
-            ))}
-          </ol>
+        <section className="section authorization-history" aria-label="授權歷史">
+          <details>
+            <summary>
+              授權歷史 <span className="count">{view.revisions.length}</span>
+            </summary>
+            <ol className="row-list">
+              {[...view.revisions].reverse().map((revision) => (
+                <li key={revision.revision}>
+                  <div className="row-head">
+                    <h4>第 {revision.revision} 版</h4>
+                    {revision.revision === effective?.revision && <span className="badge badge-success">目前生效</span>}
+                  </div>
+                  <p className="meta">
+                    <span>確認於 {formatTimestamp(revision.confirmed_at, timeZone)}</span>
+                    <span>來源：{sourceLabel(revision, view)}</span>
+                  </p>
+                </li>
+              ))}
+            </ol>
+          </details>
         </section>
       )}
+    </PageFrame>
+  );
+}
+
+/** 頁面外框：載入中、讀取失敗與正常內容共用同一個頁面標題（h2 與跑道欄的頁名相同）。 */
+function PageFrame({ children }: { children: ReactNode }) {
+  return (
+    <section className="page authorization-page" aria-label="授權">
+      <header className="page-header">
+        <h2>授權</h2>
+      </header>
+      {children}
     </section>
   );
 }
@@ -362,45 +456,60 @@ function LegacyRunsNotice({
   onCancel: (run: LegacyRun) => void;
 }) {
   const headingId = useId();
-  const labelOf = (capability: Capability) => capabilities.find((c) => c.capability === capability)?.label ?? capability;
+  // 找不到能力名稱時才顯示原始代碼，以等寬字標示（MASTER 7.1 機器代碼；所在的 .meta 已是次要色）
+  const labelOf = (capability: Capability): ReactNode =>
+    capabilities.find((c) => c.capability === capability)?.label ?? <span className="mono">{capability}</span>;
   return (
-    <section className="authorization-legacy-runs" role="status" aria-labelledby={headingId}>
-      <h3 id={headingId}>後續執行已停用，仍有 {runs.length} 個 Run 沿用舊授權</h3>
-      <p>已准入的 Run 撤權沒有固定完成時間，可以自行暫停或取消。</p>
-      {/* 每列＝標題（2 行）與狀態說明｜按鈕組（audit P-AUTH-2） */}
-      <ul className="authorization-legacy-list">
+    <section className="section authorization-legacy" role="status" aria-labelledby={headingId}>
+      <div className="section-heading">
+        <h3 id={headingId}>後續執行已停用，仍有 {runs.length} 個 Run 沿用舊授權</h3>
+        <p>已准入的 Run 撤權沒有固定完成時間，可以自行暫停或取消。</p>
+      </div>
+      {/* 每列＝Task 標題（2 行）與按鈕組 → 沿用的 revision、被撤銷的能力、准入時間、停止要求 */}
+      <ul className="row-list">
         {runs.map((run) => (
-          <li key={run.run_id} className="authorization-legacy-run">
-            <div className="authorization-legacy-text">
-              <strong className="clamp-2" title={run.task_title}>
+          <li key={run.run_id} className="authorization-legacy-run stripe-warning">
+            <div className="row-head">
+              <h4 className="clamp-2" title={run.task_title}>
                 {run.task_title}
-              </strong>
-              <p>
-                沿用 revision {run.authorization_revision}
-                {run.revoked_capabilities.length > 0 && <>；已撤銷：{run.revoked_capabilities.map(labelOf).join("、")}</>}
-                {run.admitted_at !== null && <>；准入於 {formatTimestamp(run.admitted_at, timeZone)}</>}
-              </p>
-              {run.cancel_requested && <p>已要求停止，等待程序確認</p>}
+              </h4>
+              <div className="authorization-legacy-actions">
+                <button
+                  type="button"
+                  disabled={busy || run.cancel_requested}
+                  title="停止這個 Run，Task 回到可派工；之後重新派工時依目前授權准入"
+                  onClick={() => onPause(run)}
+                >
+                  暫停
+                </button>
+                <button
+                  type="button"
+                  className="btn-danger"
+                  disabled={busy || run.cancel_requested}
+                  title="取消整個 Task"
+                  onClick={() => onCancel(run)}
+                >
+                  取消
+                </button>
+              </div>
             </div>
-            <div className="authorization-legacy-actions">
-              <button
-                type="button"
-                disabled={busy || run.cancel_requested}
-                title="停止這個 Run，Task 回到可派工；之後重新派工時依目前授權准入"
-                onClick={() => onPause(run)}
-              >
-                暫停
-              </button>
-              <button
-                type="button"
-                className="btn-danger"
-                disabled={busy || run.cancel_requested}
-                title="取消整個 Task"
-                onClick={() => onCancel(run)}
-              >
-                取消
-              </button>
-            </div>
+            <p className="meta">
+              <span>沿用第 {run.authorization_revision} 版</span>
+              {run.revoked_capabilities.length > 0 && (
+                <span>
+                  已撤銷：
+                  {run.revoked_capabilities.map((capability, index) => (
+                    <Fragment key={capability}>
+                      {index > 0 && "、"}
+                      {labelOf(capability)}
+                    </Fragment>
+                  ))}
+                </span>
+              )}
+              {run.admitted_at !== null && <span>准入於 {formatTimestamp(run.admitted_at, timeZone)}</span>}
+              {/* 系統自己在等，不是要你處理的事：中性點，不用琥珀色（MASTER 7.1） */}
+              {run.cancel_requested && <span className="dot">已要求停止，等待程序確認</span>}
+            </p>
           </li>
         ))}
       </ul>
@@ -408,26 +517,50 @@ function LegacyRunsNotice({
   );
 }
 
+/** 目標資源多半是路徑或網址：等寬（MASTER 7.1 路徑）、確認前完整顯示不縮短，以「、」分隔。 */
+function Targets({ targets }: { targets: string[] }) {
+  return targets.map((target, index) => (
+    <Fragment key={index}>
+      {index > 0 && "、"}
+      <span className="mono">{target}</span>
+    </Fragment>
+  ));
+}
+
 /** 修改既有授權時，相對於目前 revision 新增／移除的能力、目標與限制，以及影響說明。 */
 function ChangesView({ changes }: { changes: AuthorizationChanges }) {
-  const listed = (label: string, items: string[]) => items.length > 0 && <>；{label}：{items.join("、")}</>;
+  // 每一種變動各自一段（MASTER：次要資訊以間距分開，不以符號串接）；目標是路徑或網址，用等寬字
+  const parts = (change: GrantChange) =>
+    (
+      [
+        ["新增目標", change.added_targets, true],
+        ["移除目標", change.removed_targets, true],
+        ["新增限制", change.added_restrictions, false],
+        ["移除限制", change.removed_restrictions, false],
+      ] as const
+    )
+      .filter(([, items]) => items.length > 0)
+      .map(([label, items, isTarget]) => (
+        <span key={label}>
+          {label}：{isTarget ? <Targets targets={items} /> : items.join("、")}
+        </span>
+      ));
   return (
     <section className="authorization-changes" aria-label="授權變更">
-      <h4>相對於目前授權（revision {changes.base_revision}）的變更</h4>
+      <h5>相對於目前授權（第 {changes.base_revision} 版）的變更</h5>
       {changes.changes.length === 0 ? (
         <p>內容與目前授權相同。</p>
       ) : (
-        <ul>
+        <ul className="authorization-change-list">
           {changes.changes.map((change) => (
             <li key={change.capability}>
-              <strong>{change.label}</strong>
-              {change.new_capability && "（新增能力）"}
-              {change.removed_capability && "（移除能力）"}
-              {listed("新增目標", change.added_targets)}
-              {listed("移除目標", change.removed_targets)}
-              {listed("新增限制", change.added_restrictions)}
-              {listed("移除限制", change.removed_restrictions)}
-              {change.expands && <span className="authorization-high-risk">（擴大授權）</span>}
+              <p className="authorization-change-head">
+                <strong>{change.label}</strong>
+                {change.new_capability && <span className="badge badge-plain">新增能力</span>}
+                {change.removed_capability && <span className="badge badge-plain">移除能力</span>}
+                {change.expands && <span className="badge badge-warning">擴大授權</span>}
+              </p>
+              {parts(change).length > 0 && <p className="meta">{parts(change)}</p>}
             </li>
           ))}
         </ul>

@@ -58,6 +58,30 @@ describe("流程", () => {
     expect(workflow).toHaveTextContent("建立於2023/11/15 06:13");
   });
 
+  it("理由的標籤是使用者語言；Playbook 代碼不在理由文字裡，放在卡片標題的 title", async () => {
+    renderPage(fakeClient());
+
+    const workflow = await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
+    expect(workflow).toHaveTextContent("選擇這個流程的理由");
+    expect(workflow).not.toHaveTextContent("Router 的理由");
+    expect(workflow).toHaveTextContent("情境「缺陷處理」→ 缺陷處理第 1 版");
+    expect(workflow).not.toHaveTextContent("（defect）");
+    expect(within(workflow).getByRole("heading", { name: "缺陷處理 第 1 版" })).toHaveAttribute("title", "Playbook 代碼：defect");
+  });
+
+  it("Gate 平常是中性的分類標籤；輪到且要你裁定時才用琥珀色", async () => {
+    renderPage(fakeClient(workflowList({ workflows: [workflowView(), workflowView({ ...atDecisionGate, id: "wf_2", playbook_title: "新功能" })] })));
+    await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
+
+    const gate = (workflow: string) =>
+      within(within(screen.getByRole("region", { name: workflow })).getByRole("listitem", { name: "修正確認" })).getByText("裁定 Gate");
+    // 還沒輪到：中性
+    expect(gate("缺陷處理 第 1 版")).toHaveClass("badge", "badge-plain");
+    expect(gate("缺陷處理 第 1 版")).not.toHaveClass("badge-warning");
+    // 輪到且需要你裁定：琥珀
+    expect(gate("新功能 第 1 版")).toHaveClass("badge", "badge-warning");
+  });
+
   it("Playbook 沒有新版時不顯示新版提示；沒有 Task 時說明尚未綁定", async () => {
     renderPage(fakeClient(workflowList({ workflows: [workflowView({ latest_playbook_version: 1, task_id: null, task_title: null })] })));
 
@@ -80,7 +104,7 @@ describe("流程", () => {
     expect(await screen.findByRole("region", { name: "缺陷處理 第 1 版" })).toHaveTextContent("阻擋原因失敗次數用盡");
     const done = screen.getByRole("region", { name: "新功能 第 1 版" });
     expect(done).toHaveTextContent("已完成");
-    expect(within(done).queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
+    expect(within(done).queryByRole("button", { name: /^跳過此 Stage/ })).not.toBeInTheDocument();
     expect(within(done).queryByText("此 Gate 不能跳過")).not.toBeInTheDocument();
   });
 
@@ -113,20 +137,38 @@ describe("流程", () => {
     expect(within(review).queryByRole("list", { name: "修正確認 的允許的動作" })).not.toBeInTheDocument();
   });
 
-  it("已通過、已跳過的 Stage 只顯示標題列，事實與嘗試紀錄收合；其他 Stage 攤開", async () => {
+  it("已通過、已跳過與還沒輪到的 Stage 只顯示標題列，事實與嘗試紀錄收合；目前、受阻、需重驗的攤開", async () => {
     const workflow = workflowView();
     workflow.stages[2] = { ...workflow.stages[2], state: "skipped" };
-    renderPage(fakeClient(workflowList({ workflows: [workflow] })));
+    const pending = workflowView({ id: "wf_2", playbook_title: "新功能" });
+    const blocked = workflowView({
+      id: "wf_3",
+      playbook_title: "遷移",
+      stages: [
+        stageView({ key: "a", title: "受阻的 Stage", state: "blocked" }),
+        stageView({ key: "b", title: "需重驗的 Stage", state: "invalidated" }),
+      ],
+    });
+    renderPage(fakeClient(workflowList({ workflows: [workflow, pending, blocked] })));
     await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
 
-    const collapsed = (name: string) => stage(name).querySelector(":scope > details.workflow-stage-details");
-    const passed = collapsed("建立重現");
+    const collapsed = (item: HTMLElement) => item.querySelector(":scope > details.workflow-stage-details");
+    const passed = collapsed(within(screen.getByRole("region", { name: "缺陷處理 第 1 版" })).getByRole("listitem", { name: "建立重現" }));
     expect(passed).not.toBeNull();
     expect(passed).not.toHaveAttribute("open");
-    // 摘要說明裡面有什麼（嘗試次數）
-    expect(passed?.querySelector("summary")).toHaveTextContent(`細節與嘗試紀錄（${workflow.stages[0].attempts.length} 次）`);
-    expect(collapsed("修正確認")).not.toBeNull();
-    expect(collapsed("縮小範圍")).toBeNull();
+    // 摘要說明裡面有什麼（嘗試次數）；計數只放數字（MASTER 7.1）
+    // 收合摘要一律「詳細資訊」（不用「細節」）
+    expect(passed?.querySelector("summary")).toHaveTextContent(`詳細資訊與嘗試紀錄 ${workflow.stages[0].attempts.length}`);
+    expect(passed?.querySelector("summary .count")).toHaveTextContent(String(workflow.stages[0].attempts.length));
+    const first = screen.getByRole("region", { name: "缺陷處理 第 1 版" });
+    expect(collapsed(within(first).getByRole("listitem", { name: "修正確認" }))).not.toBeNull();
+    expect(collapsed(within(first).getByRole("listitem", { name: "修正確認" }))!.querySelector("summary")).toHaveTextContent(/^詳細資訊$/);
+    expect(collapsed(within(first).getByRole("listitem", { name: "縮小範圍" }))).toBeNull();
+    // 還沒輪到的「修正確認」（第二個 Workflow）也收合
+    const second = screen.getByRole("region", { name: "新功能 第 1 版" });
+    expect(collapsed(within(second).getByRole("listitem", { name: "修正確認" }))).not.toBeNull();
+    expect(collapsed(stage("受阻的 Stage"))).toBeNull();
+    expect(collapsed(stage("需重驗的 Stage"))).toBeNull();
   });
 
   it("安全 Gate 另外標示", async () => {
@@ -161,12 +203,18 @@ describe("流程", () => {
     );
     expect(attempts[0]).toHaveTextContent("還沒有重現");
     expect(cells(attempts[1])).toEqual(["第 2 次", "通過", "2023/11/15 06:14"]);
-    expect(within(attempts[1]).getByRole("list", { name: "證據" })).toHaveTextContent("reproduction：產出物 art_1・有效");
-    expect(attempts[1]).toHaveTextContent("記錄者：ctl_1・帳號 prof_1");
+    // 證據的查驗狀態是旁邊的徽章；記錄者與帳號是同一列的兩段次要資訊（不以「・」串接）
+    const evidence = within(attempts[1]).getByRole("list", { name: "證據" });
+    expect(evidence).toHaveTextContent("reproduction：產出物 art_1");
+    expect(within(evidence).getByText("有效")).toHaveClass("badge", "badge-success");
+    expect(within(attempts[1]).getByText("記錄者：ctl_1")).toBeInTheDocument();
+    expect(within(attempts[1]).getByText("帳號 prof_1")).toBeInTheDocument();
+    expect(attempts[1]).not.toHaveTextContent("・");
 
     const skipped = within(screen.getByRole("table", { name: "修正確認 的嘗試紀錄" })).getByRole("row", { name: "第 1 次" });
     expect(cells(skipped).slice(0, 2)).toEqual(["第 1 次", "已跳過"]);
-    expect(skipped).toHaveTextContent("approved：裁定 dec_1・尚未完成");
+    expect(skipped).toHaveTextContent("approved：裁定 dec_1");
+    expect(within(skipped).getByText("尚未完成")).toHaveClass("badge");
     expect(skipped).toHaveTextContent("記錄者：使用者");
     expect(skipped).not.toHaveTextContent("帳號");
     expect(skipped).not.toHaveTextContent("desktop");
@@ -211,7 +259,9 @@ describe("流程", () => {
     expect(within(attempts[1]).getByRole("list", { name: "失效原因" })).toHaveTextContent(
       "reproduction：build 已改變：通過時是 c1，目前是 c2",
     );
-    expect(within(attempts[1]).getByRole("list", { name: "證據" })).toHaveTextContent("reproduction：產出物 art_1・build 已改變");
+    const evidence = within(attempts[1]).getByRole("list", { name: "證據" });
+    expect(evidence).toHaveTextContent("reproduction：產出物 art_1");
+    expect(within(evidence).getByText("build 已改變")).toHaveClass("badge", "badge-warning");
     expect(attempts[1]).toHaveTextContent("記錄者：Runtime");
     expect(attempts[1]).not.toHaveTextContent("帳號");
   });
@@ -229,10 +279,11 @@ describe("流程", () => {
 
     await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
     const current = stage("縮小範圍");
-    const submit = within(current).getByRole("button", { name: "跳過此 Stage" });
-    expect(submit).toBeDisabled();
     // 其他 Stage 沒有跳過操作
-    expect(within(stage("建立重現")).queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
+    expect(within(stage("建立重現")).queryByRole("button", { name: /^跳過此 Stage/ })).not.toBeInTheDocument();
+    await user.click(within(current).getByRole("button", { name: "跳過此 Stage…" }));
+    const submit = within(current).getByRole("button", { name: "確認跳過" });
+    expect(submit).toBeDisabled();
 
     await user.type(within(current).getByLabelText("跳過原因"), "   ");
     expect(submit).toBeDisabled();
@@ -247,8 +298,37 @@ describe("流程", () => {
       reason: "已有最小重現",
     });
     await waitFor(() => expect(stage("縮小範圍")).toHaveTextContent("已跳過"));
-    expect(within(stage("縮小範圍")).queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
+    expect(within(stage("縮小範圍")).queryByRole("button", { name: /跳過/ })).not.toBeInTheDocument();
     expect(within(stage("修正確認")).getByText("此 Gate 不能跳過")).toBeInTheDocument();
+  });
+
+  it("跳過平常只是次要按鈕「跳過此 Stage…」：按下才展開原因欄位，可以取消，取消後不送出並把焦點還給按鈕", async () => {
+    const client = fakeClient();
+    const user = userEvent.setup();
+    renderPage(client);
+
+    const current = await screen.findByRole("listitem", { name: "縮小範圍" });
+    const toggle = within(current).getByRole("button", { name: "跳過此 Stage…" });
+    // 不是送出鈕（主要按鈕），原因欄位還沒出現
+    expect(toggle).toHaveAttribute("type", "button");
+    expect(within(current).queryByLabelText("跳過原因")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    const input = within(current).getByLabelText("跳過原因");
+    expect(input).toHaveFocus();
+    // 確認鈕是破壞性的次要樣式，不是主要按鈕
+    expect(within(current).getByRole("button", { name: "確認跳過" })).toHaveClass("btn-danger");
+    expect(within(current).queryByRole("button", { name: "跳過此 Stage…" })).not.toBeInTheDocument();
+
+    await user.type(input, "先不做");
+    await user.click(within(current).getByRole("button", { name: "取消" }));
+
+    expect(within(current).queryByLabelText("跳過原因")).not.toBeInTheDocument();
+    expect(within(current).getByRole("button", { name: "跳過此 Stage…" })).toHaveFocus();
+    expect(client.skipStage).not.toHaveBeenCalled();
+    // 再展開時原因欄是空的
+    await user.click(within(current).getByRole("button", { name: "跳過此 Stage…" }));
+    expect(within(current).getByLabelText("跳過原因")).toHaveValue("");
   });
 
   it("目前 Stage 是裁定或安全 Gate 時不提供跳過，改說明不能跳過", async () => {
@@ -263,7 +343,7 @@ describe("流程", () => {
     await screen.findByRole("region", { name: "缺陷處理 第 1 版" });
     expect(within(stage("修正確認")).getByText("此 Gate 不能跳過")).toBeInTheDocument();
     expect(within(stage("切換")).getByText("此 Gate 不能跳過")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "跳過此 Stage" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^跳過此 Stage/ })).not.toBeInTheDocument();
   });
 
   it("跳過被拒時顯示 Runtime 的說明，保留目前內容與輸入", async () => {
@@ -272,8 +352,9 @@ describe("流程", () => {
     const user = userEvent.setup();
     renderPage(client);
 
-    await user.type(await screen.findByLabelText("跳過原因"), "不需要");
-    await user.click(screen.getByRole("button", { name: "跳過此 Stage" }));
+    await user.click(await screen.findByRole("button", { name: "跳過此 Stage…" }));
+    await user.type(screen.getByLabelText("跳過原因"), "不需要");
+    await user.click(screen.getByRole("button", { name: "確認跳過" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("只能跳過目前的 Stage");
     expect(stage("縮小範圍")).toHaveTextContent("目前");
@@ -291,14 +372,16 @@ describe("流程", () => {
     const user = userEvent.setup();
     renderPage(client);
 
-    await user.type(await screen.findByLabelText("跳過原因"), "不需要");
-    await user.click(screen.getByRole("button", { name: "跳過此 Stage" }));
+    await user.click(await screen.findByRole("button", { name: "跳過此 Stage…" }));
+    await user.type(screen.getByLabelText("跳過原因"), "不需要");
+    await user.click(screen.getByRole("button", { name: "確認跳過" }));
 
     expect(await screen.findByText(/Workflow 在檢視後已更新，已重新載入/)).toBeInTheDocument();
     expect(client.workflows).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "跳過此 Stage" }));
+    // 重新載入後原因欄仍展開、保留輸入
+    await user.click(screen.getByRole("button", { name: "確認跳過" }));
     expect(client.skipStage).toHaveBeenLastCalledWith("ws_1", "wf_1", {
       stage: "minimization",
       expected_revision: 5,
@@ -309,7 +392,8 @@ describe("流程", () => {
   it("沒有 Workflow 時說明 Controller 會依情境選擇 Playbook", async () => {
     renderPage(fakeClient(workflowList({ workflows: [] })));
 
-    expect(await screen.findByText(/Controller 開始工作時會依情境選擇 Playbook/)).toBeInTheDocument();
+    // .empty-note 是一行說明，不加句號（MASTER 7.1）
+    expect(await screen.findByText(/Controller 開始工作時會依情境選擇 Playbook/)).toHaveTextContent(/進度$/);
   });
 
   it("讀不到流程時顯示 Runtime 的說明", async () => {
@@ -317,6 +401,9 @@ describe("流程", () => {
     client.workflows.mockRejectedValueOnce(new Error("找不到 Workspace：ws_1"));
     renderPage(client);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得流程：找不到 Workspace：ws_1");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("無法取得流程")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("找不到 Workspace：ws_1");
   });
 });

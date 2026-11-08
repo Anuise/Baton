@@ -82,8 +82,16 @@ async function settle(ms = 0) {
 }
 
 /** 兩個表單都有「名稱」欄位，以表單的名稱區分。 */
-const createForm = () => screen.getByRole("form", { name: "新增 Profile" });
-const fromDirForm = () => screen.getByRole("form", { name: "以既有目錄建立 Profile" });
+const createForm = () => screen.getByRole("form", { name: "新增帳號" });
+const fromDirForm = () => screen.getByRole("form", { name: "以既有目錄建立帳號" });
+
+/** 已有帳號時新增表單平時收起，按「新增帳號」展開；表單的送出鈕也叫「新增帳號」，以 aria-expanded 區分。 */
+const addToggle = () =>
+  screen.getAllByRole("button", { name: "新增帳號" }).find((button) => button.hasAttribute("aria-expanded"))!;
+
+/** 新增表單的送出鈕；表單收起時要帶 `hidden: true`。 */
+const submitButton = (hidden = false) =>
+  within(screen.getByRole("form", { name: "新增帳號", hidden })).getByRole("button", { name: "新增帳號", hidden });
 
 /** Profile 卡片中某一項事實（dt）的值（dd）；沒有這一項時為 null。 */
 function fact(item: HTMLElement, term: string): HTMLElement | null {
@@ -117,7 +125,7 @@ describe("帳號頁", () => {
   it("沒有 Profile 時顯示空狀態與目前數量上限", async () => {
     render(<AccountsPage client={fakeClient()} />);
 
-    expect(await screen.findByText("還沒有帳號 Profile")).toBeInTheDocument();
+    expect(await screen.findByText("還沒有帳號")).toBeInTheDocument();
     expect(screen.getByText("0 / 8")).toBeInTheDocument();
   });
 
@@ -137,9 +145,36 @@ describe("帳號頁", () => {
 
     const item = (await screen.findByText("被覆蓋的帳號")).closest("li")!;
     expect(within(item).getByText("已阻擋派工")).toBeInTheDocument();
-    expect(within(item).getByText(/API key（ANTHROPIC_API_KEY）/, { selector: ".profile-source" })).toBeInTheDocument();
+    expect(fact(item, "認證來源")).toHaveTextContent(/^API key（ANTHROPIC_API_KEY）$/);
+    // 短的認證來源不附複製
+    expect(within(fact(item, "認證來源")!).queryByRole("button")).not.toBeInTheDocument();
     expect(within(item).getByRole("alert")).toHaveTextContent("已阻擋派工");
     expect(within(item).queryByText("可派工")).not.toBeInTheDocument();
+  });
+
+  it("認證來源的說明帶長路徑時只佔一行：完整值在 title，另附「複製認證來源」", async () => {
+    const detail = "ANTHROPIC_API_KEY 由 C:\\Users\\me\\AppData\\Roaming\\deeply\\nested\\settings.json 設定";
+    const long = profile({
+      ...overridden,
+      verification: { ...overridden.verification!, source_detail: detail },
+    });
+    render(<AccountsPage client={fakeClient([long])} />);
+
+    const item = (await screen.findByText("被覆蓋的帳號")).closest("li")!;
+    const value = within(fact(item, "認證來源")!).getByTitle(`API key（${detail}）`);
+    expect(value).toHaveClass("truncate");
+    expect(within(fact(item, "認證來源")!).getByRole("button", { name: "複製認證來源" })).toBeInTheDocument();
+  });
+
+  it("「在終端機登入」是列內動作，未登入時也不是主要按鈕（下一步由狀態徽章表達）", async () => {
+    const unverified = profile({ id: "prof_9", name: "新帳號", verification: null, dispatchable: false, blockers: [] });
+    render(<AccountsPage client={fakeClient([unverified, overridden])} />);
+    await screen.findByText("新帳號");
+
+    for (const name of ["新帳號", "被覆蓋的帳號"]) {
+      expect(screen.getByRole("button", { name: `在終端機登入 ${name}` })).not.toHaveClass("btn-primary");
+    }
+    expect(within(screen.getByText("新帳號").closest("li")!).getByText("尚未核對")).toHaveClass("badge-warning");
   });
 
   it("核對結果顯示 Claude Code 版本；版本過舊時照常顯示後端的阻擋原因，取不到版本時不顯示版本", async () => {
@@ -202,31 +237,95 @@ describe("帳號頁", () => {
     expect(within(freshItem).getByRole("alert")).toHaveTextContent("尚未核對登入狀態");
   });
 
-  it("新增 Profile 後立刻出現在清單，表單清空，並通知上層", async () => {
+  it("阻擋原因以長警示呈現，色調與卡片色條、狀態徽章相同（尚未核對是警告，其他阻擋是危險）", async () => {
+    const fresh = profile({
+      id: "prof_4",
+      name: "新帳號",
+      verification: null,
+      dispatchable: false,
+      blockers: [{ code: "profile_unverified", message: "尚未核對登入狀態；請完成原生登入後按「重新核對」" }],
+    });
+    render(<AccountsPage client={fakeClient([fresh, overridden])} />);
+
+    const freshItem = (await screen.findByText("新帳號")).closest("li")!;
+    expect(freshItem).toHaveClass("stripe-warning");
+    expect(within(freshItem).getByText("尚未核對")).toHaveClass("badge-warning");
+    expect(within(freshItem).getByRole("alert")).toHaveClass("notice", "notice-warning");
+    const blockedItem = screen.getByText("被覆蓋的帳號").closest("li")!;
+    expect(blockedItem).toHaveClass("stripe-danger");
+    expect(within(blockedItem).getByText("已阻擋派工", { selector: ".badge" })).toHaveClass("badge-danger");
+    expect(within(blockedItem).getByRole("alert")).toHaveClass("notice", "notice-danger");
+  });
+
+  it("長帳號（email）只佔一行，完整值在 title，另可複製", async () => {
+    const long = "very.long.account.name.for.layout.stress.testing@subdomain.example.com";
+    render(
+      <AccountsPage
+        client={fakeClient([profile({ verification: { ...profile().verification!, account: long } })])}
+      />,
+    );
+
+    const item = (await screen.findByText("主要帳號")).closest("li")!;
+    const value = fact(item, "帳號")!;
+    expect(within(value).getByTitle(long)).toHaveClass("truncate");
+    expect(within(value).getByRole("button", { name: "複製帳號" })).toBeInTheDocument();
+    // 短的帳號不附複製
+    render(<AccountsPage client={fakeClient([profile({ id: "prof_9", name: "短帳號" })])} />);
+    const short = (await screen.findByText("短帳號")).closest("li")!;
+    expect(within(fact(short, "帳號")!).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("新增帳號後立刻出現在清單，表單清空，並通知上層", async () => {
     const client = fakeClient();
     const onChange = vi.fn();
     const user = userEvent.setup();
     render(<AccountsPage client={client} onChange={onChange} />);
-    await screen.findByText("還沒有帳號 Profile");
+    await screen.findByText("還沒有帳號");
 
-    await user.type(within(createForm()).getByLabelText("名稱"), "工作帳號");
+    // 還沒有任何帳號時新增表單直接展開
+    const form = createForm();
+    await user.type(within(form).getByLabelText("名稱"), "工作帳號");
     await user.type(screen.getByLabelText("預期帳號（選填）"), "work@example.com");
-    await user.click(screen.getByRole("button", { name: "新增 Profile" }));
+    await user.click(submitButton());
 
     expect(await screen.findByText("工作帳號")).toBeInTheDocument();
     expect(client.createProfile).toHaveBeenCalledWith({ name: "工作帳號", expectedAccount: "work@example.com" });
-    expect(within(createForm()).getByLabelText("名稱")).toHaveValue("");
     expect(screen.getByText("1 / 8")).toBeInTheDocument();
     expect(onChange).toHaveBeenCalled();
+    // 新增後表單收起，焦點移到新帳號卡片的「在終端機登入」（不掉到 body）；再展開時欄位已清空
+    expect(form).not.toBeVisible();
+    await waitFor(() => expect(screen.getByRole("button", { name: "在終端機登入 工作帳號" })).toHaveFocus());
+    await user.click(addToggle());
+    expect(within(createForm()).getByLabelText("名稱")).toHaveValue("");
+    expect(within(createForm()).getByLabelText("預期帳號（選填）")).toHaveValue("");
+  });
+
+  it("已有帳號時新增表單平時收起，按「新增帳號」展開、再按一次收起", async () => {
+    const user = userEvent.setup();
+    render(<AccountsPage client={fakeClient([profile()])} />);
+    await screen.findByText("主要帳號");
+
+    expect(screen.queryByRole("form", { name: "新增帳號" })).not.toBeInTheDocument();
+    expect(addToggle()).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(addToggle());
+
+    expect(addToggle()).toHaveAttribute("aria-expanded", "true");
+    expect(createForm()).toBeVisible();
+    expect(fromDirForm()).toBeVisible();
+
+    await user.click(addToggle());
+
+    expect(screen.queryByRole("form", { name: "新增帳號" })).not.toBeInTheDocument();
   });
 
   it("名稱是空的時不送出請求", async () => {
     const client = fakeClient();
     const user = userEvent.setup();
     render(<AccountsPage client={client} />);
-    await screen.findByText("還沒有帳號 Profile");
+    await screen.findByText("還沒有帳號");
 
-    await user.click(screen.getByRole("button", { name: "新增 Profile" }));
+    await user.click(submitButton());
 
     expect(client.createProfile).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("請輸入名稱");
@@ -239,11 +338,11 @@ describe("帳號頁", () => {
     );
     const user = userEvent.setup();
     render(<AccountsPage client={client} />);
-    await screen.findByText("還沒有帳號 Profile");
+    await screen.findByText("還沒有帳號");
 
     await user.type(within(createForm()).getByLabelText("名稱"), "工作帳號");
     await user.type(screen.getByLabelText("預期帳號（選填）"), "nope");
-    await user.click(screen.getByRole("button", { name: "新增 Profile" }));
+    await user.click(submitButton());
 
     expect(await screen.findByRole("alert")).toHaveTextContent("預期帳號必須是電子郵件");
     expect(within(createForm()).getByLabelText("名稱")).toHaveValue("工作帳號");
@@ -256,16 +355,48 @@ describe("帳號頁", () => {
     render(<AccountsPage client={client} />);
 
     expect(await screen.findByText("8 / 8")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新增 Profile" })).toBeDisabled();
-    expect(screen.getByText(/最多 8 個/)).toBeInTheDocument();
+    expect(addToggle()).toBeDisabled();
+    // 表單即使展開也不能送出
+    expect(submitButton(true)).toBeDisabled();
+    // 一行說明不加句號（MASTER 7.1）
+    expect(screen.getByText(/最多 8 個/)).toHaveTextContent(/^已達上限：最多 8 個帳號，請先封存用不到的帳號再新增$/);
 
+    // 封存收在卡片的「更多」裡：先打開選單再選
+    await user.click(screen.getByLabelText("更多（帳號 1）"));
     await user.click(screen.getByRole("button", { name: "封存 帳號 1" }));
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "新增 Profile" })).toBeEnabled());
+    await waitFor(() => expect(addToggle()).toBeEnabled());
+    expect(submitButton(true)).toBeEnabled();
     expect(screen.getByText("7 / 8")).toBeInTheDocument();
   });
 
-  describe("以既有目錄建立 Profile", () => {
+  it("封存後焦點不掉到 body：移到下一張卡片的「更多」，沒有下一張時移到上一張，全部封存後移到新增表單的名稱", async () => {
+    const client = fakeClient([
+      profile({ id: "prof_a", name: "甲" }),
+      profile({ id: "prof_b", name: "乙" }),
+      profile({ id: "prof_c", name: "丙" }),
+    ]);
+    const user = userEvent.setup();
+    render(<AccountsPage client={client} />);
+    await screen.findByText("甲");
+
+    const archive = async (name: string) => {
+      await user.click(screen.getByLabelText(`更多（${name}）`));
+      await user.click(screen.getByRole("button", { name: `封存 ${name}` }));
+      await waitFor(() => expect(screen.queryByText(name)).not.toBeInTheDocument());
+    };
+
+    await archive("乙");
+    expect(screen.getByLabelText("更多（丙）")).toHaveFocus();
+
+    await archive("丙");
+    expect(screen.getByLabelText("更多（甲）")).toHaveFocus();
+
+    await archive("甲");
+    expect(within(createForm()).getByLabelText("名稱")).toHaveFocus();
+  });
+
+  describe("以既有目錄建立帳號", () => {
     const WORK3_DIR = "C:\\Users\\me\\.claude-Work-3";
 
     it("以名稱與設定目錄送出；成功後新 Profile 帶核對結果與「外部目錄」標示出現在清單，表單清空並通知上層", async () => {
@@ -274,6 +405,7 @@ describe("帳號頁", () => {
       const user = userEvent.setup();
       render(<AccountsPage client={client} onChange={onChange} timeZone="Asia/Taipei" />);
       await screen.findByText("主要帳號");
+      await user.click(addToggle());
 
       const form = fromDirForm();
       await user.type(within(form).getByLabelText("名稱"), "工作三");
@@ -289,6 +421,9 @@ describe("帳號頁", () => {
       expect(within(fact(item, "外部目錄")!).getByTitle(WORK3_DIR)).toBeInTheDocument();
       // 平台建立的 Profile 不標示外部目錄
       expect(within(screen.getByText("主要帳號").closest("li")!).queryByText(/外部目錄/)).not.toBeInTheDocument();
+      // 建立後表單收起，焦點移到新帳號卡片的「在終端機登入」，欄位已清空
+      expect(form).not.toBeVisible();
+      await waitFor(() => expect(screen.getByRole("button", { name: "在終端機登入 工作三" })).toHaveFocus());
       expect(within(form).getByLabelText("名稱")).toHaveValue("");
       expect(within(form).getByLabelText("設定目錄")).toHaveValue("");
       expect(screen.getByText("2 / 8")).toBeInTheDocument();
@@ -302,7 +437,7 @@ describe("帳號頁", () => {
       );
       const user = userEvent.setup();
       render(<AccountsPage client={client} />);
-      await screen.findByText("還沒有帳號 Profile");
+      await screen.findByText("還沒有帳號");
 
       const form = fromDirForm();
       await user.type(within(form).getByLabelText("名稱"), "工作三");
@@ -319,7 +454,7 @@ describe("帳號頁", () => {
       const client = fakeClient();
       const user = userEvent.setup();
       render(<AccountsPage client={client} />);
-      await screen.findByText("還沒有帳號 Profile");
+      await screen.findByText("還沒有帳號");
 
       const form = fromDirForm();
       await user.type(within(form).getByLabelText("設定目錄"), WORK3_DIR);
@@ -339,7 +474,9 @@ describe("帳號頁", () => {
       render(<AccountsPage client={fakeClient(eight)} />);
 
       expect(await screen.findByText("8 / 8")).toBeInTheDocument();
-      expect(within(fromDirForm()).getByRole("button", { name: "以既有目錄建立" })).toBeDisabled();
+      expect(addToggle()).toBeDisabled();
+      const form = screen.getByRole("form", { name: "以既有目錄建立帳號", hidden: true });
+      expect(within(form).getByRole("button", { name: "以既有目錄建立", hidden: true })).toBeDisabled();
       expect(screen.getByText(/最多 8 個/)).toBeInTheDocument();
     });
   });
@@ -380,7 +517,11 @@ describe("帳號頁", () => {
 
     await user.click(screen.getByRole("button", { name: "重新核對 主要帳號" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("claude 沒有回應");
+    // 長警示：狀態詞說明哪個動作沒有完成，接著是 Runtime 的說明
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("無法重新核對")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("claude 沒有回應");
     expect(screen.getByText("可派工")).toBeInTheDocument();
   });
 
@@ -390,8 +531,10 @@ describe("帳號頁", () => {
 
     render(<AccountsPage client={client} />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("connection refused");
-    expect(screen.queryByText("還沒有帳號 Profile")).not.toBeInTheDocument();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).toHaveTextContent(/^無法取得帳號清單connection refused$/);
+    expect(screen.queryByText("還沒有帳號")).not.toBeInTheDocument();
   });
 
   it("畫面上不出現任何登入資料欄位", async () => {
@@ -411,9 +554,22 @@ describe("帳號頁", () => {
     /** 畫面上帳號的排列順序。 */
     const shownOrder = () => Array.from(document.querySelectorAll(".profile-name"), (node) => node.textContent);
 
+    /** 排序收在每張卡片的「更多」裡：先打開選單，再選「上移」或「下移」。 */
+    async function moveFromMenu(action: "上移" | "下移", name: string) {
+      await userEvent.click(screen.getByLabelText(`更多（${name}）`));
+      await userEvent.click(screen.getByRole("button", { name: `${action} ${name}` }));
+    }
+
     it("每個帳號有上移／下移；第一個不能上移，最後一個不能下移", async () => {
       render(<AccountsPage client={fakeClient(three())} />);
       await screen.findByText("甲");
+
+      // 排序與封存收在每張卡片的「更多」選單
+      const menu = screen.getAllByText("更多", { selector: "summary" })[0].closest("details")!;
+      expect(menu).toHaveClass("more-menu");
+      expect(within(menu).getByRole("button", { name: "上移 甲" })).toBeInTheDocument();
+      expect(within(menu).getByRole("button", { name: "下移 甲" })).toBeInTheDocument();
+      expect(within(menu).getByRole("button", { name: "封存 甲" })).toBeInTheDocument();
 
       expect(screen.getByRole("button", { name: "上移 甲" })).toBeDisabled();
       expect(screen.getByRole("button", { name: "下移 甲" })).toBeEnabled();
@@ -421,6 +577,30 @@ describe("帳號頁", () => {
       expect(screen.getByRole("button", { name: "下移 乙" })).toBeEnabled();
       expect(screen.getByRole("button", { name: "上移 丙" })).toBeEnabled();
       expect(screen.getByRole("button", { name: "下移 丙" })).toBeDisabled();
+    });
+
+    it("「更多」點過面板空白處後按 Esc 仍會收起，焦點回到「更多」；選了選項後也收起", async () => {
+      const user = userEvent.setup();
+      render(<AccountsPage client={fakeClient(three())} />);
+      await screen.findByText("甲");
+      const summary = screen.getByLabelText("更多（甲）");
+      const menu = summary.closest("details")!;
+      expect(menu).toHaveClass("more-menu", "more-menu-end");
+
+      await user.click(summary);
+      expect(menu).toHaveAttribute("open");
+      // 點選單面板的空白處：焦點離開「更多」
+      await user.click(menu.querySelector<HTMLElement>(".more-menu-list")!);
+      expect(summary).not.toHaveFocus();
+      await user.keyboard("{Escape}");
+
+      expect(menu).not.toHaveAttribute("open");
+      expect(summary).toHaveFocus();
+
+      await user.click(summary);
+      await user.click(screen.getByRole("button", { name: "下移 甲" }));
+
+      expect(menu).not.toHaveAttribute("open");
     });
 
     it("下移後在 Runtime 回應前就以新順序顯示，並送出全部帳號的新順序", async () => {
@@ -433,7 +613,7 @@ describe("帳號頁", () => {
       render(<AccountsPage client={client} />);
       await screen.findByText("甲");
 
-      await userEvent.click(screen.getByRole("button", { name: "下移 甲" }));
+      await moveFromMenu("下移", "甲");
 
       expect(shownOrder()).toEqual(["乙", "甲", "丙"]);
       expect(client.reorderProfiles).toHaveBeenCalledWith(["prof_b", "prof_a", "prof_c"]);
@@ -446,7 +626,7 @@ describe("帳號頁", () => {
       const { unmount } = render(<AccountsPage client={client} />);
       await screen.findByText("甲");
 
-      await userEvent.click(screen.getByRole("button", { name: "上移 丙" }));
+      await moveFromMenu("上移", "丙");
       await waitFor(() => expect(client.reorderProfiles).toHaveBeenCalledWith(["prof_a", "prof_c", "prof_b"]));
       unmount();
       render(<AccountsPage client={client} />);
@@ -462,9 +642,9 @@ describe("帳號頁", () => {
       render(<AccountsPage client={client} />);
       await screen.findByText("甲");
 
-      await userEvent.click(screen.getByRole("button", { name: "下移 乙" }));
+      await moveFromMenu("下移", "乙");
 
-      expect(await screen.findByRole("alert")).toHaveTextContent("帳號清單已經變動");
+      expect(await screen.findByRole("alert")).toHaveTextContent(/^無法調整順序帳號清單已經變動$/);
       await waitFor(() => expect(shownOrder()).toEqual(["甲", "乙", "丙"]));
     });
   });
@@ -562,7 +742,12 @@ describe("帳號頁", () => {
 
       render(<AccountsPage client={client} />);
 
-      expect(await screen.findByRole("alert")).toHaveTextContent("無法取得排程總覽：connection refused");
+      // Runtime 的錯誤可能很長：長警示（狀態詞＋原因），不是淡底提示
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveClass("notice", "notice-danger");
+      expect(alert).not.toHaveClass("callout");
+      expect(within(alert).getByText("無法取得排程總覽")).toHaveClass("notice-title");
+      expect(alert).toHaveTextContent(/^無法取得排程總覽connection refused$/);
       expect(screen.getByText("主要帳號")).toBeInTheDocument();
     });
 
@@ -737,13 +922,16 @@ describe("帳號頁", () => {
 
       const incomplete = await screen.findByRole("group", { name: "主要帳號 的額度" });
       const note = within(incomplete).getByRole("note");
-      expect(note).toHaveClass("quota-incomplete");
-      expect(note).toHaveTextContent(/^觀測不完整：五小時、七日視窗沒有來自 Claude Code 的已觀測用量/);
+      // 一句話的固定句型：提示（callout），狀態詞在前（Runtime 的說明已帶「觀測不完整」時不重複），原因完整顯示
+      expect(note).toHaveClass("callout", "callout-warning", "quota-incomplete");
+      expect(note).not.toHaveClass("notice");
+      expect(within(note).getByText("觀測不完整")).toHaveClass("callout-title");
+      expect(note).toHaveTextContent(/^觀測不完整五小時、七日視窗沒有來自 Claude Code 的已觀測用量/);
       const complete = screen.getByRole("group", { name: "備用帳號 的額度" });
       expect(within(complete).queryByRole("note")).not.toBeInTheDocument();
     });
 
-    it("整頁只有「新增 Profile」是主要按鈕；每張卡的「儲存方案上限」與「以既有目錄建立」改為次要樣式", async () => {
+    it("整頁只有「新增帳號」是主要按鈕；每張卡的「儲存方案上限」與「以既有目錄建立」改為次要樣式", async () => {
       const client = {
         ...withQuota(),
         schedulingOverview: vi.fn(async () =>
@@ -751,14 +939,16 @@ describe("帳號頁", () => {
         ),
         listProfiles: vi.fn(async () => ({ profiles: [profile(), profile({ id: "prof_2", name: "備用帳號" })], limit: 8 })),
       };
+      const user = userEvent.setup();
       render(<AccountsPage client={client} />);
       await screen.findByRole("group", { name: "備用帳號 的額度" });
+      await user.click(addToggle());
 
       // 送出鈕預設是實心主要按鈕（base.css）；加 btn-secondary 的才改回次要樣式
       const primary = screen
         .getAllByRole("button")
         .filter((button) => button.getAttribute("type") === "submit" && !button.classList.contains("btn-secondary"));
-      expect(primary.map((button) => button.textContent)).toEqual(["新增 Profile"]);
+      expect(primary.map((button) => button.textContent)).toEqual(["新增帳號"]);
       expect(screen.getByRole("button", { name: "儲存 主要帳號 的方案上限" })).toHaveClass("btn-secondary");
       expect(screen.getByRole("button", { name: "以既有目錄建立" })).toHaveClass("btn-secondary");
     });
@@ -768,6 +958,11 @@ describe("帳號頁", () => {
       const user = userEvent.setup();
       render(<AccountsPage client={client} />);
       const quota = await screen.findByRole("group", { name: "主要帳號 的額度" });
+      // 方案上限很少改，收在「設定方案上限」裡
+      const limits = within(quota).getByText("設定方案上限").closest("details")!;
+      expect(limits).not.toHaveAttribute("open");
+      await user.click(within(quota).getByText("設定方案上限"));
+      expect(limits).toHaveAttribute("open");
       expect(within(quota).getByLabelText("七日方案上限")).toHaveValue(3_000_000);
 
       await user.type(within(quota).getByLabelText("五小時方案上限"), "200000");
@@ -891,7 +1086,14 @@ describe("帳號頁", () => {
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-paused");
-      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：停止派工");
+      // 內容都是固定的短句與標籤：提示（callout），不是長警示（MASTER 7.1）
+      expect(gate).toHaveClass("callout", "callout-warning");
+      expect(gate).not.toHaveClass("notice");
+      // 狀態描述額度本身，代碼只在 title
+      const state = within(gate).getByText(/^額度：/);
+      expect(state).toHaveClass("callout-title");
+      expect(state).toHaveTextContent(/^額度：已達門檻，停止派工$/);
+      expect(within(state).getByText("已達門檻，停止派工")).toHaveAttribute("title", "paused");
       expect(within(gate).getByText(/^原因/)).toHaveTextContent("原因：達 75% 停止派工門檻（當時用量 78%）");
       expect(within(gate).getByText("回到 60% 以下或重置後才恢復派工")).toBeInTheDocument();
       expect(within(gate).getByText("重置時間：2023/11/15 01:13")).toBeInTheDocument();
@@ -916,7 +1118,10 @@ describe("帳號頁", () => {
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-draining");
-      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：交接中（draining）");
+      expect(gate).toHaveClass("callout", "callout-danger");
+      // 不在主要文字裡露出英文代碼（draining），代碼只在 title
+      expect(within(gate).getByText(/^額度：/)).toHaveTextContent(/^額度：交接中$/);
+      expect(within(gate).getByText("交接中")).toHaveAttribute("title", "draining");
       expect(within(gate).getByText(/^原因/)).toHaveTextContent(/^原因：Claude Code 回報限流警告$/);
       expect(within(gate).getByText("回到 60% 以下或重置後才恢復派工")).toBeInTheDocument();
       expect(within(gate).queryByText(/重置時間/)).not.toBeInTheDocument();
@@ -942,12 +1147,34 @@ describe("帳號頁", () => {
       expect(within(gate).getByText(/^原因/)).toHaveTextContent(/^原因：Claude Code 回報已達上限（突然限流）$/);
     });
 
-    it("沒有門檻紀錄（null）時是可派工，不顯示原因與恢復提示", async () => {
+    it("沒有門檻紀錄（null）時是未達門檻，不顯示原因與恢復提示", async () => {
       render(<AccountsPage client={withGate(null)} timeZone="UTC" />);
 
       const gate = await gateGroup();
       expect(gate).toHaveClass("profile-gate-open");
-      expect(gate).toHaveTextContent(/^額度門檻：可派工$/);
+      expect(gate).not.toHaveClass("callout");
+      expect(gate).not.toHaveClass("notice");
+      expect(gate).toHaveTextContent(/^額度：未達門檻$/);
+    });
+
+    it("帳號尚未核對時，額度門檻不說「可派工」，不與狀態徽章矛盾", async () => {
+      const client = {
+        ...fakeClient([
+          profile({
+            verification: null,
+            dispatchable: false,
+            blockers: [{ code: "profile_unverified", message: "尚未核對登入狀態；請完成原生登入後按「重新核對」" }],
+          }),
+        ]),
+        schedulingOverview: vi.fn(async () => schedulingOverview({ accounts: [accountScheduling({ quota_gate: null })] })),
+      };
+      render(<AccountsPage client={client} timeZone="UTC" />);
+
+      const gate = await gateGroup();
+      const card = gate.closest("li")!;
+      expect(within(card).getByText("尚未核對")).toHaveClass("badge");
+      expect(gate).toHaveTextContent("額度：未達門檻");
+      expect(within(card).queryByText(/可派工/)).not.toBeInTheDocument();
     });
 
     it("已恢復（open）時顯示恢復的原因與時間，不顯示恢復提示", async () => {
@@ -967,7 +1194,7 @@ describe("帳號頁", () => {
       );
 
       const gate = await gateGroup();
-      expect(within(gate).getByText(/^額度門檻/)).toHaveTextContent("額度門檻：可派工");
+      expect(within(gate).getByText(/^額度：/)).toHaveTextContent(/^額度：未達門檻$/);
       expect(within(gate).getByText(/^原因/)).toHaveTextContent("原因：用量回到 60% 以下（當時用量 55%）");
       expect(within(gate).getByText("自 2023/11/14 22:13 起")).toBeInTheDocument();
       expect(within(gate).queryByText("回到 60% 以下或重置後才恢復派工")).not.toBeInTheDocument();

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { AccountsPage } from "./AccountsPage";
 import { ArtifactsPage } from "./ArtifactsPage";
@@ -6,8 +6,8 @@ import { CopyButton, PathText } from "./LongText";
 import { AuthorizationPanel } from "./AuthorizationPanel";
 import { BackupSettings } from "./BackupSettings";
 import { ControllerPage } from "./ControllerPage";
-import { ModelOverridesPanel } from "./ModelOverridesPanel";
-import { DecisionCenter } from "./DecisionCenter";
+import { ModelCatalogSettings, ModelOverridesPanel } from "./ModelOverridesPanel";
+import { DecisionAuthorityPanel, DecisionCenter } from "./DecisionCenter";
 import { ExitProgress } from "./ExitProgress";
 import { ExplorationPage } from "./ExplorationPage";
 import { KnowledgePage } from "./KnowledgePage";
@@ -18,133 +18,141 @@ import { RecoveryPanel } from "./RecoveryPanel";
 import { SchedulingSettings } from "./SchedulingSettings";
 import { SetupWizard } from "./SetupWizard";
 import { SharedSettingsPage } from "./SharedSettingsPage";
-import { StatusBar } from "./StatusBar";
+import { StatusBar, StorageFault } from "./StatusBar";
 import { createRuntimeClient, type AppClient, type HealthResponse, type PendingDecisions, type Workspace } from "./runtimeClient";
 import { TaskBoard } from "./TaskBoard";
-import { formatCount } from "./textFormat";
+import { formatCount, formatNumber } from "./textFormat";
 import { TimelinePage } from "./TimelinePage";
 import { UpdateNotice } from "./UpdateNotice";
 import { UpdateSettings } from "./UpdateSettings";
 import { ReviewPage } from "./ReviewPage";
 import { VerificationPage } from "./VerificationPage";
 import { WorkflowPage } from "./WorkflowPage";
-import { WORKSPACE_PATH_INPUT_ID, WorkspaceSidebar } from "./WorkspaceSidebar";
+import { WorkspaceSidebar } from "./WorkspaceSidebar";
 
-/** 頂層頁簽。 */
-type TopTab = "workspace" | "accounts" | "settings";
-/** 選中 Workspace 後的各頁面；本機記住的是頁面 id，入口由頁面推得。 */
-type WorkspacePage =
+/** 選中 Workspace 後的各頁面；本機記住的是頁面 id。 */
+export type WorkspacePage =
   | "controller"
   | "tasks"
+  | "workflows"
   | "decisions"
+  | "timeline"
   | "artifacts"
   | "reviews"
   | "verification"
   | "exploration"
   | "knowledge"
-  | "workflows"
-  | "timeline"
-  | "authorization";
-/** Workspace 的五個主要入口（AI-02）。 */
-type WorkspaceSection = "controller" | "tasks" | "decisions" | "quality" | "more";
+  | "understanding"
+  | "authorization"
+  | "authority"
+  | "models";
 
-interface TabItem<T extends string> {
+/** 不屬於任何 Workspace 的平台頁面（跑道欄底部）。 */
+export type GlobalPage = "accounts" | "shared" | "settings";
+
+/** 目前看的是 Workspace 的頁面，或某個平台頁面。 */
+type View = "workspace" | GlobalPage;
+
+/** 頁面裡「前往…」要定位的對象：工作頁捲到這個 Task、裁定頁選中這筆（或這個 Task 的）裁定。 */
+export interface PageFocus {
+  taskId?: string;
+  decisionId?: string;
+}
+
+/** 傳給頁面的定位要求；nonce 讓同一個對象再要求一次時也會重新定位。 */
+export type PageTarget = PageFocus & { nonce: number };
+
+interface NavItem<T extends string> {
   id: T;
   label: string;
-  /** 徽章數字；大於 0 才顯示。 */
-  badge?: number;
-  /** 徽章的說明（滑鼠停留時顯示）。 */
-  badgeTitle?: string;
 }
 
-interface SectionItem {
-  id: WorkspaceSection;
+interface NavGroup {
+  /** 群組名稱；跑道欄上顯示，也是群組的可存取名稱。 */
   label: string;
-  /** 入口內的頁面；超過一頁時以第二層頁簽切換。 */
-  pages: TabItem<WorkspacePage>[];
+  pages: NavItem<WorkspacePage>[];
 }
 
-const TOP_TABS: TabItem<TopTab>[] = [
-  { id: "workspace", label: "Workspace" },
-  { id: "accounts", label: "帳號" },
-  { id: "settings", label: "設定" },
-];
-
-const WORKSPACE_SECTIONS: SectionItem[] = [
-  { id: "controller", label: "主控台", pages: [{ id: "controller", label: "主控台" }] },
-  { id: "tasks", label: "工作", pages: [{ id: "tasks", label: "工作" }] },
-  { id: "decisions", label: "裁定", pages: [{ id: "decisions", label: "裁定" }] },
+/**
+ * Workspace 的頁面依使用者要做的事分組（MASTER 第 7 節）：
+ * 進行（看現況、回答裁定）→ 產出（檢查成果與品質）→ 脈絡（累積的知識）→ 規則（Agent 能做什麼）。
+ */
+export const WORKSPACE_NAV: NavGroup[] = [
   {
-    id: "quality",
-    label: "成果與品質",
+    label: "進行",
+    pages: [
+      { id: "controller", label: "Controller" },
+      { id: "tasks", label: "工作" },
+      { id: "workflows", label: "流程" },
+      { id: "decisions", label: "裁定" },
+      { id: "timeline", label: "時間線" },
+    ],
+  },
+  {
+    label: "產出",
     pages: [
       { id: "artifacts", label: "成果" },
       { id: "reviews", label: "審查" },
       { id: "verification", label: "驗證" },
-      { id: "exploration", label: "探索" },
+      { id: "exploration", label: "探索測試" },
     ],
   },
   {
-    id: "more",
-    label: "更多",
+    label: "脈絡",
     pages: [
       { id: "knowledge", label: "知識" },
-      { id: "workflows", label: "流程" },
-      { id: "timeline", label: "時間線" },
+      { id: "understanding", label: "專案理解" },
+    ],
+  },
+  {
+    label: "規則",
+    pages: [
       { id: "authorization", label: "授權" },
+      { id: "authority", label: "決策權限" },
+      { id: "models", label: "模型設定" },
     ],
   },
 ];
 
-const WORKSPACE_PAGES = WORKSPACE_SECTIONS.flatMap((section) => section.pages);
+export const GLOBAL_NAV: NavItem<GlobalPage>[] = [
+  { id: "accounts", label: "帳號" },
+  { id: "shared", label: "共同設定" },
+  { id: "settings", label: "App 設定" },
+];
 
-/** 舊版記住的頁簽中已不是頁面 id 的值；舊「審查與驗證」頁簽原本開在審查。 */
+const WORKSPACE_PAGES = WORKSPACE_NAV.flatMap((group) => group.pages);
+
+/** 舊版記住的頁面 id 對應到現在的頁面（舊「審查與驗證」頁簽原本開在審查）。 */
 const LEGACY_PAGES: Record<string, WorkspacePage> = { quality: "reviews" };
 
-function sectionOf(page: WorkspacePage): SectionItem {
-  return WORKSPACE_SECTIONS.find((section) => section.pages.some((item) => item.id === page))!;
-}
-
-/**
- * 主要入口的頁簽；入口的徽章是其中各頁徽章的加總，
- * 讓收在「更多」等入口內的頁面有徽章時，入口本身也看得到提示。
- */
-export function workspaceSectionTabs(
-  badges: Partial<Record<WorkspacePage, number>>,
-  titles: Partial<Record<WorkspacePage, string>>,
-): TabItem<WorkspaceSection>[] {
-  return WORKSPACE_SECTIONS.map(({ id, label, pages }) => {
-    const marked = pages.filter((page) => (badges[page.id] ?? 0) > 0);
-    return {
-      id,
-      label,
-      badge: marked.reduce((sum, page) => sum + (badges[page.id] ?? 0), 0),
-      badgeTitle: marked.map((page) => titles[page.id]).join("、"),
-    };
-  });
-}
-
-/** 所在頁簽與 Workspace 存在本機（每個檢視者的偏好，spec Q20）。 */
+/** 所在頁面與 Workspace 存在本機（每個檢視者的偏好，spec Q20）。 */
 export const SHELL_STORAGE_KEY = "baton.shell";
 
 interface ShellState {
-  top: TopTab;
+  view: View;
   workspaceId: string | null;
   /** 欄位名稱沿用舊版，內容是頁面 id，讓舊版記住的位置直接對應。 */
   workspaceTab: WorkspacePage;
 }
 
-const DEFAULT_SHELL: ShellState = { top: "workspace", workspaceId: null, workspaceTab: "controller" };
+const DEFAULT_SHELL: ShellState = { view: "workspace", workspaceId: null, workspaceTab: "controller" };
 
-function isTab<T extends string>(tabs: TabItem<T>[], value: unknown): value is T {
-  return tabs.some((tab) => tab.id === value);
+function isOneOf<T extends string>(items: NavItem<T>[], value: unknown): value is T {
+  return items.some((item) => item.id === value);
 }
 
 /** 記住的頁面；舊版頁簽名稱換成對應頁面，不認得的用預設值。 */
 function savedPage(value: unknown): WorkspacePage {
-  if (isTab(WORKSPACE_PAGES, value)) return value;
+  if (isOneOf(WORKSPACE_PAGES, value)) return value;
   if (typeof value === "string" && Object.hasOwn(LEGACY_PAGES, value)) return LEGACY_PAGES[value];
   return DEFAULT_SHELL.workspaceTab;
+}
+
+/** 記住的檢視；舊版存的是頂層頁簽 `top`（workspace／accounts／settings），名稱相同的直接沿用。 */
+function savedView(saved: Partial<Record<string, unknown>> | null): View {
+  const value = saved?.view ?? saved?.top;
+  if (value === "workspace" || isOneOf(GLOBAL_NAV, value)) return value;
+  return DEFAULT_SHELL.view;
 }
 
 /** 讀取上次的位置；讀不到、讀不懂或名稱不認得的部分一律用預設值，不報錯。 */
@@ -152,9 +160,9 @@ function loadShell(): ShellState {
   try {
     const raw = localStorage.getItem(SHELL_STORAGE_KEY);
     if (!raw) return DEFAULT_SHELL;
-    const saved = JSON.parse(raw) as Partial<Record<keyof ShellState, unknown>> | null;
+    const saved = JSON.parse(raw) as Partial<Record<string, unknown>> | null;
     return {
-      top: isTab(TOP_TABS, saved?.top) ? saved.top : DEFAULT_SHELL.top,
+      view: savedView(saved),
       workspaceId: typeof saved?.workspaceId === "string" ? saved.workspaceId : null,
       workspaceTab: savedPage(saved?.workspaceTab),
     };
@@ -171,73 +179,6 @@ function saveShell(shell: ShellState) {
   }
 }
 
-/** 一排頁簽；選中的頁簽控制緊接在後的 tabpanel（id 為 `${idPrefix}-panel`）。 */
-function TabList<T extends string>({
-  label,
-  idPrefix,
-  tabs,
-  selected,
-  onSelect,
-}: {
-  label: string;
-  idPrefix: string;
-  tabs: TabItem<T>[];
-  selected: T;
-  onSelect: (tab: T) => void;
-}) {
-  return (
-    <div role="tablist" aria-label={label} className={`tabs tabs-${idPrefix}`}>
-      {tabs.map((tab) => {
-        const badge = tab.badge ?? 0;
-        return (
-          <button
-            key={tab.id}
-            type="button"
-            role="tab"
-            id={`${idPrefix}-tab-${tab.id}`}
-            aria-selected={tab.id === selected}
-            aria-controls={tab.id === selected ? `${idPrefix}-panel` : undefined}
-            // 有徽章時名稱仍只是頁簽名稱，數字以 title 說明
-            aria-label={badge > 0 ? tab.label : undefined}
-            onClick={() => onSelect(tab.id)}
-          >
-            {tab.label}
-            {badge > 0 && (
-              <span className="tab-badge" title={tab.badgeTitle}>
-                {formatCount(badge)}
-              </span>
-            )}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-/** 一排頁簽對應的內容區；`className` 加在 `.tab-panel` 之後（例如帳號、設定頁的欄寬）。 */
-function TabPanel<T extends string>({
-  idPrefix,
-  selected,
-  className,
-  children,
-}: {
-  idPrefix: string;
-  selected: T;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      role="tabpanel"
-      id={`${idPrefix}-panel`}
-      aria-labelledby={`${idPrefix}-tab-${selected}`}
-      className={className ? `tab-panel ${className}` : "tab-panel"}
-    >
-      {children}
-    </div>
-  );
-}
-
 /** `createClient` 只供開發用預覽注入假資料；正式畫面不傳，依執行環境挑選用戶端。 */
 export function App({ createClient = createRuntimeClient }: { createClient?: () => Promise<AppClient> } = {}) {
   const [client, setClient] = useState<AppClient | null>(null);
@@ -245,23 +186,26 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
   // 精靈與帳號頁其中一邊改變了 Profile 狀態時，讓另一邊重新讀取
   const [accountsVersion, setAccountsVersion] = useState(0);
   const accountsChanged = () => setAccountsVersion((version) => version + 1);
-  // 沒有任何可用的 Account Profile 時，首次精靈以全畫面顯示；讀不到狀態時照常顯示頁簽。
+  // 沒有任何可用的 Account Profile 時，首次精靈以全畫面顯示；讀不到狀態時照常顯示主畫面。
   // 使用者可以先進入主畫面（只在這次開啟有效），避免登入失效時連 Workspace 都看不到
   const [needsSetup, setNeedsSetup] = useState(false);
   const [setupSkipped, setSetupSkipped] = useState(false);
-  const fullScreenSetup = needsSetup && !setupSkipped;
+  // 全畫面精靈中第一個帳號就緒時，不立刻切走：先顯示完成畫面與下一步，由使用者自己進入主畫面
+  const [setupFinished, setSetupFinished] = useState(false);
+  const wasNeedingSetup = useRef(false);
+  // 背景執行的說明是否還沒確認（完成畫面上只有這時才需要精靈）
+  const [backgroundUnacknowledged, setBackgroundUnacknowledged] = useState(false);
+  const fullScreenSetup = (needsSetup || setupFinished) && !setupSkipped;
   const [shell, setShell] = useState<ShellState>(loadShell);
-  // 各入口最後停留的頁面（只在這次開啟有效），回到入口時停在原頁
-  const [sectionPages, setSectionPages] = useState<Partial<Record<WorkspaceSection, WorkspacePage>>>(() => ({
-    [sectionOf(shell.workspaceTab).id]: shell.workspaceTab,
-  }));
-  // 側欄最近一次讀到的使用中 Workspace；選中的 Workspace 不在其中（例如已封存）時視為未選
+  // 跑道欄最近一次讀到的使用中 Workspace；選中的 Workspace 不在其中（例如已封存）時視為未選
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const selected = workspaces.find((workspace) => workspace.id === shell.workspaceId) ?? null;
   // 待裁定數由狀態列輪詢；回答裁定後要求它立即重新讀取
   const [pending, setPending] = useState<PendingDecisions | null>(null);
   const [pendingVersion, setPendingVersion] = useState(0);
   const pendingByWorkspace = Object.fromEntries((pending?.by_workspace ?? []).map((w) => [w.workspace_id, w.pending_count]));
+  // 空狀態的「新增 Workspace」要求跑道欄展開建立表單並聚焦目錄欄位
+  const [createRequest, setCreateRequest] = useState(0);
 
   useEffect(() => {
     void createClient().then(setClient);
@@ -270,14 +214,29 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
   useEffect(() => saveShell(shell), [shell]);
 
   useEffect(() => {
+    if (wasNeedingSetup.current && !needsSetup && !setupSkipped) setSetupFinished(true);
+    wasNeedingSetup.current = needsSetup;
+  }, [needsSetup, setupSkipped]);
+
+  // 完成畫面上確認了背景執行的說明後精靈會移除（焦點所在的按鈕跟著消失）：焦點回到「帳號已就緒」
+  const wasBackgroundPending = useRef(false);
+  useEffect(() => {
+    if (wasBackgroundPending.current && !backgroundUnacknowledged) document.getElementById("setup-finished-title")?.focus();
+    wasBackgroundPending.current = backgroundUnacknowledged;
+  }, [backgroundUnacknowledged]);
+
+  useEffect(() => {
     if (!client) return;
     let current = true;
     client.getSetup().then(
       (status) => {
-        if (current) setNeedsSetup(!status.profiles.some((profile) => profile.status === "active" && profile.dispatchable));
+        if (!current) return;
+        setNeedsSetup(!status.profiles.some((profile) => profile.status === "active" && profile.dispatchable));
+        setBackgroundUnacknowledged(status.background_notice.acknowledged_at === null);
       },
       () => {
-        if (current) setNeedsSetup(false);
+        // 讀不到時保留原本的判斷：全畫面精靈中讀取失敗不是「帳號已就緒」；一開始就讀不到時照常顯示主畫面
+        if (current && !wasNeedingSetup.current) setNeedsSetup(false);
       },
     );
     return () => {
@@ -285,157 +244,389 @@ export function App({ createClient = createRuntimeClient }: { createClient?: () 
     };
   }, [client, accountsVersion]);
 
-  const selectWorkspace = (workspace: Workspace) =>
-    // 在 Workspace 之間切換時停在同一頁面；從未選到選中時從主控台開始
+  const selectWorkspace = (workspace: Workspace) => {
+    setPageTarget(null);
+    // 在 Workspace 之間切換時停在同一頁面；從未選到選中時從 Controller 頁開始
     setShell((current) => ({
-      ...current,
+      view: "workspace",
       workspaceId: workspace.id,
       workspaceTab: selected ? current.workspaceTab : "controller",
     }));
+  };
+
+  /** 從跑道欄換頁：不帶定位要求。 */
+  const navigateWorkspacePage = (page: WorkspacePage) => {
+    setPageTarget(null);
+    selectWorkspacePage(page);
+  };
 
   const selectWorkspacePage = (page: WorkspacePage) => {
-    setShell((current) => ({ ...current, workspaceTab: page }));
-    setSectionPages((current) => ({ ...current, [sectionOf(page).id]: page }));
+    setShell((current) => ({ ...current, view: "workspace", workspaceTab: page }));
     if (page === "decisions") setPendingVersion((version) => version + 1);
   };
 
-  const selectSection = (id: WorkspaceSection) => {
-    const target = WORKSPACE_SECTIONS.find((item) => item.id === id)!;
-    selectWorkspacePage(sectionPages[id] ?? target.pages[0].id);
+  const selectGlobal = (view: GlobalPage) => setShell((current) => ({ ...current, view }));
+
+  // 換頁後要把焦點移到主區（頁面裡的「前往…」、離開全畫面首次設定）：原本聚焦的按鈕已隨頁面消失
+  const [focusMain, setFocusMain] = useState(0);
+  useEffect(() => {
+    if (focusMain > 0) document.getElementById("main-content")?.focus();
+  }, [focusMain]);
+
+  // 「前往…」帶來的定位要求；只交給它指名的頁面，從跑道欄換頁時清掉
+  const [pageTarget, setPageTarget] = useState<(PageTarget & { page: WorkspacePage }) | null>(null);
+
+  /** 頁面裡的「前往…」：平台頁面切過去，其餘是目前 Workspace 的頁面（可以帶要定位的 Task 或裁定）。 */
+  const openPage = (page: WorkspacePage | GlobalPage, focus?: PageFocus) => {
+    if (isOneOf(GLOBAL_NAV, page)) {
+      selectGlobal(page);
+      setPageTarget(null);
+    } else {
+      selectWorkspacePage(page);
+      setPageTarget(focus ? { ...focus, page, nonce: Date.now() } : null);
+    }
+    setFocusMain((n) => n + 1);
   };
 
+  const leaveSetup = () => {
+    setSetupSkipped(true);
+    setFocusMain((n) => n + 1);
+  };
+
+  const statusBar = client ? (
+    <StatusBar client={client} onHealth={setHealth} onPending={setPending} refreshKey={pendingVersion} />
+  ) : null;
+  const storage = health?.storage;
+  // 有新版本時只通知；更新維護中以覆蓋層顯示進度（spec D-19）。儲存故障停止派工時，整寬警示
+  const notices = client && (
+    <div className="app-notices">
+      {storage?.dispatch_halted && <StorageFault fault={storage.fault ?? null} />}
+      <UpdateNotice client={client} runtimeStartedAt={health?.started_at ?? null} />
+    </div>
+  );
+
+  if (fullScreenSetup) {
+    return (
+      <div className="app app-setup">
+        <header className="setup-topbar">
+          {/* 產品名稱取自 Runtime 回報，不在前端寫死（spec D-01） */}
+          <h1 className="product-name">{health?.product ?? ""}</h1>
+          {statusBar}
+        </header>
+        <main className="main setup-screen">
+          {notices}
+          {client && !needsSetup && setupFinished && (
+            <>
+              {/* 背景執行的說明還沒確認時，精靈留在完成畫面上方讓使用者確認 */}
+              {backgroundUnacknowledged && <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />}
+              <SetupFinished
+                onEnter={leaveSetup}
+                onSharedSettings={() => {
+                  selectGlobal("shared");
+                  leaveSetup();
+                }}
+              />
+            </>
+          )}
+          {client && needsSetup && (
+            <>
+              <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
+              <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
+              <button type="button" className="setup-skip btn-quiet" onClick={leaveSetup}>
+                先進入主畫面
+              </button>
+            </>
+          )}
+        </main>
+        {client && <ExitProgress client={client} />}
+      </div>
+    );
+  }
+
   const decisionCount = selected ? (pendingByWorkspace[selected.id] ?? 0) : 0;
-  const sectionTabs = workspaceSectionTabs({ decisions: decisionCount }, { decisions: `待裁定 ${decisionCount}` });
-  const section = sectionOf(shell.workspaceTab);
-  const workspaceView = selected && client && (
-    <WorkspaceView
-      client={client}
-      workspace={selected}
-      page={shell.workspaceTab}
-      onDecisionsChange={() => setPendingVersion((version) => version + 1)}
+  const currentNav = selected && (
+    <WorkspaceNav
+      current={shell.view === "workspace" ? shell.workspaceTab : null}
+      decisionCount={decisionCount}
+      onSelect={navigateWorkspacePage}
     />
   );
 
   return (
     <div className="app">
-      {client ? <StatusBar client={client} onHealth={setHealth} onPending={setPending} refreshKey={pendingVersion} /> : <header className="status-bar" />}
-      {/* 產品名稱與頂層頁簽同一列；首次精靈全畫面時不顯示頁簽 */}
-      <div className="app-heading">
-        {/* 產品名稱取自 Runtime 回報，不在前端寫死（spec D-01） */}
-        <h1>{health?.product ?? ""}</h1>
-        {!fullScreenSetup && (
-          <TabList
-            label="主要區塊"
-            idPrefix="top"
-            tabs={TOP_TABS}
-            selected={shell.top}
-            onSelect={(top) => setShell((current) => ({ ...current, top }))}
+      {/* 鍵盤使用者略過跑道欄（WCAG 2.4.1）：平時隱藏，聚焦時出現 */}
+      <a className="skip-link" href="#main-content">
+        跳到主要內容
+      </a>
+      <Rail
+        product={health?.product ?? ""}
+        status={statusBar}
+        global={<GlobalNav current={shell.view === "workspace" ? null : shell.view} onSelect={selectGlobal} />}
+      >
+        {client && (
+          <WorkspaceSidebar
+            client={client}
+            onSelect={selectWorkspace}
+            selectedId={selected?.id ?? null}
+            pendingDecisions={pendingByWorkspace}
+            onWorkspaces={setWorkspaces}
+            currentNav={currentNav}
+            createRequest={createRequest}
           />
         )}
-      </div>
-      {/* 有新版本時只通知；更新維護中以覆蓋層顯示進度（spec D-19）。在頁簽之外，切換頁簽不影響。
-          帳號、設定與全畫面精靈的內容限寬 72em，通知跟著同寬，左右緣與下方區塊對齊 */}
-      <div className={fullScreenSetup || shell.top !== "workspace" ? "app-notices settings-column" : "app-notices"}>
-        {client && <UpdateNotice client={client} runtimeStartedAt={health?.started_at ?? null} />}
-      </div>
-      {client && fullScreenSetup && (
-        <main className="main setup-screen settings-column">
-          <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
-          <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
-          <button type="button" className="setup-skip" onClick={() => setSetupSkipped(true)}>
-            先進入主畫面
-          </button>
-        </main>
-      )}
-      {!fullScreenSetup && (
-        <div className="body">
-          {client && shell.top === "workspace" && (
-            <WorkspaceSidebar
+      </Rail>
+      <main className="main" id="main-content" tabIndex={-1}>
+        {notices}
+        {client && shell.view === "workspace" && !selected && <WorkspaceEmpty onCreate={() => setCreateRequest((n) => n + 1)} />}
+        {client && shell.view === "workspace" && selected && (
+          <>
+            <WorkspaceContext workspace={selected} />
+            <WorkspaceView
               client={client}
-              onSelect={selectWorkspace}
-              selectedId={selected?.id ?? null}
-              pendingDecisions={pendingByWorkspace}
-              onWorkspaces={setWorkspaces}
+              workspace={selected}
+              page={shell.workspaceTab}
+              onDecisionsChange={() => setPendingVersion((version) => version + 1)}
+              onOpenPage={openPage}
+              target={pageTarget?.page === shell.workspaceTab ? pageTarget : null}
             />
-          )}
-          <main className="main">
-            <TabPanel idPrefix="top" selected={shell.top} className={shell.top === "workspace" ? undefined : "settings-column"}>
-              {client && shell.top === "workspace" && !selected && <WorkspaceEmpty />}
-              {client && shell.top === "workspace" && selected && (
-                <>
-                  <WorkspaceContext workspace={selected} />
-                  <TabList
-                    label="Workspace 功能"
-                    idPrefix="workspace"
-                    tabs={sectionTabs}
-                    selected={section.id}
-                    onSelect={selectSection}
-                  />
-                  <TabPanel idPrefix="workspace" selected={section.id}>
-                    {/* 超過一頁的入口（成果與品質、更多）以第二層頁簽切換 */}
-                    {section.pages.length > 1 ? (
-                      <>
-                        <TabList
-                          label={section.label}
-                          idPrefix="page"
-                          tabs={section.pages}
-                          selected={shell.workspaceTab}
-                          onSelect={selectWorkspacePage}
-                        />
-                        <TabPanel idPrefix="page" selected={shell.workspaceTab}>
-                          {workspaceView}
-                        </TabPanel>
-                      </>
-                    ) : (
-                      workspaceView
-                    )}
-                  </TabPanel>
-                </>
-              )}
-              {client && shell.top === "accounts" && (
-                <>
-                  <SetupWizard client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
-                  <AccountsPage client={client} onChange={accountsChanged} refreshKey={accountsVersion} />
-                  <SchedulingSettings client={client} />
-                  <SharedSettingsPage client={client} />
-                </>
-              )}
-              {client && shell.top === "settings" && (
-                <>
-                  <LoginStartupSettings client={client} />
-                  <UpdateSettings client={client} />
-                  <BackupSettings client={client} />
-                  <RecoveryPanel client={client} />
-                  <PlatformPage client={client} />
-                </>
-              )}
-            </TabPanel>
-          </main>
-        </div>
-      )}
+          </>
+        )}
+        {client && shell.view !== "workspace" && (
+          <GlobalView view={shell.view} client={client} accountsVersion={accountsVersion} onAccountsChange={accountsChanged} />
+        )}
+      </main>
       {/* 系統匣「完全退出」的停止進度，以覆蓋層顯示 */}
       {client && <ExitProgress client={client} />}
     </div>
   );
 }
 
-/** 未選 Workspace 時的空狀態：「建立 Workspace」把焦點移到側欄建立表單的目錄欄位。 */
-function WorkspaceEmpty() {
+/**
+ * 跑道欄：產品名稱 → Workspace 清單（目前的 Workspace 展開它的頁面，內容多時這一段自己捲動）
+ * → 欄底固定的平台頁面與狀態。Workspace 的目前頁面以「接力棒」標記；換頁時棒子沿著跑道移過去
+ * （減少動態時直接出現）；平台頁面以靜態的同色短棒標記。
+ */
+function Rail({
+  product,
+  status,
+  global,
+  children,
+}: {
+  product: string;
+  status: ReactNode;
+  global: ReactNode;
+  children: ReactNode;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const batonRef = useRef<HTMLSpanElement>(null);
+  const lastCurrent = useRef<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
+    const track = trackRef.current;
+    const baton = batonRef.current;
+    if (!track || !baton) return;
+    const place = () => {
+      const current = track.querySelector<HTMLElement>('.nav-item[aria-current="page"]');
+      if (!current) {
+        baton.style.opacity = "0";
+        return;
+      }
+      const trackBox = track.getBoundingClientRect();
+      const box = current.getBoundingClientRect();
+      // 棒子第一次出現時直接就位，之後換頁才沿跑道移動
+      const appearing = baton.style.opacity !== "1";
+      if (appearing) baton.style.transition = "none";
+      baton.style.opacity = "1";
+      baton.style.height = `${box.height}px`;
+      baton.style.transform = `translateY(${box.top - trackBox.top + track.scrollTop}px)`;
+      if (appearing) {
+        void baton.offsetHeight;
+        baton.style.transition = "";
+      }
+      // 目前頁面換了（換頁、換 Workspace、重開 App 回到上次的頁面）而它在跑道可視範圍外時捲進來；
+      // 其他內容變動（例如待裁定數更新）不捲動，不干擾使用者自己捲到別處
+      if (current !== lastCurrent.current) {
+        lastCurrent.current = current;
+        if (box.top < trackBox.top || box.bottom > trackBox.bottom) current.scrollIntoView?.({ block: "nearest" });
+      }
+    };
+    place();
+    if (typeof ResizeObserver === "undefined" || typeof MutationObserver === "undefined") return;
+    // Workspace 清單非同步載入、展開管理選單、換頁時，上方內容的高度或目前頁面改變，棒子跟著移動。
+    // 跑道上的子元素會在載入後才出現，所以每次內容變動都重新登記要觀察的元素；
+    // 不觀察棒子自己：它的高度由這裡設定，觀察它會形成 ResizeObserver 迴圈
+    const resize = new ResizeObserver(place);
+    const observeChildren = () => {
+      resize.disconnect();
+      for (const child of Array.from(track.children)) if (child !== baton) resize.observe(child);
+      place();
+    };
+    const mutation = new MutationObserver(observeChildren);
+    mutation.observe(track, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-current", "open"] });
+    observeChildren();
+    return () => {
+      mutation.disconnect();
+      resize.disconnect();
+    };
+  }, []);
+
   return (
-    <section className="workspace-empty" aria-labelledby="workspace-empty-title">
-      <h2 id="workspace-empty-title">尚未選擇 Workspace</h2>
-      <p className="workspace-hint">請從左側選擇或建立 Workspace</p>
-      <button type="button" className="btn-primary" onClick={() => document.getElementById(WORKSPACE_PATH_INPUT_ID)?.focus()}>
-        建立 Workspace
+    <div className="rail">
+      <div className="rail-head">
+        {/* 產品名稱取自 Runtime 回報，不在前端寫死（spec D-01） */}
+        <h1 className="product-name">{product}</h1>
+      </div>
+      <div className="rail-track" ref={trackRef}>
+        <span className="rail-baton" ref={batonRef} aria-hidden="true" />
+        {children}
+      </div>
+      {/* 平台頁面與狀態固定在欄底，不隨 Workspace 清單捲走 */}
+      <div className="rail-foot">
+        {global}
+        {status}
+      </div>
+    </div>
+  );
+}
+
+/** 跑道欄上的一個頁面按鈕；有待處理數時附徽章（數字以說明提供給螢幕報讀器）。 */
+function NavButton<T extends string>({
+  item,
+  current,
+  badge = 0,
+  badgeLabel,
+  onSelect,
+}: {
+  item: NavItem<T>;
+  current: boolean;
+  badge?: number;
+  badgeLabel?: string;
+  onSelect: (id: T) => void;
+}) {
+  const badgeId = `nav-badge-${item.id}`;
+  return (
+    <button
+      type="button"
+      className="nav-item"
+      aria-current={current ? "page" : undefined}
+      // 有徽章時名稱仍只是頁名，數字以說明提供
+      aria-label={badge > 0 ? item.label : undefined}
+      aria-describedby={badge > 0 ? badgeId : undefined}
+      onClick={() => onSelect(item.id)}
+    >
+      <span className="nav-label">{item.label}</span>
+      {badge > 0 && (
+        <span className="nav-badge" id={badgeId} title={badgeLabel}>
+          <span className="visually-hidden">{badgeLabel}</span>
+          <span aria-hidden="true">{formatCount(badge)}</span>
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** 目前 Workspace 的頁面，依群組列出。 */
+function WorkspaceNav({
+  current,
+  decisionCount,
+  onSelect,
+}: {
+  current: WorkspacePage | null;
+  decisionCount: number;
+  onSelect: (page: WorkspacePage) => void;
+}) {
+  return (
+    <nav className="workspace-nav" aria-label="Workspace 頁面">
+      {WORKSPACE_NAV.map((group) => (
+        <div key={group.label} className="nav-group" role="group" aria-label={group.label}>
+          <span className="nav-group-label" aria-hidden="true">
+            {group.label}
+          </span>
+          {group.pages.map((page) => (
+            <NavButton
+              key={page.id}
+              item={page}
+              current={page.id === current}
+              badge={page.id === "decisions" ? decisionCount : 0}
+              badgeLabel={page.id === "decisions" ? `待裁定 ${formatNumber(decisionCount)}` : undefined}
+              onSelect={onSelect}
+            />
+          ))}
+        </div>
+      ))}
+    </nav>
+  );
+}
+
+/** 平台頁面：帳號、共同設定、App 設定。 */
+function GlobalNav({ current, onSelect }: { current: GlobalPage | null; onSelect: (page: GlobalPage) => void }) {
+  return (
+    <nav className="global-nav" aria-label="平台">
+      {GLOBAL_NAV.map((item) => (
+        <NavButton key={item.id} item={item} current={item.id === current} onSelect={onSelect} />
+      ))}
+    </nav>
+  );
+}
+
+/** 首次設定完成畫面：帳號已就緒，列出開始派工前的下一步（真的有先後順序）。 */
+function SetupFinished({ onEnter, onSharedSettings }: { onEnter: () => void; onSharedSettings: () => void }) {
+  // 出現時把焦點移到標題：剛按的「重新檢查」已隨精靈消失，也讓螢幕報讀器唸出「帳號已就緒」
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => titleRef.current?.focus(), []);
+  return (
+    <section className="setup-finished" aria-labelledby="setup-finished-title">
+      <h2 id="setup-finished-title" ref={titleRef} tabIndex={-1}>
+        帳號已就緒
+      </h2>
+      <p>接下來依序完成這幾步，就能開始派工：</p>
+      <ol className="setup-next-steps">
+        <li>
+          <strong>匯入共同設定（建議）</strong>
+          <span>讓所有帳號使用同一份 Claude Code 偏好、指示、hooks 與 MCP 伺服器；也可以稍後再做。</span>
+        </li>
+        <li>
+          <strong>新增 Workspace</strong>
+          <span>進入主畫面後，在左欄的 Workspace 清單按「新增」，選一個要讓 Agent 工作的目錄。</span>
+        </li>
+        <li>
+          <strong>確認授權</strong>
+          <span>在 Workspace 的「規則」›「授權」確認 Agent 可以做什麼；確認之前，需要能力的工作都不會開始。</span>
+        </li>
+        <li>
+          <strong>開啟 Controller</strong>
+          <span>在「Controller」頁開啟，然後在終端機裡描述你的目標。</span>
+        </li>
+      </ol>
+      <div className="form-actions">
+        <button type="button" className="btn-primary" onClick={onEnter}>
+          進入主畫面
+        </button>
+        <button type="button" onClick={onSharedSettings}>
+          前往共同設定
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** 未選 Workspace 時的空狀態：「新增 Workspace」展開跑道欄的建立表單並聚焦目錄欄位。 */
+function WorkspaceEmpty({ onCreate }: { onCreate: () => void }) {
+  return (
+    <section className="empty-state workspace-empty" aria-labelledby="workspace-empty-title">
+      <h2 id="workspace-empty-title">選一個 Workspace 開始</h2>
+      <p>Workspace 對應你電腦上的一個目錄。從左側選一個，或新增一個來放 Goal 與 Task。</p>
+      <button type="button" className="btn-primary" onClick={onCreate}>
+        新增 Workspace
       </button>
     </section>
   );
 }
 
-/** 頁簽列上方的情境列：目前 Workspace 的名稱與縮短路徑（與側欄同一種寫法，保留結尾），一行；完整值在 title，路徑可複製（完整名稱在側欄）。 */
+/** 頁面上方的情境列：目前 Workspace 的名稱與縮短路徑；完整值在 title，路徑可複製。 */
 function WorkspaceContext({ workspace }: { workspace: Workspace }) {
   return (
-    <div className="workspace-context" aria-label="目前的 Workspace">
+    <div className="workspace-context" role="group" aria-label="目前的 Workspace">
       <span className="workspace-context-name truncate" title={workspace.name}>
         {workspace.name}
       </span>
@@ -447,55 +638,115 @@ function WorkspaceContext({ workspace }: { workspace: Workspace }) {
   );
 }
 
-/** 選中 Workspace 後，目前頁面的功能；各功能元件原樣放入。 */
+/** 選中 Workspace 後，目前頁面的功能。 */
 function WorkspaceView({
   client,
   workspace,
   page,
   onDecisionsChange,
+  onOpenPage,
+  target,
 }: {
   client: AppClient;
   workspace: Workspace;
   page: WorkspacePage;
   onDecisionsChange: () => void;
+  /** 頁面裡的「前往…」按鈕切到同一個 Workspace 的另一頁（可帶要定位的 Task 或裁定），或某個平台頁面。 */
+  onOpenPage: (page: WorkspacePage | GlobalPage, focus?: PageFocus) => void;
+  /** 這一頁要定位的 Task 或裁定（從別頁的「前往…」來時才有）。 */
+  target: PageTarget | null;
 }) {
   // 換 Workspace 時以 key 重新掛載，上一個 Workspace 較晚回來的讀取結果不會蓋掉目前畫面與草稿
   switch (page) {
     case "controller":
-      return <ControllerPage key={workspace.id} client={client} workspace={workspace} />;
+      return <ControllerPage key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
     case "tasks":
-      return <TaskBoard key={workspace.id} client={client} workspace={workspace} />;
+      return <TaskBoard key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} target={target} />;
+    case "workflows":
+      return <WorkflowPage key={workspace.id} client={client} workspace={workspace} />;
     case "decisions":
-      return <DecisionCenter key={workspace.id} client={client} workspace={workspace} onChange={onDecisionsChange} />;
+      return (
+        <DecisionCenter
+          key={workspace.id}
+          client={client}
+          workspace={workspace}
+          onChange={onDecisionsChange}
+          onOpenPage={onOpenPage}
+          target={target}
+        />
+      );
+    case "timeline":
+      return <TimelinePage key={workspace.id} client={client} workspace={workspace} />;
     case "artifacts":
-      return <ArtifactsPage key={workspace.id} client={client} workspace={workspace} />;
+      return <ArtifactsPage key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
     case "reviews":
       return <ReviewPage key={workspace.id} client={client} workspace={workspace} />;
     case "verification":
-      // 換 Workspace 時重新掛載，清掉上一個 Workspace 正在編輯的 Profile 與訊息
       return <VerificationPage key={workspace.id} client={client} workspace={workspace} />;
     case "exploration":
       return <ExplorationPage key={workspace.id} client={client} workspace={workspace} />;
     case "knowledge":
-      return (
-        <>
-          <KnowledgePage key={workspace.id} client={client} workspace={workspace} />
-          {/* 換 Workspace 時重新掛載，清掉上一個 Workspace 的協調提示與錯誤 */}
-          <ProjectUnderstandingPage key={`understanding-${workspace.id}`} client={client} workspace={workspace} />
-        </>
-      );
-    case "workflows":
-      // 換 Workspace 時重新掛載，清掉上一個 Workspace 的跳過原因與錯誤
-      return <WorkflowPage key={workspace.id} client={client} workspace={workspace} />;
-    case "timeline":
-      // 換 Workspace 時重新掛載，清掉上一個 Workspace 的 Task 過濾
-      return <TimelinePage key={workspace.id} client={client} workspace={workspace} />;
+      return <KnowledgePage key={workspace.id} client={client} workspace={workspace} />;
+    case "understanding":
+      return <ProjectUnderstandingPage key={workspace.id} client={client} workspace={workspace} />;
     case "authorization":
+      return <AuthorizationPanel key={workspace.id} client={client} workspace={workspace} />;
+    case "authority":
+      return <DecisionAuthorityPanel key={workspace.id} client={client} workspace={workspace} />;
+    case "models":
+      return <ModelOverridesPanel key={workspace.id} client={client} workspace={workspace} onOpenPage={onOpenPage} />;
+  }
+}
+
+/** 平台頁面的內容；由多個元件組成的頁面（帳號、設定）在這裡加上頁面標題。 */
+function GlobalView({
+  view,
+  client,
+  accountsVersion,
+  onAccountsChange,
+}: {
+  view: GlobalPage;
+  client: AppClient;
+  accountsVersion: number;
+  onAccountsChange: () => void;
+}) {
+  switch (view) {
+    case "accounts":
       return (
-        <>
-          <AuthorizationPanel key={workspace.id} client={client} workspace={workspace} />
-          <ModelOverridesPanel key={`models-${workspace.id}`} client={client} workspace={workspace} />
-        </>
+        <div className="page global-page">
+          <header className="page-header">
+            <h2>帳號</h2>
+          </header>
+          <SetupWizard client={client} onChange={onAccountsChange} refreshKey={accountsVersion} />
+          <AccountsPage client={client} onChange={onAccountsChange} refreshKey={accountsVersion} />
+          <SchedulingSettings client={client} />
+        </div>
+      );
+    case "shared":
+      return (
+        <div className="page global-page">
+          <SharedSettingsPage client={client} />
+        </div>
+      );
+    case "settings":
+      return (
+        <div className="page global-page">
+          <header className="page-header">
+            <h2>App 設定</h2>
+          </header>
+          {/* 短的區段兩兩並排（窄時上下排列）；備份內容較多，自成一列 */}
+          <div className="split">
+            <LoginStartupSettings client={client} />
+            <UpdateSettings client={client} />
+          </div>
+          <BackupSettings client={client} />
+          <div className="split">
+            <RecoveryPanel client={client} />
+            <PlatformPage client={client} />
+          </div>
+          {/* 可用模型清單影響所有 Workspace（各 Workspace 的「模型設定」從這份清單選） */}
+          <ModelCatalogSettings client={client} />
+        </div>
       );
   }
 }

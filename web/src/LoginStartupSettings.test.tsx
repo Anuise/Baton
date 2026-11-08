@@ -54,7 +54,9 @@ describe("登入時自動啟動", () => {
 
     await user.click(await screen.findByRole("checkbox", SWITCH));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("拒絕存取");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).toHaveTextContent(/^無法變更登入時自動啟動無法變更 Windows 的登入啟動登記：拒絕存取$/);
     expect(screen.getByRole("checkbox", SWITCH)).not.toBeChecked();
   });
 

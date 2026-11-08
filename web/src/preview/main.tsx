@@ -31,7 +31,7 @@ if (page) {
   localStorage.setItem(
     SHELL_STORAGE_KEY,
     JSON.stringify({
-      top: page.top,
+      view: page.view,
       workspaceId: page.workspacePage ? PREVIEW_WORKSPACE_ID : null,
       workspaceTab: page.workspacePage ?? "controller",
     }),
@@ -45,7 +45,7 @@ if (page) {
   );
 } else {
   root.render(
-    <main className="main">
+    <main className="main preview-index">
       <h1>UI 預覽</h1>
       <table>
         <tbody>

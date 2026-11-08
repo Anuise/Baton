@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -36,6 +36,10 @@ async function click(element: HTMLElement) {
   });
 }
 
+/** 更新通知的文字；版本號是等寬字的子元素（MASTER 7.1），文字分在幾個節點裡，以整段文字比對。 */
+const noticeText = (text: string) =>
+  screen.getByText((_, element) => element?.classList.contains("update-notice-text") === true && element.textContent === text);
+
 /** 這次 Runtime 的啟動時間：在最近一次維護結束之前。 */
 const STARTED_AT = CHECKED_AT + 30_000;
 
@@ -51,7 +55,8 @@ describe("更新通知", () => {
     render(<UpdateNotice client={client} runtimeStartedAt={STARTED_AT} />);
     await settle();
 
-    expect(screen.getByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+    expect(noticeText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+    expect(screen.getByText("0.2.0")).toHaveClass("mono");
     expect(screen.getByText("更新說明")).toBeInTheDocument();
     expect(screen.getByText("修正完全退出的逾時")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "更新並重新開啟…" })).toBeInTheDocument();
@@ -67,7 +72,7 @@ describe("更新通知", () => {
     render(<UpdateNotice client={fakeClient(status)} runtimeStartedAt={STARTED_AT} />);
     await settle();
 
-    expect(screen.getByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+    expect(noticeText("Baton 0.2.0 可以更新")).toBeInTheDocument();
     expect(screen.queryByText("更新說明")).not.toBeInTheDocument();
   });
 
@@ -99,12 +104,12 @@ describe("更新通知", () => {
     await settle(1_000);
 
     expect(client.updateStatus).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+    expect(noticeText("Baton 0.2.0 可以更新")).toBeInTheDocument();
 
     await settle(60_000);
 
     expect(client.updateStatus).toHaveBeenCalledTimes(3);
-    expect(screen.getByText("Baton 0.2.0 可以更新")).toBeInTheDocument();
+    expect(noticeText("Baton 0.2.0 可以更新")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -116,6 +121,10 @@ describe("更新通知", () => {
     await click(screen.getByRole("button", { name: "更新並重新開啟…" }));
 
     const dialog = screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" });
+    // 標題裡的版本號用等寬字（MASTER 7.1），可存取名稱不變
+    expect(within(within(dialog).getByRole("heading", { name: "更新到 Baton 0.2.0" })).getByText("0.2.0")).toHaveClass(
+      "mono",
+    );
     expect(dialog).toHaveTextContent("先下載並驗證安裝程式；失敗不會停止任何工作。");
     expect(dialog).toHaveTextContent("執行與「完全退出」相同的停止流程（最多 40 秒）。");
     expect(dialog).toHaveTextContent("備份資料。");
@@ -129,6 +138,44 @@ describe("更新通知", () => {
 
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(client.applyUpdate).not.toHaveBeenCalled();
+  });
+
+  it("確認對話框是 modal：開啟時焦點移到「取消」，Esc 關閉並把焦點還給「更新並重新開啟…」", async () => {
+    const client = fakeClient();
+    render(<UpdateNotice client={client} runtimeStartedAt={STARTED_AT} />);
+    await settle();
+    const opener = screen.getByRole("button", { name: "更新並重新開啟…" });
+    opener.focus();
+
+    await click(opener);
+
+    const dialog = screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" });
+    expect(dialog.tagName).toBe("DIALOG");
+    expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
+
+    await act(async () => {
+      fireEvent.keyDown(within(dialog).getByRole("button", { name: "取消" }), { key: "Escape" });
+    });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(opener).toHaveFocus();
+    expect(client.applyUpdate).not.toHaveBeenCalled();
+  });
+
+  it("下載並驗證中按 Esc 不會關閉確認對話框", async () => {
+    const client = fakeClient();
+    client.applyUpdate.mockImplementationOnce(() => new Promise<UpdateStatusView>(() => {}));
+    render(<UpdateNotice client={client} runtimeStartedAt={STARTED_AT} />);
+    await settle();
+    await click(screen.getByRole("button", { name: "更新並重新開啟…" }));
+    await click(screen.getByRole("button", { name: "更新並重新開啟" }));
+
+    const dialog = screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" });
+    await act(async () => {
+      fireEvent.keyDown(dialog, { key: "Escape" });
+    });
+
+    expect(screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" })).toHaveTextContent("下載並驗證中…");
   });
 
   it("確認後以看到的版本同意更新，下載並驗證期間顯示進度，開始維護後改顯示更新進度", async () => {
@@ -145,15 +192,26 @@ describe("更新通知", () => {
 
     expect(client.applyUpdate).toHaveBeenCalledWith("0.2.0");
     const dialog = screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" });
-    expect(dialog).toHaveTextContent("下載並驗證中…");
-    expect(within(dialog).getByRole("button", { name: "更新並重新開啟" })).toBeDisabled();
-    expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+    expect(within(dialog).getByRole("status")).toHaveTextContent("下載並驗證中…");
+    // 只標 aria-disabled、不設 disabled：焦點留在對話框的「取消」，不落到 body
+    const confirmButton = within(dialog).getByRole("button", { name: "更新並重新開啟" });
+    const cancelButton = within(dialog).getByRole("button", { name: "取消" });
+    expect(confirmButton).toHaveAttribute("aria-disabled", "true");
+    expect(cancelButton).toHaveAttribute("aria-disabled", "true");
+    expect(cancelButton).toHaveFocus();
+    // 下載並驗證中按兩顆按鈕都沒有作用
+    await click(confirmButton);
+    await click(cancelButton);
+    expect(client.applyUpdate).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("dialog", { name: "更新到 Baton 0.2.0" })).toBeInTheDocument();
 
     await act(async () => finishDownload(availableUpdateStatus({ maintenance: maintenance() })));
 
     expect(screen.queryByRole("dialog", { name: "更新到 Baton 0.2.0" })).not.toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "更新 Baton" })).toHaveTextContent("停止執行中的工作");
     expect(screen.queryByText(/可以更新/)).not.toBeInTheDocument();
+    // 確認對話框與通知都已消失：焦點移進更新進度對話框（標題），不落到 body
+    expect(screen.getByRole("heading", { name: "更新 Baton" })).toHaveFocus();
 
     // 維護中由更新進度輪詢；通知本身不再每 60 秒讀取
     const calls = client.updateStatus.mock.calls.length;
@@ -169,12 +227,19 @@ describe("更新通知", () => {
     await settle();
     await click(screen.getByRole("button", { name: "更新並重新開啟…" }));
 
-    await click(screen.getByRole("button", { name: "更新並重新開啟" }));
+    // 與瀏覽器一樣，按下的按鈕先取得焦點
+    const confirmButton = screen.getByRole("button", { name: "更新並重新開啟" });
+    confirmButton.focus();
+    await click(confirmButton);
 
     const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("更新沒有開始：無法下載或驗證安裝程式（工作沒有停止）：簽章不符");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(within(alert).getByText("更新沒有開始")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("無法下載或驗證安裝程式（工作沒有停止）：簽章不符");
     expect(alert).toHaveTextContent("工作沒有停止，照常進行。");
     expect(screen.queryByRole("dialog", { name: "更新 Baton" })).not.toBeInTheDocument();
+    // 失敗後焦點移到「取消」（不會停止任何工作的選項）
+    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
 
     await click(screen.getByRole("button", { name: "更新並重新開啟" }));
 
@@ -200,11 +265,14 @@ describe("更新通知", () => {
     );
     await settle();
 
-    expect(screen.getByText("已從 0.1.0 更新到 0.2.0")).toBeInTheDocument();
+    const outcome = noticeText("已從 0.1.0 更新到 0.2.0");
+    // 版本號用等寬字（MASTER 7.1）
+    expect(within(outcome).getByText("0.1.0")).toHaveClass("mono");
+    expect(within(outcome).getByText("0.2.0")).toHaveClass("mono");
 
     await click(screen.getByRole("button", { name: "知道了" }));
 
-    expect(screen.queryByText("已從 0.1.0 更新到 0.2.0")).not.toBeInTheDocument();
+    expect(screen.queryByText(/已從/)).not.toBeInTheDocument();
   });
 
   it("更新沒有套用時說明仍是原本的版本", async () => {
@@ -212,7 +280,7 @@ describe("更新通知", () => {
     render(<UpdateNotice client={fakeClient(updateStatus({ last_maintenance: outcome }))} runtimeStartedAt={STARTED_AT} />);
     await settle();
 
-    expect(screen.getByText("更新沒有套用，仍是 0.1.0")).toBeInTheDocument();
+    expect(within(noticeText("更新沒有套用，仍是 0.1.0")).getByText("0.1.0")).toHaveClass("mono");
   });
 
   it.each([

@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
+import { FailureNotice } from "./ExitProgress";
 import type { UpdateClient, UpdateStatusView } from "./runtimeClient";
 import { formatTimestamp } from "./time";
 
@@ -15,15 +16,19 @@ function reasonOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** 依檢查結果說明目前狀態。 */
-function statusText(view: UpdateStatusView): string {
+/** 依檢查結果說明目前狀態；版本號用等寬字（MASTER 7.1）。 */
+function statusText(view: UpdateStatusView): ReactNode {
   switch (view.status) {
     case "unconfigured":
       return "未設定更新來源（這個版本不會自動檢查）";
     case "up_to_date":
       return "已是最新版本";
     case "available":
-      return `有新版本 ${view.available?.version ?? ""}`;
+      return (
+        <>
+          有新版本 <span className="mono">{view.available?.version ?? ""}</span>
+        </>
+      );
     case "failed":
       return `檢查失敗：${view.error ?? "原因不明"}（明天再試）`;
     case "not_checked":
@@ -46,24 +51,31 @@ export function UpdateSettings({ client, timeZone }: Props) {
   }, [client]);
 
   return (
-    <section className="update-settings" aria-labelledby="update-settings-title">
-      <h2 id="update-settings-title">更新</h2>
-      <p className="section-hint">啟動時與每天自動檢查；有新版本只會通知，不會自動更新。</p>
-      {loaded.state === "loading" && <p>載入中…</p>}
-      {loaded.state === "failed" && <p role="alert">無法取得更新狀態：{loaded.reason}</p>}
+    <section className="section update-settings" aria-labelledby="update-settings-title">
+      <div className="section-heading">
+        <h3 id="update-settings-title">更新</h3>
+        <p>啟動時與每天自動檢查；有新版本只會通知，不會自動更新。</p>
+      </div>
+      {loaded.state === "loading" && <p className="empty-note">載入中…</p>}
+      {/* Runtime 的錯誤可能很長：長警示，不用淡底提示（MASTER 7.1） */}
+      {loaded.state === "failed" && <FailureNotice title="無法取得更新狀態" reason={loaded.reason} />}
       {loaded.state === "ready" && (
-        <>
-          <dl className="settings-facts">
+        <div className="panel">
+          <dl className="facts">
             <dt>目前版本</dt>
             <dd className="mono">{loaded.view.current_version}</dd>
             <dt>狀態</dt>
-            <dd>{statusText(loaded.view)}</dd>
+            <dd className={`update-status update-status-${loaded.view.status}`}>{statusText(loaded.view)}</dd>
             <dt>上次檢查</dt>
-            <dd>{loaded.view.checked_at === null ? "尚未檢查" : formatTimestamp(loaded.view.checked_at, timeZone)}</dd>
+            <dd className="tabular">
+              {loaded.view.checked_at === null ? "尚未檢查" : formatTimestamp(loaded.view.checked_at, timeZone)}
+            </dd>
             <dt>下次檢查</dt>
-            <dd>{loaded.view.next_check_at === null ? "未排定" : formatTimestamp(loaded.view.next_check_at, timeZone)}</dd>
+            <dd className="tabular">
+              {loaded.view.next_check_at === null ? "未排定" : formatTimestamp(loaded.view.next_check_at, timeZone)}
+            </dd>
           </dl>
-        </>
+        </div>
       )}
     </section>
   );

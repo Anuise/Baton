@@ -29,9 +29,9 @@ pub struct AccountQuota {
 pub enum QuotaApplyError {
     #[error(transparent)]
     Invalid(#[from] PlanLimitError),
-    #[error("找不到帳號 Profile {0}")]
+    #[error("找不到帳號 {0}")]
     ProfileNotFound(String),
-    #[error("帳號 Profile {0} 已封存，不能設定方案上限")]
+    #[error("帳號 {0} 已封存，不能設定方案上限")]
     ProfileArchived(String),
     #[error(transparent)]
     Store(#[from] StoreError),

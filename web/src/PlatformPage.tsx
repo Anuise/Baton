@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { CopyButton } from "./LongText";
 import type { PlatformResponse, RuntimeClient } from "./runtimeClient";
-import { docsHost } from "./textFormat";
+import { docsHost, splitFirstSentence } from "./textFormat";
 
 type Assessment = PlatformResponse["assessment"];
 
@@ -40,12 +40,42 @@ export function PlatformPage({ client }: Props) {
   }, [client]);
 
   return (
-    <section className="platform-page" aria-labelledby="platform-title">
-      <h2 id="platform-title">平台狀態</h2>
-      {page.state === "loading" && <p>平台檢查中…</p>}
-      {page.state === "failed" && <p>無法取得平台狀態：{page.reason}</p>}
+    <section className="section platform-page" aria-labelledby="platform-title">
+      <div className="section-heading">
+        <h3 id="platform-title">平台狀態</h3>
+        {page.state === "ready" && (
+          <span
+            className={`badge platform-status platform-${page.platform.assessment.status} ${
+              page.platform.assessment.status === "supported" ? "badge-success" : "badge-warning"
+            }`}
+          >
+            {platformStatusLabel(page.platform.assessment.status)}
+          </span>
+        )}
+        {/* 與並排的崩潰恢復一樣有一行說明，兩個面板上緣對齊 */}
+        <p>Windows 版本與支援判定；非正式支援只會警告，不會阻擋使用、派工、交接或恢復。</p>
+      </div>
+      {page.state === "loading" && <p className="empty-note">平台檢查中…</p>}
+      {page.state === "failed" && <PlatformNotice tone="danger" title="無法取得平台狀態" message={page.reason} />}
       {page.state === "ready" && <PlatformDetails platform={page.platform} />}
     </section>
+  );
+}
+
+/** 平台警告或讀取失敗：長警示（只有色條與狀態詞上色）；第一句完整顯示，其餘收進「詳細資訊」。 */
+function PlatformNotice({ tone, title, message }: { tone: "warning" | "danger"; title: string; message: string }) {
+  const { summary, rest } = splitFirstSentence(message);
+  return (
+    <div role="alert" className={`notice notice-${tone}`}>
+      <p className="notice-title">{title}</p>
+      <p>{summary}</p>
+      {rest !== "" && (
+        <details>
+          <summary>詳細資訊</summary>
+          <p>{rest}</p>
+        </details>
+      )}
+    </div>
   );
 }
 
@@ -53,48 +83,45 @@ function PlatformDetails({ platform }: { platform: PlatformResponse }) {
   const { assessment } = platform;
   return (
     <>
-      <p className={`platform-status platform-${assessment.status}`}>
-        <span className={`badge ${assessment.status === "supported" ? "badge-success" : "badge-warning"}`}>
-          {platformStatusLabel(assessment.status)}
-        </span>
-      </p>
       {assessment.issues.map((issue) => (
-        <p key={issue.code} role="alert" className="platform-warning">
-          {issue.message}
-        </p>
+        <PlatformNotice key={issue.code} tone="warning" title="平台警告" message={issue.message} />
       ))}
-      {assessment.status !== "supported" && <p>平台警告不會阻擋使用，也不會阻擋派工、交接或恢復。</p>}
-      <dl className="platform-facts settings-facts">
-        <dt>OS build</dt>
-        <dd>{platform.platform.os_build}</dd>
-        <dt>功能版本</dt>
-        <dd>{platform.platform.feature_version}</dd>
-        <dt>版本別</dt>
-        <dd>{platform.platform.edition}</dd>
-        <dt>原生架構</dt>
-        <dd data-field="native-arch">{platform.platform.native_arch}</dd>
-        <dt>程序架構</dt>
-        <dd>{platform.platform.process_arch}</dd>
-        <dt>App 版本</dt>
-        <dd>{platform.app_version}</dd>
-        {assessment.support_ends_on && (
-          <>
-            {/* 標籤欄放不下時在空白處換行，不在「服務結束日」中間拆開 */}
-            <dt>
-              Microsoft <span className="nowrap">服務結束日</span>
-            </dt>
-            <dd>{assessment.support_ends_on}</dd>
-          </>
-        )}
-      </dl>
-      <p className="platform-source section-hint">
-        支援期限資料來源：
-        <span className="mono" title={platform.support_table_source}>
-          {docsHost(platform.support_table_source)}
-        </span>
-        <CopyButton text={platform.support_table_source} label="複製網址" />
-        <span className="platform-checked-on">（查閱日期 {platform.support_table_checked_on}）</span>
-      </p>
+      <div className="panel">
+        <dl className="facts platform-facts">
+          <dt>OS build</dt>
+          <dd className="tabular">{platform.platform.os_build}</dd>
+          <dt>功能版本</dt>
+          <dd>{platform.platform.feature_version}</dd>
+          <dt>版本別</dt>
+          <dd>{platform.platform.edition}</dd>
+          <dt>原生架構</dt>
+          <dd data-field="native-arch">{platform.platform.native_arch}</dd>
+          <dt>程序架構</dt>
+          <dd>{platform.platform.process_arch}</dd>
+          <dt>App 版本</dt>
+          <dd className="mono">{platform.app_version}</dd>
+          {assessment.support_ends_on && (
+            <>
+              {/* 標籤欄放不下時在空白處換行，不在「服務結束日」中間拆開 */}
+              <dt>
+                Microsoft <span className="nowrap">服務結束日</span>
+              </dt>
+              <dd className="tabular">{assessment.support_ends_on}</dd>
+            </>
+          )}
+        </dl>
+        <p className="meta platform-source">
+          <span className="copy-text">
+            {/* 標籤不縮小，寬度不夠時只截斷網址 */}
+            <span className="no-shrink">支援期限資料來源：</span>
+            <span className="mono truncate" title={platform.support_table_source}>
+              {docsHost(platform.support_table_source)}
+            </span>
+            <CopyButton text={platform.support_table_source} label="複製網址" />
+          </span>
+          <span className="tabular">查閱日期 {platform.support_table_checked_on}</span>
+        </p>
+      </div>
     </>
   );
 }

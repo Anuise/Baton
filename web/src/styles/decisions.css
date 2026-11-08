@@ -1,127 +1,105 @@
 /* ==========================================================================
-   裁定
-   裁定清單與詳情、權限提示、批次與連結。
-   清單只放摘要（問題 3 行、Task 1 行、一列徽章），完整內容在右側詳情；
-   詳情內容受閱讀寬度上限（46em）。安全相關的提示（先前已放行、不能沿用的批准、
-   延後不是同意、逾期）一律直接顯示，不收合。
+   裁定、決策權限、流程、時間線
+   只寫共用元件（components.css）沒有的部分，一律以頁面根 class 開頭：
+   .decision-center（裁定）、.decision-authority（決策權限）、
+   .workflow-page（流程）、.timeline-page（時間線）。
    ========================================================================== */
 
-/* 頁簽與標題之間沿用 .tab-panel 的間距，不另加（audit P-DEC-5） */
+/* ==========================================================================
+   裁定：收件匣。上方一列總覽數字；左欄分組清單，右欄工作區（批次與詳情）
+   ========================================================================== */
 
-.decision-center h3,
-.decision-center h4 {
-  margin: var(--space-7) 0 var(--space-3);
+/* 詳情與批次的閱讀寬度：以 body 字級計算（約 44 個中文字），
+   不受各元素自己的字級影響，讓 13px 的欄位、提示與 14px 的段落對齊同一欄寬 */
+.decision-center {
+  --decision-measure: calc(var(--text-body) * 44);
 }
 
-/* 標題旁的「?」說明垂直置中 */
-.decision-center :is(h3, h4):has(.help-tip) {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
+/* 總覽緊貼頁面標題（頁面區段間距 32px 收成 16px） */
+.decision-center .decision-overview {
+  margin-top: calc(var(--space-6) * -1);
 }
 
-.decision-empty,
-.decision-hint {
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-  line-height: var(--leading-meta);
-}
-
-.decision-empty {
-  margin: 0;
-}
-
-/* 帶有授權意涵、必須直接看得到的簡短說明（不收在「?」說明裡） */
-.decision-note {
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-  font-weight: var(--font-weight-normal);
-  line-height: var(--leading-meta);
-}
-
-.decision-saved {
-  color: var(--color-success);
-  font-size: var(--text-meta);
-}
-
-/* ---- 總覽 ---------------------------------------------------------------- */
-
-.decision-overview dl {
+/* 一列數字：「可處理 3」，待裁定的幾項在前，已結束的幾項在分隔線之後 */
+.decision-center .decision-summary {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-4) 0;
-  margin: 0 0 var(--space-7);
+  gap: var(--space-3) var(--space-7);
+  margin: 0;
+  font-size: var(--text-meta);
 }
 
-.decision-overview-item {
-  padding: 0 var(--space-6);
-  border-left: 1px solid var(--color-border);
-}
-
-.decision-overview-item:first-child {
-  padding-left: 0;
-  border-left: 0;
-}
-
-.decision-overview-item dt {
-  color: var(--color-text-muted);
-  font-size: var(--text-caption);
-  line-height: var(--leading-caption);
+.decision-center .decision-summary-item {
+  display: flex;
+  gap: var(--space-3);
+  align-items: baseline;
   white-space: nowrap;
 }
 
-.decision-overview-item dd {
-  margin: 0;
-  font-size: var(--text-title);
+.decision-center .decision-summary-item > dt {
+  color: var(--color-text-muted);
+}
+
+.decision-center .decision-summary-item > dd {
   font-weight: var(--font-weight-strong);
-  line-height: var(--leading-title);
   font-variant-numeric: tabular-nums;
 }
 
-.decision-overview-overdue dd,
-.decision-overview-high_urgency dd {
+.decision-center .decision-summary-item.is-zero > dd {
+  color: var(--color-text-subtle);
+  font-weight: var(--font-weight-normal);
+}
+
+/* 逾期、高緊急大於 0：琥珀色＝要你處理 */
+.decision-center .decision-summary-item.is-attention > dd {
   color: var(--color-warning);
 }
 
-/* ---- 清單 + 詳情（MASTER 第 8 節：≥ 1101px 清單 260～340px） ---------------- */
+.decision-center .decision-summary-item.is-group-start {
+  padding-left: var(--space-7);
+  border-left: 1px solid var(--color-border);
+}
 
-.decision-layout {
+/* ---------- 版面：左欄清單、右欄工作區 ---------- */
+.decision-center .decision-layout {
   display: grid;
-  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
   gap: var(--space-7);
   align-items: start;
 }
 
-.decision-group + .decision-group {
-  margin-top: var(--space-7);
-}
-
-.decision-lists h3 {
-  margin: 0 0 var(--space-4);
-}
-
-.decision-list {
+.decision-center .decision-lists {
   display: grid;
-  gap: var(--space-4);
-  margin: 0;
-  padding: 0;
-  list-style: none;
+  gap: var(--space-7);
+  align-content: start;
+  min-width: 0;
 }
 
-.decision-list li {
+/* ---------- 清單：一個外框、列與列之間細線；整列是「查看裁定」按鈕，可處理的列前面有批次勾選 ---------- */
+.decision-center .decision-list > li {
   display: flex;
-  gap: var(--space-4);
+  gap: 0;
   align-items: flex-start;
+  padding: 0;
+  transition: background-color var(--duration-fast) var(--ease-out);
 }
 
-/* 勾選框對齊清單項的第一行 */
-.decision-batch-check {
+.decision-center .decision-list > li:hover {
+  background: var(--color-surface-hover);
+}
+
+/* 目前選取的一列：群青淡底＋左側色條（群青＝目前所在） */
+.decision-center .decision-list > li.is-selected {
+  background: var(--color-accent-subtle);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+.decision-center .decision-batch-check {
   flex: none;
-  margin: var(--space-6) 0 0;
+  margin: calc(var(--space-5) + 3px) 0 0 var(--space-6);
 }
 
-/* 整個清單項是一個按鈕：問題、Task、徽章由上而下 */
-.decision-list li button {
+.decision-center .decision-item-button {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -129,325 +107,130 @@
   align-items: stretch;
   justify-content: flex-start;
   min-width: 0;
-  padding: var(--space-5);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  font-weight: var(--font-weight-normal);
+  min-height: 0;
+  padding: var(--space-5) var(--space-6);
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--color-text);
+  line-height: var(--leading-meta);
   text-align: left;
   white-space: normal;
 }
 
-.decision-list li button:hover:not(:disabled) {
-  border-color: var(--color-border-strong);
-  background: var(--color-surface);
+.decision-center .decision-batch-check + .decision-item-button {
+  padding-left: var(--space-5);
 }
 
-.decision-selected button,
-.decision-selected button:hover:not(:disabled) {
-  border-color: var(--color-accent-border);
-  background: var(--color-accent-subtle);
+.decision-center .decision-item-button:hover:not(:disabled) {
+  border-color: transparent;
+  background: none;
 }
 
-.decision-question {
-  color: var(--color-text);
+/* 清單外框會裁切，焦點外框畫在按鈕內側 */
+.decision-center .decision-item-button:focus-visible {
+  outline-offset: -2px;
+}
+
+.decision-center .decision-question {
   font-size: var(--text-title-sm);
   font-weight: var(--font-weight-strong);
   line-height: var(--leading-title-sm);
   overflow-wrap: anywhere;
 }
 
-.decision-task {
+.decision-center .decision-task {
   color: var(--color-text-muted);
   font-size: var(--text-meta);
-  line-height: var(--leading-meta);
   overflow-wrap: anywhere;
 }
 
-.decision-meta {
+.decision-center .decision-badges {
   margin-top: var(--space-1);
 }
 
-.decision-meta .decision-deferred {
+.decision-center .decision-deferred-until {
   color: var(--color-text-muted);
   font-size: var(--text-caption);
-  font-weight: var(--font-weight-normal);
   line-height: var(--leading-caption);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- 詳情 ---------------------------------------------------------------- */
-
-/* 清單很長時詳情欄停在視窗內：高度不超過視窗，內容在欄內自己捲動。
-   換一筆時詳情重新掛載，捲動位置回到頂端，標題與安全警示先出現 */
-.decision-detail {
+/* ---------- 右欄工作區：批次結果 → 批次處理 → 詳情；停在視窗內、自己捲動 ---------- */
+/* 新加入的批次項目從上方推開內容，不讓捲動錨點把它藏到可視範圍外（overflow-anchor: none）。
+   處理區的送出列會停在右欄底部：scroll-padding-bottom 讓 Tab 移動焦點時，瀏覽器把焦點元素捲到送出列上方，不被它蓋住。
+   右欄從頁首與總覽下方開始，頁面還沒捲動時右欄底部（連同送出列）在視窗外：
+   不設 overscroll-behavior，右欄捲到底後滾輪會交給文件，文件捲動後右欄停在視窗內、送出列看得到 */
+.decision-center .decision-pane {
   position: sticky;
   top: var(--space-6);
+  display: grid;
+  gap: var(--space-6);
+  align-content: start;
   box-sizing: border-box;
-  max-block-size: calc(100vh - 2 * var(--space-6));
-  overflow-y: auto;
   min-width: 0;
-  padding: var(--space-6) var(--space-7);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
+  max-block-size: calc(100vh - 2 * var(--space-6));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overflow-anchor: none;
+  scroll-padding-bottom: calc(var(--control-height) + var(--space-4) + var(--space-6) + var(--space-4));
+  scrollbar-width: thin;
 }
 
-/* 詳情中的段落、清單與區塊都受閱讀寬度上限（約每行 46 個中文字） */
-.decision-detail > * {
-  box-sizing: border-box;
-  max-inline-size: var(--measure);
-}
-
-.decision-detail-header h3 {
-  margin: 0 0 var(--space-4);
-  font-size: var(--text-title);
-  line-height: var(--leading-title);
-}
-
-.decision-detail-badges {
-  margin-bottom: var(--space-3);
-}
-
-.decision-detail-time {
-  color: var(--color-text-muted);
-  font-size: var(--text-caption);
-  line-height: var(--leading-caption);
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.decision-detail-task {
+/* 共用：區塊之間的間距、段落不另加外距 */
+.decision-center .decision-pane :is(h3, h4, h5, p) {
   margin: 0;
+}
+
+.decision-center .decision-heading-tip,
+.decision-center .decision-batch-head > h3,
+.decision-center .decision-batch-results > h3 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.decision-center .decision-note,
+.decision-center .decision-hint {
   color: var(--color-text-muted);
   font-size: var(--text-meta);
   line-height: var(--leading-meta);
 }
 
-/* 狀態提示（逾期、延後、期限）：短句，直接顯示 */
-p.decision-overdue,
-p.decision-deferred,
-.decision-deadline {
-  margin: var(--space-5) 0 0;
-}
-
-p.decision-overdue {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: center;
-  color: var(--color-warning);
-  font-weight: var(--font-weight-strong);
-}
-
-p.decision-deferred {
-  color: var(--color-text-muted);
-  font-weight: var(--font-weight-strong);
-}
-
-.decision-deadline {
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-}
-
-/* 安全警示（先前已放行過一次、不能沿用的批准）：左側色條 + 淡色底，醒目但正文維持 text 色 */
-.decision-alert {
-  margin: var(--space-5) 0 0;
-  padding: var(--space-4) var(--space-5);
-  border: 1px solid var(--color-warning-border);
-  border-left: 3px solid var(--color-warning);
-  border-radius: var(--radius-md);
-  background: var(--color-warning-subtle);
-  color: var(--color-text);
-  font-weight: var(--font-weight-strong);
-}
-
-.decision-reason {
-  margin: 0;
-}
-
-/* 權限提示、權限表攔截：沉底的區塊 */
-.decision-permission {
-  margin-top: var(--space-7);
-  padding: var(--space-5) var(--space-6);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-sunken);
-}
-
-.decision-detail .decision-permission h4 {
-  margin-top: 0;
-}
-
-.decision-permission details {
-  margin-top: var(--space-4);
-}
-
-.decision-permission summary {
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-}
-
-/* 工具輸入 JSON：不折行，在 24 行高的框內自己捲動（base.css 的 pre） */
-.decision-permission pre {
-  margin: var(--space-3) 0 0;
-  background: var(--color-surface);
-}
-
-/* 標籤 + 值的兩欄（MASTER 6.4 第 5 條） */
-.decision-dl,
-.decision-more dl {
-  display: grid;
-  grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
-  gap: var(--space-2) var(--space-6);
-  margin: 0;
-}
-
-.decision-dl dt,
-.decision-more dt {
-  max-width: 12em;
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-  line-height: var(--leading-body);
-}
-
-.decision-dl dd,
-.decision-more dd {
-  margin: 0;
-}
-
-.decision-dl ul {
-  margin: 0;
-  padding-left: var(--space-6);
-}
-
-.decision-approve-once p {
-  margin: 0 0 var(--space-4);
-}
-
-.decision-approve-once .decision-alert {
-  margin: var(--space-4) 0 0;
-}
-
-/* 次要與技術資訊收合在 details 裡 */
-.decision-more {
-  margin-top: var(--space-4);
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-}
-
-.decision-more dl {
+/* 收合的次要與技術資訊 */
+.decision-center .decision-more > :not(summary) {
   margin-top: var(--space-3);
 }
 
-.decision-more p {
-  margin: var(--space-3) 0 0;
-}
-
-.decision-authorization-change label {
-  display: flex;
-  gap: var(--space-3);
-  align-items: flex-start;
-  margin: var(--space-3) 0;
-}
-
-.decision-authorization-change ul {
-  margin: 0 0 var(--space-4);
-  padding-left: var(--space-6);
-}
-
-.decision-authorization-change h5 {
-  margin: var(--space-4) 0 var(--space-2);
-}
-
-/* 選項與取捨：每個選項一段，取捨在下方以次要文字顯示 */
-.decision-options {
-  display: grid;
-  gap: var(--space-4);
-  margin: 0;
+/* 「已結束」一組的收合：收合摘要樣式（三角形＋次要文字、沒有按鈕外框），與 <details> 的 ▶ 一致（MASTER 7.1） */
+.decision-center .decision-group-toggle {
+  min-height: 0;
   padding: 0;
-  list-style: none;
-}
-
-.decision-option {
-  display: grid;
-  gap: var(--space-1);
-  padding-left: var(--space-5);
-  border-left: 2px solid var(--color-border);
-}
-
-.decision-option-head {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: center;
-}
-
-.decision-option-label {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.decision-tradeoff {
+  border: 0;
+  background: none;
   color: var(--color-text-muted);
   font-size: var(--text-meta);
   line-height: var(--leading-meta);
-  overflow-wrap: anywhere;
 }
 
-.decision-evidence,
-.decision-blocking {
-  margin: 0;
-  padding-left: var(--space-6);
+.decision-center .decision-group-toggle::before {
+  content: counter(list-item, disclosure-closed) " ";
 }
 
-.decision-evidence li + li,
-.decision-blocking li + li {
-  margin-top: var(--space-2);
+.decision-center .decision-group-toggle[aria-expanded="true"]::before {
+  content: counter(list-item, disclosure-open) " ";
 }
 
-/* ---- 相似問題 ------------------------------------------------------------ */
-
-.decision-related h5 {
-  margin: var(--space-4) 0 var(--space-2);
-  color: var(--color-text-muted);
+.decision-center .decision-group-toggle:hover:not(:disabled) {
+  border-color: transparent;
+  background: none;
+  color: var(--color-text);
 }
 
-.decision-links {
-  margin: 0;
-  padding-left: var(--space-6);
-}
-
-.decision-related-action {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3) var(--space-4);
-  align-items: flex-end;
-  margin: var(--space-4) 0;
-}
-
-/* 選單最寬 32em，按鈕緊跟在選單後面 */
-.decision-related-action label {
-  display: grid;
-  flex: 0 1 32em;
-  gap: var(--space-2);
-  min-width: 0;
-  font-size: var(--text-meta);
-  font-weight: var(--font-weight-strong);
-}
-
-.decision-related-action select {
-  width: 100%;
-  font-weight: var(--font-weight-normal);
-}
-
-.decision-related-action > :not(label) {
-  flex: none;
-}
-
-/* 文字連結樣式的按鈕（前往連結或合併目標的請求） */
-.decision-link-button {
+/* 文字連結樣式的按鈕（前往相似問題、合併目標或 Task 所在的工作頁） */
+.decision-center .decision-link-button {
   display: inline;
   min-height: 0;
   padding: 0;
@@ -458,106 +241,325 @@ p.decision-deferred {
   line-height: inherit;
   text-align: left;
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-decoration-color: var(--color-accent-border);
+  text-underline-offset: 3px;
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 
-.decision-link-button:hover:not(:disabled) {
+.decision-center .decision-link-button:hover:not(:disabled) {
   background: none;
-  color: var(--color-accent-hover);
+  text-decoration-color: currentColor;
 }
 
-/* ---- 處理（詳情的表單、批次面板共用的欄位） --------------------------------- */
+/* ---------- 詳情：一份簡報，內容受閱讀寬度上限 ---------- */
+.decision-center .decision-detail {
+  display: grid;
+  gap: var(--space-7);
+  align-content: start;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--space-7);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
 
-.decision-form,
-.decision-outcome {
-  margin-top: var(--space-7);
-  padding-top: var(--space-6);
+.decision-center .decision-detail > * {
+  max-inline-size: var(--decision-measure);
+}
+
+.decision-center .decision-detail-header {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.decision-center .decision-detail-header > h3 {
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
+}
+
+.decision-center .decision-detail-task {
+  overflow-wrap: anywhere;
+}
+
+/* 延後、逾期：直接顯示的狀態提醒 */
+.decision-center .decision-overdue {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--color-warning);
+  font-weight: var(--font-weight-strong);
+}
+
+/* 逾期提示的「?」在行尾：說明向左展開，不被右欄裁切 */
+.decision-center .decision-overdue .help-tip-content {
+  right: 0;
+  left: auto;
+  color: var(--color-text);
+  font-weight: var(--font-weight-normal);
+}
+
+.decision-center .decision-deferred {
+  font-weight: var(--font-weight-strong);
+}
+
+.decision-center .decision-deferred .decision-note {
+  font-weight: var(--font-weight-normal);
+}
+
+.decision-center .decision-block {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+  min-width: 0;
+}
+
+.decision-center .decision-block h4 {
+  font-size: var(--text-title-sm);
+  line-height: var(--leading-title-sm);
+}
+
+.decision-center .decision-block h5 {
+  margin-bottom: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+.decision-center .decision-block :is(ul, ol) {
+  padding-left: var(--space-7);
+}
+
+.decision-center .decision-block li + li {
+  margin-top: var(--space-2);
+}
+
+/* 權限提示、決策權限攔截（Agent 想做的事）：下沉的嵌入區。
+   border-box：padding 算在閱讀寬度內，與其他區塊同寬 */
+.decision-center .decision-request {
+  box-sizing: border-box;
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+/* 「調整決策權限」：依文字寬度，不撐滿嵌入區 */
+.decision-center .decision-request > button {
+  justify-self: start;
+}
+
+/* 嵌入區裡的程式碼區塊改用 surface，與下沉底色區分 */
+.decision-center .decision-request pre {
+  background: var(--color-surface);
+}
+
+/* 選項與取捨：每個選項一列，列與列之間細線分隔（詳情卡裡不再放有框的子卡片）；
+   建議的選項以「建議」徽章標示，旁邊是「採用建議」 */
+.decision-center .decision-block .decision-options {
+  display: grid;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-center .decision-block .decision-option {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-4) 0;
+}
+
+.decision-center .decision-block .decision-option:first-child {
+  padding-top: 0;
+}
+
+.decision-center .decision-block .decision-option:last-child {
+  padding-bottom: 0;
+}
+
+.decision-center .decision-block .decision-option + .decision-option {
   border-top: 1px solid var(--color-border);
 }
 
-.decision-form {
-  display: grid;
-  gap: var(--space-5);
-}
-
-.decision-detail .decision-outcome h4 {
-  margin-top: 0;
-}
-
-.decision-outcome p {
-  margin: 0 0 var(--space-3);
-}
-
-.decision-superseded h4 {
-  color: var(--color-warning);
-}
-
-.decision-detail-meta {
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-  line-height: var(--leading-meta);
-}
-
-/* 處理方式：radio 排成可換行的一列 */
-.decision-actions {
+.decision-center .decision-option-head {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3) var(--space-6);
-}
-
-.decision-actions label {
-  display: inline-flex;
-  gap: var(--space-2);
-  align-items: center;
-  white-space: nowrap;
-}
-
-/* 選項：radio + 可能很長的選項文字，文字換行時與 radio 頂端對齊 */
-.decision-choice {
-  display: flex;
   gap: var(--space-3);
-  align-items: flex-start;
+  align-items: center;
 }
 
-.decision-choice + .decision-choice {
-  margin-top: var(--space-3);
-}
-
-.decision-choice input {
-  flex: none;
-  margin-top: 0.3em;
-}
-
-.decision-choice span {
+.decision-center .decision-option-label {
   min-width: 0;
+  font-weight: var(--font-weight-strong);
   overflow-wrap: anywhere;
 }
 
-.decision-note-field {
+.decision-center .decision-tradeoff {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+  overflow-wrap: anywhere;
+}
+
+/* 相似問題：合併與連結的選單最寬 32em，按鈕緊跟在後 */
+.decision-center .decision-related-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  align-items: flex-end;
+}
+
+.decision-center .decision-related-action > label {
   display: grid;
-  max-inline-size: var(--measure);
+  flex: 0 1 32em;
   gap: var(--space-2);
+  min-width: 0;
   font-size: var(--text-meta);
   font-weight: var(--font-weight-strong);
 }
 
-.decision-note-field textarea {
+.decision-center .decision-related-action select {
   width: 100%;
-  font-size: var(--text-body);
   font-weight: var(--font-weight-normal);
-  line-height: var(--leading-body);
 }
 
-/* 欄位與它的說明排在同一列，放不下時換行 */
-.decision-inline {
+.decision-center .decision-related-action > :not(label) {
+  flex: none;
+}
+
+/* 欄位旁的「?」靠右展開，不超出右欄 */
+.decision-center .decision-related-action .help-tip-content {
+  right: 0;
+  left: auto;
+}
+
+/* 修改 Workspace 授權：檢視變更時的嵌入區 */
+.decision-center .decision-authorization-review :is(ul, ol) {
+  padding-left: var(--space-7);
+}
+
+.decision-center .decision-acks {
+  display: grid;
+  gap: var(--space-3);
+  justify-items: start;
+}
+
+/* ---------- 處理區：處理方式 → 選項或文字 → 送出（已結束的請求是裁定結果） ---------- */
+/* border-box：padding 算在閱讀寬度內，與上方各區塊同寬 */
+.decision-center .decision-form,
+.decision-center .decision-outcome {
+  display: grid;
+  gap: var(--space-5);
+  box-sizing: border-box;
+  padding: var(--space-6);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+/* 待裁定的處理區隨內容捲動，不整塊停在右欄底部（以免蓋住上方的內容與焦點）。
+   只有送出列停在右欄底部（右欄是捲動容器）：處理區只露出上半部時，「送出裁定」仍看得到。
+   送出列撐滿處理區寬度、以上緣細線和從底下捲過的欄位分開；處理區下方的留白由送出列自己的 padding 提供
+   （處理區沒有 padding-bottom，sticky 的範圍不會被 padding 內縮） */
+.decision-center .decision-form {
+  padding-bottom: 0;
+}
+
+.decision-center .decision-form > .form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin-inline: calc(var(--space-6) * -1);
+  padding: var(--space-4) var(--space-6) var(--space-6);
+  border-top: 1px solid var(--color-border);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+.decision-center .decision-outcome > h4 {
+  font-size: var(--text-title-sm);
+}
+
+/* 處理方式、選項的 fieldset 不另加框（避免框中有框），legend 是欄位標籤 */
+.decision-center :is(.decision-actions, .decision-option-choices) {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.decision-center :is(.decision-actions, .decision-option-choices) > legend {
+  padding: 0;
+  color: var(--color-text);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.decision-center :is(.decision-action-list, .decision-option-choices > .choice-list) {
+  margin-top: var(--space-3);
+}
+
+/* 處理方式：一排可換行的選項鈕；選到的以群青標示 */
+.decision-center .decision-action-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.decision-center .decision-action {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  box-sizing: border-box;
+  min-height: var(--control-height);
+  padding: 0 var(--space-5);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-size: var(--text-meta);
+  white-space: nowrap;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.decision-center .decision-action:hover {
+  border-color: var(--color-control-border);
+}
+
+.decision-center .decision-action:has(input:checked) {
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+  font-weight: var(--font-weight-strong);
+}
+
+/* 選項：選項卡（.choice），只有一行選項文字，選項鈕不必跨兩列；建議的選項文字後接「建議」徽章 */
+.decision-center .decision-choice {
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+}
+
+.decision-center .decision-choice > input {
+  grid-row: auto;
+  align-self: center;
+  margin-top: 0;
+}
+
+.decision-center .decision-choice-label {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.decision-center .decision-inline {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3) var(--space-5);
   align-items: center;
 }
 
-.decision-inline label {
+.decision-center .decision-inline-field {
   display: inline-flex;
   gap: var(--space-3);
   align-items: center;
@@ -565,165 +567,780 @@ p.decision-deferred {
   font-weight: var(--font-weight-strong);
 }
 
-.decision-inline select {
+.decision-center .decision-inline-field select {
   font-weight: var(--font-weight-normal);
 }
 
-/* 錯誤：左側色條 + 危險色短句 */
-.decision-error,
-.decision-batch [role="alert"],
-.decision-related [role="alert"],
-.decision-authority [role="alert"],
-.decision-authorization-change [role="alert"] {
-  margin: var(--space-4) 0 0;
-  padding-left: var(--space-4);
-  border-left: 3px solid var(--color-danger);
-  color: var(--color-danger);
+.decision-center .decision-note-field {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
 }
 
-/* ---- 批次 ---------------------------------------------------------------- */
+.decision-center .decision-note-field textarea {
+  width: 100%;
+  font-size: var(--text-body);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--leading-body);
+}
 
-.decision-batch,
-.decision-batch-results,
-.decision-authority {
-  margin: 0 0 var(--space-7);
-  padding: var(--space-6);
+/* 批次的處理欄位放在 surface 上：選項卡改用下沉底色區分 */
+.decision-center .decision-batch .choice {
+  background: var(--color-surface-sunken);
+}
+
+.decision-center .decision-batch .choice:has(input:checked) {
+  background: var(--color-accent-subtle);
+}
+
+/* ---------- 批次處理：選了幾項、填妥幾項、每一項還差什麼 ---------- */
+.decision-center .decision-batch,
+.decision-center .decision-batch-results {
+  display: grid;
+  gap: var(--space-5);
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--space-6) var(--space-7);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--color-surface);
 }
 
-.decision-batch {
-  display: grid;
-  gap: var(--space-5);
+/* 進行中的批次以群青框標出（目前所在的工作）。
+   沒有 padding-bottom：下方留白由送出列自己的 padding 提供，sticky 的範圍不會被 padding 內縮（同單筆的處理區） */
+.decision-center .decision-batch {
+  padding-bottom: 0;
   border-color: var(--color-accent-border);
 }
 
-.decision-center .decision-batch h3,
-.decision-center .decision-batch-results h3,
-.decision-center .decision-authority h3 {
-  margin-top: 0;
+.decision-center :is(.decision-batch-head, .decision-batch-results) > h3 {
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
 }
 
-.decision-batch .decision-hint {
+.decision-center .decision-batch-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.decision-center .decision-batch-progress {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 每一項：問題（最多 2 行）在框內當標題，項目之間細線分隔 */
+.decision-center .decision-batch-item {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-5) 0 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+}
+
+.decision-center .decision-batch-item > * {
+  max-inline-size: var(--decision-measure);
+}
+
+.decision-center .decision-batch-item > legend {
+  float: left;
+  width: 100%;
+  padding: 0;
+  color: var(--color-text);
+  font-size: var(--text-title-sm);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title-sm);
+}
+
+/* 每一項的狀態（還差什麼）與「採用建議」同一列，放不下時換行 */
+.decision-center .decision-batch-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  align-items: center;
+}
+
+.decision-center .decision-batch-state {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 「送出批次」停在右欄底部（比照單筆的送出列）：批次很長時不必捲到最後才看得到；
+   撐滿批次面板寬度、以上緣細線和從底下捲過的項目分開 */
+.decision-center .decision-batch > .form-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin-inline: calc(var(--space-7) * -1);
+  padding: var(--space-4) var(--space-7) var(--space-6);
+  border-top: 1px solid var(--color-border);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  background: var(--color-surface);
+}
+
+/* 批次結果：每一項一行，前面的點標示成功或失敗（旁邊一定有文字） */
+.decision-center .decision-batch-results > ul {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.decision-center .decision-batch-results li {
+  position: relative;
+  padding-left: var(--space-6);
+  overflow-wrap: anywhere;
+}
+
+.decision-center .decision-batch-results li::before {
+  position: absolute;
+  top: 0.65em;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-success);
+  content: "";
+}
+
+.decision-center .decision-batch-results li.is-failed {
+  color: var(--color-danger);
+}
+
+.decision-center .decision-batch-results li.is-failed::before {
+  background: var(--color-danger);
+}
+
+/* ==========================================================================
+   決策權限：一張表；和內建不同的列以左側色條與徽章標出
+   ========================================================================== */
+.decision-authority .decision-authority-sheet {
+  max-width: 64em;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.decision-authority .decision-authority-table :is(th, td) {
+  padding: var(--space-4) var(--space-6);
+  vertical-align: middle;
+}
+
+.decision-authority .decision-authority-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+/* 最長的層級「Controller 可自主處理」一行放得下 */
+.decision-authority .decision-authority-level {
+  width: 13em;
+}
+
+/* 最長選項「Controller 可自主處理（內建）」連同下拉箭頭約 216px，加上儲存格左右留白 */
+.decision-authority .decision-authority-setting {
+  width: 19em;
+}
+
+.decision-authority .decision-authority-table select {
+  width: 100%;
+}
+
+.decision-authority .decision-authority-effective {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+}
+
+/* 放寬（Controller 能自行處理更多）：琥珀色條；收窄：中性色條 */
+.decision-authority tr.is-widened > td:first-child {
+  box-shadow: inset 3px 0 0 var(--color-warning);
+}
+
+.decision-authority tr.is-narrowed > td:first-child {
+  box-shadow: inset 3px 0 0 var(--color-border-strong);
+}
+
+.decision-authority :is(tr.is-widened, tr.is-narrowed) .decision-authority-effective > span:first-child {
+  font-weight: var(--font-weight-strong);
+}
+
+/* 改過但還沒儲存的設定：選單框改成群青 */
+.decision-authority tr.is-dirty select {
+  border-color: var(--color-accent);
+}
+
+.decision-authority .decision-saved {
+  color: var(--color-success);
+  font-size: var(--text-meta);
+}
+
+/* ==========================================================================
+   流程：每個 Workflow 一張卡；Stage 是有編號的步驟線
+   ========================================================================== */
+.workflow-page .workflow {
+  display: grid;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-7);
+}
+
+.workflow-page .workflow :is(h3, p) {
   margin: 0;
 }
 
-.decision-batch-item {
-  display: grid;
-  gap: var(--space-4);
-}
-
-/* 問題（最多 2 行）放進框內當標題，不壓在框線上 */
-.decision-batch-item > legend {
-  float: left;
-  max-inline-size: var(--measure);
-  padding: 0;
-  color: var(--color-text);
+/* Workflow 是一個物件：標題用物件標題字級（MASTER 7.1） */
+.workflow-page .workflow > .card-header > h3 {
   font-size: var(--text-title-sm);
   line-height: var(--leading-title-sm);
 }
 
-/* 批次項目裡的處理方式、選項不再加框，避免框中有框 */
-.decision-batch-item fieldset {
-  padding: 0;
-  border: 0;
+.workflow-page .workflow-newer-version {
+  margin-top: calc(var(--space-5) * -1);
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
 }
 
-.decision-batch-item fieldset legend {
-  margin-bottom: var(--space-2);
-  padding: 0;
+.workflow-page .workflow-blocked-reason details > p {
+  margin-top: var(--space-2);
 }
 
-.decision-batch-results ul {
+.workflow-page .workflow-summary .long-text {
+  max-inline-size: var(--measure);
+}
+
+/* ---------- Stage 步驟線：左側編號圓＋連線，右側標題列與內容 ---------- */
+/* 與上方的摘要以細線分開 */
+.workflow-page .workflow-stages {
+  display: grid;
   margin: 0;
-  padding-left: var(--space-6);
+  padding: var(--space-6) 0 0;
+  border-top: 1px solid var(--color-border);
+  list-style: none;
+  counter-reset: workflow-stage;
 }
 
-.decision-batch-failed {
+.workflow-page .workflow-stage {
+  position: relative;
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: 0 0 var(--space-7) calc(28px + var(--space-5));
+  counter-increment: workflow-stage;
+}
+
+.workflow-page .workflow-stage:last-child {
+  padding-bottom: 0;
+}
+
+/* 編號圓：狀態以樣式與旁邊的狀態徽章（文字）一起表達 */
+.workflow-page .workflow-stage::before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  box-sizing: border-box;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 2px solid var(--color-border-strong);
+  border-radius: 50%;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-size: var(--text-caption);
+  font-weight: var(--font-weight-strong);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  content: counter(workflow-stage);
+}
+
+/* 連到下一個 Stage 的線 */
+.workflow-page .workflow-stage:not(:last-child)::after {
+  position: absolute;
+  top: 32px;
+  bottom: 4px;
+  left: 13px;
+  width: 2px;
+  border-radius: var(--radius-full);
+  background: var(--color-border);
+  content: "";
+}
+
+.workflow-page .workflow-stage.stage-passed::before {
+  border-color: var(--color-success);
+  background: var(--color-success-subtle);
+  color: var(--color-success);
+}
+
+.workflow-page .workflow-stage.stage-passed:not(:last-child)::after {
+  background: var(--color-success-border);
+}
+
+.workflow-page .workflow-stage.stage-current::before {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.workflow-page .workflow-stage:is(.stage-blocked, .stage-invalidated)::before {
+  border-color: var(--color-danger);
+  background: var(--color-danger-subtle);
   color: var(--color-danger);
 }
 
-/* ---- 決策權限表 ---------------------------------------------------------- */
-
-.decision-authority {
-  margin: var(--space-8) 0 0;
+.workflow-page .workflow-stage.stage-skipped::before {
+  border-style: dashed;
+  color: var(--color-text-subtle);
 }
 
-.decision-authority .table-wrap {
-  margin-bottom: var(--space-5);
+.workflow-page .workflow-stage-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  align-items: center;
+  min-height: 28px;
 }
 
-.decision-authority-level {
-  width: 12em;
+.workflow-page .workflow-stage-title {
+  min-width: 0;
+  font-weight: var(--font-weight-strong);
+  overflow-wrap: anywhere;
 }
 
-.decision-authority-setting {
-  /* 最長選項「Controller 可自主處理（內建）」連同下拉箭頭約 216px，加上儲存格左右留白 */
-  width: 17em;
+.workflow-page .workflow-stage.stage-skipped .workflow-stage-title {
+  color: var(--color-text-muted);
 }
 
-.decision-authority-table select {
+/* 攤開的 Stage 內容：目前的 Stage 放在下沉區，其他（受阻、需重驗）直接排在標題下 */
+.workflow-page .workflow-stage-body {
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.workflow-page .workflow-stage.stage-current > .workflow-stage-body {
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+.workflow-page .workflow-stage-details > .workflow-stage-body {
+  margin-top: var(--space-4);
+}
+
+/* 值欄左緣與其他值對齊：項目符號掛在左緣外（落在 dt 與 dd 之間的欄距）；只有一項時不加項目符號 */
+.workflow-page .workflow-stage-list {
+  margin: 0;
+  padding-left: 0;
+  list-style: disc outside;
+}
+
+.workflow-page .workflow-stage-list:has(> li:only-child) {
+  list-style: none;
+}
+
+.workflow-page .workflow-gate-locked {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 嘗試紀錄：前三欄固定寬度，說明欄自己換行 */
+.workflow-page .workflow-attempts-count {
+  width: 5.5em;
+}
+
+.workflow-page .workflow-attempts-outcome {
+  width: 7em;
+}
+
+.workflow-page .workflow-attempts-time {
+  width: 9.5em;
+}
+
+.workflow-page .workflow-stage.stage-current .workflow-attempts {
+  background: var(--color-surface);
+}
+
+.workflow-page .workflow-attempt-detail {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* 缺少的證據、證據：每項一行，不加項目符號（證據的查驗狀態是行尾的徽章） */
+.workflow-page .workflow-attempt-detail ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workflow-page .workflow-attempt-evidence li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  align-items: center;
+}
+
+.workflow-page .workflow-attempt-recorder {
+  font-size: var(--text-caption);
+}
+
+/* 跳過目前的 Stage：平常只有次要的「跳過此 Stage…」；展開後原因欄＋確認、取消同一列，放不下時換行 */
+.workflow-page .workflow-skip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  align-items: flex-end;
+}
+
+.workflow-page .workflow-skip > label {
+  display: grid;
+  flex: 0 1 26em;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.workflow-page .workflow-skip input {
   width: 100%;
-  /* 備援：字型較寬時選單仍至少容納最長選項，不裁切 */
-  min-inline-size: max-content;
+  font-weight: var(--font-weight-normal);
 }
 
-/* ---- 1024px 寬（MASTER 第 8 節：清單 220～280px） ----------------------------- */
+.workflow-page .workflow-skip-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
 
+/* ==========================================================================
+   時間線：上方精簡的指標表，下方可過濾、可搜尋、分頁的事件清單
+   ========================================================================== */
+
+/* 指標：一張以細線分格的數字表（不是一排獨立的大數字卡）；8 項排成 4×2（窄時 2×4） */
+.timeline-page .timeline-metric-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-border);
+}
+
+.timeline-page .timeline-metric {
+  display: grid;
+  gap: var(--space-1);
+  align-content: start;
+  min-width: 0;
+  padding: var(--space-5) var(--space-6);
+  background: var(--color-surface);
+}
+
+.timeline-page .timeline-metric > dt {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+.timeline-page .timeline-metric > dd {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+.timeline-page .timeline-metric > .timeline-metric-value {
+  margin-bottom: var(--space-1);
+  color: var(--color-text);
+  font-size: var(--text-title);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.timeline-page :is(.timeline-metric-prefix, .timeline-metric-unit) {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-normal);
+}
+
+.timeline-page .timeline-metric > .meta {
+  gap: 0 var(--space-5);
+}
+
+/* 階段多時在格子內捲動，不把同列的格子撐高 */
+.timeline-page .timeline-metric-stages {
+  display: grid;
+  max-height: 6lh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.timeline-page .timeline-metric-stage {
+  overflow-wrap: anywhere;
+}
+
+/* 沒有中文名稱的階段 key：等寬、次要色，不加程式碼底色 */
+.timeline-page .timeline-stage-code {
+  padding: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: inherit;
+}
+
+.timeline-page .timeline-quota {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 36em;
+}
+
+.timeline-page .timeline-quota > h4 {
+  margin: 0;
+  font-size: var(--text-title-sm);
+}
+
+/* ---------- 事件：過濾列 → 清單 → 分頁 ---------- */
+.timeline-page .timeline-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-6);
+  align-items: flex-end;
+}
+
+.timeline-page .timeline-filter > label {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-strong);
+}
+
+.timeline-page .timeline-filter-task {
+  flex: 0 1 24em;
+}
+
+.timeline-page .timeline-filter-search {
+  flex: 0 1 18em;
+}
+
+.timeline-page .timeline-filter :is(select, input) {
+  width: 100%;
+  font-weight: var(--font-weight-normal);
+}
+
+/* 每列：時間｜類別｜事件類型與摘要（Task、Run、帳號），詳細資訊收合 */
+.timeline-page .timeline-list > .timeline-event {
+  grid-template-columns: 9.5em 6.5em minmax(0, 1fr);
+  gap: var(--space-2) var(--space-5);
+  align-items: baseline;
+  padding: var(--space-4) var(--space-6);
+}
+
+.timeline-page .timeline-time {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  white-space: nowrap;
+}
+
+.timeline-page .timeline-category {
+  min-width: 0;
+}
+
+/* 事件類型、摘要與「詳細資訊」排在同一行，放不下才換行；展開時詳細資訊佔滿整行 */
+.timeline-page .timeline-event-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-6);
+  align-items: baseline;
+  min-width: 0;
+}
+
+/* 事件類型：中文名稱是每列的主要文字；沒有中文名稱時才顯示原始代碼（等寬、次要色、不加粗） */
+.timeline-page .timeline-type {
+  min-width: 0;
+  max-width: 100%;
+  font-weight: var(--font-weight-strong);
+  overflow-wrap: anywhere;
+}
+
+.timeline-page .timeline-type-code {
+  padding: 0;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-normal);
+}
+
+.timeline-page .timeline-facts {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.timeline-page .timeline-facts > span {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.timeline-page .timeline-event-more[open] {
+  flex-basis: 100%;
+}
+
+.timeline-page .timeline-fact-label {
+  color: var(--color-text-subtle);
+}
+
+.timeline-page .timeline-event-more > summary {
+  font-size: var(--text-caption);
+  white-space: nowrap;
+}
+
+.timeline-page .timeline-event-more > .facts {
+  margin-top: var(--space-3);
+}
+
+.timeline-page .timeline-aggregate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  align-items: baseline;
+}
+
+.timeline-page .timeline-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.timeline-page .timeline-pagination > span {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* ==========================================================================
+   1100px 以下（1024 寬）：清單變窄、權限表每列上下排列、指標 2 欄
+   ========================================================================== */
 @media (max-width: 1100px) {
-  /* 清單最多佔 36%，讓詳情在側欄較寬時仍有約 420px 以上（見 AI 決策紀錄） */
-  .decision-layout {
-    grid-template-columns: minmax(220px, min(280px, 36%)) minmax(0, 1fr);
+  /* 清單最多佔 34%，右欄仍有約 480px，詳情與批次欄位不擠 */
+  .decision-center .decision-layout {
+    grid-template-columns: minmax(220px, 34%) minmax(0, 1fr);
     gap: var(--space-6);
   }
 
-  .decision-detail {
+  .decision-center .decision-batch-check {
+    margin-left: var(--space-5);
+  }
+
+  .decision-center .decision-item-button {
+    padding: var(--space-5);
+  }
+
+  .decision-center .decision-detail {
+    padding: var(--space-6);
+  }
+
+  .decision-center :is(.decision-batch, .decision-batch-results) {
     padding: var(--space-5) var(--space-6);
   }
 
-  .decision-dl,
-  .decision-more dl {
-    grid-template-columns: minmax(5em, max-content) minmax(0, 1fr);
+  .decision-center .decision-batch {
+    padding-bottom: 0;
   }
 
-  .decision-dl dt,
-  .decision-more dt {
-    max-width: 9em;
+  .decision-center .decision-batch > .form-actions {
+    margin-inline: calc(var(--space-6) * -1);
+    padding: var(--space-4) var(--space-6) var(--space-5);
   }
 
-  /* 決策權限表每列上下排列：事項佔整列，內建、目前生效、設定在下一列。
-     事項欄不再被三個層級欄擠到約 236px，長事項名稱不再折成 3 行以上；設定欄維持 17em，選單文字不裁切 */
-  .decision-authority-table,
-  .decision-authority-table thead,
-  .decision-authority-table tbody {
+  .decision-center .decision-form,
+  .decision-center .decision-outcome {
+    padding: var(--space-5);
+  }
+
+  .decision-center .decision-form {
+    padding-bottom: 0;
+  }
+
+  .decision-center .decision-form > .form-actions {
+    margin-inline: calc(var(--space-5) * -1);
+    padding: var(--space-4) var(--space-5) var(--space-5);
+  }
+
+  /* 決策權限表每列上下排列：事項佔整列，內建、目前生效、設定在下一列；設定欄寬不變，選單文字不裁切 */
+  .decision-authority .decision-authority-table,
+  .decision-authority .decision-authority-table thead,
+  .decision-authority .decision-authority-table tbody {
     display: block;
   }
 
-  .decision-authority-table tr {
+  .decision-authority .decision-authority-table colgroup {
+    display: none;
+  }
+
+  .decision-authority .decision-authority-table tr {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 17em;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 19em;
     align-items: center;
     border-bottom: 1px solid var(--color-border);
   }
 
-  .decision-authority-table th,
-  .decision-authority-table td {
+  .decision-authority .decision-authority-table tbody tr:last-child {
     border-bottom: 0;
   }
 
-  .decision-authority-table td:first-child {
-    grid-column: 1 / -1;
-    padding-bottom: 0;
+  .decision-authority .decision-authority-table :is(th, td) {
+    border-bottom: 0;
   }
 
-  /* 每列第一行就是事項名稱，表頭的「事項」只留給螢幕閱讀器 */
-  .decision-authority-table th:first-child {
+  .decision-authority .decision-authority-table td:first-child {
+    grid-column: 1 / -1;
+    padding-bottom: 0;
+    font-weight: var(--font-weight-strong);
+  }
+
+  /* 每列第一行就是事項名稱，表頭的「事項」只留給螢幕報讀器 */
+  .decision-authority .decision-authority-table th:first-child {
     position: absolute;
     width: 1px;
     height: 1px;
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+
+  /* 上下排列時色條畫在整列左側 */
+  .decision-authority tr:is(.is-widened, .is-narrowed) > td:first-child {
+    box-shadow: none;
+  }
+
+  .decision-authority tr.is-widened {
+    box-shadow: inset 3px 0 0 var(--color-warning);
+  }
+
+  .decision-authority tr.is-narrowed {
+    box-shadow: inset 3px 0 0 var(--color-border-strong);
+  }
+
+  .timeline-page .timeline-metric-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .timeline-page .timeline-list > .timeline-event {
+    grid-template-columns: 9em 6em minmax(0, 1fr);
+    gap: var(--space-2) var(--space-4);
+    padding: var(--space-4) var(--space-5);
+  }
+
+  .workflow-page .workflow {
+    padding: var(--space-5) var(--space-6);
   }
 }

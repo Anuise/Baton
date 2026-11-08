@@ -344,7 +344,7 @@ pub fn place_preferring(capacity: &Capacity<'_>, kind: SlotKind, preferred: Opti
         return Placement::Wait(vec![reason(
             WaitCategory::Account,
             "no_account",
-            "還沒有任何帳號 Profile；請先到帳號頁新增並完成登入".to_string(),
+            "還沒有任何帳號；請先到帳號頁新增並完成登入".to_string(),
             None,
         )]);
     }

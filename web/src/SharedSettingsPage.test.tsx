@@ -38,8 +38,8 @@ describe("共同設定頁", () => {
   it("明講只讀取平常的 Claude Code 設定、不修改、不複製登入資料", async () => {
     render(<SharedSettingsPage client={fakeClient()} />);
 
-    expect(screen.getByText(/只讀取你平常的 Claude Code 設定/)).toHaveTextContent(
-      "不會修改它們，也不會複製任何登入資料",
+    expect(screen.getByText(/從你平常的 Claude Code 設定匯入/)).toHaveTextContent(
+      "只讀取、不修改原檔，也不複製登入資料",
     );
     await screen.findByText("尚未採用任何版本");
   });
@@ -215,7 +215,10 @@ describe("共同設定頁", () => {
     await user.click(await screen.findByRole("button", { name: "預覽匯入" }));
     await user.click(await screen.findByRole("button", { name: "採用" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("拒絕存取");
+    // Runtime 的錯誤可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).toHaveTextContent(/^無法採用無法讀取使用者的設定檔：拒絕存取$/);
     expect(screen.getByRole("button", { name: "採用" })).toBeEnabled();
   });
 

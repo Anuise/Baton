@@ -75,7 +75,9 @@ describe("並行容量設定", () => {
 
     await user.click(screen.getByRole("radio", { name: /較高並行/ }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Runtime 拒絕連線");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).toHaveTextContent(/^無法切換並行容量Runtime 拒絕連線$/);
     expect(screen.getByRole("radio", { name: /保留交接容量/ })).toBeChecked();
   });
 

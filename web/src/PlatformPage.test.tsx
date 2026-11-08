@@ -41,13 +41,17 @@ describe("平台狀態頁", () => {
 
     expect(await screen.findByText(/2026-10-22/)).toBeInTheDocument();
     expect(screen.getByText(/example\.test/)).toBeInTheDocument();
+    // 標籤不縮小（不被擠到折行），寬度不夠時只截斷網址
+    expect(screen.getByText("支援期限資料來源：")).toHaveClass("no-shrink");
   });
 
   it("非正式支援時顯示警告原因，並說明不阻擋使用", async () => {
     render(<PlatformPage client={clientWith(unofficialPlatform)} />);
 
     expect(await screen.findByText("非正式支援")).toBeInTheDocument();
-    expect(screen.getByRole("alert")).toHaveTextContent("x64 模擬執行");
+    const warning = screen.getByRole("alert");
+    expect(warning).toHaveClass("notice", "notice-warning");
+    expect(warning).toHaveTextContent("x64 模擬執行");
     expect(screen.getByText(/不會阻擋使用/)).toBeInTheDocument();
   });
 
@@ -62,5 +66,9 @@ describe("平台狀態頁", () => {
 
     expect(await screen.findByText(/connection refused/)).toBeInTheDocument();
     expect(screen.queryByText("正式支援")).not.toBeInTheDocument();
+    // 原因可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).toHaveTextContent(/^無法取得平台狀態connection refused$/);
   });
 });

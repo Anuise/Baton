@@ -103,28 +103,67 @@ describe("時間線", () => {
     expect(metric("工作完成率")).toHaveTextContent("33.3%（1／3）");
     expect(metric("工作完成率")).toHaveTextContent("已取消 1");
     expect(metric("交接成功率")).toHaveTextContent("50%（1／2）");
-    expect(metric("交接成功率")).toHaveTextContent("已放棄 1・已確認接手 1・進行中 0");
+    // 次要數字各自一段（不以「・」串接）
+    expect(within(metric("交接成功率")).getByText("已放棄 1")).toBeInTheDocument();
+    expect(within(metric("交接成功率")).getByText("已確認接手 1")).toBeInTheDocument();
+    expect(within(metric("交接成功率")).getByText("進行中 0")).toBeInTheDocument();
     expect(metric("恢復耗時")).toHaveTextContent("平均 40 秒");
     expect(metric("恢復耗時")).toHaveTextContent("最長 40 秒");
-    expect(metric("恢復耗時")).toHaveTextContent("已恢復 1 次・尚未恢復 0");
+    expect(within(metric("恢復耗時")).getByText("已恢復 1 次")).toBeInTheDocument();
+    expect(within(metric("恢復耗時")).getByText("尚未恢復 0")).toBeInTheDocument();
     expect(metric("重複操作事件")).toHaveTextContent("被擋下 3 次");
-    expect(metric("重複操作事件")).toHaveTextContent("已成功 2・結果未知 1・他處進行中 0");
+    expect(within(metric("重複操作事件")).getByText("已成功 2")).toBeInTheDocument();
+    expect(within(metric("重複操作事件")).getByText("結果未知 1")).toBeInTheDocument();
+    expect(within(metric("重複操作事件")).getByText("他處進行中 0")).toBeInTheDocument();
     expect(metric("重複操作事件")).toHaveTextContent("變成結果未知 1 次");
     expect(metric("裁定等待時間")).toHaveTextContent("平均 40 秒");
     expect(metric("裁定等待時間")).toHaveTextContent("最長 2 分 30 秒");
-    expect(metric("裁定等待時間")).toHaveTextContent("已回答 2・等待中 1");
+    expect(within(metric("裁定等待時間")).getByText("已回答 2")).toBeInTheDocument();
+    expect(within(metric("裁定等待時間")).getByText("等待中 1")).toBeInTheDocument();
     expect(metric("教訓重犯率")).toHaveTextContent("25%（1／4）");
-    expect(metric("教訓重犯率")).toHaveTextContent("重犯 2 次・Guard 擋下 1・使用者回報 1");
-    expect(metric("每階段用量")).toHaveTextContent("總計 2,000 tokens");
-    expect(metric("每階段用量")).toHaveTextContent("共 3 個 Run");
-    expect(metric("每階段用量")).toHaveTextContent("implement：2,000 tokens（3 個 Run）");
+    expect(within(metric("教訓重犯率")).getByText("重犯 2 次")).toBeInTheDocument();
+    expect(within(metric("教訓重犯率")).getByText("Guard 擋下 1")).toBeInTheDocument();
+    expect(within(metric("教訓重犯率")).getByText("使用者回報 1")).toBeInTheDocument();
+    expect(metric("Token 用量")).toHaveTextContent("總計 2,000 tokens");
+    expect(metric("Token 用量")).toHaveTextContent("共 3 個 Run");
+    expect(metric("Token 用量")).toHaveTextContent("implement：2,000 tokens（3 個 Run）");
     expect(metric("Context 使用量")).toHaveTextContent("平均 45,000 tokens");
     expect(metric("Context 使用量")).toHaveTextContent("最長 60,000 tokens");
-    expect(metric("Context 使用量")).toHaveTextContent("已回報 2 個 Run・未回報 1 個 Run");
+    expect(within(metric("Context 使用量")).getByText("已回報 2 個 Run")).toBeInTheDocument();
+    expect(within(metric("Context 使用量")).getByText("未回報 1 個 Run")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "觀測指標" })).not.toHaveTextContent("・");
     expect(quotaCells("Work-1")).toEqual(["Work-1", "42%", "10%"]);
   });
 
-  it("沒有資料的比率、耗時與 Context 顯示「無資料」而不是 0；沒有 Stage 顯示「未分階段」", async () => {
+  it("Token 用量有 Stage 時列出各階段：中文名稱（key 在 title）；沒有對照的 key 才顯示代碼（等寬）；沒有 Stage 的一列是「未分階段」", async () => {
+    renderPage(
+      fakeClient({
+        metricsValue: metricsResponse({
+          metrics: metrics({
+            usage: {
+              total_tokens: 3000,
+              runs: 4,
+              by_stage: [
+                { stage: "tests_and_implementation", tokens: 2000, runs: 3 },
+                { stage: "custom_stage", tokens: 1000, runs: 1 },
+                { stage: null, tokens: 500, runs: 1 },
+              ],
+            },
+          }),
+        }),
+      }),
+    );
+
+    const usage = await screen.findByRole("group", { name: "Token 用量" });
+    expect(usage).toHaveTextContent("行為測試及實作：2,000 tokens（3 個 Run）");
+    expect(usage).not.toHaveTextContent("tests_and_implementation");
+    expect(within(usage).getByText("行為測試及實作")).toHaveAttribute("title", "tests_and_implementation");
+    expect(within(usage).getByText("custom_stage")).toHaveClass("mono");
+    expect(usage).toHaveTextContent("custom_stage：1,000 tokens（1 個 Run）");
+    expect(usage).toHaveTextContent("未分階段：500 tokens（1 個 Run）");
+  });
+
+  it("沒有資料的比率、耗時與 Context 顯示「無資料」而不是 0；Token 用量只有「未分階段」一列時不列分段（和總計重複）", async () => {
     const empty = { numerator: 0, denominator: 0, rate: null };
     const noDuration = { count: 0, pending: 0, average_ms: null, max_ms: null };
     const client = fakeClient({
@@ -154,7 +193,9 @@ describe("時間線", () => {
     expect(metric("裁定等待時間")).toHaveTextContent("等待中 1");
     expect(metric("Context 使用量")).toHaveTextContent("平均 無資料");
     expect(metric("Context 使用量")).toHaveTextContent("最長 無資料");
-    expect(metric("每階段用量")).toHaveTextContent("未分階段：500 tokens（1 個 Run）");
+    expect(metric("Token 用量")).toHaveTextContent("總計 500 tokens");
+    expect(metric("Token 用量")).not.toHaveTextContent("未分階段");
+    expect(metric("Token 用量").querySelector(".timeline-metric-stages")).toBeNull();
   });
 
   it("看不到的服務端額度顯示「未知」，看得到的顯示百分比", async () => {
@@ -192,6 +233,84 @@ describe("時間線", () => {
     expect(items[2]).toHaveTextContent("裁定");
     expect(items[2]).toHaveTextContent("Task：整理筆記、撰寫報告");
     expect(items[2]).not.toHaveTextContent("Run：");
+  });
+
+  it("事件類型以中文名稱為主要文字，原始代碼放在 title 與「詳細資訊」；沒有中文名稱時才顯示代碼（等寬）", async () => {
+    const unknown = timelineEvent({ seq: 4, event_type: "some_future_event", task_ids: [], run_id: null });
+    renderPage(fakeClient({ events: [...allEvents, unknown] }));
+
+    const list = await screen.findByRole("list", { name: "事件" });
+    const items = within(list).getAllByRole("listitem");
+    const type = (item: HTMLElement) => item.querySelector(".timeline-event-main > .timeline-type")!;
+    expect(type(items[0])).toHaveTextContent(/^建立 Run$/);
+    expect(type(items[0])).toHaveAttribute("title", "run_created");
+    expect(type(items[0])).not.toHaveClass("mono");
+    expect(type(items[1])).toHaveTextContent(/^要求交接$/);
+    expect(type(items[2])).toHaveTextContent(/^提出裁定$/);
+    // 原始代碼在預設收合的「詳細資訊」
+    const code = within(items[0].querySelector("details")!).getByText("run_created");
+    expect(code).toHaveClass("mono");
+    expect(code).not.toBeVisible();
+    // 沒有對照的事件類型：顯示代碼本身
+    expect(type(items[3])).toHaveTextContent(/^some_future_event$/);
+    expect(type(items[3])).toHaveClass("mono", "timeline-type-code");
+  });
+
+  it("交接事件的名稱和工作頁的交接階段用同一套詞彙", async () => {
+    const handoff = (seq: number, event_type: string) =>
+      timelineEvent({ seq, category: "handoff", aggregate_type: "handoff", aggregate_id: "hof_1", event_type, run_id: null });
+    renderPage(
+      fakeClient({
+        events: [
+          handoff(1, "handoff_stopping"),
+          handoff(2, "handoff_transferred"),
+          handoff(3, "handoff_confirmed"),
+          handoff(4, "handoff_waiting_resource"),
+        ],
+      }),
+    );
+
+    const list = await screen.findByRole("list", { name: "事件" });
+    const types = within(list)
+      .getAllByRole("listitem")
+      .map((item) => item.querySelector(".timeline-event-main > .timeline-type")!.textContent);
+    expect(types).toEqual(["交接中：停止舊程序", "已交接，等待接手確認", "已交接並確認", "交接等待資源"]);
+  });
+
+  it("關鍵字也比對事件類型的中文名稱", async () => {
+    const user = userEvent.setup();
+    renderPage(fakeClient());
+    await screen.findByRole("list", { name: "事件" });
+
+    await user.type(screen.getByRole("searchbox", { name: "搜尋事件" }), "提出裁定");
+
+    const items = within(screen.getByRole("list", { name: "事件" })).getAllByRole("listitem");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toHaveTextContent("decision_requested");
+  });
+
+  it("每個事件的詳細資訊預設收合：對象、完整的 Task 名稱與事件內容", async () => {
+    const event = timelineEvent({
+      seq: 5,
+      category: "decision",
+      aggregate_type: "decision",
+      aggregate_id: "dec_1",
+      event_type: "decision_requested",
+      task_ids: ["task_1", "task_2"],
+      run_id: null,
+      payload: { question: "要保留舊的目錄結構嗎？" },
+    });
+    renderPage(fakeClient({ events: [event] }));
+
+    const list = await screen.findByRole("list", { name: "事件" });
+    const [item] = within(list).getAllByRole("listitem");
+    await waitFor(() => expect(item).toHaveTextContent("Task：整理筆記、撰寫報告"));
+    const details = item.querySelector("details")!;
+    expect(details.querySelector("summary")).toHaveTextContent(/^詳細資訊$/);
+    expect(details).not.toHaveAttribute("open");
+    expect(within(details).getByText("dec_1")).not.toBeVisible();
+    expect(details).toHaveTextContent("Task整理筆記、撰寫報告");
+    expect(details.querySelector("pre")).toHaveTextContent('"question": "要保留舊的目錄結構嗎？"');
   });
 
   it("Controller CLI 的開啟與結束以「Controller」類別列出", async () => {
@@ -462,8 +581,16 @@ describe("時間線", () => {
     });
     renderPage(client);
 
-    expect(await screen.findByText("無法取得時間線：找不到 Workspace：ws_1")).toHaveAttribute("role", "alert");
-    expect(await screen.findByText("無法取得觀測指標：Runtime 拒絕連線")).toHaveAttribute("role", "alert");
+    // Runtime 的說明可能超過兩行：用長警示（.notice），狀態詞＋說明
+    const notice = async (title: string) => (await screen.findByText(title, { selector: ".notice-title" })).closest(".notice");
+    const timelineError = await notice("無法取得時間線");
+    expect(timelineError).toHaveAttribute("role", "alert");
+    expect(timelineError).toHaveClass("notice-danger");
+    expect(timelineError).toHaveTextContent("找不到 Workspace：ws_1");
+    const metricsError = await notice("無法取得觀測指標");
+    expect(metricsError).toHaveAttribute("role", "alert");
+    expect(metricsError).toHaveClass("notice-danger");
+    expect(metricsError).toHaveTextContent("Runtime 拒絕連線");
   });
 
   it("過濾的 Task 被 Runtime 拒絕時顯示它的說明", async () => {
@@ -474,6 +601,8 @@ describe("時間線", () => {
 
     await user.selectOptions(screen.getByLabelText("依 Task 過濾"), "整理筆記");
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("無法取得時間線：找不到 Task：task_1");
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("無法取得時間線")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent("找不到 Task：task_1");
   });
 });

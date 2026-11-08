@@ -58,7 +58,10 @@ describe("首次啟動精靈", () => {
 
     const section = await screen.findByRole("region", { name: "Claude Code" });
     expect(within(section).getByText("版本過舊")).toBeInTheDocument();
-    expect(within(section).getByText("目前版本 2.0.9（最低 2.1.0）")).toBeInTheDocument();
+    expect(within(section).getByText(/^目前版本/)).toHaveTextContent(/^目前版本 2\.0\.9（最低 2\.1\.0）$/);
+    // 版本號用等寬字（MASTER 7.1，與帳號頁一致）
+    expect(within(section).getByText("2.0.9")).toHaveClass("mono");
+    expect(within(section).getByText("2.1.0")).toHaveClass("mono");
     expect(within(section).getByText("claude update")).toBeInTheDocument();
   });
 
@@ -97,16 +100,35 @@ describe("首次啟動精靈", () => {
     });
     render(<SetupWizard client={fakeClient(setupStatus({ profiles: [profile(), loggedOut], ready: true }))} />);
 
-    const section = await screen.findByRole("region", { name: "帳號 Profile" });
+    const section = await screen.findByRole("region", { name: "帳號登入" });
     expect(within(section).getByText("主要帳號").closest("li")).toHaveTextContent("可派工");
     expect(within(section).getByText("尚未登入").closest("li")).toHaveTextContent("未登入");
-    expect(within(section).getByText(/在下方「帳號」/)).toBeInTheDocument();
+    expect(within(section).getByText("可派工 1 個")).toHaveClass("badge");
+    expect(within(section).getByText(/在下方「帳號清單」/)).toBeInTheDocument();
+  });
+
+  it("還沒有可派工的帳號時以歡迎畫面呈現（頁面主角，h2）；已有可派工的帳號時是帳號頁中的一般區段（h3）", async () => {
+    const { unmount } = render(
+      <SetupWizard client={fakeClient(setupStatus({ profiles: [profile({ dispatchable: false })], ready: false }))} />,
+    );
+
+    expect(await screen.findByRole("heading", { level: 2, name: "首次設定" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "首次設定" })).toHaveClass("setup-welcome");
+    expect(screen.getByRole("heading", { level: 3, name: "Claude Code" })).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "帳號登入" })).getByText("還沒有可派工的帳號")).toHaveClass("badge");
+    unmount();
+
+    render(<SetupWizard client={fakeClient(setupStatus())} />);
+
+    expect(await screen.findByRole("heading", { level: 3, name: "首次設定" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "首次設定" })).not.toHaveClass("setup-welcome");
+    expect(screen.getByRole("heading", { level: 4, name: "Claude Code" })).toBeInTheDocument();
   });
 
   it("沒有任何 Profile 時引導新增", async () => {
     render(<SetupWizard client={fakeClient(setupStatus({ profiles: [], ready: false }))} />);
 
-    expect(await screen.findByText(/還沒有帳號 Profile/)).toBeInTheDocument();
+    expect(await screen.findByText(/還沒有帳號。請在下方「帳號清單」新增/)).toBeInTheDocument();
   });
 
   it("首次使用時顯示背景執行行為的告知，確認後不再顯示", async () => {
@@ -142,7 +164,11 @@ describe("首次啟動精靈", () => {
 
     render(<SetupWizard client={client} />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("connection refused");
+    // Runtime 的錯誤可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("notice", "notice-danger");
+    expect(alert).not.toHaveClass("callout");
+    expect(alert).toHaveTextContent(/^無法取得首次設定狀態connection refused$/);
   });
 
   it("探測失敗（狀態未知）時顯示原因並提示重新檢查", async () => {

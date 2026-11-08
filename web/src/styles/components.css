@@ -1,11 +1,11 @@
 /* ==========================================================================
    共用元件
-   全站共用、不屬於任何單一頁面的元件與工具 class（design-system/baton/MASTER.md 第 5、6 節）：
-   長文字工具、按鈕變體、徽章、卡片與狀態色條、表單、表格、LongText、HelpTip、完全退出遮罩。
-   用法對照見 MASTER.md 檔尾「實作對照」。
+   全站共用、不屬於任何單一頁面的元件與工具 class（MASTER.md 第 5、6 節）：
+   長文字工具、按鈕、徽章、頁面骨架（page／page-header／section）、物件卡、
+   分隔清單、事實表、提示、表單、表格、「更多」選單、LongText、HelpTip、對話框。
    ========================================================================== */
 
-/* 長文字工具（MASTER 6.1、6.2）：截斷一定要另有完整文字的取得路徑（title、展開、複製或詳情） */
+/* ---------- 長文字工具：截斷一定要另有完整文字的取得路徑（title、展開、複製或詳情） ---------- */
 .mono {
   font-family: var(--font-mono);
   font-size: 0.92em;
@@ -16,7 +16,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 不拆開的詞組（例：標籤欄中的「服務結束日」），放不下時在詞組前換行 */
 .nowrap {
   white-space: nowrap;
 }
@@ -52,13 +51,11 @@
   line-clamp: 3;
 }
 
-/* 單行指令等需要保留換行、又不能撐破版面的程式碼 */
 .pre-wrap {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-/* 閱讀寬度：段落以外的長內容容器（dd、li、div）；表單用 measure-form */
 .measure {
   max-inline-size: var(--measure);
 }
@@ -67,39 +64,49 @@
   max-inline-size: var(--measure-form);
 }
 
-/* flex 列中放文字、應該縮小的那一個 */
-.grow {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-/* flex 列中不該縮小的（按鈕、徽章、時間） */
 .no-shrink {
   flex: none;
 }
 
-/* 按鈕變體（MASTER 5.1）：每個區域最多一個主要按鈕；按鈕文字不換行，放不下時整組換行 */
-.btn-primary,
-.btn-quiet,
-.btn-danger {
+/* 只給螢幕報讀器 */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
-.btn-primary,
-:is(.controller-page, .task-board, .decision-center) .primary-action {
+/* ---------- 按鈕（MASTER 5.1）：每個區域最多一個主要按鈕 ---------- */
+.btn-primary {
   border-color: var(--color-accent);
   background: var(--color-accent);
   color: var(--color-on-accent);
   font-weight: var(--font-weight-strong);
 }
 
-.btn-primary:hover:not(:disabled),
-:is(.controller-page, .task-board, .decision-center) .primary-action:hover:not(:disabled) {
+.btn-primary:hover:not(:disabled) {
   border-color: var(--color-accent-hover);
   background: var(--color-accent-hover);
 }
 
-/* 低調：卡片內第三順位以後的動作、「展開」「複製」 */
+/* 次要：送出鈕（type="submit"）預設是主要按鈕；同一區已有主要動作時以此改回次要樣式（例：搜尋） */
+.btn-secondary {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: var(--font-weight-normal);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--color-control-border);
+  background: var(--color-surface-hover);
+}
+
+/* 低調：物件內第三順位以後的動作、「展開」「複製」 */
 .btn-quiet {
   border-color: transparent;
   background: none;
@@ -107,6 +114,7 @@
 }
 
 .btn-quiet:hover:not(:disabled) {
+  border-color: transparent;
   background: var(--color-surface-hover);
   color: var(--color-text);
 }
@@ -126,38 +134,35 @@
 .btn-danger.btn-solid {
   border-color: var(--color-danger);
   background: var(--color-danger);
-  color: var(--color-on-accent);
+  color: var(--color-surface);
+}
+
+.btn-danger.btn-solid:hover:not(:disabled) {
+  background: var(--color-danger);
+  filter: brightness(0.92);
 }
 
 /* 小尺寸：行內的「展開」「複製」 */
 .btn-sm {
-  min-height: 24px;
+  min-height: var(--control-height-sm);
   padding: 0 var(--space-3);
   font-size: var(--text-caption);
 }
 
-/* 圖示按鈕：28×28 */
 .btn-icon {
   width: var(--control-height);
   padding: 0;
 }
 
-/* 徽章與狀態標籤（MASTER 5.4）：一行不換行、不被擠小；計數超過 999 以 formatCount 顯示 999+。
-   .decision-badge、.tab-badge 是改版前的計數徽章，一併保護 */
-.badge,
-.decision-badge,
-.tab-badge {
-  flex-shrink: 0;
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
+/* ---------- 徽章與狀態標籤（MASTER 5.4）：一行不換行、不被擠小 ---------- */
 .badge {
   display: inline-flex;
+  flex-shrink: 0;
+  gap: var(--space-2);
   align-items: center;
   box-sizing: border-box;
-  height: 18px;
-  padding: 0 var(--space-3);
+  min-height: 20px;
+  padding: 0 var(--space-4);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-full);
   background: var(--color-surface-sunken);
@@ -165,6 +170,8 @@
   font-size: var(--text-caption);
   font-weight: var(--font-weight-strong);
   line-height: var(--leading-caption);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   vertical-align: middle;
 }
 
@@ -192,14 +199,26 @@
   color: var(--color-accent);
 }
 
-/* 知識卡標題列的狀態徽章：標題的 overflow-wrap: anywhere 會讓它被擠成直排，
-   改為不縮小；「不生效：<原因>」這類長文字在上限內換行 */
-.knowledge-badge {
-  flex-shrink: 0;
-  max-width: 16em;
+.badge-orange {
+  border-color: var(--color-orange-border);
+  background: var(--color-orange-subtle);
+  color: var(--color-orange);
 }
 
-/* 多個徽章並排：整組換行，不縮小單一徽章 */
+.badge-magenta {
+  border-color: var(--color-magenta-border);
+  background: var(--color-magenta-subtle);
+  color: var(--color-magenta);
+}
+
+/* 純文字的中性標籤（分類、標籤）：沒有框，與狀態徽章區分 */
+/* 半透明疊色：放在選取列（accent-subtle）或 sunken 底上也看得出是徽章 */
+.badge-plain {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--color-text) 7%, transparent);
+  font-weight: var(--font-weight-normal);
+}
+
 .badge-group {
   display: flex;
   flex-wrap: wrap;
@@ -207,15 +226,198 @@
   align-items: center;
 }
 
-/* 卡片（MASTER 5.2）：細框、無陰影；標題列＝標題（可縮小）＋ 狀態徽章 */
+/* 狀態點：點旁一定有文字，不以顏色單獨傳達 */
+.dot {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  white-space: nowrap;
+}
+
+.dot::before {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-subtle);
+  content: "";
+}
+
+.dot-success::before {
+  background: var(--color-success);
+}
+
+.dot-warning::before {
+  background: var(--color-warning);
+}
+
+.dot-danger::before {
+  background: var(--color-danger);
+}
+
+.dot-accent::before {
+  background: var(--color-accent);
+}
+
+/* ---------- 頁面骨架（MASTER 第 7 節） ---------- */
+
+/* 一頁的外層：區段之間 32px */
+.page {
+  display: grid;
+  gap: var(--space-8);
+  align-content: start;
+  min-width: 0;
+}
+
+/* 頁面標題列：h2 只寫頁名（page 字級、display 字型），主要動作靠右；放不下時動作換到下一列 */
+.page-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-6);
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.page-header > h2 {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-page);
+  font-weight: var(--font-weight-heavy);
+  line-height: var(--leading-page);
+  letter-spacing: -0.01em;
+}
+
+.page-header > :not(h2) {
+  flex: none;
+}
+
+.page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+/* 標題下一句話的頁面說明：只在使用者需要知道「這頁做什麼」時才寫 */
+.page-lede {
+  margin: calc(var(--space-6) * -1) 0 0;
+  color: var(--color-text-muted);
+}
+
+/* 頁面中的區段：標題列 + 內容，間距 12px；區段本身不加框 */
+.section {
+  display: grid;
+  gap: var(--space-5);
+  align-content: start;
+  min-width: 0;
+}
+
+/* 區段標題列：h3（＋計數）在左、動作在右；說明一行在下 */
+.section-heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  align-items: baseline;
+}
+
+.section-heading > h3 {
+  margin: 0;
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
+}
+
+.section-heading > p {
+  flex-basis: 100%;
+  max-inline-size: none;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+.section-heading > .section-actions {
+  margin-left: auto;
+}
+
+.section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+/* 標題旁的計數：「可處理 2」，次要色、等寬數字 */
+.count {
+  color: var(--color-text-subtle);
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-normal);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 一行說明（取代舊的 section-hint） */
+.section-hint {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 區段內的空清單：一行 muted 文字，不加框（MASTER 5.7） */
+.empty-note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 整頁或大區塊的空狀態：說明下一步，附一個動作 */
+.empty-state {
+  display: grid;
+  gap: var(--space-4);
+  justify-items: start;
+  max-width: var(--measure);
+  padding: var(--space-8) 0;
+}
+
+.empty-state > h2,
+.empty-state > h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-page);
+  font-weight: var(--font-weight-heavy);
+  line-height: var(--leading-page);
+}
+
+/* 頁面裡已經有頁面標題時，空狀態的標題降一級，不與頁名一樣大 */
+.page .empty-state > :is(h2, h3) {
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
+}
+
+.page .empty-state {
+  padding: var(--space-6) 0;
+}
+
+.empty-state > p {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+/* 寬視窗並排兩欄，窄時上下排列（例：設定頁的小面板） */
+.split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 28em), 1fr));
+  gap: var(--space-7);
+  align-items: start;
+}
+
+/* ---------- 物件卡（MASTER 5.2）：Task、裁定、帳號這類「一個東西」；細框、無陰影 ---------- */
 .card {
   box-sizing: border-box;
   min-width: 0;
-  padding: var(--space-5);
+  padding: var(--space-6);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--color-surface);
-  font-size: var(--text-meta);
 }
 
 .card-header {
@@ -234,32 +436,293 @@
   flex: none;
 }
 
-/* 狀態色條（MASTER 2.3）：語意色只標示狀態，長內容不整塊上色 */
-.stripe-success,
-.stripe-warning,
-.stripe-danger,
-.stripe-accent {
-  border-left-width: 3px;
-  border-left-style: solid;
+/* 面板：一組相關設定或表單的容器（比物件卡平，用 surface，不放在 surface 裡） */
+.panel {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--space-5);
+  align-content: start;
+  min-width: 0;
+  padding: var(--space-6) var(--space-7);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
 }
 
+.panel > h3,
+.panel > header > h3 {
+  margin: 0;
+  font-size: var(--text-title);
+}
+
+/* 嵌入區：表單、建立新項目、次要資訊，放在 surface 上的下沉底色 */
+.inset {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+/* ---------- 分隔清單：一串同類物件（知識條目、成果、Guard），一個外框、列與列之間細線 ---------- */
+/* 不用 overflow: hidden 裁圓角（會裁掉列中按鈕的焦點外框），改讓第一列與最後一列自己帶圓角 */
+.row-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  list-style: none;
+}
+
+.row-list > li,
+.row-list > .row {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-5) var(--space-6);
+}
+
+.row-list > :first-child {
+  border-top-left-radius: calc(var(--radius-lg) - 1px);
+  border-top-right-radius: calc(var(--radius-lg) - 1px);
+}
+
+.row-list > :last-child {
+  border-bottom-right-radius: calc(var(--radius-lg) - 1px);
+  border-bottom-left-radius: calc(var(--radius-lg) - 1px);
+}
+
+.row-list > li + li,
+.row-list > .row + .row {
+  border-top: 1px solid var(--color-border);
+}
+
+/* 列的標題行：名稱在左、狀態徽章在右 */
+.row-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  align-items: baseline;
+}
+
+.row-head > :first-child {
+  flex: 1 1 12em;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-title-sm);
+  font-weight: var(--font-weight-strong);
+}
+
+/* 次要資訊：一列小字，項目之間用間距（不用「·」串接） */
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-6);
+  max-inline-size: none;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+}
+
+/* 狀態色條：語意色只標示狀態，長內容不整塊上色。
+   寫在所有外框（.card、.panel、.row-list）之後，才不會被它們的 border 簡寫蓋掉。
+   顏色放在 --stripe，分隔清單的列改用內陰影畫色條，內容不會因 3px 左框而位移 */
 .stripe-success {
-  border-left-color: var(--color-success);
+  --stripe: var(--color-success);
 }
 
 .stripe-warning {
-  border-left-color: var(--color-warning);
+  --stripe: var(--color-warning);
 }
 
 .stripe-danger {
-  border-left-color: var(--color-danger);
+  --stripe: var(--color-danger);
 }
 
 .stripe-accent {
+  --stripe: var(--color-accent);
+}
+
+.stripe-muted {
+  --stripe: var(--color-border-strong);
+}
+
+:is(.stripe-success, .stripe-warning, .stripe-danger, .stripe-accent, .stripe-muted) {
+  border-left: 3px solid var(--stripe);
+}
+
+.row-list > :is(.stripe-success, .stripe-warning, .stripe-danger, .stripe-accent, .stripe-muted) {
+  border-left: 0;
+  box-shadow: inset 3px 0 0 var(--stripe);
+}
+
+/* ---------- 事實表（dl）：左欄標籤、右欄值；窄時上下排列 ---------- */
+.facts {
+  display: grid;
+  grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
+  gap: var(--space-3) var(--space-6);
+  margin: 0;
+  font-size: var(--text-meta);
+}
+
+.facts > dt {
+  color: var(--color-text-muted);
+}
+
+.facts > dd {
+  min-width: 0;
+  margin: 0;
+}
+
+/* ---------- 提示（callout）：兩行以內的狀態說明；左側色條＋淡底 ---------- */
+.callout {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-4) var(--space-5);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--color-surface-sunken);
+  font-size: var(--text-meta);
+}
+
+.callout > p {
+  margin: 0;
+}
+
+.callout-accent {
+  border-left-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+
+.callout-success {
+  border-left-color: var(--color-success);
+  background: var(--color-success-subtle);
+}
+
+.callout-warning {
+  border-left-color: var(--color-warning);
+  background: var(--color-warning-subtle);
+}
+
+.callout-danger {
+  border-left-color: var(--color-danger);
+  background: var(--color-danger-subtle);
+}
+
+/* 提示開頭的狀態詞：語意色＋粗體，正文維持主要文字色 */
+.callout-title {
+  margin: 0;
+  font-weight: var(--font-weight-strong);
+}
+
+.callout-warning > .callout-title {
+  color: var(--color-warning);
+}
+
+.callout-danger > .callout-title {
+  color: var(--color-danger);
+}
+
+.callout-success > .callout-title {
+  color: var(--color-success);
+}
+
+.callout-accent > .callout-title {
+  color: var(--color-accent);
+}
+
+/* ---------- 長警示（notice）：超過兩行的錯誤、阻擋原因、平台警告。
+   不整塊上色：語意色只在左側色條與開頭的狀態詞（.notice-title），正文是一般文字色 ---------- */
+.notice {
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--color-surface);
+  font-size: var(--text-meta);
+}
+
+.notice > p {
+  max-inline-size: var(--measure);
+  margin: 0;
+}
+
+.notice-title {
+  margin: 0;
+  font-weight: var(--font-weight-strong);
+}
+
+.notice-warning {
+  border-color: var(--color-warning-border);
+  border-left-color: var(--color-warning);
+}
+
+.notice-warning > .notice-title {
+  color: var(--color-warning);
+}
+
+.notice-danger {
+  border-color: var(--color-danger-border);
+  border-left-color: var(--color-danger);
+}
+
+.notice-danger > .notice-title {
+  color: var(--color-danger);
+}
+
+.notice-accent {
+  border-color: var(--color-accent-border);
   border-left-color: var(--color-accent);
 }
 
-/* 表單（MASTER 5.5）：label → 控制項 → 說明 → 錯誤，label 與控制項間 4px */
+.notice-accent > .notice-title {
+  color: var(--color-accent);
+}
+
+/* 放在物件卡、分隔清單的列或面板裡時只留左側色條：完整外框會變成卡片裡的子卡片（MASTER 7.1） */
+:is(.card, .row-list > li, .panel) .notice {
+  padding-block: var(--space-2);
+  padding-right: 0;
+  border-width: 0 0 0 3px;
+  border-radius: 0;
+  background: none;
+}
+
+/* ---------- 量表：額度、進度；數字一定另外以文字顯示 ---------- */
+.meter {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-sunken);
+}
+
+.meter > span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: var(--color-accent);
+}
+
+.meter-warning > span {
+  background: var(--color-warning);
+}
+
+.meter-danger > span {
+  background: var(--color-danger);
+}
+
+/* ---------- 表單（MASTER 5.5）：label → 控制項 → 說明 → 錯誤 ---------- */
 .field {
   display: grid;
   gap: var(--space-2);
@@ -283,15 +746,14 @@
   font-size: var(--text-meta);
 }
 
-/* 同一列的 label + 控制項（例：方案上限） */
-.field-inline {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  align-items: center;
+/* 欄位並排：寬時多欄、窄時單欄 */
+.field-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14em), 1fr));
+  gap: var(--space-5);
+  align-items: start;
 }
 
-/* 控制項寬度依內容性質：短值 12em、選單最多 32em */
 .input-short {
   width: 12em;
 }
@@ -299,13 +761,6 @@
 .select-fit {
   width: 100%;
   max-width: 32em;
-}
-
-/* flex 中要縮小的選單 */
-.select-shrink {
-  flex: 1 1 0;
-  width: 0;
-  min-width: 0;
 }
 
 /* 表單底部的動作列：按鈕依內容寬、整組換行 */
@@ -318,10 +773,49 @@
 
 .form-actions > button {
   flex: none;
-  white-space: nowrap;
 }
 
-/* 表格（MASTER 5.3）：外層自己水平捲動；資料表以 <colgroup> 指定欄寬，只給一個文字欄彈性寬度 */
+/* 選項卡（單選）：一組互斥選擇，每個選項有名稱與一行說明 */
+.choice-list {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-1) var(--space-4);
+  align-items: baseline;
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  cursor: pointer;
+}
+
+.choice:hover {
+  border-color: var(--color-border-strong);
+}
+
+.choice:has(input:checked) {
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+
+.choice > input {
+  align-self: start;
+  margin-top: 0.2em;
+}
+
+/* 名稱與說明都在第二欄；只有名稱時不多出空白列 */
+.choice > :not(input) {
+  grid-column: 2;
+}
+
+/* ---------- 表格（MASTER 5.3）：外層自己水平捲動 ---------- */
 .table-wrap {
   max-width: 100%;
   overflow-x: auto;
@@ -330,10 +824,16 @@
 .data-table {
   width: 100%;
   table-layout: fixed;
+  font-size: var(--text-meta);
 }
 
-.data-table th {
+/* 欄標題不折行；列標題（th scope="row"）與內文一樣可以折行 */
+.data-table thead th {
   white-space: nowrap;
+}
+
+.data-table tbody th {
+  overflow-wrap: anywhere;
 }
 
 .data-table td {
@@ -349,49 +849,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 頁面標題列（MASTER 第 7 節）：h2 只寫頁名，主要動作靠右；放不下時動作換到下一列 */
-.page-header {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  align-items: center;
-  justify-content: space-between;
-}
-
-.page-header > h2 {
-  flex: 1 1 auto;
-  min-width: 0;
-  margin: 0;
-}
-
-.page-header > :not(h2) {
-  flex: none;
-}
-
-/* 區塊標題列：h3 + 計數或說明，與內容間距 8px */
-.section-heading {
-  display: grid;
-  gap: var(--space-1);
-}
-
-.section-heading > :is(h3, p) {
-  margin: 0;
-}
-
-.section-heading > p {
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-}
-
-/* 區塊內的空清單：一行 muted 文字，不加框（MASTER 5.7） */
-.empty-note {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
-}
-
-/* 「更多」選單：卡片中第二順位以後的動作（MASTER 5.1）；以 <details> 做成浮層。
-   選項是 .more-menu-list 中的 .btn-quiet，破壞性選項再加 .more-menu-danger */
+/* ---------- 「更多」選單：物件中第二順位以後的動作；以 <details> 做成浮層 ---------- */
 .more-menu {
   position: relative;
 }
@@ -405,6 +863,7 @@
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   color: var(--color-text-muted);
+  font-size: var(--text-meta);
   list-style: none;
   white-space: nowrap;
 }
@@ -432,26 +891,30 @@
   left: 0;
   display: grid;
   gap: var(--space-1);
-  min-width: 8em;
+  min-width: 9em;
   padding: var(--space-2);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--color-surface-raised);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-popover);
+}
+
+/* 放在列尾的選單：往左展開，不超出視窗 */
+.more-menu-end > .more-menu-list {
+  right: 0;
+  left: auto;
 }
 
 .more-menu-list > button {
   justify-content: flex-start;
   justify-self: stretch;
-  white-space: nowrap;
 }
 
-/* 撤銷、淘汰這類破壞性選項用 danger 字色 */
 .more-menu-list > .more-menu-danger {
   color: var(--color-danger);
 }
 
-/* 長文字（LongText.tsx）：限制行數 + 展開／收合，可選複製 */
+/* ---------- 長文字（LongText.tsx）：限制行數 + 展開／收合，可選複製 ---------- */
 .long-text {
   min-width: 0;
   max-inline-size: var(--measure);
@@ -467,10 +930,19 @@
   flex-wrap: wrap;
   gap: var(--space-2);
   margin-top: var(--space-1);
+  margin-left: calc(var(--space-3) * -1);
 }
 
-/* 收合摘要樣式的「展開／收合」（.long-text-disclosure）：與 <details> 的「▶ 技術細節」相同——
-   原生摘要的三角形（disclosure-closed／open）＋次要文字、沒有按鈕內距，與內文左緣對齊 */
+/* 收合摘要樣式的「展開／收合」：與 <details> 的摘要相同（三角形＋次要文字、沒有按鈕內距） */
+.long-text-disclosure .long-text-actions {
+  margin-left: 0;
+}
+
+/* 只有「複製」時（沒有展開鈕），按鈕的內距抵銷掉，文字與內文左緣對齊 */
+.long-text-disclosure .long-text-actions > :first-child:not([aria-expanded]) {
+  margin-left: calc(var(--space-3) * -1);
+}
+
 .long-text-disclosure .long-text-actions > [aria-expanded] {
   min-height: 0;
   padding: 0;
@@ -500,7 +972,7 @@
   max-width: 100%;
 }
 
-/* 縮短路徑（PathText）：開頭「C:\…」與結尾不縮小，寬度不夠時中段先以「…」截斷，結尾最後才截斷 */
+/* 縮短路徑（PathText）：開頭「C:\…」與結尾不縮小，寬度不夠時中段先截斷，結尾最後才截斷 */
 .path-text {
   display: inline-flex;
   min-width: 0;
@@ -524,138 +996,107 @@
   flex: 0 1 auto;
 }
 
-/* 結尾的縮小權重近乎 0：中段還有寬度時不分攤（分攤到不足 1px 也會出現「…」），中段縮到 0 後才截斷 */
 .path-text > .path-text-end {
   flex: 0 0.0001 auto;
 }
 
-/* 「?」說明提示（HelpTip）：取代解釋性小字，懸停或鍵盤聚焦時浮出 */
+/* ---------- 「?」說明提示（HelpTip） ---------- */
 .help-tip {
   position: relative;
   display: inline-flex;
+  vertical-align: middle;
 }
 
 .help-tip-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   min-height: 0;
   padding: 0;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-full);
   background: none;
-  box-shadow: none;
   color: var(--color-text-muted);
   font-size: var(--text-caption);
+  font-weight: var(--font-weight-strong);
   line-height: 1;
   cursor: help;
 }
 
-.help-tip-trigger:hover,
+.help-tip-trigger:hover:not(:disabled),
 .help-tip-trigger:focus-visible {
   border-color: var(--color-accent);
+  background: none;
   color: var(--color-accent);
 }
 
 .help-tip-content {
   position: absolute;
-  top: calc(100% + var(--space-2));
+  top: calc(100% + var(--space-3));
   left: 0;
   z-index: var(--z-popover);
   width: max-content;
-  max-width: 240px;
-  padding: var(--space-3) var(--space-4);
-  background: var(--color-surface-raised);
+  max-width: 260px;
+  padding: var(--space-4) var(--space-5);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-popover);
   color: var(--color-text);
-  font-size: var(--text-caption);
-  font-weight: 400;
-  line-height: 1.5;
+  font-size: var(--text-meta);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--leading-meta);
+  white-space: normal;
 }
 
-.exit-overlay {
+/* ---------- 對話框：遮罩＋置中面板（完全退出、更新確認與進度共用） ---------- */
+.overlay {
   position: fixed;
   inset: 0;
-  z-index: var(--z-toast);
+  z-index: var(--z-overlay);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: var(--space-7);
   background: var(--color-overlay);
 }
 
-.exit-progress {
+.dialog-panel {
+  box-sizing: border-box;
   display: grid;
-  gap: var(--space-5);
-  width: min(560px, calc(100vw - 48px));
+  gap: var(--space-6);
+  width: min(560px, 100%);
   max-height: calc(100vh - 48px);
-  padding: var(--space-6);
+  padding: var(--space-7);
   overflow-y: auto;
-  background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md);
+  border-radius: var(--radius-xl);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-popover);
 }
 
-.exit-progress h2,
-.exit-progress p {
+/* 原生 <dialog> 關閉時不顯示（上面的 display: grid 會蓋過瀏覽器預設的 display: none） */
+dialog.dialog-panel:not([open]) {
+  display: none;
+}
+
+.dialog-panel h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: var(--font-weight-heavy);
+  line-height: var(--leading-title);
+}
+
+.dialog-panel p {
   margin: 0;
 }
 
-.exit-phase {
+.dialog-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-5);
-}
-
-.exit-runs,
-.exit-notes {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: var(--text-meta);
-}
-
-.exit-run {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-5);
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--color-border);
-  overflow-wrap: anywhere;
-}
-
-.exit-run-anomaly strong,
-.exit-progress [role="alert"] {
-  color: var(--color-danger);
-}
-
-.exit-notes {
-  color: var(--color-text-muted);
-}
-
-.exit-anomalies {
-  display: grid;
   gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
-  background: var(--color-danger-subtle);
-  border: 1px solid var(--color-danger-border);
-  border-radius: var(--radius-md);
-}
-
-.exit-anomalies ul {
-  margin: 0;
-  padding-left: var(--space-6);
-}
-
-.exit-anomalies button {
-  justify-self: start;
-}
-
-.exit-actions {
-  display: flex;
-  gap: var(--space-4);
+  justify-content: flex-end;
 }

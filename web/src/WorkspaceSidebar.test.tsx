@@ -134,8 +134,11 @@ describe("左側 Workspace 清單", () => {
     // 名稱預設取目錄名，與路徑的結尾同字，以選擇按鈕確認
     expect(await screen.findByRole("button", { name: "選擇 docs" })).toBeInTheDocument();
     expect(client.createWorkspace).toHaveBeenCalledWith({ path: "C:\\work\\docs", name: undefined });
-    expect(screen.getByLabelText("目錄")).toHaveValue("");
     expect(screen.queryByText("還沒有 Workspace")).not.toBeInTheDocument();
+    // 建立完成後表單收起；再次展開時是清空的
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "新增 Workspace" }));
+    expect(screen.getByLabelText("目錄")).toHaveValue("");
   });
 
   it("可以指定名稱", async () => {
@@ -188,6 +191,9 @@ describe("左側 Workspace 清單", () => {
     const item = (await screen.findByText("筆記")).closest("li")!;
 
     await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    // 封存要再確認一次；確認前不呼叫 API
+    expect(client.archiveWorkspace).not.toHaveBeenCalled();
+    await user.click(within(item).getByRole("button", { name: "確認封存 筆記" }));
 
     await waitFor(() => expect(screen.queryByText("筆記")).not.toBeInTheDocument());
     expect(client.archiveWorkspace).toHaveBeenCalledWith("ws_1");
@@ -316,15 +322,175 @@ describe("左側 Workspace 清單", () => {
     expect(trigger).toHaveFocus();
   });
 
-  it("展開的「管理」選單不被暫停列與下一個項目蓋住：浮層以項目定位，中間沒有層級較低的堆疊脈絡", async () => {
-    // jsdom 不排版，只能檢查決定蓋疊的樣式；實際點擊命中以 Playwright 探針驗證
-    // Vitest 會把 CSS 匯入（含 ?raw）換成空字串，專案也沒有 @types/node，所以以非字面的動態匯入讀檔
+  it("已有 Workspace 時建立表單收起，按「新增」展開、再按收起；沒有 Workspace 時直接展開", async () => {
+    const user = userEvent.setup();
+    const { unmount } = render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+    await screen.findByRole("button", { name: "選擇 筆記" });
+    const toggle = screen.getByRole("button", { name: "新增 Workspace" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("form", { name: "新增 Workspace" })).toHaveAttribute("id", toggle.getAttribute("aria-controls"));
+
+    await user.click(toggle);
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+    unmount();
+
+    render(<WorkspaceSidebar client={fakeClient()} />);
+    await screen.findByText("還沒有 Workspace");
+    expect(screen.getByLabelText("目錄")).toBeInTheDocument();
+  });
+
+  it("建立完成、表單收起後，焦點移到新 Workspace 的選擇按鈕（不落到 body）", async () => {
+    const client = fakeClient();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    await screen.findByText("還沒有 Workspace");
+
+    await user.type(screen.getByLabelText("目錄"), "C:\\work\\docs");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "選擇 docs" })).toHaveFocus());
+  });
+
+  it("封存最後一個 Workspace 後，建立表單自動展開", async () => {
+    const client = fakeClient();
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    await screen.findByText("還沒有 Workspace");
+    await user.type(screen.getByLabelText("目錄"), "C:\\work\\docs");
+    await user.click(screen.getByRole("button", { name: "建立 Workspace" }));
+    await screen.findByRole("button", { name: "選擇 docs" });
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "封存 docs" }));
+    await user.click(screen.getByRole("button", { name: "確認封存 docs" }));
+
+    expect(await screen.findByText("還沒有 Workspace")).toBeInTheDocument();
+    expect(screen.getByLabelText("目錄")).toBeInTheDocument();
+  });
+
+  it("封存要再確認一次，可以取消", async () => {
+    const client = fakeClient([workspace()]);
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+
+    await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    expect(within(item).getByRole("group", { name: "確認封存 筆記" })).toHaveTextContent("無法在 App 中復原");
+    await user.click(within(item).getByRole("button", { name: "取消" }));
+
+    expect(within(item).queryByRole("button", { name: "確認封存 筆記" })).not.toBeInTheDocument();
+    expect(client.archiveWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("封存後焦點移到下一個 Workspace（不落到 body）", async () => {
+    const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "專案", path: "D:\proj" })]);
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+
+    await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    await user.click(within(item).getByRole("button", { name: "確認封存 筆記" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "選擇 專案" })).toHaveFocus());
+  });
+
+  it("確認區出現時焦點在「確認封存」，取消後回到「封存…」；送出中再按不會重複封存", async () => {
+    const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "專案", path: "D:\proj" })]);
+    let release: () => void = () => {};
+    const original = client.archiveWorkspace.getMockImplementation()!;
+    client.archiveWorkspace.mockImplementation(async (id: string) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return original(id);
+    });
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={client} />);
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+
+    await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    expect(within(item).getByRole("button", { name: "確認封存 筆記" })).toHaveFocus();
+    await user.click(within(item).getByRole("button", { name: "取消" }));
+    expect(within(item).getByRole("button", { name: "封存 筆記" })).toHaveFocus();
+
+    await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    const confirm = within(item).getByRole("button", { name: "確認封存 筆記" });
+    await user.click(confirm);
+    await user.click(confirm);
+    expect(confirm).toHaveAttribute("aria-disabled", "true");
+    release();
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "選擇 筆記" })).not.toBeInTheDocument());
+    expect(client.archiveWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("「管理」收起時取消進行到一半的封存確認", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+    const item = (await screen.findByRole("button", { name: "選擇 筆記" })).closest("li")!;
+    const trigger = within(item).getByLabelText("管理 筆記");
+    await user.click(trigger);
+    await user.click(within(item).getByRole("button", { name: "封存 筆記" }));
+    expect(within(item).getByRole("button", { name: "確認封存 筆記" })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(trigger);
+
+    await waitFor(() => expect(within(item).queryByRole("button", { name: "確認封存 筆記" })).not.toBeInTheDocument());
+    expect(within(item).getByRole("button", { name: "封存 筆記" })).toBeInTheDocument();
+  });
+
+  it("建立表單收起時「新增」不指向不存在的元素", async () => {
+    const user = userEvent.setup();
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} />);
+    await screen.findByRole("button", { name: "選擇 筆記" });
+    const toggle = screen.getByRole("button", { name: "新增 Workspace" });
+    expect(toggle).not.toHaveAttribute("aria-controls");
+
+    await user.click(toggle);
+
+    expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toBe(screen.getByRole("form", { name: "新增 Workspace" }));
+  });
+
+  it("createRequest 改變時展開表單並聚焦目錄欄位", async () => {
+    const client = fakeClient([workspace()]);
+    const { rerender } = render(<WorkspaceSidebar client={client} createRequest={0} />);
+    await screen.findByRole("button", { name: "選擇 筆記" });
+    expect(screen.queryByLabelText("目錄")).not.toBeInTheDocument();
+
+    rerender(<WorkspaceSidebar client={client} createRequest={1} />);
+
+    await waitFor(() => expect(screen.getByLabelText("目錄")).toHaveFocus());
+  });
+
+  it("選中的 Workspace 的頁面（currentNav）放在整份清單之後；選中的不在清單中時不顯示", async () => {
+    const client = fakeClient([workspace(), workspace({ id: "ws_2", name: "專案", path: "D:\proj" })]);
+    const { rerender } = render(<WorkspaceSidebar client={client} selectedId="ws_1" currentNav={<nav aria-label="頁面" />} />);
+
+    const list = (await screen.findByRole("button", { name: "選擇 專案" })).closest("ul")!;
+    const nav = screen.getByRole("navigation", { name: "頁面" });
+    expect(list).not.toContainElement(nav);
+    expect(list.compareDocumentPosition(nav) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    rerender(<WorkspaceSidebar client={client} selectedId="ws_gone" currentNav={<nav aria-label="頁面" />} />);
+    expect(screen.queryByRole("navigation", { name: "頁面" })).not.toBeInTheDocument();
+  });
+
+  it("待裁定數在路徑那一行，名稱拿滿寬", async () => {
+    render(<WorkspaceSidebar client={fakeClient([workspace()])} pendingDecisions={{ ws_1: 2 }} />);
+
+    const badge = await screen.findByText("待裁定 2");
+    expect(badge.closest(".workspace-meta")).not.toBeNull();
+    expect(badge.closest(".workspace-heading")).toBeNull();
+  });
+
+  it("展開的「管理」浮層不被暫停列與下一個項目蓋住：浮層與項目之間沒有設 z-index 的祖先", async () => {
+    // jsdom 不排版，只能檢查決定蓋疊的樣式；Vitest 會把 CSS 匯入換成空字串，所以以非字面的動態匯入讀檔
     const fs: { readFileSync(path: string, encoding: "utf8"): string } = await import(/* @vite-ignore */ `node:${"fs"}`);
     const url: { fileURLToPath(url: string): string } = await import(/* @vite-ignore */ `node:${"url"}`);
     const style = document.createElement("style");
-    // 相對於本檔解析，不依賴 cwd（從 repo 根目錄以 --root web 執行也讀得到）。
-    // import.meta.url 先放進變數：Vite 會把字面的 new URL("…", import.meta.url) 改寫成開發伺服器網址；
-    // jsdom 環境的全域 URL 也不是 Node 的 URL，fs 不收，所以轉成路徑字串
     const here = import.meta.url;
     style.textContent = fs.readFileSync(url.fileURLToPath(new URL("./styles/shell.css", here).href), "utf8");
     document.head.append(style);
@@ -337,14 +503,12 @@ describe("左側 Workspace 清單", () => {
       await user.click(within(item).getByLabelText("管理 筆記"));
       const panel = item.querySelector(".workspace-menu-panel")!;
 
-      // 浮層與項目之間的祖先都不定位、不設 z-index：浮層的定位基準是整個項目（寬度以項目為上限），
-      // 它的 --z-popover 也不會被困在 z-index: 1 的選單裡、輸給同一項目的暫停列或下一個項目
+      // 浮層的 --z-popover 不會被困在某個 z-index 的祖先裡，輸給同一項的暫停列（z-index 1）或下一個項目
       for (let el = panel.parentElement!; el !== item; el = el.parentElement!) {
-        expect(getComputedStyle(el).position).toBe("static");
         expect(getComputedStyle(el).zIndex).toMatch(/^(auto|)$/);
       }
-      expect(getComputedStyle(item).position).toBe("relative");
       expect(getComputedStyle(item).zIndex).toMatch(/^(auto|)$/);
+      expect(getComputedStyle(panel).position).toBe("absolute");
       expect(getComputedStyle(panel).zIndex).toBe("var(--z-popover)");
       expect(getComputedStyle(item.querySelector(".workspace-paused")!).zIndex).toBe("1");
     } finally {
@@ -352,11 +516,11 @@ describe("左側 Workspace 清單", () => {
     }
   });
 
-  it("待裁定數超過 999 時徽章顯示 999+，完整數字在可存取名稱", async () => {
+  it("待裁定數超過 999 時徽章顯示 999+，完整數字在 title", async () => {
     render(<WorkspaceSidebar client={fakeClient([workspace()])} pendingDecisions={{ ws_1: 1284 }} />);
 
     const badge = await screen.findByText("待裁定 999+");
-    expect(badge).toHaveAttribute("aria-label", "待裁定 1,284 項");
+    expect(badge).toHaveAttribute("title", "待裁定 1,284");
   });
 
   it("讀到清單後把使用中的 Workspace 告訴上層，封存後再告知一次", async () => {
@@ -367,6 +531,7 @@ describe("左側 Workspace 清單", () => {
 
     await waitFor(() => expect(onWorkspaces).toHaveBeenLastCalledWith([workspace()]));
     await user.click(screen.getByRole("button", { name: "封存 筆記" }));
+    await user.click(screen.getByRole("button", { name: "確認封存 筆記" }));
 
     await waitFor(() => expect(onWorkspaces).toHaveBeenLastCalledWith([]));
   });
@@ -583,7 +748,7 @@ describe("左側 Workspace 清單", () => {
 
     await screen.findByText("專案");
 
-    expect(screen.getAllByText(/待裁定/)).toHaveLength(1);
+    expect(screen.getAllByText(/^待裁定/)).toHaveLength(1);
     expect(screen.getByText("待裁定 3")).toBeInTheDocument();
   });
 });

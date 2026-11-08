@@ -1,106 +1,227 @@
 /* ==========================================================================
-   主控台與工作
-   工作看板、整合佇列、Task 表單與契約編輯器（對話框）、主控台。
-   共用的按鈕、徽章、狀態色條、長文字工具見 components.css（MASTER.md 第 10 節）。
+   Controller 與工作（MASTER.md 第 7 節：頁面專屬樣式）
+   Controller：駕駛艙卡片（狀態讀數、提示、額度量表、開啟表單）與換帳號重開。
+   工作：整合佇列、計數列與狀態跑道（看板）、Task 卡、建立 Task／編輯契約對話框。
+   只寫共用元件（components.css）沒有的部分，一律以頁面根 class 開頭、只用 token。
    ========================================================================== */
 
-.task-board {
+/* ---------- Controller ---------- */
+
+/* 頁面根不限寬（MASTER 7.1：標題列對齊主區右緣）；內容不多，區段自己限寬，讀數與量表不被拉散到整個主區 */
+.controller-page > :not(.page-header) {
+  max-inline-size: var(--content-narrow);
+}
+
+.controller-page .controller-run {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-7);
+  gap: var(--space-6);
+  padding: var(--space-7);
 }
 
-/* 頁面標題列：頁名 + 主要動作靠右；按鈕不被擠成兩行 */
-.task-board-header {
+/* 第一列：狀態讀數＋主要動作（結束）靠右；讀數放不下時自己換行，按鈕不被擠掉 */
+.controller-page .controller-run-head {
   display: flex;
-  gap: var(--space-5);
-  align-items: center;
-  justify-content: space-between;
+  gap: var(--space-5) var(--space-7);
+  align-items: flex-start;
 }
 
-.task-board h2,
-.task-board h3,
-.task-board h4 {
-  margin: 0;
+.controller-page .controller-readout {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: var(--space-5) var(--space-8);
+  min-width: 0;
 }
 
-.task-board-header > button {
-  flex: none;
-  white-space: nowrap;
+.controller-page .controller-readout > div {
+  display: grid;
+  gap: var(--space-1);
+  align-content: start;
+  min-width: 0;
+  max-width: 24em;
 }
 
-.task-board h3 {
-  font-size: var(--text-title-sm);
+.controller-page :is(.controller-readout, .controller-gauge) dt {
+  color: var(--color-text-muted);
+  font-size: var(--text-meta);
+  line-height: var(--leading-meta);
+}
+
+.controller-page .controller-readout dd {
   line-height: var(--leading-title-sm);
 }
 
-/* --- 整合佇列：一項一列（序號｜標題｜分支｜狀態） --- */
-
-.integration-queue {
-  display: grid;
-  gap: var(--space-4);
-  padding: var(--space-5) var(--space-6);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+/* 狀態是整頁最先要看的字：放大一級，旁邊的狀態點表示語意 */
+.controller-page .controller-status {
+  font-size: var(--text-title);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title);
 }
 
-.integration-queue p {
+.controller-page .controller-hint {
   margin: 0;
   color: var(--color-text-muted);
   font-size: var(--text-meta);
 }
 
-.integration-queue ol {
+/* 額度：三個讀數並排，數字在上、量表在下；與上方以細線分隔 */
+.controller-page .controller-gauges {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-7);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+}
+
+.controller-page .controller-gauge {
   display: grid;
   gap: var(--space-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  counter-reset: integration;
+  align-content: start;
+}
+
+.controller-page .controller-gauge dd {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.controller-page .controller-gauge-value {
+  font-size: var(--text-title);
+  font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title);
+}
+
+/* 選帳號＋動作按鈕同一列：選單可縮小，按鈕依內容寬、對齊選單底部 */
+.controller-page .controller-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: flex-end;
+}
+
+.controller-page .controller-pick > .field {
+  flex: 1 1 18em;
+  max-width: 34em;
+}
+
+.controller-page .controller-pick > button {
+  flex: none;
+}
+
+/* 選項文字（帳號名稱＋額度摘要）比選單寬時，收合狀態以「…」結尾 */
+.controller-page .controller-pick select {
+  width: 100%;
+  text-overflow: ellipsis;
+}
+
+/* 授權未確認的提示「前往授權」、沒有可用帳號時的「前往帳號」：依內容寬，不被 grid 拉滿 */
+.controller-page :is(.controller-authorization, .controller-launch) > button {
+  justify-self: start;
+}
+
+.controller-page .controller-unavailable ul {
+  margin-top: var(--space-3);
+  color: var(--color-text-muted);
   font-size: var(--text-meta);
 }
 
-.integration-queue li {
-  display: grid;
-  grid-template-columns: 2.5ch minmax(0, 1fr) minmax(0, 22em) max-content;
+.controller-page .controller-more .facts {
+  margin-top: var(--space-4);
+}
+
+/* ---------- 工作：整合佇列（精簡清單，一項一列：序號｜標題｜分支｜狀態） ---------- */
+
+.task-board .integration-list {
+  counter-reset: integration;
+}
+
+.task-board .integration-list > li {
+  grid-template-columns: 2ch minmax(0, 1fr) minmax(0, 20em) max-content;
   gap: var(--space-5);
   align-items: center;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-6);
+  font-size: var(--text-meta);
   counter-increment: integration;
 }
 
-.integration-queue li::before {
-  color: var(--color-text-muted);
-  content: counter(integration) ".";
+.task-board .integration-list > li::before {
+  color: var(--color-text-subtle);
+  content: counter(integration);
   font-variant-numeric: tabular-nums;
 }
 
-/* 處理中的那一項 */
-.integration-queue li[aria-current] {
-  background: var(--color-accent-subtle);
+/* 處理中的那一項：標題加粗（狀態徽章另有「處理中」） */
+.task-board .integration-list > li[aria-current] .integration-title {
+  font-weight: var(--font-weight-strong);
 }
 
-/* 分支依內容寬（短分支不拉滿整欄），太長時在欄寬內截斷 */
-.integration-branch {
+/* 分支依內容寬，太長時在欄寬內截斷（完整文字在 title） */
+.task-board .integration-branch {
   justify-self: start;
   max-width: 100%;
+  padding: 0;
+  background: none;
   color: var(--color-text-muted);
 }
 
-/* --- 看板：欄寬固定、水平捲動；兩側以漸層提示還有欄位 --- */
+/* ---------- 工作：狀態跑道（看板）。欄位多時在自己的容器內水平捲動，整頁不出現水平捲軸 ---------- */
 
-.task-columns {
+/* 計數列與看板是同一組：間距比頁面區段之間（32px）緊 */
+.task-board .task-lanes {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* 計數列：每個狀態一個低調按鈕（狀態名＋等寬數字），點了把看板捲到該欄；
+   以負邊距抵銷按鈕內距，第一個狀態名與頁面左緣對齊 */
+.task-board .task-status-counts {
   display: flex;
-  gap: var(--space-5);
-  align-items: flex-start;
-  padding-bottom: var(--space-4);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin-inline-start: calc(-1 * var(--space-3));
+}
+
+.task-board .task-status-count {
+  gap: var(--space-3);
+  font-size: var(--text-meta);
+}
+
+.task-board .task-status-count > .tabular {
+  color: var(--color-text);
+  font-weight: var(--font-weight-strong);
+}
+
+/* 狀態點與卡片同一個色調（TaskBoard.tsx 的 statusTone）：有要你處理的 Task 時琥珀色、有錯誤時紅色；其餘中性 */
+.task-board .task-status-count-warning,
+.task-board .task-status-count-warning > .tabular {
+  color: var(--color-warning);
+}
+
+.task-board .task-status-count-danger,
+.task-board .task-status-count-danger > .tabular {
+  color: var(--color-danger);
+}
+
+/* 左右各留 4px（以負邊距抵銷、與頁面左緣對齊），最右一條跑道的框線與按鈕的焦點外框不被捲動容器裁掉。
+   scroll-padding：計數列跳到某欄時，欄的左緣停在邊緣淡出（32px）之外 */
+.task-board .task-columns {
+  display: flex;
+  gap: var(--space-4);
+  margin-inline: calc(-1 * var(--space-2));
+  padding: 0 var(--space-2) var(--space-4);
   overflow-x: auto;
+  scroll-padding-inline: var(--space-9);
+  scrollbar-color: var(--color-border-strong) transparent;
   scrollbar-width: thin;
 }
 
-/* 捲動驅動的邊緣漸層：還能往左／右捲時，該側淡出 32px；沒有水平捲動時不套用遮罩 */
+@media (prefers-reduced-motion: no-preference) {
+  .task-board .task-columns {
+    scroll-behavior: smooth;
+  }
+}
+
+/* 捲動驅動的邊緣淡出：還能往左／右捲時，該側淡出 32px，提示畫面外還有欄位；沒有水平捲動時捲動時間軸無效，不套用遮罩 */
 @property --task-fade-start {
   syntax: "<length>";
   inherits: false;
@@ -114,7 +235,7 @@
 }
 
 @supports (animation-timeline: scroll()) {
-  .task-columns {
+  .task-board .task-columns {
     animation: task-columns-fade linear both;
     animation-timeline: scroll(self inline);
     mask-image: linear-gradient(
@@ -147,590 +268,581 @@
   }
 }
 
-.task-column {
+/* 一條跑道：下沉底色，等高排列（看起來是並行的跑道），卡片由上往下排 */
+.task-board .task-column {
+  box-sizing: border-box;
   display: grid;
-  flex: 0 0 280px;
+  flex: 0 0 272px;
   gap: var(--space-4);
+  align-content: start;
   padding: var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
   background: var(--color-surface-sunken);
-  border-radius: var(--radius-md);
 }
 
-/* 欄標題：狀態名 + 卡片數徽章 */
-.task-column > h3 {
+.task-board .task-column-head {
   display: flex;
   gap: var(--space-3);
-  align-items: center;
-  padding: var(--space-1) var(--space-2);
-  color: var(--color-text-muted);
+  align-items: baseline;
+  padding: var(--space-1) var(--space-3) 0;
+}
+
+.task-board .task-column-head > h3 {
+  margin: 0;
   font-size: var(--text-meta);
   line-height: var(--leading-meta);
 }
 
-/* --- Task 卡片：標題 2 行 → 種類與 Goal 1 行 → 狀態 1 行 → 詳細資訊（收合）→ 動作
-   外框、內距、字級與狀態色條用共用的 .card、.stripe-*（components.css） --- */
+/* 用鍵盤從計數列跳過來時，欄標題的焦點外框與其他控制項一致 */
+.task-board .task-column-head > h3:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
 
-.task-card {
+/* 空的跑道收成一條窄的直排標籤（中文直排可直接閱讀），讓有 Task 的跑道多露出來；狀態流的順序不變 */
+.task-board .task-column-empty {
+  flex-basis: 44px;
+  justify-items: center;
+  padding: var(--space-5) 0;
+}
+
+.task-board .task-column-empty .task-column-head {
+  gap: var(--space-3);
+  align-items: center;
+  padding: 0;
+  writing-mode: vertical-rl;
+}
+
+.task-board .task-column-empty .count {
+  text-combine-upright: all;
+}
+
+/* ---------- 工作：Task 卡。標題 2 行 → 種類與 Goal 1 行 → 狀態 1 行 → 詳細資訊（收合）→ 動作 ---------- */
+
+/* 沒有狀態色條的卡片也保留 3px 左框（框色），所有卡片的內容左緣對齊 */
+.task-board .task-card {
   display: grid;
   gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  border-left-width: 3px;
+  font-size: var(--text-meta);
   line-height: var(--leading-meta);
 }
 
-.task-card p,
-.task-card ul,
-.task-card ol {
+.task-board .task-card :is(p, ul, ol) {
   margin: 0;
 }
 
-.task-card ul,
-.task-card ol {
+.task-board .task-card :is(ul, ol) {
   padding-left: var(--space-6);
 }
 
+.task-board .task-card :is(input, select, textarea) {
+  font-weight: var(--font-weight-normal);
+}
+
 .task-board .task-title {
+  margin: 0;
   font-size: var(--text-title-sm);
   line-height: var(--leading-title-sm);
 }
 
-.task-meta,
-.task-status {
+/* 定位到這張卡時焦點在標題（tabIndex -1）：以鍵盤來的焦點外框與其他控制項一致 */
+.task-board .task-title:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+/* 從別頁「前往工作頁」定位到的卡片：強調外框標示 1.5 秒（TaskBoard.tsx 的 LOCATED_HIGHLIGHT_MS）；
+   外框在卡片外 2px，落在跑道的內距裡，不被捲動容器裁掉 */
+.task-board .task-card-located {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* 可以有動態時外框在後段淡出；prefers-reduced-motion 時只顯示、時間到直接移除 */
+@media (prefers-reduced-motion: no-preference) {
+  .task-board .task-card-located {
+    animation: task-card-located 1.5s var(--ease-out) forwards;
+  }
+}
+
+@keyframes task-card-located {
+  0%,
+  60% {
+    outline-color: var(--color-accent);
+  }
+
+  100% {
+    outline-color: transparent;
+  }
+}
+
+/* 種類與 Goal 一行：Goal 放不下時截斷，不換到第二行 */
+.task-board .task-meta {
+  flex-wrap: nowrap;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.task-board .task-goal {
+  flex: 1 1 auto;
+}
+
+.task-board .task-status {
   display: flex;
   gap: var(--space-3);
   align-items: center;
   min-width: 0;
 }
 
-.task-goal,
-.task-status-text {
+.task-board .task-status-text {
   flex: 1 1 auto;
 }
 
-.task-goal,
-.task-contract-version,
-.task-dependencies {
-  color: var(--color-text-muted);
-}
-
-/* 展開「詳細資訊」時，標題與 Goal 顯示完整文字（清單中截斷的完整取得路徑） */
-.task-card:has(> .task-details[open]) .task-title {
+/* 展開「詳細資訊」時，標題與 Goal 顯示完整文字（截斷文字的完整取得方式） */
+.task-board .task-card:has(> .task-details[open]) .task-title {
   display: block;
   overflow: visible;
 }
 
-.task-card:has(> .task-details[open]) .task-meta {
-  align-items: flex-start;
+/* 展開時種類與 Goal 改為一般文字流：Goal 接在種類後面換行，不擠在徽章旁的窄欄 */
+.task-board .task-card:has(> .task-details[open]) .task-meta {
+  display: block;
 }
 
-.task-card:has(> .task-details[open]) .task-goal {
+.task-board .task-card:has(> .task-details[open]) .task-meta > .badge {
+  margin-inline-end: var(--space-4);
+}
+
+.task-board .task-card:has(> .task-details[open]) .task-goal {
+  overflow: visible;
   white-space: normal;
-  overflow-wrap: anywhere;
 }
 
-/* 次要與技術資訊收合在 details 裡 */
-.task-details > summary,
-.task-run-more > summary {
-  color: var(--color-text-muted);
-}
-
-.task-details > summary:hover,
-.task-run-more > summary:hover {
-  color: var(--color-text);
-}
-
-.task-details-body {
+.task-board .task-details-body {
   display: grid;
   gap: var(--space-4);
-  margin-top: var(--space-3);
+  margin-top: var(--space-4);
 }
 
-/* 細節中的每一段：細線分隔，不另外加框；需要注意時以左側色條表示（MASTER 2.3） */
-.task-details-body > :is(div, p) + :is(div, p) {
+/* 細節中的每一段以細線分隔、不另外加框；需要注意的段落改以左側色條標示 */
+.task-board .task-details-body > * + * {
   padding-top: var(--space-4);
   border-top: 1px solid var(--color-border);
 }
 
-.task-run,
-.task-workdir,
-.task-integration,
-.task-handoff,
-.task-budget,
-.task-queued,
-.task-missing,
-.task-verification-failed,
-.task-run-more[open],
-.task-workdir-cleanup {
+.task-board .task-details-body > .task-history {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.task-board
+  :is(
+    .task-run,
+    .task-run-more[open],
+    .task-checkpoint,
+    .task-workdir,
+    .task-workdir-cleanup,
+    .task-integration,
+    .task-handoff,
+    .task-handoff-waiting,
+    .task-budget,
+    .task-queued,
+    .task-missing,
+    .task-verification-failed
+  ) {
   display: grid;
   gap: var(--space-2);
 }
 
-.task-missing,
-.task-workdir-failed,
-.task-integration-failed,
-.task-handoff-abandoned,
-.task-budget-exhausted,
-.task-verification-failed,
-.task-workdir-cleanup-failed {
+.task-board
+  :is(
+    .task-missing,
+    .task-workdir-failed,
+    .task-workdir-cleanup-failed,
+    .task-integration-failed,
+    .task-handoff-abandoned,
+    .task-budget-exhausted,
+    .task-verification-failed
+  ) {
   padding-left: var(--space-4);
   border-left: 3px solid var(--color-danger);
 }
 
-.task-missing {
+.task-board .task-details-body
+  > :is(.task-missing, .task-workdir-failed, .task-integration-failed, .task-handoff-abandoned, .task-budget-exhausted, .task-verification-failed) {
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* 缺項、預算用盡要你處理：與卡片的狀態徽章同一個色調（琥珀色） */
+.task-board :is(.task-missing, .task-budget-exhausted) {
   border-left-color: var(--color-warning);
 }
 
-.task-missing-unknown strong {
+.task-board .task-missing-unknown strong {
   color: var(--color-warning);
 }
 
-.task-workdir-removed {
+.task-board :is(.task-dependencies, .task-contract-version, .task-history, .task-guard-source) {
+  color: var(--color-text-muted);
+}
+
+.task-board .task-workdir-removed {
   color: var(--color-text-muted);
   text-decoration: line-through;
 }
 
-.task-guard-source {
-  color: var(--color-text-muted);
-}
-
-.task-history {
-  color: var(--color-text-muted);
-}
-
 /* 契約版本與「契約版本歷史」同一列 */
-.task-contract-version {
+.task-board .task-contract-version {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
 }
 
-.task-card pre {
+.task-board .task-card pre {
   font-size: var(--text-caption);
 }
 
-/* 驗證中：狀態列（徽章 + 檢視驗證），展開後是檢查清單與接受成果 */
-.task-verification {
+.task-board .task-card [role="alert"] {
+  color: var(--color-danger);
+}
+
+/* 要你處理的阻擋（Worker 回報受阻、預算用盡）：與卡片的狀態徽章同一個色調 */
+.task-board .task-card .task-attention {
+  color: var(--color-warning);
+}
+
+/* 載入紀錄：按鈕與「?」說明同一列 */
+.task-board .task-run-context-head {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+/* 驗證中：狀態列（徽章＋檢視驗證），展開後是檢查清單、成果與接受成果 */
+.task-board .task-verification {
   display: grid;
   gap: var(--space-3);
 }
 
-.task-verification label {
+.task-board .task-verification label {
   display: grid;
   gap: var(--space-2);
+  color: var(--color-text-muted);
 }
 
-/* 動作列：主要動作 + 「更多」；放不下時整組換行 */
-.task-actions {
+/* 動作列：一個直接看得到的動作（次要或低調按鈕）＋「更多」；放不下時整組換行 */
+.task-board .task-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
 }
 
-.task-actions > button {
+.task-board .task-actions > button {
   flex: none;
-  white-space: nowrap;
 }
 
-/* 沒有主要動作時「更多」是第一個按鈕：以負邊距抵銷內距，文字與卡片內容左緣對齊（按鈕停在卡片內距邊緣、不壓到色條） */
-.task-actions > .task-more-toggle:first-child {
+/* 第一個按鈕是低調按鈕（只有「更多」）時：以負邊距抵銷內距，文字與卡片內容左緣對齊 */
+.task-board .task-actions > .btn-quiet:first-child {
   margin-inline-start: calc(-1 * var(--space-5));
 }
 
-.task-more-toggle[aria-expanded="true"] {
+/* 「更多」與其他頁的 .more-menu 同一套外觀：低調文字＋▾，展開時底色同 hover */
+.task-board .task-more-toggle {
+  gap: var(--space-2);
+}
+
+.task-board .task-more-caret {
+  font-size: var(--text-caption);
+}
+
+.task-board .task-more-toggle[aria-expanded="true"] {
   background: var(--color-surface-hover);
   color: var(--color-text);
 }
 
-/* 「更多」展開的動作：直排、靠左；危險動作只用文字色，與其他項目同樣式 */
-.task-more {
+/* 「更多」展開的動作：外觀同 .more-menu-list（框線、圓角、浮起的底色），但在卡片內原地展開——
+   看板是水平捲動容器，浮層放在最後一張卡片時會被裁掉或撐出直向捲軸。危險動作只用文字色 */
+.task-board .task-more {
   display: grid;
   gap: var(--space-1);
+  justify-self: start;
+  min-width: 9em;
   padding: var(--space-2);
-  background: var(--color-surface-sunken);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+  box-shadow: var(--shadow-popover);
 }
 
-.task-more > button {
+.task-board .task-more > button {
   justify-content: flex-start;
   justify-self: stretch;
 }
 
-.task-more > .btn-danger {
+.task-board .task-more > .btn-danger {
   border-color: transparent;
   background: none;
 }
 
-.task-more > .btn-danger:hover:not(:disabled) {
+.task-board .task-more > .btn-danger:hover:not(:disabled) {
   background: var(--color-danger-subtle);
 }
 
-.task-dependency-form {
-  display: grid;
-  gap: var(--space-3);
+.task-board .task-dependency-form {
+  padding: var(--space-4) var(--space-5);
 }
 
-.task-dependency-form label {
-  display: grid;
-  gap: var(--space-2);
+/* ---------- 工作：建立 Task／編輯契約對話框（.dialog-panel 加寬；標題列與動作列固定，欄位區自己捲動） ---------- */
+
+/* .dialog-panel 會設定 display，關閉中的 <dialog> 要維持隱藏 */
+.task-board .task-dialog:not([open]) {
+  display: none;
 }
 
-.task-card [role="alert"],
-.task-form [role="alert"] {
-  color: var(--color-danger);
-}
-
-/* --- 建立 Task／編輯契約：modal 對話框（MASTER 5.6） --- */
-
-.task-dialog[open] {
+.task-board .task-dialog[open] {
   display: flex;
   flex-direction: column;
-  box-sizing: border-box;
-  width: min(720px, calc(100vw - 48px));
+  gap: 0;
+  width: min(820px, calc(100vw - 48px));
   max-width: none;
   max-height: calc(100vh - 48px);
   padding: 0;
   overflow: hidden;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md);
   color: var(--color-text);
 }
 
-.task-dialog::backdrop {
+.task-board .task-dialog::backdrop {
   background: var(--color-overlay);
 }
 
-.task-dialog-header {
+.task-board .task-dialog-header {
   display: flex;
   gap: var(--space-5);
   align-items: flex-start;
-  padding: var(--space-5) var(--space-6);
+  padding: var(--space-6) var(--space-7) var(--space-5);
   border-bottom: 1px solid var(--color-border);
 }
 
-.task-dialog-title {
+.task-board .task-dialog-title {
   display: grid;
   flex: 1 1 auto;
   gap: var(--space-2);
   min-width: 0;
 }
 
-.task-dialog-title h3 {
-  margin: 0;
-  font-size: var(--text-title);
-  line-height: var(--leading-title);
-}
-
-.task-dialog-title p {
-  margin: 0;
+.task-board .task-dialog-title > p {
   color: var(--color-text-muted);
-  font-size: var(--text-body);
-  line-height: var(--leading-body);
 }
 
-.task-dialog-header > button {
+.task-board .task-dialog-header > button {
   flex: none;
   font-size: var(--text-title);
 }
 
-.task-dialog-form {
+.task-board .task-dialog-form {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
 }
 
-/* 內容區自己捲動，標題列與動作列固定 */
-.task-dialog-body {
+.task-board .task-dialog-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-6);
+  gap: var(--space-7);
   min-height: 0;
-  padding: var(--space-6);
+  padding: var(--space-6) var(--space-7) var(--space-7);
   overflow-y: auto;
 }
 
-.task-dialog-footer {
+.task-board .task-dialog-footer {
   display: grid;
-  gap: var(--space-3);
-  padding: var(--space-5) var(--space-6);
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-7);
   border-top: 1px solid var(--color-border);
 }
 
-/* 動作列靠右：次要在左、主要在右 */
-.task-dialog-footer .form-actions {
-  justify-content: flex-end;
+.task-board .task-dialog-errors {
+  max-height: 8lh;
+  overflow-y: auto;
 }
 
 /* 儲存中：外觀同 :disabled，但不設 disabled（焦點才不會落到 body），hover 也不變色 */
-.task-dialog-footer button[aria-disabled="true"],
-.task-dialog-footer button[aria-disabled="true"]:hover {
+.task-board .task-dialog-footer button[aria-disabled="true"],
+.task-board .task-dialog-footer button[aria-disabled="true"]:hover {
   border-color: var(--color-accent);
   background: var(--color-accent);
   cursor: not-allowed;
   opacity: 0.5;
 }
 
-/* 視窗矮（如 1024×768）時多行輸入最多 8 行，不是 16 行：
-   第一組欄位撐滿也不會佔掉整個內容區，下一組的標題會露出來，看得出下方還有欄位 */
-@media (max-height: 800px) {
-  .task-dialog textarea {
-    max-height: 8lh;
-  }
-}
-
-.task-dialog-errors {
-  display: grid;
-  gap: var(--space-1);
-  max-height: 8lh;
-  overflow-y: auto;
-}
-
-.task-dialog-errors p {
-  margin: 0;
-}
-
-/* 欄位：label（13px、600）→ 控制項，間距 4px；控制項維持一般字重 */
-.task-form label {
-  display: grid;
-  gap: var(--space-2);
+/* 欄位標籤：meta 字級、粗；包在標籤裡的控制項維持一般字重 */
+.task-board .task-dialog label {
   font-size: var(--text-meta);
   font-weight: var(--font-weight-strong);
 }
 
-.task-form :is(input, select, textarea) {
+.task-board .task-dialog :is(input, select, textarea) {
   font-weight: var(--font-weight-normal);
 }
 
-.task-form-select {
-  width: 100%;
-  max-width: 32em;
-}
-
-.contract-editor {
-  display: grid;
-  gap: var(--space-6);
-}
-
-/* fieldset 內欄位之間 12px（P-TC-2） */
-.contract-field {
+.task-board .task-dialog-basics {
   display: grid;
   gap: var(--space-5);
 }
 
-/* 模式只有 2～4 個選項：依內容寬，不滿版（P-TC-4） */
-.task-form .contract-mode {
-  justify-self: start;
-  width: auto;
-  max-width: 16em;
+/* Goal 較長、種類只有三個選項：Goal 拿剩下的寬度 */
+.task-board .task-dialog-basics .field-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 12em);
 }
 
-.contract-capabilities label:has(input[type="checkbox"]) {
-  display: flex;
-  gap: var(--space-3);
-  align-items: center;
-  font-weight: var(--font-weight-normal);
-}
-
-/* --- 主控台 --- */
-
-.controller-page {
+/* 契約：標題與說明，然後每一項一列（左欄名稱與模式、右欄內容），項目之間細線分隔 */
+.task-board .contract-editor {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-7);
 }
 
-.controller-page h2,
-.controller-page h3,
-.controller-page p {
+.task-board .contract-heading {
+  display: grid;
+  gap: var(--space-2);
+  padding-bottom: var(--space-5);
+}
+
+.task-board .contract-heading > h3 {
   margin: 0;
+  font-size: var(--text-title);
+  line-height: var(--leading-title);
 }
 
-/* 頁面標題列：頁名 + 開著時的「結束」 */
-.controller-header {
-  display: flex;
-  gap: var(--space-5);
-  align-items: center;
-  justify-content: space-between;
-}
-
-.controller-header > button {
-  flex: none;
-  white-space: nowrap;
-}
-
-/* 狀態與帳號兩張卡片：寬時並排，1024 寬時上下排列 */
-.controller-layout {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
-  gap: var(--space-6);
-  align-items: start;
-}
-
-.controller-card {
-  display: grid;
-  gap: var(--space-5);
-  padding: var(--space-6);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-}
-
-.controller-card h3 {
-  font-size: var(--text-title-sm);
-  line-height: var(--leading-title-sm);
-}
-
-/* 事實清單：標籤欄依內容寬、最多 12em，值欄可縮小（MASTER 6.4 第 5 條） */
-.controller-facts {
-  display: grid;
-  grid-template-columns: minmax(6em, max-content) minmax(0, 1fr);
-  gap: var(--space-3) var(--space-6);
-  margin: 0;
-}
-
-.controller-facts dt {
-  max-width: 12em;
+.task-board .contract-heading > p {
   color: var(--color-text-muted);
+  font-size: var(--text-meta);
 }
 
-.controller-facts dd {
-  margin: 0;
+.task-board .contract-field {
+  position: relative;
+  display: grid;
+  grid-template-columns: 10em minmax(0, 1fr);
+  gap: var(--space-3) var(--space-7);
+  padding: var(--space-5) 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
 }
 
-/* 狀態：小圓點加文字；開啟中為黃、執行中為綠、中斷為紅，未開啟與已結束為中性灰 */
-.controller-status {
+.task-board .contract-field-key {
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  justify-items: start;
+}
+
+.task-board .contract-field-name {
   display: inline-flex;
   gap: var(--space-3);
   align-items: center;
   font-weight: var(--font-weight-strong);
+  line-height: var(--leading-title-sm);
 }
 
-.controller-status::before {
-  width: var(--space-4);
-  height: var(--space-4);
-  border-radius: var(--radius-full);
-  background: var(--color-text-subtle);
-  content: "";
-}
-
-.controller-status-starting::before {
-  background: var(--color-warning);
-}
-
-.controller-status-running::before {
-  background: var(--color-success);
-}
-
-.controller-status-interrupted::before {
-  background: var(--color-danger);
-}
-
-/* 額度：三個小指標，數值在上、標籤在下 */
-.controller-quota {
+/* 模式：可見的小標「狀態」＋下拉，與上方的項目名稱分開 */
+.task-board .contract-mode-field {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-4);
-  margin: 0;
-}
-
-.controller-metric {
-  display: flex;
-  flex-direction: column-reverse;
   gap: var(--space-1);
-  padding: var(--space-4) var(--space-5);
-  background: var(--color-surface-sunken);
-  border-radius: var(--radius-md);
+  justify-self: stretch;
 }
 
-.controller-metric dt {
+.task-board .contract-mode-label {
   color: var(--color-text-muted);
   font-size: var(--text-caption);
-  line-height: var(--leading-caption);
+  line-height: var(--leading-meta);
 }
 
-.controller-metric dd {
-  margin: 0;
-  font-size: var(--text-title);
-  font-weight: var(--font-weight-strong);
-  line-height: var(--leading-title);
+.task-board .contract-mode {
+  width: 100%;
 }
 
-/* 選擇框與它的動作按鈕排在同一列；選單可縮小，按鈕不換行 */
-.controller-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  align-items: flex-end;
-}
-
-.controller-row label {
+.task-board .contract-field-value {
   display: grid;
-  flex: 1 1 16em;
+  gap: var(--space-4);
+  align-content: start;
+}
+
+.task-board .contract-field-value > :is(label, .contract-subfield) {
+  display: grid;
   gap: var(--space-2);
   color: var(--color-text-muted);
+}
+
+/* 引用：標籤與「?」說明同一列 */
+.task-board .contract-subfield-label {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.task-board .contract-field-value :is(input, textarea) {
+  color: var(--color-text);
+}
+
+/* 未提供：右欄只有一行說明，與左欄的項目名稱對齊 */
+.task-board .contract-field-missing {
+  color: var(--color-text-subtle);
   font-size: var(--text-meta);
+  line-height: var(--leading-title-sm);
 }
 
-/* 選項文字（帳號名稱＋額度摘要）比選單寬時，收合狀態以「…」結尾，不在字中間切掉 */
-.controller-row select {
-  width: 100%;
-  text-overflow: ellipsis;
+/* 引用是選填：起始兩行高，內容多時再長高 */
+.task-board .contract-references {
+  min-height: 2lh;
 }
 
-.controller-row > button {
-  flex: none;
-  white-space: nowrap;
+/* 所需能力：核取方塊依內容寬排成一列，放不下時換行 */
+.task-board .contract-capabilities .contract-field-value {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-6);
+  align-items: center;
 }
 
-.controller-hint,
-.controller-quota-error {
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
+.task-board .contract-capabilities .contract-field-value > label {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--color-text);
+  font-weight: var(--font-weight-normal);
 }
 
-/* 警告與結束原因：左側色條標示，正文維持內文色（MASTER 2.3） */
-.controller-quota-warning,
-.controller-switching,
-.controller-end-reason {
-  padding-left: var(--space-4);
-  border-left: 3px solid var(--color-warning);
-  font-size: var(--text-meta);
+.task-board .task-dialog-note {
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--color-border);
 }
 
-.controller-unavailable-details,
-.controller-more {
-  color: var(--color-text-muted);
-  font-size: var(--text-meta);
+/* 視窗矮（如 1024×768）時多行輸入最多 8 行：一項撐滿也不會佔掉整個欄位區，下一項的名稱會露出來 */
+@media (max-height: 800px) {
+  .task-board .task-dialog textarea {
+    max-height: 8lh;
+  }
 }
 
-.controller-unavailable {
-  margin: var(--space-3) 0 0;
-  padding-left: var(--space-6);
-}
-
-.controller-more .controller-facts {
-  margin-top: var(--space-3);
-}
-
-.controller-page [role="alert"] {
-  color: var(--color-danger);
-}
-
-/* --- 1024 寬（MASTER 8） --- */
-
+/* ---------- 1024 寬（MASTER 第 6 節的設計下限） ---------- */
 @media (max-width: 1100px) {
-  .task-column {
-    flex-basis: 260px;
+  .task-board .task-column {
+    flex-basis: 256px;
   }
 
-  .integration-queue li {
-    grid-template-columns: 2.5ch minmax(0, 1fr) minmax(0, 14em) max-content;
+  .task-board .task-column-empty {
+    flex-basis: 44px;
+  }
+
+  .task-board .integration-list > li {
+    grid-template-columns: 2ch minmax(0, 1fr) minmax(0, 14em) max-content;
     gap: var(--space-4);
-  }
-
-  .controller-facts dt {
-    max-width: 9em;
   }
 }

@@ -77,6 +77,9 @@ describe("更新進度", () => {
 
     const dialog = screen.getByRole("dialog", { name: "更新 Baton" });
     expect(dialog).toHaveTextContent("從 0.1.0 更新到 0.2.0");
+    // 版本號用等寬字（MASTER 7.1）
+    expect(within(dialog).getByText("0.1.0")).toHaveClass("mono");
+    expect(within(dialog).getByText("0.2.0")).toHaveClass("mono");
     expect(dialog).toHaveTextContent("停止執行中的工作");
     expect(client.updateStatus).not.toHaveBeenCalled();
 
@@ -86,7 +89,7 @@ describe("更新進度", () => {
     expect(client.lifecycleStatus).toHaveBeenCalledTimes(1);
     expect(dialog).toHaveTextContent("距期限剩餘 40 秒（上限 40 秒）");
     const runs = within(dialog).getByRole("list", { name: "Run 停止結果" });
-    expect(within(runs).getByText("筆記 · run_1").closest("li")).toHaveTextContent("等待中");
+    expect(within(runs).getByText("run_1").closest("li")).toHaveTextContent("筆記 run_1等待中");
     expect(dialog).toHaveTextContent("已停止新派工、交接與重試");
 
     await settle(500);
@@ -103,7 +106,7 @@ describe("更新進度", () => {
     const dialog = screen.getByRole("dialog", { name: "更新 Baton" });
     expect(dialog).toHaveTextContent("備份資料");
     expect(dialog).toHaveTextContent("工作已停止，正在備份資料…");
-    expect(within(dialog).getByText("筆記 · run_1").closest("li")).toHaveTextContent("已停止");
+    expect(within(dialog).getByText("run_1").closest("li")).toHaveTextContent("筆記 run_1已停止");
   });
 
   it("準備套用且沒有停止異常時自動安裝更新，之後不再輪詢", async () => {
@@ -143,7 +146,7 @@ describe("更新進度", () => {
 
     const anomalies = screen.getByRole("alert");
     expect(anomalies).toHaveTextContent("停止異常 1 個");
-    expect(anomalies).toHaveTextContent("筆記 · run_2：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
+    expect(anomalies).toHaveTextContent("筆記 run_2：停止異常（程序仍在執行：pid 4242 在期限後仍存在）");
     expect(client.installUpdate).not.toHaveBeenCalled();
 
     await act(async () => {
@@ -162,20 +165,70 @@ describe("更新進度", () => {
     render(<UpdateProgress client={client} maintenance={maintenance()} />);
     await settle(500);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("無法安裝更新：找不到安裝程式");
+    // 原因可能很長：長警示（狀態詞＋原因），不是淡底提示
+    const failure = screen.getByRole("alert");
+    expect(failure).toHaveClass("notice", "notice-danger");
+    expect(within(failure).getByText("無法安裝更新")).toHaveClass("notice-title");
+    expect(failure).toHaveTextContent(/^無法安裝更新找不到安裝程式$/);
 
     await act(async () => {
       screen.getByRole("button", { name: "重試" }).click();
     });
 
     expect(client.installUpdate).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("alert")).toHaveTextContent("無法安裝更新：維護尚未準備好");
+    expect(screen.getByRole("alert")).toHaveTextContent(/^無法安裝更新維護尚未準備好$/);
     expect(client.quitApp).not.toHaveBeenCalled();
 
     await act(async () => {
       screen.getByRole("button", { name: "關閉 Baton" }).click();
     });
     expect(client.quitApp).toHaveBeenCalledTimes(1);
+  });
+
+  it("開啟時焦點移到對話框標題；按「重試」後按鈕隨安裝開始消失，焦點仍在對話框標題，不落到 body", async () => {
+    const client = fakeClient([inMaintenance({ phase: "ready" }), stopped()]);
+    let failAgain: (error: Error) => void = () => {};
+    client.installUpdate
+      .mockRejectedValueOnce(new Error("找不到安裝程式"))
+      .mockImplementationOnce(() => new Promise<void>((_, reject) => (failAgain = reject)));
+    render(<UpdateProgress client={client} maintenance={maintenance()} />);
+    await settle();
+
+    const title = screen.getByRole("heading", { name: "更新 Baton" });
+    expect(title).toHaveFocus();
+
+    await settle(500);
+    // 與瀏覽器一樣，按下的按鈕先取得焦點
+    const retry = screen.getByRole("button", { name: "重試" });
+    retry.focus();
+    await act(async () => {
+      retry.click();
+    });
+
+    expect(screen.getByRole("dialog")).toHaveTextContent("正在安裝更新並重新開啟…");
+    expect(screen.queryByRole("button", { name: "重試" })).not.toBeInTheDocument();
+    expect(title).toHaveFocus();
+
+    await act(async () => failAgain(new Error("維護尚未準備好")));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("維護尚未準備好");
+    expect(title).toHaveFocus();
+  });
+
+  it("按「仍要安裝更新並重新開啟」後按鈕消失，焦點移到對話框標題", async () => {
+    const client = fakeClient(new Error("connection refused"));
+    client.installUpdate.mockImplementationOnce(() => new Promise<void>(() => {}));
+    render(<UpdateProgress client={client} maintenance={maintenance({ phase: "ready" })} />);
+    await settle(500);
+
+    const install = within(screen.getByRole("alert")).getByRole("button", { name: "仍要安裝更新並重新開啟" });
+    install.focus();
+    await act(async () => {
+      install.click();
+    });
+
+    expect(screen.queryByRole("button", { name: "仍要安裝更新並重新開啟" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "更新 Baton" })).toHaveFocus();
   });
 
   it("維護失敗時說明更新沒有套用、Baton 已完全退出，按「關閉 Baton」結束 App，不安裝", async () => {
@@ -185,7 +238,8 @@ describe("更新進度", () => {
     await settle(2000);
 
     const dialog = screen.getByRole("dialog", { name: "更新 Baton" });
-    expect(within(dialog).getByRole("alert")).toHaveTextContent("更新沒有套用：更新前備份失敗：磁碟已滿");
+    expect(within(dialog).getByRole("alert")).toHaveClass("notice", "notice-danger");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(/^更新沒有套用更新前備份失敗：磁碟已滿$/);
     expect(dialog).toHaveTextContent("Baton 已完全退出；重新開啟後會依各 Workspace 的設定繼續工作。");
     expect(client.installUpdate).not.toHaveBeenCalled();
     expect(client.updateStatus).toHaveBeenCalledTimes(1);
@@ -202,7 +256,12 @@ describe("更新進度", () => {
     render(<UpdateProgress client={client} maintenance={maintenance()} />);
     await settle(500);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("暫時無法取得更新進度：connection refused");
+    // 系統暫時的狀態：中性的長警示（不是琥珀色的淡底提示），狀態詞＋原因
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveClass("notice");
+    expect(alert).not.toHaveClass("notice-warning", "notice-danger", "callout");
+    expect(within(alert).getByText("暫時無法取得更新進度")).toHaveClass("notice-title");
+    expect(alert).toHaveTextContent(/^暫時無法取得更新進度connection refused$/);
 
     await settle(500);
 
@@ -278,7 +337,7 @@ describe("更新進度", () => {
     });
 
     expect(client.installUpdate).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("alert")).toHaveTextContent("無法安裝更新：沒有準備好的安裝程式");
+    expect(screen.getByRole("alert")).toHaveTextContent(/^無法安裝更新沒有準備好的安裝程式$/);
     expect(screen.getByRole("button", { name: "重試" })).toBeInTheDocument();
   });
 

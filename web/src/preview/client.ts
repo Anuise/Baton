@@ -25,6 +25,44 @@ export function createPreviewClient(data: PreviewData): AppClient {
     listWorkspaces: () => reply({ workspaces: data.workspaces }),
     listModels: () => reply(data.models),
     getAuthorization: () => reply(data.authorization),
+    // 確認摘要：依送來的能力組出，第一次確認之外都列出相對於目前 revision 的變動（只為了呈現版面）
+    summarizeAuthorization: async (_workspaceId, grants) => {
+      const capabilities = data.authorization.capabilities;
+      const info = (capability: string) => capabilities.find((item) => item.capability === capability);
+      const highRisk = grants.some((grant) => info(grant.capability)?.high_risk);
+      const base = data.authorization.effective;
+      const added = base ? grants.filter((grant) => !base.grants.some((old) => old.capability === grant.capability)) : [];
+      return {
+        items: grants.map((grant) => ({
+          capability: grant.capability,
+          label: info(grant.capability)?.label ?? grant.capability,
+          targets: grant.targets,
+          restrictions: grant.restrictions,
+          high_risk: info(grant.capability)?.high_risk ?? false,
+        })),
+        risks: highRisk ? [data.authorization.risk_disclosure] : [],
+        requires_risk_acknowledgement: highRisk,
+        changes: base
+          ? {
+              base_revision: base.revision,
+              expands: added.length > 0,
+              impact: added.length > 0 ? ["新增能力會擴大這個 Workspace 的授權，之後派出的 Run 才會使用。"] : [],
+              changes: added.map((grant) => ({
+                  capability: grant.capability,
+                  label: info(grant.capability)?.label ?? grant.capability,
+                  high_risk: info(grant.capability)?.high_risk ?? false,
+                  new_capability: true,
+                  removed_capability: false,
+                  added_targets: grant.targets,
+                  removed_targets: [],
+                  added_restrictions: grant.restrictions,
+                  removed_restrictions: [],
+                  expands: true,
+                })),
+            }
+          : null,
+      };
+    },
     getTaskBoard: () => reply(data.board),
     getTask: async (_workspaceId, taskId) => {
       const task = data.board.tasks.find((item) => item.id === taskId) ?? data.board.tasks[0];
